@@ -1,0 +1,13 @@
+node_modules/
+dist/
+*.log
+.env
+.DS_Store
+src/web/generated/
+.smoke-sessions/
+*-smoke.log
+*-smoke.pid
+*-bootstrap.json
+new-session.json
+
+dist-local/
