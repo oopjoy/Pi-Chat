@@ -12,19 +12,15 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
   const content = blocks(message);
   const hasVisibleContent = content.some((block) =>
     (block.type === "text" && Boolean(block.text))
-    || (block.type === "image" && Boolean(block.data && block.mimeType))
-    || (block.type === "thinking" && Boolean(block.thinking))
-    || block.type === "toolCall",
+    || (block.type === "image" && Boolean(block.data && block.mimeType)),
   );
   if (!streaming && !hasVisibleContent) return null;
-  const roleLabel = message.role === "user" ? "你" : "Pi";
   return (
     <article className={`message message-${message.role}`}>
-      <header>
-        <span className="message-role">{roleLabel}</span>
+      {message.role === "assistant" && <header>
         {streaming && <span className="streaming-dot" aria-label="正在生成" />}
         {message.model && <span className="message-model">{message.model}</span>}
-      </header>
+      </header>}
       <div className="message-content">
         {content.map((block, index) => {
           if (block.type === "text" && block.text) {
@@ -32,15 +28,6 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
           }
           if (block.type === "image" && block.data && block.mimeType) {
             return <img className="message-image" key={index} src={`data:${block.mimeType};base64,${block.data}`} alt="用户附加图片" />;
-          }
-          if (block.type === "thinking" && block.thinking) {
-            return <details className="thinking" key={index}><summary>思考过程</summary><pre>{block.thinking}</pre></details>;
-          }
-          if (block.type === "toolCall") {
-            return <details className="tool-call" key={block.id || index}>
-              <summary>工具：{block.name || "unknown"}</summary>
-              <pre>{JSON.stringify(block.arguments, null, 2)}</pre>
-            </details>;
           }
           return null;
         })}

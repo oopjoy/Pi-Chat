@@ -10,6 +10,7 @@ export interface ExtensionUiRequest {
   placeholder?: string;
   prefill?: string;
   notifyType?: string;
+  piChatSessionId?: string;
 }
 
 export function ExtensionDialog({ request, onRespond }: {
@@ -19,6 +20,7 @@ export function ExtensionDialog({ request, onRespond }: {
   const [value, setValue] = useState("");
   useEffect(() => setValue(request?.prefill || ""), [request]);
   if (!request || !["select", "confirm", "input", "editor"].includes(request.method)) return null;
+  const gatePrompt = /(?:Write|Edit|Destructive bash|Allow\?)/i.test(request.title || "");
 
   const cancel = () => onRespond({ id: request.id, cancelled: true });
   const submit = () => {
@@ -28,13 +30,14 @@ export function ExtensionDialog({ request, onRespond }: {
 
   return (
     <div className="dialog-backdrop" role="presentation">
-      <section className="dialog" role="dialog" aria-modal="true" aria-labelledby="extension-dialog-title">
-        <h2 id="extension-dialog-title">{request.title || "Pi 需要你的输入"}</h2>
+      <section className={`dialog ${gatePrompt ? "gate-confirmation" : ""}`} role="dialog" aria-modal="true" aria-labelledby="extension-dialog-title">
+        <h2 id="extension-dialog-title">{gatePrompt ? "文件权限确认" : request.title || "Pi 需要你的输入"}</h2>
+        {gatePrompt && <p className="gate-confirmation-note">此操作由 Pi 的文件权限 Gate 拦截；只有选择允许后，Pi 才会继续执行。</p>}
         {request.message && <p>{request.message}</p>}
         {request.method === "select" && (
           <div className="dialog-options">
             {(request.options || []).map((option) => (
-              <button type="button" key={option} onClick={() => onRespond({ id: request.id, value: option })}>{option}</button>
+              <button type="button" className={gatePrompt && option.includes("Allow") ? "gate-allow" : gatePrompt ? "gate-block" : ""} key={option} onClick={() => onRespond({ id: request.id, value: option })}>{option}</button>
             ))}
           </div>
         )}

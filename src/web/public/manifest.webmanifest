@@ -1,0 +1,25 @@
+{
+  "name": "Pi Chat",
+  "short_name": "Pi Chat",
+  "description": "A lightweight local-first web chat client for Pi",
+  "lang": "zh-CN",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f5f7fb",
+  "theme_color": "#2368d8",
+  "icons": [
+    {
+      "src": "/icons/pi-chat-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icons/pi-chat-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

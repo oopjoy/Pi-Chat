@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { ResourceManager } from "../src/server/resource-manager";
 
-test("resource manager scans and toggles managed skills and plugins", async () => {
+test("resource manager separates skills, extensions, and packages with their real Pi ownership", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-resources-"));
   const sourceRoot = await mkdtemp(join(tmpdir(), "pi-chat-skill-source-"));
   try {
@@ -24,12 +24,12 @@ test("resource manager scans and toggles managed skills and plugins", async () =
     assert.equal(skills.resources[0].enabled, false);
     assert.match(await readFile(join(root, "skills", "demo", "SKILL.md"), "utf8"), /disable-model-invocation: true/);
 
-    let plugins = await manager.listPlugins(root);
-    const extension = plugins.resources.find((item) => item.kind === "extension");
+    let extensions = await manager.listExtensions(root);
+    const extension = extensions.resources.find((item) => item.name === "demo");
     assert.ok(extension);
-    await manager.setPluginEnabled(extension.id, false, root);
-    plugins = await manager.listPlugins(root);
-    assert.equal(plugins.resources.find((item) => item.id === extension.id)?.enabled, false);
+    await manager.setExtensionEnabled(extension.id, false, root);
+    extensions = await manager.listExtensions(root);
+    assert.equal(extensions.resources.find((item) => item.id === extension.id)?.enabled, false);
 
     await mkdir(join(sourceRoot, "installed"));
     await writeFile(join(sourceRoot, "installed", "SKILL.md"), "---\nname: installed\ndescription: Installed skill\n---\n");
@@ -46,15 +46,23 @@ test("resource manager scans and toggles managed skills and plugins", async () =
     await writeFile(join(localPackage, "package.json"), JSON.stringify({ name: "test-plugin", version: "1.0.0" }));
     await writeFile(join(localPackage, "extensions", "index.ts"), "export default function () {}\n");
     await writeFile(join(localPackage, "skills", "packaged", "SKILL.md"), "---\nname: packaged\ndescription: Package skill\n---\n");
-    await manager.installPlugin(localPackage);
-    plugins = await manager.listPlugins(root);
-    const packagePlugin = plugins.resources.find((item) => item.kind === "package");
-    assert.ok(packagePlugin);
-    assert.equal(packagePlugin.resources.length, 2);
-    await manager.setPluginEnabled(packagePlugin.id, false, root);
-    assert.equal((await manager.listPlugins(root)).resources.find((item) => item.id === packagePlugin.id)?.enabled, false);
-    await manager.removePlugin(packagePlugin.id, root);
-    assert.equal((await manager.listPlugins(root)).resources.some((item) => item.id === packagePlugin.id), false);
+    await manager.installPackage(localPackage);
+    let packages = await manager.listPackages(root);
+    const packageResource = packages.resources.find((item) => item.name === "test-plugin");
+    assert.ok(packageResource);
+    assert.equal(packageResource.resources.length, 2);
+    extensions = await manager.listExtensions(root);
+    const packagedExtension = extensions.resources.find((item) => item.packageSource === packageResource.source);
+    assert.ok(packagedExtension);
+    assert.equal(packagedExtension.removable, false);
+    await assert.rejects(manager.setExtensionEnabled(packagedExtension.id, false, root), /Package-provided/);
+    await manager.setPackageEnabled(packageResource.id, false, root);
+    packages = await manager.listPackages(root);
+    assert.equal(packages.resources.find((item) => item.id === packageResource.id)?.enabled, false);
+    extensions = await manager.listExtensions(root);
+    assert.equal(extensions.resources.find((item) => item.id === packagedExtension.id)?.enabled, false);
+    await manager.removePackage(packageResource.id, root);
+    assert.equal((await manager.listPackages(root)).resources.some((item) => item.id === packageResource.id), false);
   } finally {
     await rm(root, { recursive: true, force: true });
     await rm(sourceRoot, { recursive: true, force: true });

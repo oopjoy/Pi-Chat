@@ -8,6 +8,22 @@ import type { SessionIndex } from "../src/server/session-index";
 import type { ResourceManager } from "../src/server/resource-manager";
 import { commandMatches, fileReferences, windowsPathsFromText } from "../src/web/components/ChatInput";
 
+test("production web entry advertises standalone install metadata", async () => {
+  const html = await (await import("node:fs/promises")).readFile(new URL("../src/web/index.html", import.meta.url), "utf8");
+  const manifest = JSON.parse(await (await import("node:fs/promises")).readFile(new URL("../src/web/public/manifest.webmanifest", import.meta.url), "utf8")) as { display: string; start_url: string; icons: Array<{ src: string }> };
+  assert.match(html, /rel="manifest" href="\/manifest\.webmanifest"/);
+  assert.match(html, /rel="icon" href="\/icons\/pi-chat-192\.png"/);
+  assert.equal(manifest.display, "standalone");
+  assert.equal(manifest.start_url, "/");
+  assert.deepEqual(manifest.icons.map((icon) => icon.src), ["/icons/pi-chat-192.png", "/icons/pi-chat-512.png"]);
+});
+
+test("session sidebar switches sessions without link navigation", async () => {
+  const sidebar = await (await import("node:fs/promises")).readFile(new URL("../src/web/components/SessionSidebar.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(sidebar, /href=\{`\?session=/);
+  assert.match(sidebar, /type="button"[\s\S]*onClick=\{\(\) => onView\(session\.id\)\}/);
+});
+
 test("prompt image validation accepts Pi image content and rejects unsafe payloads", () => {
   assert.deepEqual(promptImages([{ type: "image", data: "aGVsbG8=", mimeType: "image/png", fileName: "ignored.png" }]), [
     { type: "image", data: "aGVsbG8=", mimeType: "image/png" },
@@ -114,48 +130,63 @@ test("extension slash commands execute immediately without entering the local qu
   }
 });
 
-test("read-only session view does not switch or interrupt the active Pi session", async () => {
-  const commands: Record<string, unknown>[] = [];
+test("opening any session automatically creates a writable independent runtime", async () => {
+  const mainCommands: Record<string, unknown>[] = [];
+  const workerCommands: Record<string, unknown>[] = [];
   const activePath = "C:\\sessions\\active.jsonl";
+  const historyPath = "C:\\sessions\\history.jsonl";
   const historyId = "0123456789abcdefabcd";
-  const rpc = {
+  const mainRpc = {
     onEvent: () => () => {},
     send: async (command: Record<string, unknown>) => {
-      commands.push(command);
-      if (command.type === "get_state") return { type: "response", success: true, data: { model: null, sessionFile: activePath, sessionId: "active", isStreaming: true } };
-      throw new Error(`Unexpected RPC command: ${String(command.type)}`);
+      mainCommands.push(command);
+      if (command.type === "get_state") return { type: "response", success: true, data: { model: null, sessionFile: activePath, sessionId: "active", isStreaming: false } };
+      throw new Error(`Unexpected main RPC command: ${String(command.type)}`);
+    },
+  } as unknown as PiRpcClient;
+  const workerRpc = {
+    onEvent: () => () => {}, start: async () => { await new Promise((resolve) => setTimeout(resolve, 10)); }, stop: async () => {},
+    send: async (command: Record<string, unknown>) => {
+      workerCommands.push(command);
+      if (command.type === "get_state") return { type: "response", success: true, data: { model: null, sessionFile: historyPath, sessionId: "history", isStreaming: false } };
+      if (command.type === "get_messages") return { type: "response", success: true, data: { messages: [{ role: "user", content: "old question" }] } };
+      if (command.type === "get_session_stats") return { type: "response", success: true, data: { tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
+      if (command.type === "get_commands") return { type: "response", success: true, data: { commands: [] } };
+      if (command.type === "prompt") return { type: "response", success: true };
+      throw new Error(`Unexpected worker RPC command: ${String(command.type)}`);
     },
   } as unknown as PiRpcClient;
   const sessions = {
-    list: async () => [
-      { id: historyId, sessionId: "history", name: "History", preview: "old", cwd: process.cwd(), updatedAt: 1, messageCount: 2, active: false },
-    ],
+    list: async () => [{ id: historyId, sessionId: "history", name: "History", preview: "old", cwd: process.cwd(), updatedAt: 1, messageCount: 2, active: false }],
+    pathForId: (id: string) => id === historyId ? historyPath : null,
     messagesForId: async (id: string) => id === historyId ? [
       { role: "user", content: "old question" },
-      { role: "assistant", content: "old answer" },
+      { role: "assistant", content: "new answer written outside Pi Chat" },
     ] : null,
   } as unknown as SessionIndex;
-  const app = new PiChatApp({ rpc, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  let workerCreations = 0;
+  const app = new PiChatApp({ rpc: mainRpc, createRpc: () => { workerCreations += 1; return workerRpc; }, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
   const server = createServer((request, response) => void app.handle(request, response));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   try {
     const address = server.address();
     assert.ok(address && typeof address === "object");
-    const response = await fetch(`http://127.0.0.1:${address.port}/api/sessions/${historyId}/view`);
+    const origin = `http://127.0.0.1:${address.port}`;
+    const [response, concurrentResponse] = await Promise.all([
+      fetch(`${origin}/api/sessions/${historyId}/view`),
+      fetch(`${origin}/api/sessions/${historyId}/view`),
+    ]);
     assert.equal(response.status, 200);
-    const view = await response.json() as { isActive: boolean; isStreaming: boolean; messages: Array<{ content: string }> };
-    assert.equal(view.isActive, false);
-    assert.equal(view.isStreaming, false);
-    assert.deepEqual(view.messages.map((message) => message.content), ["old question", "old answer"]);
-    assert.equal(commands.some((command) => command.type === "switch_session"), false);
-    const stalePrompt = await fetch(`http://127.0.0.1:${address.port}/api/chat/prompt`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ message: "must not reach active session", sessionId: historyId }),
-    });
-    assert.equal(stalePrompt.status, 409);
-    assert.equal(commands.some((command) => command.type === "prompt"), false);
-    assert.deepEqual(commands.map((command) => command.type), ["get_state"]);
+    assert.equal(concurrentResponse.status, 200);
+    assert.equal(workerCreations, 1);
+    const view = await response.json() as { isActive: boolean; messages: Array<{ content: string }> };
+    assert.equal(view.isActive, true);
+    assert.deepEqual(view.messages.map((message) => message.content), ["old question", "new answer written outside Pi Chat"]);
+    assert.equal(workerCommands.some((command) => command.type === "get_messages"), false);
+    const prompt = await fetch(`${origin}/api/chat/prompt`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message: "continue here", sessionId: historyId }) });
+    assert.equal(prompt.status, 202);
+    assert.equal(mainCommands.some((command) => command.type === "switch_session" || command.type === "prompt"), false);
+    assert.equal(workerCommands.some((command) => command.type === "prompt"), true);
   } finally {
     server.close();
     await app.close();

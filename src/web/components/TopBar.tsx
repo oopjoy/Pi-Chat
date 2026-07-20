@@ -1,5 +1,7 @@
 import type { CSSProperties } from "react";
 import type { ModelInfo, PiState, SessionStats, ThinkingLevel } from "../../shared/types";
+import type { GateMode } from "../lib/gate-mode";
+import { GateControl } from "./GateControl";
 
 function modelValue(model: Pick<ModelInfo, "provider" | "id">): string {
   return `${model.provider}\u0000${model.id}`;
@@ -40,11 +42,16 @@ function UsageStats({ stats }: { stats?: SessionStats }) {
   </div>;
 }
 
-export function TopBar({ state, models, stats, disabled, onModel, onThinking }: {
+export function TopBar({ state, models, stats, conversationName, workspacePath, disabled, gateAvailable, gateMode, onGate, onModel, onThinking }: {
   state: PiState;
   models: ModelInfo[];
   stats?: SessionStats;
+  conversationName: string;
+  workspacePath: string;
   disabled: boolean;
+  gateAvailable: boolean;
+  gateMode: GateMode;
+  onGate: (mode: GateMode) => void;
   onModel: (provider: string, id: string) => void;
   onThinking: (level: ThinkingLevel) => void;
 }) {
@@ -57,8 +64,12 @@ export function TopBar({ state, models, stats, disabled, onModel, onThinking }: 
   }, new Map<string, ModelInfo[]>());
   return (
     <header className="topbar">
-      <div className="topbar-title" title={state.sessionName || "Pi Chat"}><strong>Pi Chat</strong><small>· {state.sessionFile ? "已保存对话" : "新对话"}</small></div>
+      <div className="topbar-context" title={`当前对话：${conversationName}\n工作路径：${workspacePath}`}>
+        <div className="topbar-title"><strong>Pi Chat</strong><b><span className="topbar-label">当前对话：</span>{conversationName}</b></div>
+        <div className="topbar-path" title={`工作路径：${workspacePath}`}><span aria-hidden="true">⌂</span><em>工作路径：</em>{workspacePath}</div>
+      </div>
       <UsageStats stats={stats} />
+      {gateAvailable && <GateControl mode={gateMode} disabled={disabled} onChange={onGate} />}
       <label className="topbar-select model-select">
         <span>模型</span>
         <select value={current} disabled={disabled || !models.length} onChange={(event) => { const [provider, id] = event.target.value.split("\u0000"); onModel(provider, id); }}>

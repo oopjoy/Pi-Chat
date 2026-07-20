@@ -4,7 +4,7 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { extname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
-import type { PiMessage, SessionSummary } from "../shared/types.js";
+import type { PiMessage, SessionSummary, TodoItem } from "../shared/types.js";
 import { loadSessionCache, saveSessionCache, type SessionCacheEntry } from "./session-index-cache.js";
 
 interface SessionHeader {
@@ -15,10 +15,12 @@ interface SessionHeader {
 
 interface SessionEntry {
   type?: string;
+  customType?: string;
   id?: string;
   parentId?: string | null;
   timestamp?: string | number;
   name?: string;
+  data?: { todos?: unknown };
   message?: PiMessage;
 }
 
@@ -57,7 +59,7 @@ async function listJsonlFiles(root: string): Promise<string[]> {
   return files;
 }
 
-export async function readSessionMessages(path: string): Promise<PiMessage[]> {
+async function readSessionBranch(path: string): Promise<SessionEntry[]> {
   const entries: SessionEntry[] = [];
   for (const line of (await readFile(path, "utf8")).split("\n")) {
     if (!line.trim()) continue;
@@ -77,7 +79,22 @@ export async function readSessionMessages(path: string): Promise<PiMessage[]> {
     branch.push(current);
     current = current.parentId ? byId.get(current.parentId) : undefined;
   }
-  return branch.reverse().flatMap((entry) => {
+  return branch.reverse();
+}
+
+function todoItems(value: unknown): TodoItem[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const candidate = item as Record<string, unknown>;
+    if (!Number.isInteger(candidate.id) || typeof candidate.text !== "string" || typeof candidate.done !== "boolean") return [];
+    return [{ id: candidate.id as number, text: candidate.text.slice(0, 500), done: candidate.done }];
+  });
+}
+
+export async function readSessionMessages(path: string): Promise<PiMessage[]> {
+  const branch = await readSessionBranch(path);
+  return branch.flatMap((entry) => {
     if (entry.type !== "message" || !entry.message) return [];
     const timestamp = typeof entry.message.timestamp === "number"
       ? entry.message.timestamp
@@ -88,6 +105,14 @@ export async function readSessionMessages(path: string): Promise<PiMessage[]> {
           : undefined;
     return [{ ...entry.message, ...(Number.isFinite(timestamp) ? { timestamp } : {}) }];
   });
+}
+
+export async function readSessionTodos(path: string): Promise<TodoItem[]> {
+  const branch = await readSessionBranch(path);
+  for (const entry of [...branch].reverse()) {
+    if (entry.type === "custom" && entry.customType === "pi-deck-todo") return todoItems(entry.data?.todos);
+  }
+  return [];
 }
 
 async function parseSession(path: string, modifiedAt: number): Promise<Omit<SessionSummary, "active"> | null> {
@@ -123,6 +148,9 @@ async function parseSession(path: string, modifiedAt: number): Promise<Omit<Sess
   }
 
   if (!header?.id) return null;
+  // A Pi process creates an empty JSONL before the user actually starts a conversation.
+  // Those draft files belong to the composer, not to the persisted sidebar history.
+  if (messageCount === 0) return null;
   const displayName = name || preview || "新会话";
   return {
     id: idForPath(path),
@@ -163,10 +191,17 @@ export class SessionIndex {
       let cached = this.cache.get(normalized);
       if (!cached || cached.mtimeMs !== fileStat.mtimeMs || cached.size !== fileStat.size) {
         const summary = await parseSession(normalized, fileStat.mtimeMs);
-        if (!summary) continue;
+        if (!summary) {
+          if (this.cache.delete(normalized)) cacheChanged = true;
+          continue;
+        }
         cached = { mtimeMs: fileStat.mtimeMs, size: fileStat.size, summary };
         this.cache.set(normalized, cached);
         cacheChanged = true;
+      }
+      if (cached.summary.messageCount === 0) {
+        if (this.cache.delete(normalized)) cacheChanged = true;
+        continue;
       }
       if (normalizedCwd && resolve(cached.summary.cwd || "").toLowerCase() !== normalizedCwd) continue;
       this.pathsById.set(cached.summary.id, normalized);

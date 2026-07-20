@@ -14,7 +14,7 @@ const managementItems: Array<{ section: ManagementSection; icon: string; label: 
   { section: "models", icon: "◈", label: "Models" },
 ];
 
-export function SessionSidebar({ sessions, viewedSessionId, workspaceCwd, open, busy, viewBusy, refreshing, workspacePicking, onClose, onCollapse, onNew, onRefresh, onView, onPickWorkspace, onManage }: {
+export function SessionSidebar({ sessions, viewedSessionId, workspaceCwd, open, busy, viewBusy, refreshing, workspacePicking, onClose, onCollapse, onNew, onRefresh, onRestart, onView, onRename, onDelete, onPickWorkspace, onManage }: {
   sessions: SessionSummary[];
   viewedSessionId: string;
   workspaceCwd: string;
@@ -27,7 +27,10 @@ export function SessionSidebar({ sessions, viewedSessionId, workspaceCwd, open, 
   onCollapse: () => void;
   onNew: () => void;
   onRefresh: () => void;
+  onRestart: () => void;
   onView: (id: string) => void;
+  onRename: (session: SessionSummary) => void;
+  onDelete: (session: SessionSummary) => void;
   onPickWorkspace: () => void;
   onManage: (section: ManagementSection) => void;
 }) {
@@ -46,29 +49,36 @@ export function SessionSidebar({ sessions, viewedSessionId, workspaceCwd, open, 
         </div>
         <div className="sidebar-actions">
           <button type="button" className="new-chat" disabled={busy} onClick={onNew}><span>＋</span> New</button>
-          <button type="button" className={`refresh-chat ${refreshing ? "is-spinning" : ""}`} disabled={busy || refreshing} onClick={onRefresh} title="刷新会话" aria-label="刷新会话">↻</button>
+          <button type="button" className={`refresh-chat ${refreshing ? "is-spinning" : ""}`} disabled={busy || refreshing} onClick={onRefresh} title="刷新会话列表" aria-label="刷新会话列表">↻</button>
+          <button type="button" className="restart-pi" disabled={busy || refreshing} onClick={onRestart} title="重启 Pi RPC（不删除聊天记录）" aria-label="重启 Pi RPC">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.6v7.1M5.15 5.55a6.45 6.45 0 1 0 9.7 0" /></svg>
+          </button>
         </div>
         <div className="session-heading"><span>对话</span><span>{sessions.length}</span></div>
         <nav className="session-list" aria-label="会话列表">
           {sessions.map((session) => {
             const unavailable = viewBusy || session.id === viewedSessionId;
-            return <a
-              key={session.id}
-              href={`?session=${session.id}`}
-              className={`session-item ${session.id === viewedSessionId ? "is-active" : ""} ${session.running ? "is-running" : ""} ${unavailable ? "is-disabled" : ""}`}
-              aria-disabled={unavailable}
-              onClick={(event) => {
-                if (unavailable) event.preventDefault();
-                else if (!event.ctrlKey && !event.metaKey && !event.shiftKey && event.button === 0) {
-                  event.preventDefault();
-                  onView(session.id);
-                }
-              }}
-              title={`${session.cwd}\n${session.preview}\nCtrl + 点击可在新标签页查看`}
-            >
-              <span className="session-name">{session.name}{session.running && <i className="session-running-dot" title="正在后台生成" />}</span>
-              <span className="session-meta">{session.running ? "正在后台生成 · " : ""}{relativeTime(session.updatedAt)} · {session.messageCount} 条</span>
-            </a>;
+            return <div className={`session-row ${session.id === viewedSessionId ? "is-active" : ""}`} key={session.id}>
+              <button
+                type="button"
+                className={`session-item ${session.id === viewedSessionId ? "is-active" : ""} ${session.running ? "is-running" : ""} ${unavailable ? "is-disabled" : ""}`}
+                disabled={unavailable}
+                aria-current={session.id === viewedSessionId ? "page" : undefined}
+                onClick={() => onView(session.id)}
+                title={`${session.cwd}\n${session.preview}`}
+              >
+                <span className="session-name">{session.name}{session.running && <i className="session-running-dot" title="正在后台生成" />}</span>
+                <span className="session-meta">{session.running ? "正在生成 · " : session.writable ? "并行就绪 · " : "按需启动 · "}{relativeTime(session.updatedAt)} · {session.messageCount} 条</span>
+              </button>
+              <span className="session-item-actions">
+                <button type="button" onClick={() => onRename(session)} title="重命名对话" aria-label={`重命名 ${session.name}`}>
+                  <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 13.8-.7 3 3-.7L15 7.4 12.6 5 4 13.8Z" /><path d="m11.7 5.9 2.4 2.4" /></svg>
+                </button>
+                <button type="button" onClick={() => onDelete(session)} title="删除对话" aria-label={`删除 ${session.name}`}>
+                  <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4.5 6h11M8 3.8h4M6 6l.7 10h6.6L14 6M8.2 8.5v5M11.8 8.5v5" /></svg>
+                </button>
+              </span>
+            </div>;
           })}
           {!sessions.length && <p className="empty-list">还没有历史会话</p>}
         </nav>

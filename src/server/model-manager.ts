@@ -104,6 +104,32 @@ export class ModelManager {
     return models.map((model) => ({ ...model, custom: custom.has(`${model.provider}\u0000${model.id}`) }));
   }
 
+  async getCustomConfig(providerValue: unknown, idValue: unknown): Promise<CustomModelInput> {
+    const providerName = validateName(String(providerValue || ""), "Provider", /^[A-Za-z0-9._-]+$/, 80);
+    const id = validateName(String(idValue || ""), "Model ID", /^[^\s\u0000-\u001f]+$/, 200);
+    const value = await this.read();
+    const provider = value.providers?.[providerName];
+    const model = provider && Array.isArray(provider.models)
+      ? provider.models.find((item) => item && typeof item === "object" && (item as Record<string, unknown>).id === id) as Record<string, unknown> | undefined
+      : undefined;
+    if (!provider || !model) throw new Error("只能编辑 models.json 中的自定义模型");
+    const api = (typeof model.api === "string" ? model.api : typeof provider.api === "string" ? provider.api : "openai-completions") as ModelApi;
+    if (!MODEL_APIS.includes(api)) throw new Error("模型 API 类型不受支持");
+    const input = Array.isArray(model.input) ? model.input : [];
+    return {
+      provider: providerName,
+      id,
+      name: typeof model.name === "string" ? model.name : id,
+      baseUrl: typeof provider.baseUrl === "string" ? provider.baseUrl : "",
+      api,
+      apiKey: "",
+      reasoning: model.reasoning === true,
+      imageInput: input.includes("image"),
+      contextWindow: typeof model.contextWindow === "number" ? model.contextWindow : undefined,
+      maxTokens: typeof model.maxTokens === "number" ? model.maxTokens : undefined,
+    };
+  }
+
   async add(raw: unknown): Promise<CustomModelInput> {
     const input = validateCustomModel(raw);
     const value = await this.read();

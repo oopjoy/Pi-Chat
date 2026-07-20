@@ -10,6 +10,7 @@ import { ResourceManager } from "./resource-manager.js";
 import { PiRpcClient } from "./rpc-client.js";
 import { SessionIndex } from "./session-index.js";
 import { loadWorkspace } from "./workspace-state.js";
+import { ensureBundledExtension, ensurePiChatTodoExtension } from "./todo-extension-installer.js";
 
 interface CliOptions {
   host: string;
@@ -53,6 +54,21 @@ function findProjectRoot(start: string): string {
 const options = parseArgs(process.argv.slice(2));
 options.cwd = await loadWorkspace(options.cwd);
 const projectRoot = findProjectRoot(dirname(fileURLToPath(import.meta.url)));
+const agentDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
+const todoExtension = await ensurePiChatTodoExtension({
+  agentDir,
+  sourcePath: join(projectRoot, "resources", "extensions", "pi-chat-todo.ts"),
+});
+if (todoExtension === "installed") console.log("[Pi Chat] 已安装内置 Todo 扩展。");
+if (todoExtension === "source-missing") console.warn("[Pi Chat] 未找到内置 Todo 扩展；待办面板仍可读取已有状态，但无法提供 /todo 工具。");
+const gateExtension = await ensureBundledExtension({
+  agentDir,
+  sourcePath: join(projectRoot, "resources", "extensions", "pi-chat-file-permission-gate.ts"),
+  targetName: "pi-chat-file-permission-gate.ts",
+  legacyNames: ["file-permission-gate.ts"],
+});
+if (gateExtension === "installed") console.log("[Pi Chat] 已安装内置文件权限 Gate 扩展。");
+if (gateExtension === "source-missing") console.warn("[Pi Chat] 未找到内置文件权限 Gate 扩展；文件权限控制器不可用。");
 const rpc = new PiRpcClient({ cwd: options.cwd });
 
 console.log("[Pi Chat] 正在启动 Pi RPC…");
@@ -70,6 +86,7 @@ if (options.dev) {
 
 const app = new PiChatApp({
   rpc,
+  createRpc: (cwd) => new PiRpcClient({ cwd }),
   sessions: new SessionIndex(),
   resources: new ResourceManager(),
   modelManager: new ModelManager(),
@@ -86,6 +103,9 @@ await new Promise<void>((resolveListen, reject) => {
 const address = server.address();
 const port = typeof address === "object" && address ? address.port : options.port;
 console.log(`[Pi Chat] 已启动：http://${options.host}:${port}`);
+void app.preheatRecentSessions().then((ids) => {
+  if (ids.length) console.log(`[Pi Chat] 已后台预热最近 ${ids.length} 个历史会话。`);
+}).catch((error) => console.warn(`[Pi Chat] 历史会话预热失败：${error instanceof Error ? error.message : String(error)}`));
 if (options.host !== "127.0.0.1" && options.host !== "localhost" && options.host !== "::1") {
   console.warn("[Pi Chat] 警告：基础版尚未实现远程登录认证，请勿直接暴露到公网。");
 }

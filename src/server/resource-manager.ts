@@ -4,7 +4,7 @@ import { cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:
 import { homedir } from "node:os";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { spawn } from "node:child_process";
-import type { PluginResource, PluginResourceItem, ResourceResponse, SkillResource } from "../shared/types.js";
+import type { ExtensionResource, PackageResource, PluginResourceItem, ResourceResponse, SkillResource } from "../shared/types.js";
 import { resolvePiEntry } from "./rpc-client.js";
 
 interface PackageFilter {
@@ -78,6 +78,10 @@ async function walkFiles(root: string, predicate: (path: string) => boolean, dep
     else if (entry.isFile() && predicate(path)) result.push(path);
   }
   return result;
+}
+
+function packageSourceLabel(source: string): string {
+  return npmPackageName(source) || source.replace(/^packages[\\/]/, "") || source;
 }
 
 function npmPackageName(source: string): string | null {
@@ -255,9 +259,9 @@ export class ResourceManager {
     await rm(basename(path).toLowerCase() === "skill.md" ? dirname(path) : path, { recursive: true, force: true });
   }
 
-  async listPlugins(cwd: string): Promise<ResourceResponse<PluginResource>> {
+  async listPackages(cwd: string): Promise<ResourceResponse<PackageResource>> {
     const settings = await readSettings(this.settingsPath);
-    const resources: PluginResource[] = [];
+    const resources: PackageResource[] = [];
     const diagnostics: string[] = [];
     for (const entry of settings.packages ?? []) {
       const source = packageSource(entry);
@@ -266,70 +270,61 @@ export class ResourceManager {
       if (!installed) diagnostics.push(`${source}: configured package path was not found`);
       const metadata = installed ? await packageMetadata(installed) : {};
       const packageResources: PluginResourceItem[] = [];
-      if (installed) {
-        for (const resource of await manifestResources(installed)) packageResources.push(...await resourceItems(resource.path, resource.key));
-      }
+      if (installed) for (const resource of await manifestResources(installed)) packageResources.push(...await resourceItems(resource.path, resource.key));
       resources.push({
-        id: hashId(`global\0${source}`),
-        name: metadata.name || source.replace(/^npm:/, ""),
-        source,
-        scope: "global",
-        kind: "package",
-        enabled: !packageDisabled(entry),
-        removable: true,
-        installedPath: installed ? pathLabel(installed) : undefined,
-        version: metadata.version,
-        description: metadata.description,
-        resources: packageResources,
-      });
-    }
-
-    const extensionsRoot = join(this.agentDir, "extensions");
-    const extensionFiles = await walkFiles(extensionsRoot, (path) => EXTENSION_PATTERN.test(path) && (dirname(path) === extensionsRoot || /^index\.(?:ts|js)$/i.test(basename(path))), 3);
-    for (const path of extensionFiles) {
-      const pattern = relative(this.agentDir, path);
-      let override: string | undefined;
-      for (const entry of settings.extensions ?? []) {
-        if (entry.replace(/^[+\-!]/, "") === pattern || resolve(this.agentDir, entry.replace(/^[+\-!]/, "")) === resolve(path)) override = entry;
-      }
-      const enabled = !override?.startsWith("-") && !override?.startsWith("!");
-      resources.push({
-        id: hashId(`extension\0${resolve(path)}`),
-        name: /^index\./i.test(basename(path)) ? basename(dirname(path)) : basename(path, extname(path)),
-        source: pathLabel(path),
-        scope: "global",
-        kind: "extension",
-        enabled,
-        removable: true,
-        installedPath: pathLabel(path),
-        resources: [{ kind: "extension", name: basename(path, extname(path)), relativePath: pattern }],
+        id: hashId(`global\0${source}`), name: metadata.name || source.replace(/^npm:/, ""), source, scope: "global",
+        enabled: !packageDisabled(entry), removable: true, installedPath: installed ? pathLabel(installed) : undefined,
+        version: metadata.version, description: metadata.description, resources: packageResources,
       });
     }
     return { resources: resources.sort((a, b) => a.name.localeCompare(b.name)), diagnostics };
   }
 
-  async setPluginEnabled(id: string, enabled: boolean, cwd: string): Promise<void> {
-    const plugin = (await this.listPlugins(cwd)).resources.find((item) => item.id === id);
-    if (!plugin) throw new Error("Plugin not found");
+  async listExtensions(cwd: string): Promise<ResourceResponse<ExtensionResource>> {
     const settings = await readSettings(this.settingsPath);
-    if (plugin.kind === "package") {
-      const packages = settings.packages ?? [];
-      let found = false;
-      settings.packages = packages.map((entry): PackageSetting => {
-        if (hashId(`global\0${packageSource(entry)}`) !== id) return entry;
-        found = true;
-        if (enabled) return packageSource(entry);
-        return { ...(typeof entry === "string" ? { source: entry } : entry), extensions: [], skills: [], prompts: [], themes: [] };
+    const resources: ExtensionResource[] = [];
+    const diagnostics: string[] = [];
+    const extensionsRoot = join(this.agentDir, "extensions");
+    const extensionFiles = await walkFiles(extensionsRoot, (path) => EXTENSION_PATTERN.test(path) && (dirname(path) === extensionsRoot || /^index\.(?:ts|js)$/i.test(basename(path))), 3);
+    for (const path of extensionFiles) {
+      const pattern = relative(this.agentDir, path);
+      const override = (settings.extensions ?? []).find((entry) => entry.replace(/^[+\-!]/, "") === pattern || resolve(this.agentDir, entry.replace(/^[+\-!]/, "")) === resolve(path));
+      resources.push({
+        id: hashId(`extension\0${resolve(path)}`), name: /^index\./i.test(basename(path)) ? basename(dirname(path)) : basename(path, extname(path)),
+        source: pathLabel(path), scope: "global", enabled: !override?.startsWith("-") && !override?.startsWith("!"),
+        removable: true, installedPath: pathLabel(path),
       });
-      if (!found) throw new Error("Package setting not found");
-    } else {
-      const realPath = await this.extensionPathFromId(id);
-      if (!realPath) throw new Error("Extension path not found");
-      const pattern = relative(this.agentDir, realPath);
-      const current = settings.extensions ?? [];
-      settings.extensions = current.filter((entry) => entry.replace(/^[+\-!]/, "") !== pattern && resolve(this.agentDir, entry.replace(/^[+\-!]/, "")) !== resolve(realPath));
-      settings.extensions.push(`${enabled ? "+" : "-"}${pattern}`);
     }
+    for (const entry of settings.packages ?? []) {
+      const source = packageSource(entry);
+      const root = resolvePackagePath(source, this.agentDir, cwd);
+      if (!root || !existsSync(root)) { diagnostics.push(`${source}: configured package path was not found`); continue; }
+      const packageExtensions: PluginResourceItem[] = [];
+      for (const resource of await manifestResources(root)) {
+        if (resource.key === "extensions") packageExtensions.push(...await resourceItems(resource.path, resource.key));
+      }
+      for (const item of packageExtensions) {
+        const label = packageExtensions.length > 1 ? `${packageSourceLabel(source)} · ${item.name}` : packageSourceLabel(source);
+        resources.push({
+          id: hashId(`package-extension\0${source}\0${item.relativePath}`), name: label,
+          source: `${source} · ${item.relativePath}`, scope: "global", enabled: !packageDisabled(entry),
+          removable: false, packageSource: source,
+        });
+      }
+    }
+    return { resources: resources.sort((a, b) => a.name.localeCompare(b.name)), diagnostics };
+  }
+
+  async setPackageEnabled(id: string, enabled: boolean, cwd: string): Promise<void> {
+    if (!(await this.listPackages(cwd)).resources.some((item) => item.id === id)) throw new Error("Package not found");
+    const settings = await readSettings(this.settingsPath);
+    let found = false;
+    settings.packages = (settings.packages ?? []).map((entry): PackageSetting => {
+      if (hashId(`global\0${packageSource(entry)}`) !== id) return entry;
+      found = true;
+      return enabled ? packageSource(entry) : { ...(typeof entry === "string" ? { source: entry } : entry), extensions: [], skills: [], prompts: [], themes: [] };
+    });
+    if (!found) throw new Error("Package setting not found");
     await writeSettingsAtomic(this.settingsPath, settings);
   }
 
@@ -339,17 +334,30 @@ export class ResourceManager {
     return files.find((path) => hashId(`extension\0${resolve(path)}`) === id) ?? null;
   }
 
-  async installPlugin(source: string): Promise<void> {
-    await runPiPackageCommand(["install", source], this.agentDir);
+  async setExtensionEnabled(id: string, enabled: boolean, cwd: string): Promise<void> {
+    const extension = (await this.listExtensions(cwd)).resources.find((item) => item.id === id);
+    if (!extension) throw new Error("Extension not found");
+    if (extension.packageSource) throw new Error("Package-provided extensions are controlled by their Package switch");
+    const realPath = await this.extensionPathFromId(id);
+    if (!realPath) throw new Error("Extension path not found");
+    const pattern = relative(this.agentDir, realPath);
+    const settings = await readSettings(this.settingsPath);
+    settings.extensions = (settings.extensions ?? []).filter((entry) => entry.replace(/^[+\-!]/, "") !== pattern && resolve(this.agentDir, entry.replace(/^[+\-!]/, "")) !== resolve(realPath));
+    settings.extensions.push(`${enabled ? "+" : "-"}${pattern}`);
+    await writeSettingsAtomic(this.settingsPath, settings);
   }
 
-  async removePlugin(id: string, cwd: string): Promise<void> {
-    const plugin = (await this.listPlugins(cwd)).resources.find((item) => item.id === id);
-    if (!plugin?.removable) throw new Error("Plugin cannot be removed");
-    if (plugin.kind === "package") {
-      await runPiPackageCommand(["remove", plugin.source], this.agentDir);
-      return;
-    }
+  async installPackage(source: string): Promise<void> { await runPiPackageCommand(["install", source], this.agentDir); }
+
+  async removePackage(id: string, cwd: string): Promise<void> {
+    const resource = (await this.listPackages(cwd)).resources.find((item) => item.id === id);
+    if (!resource?.removable) throw new Error("Package cannot be removed");
+    await runPiPackageCommand(["remove", resource.source], this.agentDir);
+  }
+
+  async removeExtension(id: string, cwd: string): Promise<void> {
+    const extension = (await this.listExtensions(cwd)).resources.find((item) => item.id === id);
+    if (!extension?.removable || extension.packageSource) throw new Error("Package-provided extensions must be removed with their Package");
     const path = await this.extensionPathFromId(id);
     if (!path) throw new Error("Extension path not found");
     const root = resolve(this.agentDir, "extensions").toLowerCase();
@@ -358,10 +366,7 @@ export class ResourceManager {
     if (!normalized.startsWith(`${root}${separator}`)) throw new Error("Refusing to remove extension outside managed directory");
     await rm(/^index\./i.test(basename(path)) ? dirname(path) : path, { recursive: true, force: true });
     const settings = await readSettings(this.settingsPath);
-    settings.extensions = (settings.extensions ?? []).filter((entry) => {
-      const resolved = resolve(this.agentDir, entry.replace(/^[+\-!]/, ""));
-      return resolved !== resolve(path) && resolved !== resolve(dirname(path));
-    });
+    settings.extensions = (settings.extensions ?? []).filter((entry) => resolve(this.agentDir, entry.replace(/^[+\-!]/, "")) !== resolve(path) && resolve(this.agentDir, entry.replace(/^[+\-!]/, "")) !== resolve(dirname(path)));
     await writeSettingsAtomic(this.settingsPath, settings);
   }
 }

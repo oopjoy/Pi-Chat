@@ -9,5 +9,6 @@ src/web/generated/
 *-smoke.pid
 *-bootstrap.json
 new-session.json
+.pi-subagents/
 
 dist-local/

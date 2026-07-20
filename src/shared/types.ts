@@ -7,6 +7,7 @@ export interface SessionSummary {
   updatedAt: number;
   messageCount: number;
   active: boolean;
+  writable?: boolean;
   running?: boolean;
 }
 
@@ -31,6 +32,11 @@ export interface CustomModelInput {
   imageInput: boolean;
   contextWindow?: number;
   maxTokens?: number;
+}
+
+export interface CustomModelConfig extends CustomModelInput {
+  /** API keys are never returned by the server; an empty value preserves the existing key on save. */
+  apiKey: "";
 }
 
 export interface PiContentBlock {
@@ -94,16 +100,28 @@ export interface QueuedPrompt {
   createdAt: number;
 }
 
+export interface TodoItem {
+  id: number;
+  text: string;
+  done: boolean;
+}
+
 export interface SessionViewData {
   session: SessionSummary;
+  state: PiState;
   messages: PiMessage[];
   messageTotal: number;
+  turnTotal?: number;
   messagesTruncated: boolean;
   isActive: boolean;
   isStreaming: boolean;
   liveMessage?: PiMessage;
   toolStatus?: string;
   stats?: SessionStats;
+  queue?: QueuedPrompt[];
+  queuePaused?: boolean;
+  todos?: TodoItem[];
+  commands?: SlashCommand[];
 }
 
 export interface BootstrapData {
@@ -116,12 +134,15 @@ export interface BootstrapData {
   queuePaused: boolean;
   workspaceCwd: string;
   messageTotal?: number;
+  turnTotal?: number;
   messagesTruncated?: boolean;
   activeSessionId?: string;
+  activeSessionIds?: string[];
   liveMessage?: PiMessage;
   toolStatus?: string;
   stats?: SessionStats;
   piVersion?: string;
+  todos?: TodoItem[];
 }
 
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -152,12 +173,23 @@ export interface PluginResourceItem {
   relativePath: string;
 }
 
-export interface PluginResource {
+export interface ExtensionResource {
   id: string;
   name: string;
   source: string;
   scope: "global" | "project";
-  kind: "package" | "extension";
+  enabled: boolean;
+  removable: boolean;
+  installedPath?: string;
+  /** Package-owned extensions inherit the package switch and are intentionally read-only here. */
+  packageSource?: string;
+}
+
+export interface PackageResource {
+  id: string;
+  name: string;
+  source: string;
+  scope: "global" | "project";
   enabled: boolean;
   removable: boolean;
   installedPath?: string;
@@ -165,6 +197,9 @@ export interface PluginResource {
   description?: string;
   resources: PluginResourceItem[];
 }
+
+/** @deprecated Use PackageResource. Kept as a compatibility alias for API consumers. */
+export type PluginResource = PackageResource;
 
 export interface ResourceResponse<T> {
   resources: T[];

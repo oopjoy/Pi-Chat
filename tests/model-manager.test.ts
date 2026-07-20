@@ -37,6 +37,20 @@ test("model manager adds, annotates and removes custom models without losing pro
     assert.equal(configured.providers.local.models[1].api, "openai-responses");
     assert.deepEqual(configured.providers.local.models[1].input, ["text", "image"]);
 
+    const editable = await manager.getCustomConfig("local", "vision-model");
+    assert.deepEqual(editable, {
+      provider: "local",
+      id: "vision-model",
+      name: "Vision Model",
+      baseUrl: "http://localhost:11434/v1",
+      api: "openai-responses",
+      apiKey: "",
+      reasoning: true,
+      imageInput: true,
+      contextWindow: 256000,
+      maxTokens: 32000,
+    });
+
     const annotated = await manager.annotate([
       { provider: "local", id: "vision-model", name: "Vision Model" },
       { provider: "openai", id: "built-in", name: "Built-in" },

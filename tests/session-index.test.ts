@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { SessionIndex, cleanPreview, idForPath, readSessionMessages, textFromContent } from "../src/server/session-index";
+import { SessionIndex, cleanPreview, idForPath, readSessionMessages, readSessionTodos, textFromContent } from "../src/server/session-index";
 
 test("session index extracts header, title, preview and message count", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-sessions-"));
@@ -36,6 +36,21 @@ test("session index extracts header, title, preview and message count", async ()
   }
 });
 
+test("session index keeps empty draft JSONL files out of sidebar history", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-empty-draft-"));
+  try {
+    await writeFile(join(root, "empty.jsonl"), `${JSON.stringify({ type: "session", id: "empty", cwd: "C:\\work" })}\n`);
+    await writeFile(join(root, "saved.jsonl"), [
+      { type: "session", id: "saved", cwd: "C:\\work" },
+      { type: "message", id: "m1", message: { role: "user", content: "saved question" } },
+    ].map(JSON.stringify).join("\n"));
+    const sessions = await new SessionIndex(root).list();
+    assert.deepEqual(sessions.map((session) => session.sessionId), ["saved"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("session message reader follows only the current JSONL branch", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-session-branch-"));
   try {
@@ -50,6 +65,22 @@ test("session message reader follows only the current JSONL branch", async () =>
     const messages = await readSessionMessages(path);
     assert.deepEqual(messages.map((message) => message.content), ["kept user", "current user", "current answer"]);
     assert.equal(messages[0].timestamp, Date.parse("2026-01-01T00:00:00Z"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("todo reader uses the newest snapshot on the current JSONL branch", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-todo-branch-"));
+  try {
+    const path = join(root, "todos.jsonl");
+    await writeFile(path, [
+      { type: "session", id: "session", cwd: "C:\\work" },
+      { type: "custom", customType: "pi-deck-todo", id: "old", parentId: null, data: { todos: [{ id: 1, text: "abandoned", done: false }] } },
+      { type: "message", id: "abandoned-leaf", parentId: "old", message: { role: "assistant", content: "old" } },
+      { type: "custom", customType: "pi-deck-todo", id: "current", parentId: "old", data: { todos: [{ id: 1, text: "kept", done: true }, { id: 2, text: "next", done: false }] } },
+    ].map(JSON.stringify).join("\n"));
+    assert.deepEqual(await readSessionTodos(path), [{ id: 1, text: "kept", done: true }, { id: 2, text: "next", done: false }]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
