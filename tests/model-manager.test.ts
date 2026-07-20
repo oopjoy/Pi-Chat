@@ -68,6 +68,63 @@ test("model manager adds, annotates and removes custom models without losing pro
   }
 });
 
+test("model manager update renames provider/id, carries secrets and rejects collisions", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-models-update-"));
+  try {
+    await writeFile(join(root, "models.json"), JSON.stringify({
+      providers: {
+        local: {
+          baseUrl: "http://localhost:11434/v1",
+          api: "openai-completions",
+          apiKey: "$LOCAL_KEY",
+          models: [{ id: "a", name: "A" }, { id: "b", name: "B" }],
+        },
+        other: {
+          baseUrl: "http://other.example/v1",
+          api: "openai-completions",
+          models: [{ id: "a", name: "Other A" }],
+        },
+      },
+    }));
+    const manager = new ModelManager(root);
+
+    // Same-key edit keeps sibling models and provider config intact.
+    await manager.update("local", "a", { provider: "local", id: "a", name: "A2", api: "openai-completions", reasoning: true, imageInput: false });
+    let configured = JSON.parse(await readFile(join(root, "models.json"), "utf8"));
+    assert.equal(configured.providers.local.models[0].name, "A2");
+    assert.equal(configured.providers.local.models.length, 2);
+    assert.equal(configured.providers.local.apiKey, "$LOCAL_KEY");
+
+    // Renaming onto an existing custom model is rejected.
+    await assert.rejects(
+      () => manager.update("local", "a", { provider: "local", id: "b", api: "openai-completions", reasoning: false, imageInput: false }),
+      /已存在/,
+    );
+
+    // Provider rename carries baseUrl/apiKey because the form never echoes the key.
+    await manager.update("local", "a", { provider: "moved", id: "a", name: "A2", api: "openai-completions", reasoning: false, imageInput: false });
+    configured = JSON.parse(await readFile(join(root, "models.json"), "utf8"));
+    assert.deepEqual(configured.providers.local.models.map((model: { id: string }) => model.id), ["b"]);
+    assert.equal(configured.providers.moved.baseUrl, "http://localhost:11434/v1");
+    assert.equal(configured.providers.moved.apiKey, "$LOCAL_KEY");
+    assert.equal(configured.providers.moved.models[0].name, "A2");
+
+    // Renaming away the last model removes the empty provider shell.
+    await manager.update("other", "a", { provider: "other2", id: "a", api: "openai-completions", reasoning: false, imageInput: false });
+    configured = JSON.parse(await readFile(join(root, "models.json"), "utf8"));
+    assert.equal(configured.providers.other, undefined);
+    assert.equal(configured.providers.other2.baseUrl, "http://other.example/v1");
+
+    // Entries outside models.json cannot be edited.
+    await assert.rejects(
+      () => manager.update("nope", "a", { provider: "nope", id: "a", api: "openai-completions", reasoning: false, imageInput: false }),
+      /只能编辑/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("custom model validation rejects unsafe provider names and invalid endpoints", () => {
   assert.throws(() => validateCustomModel({ provider: "../bad", id: "model", api: "openai-completions" }), /Provider/);
   assert.throws(() => validateCustomModel({ provider: "local", id: "model", api: "openai-completions", baseUrl: "file:///tmp" }), /Base URL/);

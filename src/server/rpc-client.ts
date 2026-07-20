@@ -15,6 +15,11 @@ export interface RpcClientOptions {
   args?: string[];
 }
 
+export interface PiRpcCompatibility {
+  compatible: boolean;
+  diagnostics: string[];
+}
+
 type EventListener = (event: Record<string, unknown>) => void;
 
 export function resolvePiEntry(env: NodeJS.ProcessEnv = process.env): string | null {
@@ -183,6 +188,24 @@ export class PiRpcClient {
     });
   }
 
+  async probeCompatibility(): Promise<PiRpcCompatibility> {
+    const diagnostics: string[] = [];
+    const check = async (type: string, validate: (data: unknown) => boolean, label: string) => {
+      try {
+        const response = await this.send({ type }, 10_000);
+        if (!validate(response.data)) diagnostics.push(`RPC ${type} 返回格式不兼容（需要 ${label}）`);
+      } catch (error) {
+        diagnostics.push(`RPC 不支持 ${type}：${error instanceof Error ? error.message : String(error)}`);
+      }
+    };
+    await check("get_state", (data) => Boolean(data && typeof data === "object" && typeof (data as Record<string, unknown>).isStreaming === "boolean"), "isStreaming");
+    await check("get_messages", (data) => Boolean(data && typeof data === "object" && Array.isArray((data as Record<string, unknown>).messages)), "messages[]");
+    await check("get_available_models", (data) => Boolean(data && typeof data === "object" && Array.isArray((data as Record<string, unknown>).models)), "models[]");
+    await check("get_commands", (data) => Boolean(data && typeof data === "object" && Array.isArray((data as Record<string, unknown>).commands)), "commands[]");
+    await check("get_session_stats", (data) => Boolean(data && typeof data === "object" && (data as Record<string, unknown>).tokens && typeof (data as Record<string, unknown>).tokens === "object"), "tokens");
+    return { compatible: diagnostics.length === 0, diagnostics };
+  }
+
   async restart(sessionPath?: string, cwd?: string): Promise<void> {
     await this.stop();
     if (cwd) this.options.cwd = cwd;
@@ -198,7 +221,16 @@ export class PiRpcClient {
       new Promise<void>((resolve) => child.once("exit", () => resolve())),
       new Promise<void>((resolve) => setTimeout(resolve, 1_500)),
     ]);
-    if (child.exitCode === null) child.kill("SIGKILL");
+    if (child.exitCode === null) {
+      child.kill("SIGKILL");
+      // A service restart must not leave an old worker holding resources while
+      // the replacement server starts. Give the forced termination a bounded
+      // chance to be observed before continuing the process handoff.
+      await Promise.race([
+        new Promise<void>((resolve) => child.once("exit", () => resolve())),
+        new Promise<void>((resolve) => setTimeout(resolve, 1_500)),
+      ]);
+    }
   }
 }
 

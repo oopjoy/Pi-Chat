@@ -123,14 +123,14 @@ test("extension slash commands execute immediately without entering the local qu
     });
     assert.equal(response.status, 202);
     assert.deepEqual(await response.json(), { accepted: true, queued: false, extension: true, command: "gate", description: "Control file permission gate: /gate status|open|strict|once", isStreaming: false });
-    assert.equal(commands.filter((command) => command.type === "prompt").length, 1);
+    assert.deepEqual(commands.filter((command) => command.type === "prompt"), [{ type: "prompt", message: "/gate open" }]);
   } finally {
     server.close();
     await app.close();
   }
 });
 
-test("opening any session automatically creates a writable independent runtime", async () => {
+test("viewing a cold session returns history before its runtime finishes restoring", async () => {
   const mainCommands: Record<string, unknown>[] = [];
   const workerCommands: Record<string, unknown>[] = [];
   const activePath = "C:\\sessions\\active.jsonl";
@@ -178,11 +178,19 @@ test("opening any session automatically creates a writable independent runtime",
     ]);
     assert.equal(response.status, 200);
     assert.equal(concurrentResponse.status, 200);
-    assert.equal(workerCreations, 1);
-    const view = await response.json() as { isActive: boolean; messages: Array<{ content: string }> };
-    assert.equal(view.isActive, true);
+    assert.equal(workerCreations, 0);
+    const view = await response.json() as { isActive: boolean; runtimeStatus: string; messages: Array<{ content: string }> };
+    assert.equal(view.isActive, false);
+    assert.equal(view.runtimeStatus, "view-only");
     assert.deepEqual(view.messages.map((message) => message.content), ["old question", "new answer written outside Pi Chat"]);
     assert.equal(workerCommands.some((command) => command.type === "get_messages"), false);
+    const activated = await fetch(`${origin}/api/sessions/${historyId}/activate`, { method: "POST" });
+    assert.equal(activated.status, 200);
+    assert.equal(workerCreations, 1);
+    const activeView = await activated.json() as { isActive: boolean; runtimeStatus: string; messages: Array<{ content: string }> };
+    assert.equal(activeView.isActive, true);
+    assert.equal(activeView.runtimeStatus, "active");
+    assert.deepEqual(activeView.messages.map((message) => message.content), ["old question", "new answer written outside Pi Chat"]);
     const prompt = await fetch(`${origin}/api/chat/prompt`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message: "continue here", sessionId: historyId }) });
     assert.equal(prompt.status, 202);
     assert.equal(mainCommands.some((command) => command.type === "switch_session" || command.type === "prompt"), false);

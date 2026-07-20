@@ -18,11 +18,12 @@ class FakeRpc {
   emit(event: Record<string, unknown>) { for (const listener of this.listeners) listener(event); }
   async start() {}
   async stop() { this.stopCount += 1; }
+  sendRaw(command: Record<string, unknown>) { this.commands.push(command); }
   async send(command: Record<string, unknown>) {
     this.commands.push(command);
     if (command.type === "get_state") return { type: "response", success: true, data: { model: null, sessionFile: this.path, sessionId: this.sessionId, isStreaming: this.streaming } };
     if (command.type === "get_messages") return { type: "response", success: true, data: { messages: [] } };
-    if (command.type === "get_available_models") return { type: "response", success: true, data: { models: [] } };
+    if (command.type === "get_available_models") return { type: "response", success: true, data: { models: [{ provider: "test", id: "next", name: "Next", reasoning: true }] } };
     if (command.type === "get_commands") return { type: "response", success: true, data: { commands: [] } };
     if (command.type === "get_session_stats") return { type: "response", success: true, data: { tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
     if (command.type === "prompt") { this.streaming = true; this.emit({ type: "agent_start" }); return { type: "response", success: true }; }
@@ -30,6 +31,110 @@ class FakeRpc {
     return { type: "response", success: true, data: {} };
   }
 }
+
+test("one browser window controls a Session until another explicitly takes over", async () => {
+  const path = "C:\\sessions\\primary.jsonl";
+  const id = idForPath(path);
+  const primary = new FakeRpc(path, "primary");
+  const sessions = {
+    list: async () => [{ id, sessionId: "primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+    pathForId: () => path,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const headers = (client: string) => ({ "content-type": "application/json", "x-pi-chat-client": client });
+  const first = "11111111-1111-4111-8111-111111111111";
+  const second = "22222222-2222-4222-8222-222222222222";
+  try {
+    await fetch(`${origin}/api/bootstrap`, { headers: headers(first) });
+    assert.equal((await fetch(`${origin}/api/chat/prompt`, { method: "POST", headers: headers(first), body: JSON.stringify({ message: "owned by first", sessionId: id }) })).status, 202);
+    const blocked = await fetch(`${origin}/api/chat/prompt`, { method: "POST", headers: headers(second), body: JSON.stringify({ message: "blocked second", sessionId: id }) });
+    assert.equal(blocked.status, 409);
+    assert.match((await blocked.json() as { error: string }).error, /另一窗口/);
+    primary.streaming = false;
+    primary.emit({ type: "agent_settled" });
+    const takeover = await fetch(`${origin}/api/sessions/${id}/control`, { method: "POST", headers: headers(second) });
+    assert.deepEqual(await takeover.json(), { controlOwner: second, controlledByThisWindow: true });
+    assert.equal((await fetch(`${origin}/api/chat/prompt`, { method: "POST", headers: headers(second), body: JSON.stringify({ message: "owned by second", sessionId: id }) })).status, 202);
+    assert.deepEqual(primary.commands.filter((command) => command.type === "prompt").map((command) => command.message), ["owned by first", "owned by second"]);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("a pending extension confirmation belongs to one Session and only its first response is forwarded", async () => {
+  const path = "C:\\sessions\\primary.jsonl";
+  const id = idForPath(path);
+  const primary = new FakeRpc(path, "primary");
+  const sessions = {
+    list: async (activePath?: string) => [{ id, sessionId: "primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: id === idForPath(activePath || path) }],
+    pathForId: () => path,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const post = (body: object) => fetch(`${origin}/api/extension-ui/respond`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  try {
+    assert.equal((await fetch(`${origin}/api/bootstrap`)).status, 200);
+    primary.emit({ type: "extension_ui_request", id: "gate-1", method: "select", title: "Write file?", options: ["Allow", "Block"] });
+    const view = await (await fetch(`${origin}/api/sessions/${id}/view`)).json() as { pendingExtensionRequest?: { id: string }; session: { pendingConfirmation?: boolean } };
+    assert.equal(view.pendingExtensionRequest?.id, "gate-1");
+    assert.equal(view.session.pendingConfirmation, true);
+    assert.equal((await post({ id: "gate-1", value: "Allow", sessionId: id })).status, 200);
+    const second = await post({ id: "gate-1", value: "Block", sessionId: id });
+    assert.equal(second.status, 409);
+    assert.equal(primary.commands.filter((command) => command.type === "extension_ui_response").length, 1);
+    assert.deepEqual(primary.commands.find((command) => command.type === "extension_ui_response"), { type: "extension_ui_response", id: "gate-1", value: "Allow" });
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("running Sessions stage model and thinking changes until their next prompt", async () => {
+  const path = "C:\\sessions\\primary.jsonl";
+  const id = idForPath(path);
+  const primary = new FakeRpc(path, "primary");
+  primary.streaming = true;
+  const sessions = {
+    list: async () => [{ id, sessionId: "primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+    pathForId: () => path,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const post = (url: string, body: object) => fetch(`${origin}${url}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  try {
+    assert.equal((await fetch(`${origin}/api/bootstrap`)).status, 200);
+    assert.deepEqual(await (await post("/api/models/set", { provider: "test", modelId: "next", sessionId: id })).json(), { model: { provider: "test", id: "next", name: "Next", reasoning: true }, pending: true });
+    assert.deepEqual(await (await post("/api/thinking/set", { level: "high", sessionId: id })).json(), { level: "high", pending: true });
+    assert.equal(primary.commands.some((command) => command.type === "set_model" || command.type === "set_thinking_level"), false);
+    primary.streaming = false;
+    primary.emit({ type: "agent_settled" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const prompt = await post("/api/chat/prompt", { message: "next turn", sessionId: id });
+    assert.equal(prompt.status, 202);
+    const types = primary.commands.map((command) => command.type);
+    assert.deepEqual(types.slice(-3), ["set_model", "set_thinking_level", "prompt"]);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
 
 test("startup preheats the three most recent saved secondary sessions sequentially", async () => {
   const paths = ["C:\\sessions\\primary.jsonl", "C:\\sessions\\newest.jsonl", "C:\\sessions\\next.jsonl", "C:\\sessions\\third.jsonl", "C:\\sessions\\older.jsonl"];
@@ -102,17 +207,17 @@ test("idle secondary workers use LRU capacity reclamation without stopping activ
   assert.ok(address && typeof address === "object");
   const origin = `http://127.0.0.1:${address.port}`;
   try {
-    assert.equal((await fetch(`${origin}/api/sessions/${idB}/view`)).status, 200);
+    assert.equal((await fetch(`${origin}/api/sessions/${idB}/activate`, { method: "POST" })).status, 200);
     assert.equal(firstB.stopCount, 0);
-    // Opening C exceeds one idle secondary worker, so the oldest idle B worker is reclaimed.
-    assert.equal((await fetch(`${origin}/api/sessions/${idC}/view`)).status, 200);
+    // Activating C exceeds one idle secondary worker, so the oldest idle B worker is reclaimed.
+    assert.equal((await fetch(`${origin}/api/sessions/${idC}/activate`, { method: "POST" })).status, 200);
     assert.equal(firstB.stopCount, 1);
     assert.equal(workerC.stopCount, 0);
 
     // A running worker is never evicted to make capacity for another viewed Session.
     assert.equal((await fetch(`${origin}/api/chat/prompt`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message: "keep C", sessionId: idC }) })).status, 202);
     assert.equal(workerC.streaming, true);
-    assert.equal((await fetch(`${origin}/api/sessions/${idB}/view`)).status, 200);
+    assert.equal((await fetch(`${origin}/api/sessions/${idB}/activate`, { method: "POST" })).status, 200);
     assert.equal(workerC.stopCount, 0);
     const bootstrap = await (await fetch(`${origin}/api/bootstrap`)).json() as { activeSessionIds: string[] };
     assert.deepEqual(new Set(bootstrap.activeSessionIds), new Set([idA, idB, idC]));
@@ -154,12 +259,47 @@ test("an idle secondary worker is reclaimed after its configured timeout", async
   assert.ok(address && typeof address === "object");
   const origin = `http://127.0.0.1:${address.port}`;
   try {
-    assert.equal((await fetch(`${origin}/api/sessions/${idB}/view`)).status, 200);
+    assert.equal((await fetch(`${origin}/api/sessions/${idB}/activate`, { method: "POST" })).status, 200);
     await new Promise((resolve) => setTimeout(resolve, 180));
     assert.equal(secondary.stopCount, 1);
     const bootstrap = await (await fetch(`${origin}/api/bootstrap`)).json() as { activeSessionIds: string[] };
     assert.deepEqual(bootstrap.activeSessionIds, [idA]);
     assert.equal(primary.stopCount, 0);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("New creates an independent draft while the primary Session is running", async () => {
+  const primaryPath = "C:\\sessions\\primary.jsonl";
+  const draftPath = "C:\\sessions\\draft.jsonl";
+  const primaryId = idForPath(primaryPath);
+  const draftId = idForPath(draftPath);
+  const primary = new FakeRpc(primaryPath, "primary");
+  primary.streaming = true;
+  const draft = new FakeRpc(draftPath, "draft");
+  const sessions = {
+    list: async (activePath?: string) => [{ id: primaryId, sessionId: "primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: primaryId === idForPath(activePath || primaryPath) }],
+    pathForId: (id: string) => id === primaryId ? primaryPath : id === draftId ? draftPath : null,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, createRpc: () => draft as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    const response = await fetch(`${origin}/api/sessions/new`, { method: "POST" });
+    assert.equal(response.status, 200);
+    const view = await response.json() as { session: { id: string; name: string }; isStreaming: boolean };
+    assert.equal(view.session.id, draftId);
+    assert.equal(view.session.name, "新对话");
+    assert.equal(view.isStreaming, false);
+    assert.equal(primary.commands.some((command) => command.type === "new_session"), false);
+    assert.equal(draft.commands.some((command) => command.type === "new_session"), false);
+    assert.equal((await fetch(`${origin}/api/sessions`)).status, 200);
   } finally {
     server.close();
     await app.close();

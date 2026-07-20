@@ -1,6 +1,6 @@
 {
   "name": "pi-chat",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "A lightweight local-first web chat for Pi",
@@ -11,12 +11,16 @@
     "dist",
     "resources",
     "README.md",
-    "start-pi-chat.cmd"
+    "start-pi-chat.cmd",
+    "pi-chat-launch.cmd",
+    "scripts/pi-chat-port-ready.ps1",
+    "scripts/clean-dist.mjs"
   ],
   "scripts": {
     "prepare:katex": "node scripts/prepare-katex-css.mjs",
     "dev": "npm run prepare:katex && tsx watch src/server/index.ts --dev",
-    "build": "npm run build:web && npm run build:server && npm run copy:resources",
+    "clean": "node scripts/clean-dist.mjs",
+    "build": "npm run clean && npm run build:web && npm run build:server && npm run copy:resources",
     "build:web": "npm run prepare:katex && vite build",
     "build:server": "tsc -p tsconfig.server.json",
     "copy:resources": "node scripts/copy-runtime-resources.mjs",

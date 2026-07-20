@@ -21,7 +21,10 @@ export const DEFAULT_APPEARANCE: AppearancePreferences = {
 
 const STORAGE_KEY = "pi-chat.appearance.v1";
 const SIDEBAR_KEY = "pi-chat.sidebar-open.v1";
-const TODO_PANEL_COLLAPSED_KEY = "pi-chat.todo-panel-collapsed.v1";
+const SIDEBAR_WIDTH_KEY = "pi-chat.sidebar-width.v1";
+export const SIDEBAR_WIDTH_MIN = 220;
+export const SIDEBAR_WIDTH_MAX = 480;
+export const SIDEBAR_WIDTH_DEFAULT = 286;
 
 function clamp(value: unknown, minimum: number, maximum: number, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value)
@@ -57,12 +60,14 @@ export function saveSidebarOpen(open: boolean): void {
   localStorage.setItem(SIDEBAR_KEY, String(open));
 }
 
-export function loadTodoPanelCollapsed(): boolean {
-  return localStorage.getItem(TODO_PANEL_COLLAPSED_KEY) === "true";
+export function loadSidebarWidth(): number {
+  const raw = localStorage.getItem(SIDEBAR_WIDTH_KEY);
+  if (raw === null) return SIDEBAR_WIDTH_DEFAULT;
+  return clamp(Number(raw), SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_DEFAULT);
 }
 
-export function saveTodoPanelCollapsed(collapsed: boolean): void {
-  localStorage.setItem(TODO_PANEL_COLLAPSED_KEY, String(collapsed));
+export function saveSidebarWidth(width: number): void {
+  localStorage.setItem(SIDEBAR_WIDTH_KEY, String(Math.round(clamp(width, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_DEFAULT))));
 }
 
 export function applyAppearance(preferences: AppearancePreferences): void {

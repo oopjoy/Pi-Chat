@@ -1,17 +1,7 @@
 import { useEffect, useState } from "react";
+import type { ExtensionUiRequest } from "../../shared/types";
 
-export interface ExtensionUiRequest {
-  type: "extension_ui_request";
-  id: string;
-  method: string;
-  title?: string;
-  message?: string;
-  options?: string[];
-  placeholder?: string;
-  prefill?: string;
-  notifyType?: string;
-  piChatSessionId?: string;
-}
+export type { ExtensionUiRequest } from "../../shared/types";
 
 export function ExtensionDialog({ request, onRespond }: {
   request: ExtensionUiRequest | null;

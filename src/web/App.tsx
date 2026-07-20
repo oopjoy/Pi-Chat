@@ -1,23 +1,41 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { BootstrapData, ModelInfo, PiMessage, PiState, PromptImage, QueuedPrompt, SessionStats, SessionSummary, SessionViewData, SlashCommand, ThinkingLevel, TodoItem } from "../shared/types";
+import type { BootstrapData, ExtensionUiRequest, ModelInfo, PiMessage, PiState, PromptImage, QueuedPrompt, SessionStats, SessionSummary, SessionViewData, SlashCommand, ThinkingLevel } from "../shared/types";
 import { api } from "./api";
 import { ChatInput } from "./components/ChatInput";
 import { ChatMessage } from "./components/ChatMessage";
 import { ConversationProcess } from "./components/ConversationProcess";
-import { ExtensionDialog, type ExtensionUiRequest } from "./components/ExtensionDialog";
+import { ExtensionDialog } from "./components/ExtensionDialog";
+import { ChevronRightIcon, PiMarkIcon } from "./components/Icons";
 import { ManagementPanel, type ManagementSection } from "./components/ManagementPanel";
 import { PromptQueue } from "./components/PromptQueue";
+import { SessionControlBanner } from "./components/SessionControlBanner";
 import { SessionDialog, type SessionDialogState } from "./components/SessionDialog";
 import { SessionSidebar } from "./components/SessionSidebar";
-import { TodoPanel } from "./components/TodoPanel";
 import { TopBar } from "./components/TopBar";
 import { adjacentUserMessageOffset } from "./lib/conversation-navigation";
 import { groupConversation } from "./lib/conversation-process";
 import { extensionExecutionNotice } from "./lib/extension-notice";
 import { gateModeFromCommand, gateModeFromNotice, type GateMode } from "./lib/gate-mode";
-import { applyAppearance, loadAppearance, loadSidebarOpen, loadTodoPanelCollapsed, saveAppearance, saveSidebarOpen, saveTodoPanelCollapsed, type AppearancePreferences } from "./lib/preferences";
+import { applyAppearance, loadAppearance, loadSidebarOpen, loadSidebarWidth, saveAppearance, saveSidebarOpen, saveSidebarWidth, type AppearancePreferences } from "./lib/preferences";
 
 const EMPTY_STATE: PiState = { model: null, isStreaming: false };
+const VIEW_CACHE_LIMIT = 5;
+
+type SessionViewSnapshot = SessionViewData & { cachedAt: number };
+
+function rememberView(cache: Map<string, SessionViewSnapshot>, view: SessionViewData): void {
+  cache.delete(view.session.id);
+  cache.set(view.session.id, { ...view, cachedAt: Date.now() });
+  while (cache.size > VIEW_CACHE_LIMIT) {
+    const oldest = cache.keys().next().value;
+    if (!oldest) break;
+    cache.delete(oldest);
+  }
+}
+
+function forgetView(cache: Map<string, SessionViewSnapshot>, id: string): void {
+  cache.delete(id);
+}
 
 function assistantMessage(event: Record<string, unknown>): PiMessage | null {
   const message = event.message;
@@ -42,7 +60,9 @@ export function App() {
   const [messages, setMessages] = useState<PiMessage[]>([]);
   const [messageTotal, setMessageTotal] = useState(0);
   const [turnTotal, setTurnTotal] = useState(0);
+  const [visibleTurnCount, setVisibleTurnCount] = useState(20);
   const [messagesTruncated, setMessagesTruncated] = useState(false);
+  const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [stats, setStats] = useState<SessionStats | undefined>();
   const [liveMessage, setLiveMessage] = useState<PiMessage | null>(null);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
@@ -52,16 +72,16 @@ export function App() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [workspaceCwd, setWorkspaceCwd] = useState("");
   const [commands, setCommands] = useState<SlashCommand[]>([]);
+  const [gateAvailableOverride, setGateAvailableOverride] = useState<boolean | null>(null);
   const [queue, setQueue] = useState<QueuedPrompt[]>([]);
   const [queuePaused, setQueuePaused] = useState(false);
-  const [todos, setTodos] = useState<TodoItem[]>([]);
   const [stopping, setStopping] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [workspacePicking, setWorkspacePicking] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(loadSidebarOpen);
-  const [todoPanelCollapsed, setTodoPanelCollapsed] = useState(loadTodoPanelCollapsed);
+  const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
   const [managementSection, setManagementSection] = useState<ManagementSection | null>(null);
   const [sessionDialog, setSessionDialog] = useState<SessionDialogState>(null);
   const [sessionActionBusy, setSessionActionBusy] = useState(false);
@@ -70,6 +90,7 @@ export function App() {
   const [notice, setNotice] = useState("");
   const [toolStatus, setToolStatus] = useState("");
   const [extensionRequest, setExtensionRequest] = useState<ExtensionUiRequest | null>(null);
+  const [runtimeStatus, setRuntimeStatus] = useState<"active" | "restoring" | "view-only">("active");
   const [gateModes, setGateModes] = useState<Record<string, GateMode>>({});
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
@@ -78,6 +99,7 @@ export function App() {
   const sessionRefreshTimerRef = useRef<number | null>(null);
   const sessionRefreshInFlightRef = useRef(false);
   const sessionRefreshRequestedRef = useRef(false);
+  const viewCacheRef = useRef(new Map<string, SessionViewSnapshot>());
 
   const setViewedId = useCallback((id: string) => {
     viewedSessionIdRef.current = id;
@@ -93,6 +115,7 @@ export function App() {
     setMessages(data.messages);
     setMessageTotal(data.messageTotal ?? data.messages.length);
     setTurnTotal(data.turnTotal ?? data.messages.filter((message) => message.role === "user").length);
+    setVisibleTurnCount(data.visibleTurnCount ?? data.messages.filter((message) => message.role === "user").length);
     setMessagesTruncated(data.messagesTruncated === true);
     setStats(data.stats);
     setSessions(data.sessions);
@@ -105,25 +128,51 @@ export function App() {
     setCommands(data.commands);
     setQueue(data.queue);
     setQueuePaused(data.queuePaused);
-    setTodos(data.todos || []);
     setLiveMessage(null);
     setLiveMessage(data.liveMessage || null);
     setToolStatus(data.toolStatus || "");
+    setExtensionRequest(data.pendingExtensionRequest || null);
+    setRuntimeStatus("active");
+    const activeViewId = data.activeSessionId || data.sessions.find((item) => item.active)?.id || "";
+    const activeViewSession = data.sessions.find((session) => session.id === activeViewId);
+    if (activeViewSession) rememberView(viewCacheRef.current, {
+      session: activeViewSession,
+      state: data.state,
+      messages: data.messages,
+      messageTotal: data.messageTotal ?? data.messages.length,
+      turnTotal: data.turnTotal,
+      visibleTurnCount: data.visibleTurnCount,
+      messagesTruncated: data.messagesTruncated === true,
+      isActive: true,
+      runtimeStatus: "active",
+      isStreaming: data.state.isStreaming,
+      liveMessage: data.liveMessage,
+      toolStatus: data.toolStatus,
+      stats: data.stats,
+      queue: data.queue,
+      queuePaused: data.queuePaused,
+      commands: data.commands,
+      pendingExtensionRequest: data.pendingExtensionRequest,
+    });
   }, [setViewedId]);
 
   const applySessionView = useCallback((view: SessionViewData) => {
+    setGateAvailableOverride(typeof view.gateAvailable === "boolean" ? view.gateAvailable : null);
     setState(view.state);
     setMessages(view.messages);
     setMessageTotal(view.messageTotal);
     setTurnTotal(view.turnTotal ?? view.messages.filter((message) => message.role === "user").length);
+    setVisibleTurnCount(view.visibleTurnCount ?? view.messages.filter((message) => message.role === "user").length);
     setMessagesTruncated(view.messagesTruncated);
     setStats(view.stats);
     setQueue(view.queue || []);
     setQueuePaused(view.queuePaused === true);
-    setTodos(view.todos || []);
     if (view.commands) setCommands(view.commands);
     setLiveMessage(view.liveMessage || null);
     setToolStatus(view.toolStatus || "");
+    setExtensionRequest(view.pendingExtensionRequest || null);
+    setRuntimeStatus(view.runtimeStatus || (view.isActive ? "active" : "view-only"));
+    setSessions((current) => current.some((session) => session.id === view.session.id) ? current.map((session) => session.id === view.session.id ? { ...session, ...view.session } : session) : [...current, view.session]);
     if (view.isActive) setActiveSessionIds((current) => [...new Set([...current, view.session.id])]);
     setViewedId(view.session.id);
   }, [setViewedId]);
@@ -135,7 +184,9 @@ export function App() {
     const activeId = data.activeSessionId || data.sessions.find((session) => session.active)?.id || "";
     if (wantedId && wantedId !== activeId) {
       try {
-        applySessionView(await api.viewSession(wantedId));
+        const view = await api.viewSession(wantedId);
+        rememberView(viewCacheRef.current, view);
+        applySessionView(view);
       } catch (cause) {
         // Another window may have deleted this Session while this page was refreshing.
         // Bootstrap has already selected the current writable Session, so treat that 404 as recovery.
@@ -181,10 +232,12 @@ export function App() {
   }, [appearance]);
 
   useEffect(() => saveSidebarOpen(sidebarOpen), [sidebarOpen]);
-  useEffect(() => saveTodoPanelCollapsed(todoPanelCollapsed), [todoPanelCollapsed]);
+  useEffect(() => saveSidebarWidth(sidebarWidth), [sidebarWidth]);
 
   useEffect(() => {
-    const source = new EventSource("/api/events");
+    // Bootstrap obtains the per-start token before SSE is allowed to connect.
+    if (loading) return;
+    const source = new EventSource(api.eventsUrl());
     // EventSource reconnects after a server restart, but it cannot replay the events missed
     // while disconnected. Reload the requested Session as soon as the new stream is ready.
     source.addEventListener("ready", () => {
@@ -195,11 +248,27 @@ export function App() {
       const type = String(event.type || "");
       const eventSessionId = typeof event.piChatSessionId === "string" ? event.piChatSessionId : "";
       const viewingEventSession = !eventSessionId || eventSessionId === viewedSessionIdRef.current;
+      if (eventSessionId && ["agent_start", "agent_settled", "message_start", "message_update", "message_end", "tool_execution_start", "tool_execution_end"].includes(type)) forgetView(viewCacheRef.current, eventSessionId);
       if (type === "agent_start") {
         if (eventSessionId) setSessions((current) => current.map((session) => ({ ...session, running: session.id === eventSessionId ? true : session.running })));
         if (viewingEventSession) {
+          setRuntimeStatus("active");
           setState((current) => ({ ...current, isStreaming: true }));
           setToolStatus("Pi 正在思考…");
+        }
+      } else if (type === "compaction_start") {
+        if (viewingEventSession) {
+          const reason = String(event.reason || "");
+          setState((current) => ({ ...current, isCompacting: true }));
+          setToolStatus(reason === "overflow" ? "上下文溢出，正在自动压缩…" : "正在压缩上下文…");
+        }
+      } else if (type === "compaction_end") {
+        if (viewingEventSession) {
+          setState((current) => ({ ...current, isCompacting: false }));
+          setToolStatus("");
+          const errorMessage = typeof event.errorMessage === "string" ? event.errorMessage : "";
+          if (errorMessage) setError(errorMessage);
+          else if (event.aborted === false) setNotice("上下文压缩完成");
         }
       } else if ((type === "message_start" || type === "message_update") && viewingEventSession) {
         const assistant = assistantMessage(event);
@@ -229,14 +298,13 @@ export function App() {
         if (!ids.length && id) setActiveSessionId(id);
         scheduleSidebarRefresh();
       } else if (type === "pi_chat_sessions_changed") {
+        if (typeof event.sessionId === "string") forgetView(viewCacheRef.current, event.sessionId);
         if (event.action === "deleted" && event.sessionId === viewedSessionIdRef.current) {
           viewedSessionIdRef.current = "";
           void refresh().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
         } else {
           scheduleSidebarRefresh();
         }
-      } else if (type === "pi_chat_todos_update" && viewingEventSession) {
-        setTodos(Array.isArray(event.todos) ? event.todos as unknown as TodoItem[] : []);
       } else if (type === "pi_chat_queue_update" && viewingEventSession) {
         setQueue(Array.isArray(event.queue) ? event.queue as unknown as QueuedPrompt[] : []);
         setQueuePaused(event.paused === true);
@@ -250,12 +318,22 @@ export function App() {
         setError(String(event.error || "队列消息发送失败"));
       } else if (type === "extension_ui_request") {
         const request = event as unknown as ExtensionUiRequest;
-        if (["select", "confirm", "input", "editor"].includes(request.method)) setExtensionRequest(request);
+        if (["select", "confirm", "input", "editor"].includes(request.method)) {
+          if (eventSessionId) setSessions((current) => current.map((session) => session.id === eventSessionId ? { ...session, pendingConfirmation: true } : session));
+          if (viewingEventSession) setExtensionRequest(request);
+        }
         else if (request.method === "notify") {
           const mode = gateModeFromNotice(request.message);
           if (mode && eventSessionId) setGateModes((current) => ({ ...current, [eventSessionId]: mode }));
           setNotice(request.message || "Pi 通知");
         }
+      } else if (type === "pi_chat_session_control_changed") {
+        const id = typeof event.sessionId === "string" ? event.sessionId : "";
+        const owner = typeof event.controlOwner === "string" ? event.controlOwner : undefined;
+        if (id) setSessions((current) => current.map((session) => session.id === id ? { ...session, controlOwner: owner, controlledByThisWindow: false } : session));
+      } else if (type === "pi_chat_extension_request_resolved") {
+        if (viewingEventSession) setExtensionRequest((current) => current?.id === event.id ? null : current);
+        if (eventSessionId) setSessions((current) => current.map((session) => session.id === eventSessionId ? { ...session, pendingConfirmation: false } : session));
       } else if (type === "extension_error") {
         setError(String(event.error || "扩展执行失败"));
       } else if (type === "pi_chat_process_error") {
@@ -267,7 +345,7 @@ export function App() {
     });
     source.onerror = () => setError("与 Pi Chat 服务的事件连接已断开，浏览器将自动重连。");
     return () => source.close();
-  }, [refresh, scheduleSidebarRefresh]);
+  }, [loading, refresh, scheduleSidebarRefresh]);
 
   useEffect(() => {
     if (!stickToBottomRef.current) return;
@@ -296,6 +374,27 @@ export function App() {
     stickToBottomRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 120;
   };
 
+  const loadEarlierTurns = async () => {
+    const id = viewedSessionIdRef.current;
+    if (!id || !messagesTruncated || loadingEarlier) return;
+    const timeline = scrollRef.current;
+    const previousHeight = timeline?.scrollHeight || 0;
+    setLoadingEarlier(true);
+    setError("");
+    stickToBottomRef.current = false;
+    try {
+      applySessionView(await api.viewSession(id, visibleTurnCount + 10));
+      requestAnimationFrame(() => {
+        const element = scrollRef.current;
+        if (element) element.scrollTop = element.scrollHeight - previousHeight;
+      });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLoadingEarlier(false);
+    }
+  };
+
   const navigateConversation = (direction: "top" | "previous" | "next" | "bottom") => {
     const timeline = scrollRef.current;
     if (!timeline) return;
@@ -320,15 +419,21 @@ export function App() {
   const send = async (message: string, images: PromptImage[]) => {
     setError("");
     stickToBottomRef.current = true;
+    setBusy(true);
     try {
       const command = /^\/(new|compact|abort)(?:\s+([\s\S]*))?$/.exec(message);
       if (command?.[1] === "new") {
-        if (state.isStreaming || queue.length) throw new Error("请先停止当前生成并清空队列");
-        applyBootstrap(await api.newSession());
-        setNotice("已新建会话");
+        applySessionView(await api.newSession());
+        setNotice("已新建独立会话");
         return;
       }
       if (command?.[1] === "compact") {
+        if (runtimeStatus !== "active") {
+          setRuntimeStatus("restoring");
+          const view = await api.activateSession(viewedSessionId);
+          forgetView(viewCacheRef.current, view.session.id);
+          applySessionView(view);
+        }
         await api.compact(command[2] || "", viewedSessionId);
         await refresh();
         setNotice("上下文压缩完成");
@@ -337,6 +442,12 @@ export function App() {
       if (command?.[1] === "abort") {
         await stopGeneration();
         return;
+      }
+      if (runtimeStatus !== "active") {
+        setRuntimeStatus("restoring");
+        const view = await api.activateSession(viewedSessionId);
+        forgetView(viewCacheRef.current, view.session.id);
+        applySessionView(view);
       }
       const result = await api.prompt(message, images, viewedSessionId);
       if (result.extension) {
@@ -355,6 +466,8 @@ export function App() {
       const messageText = cause instanceof Error ? cause.message : String(cause);
       setError(messageText);
       throw cause;
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -383,10 +496,28 @@ export function App() {
   };
 
   const viewSession = async (id: string) => {
-    setBusy(true);
+    if (id === viewedSessionIdRef.current) return;
     setError("");
+    const cached = viewCacheRef.current.get(id);
+    if (cached) {
+      applySessionView(cached);
+      stickToBottomRef.current = true;
+      const cachedStatus = cached.runtimeStatus || (cached.isActive ? "active" : "view-only");
+      if (cachedStatus !== "active") {
+        void api.viewSession(id).then((view) => {
+          if (!view.isActive) rememberView(viewCacheRef.current, view);
+          else forgetView(viewCacheRef.current, view.session.id);
+          if (viewedSessionIdRef.current === id) applySessionView(view);
+        }).catch(() => undefined);
+      }
+      return;
+    }
+    setBusy(true);
     try {
-      applySessionView(await api.viewSession(id));
+      const view = await api.viewSession(id);
+      if (!view.isActive) rememberView(viewCacheRef.current, view);
+      else forgetView(viewCacheRef.current, view.session.id);
+      applySessionView(view);
       stickToBottomRef.current = true;
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -395,21 +526,26 @@ export function App() {
     }
   };
 
-  const runTransition = async (operation: () => Promise<BootstrapData>) => {
-    if (state.isStreaming || queue.length) {
-      setError("请先停止当前生成并清空队列，再切换或新建会话。");
-      return;
-    }
+  const createSession = async () => {
     setBusy(true);
     setError("");
     try {
-      applyBootstrap(await operation());
+      applySessionView(await api.newSession());
       stickToBottomRef.current = true;
+      setNotice("已新建独立会话");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setBusy(false);
     }
+  };
+
+  const ensureRuntimeActive = async () => {
+    if (!viewedSessionId || runtimeStatus === "active") return;
+    setRuntimeStatus("restoring");
+    const view = await api.activateSession(viewedSessionId);
+    forgetView(viewCacheRef.current, view.session.id);
+    applySessionView(view);
   };
 
   const changeModel = async (provider: string, modelId: string) => {
@@ -417,9 +553,10 @@ export function App() {
     setBusy(true);
     setError("");
     try {
+      await ensureRuntimeActive();
       const result = await api.setModel(provider, modelId, viewedSessionId);
       setState((current) => ({ ...current, model: result.model }));
-      setNotice(`已切换到 ${result.model?.name || modelId}`);
+      setNotice(result.pending ? `已选择 ${result.model?.name || modelId}，下一轮对话生效` : `已切换到 ${result.model?.name || modelId}`);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -431,9 +568,10 @@ export function App() {
     setBusy(true);
     setError("");
     try {
+      await ensureRuntimeActive();
       const result = await api.setThinking(level, viewedSessionId);
       setState((current) => ({ ...current, thinkingLevel: result.level }));
-      setNotice(`思考强度已切换为 ${result.level}`);
+      setNotice(result.pending ? `已选择 ${result.level}，下一轮对话生效` : `思考强度已切换为 ${result.level}`);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -442,8 +580,8 @@ export function App() {
   };
 
   const pickWorkspace = async () => {
-    if (state.isStreaming || queue.length) {
-      setError("请先停止当前生成并清空队列，再切换工作目录。");
+    if (anySessionRunning || sessions.some((session) => session.queued || session.pendingConfirmation)) {
+      setError("请先停止所有并行生成、处理权限确认并清空当前队列，再切换工作目录。");
       return;
     }
     setBusy(true);
@@ -478,14 +616,30 @@ export function App() {
   };
 
   const restartPi = async () => {
-    if (!window.confirm("重启 Pi RPC？不会删除聊天记录或 Session JSONL；正在生成、排队或等待权限确认时无法重启。")) return;
+    if (!window.confirm("完整重启 Pi Chat 并应用本地更新？\n\n将结束 Pi Chat 服务及其所有 Pi RPC 会话进程，重新构建当前工作目录，然后启动全新的 Pi Chat。已保存的前端、服务端、内置组件与本地配置更新都会生效；聊天记录不会删除。\n\n会重新加载当前电脑上已经保存的 Pi Chat、扩展和配置改动。正在生成、排队或等待确认时无法执行。")) return;
     setBusy(true);
     setError("");
+    setNotice("正在结束 Pi Chat 进程、构建本地更新并启动全新服务…");
     try {
       await api.restart();
-      // A Pi restart is the explicit recovery/update action. Reload the SPA as well so
-      // it fetches the current no-cache index.html and its latest hashed web bundle.
-      window.location.reload();
+      // The server briefly disappears while the handoff process replaces it.
+      // A delayed full reload obtains the new per-start token and hashed bundle.
+      window.setTimeout(() => window.location.reload(), 700);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const shutdownPiChat = async () => {
+    if (!window.confirm("关闭 Pi Chat？\n\n将结束 Pi Chat 服务及其管理的全部 Pi RPC 会话进程。聊天记录和设置会保留。\n\n之后请通过桌面上的“Pi Chat（网页）”或“Pi Chat（Edge PWA）”重新启动。")) return;
+    setBusy(true);
+    setError("");
+    setNotice("正在关闭 Pi Chat 服务和会话进程…");
+    try {
+      await api.shutdown();
+      window.setTimeout(() => window.location.reload(), 700);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -552,12 +706,28 @@ export function App() {
   const viewingActiveSession = Boolean(viewedSessionId) && activeSessionIds.includes(viewedSessionId);
   const conversationItems = useMemo(() => groupConversation(messages), [messages]);
   const anySessionRunning = sessions.some((session) => session.running);
+  const anySessionPendingConfirmation = sessions.some((session) => session.pendingConfirmation);
+  const anySessionQueued = sessions.some((session) => session.queued);
+  const globalMutationBlocked = anySessionRunning || anySessionQueued || anySessionPendingConfirmation;
   const primaryQueueBusy = viewedSessionId === activeSessionId && queue.length > 0;
   const viewedSession = sessions.find((session) => session.id === viewedSessionId);
   const conversationName = viewedSession?.name || (state.messageCount ? state.sessionName || "已保存对话" : "新对话");
   const conversationWorkspace = viewedSession?.cwd || workspaceCwd;
-  const gateAvailable = commands.some((command) => command.name === "gate" && command.source === "extension");
+  // Cold view-only sessions carry no RPC command list; the server reports Gate availability explicitly.
+  const gateAvailable = gateAvailableOverride ?? commands.some((command) => command.name === "gate" && command.source === "extension");
   const gateMode = gateModes[viewedSessionId] || "strict";
+  const observing = Boolean(viewedSession?.controlOwner && !viewedSession?.controlledByThisWindow);
+  const takeControl = async () => {
+    if (!viewedSessionId) return;
+    try {
+      if (runtimeStatus !== "active") await ensureRuntimeActive();
+      const result = await api.takeSessionControl(viewedSessionId);
+      setSessions((current) => current.map((session) => session.id === viewedSessionId ? { ...session, ...result } : session));
+      setNotice("已接管此对话控制权");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
 
   return (
     <div className="app-shell">
@@ -566,13 +736,18 @@ export function App() {
         viewedSessionId={viewedSessionId}
         workspaceCwd={workspaceCwd}
         open={sidebarOpen}
-        busy={loading || busy || anySessionRunning || queue.length > 0}
+        width={sidebarWidth}
+        onWidthChange={setSidebarWidth}
+        newDisabled={loading || busy}
+        refreshDisabled={loading || refreshing}
+        restartDisabled={loading || busy || refreshing || globalMutationBlocked}
+        workspaceDisabled={loading || busy || workspacePicking || globalMutationBlocked}
         viewBusy={loading || busy}
         refreshing={refreshing}
         workspacePicking={workspacePicking}
         onClose={() => setSidebarOpen(false)}
         onCollapse={() => setSidebarOpen(false)}
-        onNew={() => void runTransition(api.newSession)}
+        onNew={() => void createSession()}
         onRefresh={() => void refreshManually()}
         onRestart={() => void restartPi()}
         onView={(id) => void viewSession(id)}
@@ -581,7 +756,7 @@ export function App() {
         onPickWorkspace={() => void pickWorkspace()}
         onManage={setManagementSection}
       />
-      {!sidebarOpen && <button type="button" className="sidebar-restore" onClick={() => setSidebarOpen(true)} title="展开会话栏" aria-label="展开会话栏">›</button>}
+      {!sidebarOpen && <button type="button" className="sidebar-restore" onClick={() => setSidebarOpen(true)} title="展开会话栏" aria-label="展开会话栏"><ChevronRightIcon /></button>}
       <main className="chat-shell">
         <TopBar
           state={state}
@@ -589,34 +764,35 @@ export function App() {
           stats={stats}
           conversationName={conversationName}
           workspacePath={conversationWorkspace}
-          disabled={busy || state.isStreaming || primaryQueueBusy}
+          disabled={busy || observing}
+          streaming={state.isStreaming}
           gateAvailable={gateAvailable}
           gateMode={gateMode}
           onGate={(mode) => void changeGate(mode)}
           onModel={(provider, id) => void changeModel(provider, id)}
           onThinking={(level) => void changeThinking(level)}
         />
-        <TodoPanel todos={todos} collapsed={todoPanelCollapsed} onToggle={() => setTodoPanelCollapsed((collapsed) => !collapsed)} />
         <div className="timeline" ref={scrollRef} onScroll={onScroll}>
           <div className="timeline-inner">
             {loading ? (
               <div className="center-state"><span className="loader" />正在连接 Pi…</div>
             ) : !messages.length && !liveMessage ? (
               <section className="welcome">
-                <span className="welcome-mark">π</span>
+                <span className="welcome-mark"><PiMarkIcon /></span>
                 <h1>开始与 Pi 对话</h1>
                 <p>支持流式输出、Markdown、KaTeX，以及复制原始 LaTeX 源码。</p>
               </section>
             ) : (
               <>
-                {messagesTruncated && <div className="message-window-notice" role="status">为保持轻量，当前仅显示最近 20 轮对话（共 {turnTotal} 轮、{messageTotal} 条消息）。历史内容仍保留在 Pi 会话中。</div>}
+                {messagesTruncated && <div className="message-window-notice" role="status"><span>当前显示最近 {visibleTurnCount} 轮（共 {turnTotal} 轮、{messageTotal} 条消息）</span><button type="button" onClick={() => void loadEarlierTurns()} disabled={loadingEarlier}>{loadingEarlier ? "正在加载…" : "加载更早 10 轮"}</button></div>}
                 {conversationItems.map((item, index) => item.kind === "process"
                   ? <ConversationProcess key={`process-${index}`} entries={item.entries} />
                   : <ChatMessage key={`message-${item.message.timestamp || 0}-${index}`} message={item.message} />)}
               </>
             )}
             {liveMessage && <ChatMessage message={liveMessage} streaming />}
-            {state.isStreaming && toolStatus && <div className="agent-status"><span className="loader small" />{toolStatus}</div>}
+            {state.isCompacting && <div className="agent-status is-compacting" role="status"><span className="loader small" />{toolStatus || "正在压缩上下文，当前消息会在完成后继续发送…"}</div>}
+            {state.isStreaming && !state.isCompacting && toolStatus && <div className="agent-status"><span className="loader small" />{toolStatus}</div>}
           </div>
         </div>
         <nav className="conversation-nav" aria-label="对话导航">
@@ -633,18 +809,19 @@ export function App() {
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 16h12M10 4v9M7.2 10.2 10 13l2.8-2.8" /></svg>
           </button>
         </nav>
+        <SessionControlBanner observing={observing} onTakeOver={() => void takeControl()} />
         <PromptQueue
           queue={queue}
           paused={queuePaused}
-          busy={busy}
+          busy={busy || observing}
           onCancel={(id) => void api.cancelQueued(id, viewedSessionId).then((result) => { setQueue(result.queue); setQueuePaused(result.paused); }).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))}
           onResume={() => void api.resumeQueue(viewedSessionId).then((result) => { setQueue(result.queue); setQueuePaused(result.paused); }).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))}
         />
         <ChatInput
           streaming={state.isStreaming}
           stopping={stopping}
-          disabled={loading || busy}
-          disabledPlaceholder={!viewingActiveSession ? "会话已休眠；发送时会自动恢复运行进程…" : undefined}
+          disabled={loading || busy || observing || Boolean(state.isCompacting)}
+          disabledPlaceholder={observing ? "此对话正在另一窗口中控制；点击“接管控制”后可操作" : state.isCompacting ? "正在压缩上下文，完成后可继续发送…" : runtimeStatus === "restoring" || (busy && runtimeStatus !== "active") ? "正在恢复 Pi Runtime，就绪后即可发送…" : runtimeStatus === "view-only" ? "当前为只读查看；发送时会自动恢复 Pi Runtime" : undefined}
           acceptsImages={state.model?.input?.includes("image") === true}
           commands={commands}
           onSend={send}
@@ -660,11 +837,12 @@ export function App() {
         appearance={appearance}
         models={models}
         state={state}
-        busy={busy || anySessionRunning || queue.length > 0}
+        busy={busy || globalMutationBlocked}
         onClose={() => setManagementSection(null)}
         onAppearance={setAppearance}
         onModel={(provider, id) => void changeModel(provider, id)}
         onReloaded={(data) => data ? applyBootstrap(data) : void refresh()}
+        onShutdown={() => void shutdownPiChat()}
       />
       <SessionDialog
         state={sessionDialog}

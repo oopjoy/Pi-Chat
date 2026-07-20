@@ -1,5 +1,6 @@
 /**
  * Pi Chat File Permission Gate
+ * Pi Chat system component: file-permission-gate; version: 1
  *
  * 随 Pi Chat 发布，拦截所有 写/编辑/删除 操作，弹窗请求用户确认后才能执行。
  * 覆盖的工具：write, edit, bash (rm/del)

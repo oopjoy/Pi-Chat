@@ -2,6 +2,8 @@ import type { CSSProperties } from "react";
 import type { ModelInfo, PiState, SessionStats, ThinkingLevel } from "../../shared/types";
 import type { GateMode } from "../lib/gate-mode";
 import { GateControl } from "./GateControl";
+import { ChipIcon } from "./Icons";
+import { contextUsageTone } from "../lib/context-usage";
 
 function modelValue(model: Pick<ModelInfo, "provider" | "id">): string {
   return `${model.provider}\u0000${model.id}`;
@@ -24,31 +26,45 @@ const THINKING_LEVELS: Array<{ value: ThinkingLevel; label: string }> = [
   { value: "max", label: "Max" },
 ];
 
-function UsageStats({ stats }: { stats?: SessionStats }) {
+function formatPercent(percent: number | null): string {
+  return percent === null ? "—" : `${percent.toFixed(1).replace(/\.0$/, "")}%`;
+}
+
+/**
+ * Compact context-occupancy indicator. Cumulative token counters are
+ * diagnostic-only, so they live in the hover/focus card instead of the bar.
+ */
+function UsageStats({ stats, isCompacting }: { stats?: SessionStats; isCompacting?: boolean }) {
   const usage = stats?.tokens;
   const context = stats?.contextUsage;
   const percent = typeof context?.percent === "number" ? Math.max(0, Math.min(100, context.percent)) : null;
-  const contextTitle = percent === null || !context
-    ? "当前上下文用量不可用"
-    : `上下文：${compactTokens(context.tokens)} / ${compactTokens(context.contextWindow)}（${percent.toFixed(1).replace(/\.0$/, "")}%）`;
-  return <div className="usage-stats" aria-label="会话 Token 用量">
-    <span title={`累计输入 Token：${compactTokens(usage?.input)}`}><b className="usage-arrow">↑</b>{compactTokens(usage?.input)}</span>
-    <span title={`累计输出 Token：${compactTokens(usage?.output)}`}><b className="usage-arrow">↓</b>{compactTokens(usage?.output)}</span>
-    <span title={`累计缓存读取 Token：${compactTokens(usage?.cacheRead)}`}><b className="usage-cache">R</b>{compactTokens(usage?.cacheRead)}</span>
-    <span className={`usage-context ${percent === null ? "is-unavailable" : ""}`} title={contextTitle}>
+  const tone = contextUsageTone(percent, isCompacting);
+  const text = formatPercent(percent);
+  return (
+    <div className={`usage-pill is-${tone}`} tabIndex={0} aria-label={`会话上下文用量 ${text}`}>
       <i className="context-donut" style={{ "--context-percent": `${percent ?? 0}%` } as CSSProperties} aria-hidden="true" />
-      {percent === null ? "—" : `${percent.toFixed(1).replace(/\.0$/, "")}%`} / {compactTokens(context?.contextWindow)}
-    </span>
-  </div>;
+      <span>{isCompacting ? "压缩中" : text}</span>
+      <div className="usage-card" role="tooltip">
+        <dl>
+          <div><dt>上下文</dt><dd>{compactTokens(context?.tokens)} / {compactTokens(context?.contextWindow)}（{text}）</dd></div>
+          <div><dt>累计输入</dt><dd>{compactTokens(usage?.input)}</dd></div>
+          <div><dt>累计输出</dt><dd>{compactTokens(usage?.output)}</dd></div>
+          <div><dt>缓存读取</dt><dd>{compactTokens(usage?.cacheRead)}</dd></div>
+        </dl>
+        {isCompacting && <p>正在压缩上下文；当前消息会在完成后继续发送。</p>}
+      </div>
+    </div>
+  );
 }
 
-export function TopBar({ state, models, stats, conversationName, workspacePath, disabled, gateAvailable, gateMode, onGate, onModel, onThinking }: {
+export function TopBar({ state, models, stats, conversationName, workspacePath, disabled, streaming, gateAvailable, gateMode, onGate, onModel, onThinking }: {
   state: PiState;
   models: ModelInfo[];
   stats?: SessionStats;
   conversationName: string;
   workspacePath: string;
   disabled: boolean;
+  streaming: boolean;
   gateAvailable: boolean;
   gateMode: GateMode;
   onGate: (mode: GateMode) => void;
@@ -65,24 +81,28 @@ export function TopBar({ state, models, stats, conversationName, workspacePath, 
   return (
     <header className="topbar">
       <div className="topbar-context" title={`当前对话：${conversationName}\n工作路径：${workspacePath}`}>
-        <div className="topbar-title"><strong>Pi Chat</strong><b><span className="topbar-label">当前对话：</span>{conversationName}</b></div>
-        <div className="topbar-path" title={`工作路径：${workspacePath}`}><span aria-hidden="true">⌂</span><em>工作路径：</em>{workspacePath}</div>
+        <strong className="topbar-title">{conversationName}</strong>
       </div>
-      <UsageStats stats={stats} />
-      {gateAvailable && <GateControl mode={gateMode} disabled={disabled} onChange={onGate} />}
-      <label className="topbar-select model-select">
-        <span>模型</span>
-        <select value={current} disabled={disabled || !models.length} onChange={(event) => { const [provider, id] = event.target.value.split("\u0000"); onModel(provider, id); }}>
-          {!current && <option value="">未选择</option>}
-          {[...groups.entries()].map(([provider, providerModels]) => <optgroup key={provider} label={provider}>{providerModels.map((model) => <option key={modelValue(model)} value={modelValue(model)}>{model.name || model.id}</option>)}</optgroup>)}
-        </select>
-      </label>
-      <label className="topbar-select thinking-select">
-        <span>思考强度</span>
-        <select value={state.thinkingLevel || "off"} disabled={disabled || !state.model?.reasoning} onChange={(event) => onThinking(event.target.value as ThinkingLevel)}>
-          {THINKING_LEVELS.map((level) => <option key={level.value} value={level.value}>{level.label}</option>)}
-        </select>
-      </label>
+      <div className="topbar-indicators">
+        <UsageStats stats={stats} isCompacting={state.isCompacting} />
+      </div>
+      <div className="topbar-controls">
+        {gateAvailable && <GateControl mode={gateMode} disabled={disabled} onChange={onGate} />}
+        <div className="model-controls" title={streaming ? "当前回复不会中断；新设置将在下一轮对话生效" : undefined}>
+          <ChipIcon className="model-icon" />
+          <label className="model-select" title="模型">
+            <select value={current} disabled={disabled || !models.length} onChange={(event) => { const [provider, id] = event.target.value.split("\u0000"); onModel(provider, id); }}>
+            {!current && <option value="">未选择</option>}
+              {[...groups.entries()].map(([provider, providerModels]) => <optgroup key={provider} label={provider}>{providerModels.map((model) => <option key={modelValue(model)} value={modelValue(model)}>{model.name || model.id}</option>)}</optgroup>)}
+            </select>
+          </label>
+          <label className="thinking-select" title="思考强度">
+            <select aria-label="思考强度" value={state.thinkingLevel || "off"} disabled={disabled || !state.model?.reasoning} onChange={(event) => onThinking(event.target.value as ThinkingLevel)}>
+              {THINKING_LEVELS.map((level) => <option key={level.value} value={level.value}>{level.label}</option>)}
+            </select>
+          </label>
+        </div>
+      </div>
     </header>
   );
 }

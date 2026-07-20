@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { SessionIndex, cleanPreview, idForPath, readSessionMessages, readSessionTodos, textFromContent } from "../src/server/session-index";
+import { SessionIndex, cleanPreview, idForPath, readSessionMessages, readSessionUsage, textFromContent } from "../src/server/session-index";
 
 test("session index extracts header, title, preview and message count", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-sessions-"));
@@ -70,17 +70,38 @@ test("session message reader follows only the current JSONL branch", async () =>
   }
 });
 
-test("todo reader uses the newest snapshot on the current JSONL branch", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pi-chat-todo-branch-"));
+test("usage reader sums successful turns and derives context from the last one", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-usage-"));
   try {
-    const path = join(root, "todos.jsonl");
+    const path = join(root, "usage.jsonl");
     await writeFile(path, [
       { type: "session", id: "session", cwd: "C:\\work" },
-      { type: "custom", customType: "pi-deck-todo", id: "old", parentId: null, data: { todos: [{ id: 1, text: "abandoned", done: false }] } },
-      { type: "message", id: "abandoned-leaf", parentId: "old", message: { role: "assistant", content: "old" } },
-      { type: "custom", customType: "pi-deck-todo", id: "current", parentId: "old", data: { todos: [{ id: 1, text: "kept", done: true }, { id: 2, text: "next", done: false }] } },
+      { type: "message", id: "u1", parentId: null, message: { role: "user", content: "hi" } },
+      { type: "message", id: "a1", parentId: "u1", message: { role: "assistant", content: "one", provider: "p", model: "m1", usage: { input: 100, output: 20, cacheRead: 900, cacheWrite: 0 } } },
+      { type: "message", id: "a2", parentId: "a1", message: { role: "assistant", content: "failed", stopReason: "error", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } } },
+      { type: "message", id: "a3", parentId: "a2", message: { role: "assistant", content: "two", provider: "p", model: "m2", usage: { input: 50, output: 30, cacheRead: 1200, cacheWrite: 10 } } },
     ].map(JSON.stringify).join("\n"));
-    assert.deepEqual(await readSessionTodos(path), [{ id: 1, text: "kept", done: true }, { id: 2, text: "next", done: false }]);
+    const usage = await readSessionUsage(path);
+    assert.deepEqual(usage.tokens, { input: 150, output: 50, cacheRead: 2100, cacheWrite: 10, total: 2310 });
+    assert.deepEqual(usage.context, { tokens: 1260, provider: "p", model: "m2" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("usage reader follows only the current branch", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-usage-branch-"));
+  try {
+    const path = join(root, "usage-branch.jsonl");
+    await writeFile(path, [
+      { type: "session", id: "session", cwd: "C:\\work" },
+      { type: "message", id: "root", parentId: null, message: { role: "user", content: "hi" } },
+      { type: "message", id: "old-leaf", parentId: "root", message: { role: "assistant", content: "old", provider: "p", model: "m", usage: { input: 999, output: 1, cacheRead: 0, cacheWrite: 0 } } },
+      { type: "message", id: "new-leaf", parentId: "root", message: { role: "assistant", content: "new", provider: "p", model: "m", usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 } } },
+    ].map(JSON.stringify).join("\n"));
+    const usage = await readSessionUsage(path);
+    assert.deepEqual(usage.tokens, { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, total: 15 });
+    assert.deepEqual(usage.context, { tokens: 10, provider: "p", model: "m" });
   } finally {
     await rm(root, { recursive: true, force: true });
   }

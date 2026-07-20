@@ -25,6 +25,7 @@ interface PiSettings {
 
 const RESOURCE_KEYS = ["extensions", "skills", "prompts", "themes"] as const;
 const EXTENSION_PATTERN = /\.(?:ts|js|mts|mjs|cts|cjs)$/i;
+const PI_CHAT_SYSTEM_EXTENSION_NAMES = new Set(["pi-chat-file-permission-gate"]);
 
 function hashId(value: string): string {
   return createHash("sha256").update(value.toLowerCase()).digest("hex").slice(0, 20);
@@ -289,8 +290,13 @@ export class ResourceManager {
     for (const path of extensionFiles) {
       const pattern = relative(this.agentDir, path);
       const override = (settings.extensions ?? []).find((entry) => entry.replace(/^[+\-!]/, "") === pattern || resolve(this.agentDir, entry.replace(/^[+\-!]/, "")) === resolve(path));
+      const name = /^index\./i.test(basename(path)) ? basename(dirname(path)) : basename(path, extname(path));
+      const systemComponent = PI_CHAT_SYSTEM_EXTENSION_NAMES.has(name.toLowerCase());
+      // Pi Chat-owned adapters are intentionally not exposed as ordinary plugins.
+      // They are verified and repaired by the Pi Chat startup path instead.
+      if (systemComponent) continue;
       resources.push({
-        id: hashId(`extension\0${resolve(path)}`), name: /^index\./i.test(basename(path)) ? basename(dirname(path)) : basename(path, extname(path)),
+        id: hashId(`extension\0${resolve(path)}`), name,
         source: pathLabel(path), scope: "global", enabled: !override?.startsWith("-") && !override?.startsWith("!"),
         removable: true, installedPath: pathLabel(path),
       });
@@ -315,6 +321,15 @@ export class ResourceManager {
     return { resources: resources.sort((a, b) => a.name.localeCompare(b.name)), diagnostics };
   }
 
+  async systemGateEnabled(): Promise<boolean> {
+    const path = join(this.agentDir, "extensions", "pi-chat-file-permission-gate.ts");
+    if (!existsSync(path)) return false;
+    const settings = await readSettings(this.settingsPath);
+    const pattern = relative(this.agentDir, path).replace(/\\/g, "/");
+    const override = (settings.extensions ?? []).find((entry) => entry.replace(/^[+\-!]/, "").replace(/\\/g, "/") === pattern);
+    return !override?.startsWith("-") && !override?.startsWith("!");
+  }
+
   async setPackageEnabled(id: string, enabled: boolean, cwd: string): Promise<void> {
     if (!(await this.listPackages(cwd)).resources.some((item) => item.id === id)) throw new Error("Package not found");
     const settings = await readSettings(this.settingsPath);
@@ -337,6 +352,7 @@ export class ResourceManager {
   async setExtensionEnabled(id: string, enabled: boolean, cwd: string): Promise<void> {
     const extension = (await this.listExtensions(cwd)).resources.find((item) => item.id === id);
     if (!extension) throw new Error("Extension not found");
+    if (extension.systemComponent) throw new Error("Pi Chat 内置安全执行组件由 Pi Chat 自动管理，不能在扩展列表中停用");
     if (extension.packageSource) throw new Error("Package-provided extensions are controlled by their Package switch");
     const realPath = await this.extensionPathFromId(id);
     if (!realPath) throw new Error("Extension path not found");
@@ -357,6 +373,7 @@ export class ResourceManager {
 
   async removeExtension(id: string, cwd: string): Promise<void> {
     const extension = (await this.listExtensions(cwd)).resources.find((item) => item.id === id);
+    if (extension?.systemComponent) throw new Error("Pi Chat 内置安全执行组件由 Pi Chat 自动管理，不能移除");
     if (!extension?.removable || extension.packageSource) throw new Error("Package-provided extensions must be removed with their Package");
     const path = await this.extensionPathFromId(id);
     if (!path) throw new Error("Extension path not found");

@@ -10,7 +10,8 @@ import { ResourceManager } from "./resource-manager.js";
 import { PiRpcClient } from "./rpc-client.js";
 import { SessionIndex } from "./session-index.js";
 import { loadWorkspace } from "./workspace-state.js";
-import { ensureBundledExtension, ensurePiChatTodoExtension } from "./todo-extension-installer.js";
+import { ensurePiChatSystemGate } from "./system-gate-installer.js";
+import { buildPiChat, handOffApplicationRestart } from "./application-restart.js";
 
 interface CliOptions {
   host: string;
@@ -55,24 +56,24 @@ const options = parseArgs(process.argv.slice(2));
 options.cwd = await loadWorkspace(options.cwd);
 const projectRoot = findProjectRoot(dirname(fileURLToPath(import.meta.url)));
 const agentDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
-const todoExtension = await ensurePiChatTodoExtension({
-  agentDir,
-  sourcePath: join(projectRoot, "resources", "extensions", "pi-chat-todo.ts"),
-});
-if (todoExtension === "installed") console.log("[Pi Chat] 已安装内置 Todo 扩展。");
-if (todoExtension === "source-missing") console.warn("[Pi Chat] 未找到内置 Todo 扩展；待办面板仍可读取已有状态，但无法提供 /todo 工具。");
-const gateExtension = await ensureBundledExtension({
+const gateComponent = await ensurePiChatSystemGate({
   agentDir,
   sourcePath: join(projectRoot, "resources", "extensions", "pi-chat-file-permission-gate.ts"),
-  targetName: "pi-chat-file-permission-gate.ts",
-  legacyNames: ["file-permission-gate.ts"],
 });
-if (gateExtension === "installed") console.log("[Pi Chat] 已安装内置文件权限 Gate 扩展。");
-if (gateExtension === "source-missing") console.warn("[Pi Chat] 未找到内置文件权限 Gate 扩展；文件权限控制器不可用。");
+if (gateComponent.status === "installed") console.log("[Pi Chat] 已安装内置文件权限安全执行组件。");
+if (gateComponent.status === "repaired") console.log("[Pi Chat] 已修复内置文件权限安全执行组件。");
+if (gateComponent.status === "conflict" || gateComponent.status === "source-missing") {
+  throw new Error(`[Pi Chat] ${gateComponent.diagnostic || "内置文件权限安全执行组件不可用。"}`);
+}
 const rpc = new PiRpcClient({ cwd: options.cwd });
 
 console.log("[Pi Chat] 正在启动 Pi RPC…");
 await rpc.start();
+const compatibility = await rpc.probeCompatibility();
+if (!compatibility.compatible) {
+  await rpc.stop();
+  throw new Error(`当前 Pi RPC 协议不兼容 Pi Chat：\n- ${compatibility.diagnostics.join("\n- ")}\n请更新 Pi，或使用兼容的 Pi Chat 版本。`);
+}
 
 let vite: Awaited<ReturnType<typeof import("vite")["createServer"]>> | undefined;
 if (options.dev) {
@@ -84,6 +85,24 @@ if (options.dev) {
   });
 }
 
+async function requestApplicationRestart(): Promise<void> {
+  console.log("[Pi Chat] 正在构建本地更新…");
+  await buildPiChat(projectRoot);
+  // The handler sends its 202 response synchronously after this returns. Yield
+  // one event-loop turn so the browser receives it before this listener closes.
+  setTimeout(() => {
+    handOffApplicationRestart({
+      projectRoot,
+      serverEntry: fileURLToPath(import.meta.url),
+      host: options.host,
+      port: options.port,
+      cwd: options.cwd,
+      dev: options.dev,
+    });
+    void shutdown().then(() => process.exit(0));
+  }, 0);
+}
+
 const app = new PiChatApp({
   rpc,
   createRpc: (cwd) => new PiRpcClient({ cwd }),
@@ -93,6 +112,9 @@ const app = new PiChatApp({
   cwd: options.cwd,
   webRoot: resolve(projectRoot, "dist", "web"),
   devMiddleware: vite ? (request, response, next) => vite.middlewares(request, response, next) : undefined,
+  allowedHosts: [],
+  applicationRestart: requestApplicationRestart,
+  applicationShutdown: () => setTimeout(() => void shutdown().then(() => process.exit(0)), 0),
 });
 const server = createHttpServer((request, response) => void app.handle(request, response));
 
@@ -102,6 +124,8 @@ await new Promise<void>((resolveListen, reject) => {
 });
 const address = server.address();
 const port = typeof address === "object" && address ? address.port : options.port;
+const authority = options.host.includes(":") ? `[${options.host}]:${port}` : `${options.host}:${port}`;
+app.setAllowedHosts([authority]);
 console.log(`[Pi Chat] 已启动：http://${options.host}:${port}`);
 void app.preheatRecentSessions().then((ids) => {
   if (ids.length) console.log(`[Pi Chat] 已后台预热最近 ${ids.length} 个历史会话。`);
@@ -115,8 +139,11 @@ async function shutdown(): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log("\n[Pi Chat] 正在关闭…");
-  await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+  // End SSE clients and secondary workers before server.close(): Node waits for
+  // long-lived SSE connections, so closing the listener first can deadlock a
+  // self-restart indefinitely.
   await app.close();
+  await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
   await vite?.close();
   await rpc.stop();
 }

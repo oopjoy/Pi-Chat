@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import type { BootstrapData, CustomModelInput, ExtensionResource, ModelInfo, PackageResource, PiState, SkillResource } from "../../shared/types";
 import { api } from "../api";
-import type { AppearancePreferences, FontPreference, ThemePreference } from "../lib/preferences";
+import { DEFAULT_APPEARANCE, type AppearancePreferences, type FontPreference, type ThemePreference } from "../lib/preferences";
+import { CloseIcon, PlusIcon } from "./Icons";
 
 export type ManagementSection = "settings" | "models";
 type SettingsTab = "appearance" | "models" | "skills" | "extensions" | "packages";
@@ -14,7 +15,7 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string }> = [
   { id: "packages", label: "Packages" },
 ];
 
-export function ManagementPanel({ section, appearance, models, state, busy, onClose, onAppearance, onModel, onReloaded }: {
+export function ManagementPanel({ section, appearance, models, state, busy, onClose, onAppearance, onModel, onReloaded, onShutdown }: {
   section: ManagementSection | null;
   appearance: AppearancePreferences;
   models: ModelInfo[];
@@ -24,6 +25,7 @@ export function ManagementPanel({ section, appearance, models, state, busy, onCl
   onAppearance: (value: AppearancePreferences) => void;
   onModel: (provider: string, id: string) => void;
   onReloaded: (data?: BootstrapData) => void;
+  onShutdown: () => void;
 }) {
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("appearance");
   const [filter, setFilter] = useState("");
@@ -39,6 +41,15 @@ export function ManagementPanel({ section, appearance, models, state, busy, onCl
     setFilter("");
     setResourceError("");
   }, [section]);
+
+  useEffect(() => {
+    if (!section) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [section, onClose]);
 
   useEffect(() => {
     setResourceError("");
@@ -79,17 +90,20 @@ export function ManagementPanel({ section, appearance, models, state, busy, onCl
             <span className="management-kicker">Pi Chat</span>
             <h2 id="management-title">设置</h2>
           </div>
-          <button type="button" className="panel-close" onClick={onClose} aria-label="关闭">×</button>
+          <button type="button" className="panel-close" onClick={onClose} aria-label="关闭"><CloseIcon /></button>
         </header>
 
         {(
           <div className="settings-workspace">
             <nav className="settings-nav" aria-label="设置分类">
-              {SETTINGS_TABS.map((tab) => (
-                <button type="button" key={tab.id} className={settingsTab === tab.id ? "is-active" : ""} onClick={() => setSettingsTab(tab.id)}>
-                  {tab.label}
-                </button>
-              ))}
+              <div className="settings-nav-tabs">
+                {SETTINGS_TABS.map((tab) => (
+                  <button type="button" key={tab.id} className={settingsTab === tab.id ? "is-active" : ""} onClick={() => setSettingsTab(tab.id)}>
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+              <button type="button" className="settings-shutdown" disabled={busy} onClick={onShutdown} title="关闭 Pi Chat 服务和全部 Pi Chat 会话进程">关闭 Pi Chat</button>
             </nav>
             <div className="settings-content">
               {settingsTab === "appearance" && <AppearancePanel value={appearance} onChange={onAppearance} />}
@@ -142,12 +156,18 @@ function ModelsPanel({ models, state, busy, filter, onFilter, onModel, onReloade
   onReloaded: (data?: BootstrapData) => void;
 }) {
   const [adding, setAdding] = useState(false);
-  const [editing, setEditing] = useState(false);
+  const [editing, setEditing] = useState<{ provider: string; id: string } | null>(null);
   const [form, setForm] = useState<CustomModelInput>(EMPTY_CUSTOM_MODEL);
   const [modelBusy, setModelBusy] = useState(false);
   const [modelError, setModelError] = useState("");
   const visible = useMemo(() => filterList(models, filter, (model) => `${model.provider} ${model.id} ${model.name}`), [filter, models]);
   const update = <K extends keyof CustomModelInput>(key: K, value: CustomModelInput[K]) => setForm((current) => ({ ...current, [key]: value }));
+  const closeForm = () => {
+    setAdding(false);
+    setEditing(null);
+    setForm(EMPTY_CUSTOM_MODEL);
+    setModelError("");
+  };
   const run = async (operation: () => Promise<BootstrapData>) => {
     setModelBusy(true);
     setModelError("");
@@ -164,20 +184,23 @@ function ModelsPanel({ models, state, busy, filter, onFilter, onModel, onReloade
   };
   const save = async () => {
     if (!form.provider.trim() || !form.id.trim()) return;
-    if (await run(() => api.addModel(form))) {
-      setAdding(false);
-      setEditing(false);
-      setForm(EMPTY_CUSTOM_MODEL);
-    }
+    // Editing renames via the original key; the server reloads Pi and returns
+    // fresh bootstrap data, so the list and TopBar refresh automatically.
+    const operation = editing ? () => api.updateModel(editing.provider, editing.id, form) : () => api.addModel(form);
+    if (await run(operation)) closeForm();
   };
   const edit = async (model: ModelInfo) => {
+    if (editing?.provider === model.provider && editing?.id === model.id) {
+      closeForm();
+      return;
+    }
     setModelBusy(true);
     setModelError("");
+    setAdding(false);
     try {
       const result = await api.customModel(model.provider, model.id);
       setForm(result.model);
-      setEditing(true);
-      setAdding(true);
+      setEditing({ provider: model.provider, id: model.id });
     } catch (error) {
       setModelError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -189,34 +212,42 @@ function ModelsPanel({ models, state, busy, filter, onFilter, onModel, onReloade
     await run(() => api.removeModel(model.provider, model.id));
   };
 
-  return <div className="panel-body models-panel">
-    <div className="models-toolbar"><PanelIntro title="可用模型" description="切换模型，或管理 ~/.pi/agent/models.json 中的自定义模型。" count={models.length} /><button type="button" className="model-add-button" disabled={busy || modelBusy} onClick={() => { if (adding) { setAdding(false); setEditing(false); setForm(EMPTY_CUSTOM_MODEL); } else { setAdding(true); setEditing(false); setForm(EMPTY_CUSTOM_MODEL); } setModelError(""); }}>{adding ? "取消" : "＋ Add"}</button></div>
+  const renderForm = (isEditing: boolean, inline: boolean) => <div className={`model-form ${inline ? "model-form-inline" : ""}`}>
     {modelError && <div className="resource-error">{modelError}</div>}
-    {adding && <div className="model-form">
-      <div className="model-form-grid">
-        <label><span>Provider *</span><input value={form.provider} disabled={editing} onChange={(event) => update("provider", event.target.value)} placeholder="例如 ollama" /></label>
-        <label><span>Model ID *</span><input value={form.id} disabled={editing} onChange={(event) => update("id", event.target.value)} placeholder="例如 qwen2.5-coder:7b" /></label>
-        <label><span>显示名称</span><input value={form.name || ""} onChange={(event) => update("name", event.target.value)} placeholder="可选" /></label>
-        <label><span>API 类型</span><select value={form.api} onChange={(event) => update("api", event.target.value as CustomModelInput["api"])}><option value="openai-completions">OpenAI Completions</option><option value="openai-responses">OpenAI Responses</option><option value="anthropic-messages">Anthropic Messages</option><option value="google-generative-ai">Google Generative AI</option></select></label>
-        <label className="model-form-wide"><span>Base URL（新 Provider 必填）</span><input value={form.baseUrl || ""} onChange={(event) => update("baseUrl", event.target.value)} placeholder="http://localhost:11434/v1" /></label>
-        <label className="model-form-wide"><span>API Key 或引用</span><input type="password" autoComplete="new-password" value={form.apiKey || ""} onChange={(event) => update("apiKey", event.target.value)} placeholder="密钥、$ENV_VAR 或本地服务占位值" /></label>
-        <label><span>Context Window</span><input type="number" min="1" value={form.contextWindow || ""} onChange={(event) => update("contextWindow", event.target.value ? Number(event.target.value) : undefined)} /></label>
-        <label><span>Max Tokens</span><input type="number" min="1" value={form.maxTokens || ""} onChange={(event) => update("maxTokens", event.target.value ? Number(event.target.value) : undefined)} /></label>
-      </div>
-      <div className="model-form-options"><label><input type="checkbox" checked={form.reasoning} onChange={(event) => update("reasoning", event.target.checked)} /> Reasoning</label><label><input type="checkbox" checked={form.imageInput} onChange={(event) => update("imageInput", event.target.checked)} /> 图片输入</label><span>API Key 不会读取或回显；留空会保留已有值。</span></div>
-      <button type="button" className="model-save-button" disabled={busy || modelBusy || !form.provider.trim() || !form.id.trim()} onClick={() => void save()}>{modelBusy ? "保存中…" : editing ? "保存更改" : "保存模型"}</button>
-    </div>}
+    <div className="model-form-grid">
+      <label><span>Provider *</span><input value={form.provider} onChange={(event) => update("provider", event.target.value)} placeholder="例如 ollama" /></label>
+      <label><span>Model ID *</span><input value={form.id} onChange={(event) => update("id", event.target.value)} placeholder="例如 qwen2.5-coder:7b" /></label>
+      <label><span>显示名称</span><input value={form.name || ""} onChange={(event) => update("name", event.target.value)} placeholder="可选" /></label>
+      <label><span>API 类型</span><select value={form.api} onChange={(event) => update("api", event.target.value as CustomModelInput["api"])}><option value="openai-completions">OpenAI Completions</option><option value="openai-responses">OpenAI Responses</option><option value="anthropic-messages">Anthropic Messages</option><option value="google-generative-ai">Google Generative AI</option></select></label>
+      <label className="model-form-wide"><span>Base URL（新 Provider 必填）</span><input value={form.baseUrl || ""} onChange={(event) => update("baseUrl", event.target.value)} placeholder="http://localhost:11434/v1" /></label>
+      <label className="model-form-wide"><span>API Key 或引用</span><input type="password" autoComplete="new-password" value={form.apiKey || ""} onChange={(event) => update("apiKey", event.target.value)} placeholder="密钥、$ENV_VAR 或本地服务占位值" /></label>
+      <label><span>Context Window</span><input type="number" min="1" value={form.contextWindow || ""} onChange={(event) => update("contextWindow", event.target.value ? Number(event.target.value) : undefined)} /></label>
+      <label><span>Max Tokens</span><input type="number" min="1" value={form.maxTokens || ""} onChange={(event) => update("maxTokens", event.target.value ? Number(event.target.value) : undefined)} /></label>
+    </div>
+    <div className="model-form-options"><label><input type="checkbox" checked={form.reasoning} onChange={(event) => update("reasoning", event.target.checked)} /> Reasoning</label><label><input type="checkbox" checked={form.imageInput} onChange={(event) => update("imageInput", event.target.checked)} /> 图片输入</label><span>API Key 不会读取或回显；留空会保留已有值。</span></div>
+    {isEditing && <p className="model-form-hint">Provider 和 Model ID 都可以修改，相当于重命名；保存后模型列表和顶栏会自动刷新。</p>}
+    <button type="button" className="model-save-button" disabled={busy || modelBusy || !form.provider.trim() || !form.id.trim()} onClick={() => void save()}>{modelBusy ? "保存中…" : isEditing ? "保存更改" : "保存模型"}</button>
+  </div>;
+
+  return <div className="panel-body models-panel">
+    <div className="models-toolbar"><PanelIntro title="可用模型" description="切换模型，或管理 ~/.pi/agent/models.json 中的自定义模型。" count={models.length} /><button type="button" className="model-add-button" disabled={busy || modelBusy} onClick={() => { if (adding) closeForm(); else { closeForm(); setAdding(true); } }}>{adding ? "取消" : <><PlusIcon />Add</>}</button></div>
+    {modelError && !adding && !editing && <div className="resource-error">{modelError}</div>}
+    {adding && renderForm(false, false)}
     <Search value={filter} onChange={onFilter} placeholder="搜索 Provider 或模型" />
     <div className="model-grid">{visible.map((model) => {
       const active = state.model?.provider === model.provider && state.model?.id === model.id;
-      return <article className={`model-card ${active ? "is-active" : ""}`} key={`${model.provider}/${model.id}`}>
-        <button type="button" className="model-card-select" disabled={busy || modelBusy || active} onClick={() => onModel(model.provider, model.id)}>
-          <span className="model-provider">{model.provider}{model.custom ? " · CUSTOM" : ""}</span><strong>{model.name || model.id}</strong><small>{model.id}</small><span className="model-capabilities">{model.reasoning ? "Reasoning" : "Chat"}{model.contextWindow ? ` · ${Math.round(model.contextWindow / 1000)}k` : ""}</span>
-        </button>
-        {model.custom && <div className="model-card-actions">
-          <button type="button" disabled={busy || modelBusy} title="编辑 models.json 中的模型配置" onClick={() => void edit(model)}>编辑</button>
-          <button type="button" className="is-danger" disabled={busy || modelBusy || active} title={active ? "请先切换到其他模型" : "从 models.json 删除"} onClick={() => void remove(model)}>移除</button>
-        </div>}
+      const isEditing = editing?.provider === model.provider && editing?.id === model.id;
+      return <article className={`model-card ${active ? "is-active" : ""} ${isEditing ? "is-editing" : ""}`} key={`${model.provider}/${model.id}`}>
+        <div className="model-card-main">
+          <button type="button" className="model-card-select" disabled={busy || modelBusy || active} onClick={() => onModel(model.provider, model.id)}>
+            <strong>{model.name || model.id}</strong><small>{model.id}</small><span className="model-capabilities">{model.reasoning ? "Reasoning" : "Chat"}{model.contextWindow ? ` · ${Math.round(model.contextWindow / 1000)}k` : ""}</span>
+          </button>
+          {model.custom && <div className="model-card-actions">
+            <button type="button" disabled={busy || modelBusy} title="编辑 models.json 中的模型配置" onClick={() => void edit(model)}>{isEditing ? "收起" : "编辑"}</button>
+            <button type="button" className="is-danger" disabled={busy || modelBusy || active} title={active ? "请先切换到其他模型" : "从 models.json 删除"} onClick={() => void remove(model)}>移除</button>
+          </div>}
+        </div>
+        {isEditing && renderForm(true, true)}
       </article>;
     })}</div>
   </div>;
@@ -266,13 +297,18 @@ function SettingsResourceList<T extends { id: string; name: string; enabled: boo
 }
 
 function Toggle({ enabled, busy, onClick }: { enabled: boolean; busy: boolean; onClick: () => void }) {
-  return <button type="button" className={`resource-toggle ${enabled ? "is-enabled" : ""}`} disabled={busy} onClick={onClick} aria-pressed={enabled}><span />{enabled ? "已启用" : "已停用"}</button>;
+  const label = enabled ? "已启用，点击停用" : "已停用，点击启用";
+  return <button type="button" className={`resource-toggle ${enabled ? "is-enabled" : ""}`} disabled={busy} onClick={onClick} role="switch" aria-checked={enabled} aria-label={label} title={label}><span className="resource-toggle-knob" /></button>;
 }
 
 function AppearancePanel({ value, onChange }: { value: AppearancePreferences; onChange: (value: AppearancePreferences) => void }) {
   const update = <K extends keyof AppearancePreferences>(key: K, next: AppearancePreferences[K]) => onChange({ ...value, [key]: next });
+  const isDefault = Object.keys(DEFAULT_APPEARANCE).every((key) => value[key as keyof AppearancePreferences] === DEFAULT_APPEARANCE[key as keyof AppearancePreferences]);
   return <div className="panel-body appearance-panel">
-    <PanelIntro title="外观与阅读" description="修改会即时生效，并保存在当前浏览器中。" />
+    <div className="appearance-panel-heading">
+      <PanelIntro title="外观与阅读" description="修改会即时生效，并保存在当前浏览器中。" />
+      <button type="button" className="appearance-reset" disabled={isDefault} onClick={() => onChange({ ...DEFAULT_APPEARANCE })}>重置外观</button>
+    </div>
     <SettingRow title="主题" description="跟随系统或固定明暗主题"><select value={value.theme} onChange={(event) => update("theme", event.target.value as ThemePreference)}><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></SettingRow>
     <SettingRow title="字体" description="控制消息和界面的主要字体"><select value={value.font} onChange={(event) => update("font", event.target.value as FontPreference)}><option value="system">系统字体</option><option value="serif">衬线阅读字体</option><option value="mono">等宽字体</option></select></SettingRow>
     <RangeSetting title="字号" value={value.fontSize} minimum={13} maximum={22} step={1} suffix="px" onChange={(next) => update("fontSize", next)} />

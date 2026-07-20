@@ -57,9 +57,11 @@ export function SessionDialog({ state, busy, onClose, onRename, onDelete }: {
         <h2 id="session-dialog-title">删除对话</h2>
         <p>确定删除“<strong>{state.session.name}</strong>”吗？此操作会删除本地 Session 文件，无法撤销。</p>
         {state.session.running && <p className="dialog-warning">该对话正在生成，请先停止后再删除。</p>}
+        {state.session.queued && <p className="dialog-warning">该对话仍有待发送消息，请先清空队列。</p>}
+        {state.session.pendingConfirmation && <p className="dialog-warning">该对话正在等待确认，请先处理该请求。</p>}
         <footer>
           <button type="button" disabled={busy} onClick={onClose}>取消</button>
-          <button type="button" className="danger" disabled={busy || state.session.running} onClick={onDelete}>{busy ? "删除中…" : "确认删除"}</button>
+          <button type="button" className="danger" disabled={busy || state.session.running || state.session.queued || state.session.pendingConfirmation} onClick={onDelete}>{busy ? "删除中…" : "确认删除"}</button>
         </footer>
       </>}
     </section>

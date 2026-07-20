@@ -21,6 +21,8 @@ class SessionWorker {
     this.commands.push(command);
     if (command.type === "get_state") return { type: "response", success: true, data: { model: null, sessionFile: this.path, sessionId: "history", isStreaming: false } };
     if (command.type === "get_messages") return { type: "response", success: true, data: { messages: [] } };
+    if (command.type === "get_available_models") return { type: "response", success: true, data: { models: [] } };
+    if (command.type === "get_commands") return { type: "response", success: true, data: { commands: [] } };
     if (command.type === "get_session_stats") return { type: "response", success: true, data: { tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
     if (command.type === "set_session_name") {
       await appendFile(this.path, `${JSON.stringify({ type: "session_info", id: "rename", parentId: "m1", name: command.name })}\n`);
@@ -29,6 +31,45 @@ class SessionWorker {
     throw new Error(`Unexpected command: ${String(command.type)}`);
   }
 }
+
+test("empty draft shown in sidebar can be deleted before its first prompt", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-empty-draft-delete-"));
+  try {
+    const primaryPath = join(root, "primary.jsonl");
+    const draftPath = join(root, "draft.jsonl");
+    const primaryId = idForPath(primaryPath);
+    const draftId = idForPath(draftPath);
+    const primary = new SessionWorker(primaryPath) as unknown as PiRpcClient;
+    const draft = new SessionWorker(draftPath);
+    const sessions = {
+      list: async () => [{ id: primaryId, sessionId: "primary", name: "Saved", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+      pathForId: (id: string) => id === primaryId ? primaryPath : null,
+      messagesForId: async () => [],
+    } as unknown as SessionIndex;
+    const app = new PiChatApp({ rpc: primary, createRpc: () => draft as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+    const server = createServer((request, response) => void app.handle(request, response));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const origin = `http://127.0.0.1:${address.port}`;
+    try {
+      const created = await (await fetch(`${origin}/api/sessions/new`, { method: "POST" })).json() as { session: { id: string } };
+      assert.equal(created.session.id, draftId);
+      const sidebar = await (await fetch(`${origin}/api/sessions`)).json() as { sessions: Array<{ id: string; messageCount: number }> };
+      assert.equal(sidebar.sessions.some((session) => session.id === draftId && session.messageCount === 0), true);
+      const deleted = await fetch(`${origin}/api/sessions/${draftId}`, { method: "DELETE" });
+      assert.equal(deleted.status, 200);
+      assert.equal(draft.stopped, true);
+      const after = await (await fetch(`${origin}/api/sessions`)).json() as { sessions: Array<{ id: string }> };
+      assert.equal(after.sessions.some((session) => session.id === draftId), false);
+    } finally {
+      server.close();
+      await app.close();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("session rename uses Pi RPC and delete stops the worker before removing JSONL", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-session-management-"));

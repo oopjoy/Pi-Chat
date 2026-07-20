@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { JSDOM } from "jsdom";
-import { applyAppearance, DEFAULT_APPEARANCE, loadAppearance, loadSidebarOpen, saveAppearance, saveSidebarOpen } from "../src/web/lib/preferences";
+import { applyAppearance, DEFAULT_APPEARANCE, loadAppearance, loadSidebarOpen, loadSidebarWidth, saveAppearance, saveSidebarOpen, saveSidebarWidth, SIDEBAR_WIDTH_DEFAULT, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN } from "../src/web/lib/preferences";
 
 function installDom() {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://127.0.0.1" });
@@ -27,6 +27,12 @@ test("appearance preferences persist and apply CSS variables", () => {
   assert.equal(customStyle.textContent, "h1 { color: red; }");
 });
 
+test("default appearance is an independent reset-safe value", () => {
+  const reset = { ...DEFAULT_APPEARANCE };
+  reset.markdownCss = ".markdown-body { color: red; }";
+  assert.equal(DEFAULT_APPEARANCE.markdownCss, "");
+});
+
 test("invalid preferences fall back safely and sidebar state persists", () => {
   installDom();
   localStorage.setItem("pi-chat.appearance.v1", JSON.stringify({ theme: "invalid", fontSize: 999, lineHeight: 0, chatWidth: 10, markdownCss: 123 }));
@@ -39,4 +45,17 @@ test("invalid preferences fall back safely and sidebar state persists", () => {
   assert.equal(loadSidebarOpen(), true);
   saveSidebarOpen(false);
   assert.equal(loadSidebarOpen(), false);
+});
+
+test("sidebar width persists and clamps to the allowed range", () => {
+  installDom();
+  assert.equal(loadSidebarWidth(), SIDEBAR_WIDTH_DEFAULT);
+  saveSidebarWidth(360);
+  assert.equal(loadSidebarWidth(), 360);
+  saveSidebarWidth(40);
+  assert.equal(loadSidebarWidth(), SIDEBAR_WIDTH_MIN);
+  saveSidebarWidth(4000);
+  assert.equal(loadSidebarWidth(), SIDEBAR_WIDTH_MAX);
+  localStorage.setItem("pi-chat.sidebar-width.v1", "not-a-number");
+  assert.equal(loadSidebarWidth(), SIDEBAR_WIDTH_DEFAULT);
 });

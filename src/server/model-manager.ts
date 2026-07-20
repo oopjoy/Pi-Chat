@@ -130,17 +130,17 @@ export class ModelManager {
     };
   }
 
-  async add(raw: unknown): Promise<CustomModelInput> {
-    const input = validateCustomModel(raw);
-    const value = await this.read();
+  private upsert(value: ModelsFile, input: CustomModelInput, carried: { baseUrl?: string; apiKey?: string } = {}, insertAt?: number): void {
     const providers = value.providers ||= {};
     const existing = providers[input.provider];
     const provider = existing && typeof existing === "object" && !Array.isArray(existing) ? existing : {};
     if (input.baseUrl) provider.baseUrl = input.baseUrl;
+    else if (!provider.baseUrl && carried.baseUrl) provider.baseUrl = carried.baseUrl;
     if (!provider.baseUrl) throw new Error("新 Provider 必须填写 Base URL");
     const providerApi = typeof provider.api === "string" ? provider.api : undefined;
     if (!providerApi) provider.api = input.api;
-    if (input.apiKey) provider.apiKey = input.apiKey;
+    const apiKey = input.apiKey || carried.apiKey;
+    if (apiKey) provider.apiKey = apiKey;
     const models = Array.isArray(provider.models) ? [...provider.models] : [];
     const previousIndex = models.findIndex((item) => item && typeof item === "object" && (item as Record<string, unknown>).id === input.id);
     const previous = previousIndex >= 0 && models[previousIndex] && typeof models[previousIndex] === "object" ? models[previousIndex] as Record<string, unknown> : {};
@@ -156,9 +156,54 @@ export class ModelManager {
     if (input.contextWindow) model.contextWindow = input.contextWindow;
     if (input.maxTokens) model.maxTokens = input.maxTokens;
     if (previousIndex >= 0) models[previousIndex] = model;
+    else if (typeof insertAt === "number") models.splice(Math.min(insertAt, models.length), 0, model);
     else models.push(model);
     provider.models = models;
     providers[input.provider] = provider;
+  }
+
+  async add(raw: unknown): Promise<CustomModelInput> {
+    const input = validateCustomModel(raw);
+    const value = await this.read();
+    this.upsert(value, input);
+    await this.write(value);
+    return input;
+  }
+
+  /**
+   * Rename-aware edit: the entry is located by its original (provider, id)
+   * key, then re-inserted at the new key. Provider-level baseUrl/apiKey are
+   * carried across a provider rename because the form never echoes the key.
+   */
+  async update(originalProviderValue: unknown, originalIdValue: unknown, raw: unknown): Promise<CustomModelInput> {
+    const originalProvider = validateName(String(originalProviderValue || ""), "Provider", /^[A-Za-z0-9._-]+$/, 80);
+    const originalId = validateName(String(originalIdValue || ""), "Model ID", /^[^\s\u0000-\u001f]+$/, 200);
+    const input = validateCustomModel(raw);
+    const value = await this.read();
+    const providers = value.providers ||= {};
+    const sourceProvider = providers[originalProvider];
+    if (!sourceProvider || !Array.isArray(sourceProvider.models)) throw new Error("只能编辑 models.json 中的自定义模型");
+    const sourceIndex = sourceProvider.models.findIndex((item) => item && typeof item === "object" && (item as Record<string, unknown>).id === originalId);
+    if (sourceIndex < 0) throw new Error("只能编辑 models.json 中的自定义模型");
+    if (originalProvider !== input.provider || originalId !== input.id) {
+      const target = providers[input.provider];
+      const targetModels = target && Array.isArray(target.models) ? target.models : [];
+      if (targetModels.some((item) => item && typeof item === "object" && (item as Record<string, unknown>).id === input.id)) {
+        throw new Error(`models.json 中已存在 ${input.provider}/${input.id}`);
+      }
+    }
+    const carried = {
+      baseUrl: typeof sourceProvider.baseUrl === "string" ? sourceProvider.baseUrl : undefined,
+      apiKey: typeof sourceProvider.apiKey === "string" ? sourceProvider.apiKey : undefined,
+    };
+    const remaining = sourceProvider.models.filter((_, index) => index !== sourceIndex);
+    if (remaining.length) sourceProvider.models = remaining;
+    else {
+      delete sourceProvider.models;
+      const simpleProviderKeys = new Set(["baseUrl", "api", "apiKey"]);
+      if (Object.keys(sourceProvider).every((key) => simpleProviderKeys.has(key))) delete providers[originalProvider];
+    }
+    this.upsert(value, input, carried, originalProvider === input.provider ? sourceIndex : undefined);
     await this.write(value);
     return input;
   }

@@ -13,6 +13,7 @@ test("resource manager separates skills, extensions, and packages with their rea
     await writeFile(join(root, "skills", "demo", "SKILL.md"), "---\nname: demo\ndescription: Demo skill\n---\n\n# Demo\n");
     await mkdir(join(root, "extensions"), { recursive: true });
     await writeFile(join(root, "extensions", "demo.ts"), "export default function () {}\n");
+    await writeFile(join(root, "extensions", "pi-chat-file-permission-gate.ts"), "export default function systemGate() {}\n");
     await writeFile(join(root, "settings.json"), "{}\n");
 
     const manager = new ResourceManager(root);
@@ -27,6 +28,8 @@ test("resource manager separates skills, extensions, and packages with their rea
     let extensions = await manager.listExtensions(root);
     const extension = extensions.resources.find((item) => item.name === "demo");
     assert.ok(extension);
+    assert.equal(extensions.resources.some((item) => item.name === "pi-chat-file-permission-gate"), false);
+    assert.equal(await manager.systemGateEnabled(), true);
     await manager.setExtensionEnabled(extension.id, false, root);
     extensions = await manager.listExtensions(root);
     assert.equal(extensions.resources.find((item) => item.id === extension.id)?.enabled, false);

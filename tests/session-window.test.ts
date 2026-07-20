@@ -27,6 +27,18 @@ test("message window keeps the newest twenty complete user-initiated turns", () 
   assert.equal(windowed.messages.some((message) => message.content === "result 5"), true);
 });
 
+test("message window expands by ten requested complete turns", () => {
+  const messages = Array.from({ length: 35 }, (_, index) => turn(index)).flat();
+  const initial = messageWindow(messages);
+  const expanded = messageWindow(messages, RECENT_TURN_WINDOW_SIZE + 10);
+  assert.equal(initial.visibleTurns, 20);
+  assert.equal(initial.messages[0].content, "question 15");
+  assert.equal(expanded.visibleTurns, 30);
+  assert.equal(expanded.messages[0].content, "question 5");
+  assert.equal(expanded.messages.length, 120);
+  assert.equal(expanded.truncated, true);
+});
+
 test("message window leaves conversations with twenty or fewer user turns intact", () => {
   const messages = Array.from({ length: 20 }, (_, index) => turn(index)).flat();
   const windowed = messageWindow(messages);

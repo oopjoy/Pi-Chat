@@ -4,7 +4,7 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { extname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
-import type { PiMessage, SessionSummary, TodoItem } from "../shared/types.js";
+import type { PiMessage, SessionSummary } from "../shared/types.js";
 import { loadSessionCache, saveSessionCache, type SessionCacheEntry } from "./session-index-cache.js";
 
 interface SessionHeader {
@@ -20,7 +20,6 @@ interface SessionEntry {
   parentId?: string | null;
   timestamp?: string | number;
   name?: string;
-  data?: { todos?: unknown };
   message?: PiMessage;
 }
 
@@ -82,16 +81,6 @@ async function readSessionBranch(path: string): Promise<SessionEntry[]> {
   return branch.reverse();
 }
 
-function todoItems(value: unknown): TodoItem[] {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((item) => {
-    if (!item || typeof item !== "object") return [];
-    const candidate = item as Record<string, unknown>;
-    if (!Number.isInteger(candidate.id) || typeof candidate.text !== "string" || typeof candidate.done !== "boolean") return [];
-    return [{ id: candidate.id as number, text: candidate.text.slice(0, 500), done: candidate.done }];
-  });
-}
-
 export async function readSessionMessages(path: string): Promise<PiMessage[]> {
   const branch = await readSessionBranch(path);
   return branch.flatMap((entry) => {
@@ -107,12 +96,48 @@ export async function readSessionMessages(path: string): Promise<PiMessage[]> {
   });
 }
 
-export async function readSessionTodos(path: string): Promise<TodoItem[]> {
+export interface SessionUsageSnapshot {
+  tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
+  /** Last successful assistant turn: the live context it consumed plus its model. */
+  context: { tokens: number; provider?: string; model?: string } | null;
+}
+
+const usageNumber = (value: unknown): number => typeof value === "number" && Number.isFinite(value) ? value : 0;
+
+/**
+ * Offline token accounting for cold (view-only) sessions. Mirrors Pi's
+ * get_session_stats closely enough for the top bar: cumulative counters sum
+ * every successful assistant turn; the context occupancy is the final turn's
+ * input + cache reads/writes, which is what the next prompt would resend.
+ */
+export async function readSessionUsage(path: string): Promise<SessionUsageSnapshot> {
   const branch = await readSessionBranch(path);
-  for (const entry of [...branch].reverse()) {
-    if (entry.type === "custom" && entry.customType === "pi-deck-todo") return todoItems(entry.data?.todos);
+  const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+  let context: SessionUsageSnapshot["context"] = null;
+  for (const entry of branch) {
+    if (entry.type !== "message" || !entry.message) continue;
+    const message = entry.message as unknown as Record<string, unknown>;
+    if (message.role !== "assistant" || message.stopReason === "error") continue;
+    const usage = message.usage;
+    if (!usage || typeof usage !== "object") continue;
+    const record = usage as Record<string, unknown>;
+    const input = usageNumber(record.input);
+    const output = usageNumber(record.output);
+    const cacheRead = usageNumber(record.cacheRead);
+    const cacheWrite = usageNumber(record.cacheWrite);
+    if (!input && !output && !cacheRead && !cacheWrite) continue;
+    tokens.input += input;
+    tokens.output += output;
+    tokens.cacheRead += cacheRead;
+    tokens.cacheWrite += cacheWrite;
+    context = {
+      tokens: input + cacheRead + cacheWrite,
+      provider: typeof message.provider === "string" ? message.provider : undefined,
+      model: typeof message.model === "string" ? message.model : undefined,
+    };
   }
-  return [];
+  tokens.total = tokens.input + tokens.output + tokens.cacheRead + tokens.cacheWrite;
+  return { tokens, context };
 }
 
 async function parseSession(path: string, modifiedAt: number): Promise<Omit<SessionSummary, "active"> | null> {
@@ -225,6 +250,11 @@ export class SessionIndex {
   async messagesForId(id: string): Promise<PiMessage[] | null> {
     const path = this.pathForId(id);
     return path ? readSessionMessages(path) : null;
+  }
+
+  async usageForId(id: string): Promise<SessionUsageSnapshot | null> {
+    const path = this.pathForId(id);
+    return path ? readSessionUsage(path) : null;
   }
 }
 

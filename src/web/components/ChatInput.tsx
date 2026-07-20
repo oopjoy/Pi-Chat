@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from "react";
 import type { PromptImage, SlashCommand } from "../../shared/types";
+import { CloseIcon, FileSearchIcon, ImageIcon, PlusIcon } from "./Icons";
 
 const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 const MAX_IMAGES = 4;
@@ -203,15 +204,15 @@ export function ChatInput({ streaming, stopping, disabled, disabledPlaceholder, 
     <div className="composer-wrap">
       <div className={`composer ${dragging ? "is-dragging" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }} onDrop={drop}>
         {suggestions.length > 0 && <div className="command-suggestions" role="listbox" aria-label="Pi 指令联想">{suggestions.map((command, index) => <button type="button" role="option" aria-selected={index === suggestionIndex} className={index === suggestionIndex ? "is-active" : ""} key={`${command.source}-${command.name}`} onMouseDown={(event) => event.preventDefault()} onClick={() => completeCommand(command)}><strong>/{command.name}</strong><span>{command.description || "Pi 指令"}</span><small>{command.source}</small></button>)}</div>}
-        {images.length > 0 && <div className="image-previews">{images.map((image, index) => <div className="image-preview" key={`${image.fileName}-${index}`}><img src={`data:${image.mimeType};base64,${image.data}`} alt={image.fileName || `图片 ${index + 1}`} /><button type="button" onClick={() => setImages((current) => current.filter((_, itemIndex) => itemIndex !== index))} aria-label={`移除 ${image.fileName || "图片"}`}>×</button><small>{image.fileName || "粘贴的图片"}</small></div>)}</div>}
+        {images.length > 0 && <div className="image-previews">{images.map((image, index) => <div className="image-preview" key={`${image.fileName}-${index}`}><img src={`data:${image.mimeType};base64,${image.data}`} alt={image.fileName || `图片 ${index + 1}`} /><button type="button" onClick={() => setImages((current) => current.filter((_, itemIndex) => itemIndex !== index))} aria-label={`移除 ${image.fileName || "图片"}`}><CloseIcon /></button><small>{image.fileName || "粘贴的图片"}</small></div>)}</div>}
         <div className="composer-main">
           <textarea ref={textareaRef} value={value} onChange={(event) => setValue(event.target.value)} onPaste={paste} onKeyDown={keyDown} disabled={disabled} rows={1} placeholder={disabled ? disabledPlaceholder || "正在切换会话…" : streaming ? "继续输入，发送后加入队列；输入 / 查看指令" : "输入消息，或粘贴、拖入附件"} aria-label="消息输入" />
           {(streaming || stopping) && <button type="button" className="stop-button" disabled={stopping} onClick={() => void onAbort()}>{stopping ? "停止中…" : "停止"}</button>}
           <div className="attachment-control" ref={attachmentRef}>
-            <button type="button" className={`attachment-button ${attachmentOpen ? "is-open" : ""}`} disabled={disabled || pickingFiles} onClick={() => setAttachmentOpen((open) => !open)} title="添加附件" aria-label="添加附件" aria-haspopup="menu" aria-expanded={attachmentOpen}>＋</button>
+            <button type="button" className={`attachment-button ${attachmentOpen ? "is-open" : ""}`} disabled={disabled || pickingFiles} onClick={() => setAttachmentOpen((open) => !open)} title="添加附件" aria-label="添加附件" aria-haspopup="menu" aria-expanded={attachmentOpen}><PlusIcon /></button>
             {attachmentOpen && <div className="attachment-menu" role="menu">
-              <button type="button" role="menuitem" disabled={!acceptsImages || images.length >= MAX_IMAGES} onClick={() => { setAttachmentOpen(false); imageInputRef.current?.click(); }}><span>▧</span><strong>图片</strong><small>{acceptsImages ? "直接解析，可粘贴或拖入" : "当前模型不支持图片"}</small></button>
-              <button type="button" role="menuitem" disabled={pickingFiles} onClick={() => void pickFiles()}><span>⌕</span><strong>{pickingFiles ? "选择中…" : "本地文件"}</strong><small>引用 Windows 绝对路径</small></button>
+              <button type="button" role="menuitem" disabled={!acceptsImages || images.length >= MAX_IMAGES} onClick={() => { setAttachmentOpen(false); imageInputRef.current?.click(); }}><ImageIcon className="attachment-menu-icon" /><strong>图片</strong><small>{acceptsImages ? "直接解析，可粘贴或拖入" : "当前模型不支持图片"}</small></button>
+              <button type="button" role="menuitem" disabled={pickingFiles} onClick={() => void pickFiles()}><FileSearchIcon className="attachment-menu-icon" /><strong>{pickingFiles ? "选择中…" : "本地文件"}</strong><small>引用 Windows 绝对路径</small></button>
             </div>}
             <input ref={imageInputRef} className="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple onChange={(event) => { void addImages([...event.target.files || []]); event.target.value = ""; }} />
           </div>
