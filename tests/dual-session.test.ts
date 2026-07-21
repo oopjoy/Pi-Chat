@@ -12,13 +12,18 @@ class FakeRpc {
   private listeners = new Set<(event: Record<string, unknown>) => void>();
   streaming = false;
   stopCount = 0;
+  restartCount = 0;
+  alive = true;
 
   constructor(readonly path: string, readonly sessionId: string) {}
   onEvent(listener: (event: Record<string, unknown>) => void) { this.listeners.add(listener); return () => this.listeners.delete(listener); }
   emit(event: Record<string, unknown>) { for (const listener of this.listeners) listener(event); }
-  async start() {}
-  async stop() { this.stopCount += 1; }
+  async start() { this.alive = true; }
+  async stop() { this.stopCount += 1; this.alive = false; }
+  isRunning() { return this.alive; }
+  async restart() { this.restartCount += 1; this.alive = true; this.streaming = false; }
   sendRaw(command: Record<string, unknown>) { this.commands.push(command); }
+  crash() { this.alive = false; this.emit({ type: "pi_chat_process_error", error: "worker crashed" }); }
   async send(command: Record<string, unknown>) {
     this.commands.push(command);
     if (command.type === "get_state") return { type: "response", success: true, data: { model: null, sessionFile: this.path, sessionId: this.sessionId, isStreaming: this.streaming } };
@@ -68,6 +73,110 @@ test("one browser window controls a Session until another explicitly takes over"
   }
 });
 
+test("control-change SSE marks only the owning browser window as writable", async () => {
+  const path = "C:\\sessions\\primary.jsonl";
+  const id = idForPath(path);
+  const primary = new FakeRpc(path, "primary");
+  const sessions = {
+    list: async () => [{ id, sessionId: "primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+    pathForId: () => path,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const ownerFrames: string[] = [];
+  const observerFrames: string[] = [];
+  const clients = (app as unknown as { sseClients: Map<{ write: (frame: string) => void }, string> }).sseClients;
+  const owner = "11111111-1111-4111-8111-111111111111";
+  const observer = "22222222-2222-4222-8222-222222222222";
+  clients.set({ write: (frame) => { ownerFrames.push(frame); } }, owner);
+  clients.set({ write: (frame) => { observerFrames.push(frame); } }, observer);
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    assert.equal((await fetch(`${origin}/api/bootstrap`, { headers: { "x-pi-chat-client": owner } })).status, 200);
+    assert.equal((await fetch(`${origin}/api/chat/prompt`, { method: "POST", headers: { "content-type": "application/json", "x-pi-chat-client": owner }, body: JSON.stringify({ message: "owner", sessionId: id }) })).status, 202);
+    const controlEvent = (frames: string[]) => JSON.parse(frames.find((frame) => frame.includes("pi_chat_session_control_changed"))?.split("data: ")[1] || "{}") as { controlOwner?: string; controlledByThisWindow?: boolean };
+    assert.deepEqual(controlEvent(ownerFrames), { type: "pi_chat_session_control_changed", sessionId: id, controlOwner: owner, controlledByThisWindow: true });
+    assert.deepEqual(controlEvent(observerFrames), { type: "pi_chat_session_control_changed", sessionId: id, controlOwner: owner, controlledByThisWindow: false });
+  } finally {
+    server.close();
+    clients.clear();
+    await app.close();
+  }
+});
+
+test("a closed browser window releases Session control after its SSE lease expires", async () => {
+  const path = "C:\\sessions\\primary.jsonl";
+  const id = idForPath(path);
+  const primary = new FakeRpc(path, "primary");
+  const sessions = {
+    list: async () => [{ id, sessionId: "primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+    pathForId: () => path,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), controllerReleaseMs: 10 });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const owner = "11111111-1111-4111-8111-111111111111";
+  const observer = "22222222-2222-4222-8222-222222222222";
+  const controller = new AbortController();
+  try {
+    assert.equal((await fetch(`${origin}/api/bootstrap`, { headers: { "x-pi-chat-client": owner } })).status, 200);
+    const events = fetch(`${origin}/api/events`, { headers: { "x-pi-chat-client": owner }, signal: controller.signal }).catch(() => null);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal((await fetch(`${origin}/api/chat/prompt`, { method: "POST", headers: { "content-type": "application/json", "x-pi-chat-client": owner }, body: JSON.stringify({ message: "owner", sessionId: id }) })).status, 202);
+    primary.streaming = false;
+    primary.emit({ type: "agent_settled" });
+    assert.equal((await fetch(`${origin}/api/chat/prompt`, { method: "POST", headers: { "content-type": "application/json", "x-pi-chat-client": observer }, body: JSON.stringify({ message: "blocked", sessionId: id }) })).status, 409);
+    controller.abort();
+    await events;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const released = await fetch(`${origin}/api/chat/prompt`, { method: "POST", headers: { "content-type": "application/json", "x-pi-chat-client": observer }, body: JSON.stringify({ message: "released", sessionId: id }) });
+    const releasedText = await released.text();
+    assert.equal(released.status, 202, releasedText);
+  } finally {
+    controller.abort();
+    server.close();
+    await app.close();
+  }
+});
+
+test("an abandoned Gate confirmation is safely cancelled after its timeout", async () => {
+  const path = "C:\\sessions\\primary.jsonl";
+  const id = idForPath(path);
+  const primary = new FakeRpc(path, "primary");
+  const sessions = {
+    list: async () => [{ id, sessionId: "primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+    pathForId: () => path,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), gateRequestTimeoutMs: 10 });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    assert.equal((await fetch(`${origin}/api/bootstrap`)).status, 200);
+    primary.streaming = true;
+    primary.emit({ type: "extension_ui_request", id: "stale-gate", method: "select", title: "Write file?", options: ["Allow", "Block"] });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.deepEqual(primary.commands.find((command) => command.type === "extension_ui_response"), { type: "extension_ui_response", id: "stale-gate", cancelled: true });
+    const view = await (await fetch(`${origin}/api/sessions/${id}/view`)).json() as { pendingExtensionRequest?: unknown; session: { pendingConfirmation?: boolean } };
+    assert.equal(view.pendingExtensionRequest, undefined);
+    assert.equal(view.session.pendingConfirmation, false);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
 test("a pending extension confirmation belongs to one Session and only its first response is forwarded", async () => {
   const path = "C:\\sessions\\primary.jsonl";
   const id = idForPath(path);
@@ -95,6 +204,104 @@ test("a pending extension confirmation belongs to one Session and only its first
     assert.equal(second.status, 409);
     assert.equal(primary.commands.filter((command) => command.type === "extension_ui_response").length, 1);
     assert.deepEqual(primary.commands.find((command) => command.type === "extension_ui_response"), { type: "extension_ui_response", id: "gate-1", value: "Allow" });
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("a crashed primary RPC clears stale state and recovers on the next bootstrap", async () => {
+  const path = "C:\\sessions\\primary.jsonl";
+  const id = idForPath(path);
+  const primary = new FakeRpc(path, "primary");
+  const sessions = {
+    list: async () => [{ id, sessionId: "primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+    pathForId: () => path,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    assert.equal((await fetch(`${origin}/api/bootstrap`)).status, 200);
+    primary.streaming = true;
+    primary.emit({ type: "agent_start" });
+    primary.crash();
+    const recovered = await (await fetch(`${origin}/api/bootstrap`)).json() as { state: { isStreaming: boolean }; sessions: Array<{ id: string; running?: boolean }> };
+    assert.equal(primary.restartCount, 1);
+    assert.equal(recovered.state.isStreaming, false);
+    assert.equal(recovered.sessions.find((session) => session.id === id)?.running, false);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("a crashed primary RPC also recovers through Session list and view endpoints", async () => {
+  for (const endpoint of ["/api/sessions", "view"] as const) {
+    const path = "C:\\sessions\\primary.jsonl";
+    const id = idForPath(path);
+    const primary = new FakeRpc(path, "primary");
+    const sessions = {
+      list: async () => [{ id, sessionId: "primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+      pathForId: () => path,
+      messagesForId: async () => [],
+    } as unknown as SessionIndex;
+    const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+    const server = createServer((request, response) => void app.handle(request, response));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const origin = `http://127.0.0.1:${address.port}`;
+    try {
+      assert.equal((await fetch(`${origin}/api/bootstrap`)).status, 200);
+      primary.crash();
+      const url = endpoint === "view" ? `/api/sessions/${id}/view` : endpoint;
+      assert.equal((await fetch(`${origin}${url}`)).status, 200);
+      assert.equal(primary.restartCount, 1);
+    } finally {
+      server.close();
+      await app.close();
+    }
+  }
+});
+
+test("a crashed secondary RPC clears stale running state and recovers once on the next prompt", async () => {
+  const primaryPath = "C:\\sessions\\primary.jsonl";
+  const secondaryPath = "C:\\sessions\\secondary.jsonl";
+  const primaryId = idForPath(primaryPath);
+  const secondaryId = idForPath(secondaryPath);
+  const primary = new FakeRpc(primaryPath, "primary");
+  const secondary = new FakeRpc(secondaryPath, "secondary");
+  const summaries = [
+    { id: primaryId, sessionId: "primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 2, messageCount: 1, active: true },
+    { id: secondaryId, sessionId: "secondary", name: "Secondary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: false },
+  ];
+  const sessions = {
+    list: async () => summaries,
+    pathForId: (id: string) => id === primaryId ? primaryPath : id === secondaryId ? secondaryPath : null,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, createRpc: () => secondary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    assert.equal((await fetch(`${origin}/api/sessions/${secondaryId}/activate`, { method: "POST" })).status, 200);
+    secondary.streaming = true;
+    secondary.emit({ type: "agent_start" });
+    secondary.crash();
+    const afterCrash = await (await fetch(`${origin}/api/sessions`)).json() as { sessions: Array<{ id: string; running?: boolean }> };
+    assert.equal(afterCrash.sessions.find((session) => session.id === secondaryId)?.running, false);
+    const prompt = await fetch(`${origin}/api/chat/prompt`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message: "recover", sessionId: secondaryId }) });
+    assert.equal(prompt.status, 202);
+    assert.equal(secondary.restartCount, 1);
+    assert.equal(secondary.commands.filter((command) => command.type === "prompt").at(-1)?.message, "recover");
   } finally {
     server.close();
     await app.close();
@@ -375,8 +582,10 @@ test("all opened sessions route prompts, events and aborts to independent RPC wo
     assert.equal(primary.commands.filter((item) => item.type === "abort").length, 0);
     assert.equal(secondary.commands.filter((item) => item.type === "abort").length, 1);
 
+    secondary.crash();
     const resumed = await post("/api/chat/queue/resume", { sessionId: idB });
     assert.equal(resumed.status, 200);
+    assert.equal(secondary.restartCount, 1);
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.deepEqual(secondary.commands.filter((item) => item.type === "prompt").map((item) => item.message), ["for B", "B queued then dispatched"]);
     assert.deepEqual(primary.commands.filter((item) => item.type === "prompt").map((item) => item.message), ["for A"]);

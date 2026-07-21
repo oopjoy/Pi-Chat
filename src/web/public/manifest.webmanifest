@@ -10,13 +10,13 @@
   "theme_color": "#78b8f5",
   "icons": [
     {
-      "src": "/icons/pi-chat-192.png",
+      "src": "/icons/pi-chat-pwa-v3-192.png",
       "sizes": "192x192",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "/icons/pi-chat-512.png",
+      "src": "/icons/pi-chat-pwa-v3-512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any"

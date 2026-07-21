@@ -310,7 +310,7 @@ function AppearancePanel({ value, onChange }: { value: AppearancePreferences; on
       <button type="button" className="appearance-reset" disabled={isDefault} onClick={() => onChange({ ...DEFAULT_APPEARANCE })}>重置外观</button>
     </div>
     <SettingRow title="主题" description="跟随系统或固定明暗主题"><select value={value.theme} onChange={(event) => update("theme", event.target.value as ThemePreference)}><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></SettingRow>
-    <SettingRow title="字体" description="控制消息和界面的主要字体"><select value={value.font} onChange={(event) => update("font", event.target.value as FontPreference)}><option value="system">系统字体</option><option value="serif">衬线阅读字体</option><option value="mono">等宽字体</option></select></SettingRow>
+    <SettingRow title="聊天字体" description="仅控制对话正文，不影响界面控件"><select value={value.font} onChange={(event) => update("font", event.target.value as FontPreference)}><option value="system">系统字体</option><option value="serif">衬线阅读字体</option><option value="mono">等宽字体</option></select></SettingRow>
     <RangeSetting title="字号" value={value.fontSize} minimum={13} maximum={22} step={1} suffix="px" onChange={(next) => update("fontSize", next)} />
     <RangeSetting title="行间距" value={value.lineHeight} minimum={1.35} maximum={2.2} step={0.05} suffix="" onChange={(next) => update("lineHeight", next)} />
     <RangeSetting title="对话宽度" value={value.chatWidth} minimum={700} maximum={1500} step={50} suffix="px" onChange={(next) => update("chatWidth", next)} />

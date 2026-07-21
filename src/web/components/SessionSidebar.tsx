@@ -19,11 +19,13 @@ const managementItems: Array<{ section: ManagementSection; label: string }> = [
 
 type SessionStatus = "dormant" | "ready" | "pending" | "running" | "error";
 
-function sessionStatus(session: SessionSummary): { kind: SessionStatus; label: string } {
+function sessionStatus(session: SessionSummary, warming: boolean, failed: boolean): { kind: SessionStatus; label: string } {
   // A confirmation pauses an in-flight turn but needs user attention first.
   if (session.pendingConfirmation) return { kind: "pending", label: "等待权限确认" };
   if (session.queued) return { kind: "pending", label: "消息等待发送" };
   if (session.running) return { kind: "running", label: "正在生成" };
+  if (warming) return { kind: "running", label: "正在预热会话" };
+  if (failed) return { kind: "error", label: "会话预热失败" };
   if (session.writable) return { kind: "ready", label: "已就绪" };
   return { kind: "dormant", label: "按需启动" };
 }
@@ -57,7 +59,7 @@ function ResizeHandle({ width, onWidthChange }: { width: number; onWidthChange: 
   return <div className="sidebar-resize-handle" role="separator" aria-orientation="vertical" aria-label="拖动调整会话栏宽度" aria-valuemin={SIDEBAR_WIDTH_MIN} aria-valuemax={SIDEBAR_WIDTH_MAX} aria-valuenow={Math.round(width)} tabIndex={0} onPointerDown={onPointerDown} onKeyDown={onKeyDown} />;
 }
 
-export function SessionSidebar({ sessions, viewedSessionId, workspaceCwd, open, width, newDisabled, refreshDisabled, restartDisabled, workspaceDisabled, viewBusy, refreshing, workspacePicking, onClose, onCollapse, onNew, onRefresh, onRestart, onView, onRename, onDelete, onPickWorkspace, onManage, onWidthChange }: {
+export function SessionSidebar({ sessions, viewedSessionId, workspaceCwd, open, width, newDisabled, refreshDisabled, restartDisabled, workspaceDisabled, viewBusy, refreshing, warmingSessionIds, failedSessionIds, workspacePicking, onClose, onCollapse, onNew, onRefresh, onRestart, onView, onRename, onDelete, onPickWorkspace, onManage, onWidthChange }: {
   sessions: SessionSummary[];
   viewedSessionId: string;
   workspaceCwd: string;
@@ -69,6 +71,8 @@ export function SessionSidebar({ sessions, viewedSessionId, workspaceCwd, open, 
   workspaceDisabled: boolean;
   viewBusy: boolean;
   refreshing: boolean;
+  warmingSessionIds: string[];
+  failedSessionIds: string[];
   workspacePicking: boolean;
   onClose: () => void;
   onCollapse: () => void;
@@ -103,7 +107,7 @@ export function SessionSidebar({ sessions, viewedSessionId, workspaceCwd, open, 
         <nav className="session-list" aria-label="会话列表">
           {sessions.map((session) => {
             const unavailable = viewBusy || session.id === viewedSessionId;
-            const status = sessionStatus(session);
+            const status = sessionStatus(session, warmingSessionIds.includes(session.id), failedSessionIds.includes(session.id));
             return <div className={`session-row ${session.id === viewedSessionId ? "is-active" : ""}`} key={session.id}>
               <button
                 type="button"

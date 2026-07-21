@@ -32,7 +32,7 @@ class SessionWorker {
   }
 }
 
-test("empty draft shown in sidebar can be deleted before its first prompt", async () => {
+test("empty draft stays out of the sidebar and is reclaimed when another New replaces it", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-empty-draft-delete-"));
   try {
     const primaryPath = join(root, "primary.jsonl");
@@ -56,10 +56,9 @@ test("empty draft shown in sidebar can be deleted before its first prompt", asyn
       const created = await (await fetch(`${origin}/api/sessions/new`, { method: "POST" })).json() as { session: { id: string } };
       assert.equal(created.session.id, draftId);
       const sidebar = await (await fetch(`${origin}/api/sessions`)).json() as { sessions: Array<{ id: string; messageCount: number }> };
-      assert.equal(sidebar.sessions.some((session) => session.id === draftId && session.messageCount === 0), true);
-      const deleted = await fetch(`${origin}/api/sessions/${draftId}`, { method: "DELETE" });
-      assert.equal(deleted.status, 200);
-      assert.equal(draft.stopped, true);
+      assert.equal(sidebar.sessions.some((session) => session.id === draftId), false);
+      const renamed = await fetch(`${origin}/api/sessions/${draftId}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "Should not save" }) });
+      assert.equal(renamed.status, 500);
       const after = await (await fetch(`${origin}/api/sessions`)).json() as { sessions: Array<{ id: string }> };
       assert.equal(after.sessions.some((session) => session.id === draftId), false);
     } finally {

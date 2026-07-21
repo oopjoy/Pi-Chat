@@ -7,9 +7,11 @@ function summarize(entries: ProcessEntry[]): string {
   const tools = entries.filter((entry): entry is Extract<ProcessEntry, { kind: "tool" }> => entry.kind === "tool");
   const thinking = entries.some((entry) => entry.kind === "thinking");
   const failed = tools.filter((entry) => entry.isError).length;
+  const subagents = tools.filter((entry) => entry.name === "subagent").length;
   const labels: string[] = [];
   if (thinking) labels.push("思考");
   if (tools.length) labels.push(`${tools.length} 个工具`);
+  if (subagents) labels.push(`${subagents} 个子任务`);
   if (!labels.length) labels.push(`${entries.length} 个步骤`);
   return `过程 · ${labels.join(" · ")}${failed ? ` · ${failed} 项失败` : ""}`;
 }

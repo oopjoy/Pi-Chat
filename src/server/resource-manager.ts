@@ -363,7 +363,10 @@ export class ResourceManager {
     await writeSettingsAtomic(this.settingsPath, settings);
   }
 
-  async installPackage(source: string): Promise<void> { await runPiPackageCommand(["install", source], this.agentDir); }
+  async installPackage(source: string): Promise<void> {
+    if (!source || source.length > 2_000 || source.startsWith("-") || /[\u0000-\u001f\u007f]/.test(source)) throw new Error("Package source 格式无效");
+    await runPiPackageCommand(["install", source], this.agentDir);
+  }
 
   async removePackage(id: string, cwd: string): Promise<void> {
     const resource = (await this.listPackages(cwd)).resources.find((item) => item.id === id);
@@ -400,9 +403,14 @@ async function runPiPackageCommand(args: string[], agentDir: string): Promise<vo
       windowsHide: true,
     });
     let output = "";
-    child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
-    child.stderr.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
-    child.once("error", reject);
-    child.once("exit", (code) => code === 0 ? resolvePromise() : reject(new Error(output.trim() || `Pi command exited with code ${code}`)));
+    const append = (chunk: Buffer) => { output = `${output}${chunk.toString("utf8")}`.slice(-20_000); };
+    child.stdout.on("data", append);
+    child.stderr.on("data", append);
+    const timer = setTimeout(() => child.kill(), 5 * 60_000);
+    child.once("error", (error) => { clearTimeout(timer); reject(error); });
+    child.once("exit", (code, signal) => {
+      clearTimeout(timer);
+      code === 0 ? resolvePromise() : reject(new Error(output.trim() || `Pi command exited with ${signal || `code ${code}`}`));
+    });
   });
 }

@@ -80,6 +80,8 @@ export interface SessionStats {
     contextWindow: number;
     percent: number | null;
   };
+  /** Compaction completed; the next turn will establish a new authoritative occupancy. */
+  contextUsagePendingRefresh?: boolean;
 }
 
 export interface PiState {

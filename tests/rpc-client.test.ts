@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import test from "node:test";
 import { PiRpcClient, resolvePiEntry, rpcData } from "../src/server/rpc-client";
 
@@ -19,6 +20,20 @@ test("RPC compatibility probe reports missing required capabilities", async () =
   const incompatible = await client.probeCompatibility();
   assert.equal(incompatible.compatible, false);
   assert.match(incompatible.diagnostics.join("\n"), /get_commands/);
+});
+
+test("stopping RPC rejects pending requests immediately instead of leaking timers", async () => {
+  const child = new EventEmitter() as EventEmitter & { exitCode: number | null; killed: boolean; stdin: { write: (value: string, callback?: (error?: Error | null) => void) => boolean }; kill: (signal: string) => boolean };
+  child.exitCode = 0;
+  child.killed = false;
+  child.stdin = { write: (_value, callback) => { callback?.(null); return true; } };
+  child.kill = () => { child.killed = true; child.exitCode = 0; queueMicrotask(() => child.emit("exit", 0, null)); return true; };
+  const client = new PiRpcClient({ cwd: process.cwd() });
+  Object.assign(client, { child });
+  child.exitCode = null;
+  const pending = client.send({ type: "never_answers" }, 60_000);
+  await client.stop();
+  await assert.rejects(pending, /Pi RPC 已停止/);
 });
 
 test("global Pi RPC starts and answers state requests", { skip: !piEntry, timeout: 30_000 }, async () => {

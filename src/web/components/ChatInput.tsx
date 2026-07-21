@@ -36,14 +36,29 @@ export function windowsPathsFromText(text: string): string[] {
   return [...new Set(paths)];
 }
 
+function subsequenceScore(name: string, query: string): number | null {
+  let position = 0;
+  let first = -1;
+  let gaps = 0;
+  for (const character of query) {
+    const found = name.indexOf(character, position);
+    if (found < 0) return null;
+    if (first >= 0) gaps += found - position;
+    else first = found;
+    position = found + 1;
+  }
+  // Earlier and tighter ordered matches rank ahead of looser ones.
+  return first * 100 + gaps;
+}
+
 export function commandMatches(value: string, commands: SlashCommand[]): SlashCommand[] {
   if (!value.startsWith("/") || value.includes("\n") || /^\/\S+\s/.test(value)) return [];
   const token = value.slice(1).split(/\s/, 1)[0].toLowerCase();
-  return commands.filter((command) => command.name.toLowerCase().includes(token)).sort((a, b) => {
-    const aStarts = a.name.toLowerCase().startsWith(token) ? 0 : 1;
-    const bStarts = b.name.toLowerCase().startsWith(token) ? 0 : 1;
-    return aStarts - bStarts || a.name.localeCompare(b.name);
-  }).slice(0, 9);
+  return commands.flatMap((command) => {
+    const name = command.name.toLowerCase();
+    const score = subsequenceScore(name, token);
+    return score === null ? [] : [{ command, score, rank: name === token ? 0 : name.startsWith(token) ? 1 : 2 }];
+  }).sort((a, b) => a.rank - b.rank || a.score - b.score || a.command.name.localeCompare(b.command.name)).slice(0, 9).map(({ command }) => command);
 }
 
 export function ChatInput({ streaming, stopping, disabled, disabledPlaceholder, acceptsImages, commands, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles, onError }: {

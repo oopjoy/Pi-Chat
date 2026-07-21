@@ -84,7 +84,14 @@ export class PiRpcClient {
     });
     this.attachJsonlReader(child.stdout);
 
-    await this.waitUntilReady();
+    try {
+      await this.waitUntilReady();
+    } catch (error) {
+      // A protocol/startup failure must not leave an untracked Pi child keeping
+      // the server process alive or holding a Session JSONL open.
+      await this.stop();
+      throw error;
+    }
   }
 
   private async waitUntilReady(): Promise<void> {
@@ -146,20 +153,28 @@ export class PiRpcClient {
     for (const listener of this.listeners) listener(data);
   }
 
-  private handleExit(error: Error): void {
-    if (!this.child) return;
-    this.child = null;
+  private rejectPending(error: Error): void {
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
       pending.reject(error);
     }
     this.pending.clear();
+  }
+
+  private handleExit(error: Error): void {
+    if (!this.child) return;
+    this.child = null;
+    this.rejectPending(error);
     for (const listener of this.listeners) listener({ type: "pi_chat_process_error", error: error.message });
   }
 
   onEvent(listener: EventListener): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  isRunning(): boolean {
+    return Boolean(this.child && this.child.exitCode === null && !this.child.killed);
   }
 
   sendRaw(command: Record<string, unknown>): void {
@@ -216,6 +231,7 @@ export class PiRpcClient {
     const child = this.child;
     if (!child) return;
     this.child = null;
+    this.rejectPending(new Error("Pi RPC 已停止"));
     child.kill("SIGTERM");
     await Promise.race([
       new Promise<void>((resolve) => child.once("exit", () => resolve())),

@@ -140,6 +140,13 @@ export async function readSessionUsage(path: string): Promise<SessionUsageSnapsh
   return { tokens, context };
 }
 
+function isSubagentSession(path: string, name: string): boolean {
+  // Pi stores child runs beneath the parent session directory and gives them a
+  // generated `subagent-*` session name. They are process details, not user
+  // conversations, so the main sidebar deliberately excludes them.
+  return /(?:^|[\\/])run-\d+(?:[\\/]|$)/i.test(path) && /^subagent-/i.test(name);
+}
+
 async function parseSession(path: string, modifiedAt: number): Promise<Omit<SessionSummary, "active"> | null> {
   const lines = createInterface({ input: createReadStream(path, { encoding: "utf8" }), crlfDelay: Infinity });
   let header: SessionHeader | null = null;
@@ -177,6 +184,7 @@ async function parseSession(path: string, modifiedAt: number): Promise<Omit<Sess
   // Those draft files belong to the composer, not to the persisted sidebar history.
   if (messageCount === 0) return null;
   const displayName = name || preview || "新会话";
+  if (isSubagentSession(path, displayName)) return null;
   return {
     id: idForPath(path),
     sessionId: header.id,
@@ -193,6 +201,8 @@ export class SessionIndex {
   readonly cachePath: string;
   private cache: Map<string, SessionCacheEntry> | null = null;
   private pathsById = new Map<string, string>();
+  private refreshPromise: Promise<SessionSummary[]> | null = null;
+  private refreshKey = "";
 
   constructor(root?: string, cachePath?: string) {
     this.root = root || process.env.PI_CODING_AGENT_SESSION_DIR || join(homedir(), ".pi", "agent", "sessions");
@@ -200,6 +210,28 @@ export class SessionIndex {
   }
 
   async list(activePath?: string, cwd?: string): Promise<SessionSummary[]> {
+    // Bootstrap, sidebar refresh and background preheat often arrive together.
+    // Share identical scans and serialize different scans so pathsById/cache are
+    // never mutated concurrently by callers released from the same await.
+    const key = `${activePath ? resolve(activePath).toLowerCase() : ""}\0${cwd ? resolve(cwd).toLowerCase() : ""}`;
+    while (this.refreshPromise) {
+      if (this.refreshKey === key) return this.refreshPromise;
+      await this.refreshPromise;
+    }
+    const refresh = this.refresh(activePath, cwd);
+    this.refreshPromise = refresh;
+    this.refreshKey = key;
+    try {
+      return await refresh;
+    } finally {
+      if (this.refreshPromise === refresh) {
+        this.refreshPromise = null;
+        this.refreshKey = "";
+      }
+    }
+  }
+
+  private async refresh(activePath?: string, cwd?: string): Promise<SessionSummary[]> {
     if (!this.cache) this.cache = await loadSessionCache(this.cachePath);
     const files = await listJsonlFiles(this.root);
     const livePaths = new Set(files.map((path) => resolve(path)));
@@ -224,12 +256,14 @@ export class SessionIndex {
         this.cache.set(normalized, cached);
         cacheChanged = true;
       }
-      if (cached.summary.messageCount === 0) {
+      if (cached.summary.messageCount === 0 || isSubagentSession(normalized, cached.summary.name)) {
         if (this.cache.delete(normalized)) cacheChanged = true;
         continue;
       }
-      if (normalizedCwd && resolve(cached.summary.cwd || "").toLowerCase() !== normalizedCwd) continue;
+      // Keep the global ID lookup complete even when this caller requests a
+      // workspace-filtered sidebar. Runtime restore may target another cwd.
       this.pathsById.set(cached.summary.id, normalized);
+      if (normalizedCwd && resolve(cached.summary.cwd || "").toLowerCase() !== normalizedCwd) continue;
       summaries.push({ ...cached.summary, active: isActive });
     }
 

@@ -30,7 +30,30 @@ test("session index extracts header, title, preview and message count", async ()
     assert.equal(index.pathForId(sessions[0].id), path);
     assert.equal((await index.list(path, "C:\\work")).length, 1);
     assert.equal((await index.list(path, "C:\\other")).length, 0);
-    assert.equal(index.pathForId(sessions[0].id), null);
+    assert.equal(index.pathForId(sessions[0].id), path);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("session index keeps auto-created subagent child sessions out of sidebar history", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-subagent-index-"));
+  try {
+    const parent = join(root, "parent.jsonl");
+    const childDir = join(root, "parent", "run-0");
+    const child = join(childDir, "session.jsonl");
+    await mkdir(childDir, { recursive: true });
+    await writeFile(parent, [
+      { type: "session", id: "parent", cwd: "C:\\work" },
+      { type: "message", id: "m1", parentId: null, message: { role: "user", content: "main task" } },
+    ].map(JSON.stringify).join("\n"));
+    await writeFile(child, [
+      { type: "session", id: "child", cwd: "C:\\work" },
+      { type: "session_info", id: "name", parentId: null, name: "subagent-reviewer-abc-1" },
+      { type: "message", id: "m1", parentId: "name", message: { role: "user", content: "child task" } },
+    ].map(JSON.stringify).join("\n"));
+    const index = new SessionIndex(root, join(root, "cache.json"));
+    assert.deepEqual((await index.list()).map((session) => session.id), [idForPath(parent)]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -102,6 +125,58 @@ test("usage reader follows only the current branch", async () => {
     const usage = await readSessionUsage(path);
     assert.deepEqual(usage.tokens, { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, total: 15 });
     assert.deepEqual(usage.context, { tokens: 10, provider: "p", model: "m" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("session index coalesces identical concurrent refreshes without losing path lookups", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-session-concurrent-"));
+  try {
+    const sessionPath = join(root, "session.jsonl");
+    await writeFile(sessionPath, [
+      { type: "session", id: "concurrent", cwd: process.cwd() },
+      { type: "message", id: "m1", parentId: null, message: { role: "user", content: "hello" } },
+    ].map(JSON.stringify).join("\n"));
+    const index = new SessionIndex(root, join(root, "cache.json"));
+    const [first, second, third] = await Promise.all([index.list(undefined, process.cwd()), index.list(undefined, process.cwd()), index.list(undefined, process.cwd())]);
+    assert.deepEqual(first, second);
+    assert.deepEqual(second, third);
+    assert.equal(index.pathForId(idForPath(sessionPath)), sessionPath);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("session index serializes concurrent refreshes with different keys", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-session-different-keys-"));
+  try {
+    const sessionPath = join(root, "session.jsonl");
+    await writeFile(sessionPath, [
+      { type: "session", id: "different-keys", cwd: process.cwd() },
+      { type: "message", id: "m1", parentId: null, message: { role: "user", content: "hello" } },
+    ].map(JSON.stringify).join("\n"));
+    const index = new SessionIndex(root, join(root, "cache.json"));
+    const originalRefresh = (index as unknown as { refresh: (activePath?: string, cwd?: string) => Promise<unknown> }).refresh.bind(index);
+    let activeRefreshes = 0;
+    let maximumConcurrentRefreshes = 0;
+    (index as unknown as { refresh: (activePath?: string, cwd?: string) => Promise<unknown> }).refresh = async (activePath?: string, cwd?: string) => {
+      activeRefreshes += 1;
+      maximumConcurrentRefreshes = Math.max(maximumConcurrentRefreshes, activeRefreshes);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      try {
+        return await originalRefresh(activePath, cwd);
+      } finally {
+        activeRefreshes -= 1;
+      }
+    };
+    await Promise.all([
+      index.list(undefined, process.cwd()),
+      index.list(sessionPath, process.cwd()),
+      index.list(undefined, join(process.cwd(), "other")),
+    ]);
+    assert.equal(maximumConcurrentRefreshes, 1);
+    assert.equal(index.pathForId(idForPath(sessionPath)), sessionPath);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

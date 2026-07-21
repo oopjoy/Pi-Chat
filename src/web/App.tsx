@@ -92,10 +92,13 @@ export function App() {
   const [extensionRequest, setExtensionRequest] = useState<ExtensionUiRequest | null>(null);
   const [runtimeStatus, setRuntimeStatus] = useState<"active" | "restoring" | "view-only">("active");
   const [gateModes, setGateModes] = useState<Record<string, GateMode>>({});
+  const [warmingSessionIds, setWarmingSessionIds] = useState<string[]>([]);
+  const [failedSessionIds, setFailedSessionIds] = useState<string[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const stoppingRef = useRef(false);
   const viewedSessionIdRef = useRef("");
+  const warmingSessionIdsRef = useRef(new Set<string>());
   const sessionRefreshTimerRef = useRef<number | null>(null);
   const sessionRefreshInFlightRef = useRef(false);
   const sessionRefreshRequestedRef = useRef(false);
@@ -172,7 +175,9 @@ export function App() {
     setToolStatus(view.toolStatus || "");
     setExtensionRequest(view.pendingExtensionRequest || null);
     setRuntimeStatus(view.runtimeStatus || (view.isActive ? "active" : "view-only"));
-    setSessions((current) => current.some((session) => session.id === view.session.id) ? current.map((session) => session.id === view.session.id ? { ...session, ...view.session } : session) : [...current, view.session]);
+    // A blank New draft has no persisted user message and intentionally stays
+    // out of sidebar history until its first successful prompt.
+    if (view.session.messageCount > 0) setSessions((current) => current.some((session) => session.id === view.session.id) ? current.map((session) => session.id === view.session.id ? { ...session, ...view.session } : session) : [...current, view.session]);
     if (view.isActive) setActiveSessionIds((current) => [...new Set([...current, view.session.id])]);
     setViewedId(view.session.id);
   }, [setViewedId]);
@@ -268,7 +273,13 @@ export function App() {
           setToolStatus("");
           const errorMessage = typeof event.errorMessage === "string" ? event.errorMessage : "";
           if (errorMessage) setError(errorMessage);
-          else if (event.aborted === false) setNotice("上下文压缩完成");
+          else if (event.aborted === false) {
+            setNotice("上下文压缩完成");
+            // The server now reports the compacted context as ready-but-unknown.
+            void api.viewSession(eventSessionId).then((view) => {
+              if (viewedSessionIdRef.current === eventSessionId) applySessionView(view);
+            }).catch(() => undefined);
+          }
         }
       } else if ((type === "message_start" || type === "message_update") && viewingEventSession) {
         const assistant = assistantMessage(event);
@@ -286,6 +297,10 @@ export function App() {
         if (viewingEventSession) {
           setState((current) => ({ ...current, isStreaming: false }));
           setToolStatus("");
+          // A post-compaction turn has now persisted its new usage snapshot.
+          void api.viewSession(eventSessionId).then((view) => {
+            if (viewedSessionIdRef.current === eventSessionId) applySessionView(view);
+          }).catch(() => undefined);
         }
         scheduleSidebarRefresh();
       } else if (type === "pi_chat_active_session_changed") {
@@ -336,7 +351,10 @@ export function App() {
         if (eventSessionId) setSessions((current) => current.map((session) => session.id === eventSessionId ? { ...session, pendingConfirmation: false } : session));
       } else if (type === "extension_error") {
         setError(String(event.error || "扩展执行失败"));
+      } else if (type === "pi_chat_process_recovered") {
+        if (eventSessionId) setFailedSessionIds((current) => current.filter((id) => id !== eventSessionId));
       } else if (type === "pi_chat_process_error") {
+        if (eventSessionId) setFailedSessionIds((current) => [...new Set([...current, eventSessionId])]);
         setError(String(event.error || "Pi RPC 已退出"));
         setState((current) => ({ ...current, isStreaming: false }));
         stoppingRef.current = false;
@@ -495,15 +513,44 @@ export function App() {
     }
   };
 
+  const prewarmSession = (id: string) => {
+    if (warmingSessionIdsRef.current.has(id) || activeSessionIds.includes(id)) return;
+    warmingSessionIdsRef.current.add(id);
+    setWarmingSessionIds((current) => [...new Set([...current, id])]);
+    setFailedSessionIds((current) => current.filter((sessionId) => sessionId !== id));
+    // Activation starts an independent Pi runtime only; it does not send a prompt
+    // or alter the session JSONL. History remains available while this runs.
+    void api.activateSession(id).then((view) => {
+      forgetView(viewCacheRef.current, id);
+      if (viewedSessionIdRef.current === id) {
+        applySessionView(view);
+        stickToBottomRef.current = true;
+      } else {
+        setSessions((current) => current.map((session) => session.id === id ? { ...session, ...view.session } : session));
+        if (view.isActive) setActiveSessionIds((current) => [...new Set([...current, id])]);
+      }
+    }).catch((cause) => {
+      setFailedSessionIds((current) => [...new Set([...current, id])]);
+      if (viewedSessionIdRef.current === id) setError(`会话预热失败：${cause instanceof Error ? cause.message : String(cause)}`);
+    }).finally(() => {
+      warmingSessionIdsRef.current.delete(id);
+      setWarmingSessionIds((current) => current.filter((sessionId) => sessionId !== id));
+    });
+  };
+
   const viewSession = async (id: string) => {
     if (id === viewedSessionIdRef.current) return;
     setError("");
+    // Keep the current conversation visible until the destination view has
+    // arrived. This avoids a blank timeline while an active Session is waiting
+    // for a Gate confirmation or its runtime is answering state requests.
     const cached = viewCacheRef.current.get(id);
     if (cached) {
       applySessionView(cached);
       stickToBottomRef.current = true;
       const cachedStatus = cached.runtimeStatus || (cached.isActive ? "active" : "view-only");
       if (cachedStatus !== "active") {
+        prewarmSession(id);
         void api.viewSession(id).then((view) => {
           if (!view.isActive) rememberView(viewCacheRef.current, view);
           else forgetView(viewCacheRef.current, view.session.id);
@@ -519,6 +566,7 @@ export function App() {
       else forgetView(viewCacheRef.current, view.session.id);
       applySessionView(view);
       stickToBottomRef.current = true;
+      if (!view.isActive) prewarmSession(id);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -744,6 +792,8 @@ export function App() {
         workspaceDisabled={loading || busy || workspacePicking || globalMutationBlocked}
         viewBusy={loading || busy}
         refreshing={refreshing}
+        warmingSessionIds={warmingSessionIds}
+        failedSessionIds={failedSessionIds}
         workspacePicking={workspacePicking}
         onClose={() => setSidebarOpen(false)}
         onCollapse={() => setSidebarOpen(false)}

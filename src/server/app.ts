@@ -8,7 +8,7 @@ import { pickLocalFiles, pickWorkspaceFolder, readClipboardFiles } from "./file-
 import { ModelManager } from "./model-manager.js";
 import { ResourceManager } from "./resource-manager.js";
 import { PiRpcClient, rpcData } from "./rpc-client.js";
-import { idForPath, SessionIndex } from "./session-index.js";
+import { idForPath, readSessionMessages, SessionIndex } from "./session-index.js";
 import { saveWorkspace } from "./workspace-state.js";
 import { requestGuardError } from "./request-guard.js";
 
@@ -28,6 +28,7 @@ const DEFAULT_SECONDARY_RUNTIME_IDLE_MS = 10 * 60 * 1_000;
 const PROMPT_PREPARE_TIMEOUT_MS = 200_000;
 const DEFAULT_MAX_IDLE_SECONDARY_RUNTIMES = 3;
 const DEFAULT_SECONDARY_RUNTIME_SWEEP_MS = 60 * 1_000;
+const DEFAULT_GATE_REQUEST_TIMEOUT_MS = 10 * 60 * 1_000;
 export const DEFAULT_RECENT_SESSION_PREHEAT_COUNT = 3;
 const BUILTIN_COMMANDS: SlashCommand[] = [
   { name: "new", description: "新建会话", source: "builtin" },
@@ -150,6 +151,9 @@ interface SecondaryRuntime {
   unsubscribe: () => void;
   pendingTurnSettings: PendingTurnSettings;
   pendingExtensionRequest?: ExtensionUiRequest;
+  /** A crashed worker remains addressable while one bounded restart is in flight. */
+  failed?: boolean;
+  recovery?: Promise<void>;
   /** File allocated by Pi for an as-yet empty draft. It is not indexed until a prompt is sent. */
   draftSession?: SessionSummary;
   /** Pi's JSONL path, available even before SessionIndex first observes the Session. */
@@ -169,6 +173,8 @@ export interface PiChatAppOptions {
   secondaryRuntimeIdleMs?: number;
   maxIdleSecondaryRuntimes?: number;
   secondaryRuntimeSweepMs?: number;
+  controllerReleaseMs?: number;
+  gateRequestTimeoutMs?: number;
   now?: () => number;
   allowedHosts?: string[];
   requestToken?: string;
@@ -179,7 +185,7 @@ export interface PiChatAppOptions {
 }
 
 export class PiChatApp {
-  private readonly sseClients = new Set<ServerResponse>();
+  private readonly sseClients = new Map<ServerResponse, string>();
   private readonly unsubscribe: () => void;
   private readonly promptQueue: InternalQueuedPrompt[] = [];
   private running = false;
@@ -194,10 +200,17 @@ export class PiChatApp {
   private readonly runtimeStops = new Map<string, Promise<void>>();
   /** Ephemeral browser-window ownership. It is reset when Pi Chat restarts. */
   private readonly sessionControllers = new Map<string, string>();
+  private readonly connectedClients = new Map<string, number>();
+  private readonly controllerReleaseTimers = new Map<string, NodeJS.Timeout>();
+  private readonly pendingExtensionTimers = new Map<string, NodeJS.Timeout>();
   private preheatPromise: Promise<string[]> | null = null;
+  private primaryFailed = false;
+  private primaryRecovery: Promise<void> | null = null;
   private readonly now: () => number;
   private readonly secondaryRuntimeIdleMs: number;
   private readonly maxIdleSecondaryRuntimes: number;
+  private readonly controllerReleaseMs: number;
+  private readonly gateRequestTimeoutMs: number;
   private readonly secondaryRuntimeSweepTimer: NodeJS.Timeout;
   private readonly requestToken: string;
   private allowedHosts: string[];
@@ -205,6 +218,9 @@ export class PiChatApp {
   private toolStatus = "";
   private pendingTurnSettings: PendingTurnSettings = {};
   private pendingExtensionRequest: ExtensionUiRequest | undefined;
+  /** A compaction changes the prompt structure; wait for a later completed turn before reporting occupancy again. */
+  private readonly contextUsagePendingRefresh = new Set<string>();
+  private readonly contextUsageRefreshTurn = new Set<string>();
 
   constructor(private readonly options: PiChatAppOptions) {
     this.currentCwd = resolve(options.cwd);
@@ -215,6 +231,8 @@ export class PiChatApp {
     this.now = options.now || Date.now;
     this.secondaryRuntimeIdleMs = Math.max(0, options.secondaryRuntimeIdleMs ?? DEFAULT_SECONDARY_RUNTIME_IDLE_MS);
     this.maxIdleSecondaryRuntimes = Math.max(0, Math.floor(options.maxIdleSecondaryRuntimes ?? DEFAULT_MAX_IDLE_SECONDARY_RUNTIMES));
+    this.controllerReleaseMs = Math.max(0, options.controllerReleaseMs ?? 5_000);
+    this.gateRequestTimeoutMs = Math.max(1, options.gateRequestTimeoutMs ?? DEFAULT_GATE_REQUEST_TIMEOUT_MS);
     const sweepMs = Math.max(100, options.secondaryRuntimeSweepMs ?? DEFAULT_SECONDARY_RUNTIME_SWEEP_MS);
     this.secondaryRuntimeSweepTimer = setInterval(() => void this.sweepSecondaryRuntimes(), sweepMs);
     this.secondaryRuntimeSweepTimer.unref();
@@ -268,18 +286,34 @@ export class PiChatApp {
     clearInterval(this.secondaryRuntimeSweepTimer);
     this.unsubscribe();
     await Promise.allSettled(this.runtimeStarts.values());
-    for (const runtime of this.runtimes.values()) {
-      runtime.unsubscribe();
-      await runtime.rpc.stop();
-    }
+    const runtimes = [...this.runtimes.values()];
     this.runtimes.clear();
-    for (const client of this.sseClients) client.end();
+    for (const runtime of runtimes) runtime.unsubscribe();
+    // Distinct Session workers can stop concurrently. Sequential forced-stop
+    // windows made shutdown/restart scale by roughly three seconds per worker.
+    await Promise.allSettled(runtimes.map(async (runtime) => {
+      await runtime.rpc.stop();
+      await this.cleanupEmptyDraft(runtime);
+    }));
+    for (const timer of this.controllerReleaseTimers.values()) clearTimeout(timer);
+    this.controllerReleaseTimers.clear();
+    for (const timer of this.pendingExtensionTimers.values()) clearTimeout(timer);
+    this.pendingExtensionTimers.clear();
+    this.connectedClients.clear();
+    for (const client of this.sseClients.keys()) client.end();
     this.sseClients.clear();
   }
 
   private broadcast(event: Record<string, unknown>): void {
     const frame = `event: pi\ndata: ${JSON.stringify(event)}\n\n`;
-    for (const client of this.sseClients) client.write(frame);
+    for (const client of this.sseClients.keys()) client.write(frame);
+  }
+
+  private broadcastControlState(sessionId: string): void {
+    for (const [client, clientId] of this.sseClients) {
+      const event = { type: "pi_chat_session_control_changed", sessionId, ...this.controlState(sessionId, clientId) };
+      client.write(`event: pi\ndata: ${JSON.stringify(event)}\n\n`);
+    }
   }
 
   private publicQueue(queue = this.promptQueue): QueuedPrompt[] {
@@ -303,7 +337,7 @@ export class PiChatApp {
   private setController(sessionId: string, clientId: string): void {
     if (!clientId || this.sessionControllers.get(sessionId) === clientId) return;
     this.sessionControllers.set(sessionId, clientId);
-    this.broadcast({ type: "pi_chat_session_control_changed", sessionId, ...this.controlState(sessionId) });
+    this.broadcastControlState(sessionId);
   }
 
   private requireSessionControl(sessionId: string, clientId: string): void {
@@ -315,12 +349,60 @@ export class PiChatApp {
     this.setController(sessionId, clientId);
   }
 
+  private clientConnected(clientId: string): void {
+    if (!clientId) return;
+    const timer = this.controllerReleaseTimers.get(clientId);
+    if (timer) clearTimeout(timer);
+    this.controllerReleaseTimers.delete(clientId);
+    this.connectedClients.set(clientId, (this.connectedClients.get(clientId) || 0) + 1);
+  }
+
+  private clientDisconnected(clientId: string): void {
+    if (!clientId) return;
+    const remaining = Math.max(0, (this.connectedClients.get(clientId) || 1) - 1);
+    if (remaining) {
+      this.connectedClients.set(clientId, remaining);
+      return;
+    }
+    this.connectedClients.delete(clientId);
+    const timer = setTimeout(() => {
+      this.controllerReleaseTimers.delete(clientId);
+      if (this.connectedClients.has(clientId)) return;
+      for (const [sessionId, owner] of this.sessionControllers) {
+        if (owner !== clientId) continue;
+        this.sessionControllers.delete(sessionId);
+        this.broadcastControlState(sessionId);
+      }
+    }, this.controllerReleaseMs);
+    timer.unref();
+    this.controllerReleaseTimers.set(clientId, timer);
+  }
+
   private touchRuntime(runtime: SecondaryRuntime): void {
     runtime.lastUsedAt = this.now();
   }
 
   private canReclaimRuntime(runtime: SecondaryRuntime): boolean {
     return !runtime.running && !runtime.dispatching && !runtime.queuePaused && runtime.promptQueue.length === 0 && !runtime.extensionUiPending;
+  }
+
+  private async cleanupEmptyDraft(runtime: SecondaryRuntime): Promise<void> {
+    if (!runtime.draftSessionPath) return;
+    let messages: PiMessage[];
+    try {
+      messages = await readSessionMessages(runtime.draftSessionPath);
+    } catch (error) {
+      // A sharing violation, permission error, or malformed read must never turn
+      // into permission to delete a Session whose contents we could not verify.
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        console.warn(`[Pi Chat] 无法确认草稿为空，保留文件：${runtime.draftSessionPath}`, error);
+      }
+      return;
+    }
+    if (messages.some((message) => message.role === "user")) return;
+    await unlink(runtime.draftSessionPath).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+    });
   }
 
   private async reclaimRuntime(id: string, reason: "idle" | "capacity"): Promise<boolean> {
@@ -337,6 +419,9 @@ export class PiChatApp {
     } finally {
       if (this.runtimeStops.get(id) === stopping) this.runtimeStops.delete(id);
     }
+    // A blank New draft is only a temporary composer backing process. It must
+    // never accumulate as a recoverable conversation or Session JSONL.
+    await this.cleanupEmptyDraft(runtime);
     this.broadcast({ type: "pi_chat_active_session_changed", sessionId: id, activeSessionIds: this.activeSessionIds(), reclaimed: true, reason });
     return true;
   }
@@ -363,9 +448,34 @@ export class PiChatApp {
     return sessionId === this.activeSessionId ? this.pendingExtensionRequest : this.runtimes.get(sessionId)?.pendingExtensionRequest;
   }
 
+  private trackPendingRequest(sessionId: string, request: ExtensionUiRequest): void {
+    const previous = this.pendingExtensionTimers.get(sessionId);
+    if (previous) clearTimeout(previous);
+    const timer = setTimeout(() => {
+      this.pendingExtensionTimers.delete(sessionId);
+      const current = this.pendingRequestForSession(sessionId);
+      if (!current || current.id !== request.id) return;
+      const runtime = this.runtimes.get(sessionId);
+      const targetRpc = runtime?.rpc || (sessionId === this.activeSessionId ? this.options.rpc : null);
+      if (this.clearPendingRequest(sessionId, request.id) && targetRpc && targetRpc.isRunning?.() !== false) {
+        try {
+          targetRpc.sendRaw({ type: "extension_ui_response", id: request.id, cancelled: true });
+          this.broadcast({ type: "pi_chat_extension_request_timeout", piChatSessionId: sessionId, id: request.id });
+        } catch (error) {
+          this.broadcast({ type: "pi_chat_process_error", piChatSessionId: sessionId, error: `权限确认超时清理失败：${error instanceof Error ? error.message : String(error)}` });
+        }
+      }
+    }, this.gateRequestTimeoutMs);
+    timer.unref();
+    this.pendingExtensionTimers.set(sessionId, timer);
+  }
+
   private clearPendingRequest(sessionId: string, requestId?: string): boolean {
     const current = this.pendingRequestForSession(sessionId);
     if (!current || (requestId && current.id !== requestId)) return false;
+    const timer = this.pendingExtensionTimers.get(sessionId);
+    if (timer) clearTimeout(timer);
+    this.pendingExtensionTimers.delete(sessionId);
     if (sessionId === this.activeSessionId) this.pendingExtensionRequest = undefined;
     else {
       const runtime = this.runtimes.get(sessionId);
@@ -384,7 +494,9 @@ export class PiChatApp {
     if (type === "agent_start") {
       runtime.running = true;
       runtime.toolStatus = "Pi 正在思考…";
+      this.beginContextUsageRefreshTurn(runtime.id);
     }
+    if (type === "compaction_end" && event.aborted === false) this.markContextUsagePendingRefresh(runtime.id);
     if ((type === "message_start" || type === "message_update") && event.message && typeof event.message === "object" && (event.message as PiMessage).role === "assistant") {
       runtime.liveMessage = event.message as PiMessage;
     }
@@ -394,17 +506,26 @@ export class PiChatApp {
     if (type === "extension_ui_request") {
       const method = String(event.method || "");
       runtime.extensionUiPending = ["select", "confirm", "input", "editor"].includes(method);
-      if (runtime.extensionUiPending && typeof event.id === "string") runtime.pendingExtensionRequest = { ...(event as unknown as ExtensionUiRequest), piChatSessionId: runtime.id };
+      if (runtime.extensionUiPending && typeof event.id === "string") {
+        runtime.pendingExtensionRequest = { ...(event as unknown as ExtensionUiRequest), piChatSessionId: runtime.id };
+        this.trackPendingRequest(runtime.id, runtime.pendingExtensionRequest);
+      }
     }
     if (type === "extension_error") this.clearPendingRequest(runtime.id);
     if (type === "pi_chat_process_error") {
       runtime.running = false;
       runtime.dispatching = false;
+      runtime.toolStatus = "";
+      runtime.failed = true;
+      runtime.queuePaused = runtime.promptQueue.length > 0;
       this.clearPendingRequest(runtime.id);
+      this.broadcastQueue(runtime.id);
+      this.broadcast({ type: "pi_chat_sessions_changed", action: "status", sessionId: runtime.id });
     }
     this.broadcast({ ...event, piChatSessionId: runtime.id });
     if (type === "agent_start" || type === "message_start") this.broadcast({ type: "pi_chat_sessions_changed", action: "created", sessionId: runtime.id });
     if (type === "agent_settled") {
+      this.completeContextUsageRefreshTurn(runtime.id);
       runtime.running = false;
       runtime.dispatching = false;
       runtime.liveMessage = undefined;
@@ -428,6 +549,7 @@ export class PiChatApp {
     const existing = this.runtimes.get(id);
     if (existing) {
       this.touchRuntime(existing);
+      if (existing.failed || existing.rpc.isRunning?.() === false) await this.recoverRuntime(existing);
       return existing;
     }
     const starting = this.runtimeStarts.get(id);
@@ -462,8 +584,34 @@ export class PiChatApp {
     }
   }
 
+  private async recoverRuntime(runtime: SecondaryRuntime): Promise<void> {
+    if (runtime.recovery) return runtime.recovery;
+    if (!runtime.sessionPath) throw new Error("Pi RPC 已退出，且会话路径不可用");
+    const recovery = (async () => {
+      try {
+        await runtime.rpc.restart(runtime.sessionPath, this.currentCwd);
+        const state = asState(await runtime.rpc.send({ type: "get_state" }));
+        runtime.running = state.isStreaming;
+        runtime.failed = false;
+        runtime.toolStatus = "";
+        this.broadcast({ type: "pi_chat_process_recovered", piChatSessionId: runtime.id });
+      } catch (error) {
+        runtime.failed = true;
+        throw new Error(`Pi RPC 恢复失败：${error instanceof Error ? error.message : String(error)}`);
+      }
+    })();
+    runtime.recovery = recovery;
+    try {
+      await recovery;
+    } finally {
+      if (runtime.recovery === recovery) runtime.recovery = undefined;
+    }
+  }
+
   private async createDraftRuntime(): Promise<SecondaryRuntime> {
     if (!this.options.createRpc) throw new Error("当前服务未启用多会话运行");
+    // Starting another New replaces any abandoned blank draft immediately.
+    for (const draft of [...this.runtimes.values()].filter((runtime) => Boolean(runtime.draftSession))) await this.reclaimRuntime(draft.id, "capacity");
     await this.makeRoomForSecondaryRuntime();
     const rpc = this.options.createRpc(this.currentCwd);
     const runtime: SecondaryRuntime = { id: "", rpc, running: false, queuePaused: false, dispatching: false, promptQueue: [], toolStatus: "", extensionUiPending: false, lastUsedAt: this.now(), unsubscribe: () => {}, pendingTurnSettings: {} };
@@ -502,7 +650,9 @@ export class PiChatApp {
     if (type === "agent_start") {
       this.running = true;
       this.toolStatus = "Pi 正在思考…";
+      this.beginContextUsageRefreshTurn(this.activeSessionId);
     }
+    if (type === "compaction_end" && event.aborted === false) this.markContextUsagePendingRefresh(this.activeSessionId);
     if ((type === "message_start" || type === "message_update") && event.message && typeof event.message === "object" && (event.message as PiMessage).role === "assistant") {
       this.liveMessage = event.message as PiMessage;
     }
@@ -513,13 +663,27 @@ export class PiChatApp {
     if (type === "tool_execution_end") this.toolStatus = `${String(event.toolName || "工具")} ${event.isError ? "执行失败" : "已完成"}`;
     if (type === "extension_ui_request") {
       const method = String(event.method || "");
-      if (["select", "confirm", "input", "editor"].includes(method) && typeof event.id === "string") this.pendingExtensionRequest = { ...(event as unknown as ExtensionUiRequest), piChatSessionId: this.activeSessionId };
+      if (["select", "confirm", "input", "editor"].includes(method) && typeof event.id === "string") {
+        this.pendingExtensionRequest = { ...(event as unknown as ExtensionUiRequest), piChatSessionId: this.activeSessionId };
+        this.trackPendingRequest(this.activeSessionId, this.pendingExtensionRequest);
+      }
     }
     if (type === "extension_error" || type === "pi_chat_process_error") this.clearPendingRequest(this.activeSessionId);
+    if (type === "pi_chat_process_error") {
+      this.running = false;
+      this.dispatching = false;
+      this.toolStatus = "";
+      this.liveMessage = undefined;
+      this.primaryFailed = true;
+      this.queuePaused = this.promptQueue.length > 0;
+      this.broadcastQueue();
+      this.broadcast({ type: "pi_chat_sessions_changed", action: "status", sessionId: this.activeSessionId });
+    }
     const taggedEvent = { ...event, piChatSessionId: this.activeSessionId };
     this.broadcast(taggedEvent);
     if (type === "agent_start" || type === "message_start") this.broadcast({ type: "pi_chat_sessions_changed", action: "created", sessionId: this.activeSessionId });
     if (type === "agent_settled") {
+      this.completeContextUsageRefreshTurn(this.activeSessionId);
       this.running = false;
       this.dispatching = false;
       this.liveMessage = undefined;
@@ -528,6 +692,32 @@ export class PiChatApp {
       setTimeout(() => void this.dispatchNext(), 0);
     } else if (type === "agent_start") {
       this.broadcast({ type: "pi_chat_session_status", sessionId: this.activeSessionId, running: true });
+    }
+  }
+
+  private async ensurePrimaryRuntime(): Promise<void> {
+    if (!this.primaryFailed && this.options.rpc.isRunning?.() !== false) return;
+    if (this.primaryRecovery) return this.primaryRecovery;
+    const recovery = (async () => {
+      try {
+        await this.options.rpc.restart(this.activeSessionPath, this.currentCwd);
+        const state = asState(await this.options.rpc.send({ type: "get_state" }));
+        this.activeSessionId = state.sessionFile ? idForPath(state.sessionFile) : state.sessionId || this.activeSessionId;
+        this.activeSessionPath = state.sessionFile || this.activeSessionPath;
+        this.running = state.isStreaming;
+        this.primaryFailed = false;
+        this.toolStatus = "";
+        this.broadcast({ type: "pi_chat_process_recovered", piChatSessionId: this.activeSessionId });
+      } catch (error) {
+        this.primaryFailed = true;
+        throw new Error(`主 Pi RPC 恢复失败：${error instanceof Error ? error.message : String(error)}`);
+      }
+    })();
+    this.primaryRecovery = recovery;
+    try {
+      await recovery;
+    } finally {
+      if (this.primaryRecovery === recovery) this.primaryRecovery = null;
     }
   }
 
@@ -547,6 +737,7 @@ export class PiChatApp {
   }
 
   private async sendPrompt(message: string, images: PromptImage[]): Promise<void> {
+    await this.ensurePrimaryRuntime();
     await this.applyPendingTurnSettings(this.options.rpc, this.pendingTurnSettings);
     this.running = true;
     try {
@@ -563,6 +754,16 @@ export class PiChatApp {
   private async dispatchRuntimeNext(runtime: SecondaryRuntime): Promise<void> {
     this.touchRuntime(runtime);
     if (this.closed || runtime.running || runtime.dispatching || runtime.queuePaused || !runtime.promptQueue.length) return;
+    if (runtime.failed || runtime.rpc.isRunning?.() === false) {
+      try {
+        await this.recoverRuntime(runtime);
+      } catch (error) {
+        runtime.queuePaused = true;
+        this.broadcastQueue(runtime.id);
+        this.broadcast({ type: "pi_chat_queue_error", error: error instanceof Error ? error.message : String(error), piChatSessionId: runtime.id });
+        return;
+      }
+    }
     const next = runtime.promptQueue.shift();
     if (!next) return;
     runtime.dispatching = true;
@@ -601,11 +802,9 @@ export class PiChatApp {
   }
 
   private sessionSummaries(sessions: BootstrapData["sessions"], _state: PiState, clientId = ""): BootstrapData["sessions"] {
-    // Fresh independent runtimes have an empty JSONL until their first prompt. Include those
-    // drafts so New can open immediately without replacing a different running Session.
-    const known = new Set(sessions.map((session) => session.id));
-    const drafts = [...this.runtimes.values()].flatMap((runtime) => runtime.draftSession && !known.has(runtime.draftSession.id) ? [runtime.draftSession] : []);
-    return [...sessions, ...drafts].map((session) => ({
+    // Drafts are intentionally absent: the sidebar contains only conversations
+    // with at least one persisted user message.
+    return sessions.map((session) => ({
       ...session,
       writable: this.activeSessionIds().includes(session.id),
       running: (this.running && session.id === this.activeSessionId) || this.runtimes.get(session.id)?.running === true,
@@ -651,6 +850,8 @@ export class PiChatApp {
   private async renameSession(id: string, name: string): Promise<BootstrapData> {
     await this.options.sessions.list(undefined, this.currentCwd);
     const isPrimary = id === this.activeSessionId;
+    const draft = this.runtimes.get(id)?.draftSession;
+    if (draft) throw new Error("空白新对话会在发送第一条消息后保存，届时才能重命名");
     const path = this.options.sessions.pathForId(id);
     if (!isPrimary && !path) throw new Error("会话不存在");
     const wasOpen = isPrimary || this.runtimes.has(id);
@@ -669,10 +870,8 @@ export class PiChatApp {
     await this.options.sessions.list(undefined, this.currentCwd);
     const isPrimary = id === this.activeSessionId;
     const state = isPrimary ? asState(await this.options.rpc.send({ type: "get_state" })) : null;
-    // Empty New sessions deliberately remain in the sidebar before their first
-    // prompt, but SessionIndex excludes their empty JSONL. The runtime owns the
-    // only authoritative path in that interval, and must be deletable like any
-    // persisted Session.
+    // Empty New sessions stay out of the sidebar and SessionIndex. The runtime
+    // still owns the authoritative draft path if cleanup is requested directly.
     const runtime = this.runtimes.get(id);
     const path = isPrimary ? state?.sessionFile : this.options.sessions.pathForId(id) || runtime?.draftSessionPath;
     if (!isPrimary && !path) throw new Error("会话不存在");
@@ -696,18 +895,28 @@ export class PiChatApp {
   }
 
   private async sessionView(id: string, turnLimit = RECENT_TURN_WINDOW_SIZE, clientId = ""): Promise<SessionViewData | null> {
+    await this.ensurePrimaryRuntime();
     const state = asState(await this.options.rpc.send({ type: "get_state" }));
     this.running = state.isStreaming;
     this.activeSessionId = state.sessionFile ? idForPath(state.sessionFile) : state.sessionId || "";
     this.activeSessionPath = state.sessionFile;
     const sessions = this.sessionSummaries(await this.options.sessions.list(state.sessionFile, this.currentCwd), state, clientId);
-    const session = sessions.find((item) => item.id === id);
+    const secondaryRuntime = this.runtimes.get(id);
+    // A fresh New view is valid even though it is deliberately absent from the
+    // sidebar until its first user message is persisted.
+    const session = sessions.find((item) => item.id === id) || secondaryRuntime?.draftSession;
     if (!session) return null;
     const runtime = id === this.activeSessionId
       ? { rpc: this.options.rpc, running: this.running, liveMessage: this.liveMessage, toolStatus: this.toolStatus }
-      : this.runtimes.get(id) || null;
+      : secondaryRuntime || null;
     if (runtime) {
-      if (id !== this.activeSessionId) this.touchRuntime(runtime as SecondaryRuntime);
+      if (id !== this.activeSessionId) {
+        const secondary = runtime as SecondaryRuntime;
+        this.touchRuntime(secondary);
+        if (secondary.failed || secondary.rpc.isRunning?.() === false) await this.recoverRuntime(secondary);
+      } else {
+        await this.ensurePrimaryRuntime();
+      }
       const [stateResponse, statsResponse, commandsResponse] = await Promise.all([
         runtime.rpc.send({ type: "get_state" }),
         runtime.rpc.send({ type: "get_session_stats" }),
@@ -733,7 +942,7 @@ export class PiChatApp {
         isStreaming: runtime.running,
         liveMessage: runtime.liveMessage,
         toolStatus: runtime.toolStatus,
-        stats: asSessionStats(statsResponse),
+        stats: await this.statsForSession(id, statsResponse),
         queue: id === this.activeSessionId ? this.publicQueue() : this.publicQueue((runtime as SecondaryRuntime).promptQueue),
         queuePaused: id === this.activeSessionId ? this.queuePaused : (runtime as SecondaryRuntime).queuePaused,
         commands: commandsResponse ? [...BUILTIN_COMMANDS, ...asCommands(commandsResponse)] : undefined,
@@ -768,6 +977,19 @@ export class PiChatApp {
    * a Pi process. The context window comes from the model catalogue; when the
    * model is unknown the percentage stays unavailable rather than guessed.
    */
+  private markContextUsagePendingRefresh(id: string): void {
+    if (id) this.contextUsagePendingRefresh.add(id);
+  }
+
+  private beginContextUsageRefreshTurn(id: string): void {
+    if (this.contextUsagePendingRefresh.has(id)) this.contextUsageRefreshTurn.add(id);
+  }
+
+  private completeContextUsageRefreshTurn(id: string): void {
+    if (!this.contextUsageRefreshTurn.delete(id)) return;
+    this.contextUsagePendingRefresh.delete(id);
+  }
+
   private async offlineStatsForId(id: string): Promise<SessionStats | undefined> {
     // Optional-chained: test doubles and older indexes may not implement usageForId.
     const usage = await Promise.resolve(this.options.sessions.usageForId?.(id)).catch(() => null);
@@ -785,14 +1007,26 @@ export class PiChatApp {
         contextWindow = 0;
       }
       if (contextWindow > 0) {
-        stats.contextUsage = {
-          tokens: usage.context.tokens,
-          contextWindow,
-          percent: Math.min(100, (usage.context.tokens / contextWindow) * 100),
-        };
+        const pendingRefresh = this.contextUsagePendingRefresh.has(id);
+        stats.contextUsage = pendingRefresh
+          ? { tokens: null, contextWindow, percent: null }
+          : { tokens: usage.context.tokens, contextWindow, percent: Math.min(100, (usage.context.tokens / contextWindow) * 100) };
+        if (pendingRefresh) stats.contextUsagePendingRefresh = true;
       }
     }
     return stats;
+  }
+
+  /** Prefer Pi's live counters, but use persisted usage whenever it omits occupancy. */
+  private async statsForSession(id: string, response: Record<string, unknown>): Promise<SessionStats> {
+    const live = asSessionStats(response);
+    const fallback = await this.offlineStatsForId(id);
+    const contextUsage = live.contextUsage || fallback?.contextUsage;
+    return {
+      ...live,
+      ...(contextUsage ? { contextUsage } : {}),
+      ...(fallback?.contextUsagePendingRefresh ? { contextUsagePendingRefresh: true } : {}),
+    };
   }
 
   /** The Gate UI belongs to Pi Chat; its tiny Pi hook is a verified system component. */
@@ -806,6 +1040,7 @@ export class PiChatApp {
   }
 
   private async bootstrap(clientId = ""): Promise<BootstrapData> {
+    await this.ensurePrimaryRuntime();
     const [stateResponse, messagesResponse, modelsResponse, commandsResponse, statsResponse] = await Promise.all([
       this.options.rpc.send({ type: "get_state" }),
       this.options.rpc.send({ type: "get_messages" }),
@@ -830,7 +1065,7 @@ export class PiChatApp {
       activeSessionIds: this.activeSessionIds(),
       liveMessage: this.liveMessage,
       toolStatus: this.toolStatus,
-      stats: asSessionStats(statsResponse),
+      stats: await this.statsForSession(this.activeSessionId, statsResponse),
       models: this.options.modelManager ? await this.options.modelManager.annotate(asModels(modelsResponse)) : asModels(modelsResponse),
       commands: [...BUILTIN_COMMANDS, ...asCommands(commandsResponse)],
       queue: this.publicQueue(),
@@ -886,11 +1121,13 @@ export class PiChatApp {
         "x-accel-buffering": "no",
       });
       response.write(`event: ready\ndata: ${JSON.stringify({ ok: true })}\n\n`);
-      this.sseClients.add(response);
+      this.sseClients.set(response, clientId);
+      this.clientConnected(clientId);
       const timer = setInterval(() => response.write(": ping\n\n"), 20_000);
       request.once("close", () => {
         clearInterval(timer);
         this.sseClients.delete(response);
+        this.clientDisconnected(clientId);
       });
       return;
     }
@@ -931,7 +1168,12 @@ export class PiChatApp {
       // instead of rejecting the prompt because the old in-memory worker map was lost.
       if (requestedSessionId && !this.activeSessionIds().includes(requestedSessionId)) await this.ensureRuntime(requestedSessionId);
       const secondaryRuntime = requestedSessionId ? this.runtimes.get(requestedSessionId) || null : null;
-      if (secondaryRuntime) this.touchRuntime(secondaryRuntime);
+      if (secondaryRuntime) {
+        this.touchRuntime(secondaryRuntime);
+        if (secondaryRuntime.failed || secondaryRuntime.rpc.isRunning?.() === false) await this.recoverRuntime(secondaryRuntime);
+      } else {
+        await this.ensurePrimaryRuntime();
+      }
       const targetRpc = secondaryRuntime?.rpc || this.options.rpc;
       const extensionCommand = message ? await this.extensionCommand(message, targetRpc) : null;
       if (extensionCommand) {
@@ -958,6 +1200,9 @@ export class PiChatApp {
           await this.applyPendingTurnSettings(secondaryRuntime.rpc, secondaryRuntime.pendingTurnSettings);
           secondaryRuntime.running = true;
           await secondaryRuntime.rpc.send({ type: "prompt", message: message || "请查看这些图片。", ...(images.length ? { images } : {}) }, PROMPT_PREPARE_TIMEOUT_MS);
+          secondaryRuntime.draftSession = undefined;
+          secondaryRuntime.draftSessionPath = undefined;
+          this.broadcast({ type: "pi_chat_sessions_changed", action: "created", sessionId: secondaryRuntime.id });
           json(response, 202, { accepted: true, queued: false });
         } catch (error) {
           secondaryRuntime.running = false;
@@ -1011,6 +1256,7 @@ export class PiChatApp {
       if (!runtime && sessionId !== this.activeSessionId) return json(response, 409, { error: "该会话尚未恢复运行，请刷新页面后重试" });
       if (runtime) {
         this.touchRuntime(runtime);
+        if (runtime.failed || runtime.rpc.isRunning?.() === false) await this.recoverRuntime(runtime);
         runtime.queuePaused = false;
         this.broadcastQueue(sessionId);
         void this.dispatchRuntimeNext(runtime);
@@ -1060,6 +1306,8 @@ export class PiChatApp {
       const sessionId = typeof body.sessionId === "string" ? body.sessionId : this.activeSessionId;
       this.requireSessionControl(sessionId, clientId);
       const secondaryRuntime = this.runtimes.get(sessionId) || null;
+      if (secondaryRuntime?.failed || secondaryRuntime?.rpc.isRunning?.() === false) await this.recoverRuntime(secondaryRuntime);
+      else if (!secondaryRuntime) await this.ensurePrimaryRuntime();
       if ((!secondaryRuntime && (this.running || this.promptQueue.length)) || secondaryRuntime?.running) return json(response, 409, { error: "请先停止该会话的生成并清空队列" });
       if (!secondaryRuntime && sessionId !== this.activeSessionId) return json(response, 409, { error: "该会话尚未启用" });
       const customInstructions = typeof body.customInstructions === "string" ? body.customInstructions.trim() : "";
@@ -1076,6 +1324,7 @@ export class PiChatApp {
       const runtime = this.runtimes.get(sessionId);
       if (runtime) {
         this.touchRuntime(runtime);
+        if (runtime.failed || runtime.rpc.isRunning?.() === false) return json(response, 200, { ok: true, isStreaming: false, queuePaused: runtime.queuePaused });
         if (runtime.promptQueue.length) runtime.queuePaused = true;
         await runtime.rpc.send({ type: "abort" }, 10_000);
         const state = asState(await runtime.rpc.send({ type: "get_state" }));
@@ -1084,6 +1333,7 @@ export class PiChatApp {
         return json(response, 200, { ok: true, isStreaming: state.isStreaming, queuePaused: runtime.queuePaused });
       }
       if (sessionId !== this.activeSessionId) return json(response, 409, { error: "该会话不是活动运行会话" });
+      if (this.primaryFailed || this.options.rpc.isRunning?.() === false) return json(response, 200, { ok: true, isStreaming: false, queuePaused: this.queuePaused });
       if (this.promptQueue.length) this.queuePaused = true;
       await this.options.rpc.send({ type: "abort" }, 10_000);
       this.broadcastQueue();
@@ -1095,6 +1345,7 @@ export class PiChatApp {
 
     if (url.pathname === "/api/sessions") {
       if (request.method !== "GET") return methodNotAllowed(response);
+      await this.ensurePrimaryRuntime();
       const state = asState(await this.options.rpc.send({ type: "get_state" }));
       const sessions = this.sessionSummaries(await this.options.sessions.list(state.sessionFile, this.currentCwd), state, clientId);
       json(response, 200, { sessions });
@@ -1232,7 +1483,12 @@ export class PiChatApp {
       const secondaryRuntime = this.runtimes.get(sessionId) || null;
       if (!provider || !modelId) return json(response, 400, { error: "provider 和 modelId 必填" });
       if (!secondaryRuntime && sessionId !== this.activeSessionId) return json(response, 409, { error: "该会话尚未启用" });
-      if (secondaryRuntime) this.touchRuntime(secondaryRuntime);
+      if (secondaryRuntime) {
+        this.touchRuntime(secondaryRuntime);
+        if (secondaryRuntime.failed || secondaryRuntime.rpc.isRunning?.() === false) await this.recoverRuntime(secondaryRuntime);
+      } else {
+        await this.ensurePrimaryRuntime();
+      }
       const targetRpc = secondaryRuntime?.rpc || this.options.rpc;
       const targetRunning = secondaryRuntime?.running || (!secondaryRuntime && this.running);
       if (targetRunning) {
@@ -1257,7 +1513,12 @@ export class PiChatApp {
       const secondaryRuntime = this.runtimes.get(sessionId) || null;
       if (!level) return json(response, 400, { error: "无效的 Thinking 强度" });
       if (!secondaryRuntime && sessionId !== this.activeSessionId) return json(response, 409, { error: "该会话尚未启用" });
-      if (secondaryRuntime) this.touchRuntime(secondaryRuntime);
+      if (secondaryRuntime) {
+        this.touchRuntime(secondaryRuntime);
+        if (secondaryRuntime.failed || secondaryRuntime.rpc.isRunning?.() === false) await this.recoverRuntime(secondaryRuntime);
+      } else {
+        await this.ensurePrimaryRuntime();
+      }
       const targetRpc = secondaryRuntime?.rpc || this.options.rpc;
       const targetRunning = secondaryRuntime?.running || (!secondaryRuntime && this.running);
       if (targetRunning) {

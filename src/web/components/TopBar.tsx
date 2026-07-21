@@ -1,8 +1,8 @@
-import type { CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import type { ModelInfo, PiState, SessionStats, ThinkingLevel } from "../../shared/types";
 import type { GateMode } from "../lib/gate-mode";
 import { GateControl } from "./GateControl";
-import { ChipIcon } from "./Icons";
+import { CheckIcon, ChipIcon } from "./Icons";
 import { contextUsageTone } from "../lib/context-usage";
 
 function modelValue(model: Pick<ModelInfo, "provider" | "id">): string {
@@ -37,21 +37,23 @@ function formatPercent(percent: number | null): string {
 function UsageStats({ stats, isCompacting }: { stats?: SessionStats; isCompacting?: boolean }) {
   const usage = stats?.tokens;
   const context = stats?.contextUsage;
-  const percent = typeof context?.percent === "number" ? Math.max(0, Math.min(100, context.percent)) : null;
-  const tone = contextUsageTone(percent, isCompacting);
-  const text = formatPercent(percent);
+  const pendingRefresh = stats?.contextUsagePendingRefresh === true;
+  const percent = pendingRefresh ? null : typeof context?.percent === "number" ? Math.max(0, Math.min(100, context.percent)) : null;
+  const tone = pendingRefresh ? "normal" : contextUsageTone(percent, isCompacting);
+  const text = pendingRefresh ? "?" : formatPercent(percent);
+  const ringPercent = pendingRefresh ? 33.333 : percent ?? 0;
   return (
-    <div className={`usage-pill is-${tone}`} tabIndex={0} aria-label={`会话上下文用量 ${text}`}>
-      <i className="context-donut" style={{ "--context-percent": `${percent ?? 0}%` } as CSSProperties} aria-hidden="true" />
-      <span>{isCompacting ? "压缩中" : text}</span>
+    <div className={`usage-pill is-${tone}`} tabIndex={0} aria-label={`会话上下文用量 ${pendingRefresh ? "待更新" : text}`}>
+      <i className="context-donut" style={{ "--context-percent": `${ringPercent}%` } as CSSProperties} aria-hidden="true" />
+      <span>{text}</span>
       <div className="usage-card" role="tooltip">
         <dl>
-          <div><dt>上下文</dt><dd>{compactTokens(context?.tokens)} / {compactTokens(context?.contextWindow)}（{text}）</dd></div>
+          <div><dt>上下文</dt><dd>{pendingRefresh ? "?" : compactTokens(context?.tokens)} / {compactTokens(context?.contextWindow)}（{pendingRefresh ? "待更新" : text}）</dd></div>
           <div><dt>累计输入</dt><dd>{compactTokens(usage?.input)}</dd></div>
           <div><dt>累计输出</dt><dd>{compactTokens(usage?.output)}</dd></div>
           <div><dt>缓存读取</dt><dd>{compactTokens(usage?.cacheRead)}</dd></div>
         </dl>
-        {isCompacting && <p>正在压缩上下文；当前消息会在完成后继续发送。</p>}
+        {pendingRefresh && <p>执行对话以更新上下文占比</p>}
       </div>
     </div>
   );
@@ -72,12 +74,25 @@ export function TopBar({ state, models, stats, conversationName, workspacePath, 
   onThinking: (level: ThinkingLevel) => void;
 }) {
   const current = state.model ? modelValue(state.model) : "";
-  const groups = models.reduce((map, model) => {
-    const providerModels = map.get(model.provider) || [];
-    providerModels.push(model);
-    map.set(model.provider, providerModels);
-    return map;
-  }, new Map<string, ModelInfo[]>());
+  const currentModel = models.find((model) => modelValue(model) === current);
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const modelMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!modelMenuOpen) return;
+    const closeOnOutsideClick = (event: MouseEvent) => {
+      if (!modelMenuRef.current?.contains(event.target as Node)) setModelMenuOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setModelMenuOpen(false);
+    };
+    window.addEventListener("mousedown", closeOnOutsideClick);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("mousedown", closeOnOutsideClick);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [modelMenuOpen]);
   return (
     <header className="topbar">
       <div className="topbar-context" title={`当前对话：${conversationName}\n工作路径：${workspacePath}`}>
@@ -89,13 +104,21 @@ export function TopBar({ state, models, stats, conversationName, workspacePath, 
       <div className="topbar-controls">
         {gateAvailable && <GateControl mode={gateMode} disabled={disabled} onChange={onGate} />}
         <div className="model-controls" title={streaming ? "当前回复不会中断；新设置将在下一轮对话生效" : undefined}>
-          <ChipIcon className="model-icon" />
-          <label className="model-select" title="模型">
-            <select value={current} disabled={disabled || !models.length} onChange={(event) => { const [provider, id] = event.target.value.split("\u0000"); onModel(provider, id); }}>
-            {!current && <option value="">未选择</option>}
-              {[...groups.entries()].map(([provider, providerModels]) => <optgroup key={provider} label={provider}>{providerModels.map((model) => <option key={modelValue(model)} value={modelValue(model)}>{model.name || model.id}</option>)}</optgroup>)}
-            </select>
-          </label>
+          <div className="model-menu" ref={modelMenuRef}>
+            <button type="button" className="model-menu-trigger" disabled={disabled || !models.length} aria-label="模型" aria-haspopup="listbox" aria-expanded={modelMenuOpen} onClick={() => setModelMenuOpen((open) => !open)}>
+              <ChipIcon className="model-icon" />
+              <span>{currentModel?.name || state.model?.id || "未选择"}</span>
+              <i className="model-menu-chevron" aria-hidden="true" />
+            </button>
+            {modelMenuOpen && <div className="model-menu-popover" role="listbox" aria-label="选择模型">
+              {models.map((model) => {
+                const selected = modelValue(model) === current;
+                return <button type="button" key={modelValue(model)} className={selected ? "is-selected" : ""} role="option" aria-selected={selected} onClick={() => { setModelMenuOpen(false); onModel(model.provider, model.id); }}>
+                  <span>{model.name || model.id}</span>{selected && <CheckIcon />}
+                </button>;
+              })}
+            </div>}
+          </div>
           <label className="thinking-select" title="思考强度">
             <select aria-label="思考强度" value={state.thinkingLevel || "off"} disabled={disabled || !state.model?.reasoning} onChange={(event) => onThinking(event.target.value as ThinkingLevel)}>
               {THINKING_LEVELS.map((level) => <option key={level.value} value={level.value}>{level.label}</option>)}

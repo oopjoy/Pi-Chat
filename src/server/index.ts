@@ -53,6 +53,10 @@ function findProjectRoot(start: string): string {
 }
 
 const options = parseArgs(process.argv.slice(2));
+const loopbackHosts = new Set(["127.0.0.1", "localhost", "::1"]);
+if (!loopbackHosts.has(options.host) && process.env.PI_CHAT_ALLOW_REMOTE !== "1") {
+  throw new Error("基础版 Pi Chat 尚未实现远程认证。为避免未授权访问，非回环监听需要显式设置 PI_CHAT_ALLOW_REMOTE=1。");
+}
 options.cwd = await loadWorkspace(options.cwd);
 const projectRoot = findProjectRoot(dirname(fileURLToPath(import.meta.url)));
 const agentDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
@@ -130,8 +134,8 @@ console.log(`[Pi Chat] 已启动：http://${options.host}:${port}`);
 void app.preheatRecentSessions().then((ids) => {
   if (ids.length) console.log(`[Pi Chat] 已后台预热最近 ${ids.length} 个历史会话。`);
 }).catch((error) => console.warn(`[Pi Chat] 历史会话预热失败：${error instanceof Error ? error.message : String(error)}`));
-if (options.host !== "127.0.0.1" && options.host !== "localhost" && options.host !== "::1") {
-  console.warn("[Pi Chat] 警告：基础版尚未实现远程登录认证，请勿直接暴露到公网。");
+if (!loopbackHosts.has(options.host)) {
+  console.warn("[Pi Chat] 警告：已显式启用未认证远程监听；只可在受信任网络中临时使用，严禁暴露到公网。");
 }
 
 let shuttingDown = false;

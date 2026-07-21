@@ -5,6 +5,12 @@ import { join } from "node:path";
 import test from "node:test";
 import { ResourceManager } from "../src/server/resource-manager";
 
+test("package install rejects option-like or control-character sources before spawning Pi", async () => {
+  const manager = new ResourceManager();
+  await assert.rejects(manager.installPackage("--help"), /格式无效/);
+  await assert.rejects(manager.installPackage("npm:valid\n--flag"), /格式无效/);
+});
+
 test("resource manager separates skills, extensions, and packages with their real Pi ownership", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-resources-"));
   const sourceRoot = await mkdtemp(join(tmpdir(), "pi-chat-skill-source-"));
