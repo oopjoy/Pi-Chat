@@ -89,25 +89,27 @@ if (options.dev) {
   });
 }
 
-async function prepareApplicationRestart(): Promise<() => void> {
-  console.log("[Pi Chat] 正在构建本地更新…");
-  await buildPiChat(projectRoot);
-  // Building is reversible; handoff and shutdown are not. PiChatApp performs a
-  // second authoritative quiescence check before invoking this commit closure.
-  return () => {
-    // Yield one event-loop turn so the browser receives the 202 response before
-    // the listener and its SSE streams close.
-    setTimeout(() => {
-      handOffApplicationRestart({
-        projectRoot,
-        serverEntry: fileURLToPath(import.meta.url),
-        host: options.host,
-        port: options.port,
-        cwd: options.cwd,
-        dev: options.dev,
-      });
-      void shutdown().then(() => process.exit(0));
-    }, 0);
+async function prepareApplicationRestart() {
+  console.log("[Pi Chat] 正在 staging 目录构建本地更新…");
+  const build = await buildPiChat(projectRoot);
+  return {
+    promote: () => build.promote(),
+    discard: () => build.discard(),
+    handoff: () => {
+      // Yield one event-loop turn so the browser receives the 202 response before
+      // the listener and its SSE streams close.
+      setTimeout(() => {
+        handOffApplicationRestart({
+          projectRoot,
+          serverEntry: fileURLToPath(import.meta.url),
+          host: options.host,
+          port: options.port,
+          cwd: options.cwd,
+          dev: options.dev,
+        });
+        void shutdown().then(() => process.exit(0));
+      }, 0);
+    },
   };
 }
 

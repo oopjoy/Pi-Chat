@@ -177,7 +177,9 @@ test("restart barrier rejects new mutations throughout a long build and commits 
   const id = idForPath(path);
   const primary = new FakeRpc(path, "primary");
   let resolveBuild: (() => void) | undefined;
-  let commits = 0;
+  let promotions = 0;
+  let handoffs = 0;
+  let discards = 0;
   const build = new Promise<void>((resolve) => { resolveBuild = resolve; });
   const sessions = {
     list: async () => [{ id, sessionId: "primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
@@ -190,7 +192,14 @@ test("restart barrier rejects new mutations throughout a long build and commits 
     resources: {} as ResourceManager,
     cwd: process.cwd(),
     webRoot: process.cwd(),
-    applicationRestart: async () => { await build; return () => { commits += 1; }; },
+    applicationRestart: async () => {
+      await build;
+      return {
+        promote: async () => { promotions += 1; },
+        handoff: () => { handoffs += 1; },
+        discard: async () => { discards += 1; },
+      };
+    },
   });
   const server = createServer((request, response) => void app.handle(request, response));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -225,7 +234,9 @@ test("restart barrier rejects new mutations throughout a long build and commits 
     resolveBuild?.();
     const response = await restart;
     assert.equal(response.status, 202);
-    assert.equal(commits, 1);
+    assert.equal(promotions, 1);
+    assert.equal(handoffs, 1);
+    assert.equal(discards, 0);
   } finally {
     resolveBuild?.();
     server.close();
@@ -236,7 +247,7 @@ test("restart barrier rejects new mutations throughout a long build and commits 
 test("an in-flight mutation lease prevents restart before the Prompt body is complete", async () => {
   const path = "C:\\sessions\\primary.jsonl";
   const primary = new FakeRpc(path, "primary");
-  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), applicationRestart: async () => () => undefined });
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), applicationRestart: async () => ({ promote: async () => undefined, handoff: () => undefined, discard: async () => undefined }) });
   const server = createServer((request, response) => void app.handle(request, response));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();

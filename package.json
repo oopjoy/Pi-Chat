@@ -17,6 +17,8 @@
     "scripts/install-shortcuts.ps1",
     "scripts/pi-chat-launch-process.ps1",
     "scripts/pi-chat-port-ready.ps1",
+    "scripts/build-server.mjs",
+    "scripts/build-web.mjs",
     "scripts/clean-dist.mjs"
   ],
   "scripts": {
@@ -24,8 +26,8 @@
     "dev": "npm run prepare:katex && tsx watch src/server/index.ts --dev",
     "clean": "node scripts/clean-dist.mjs",
     "build": "npm run clean && npm run build:web && npm run build:server && npm run copy:resources",
-    "build:web": "npm run prepare:katex && vite build",
-    "build:server": "tsc -p tsconfig.server.json",
+    "build:web": "npm run prepare:katex && node scripts/build-web.mjs",
+    "build:server": "node scripts/build-server.mjs",
     "copy:resources": "node scripts/copy-runtime-resources.mjs",
     "start": "node dist/server/server/index.js",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit",

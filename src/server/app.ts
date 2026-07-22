@@ -165,6 +165,12 @@ interface SecondaryRuntime {
   draftSessionPath?: string;
 }
 
+export interface PreparedApplicationRestart {
+  promote(): Promise<void>;
+  handoff(): void;
+  discard(): Promise<void>;
+}
+
 export interface PiChatAppOptions {
   rpc: PiRpcClient;
   createRpc?: (cwd: string) => PiRpcClient;
@@ -182,8 +188,8 @@ export interface PiChatAppOptions {
   now?: () => number;
   allowedHosts?: string[];
   requestToken?: string;
-  /** Build an application replacement and return the irreversible handoff commit. */
-  applicationRestart?: () => Promise<() => void>;
+  /** Build a staged replacement; PiChatApp promotes it only after its second quiescence check. */
+  applicationRestart?: () => Promise<PreparedApplicationRestart>;
   /** Gracefully terminate the entire Pi Chat service process. */
   applicationShutdown?: () => void;
 }
@@ -1371,12 +1377,20 @@ export class PiChatApp {
           this.options.applicationShutdown?.();
           return;
         }
-        const commitRestart = await this.options.applicationRestart!();
-        // Defense in depth: no request admitted after the barrier may have made
-        // the application busy, but internal runtime work must also be quiescent.
-        await this.verifyApplicationQuiescent("完成重启");
+        const prepared = await this.options.applicationRestart!();
+        try {
+          // Defense in depth: no request admitted after the barrier may have made
+          // the application busy, but internal runtime work must also be quiescent.
+          await this.verifyApplicationQuiescent("完成重启");
+          // Promotion is still reversible on failure and happens before the HTTP
+          // response. The irreversible process handoff begins only after 202.
+          await prepared.promote();
+        } catch (error) {
+          await prepared.discard();
+          throw error;
+        }
         json(response, 202, { restarting: true });
-        commitRestart();
+        prepared.handoff();
         return;
       } catch (error) {
         this.endLifecycle(lifecycle);
