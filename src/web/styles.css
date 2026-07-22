@@ -299,8 +299,9 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .compact-select-option.is-active { background: var(--surface-hover); }
 .compact-select-option.is-selected { background: var(--accent-soft); color: var(--accent); font-weight: 650; }
 .compact-select-option svg { width: 15px; height: 15px; flex: 0 0 auto; stroke-width: 2; }
-.model-menu { position: relative; min-width: 0; }
-.model-menu-trigger { display: flex; max-width: 168px; height: 26px; min-width: 0; align-items: center; gap: 6px; padding: 2px 4px 2px 1px; border: 0; border-radius: 6px; outline: 0; background: transparent; color: var(--text); cursor: pointer; font: inherit; font-size: 12px; }
+/* Keep the model slot stable as models change; only its label ellipsizes. */
+.model-menu { position: relative; width: 168px; min-width: 0; flex: 0 0 168px; }
+.model-menu-trigger { display: flex; width: 100%; max-width: none; height: 26px; min-width: 0; align-items: center; gap: 6px; padding: 2px 4px 2px 1px; border: 0; border-radius: 6px; outline: 0; background: transparent; color: var(--text); cursor: pointer; font: inherit; font-size: 12px; }
 .model-menu-trigger > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .model-menu-trigger:hover:not(:disabled) { background: var(--surface-hover); }
 .model-menu-trigger:focus-visible { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent), transparent 72%); }
@@ -666,7 +667,7 @@ button:disabled { cursor: not-allowed; opacity: .56; }
   .topbar { min-height: 46px; gap: 8px; padding: 5px 10px; }
   .topbar-indicators { gap: 6px; padding-right: 8px; }
   .thinking-select { min-width: 72px; }
-  .model-menu-trigger { max-width: 42vw; }
+  .model-menu { width: min(168px, 42vw); flex-basis: min(168px, 42vw); }
   .stepper-setting { align-items: flex-start; flex-direction: column; gap: 8px; }
   :root { --chat-column-gutter: 24px; }
   .timeline-inner { padding: 20px 0 26px; }
@@ -680,7 +681,7 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 @media (max-width: 460px) {
   .usage-pill { display: none; }
   .topbar-title { font-size: 12px; }
-  .model-menu-trigger { width: 38vw; font-size: 11px; }
+  .model-menu-trigger { width: 100%; font-size: 11px; }
   :root { --chat-column-gutter: 20px; }
   .message-content { font-size: 14px; }
   .composer { padding-left: 11px; }
