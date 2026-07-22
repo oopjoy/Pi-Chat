@@ -15,9 +15,18 @@ export const DEFAULT_APPEARANCE: AppearancePreferences = {
   font: "system",
   fontSize: 16,
   lineHeight: 1.7,
-  chatWidth: 980,
+  chatWidth: 950,
   markdownCss: "",
 };
+
+/** Snap any number onto the appearance step grid, clamped to [minimum, maximum]. */
+export function snapToStep(value: unknown, minimum: number, maximum: number, step: number, fallback?: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback ?? minimum;
+  const clamped = Math.max(minimum, Math.min(maximum, value));
+  const index = Math.round((clamped - minimum) / step);
+  const decimals = String(step).split(".")[1]?.length ?? 0;
+  return Number((minimum + index * step).toFixed(decimals));
+}
 
 const STORAGE_KEY = "pi-chat.appearance.v1";
 const SIDEBAR_KEY = "pi-chat.sidebar-open.v1";
@@ -38,9 +47,9 @@ export function loadAppearance(): AppearancePreferences {
     return {
       theme: ["system", "light", "dark"].includes(saved.theme || "") ? saved.theme as ThemePreference : DEFAULT_APPEARANCE.theme,
       font: ["system", "serif", "mono"].includes(saved.font || "") ? saved.font as FontPreference : DEFAULT_APPEARANCE.font,
-      fontSize: clamp(saved.fontSize, 13, 22, DEFAULT_APPEARANCE.fontSize),
-      lineHeight: clamp(saved.lineHeight, 1.35, 2.2, DEFAULT_APPEARANCE.lineHeight),
-      chatWidth: clamp(saved.chatWidth, 680, 1500, DEFAULT_APPEARANCE.chatWidth),
+      fontSize: snapToStep(saved.fontSize, 10, 30, 1, DEFAULT_APPEARANCE.fontSize),
+      lineHeight: snapToStep(saved.lineHeight, 1.0, 3.0, 0.1, DEFAULT_APPEARANCE.lineHeight),
+      chatWidth: snapToStep(saved.chatWidth, 600, 1500, 50, DEFAULT_APPEARANCE.chatWidth),
       markdownCss: typeof saved.markdownCss === "string" ? saved.markdownCss.replace(/\u0000/g, "").slice(0, 50_000) : DEFAULT_APPEARANCE.markdownCss,
     };
   } catch {

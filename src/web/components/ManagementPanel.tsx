@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { BootstrapData, CustomModelInput, ExtensionResource, ModelInfo, PackageResource, PiState, SkillResource } from "../../shared/types";
 import { api } from "../api";
-import { DEFAULT_APPEARANCE, type AppearancePreferences, type FontPreference, type ThemePreference } from "../lib/preferences";
-import { CloseIcon, PlusIcon } from "./Icons";
+import { DEFAULT_APPEARANCE, snapToStep, type AppearancePreferences, type FontPreference, type ThemePreference } from "../lib/preferences";
+import { CloseIcon, MinusIcon, PlusIcon } from "./Icons";
 
 export type ManagementSection = "settings" | "models";
 type SettingsTab = "appearance" | "models" | "skills" | "extensions" | "packages";
@@ -311,9 +311,9 @@ function AppearancePanel({ value, onChange }: { value: AppearancePreferences; on
     </div>
     <SettingRow title="主题"><select value={value.theme} onChange={(event) => update("theme", event.target.value as ThemePreference)}><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></SettingRow>
     <SettingRow title="聊天字体"><select value={value.font} onChange={(event) => update("font", event.target.value as FontPreference)}><option value="system">系统字体</option><option value="serif">衬线阅读字体</option><option value="mono">等宽字体</option></select></SettingRow>
-    <RangeSetting title="字号" value={value.fontSize} minimum={13} maximum={22} step={1} suffix="px" onChange={(next) => update("fontSize", next)} />
-    <RangeSetting title="行间距" value={value.lineHeight} minimum={1.35} maximum={2.2} step={0.05} suffix="" onChange={(next) => update("lineHeight", next)} />
-    <RangeSetting title="对话宽度" value={value.chatWidth} minimum={700} maximum={1500} step={50} suffix="px" onChange={(next) => update("chatWidth", next)} />
+    <StepperSetting title="字号" hint="10 ~ 30" value={value.fontSize} minimum={10} maximum={30} step={1} suffix="px" onChange={(next) => update("fontSize", next)} />
+    <StepperSetting title="行间距" hint="1.0 ~ 3.0" value={value.lineHeight} minimum={1.0} maximum={3.0} step={0.1} decimals={1} onChange={(next) => update("lineHeight", next)} />
+    <StepperSetting title="对话宽度" hint="600 ~ 1500" value={value.chatWidth} minimum={600} maximum={1500} step={50} suffix="px" onChange={(next) => update("chatWidth", next)} />
     <details className="markdown-css-settings">
       <summary>更多外观设置 · Markdown CSS</summary>
       <p>仅用于调整聊天 Markdown 的显示。请使用 <code>.markdown-body</code> 作为每条规则的选择器前缀，避免影响其他界面。</p>
@@ -327,6 +327,76 @@ function SettingRow({ title, description, children }: { title: string; descripti
   return <label className="setting-row"><span><strong>{title}</strong>{description && <small>{description}</small>}</span>{children}</label>;
 }
 
-function RangeSetting({ title, value, minimum, maximum, step, suffix, onChange }: { title: string; value: number; minimum: number; maximum: number; step: number; suffix: string; onChange: (value: number) => void }) {
-  return <label className="range-setting"><span><strong>{title}</strong><output>{Number(value.toFixed(2))}{suffix}</output></span><input type="range" min={minimum} max={maximum} step={step} value={value} onChange={(event) => onChange(Number(event.target.value))} /></label>;
+function StepperSetting({ title, hint, value, minimum, maximum, step, suffix, decimals = 0, onChange }: {
+  title: string;
+  hint?: string;
+  value: number;
+  minimum: number;
+  maximum: number;
+  step: number;
+  suffix?: string;
+  decimals?: number;
+  onChange: (value: number) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const valueRef = useRef(value);
+  valueRef.current = value;
+  const repeatRef = useRef<{ timeout?: number; interval?: number }>({});
+  const pointerActiveRef = useRef(false);
+
+  const stopRepeat = () => {
+    window.clearTimeout(repeatRef.current.timeout);
+    window.clearInterval(repeatRef.current.interval);
+    repeatRef.current = {};
+  };
+  useEffect(() => stopRepeat, []);
+
+  const applyStep = (direction: 1 | -1) => {
+    const next = snapToStep(valueRef.current + direction * step, minimum, maximum, step);
+    if (next === valueRef.current) {
+      stopRepeat();
+      return;
+    }
+    onChange(next);
+  };
+  const beginRepeat = (direction: 1 | -1) => {
+    stopRepeat();
+    applyStep(direction);
+    repeatRef.current.timeout = window.setTimeout(() => {
+      repeatRef.current.interval = window.setInterval(() => applyStep(direction), 90);
+    }, 420);
+  };
+
+  const commitDraft = () => {
+    const parsed = Number(draft.trim().replace(/px$/i, ""));
+    if (draft.trim() && Number.isFinite(parsed)) onChange(snapToStep(parsed, minimum, maximum, step));
+    setEditing(false);
+  };
+
+  return <div className="stepper-setting">
+    <span className="stepper-setting-label"><strong>{title}</strong>{hint && <small>{hint}</small>}</span>
+    <div className="stepper" role="group" aria-label={title}>
+      <button type="button" className="stepper-button" disabled={value <= minimum} aria-label={`减小${title}`}
+        onPointerDown={() => { pointerActiveRef.current = true; beginRepeat(-1); }}
+        onPointerUp={stopRepeat} onPointerLeave={stopRepeat} onPointerCancel={stopRepeat}
+        onClick={() => { if (pointerActiveRef.current) { pointerActiveRef.current = false; return; } applyStep(-1); }}
+      ><MinusIcon /></button>
+      {editing
+        ? <input className="stepper-input" value={draft} autoFocus inputMode="decimal" aria-label={`${title}数值`}
+            onChange={(event) => setDraft(event.target.value)} onBlur={commitDraft}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") { event.preventDefault(); commitDraft(); }
+              if (event.key === "Escape") { event.preventDefault(); setEditing(false); }
+            }} />
+        : <button type="button" className="stepper-value" title="点击输入精确数值（自动纠正到档位）" aria-label={`${title}当前值 ${value.toFixed(decimals)}${suffix}`}
+            onClick={() => { setDraft(String(Number(value.toFixed(decimals)))); setEditing(true); }}
+          >{value.toFixed(decimals)}{suffix}</button>}
+      <button type="button" className="stepper-button" disabled={value >= maximum} aria-label={`增大${title}`}
+        onPointerDown={() => { pointerActiveRef.current = true; beginRepeat(1); }}
+        onPointerUp={stopRepeat} onPointerLeave={stopRepeat} onPointerCancel={stopRepeat}
+        onClick={() => { if (pointerActiveRef.current) { pointerActiveRef.current = false; return; } applyStep(1); }}
+      ><PlusIcon /></button>
+    </div>
+  </div>;
 }

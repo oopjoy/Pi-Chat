@@ -27,6 +27,10 @@ export function PlusIcon(props: IconProps) {
   return <LineIcon {...props}><path d="M12 5v14M5 12h14" /></LineIcon>;
 }
 
+export function MinusIcon(props: IconProps) {
+  return <LineIcon {...props}><path d="M5 12h14" /></LineIcon>;
+}
+
 export function RefreshIcon(props: IconProps) {
   return <LineIcon {...props}><path d="M19.5 9.5A7.8 7.8 0 1 0 20 14" /><path d="M19.5 4.5v5h-5" /></LineIcon>;
 }

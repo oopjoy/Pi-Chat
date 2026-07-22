@@ -548,16 +548,26 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .appearance-panel-heading .panel-intro { flex: 1; }
 .appearance-reset { flex: 0 0 auto; margin-top: 1px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--muted); cursor: pointer; font-size: 11px; font-weight: 650; }
 .appearance-reset:hover:not(:disabled) { border-color: color-mix(in srgb, var(--accent), transparent 42%); color: var(--accent); }
-.setting-row, .range-setting { display: flex; align-items: center; justify-content: space-between; gap: 18px; min-height: 62px; padding: 10px 0; border-bottom: 1px solid color-mix(in srgb, var(--line), transparent 28%); }
-.setting-row > span, .range-setting > span { min-width: 0; }
+.setting-row, .stepper-setting { display: flex; align-items: center; justify-content: space-between; gap: 18px; min-height: 54px; padding: 8px 0; border-bottom: 1px solid color-mix(in srgb, var(--line), transparent 28%); }
+.setting-row > span { min-width: 0; }
 .setting-row strong, .setting-row small { display: block; }
-.setting-row strong, .range-setting strong { font-size: 13px; }
+.setting-row strong, .stepper-setting-label strong { font-size: 13px; }
 .setting-row small { margin-top: 3px; color: var(--muted); font-size: 10.5px; }
 .setting-row select { min-width: 138px; height: 34px; padding: 6px 28px 6px 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-soft); color: var(--text); font-size: 11.5px; }
-.range-setting { display: grid; grid-template-columns: minmax(0, 1fr) minmax(250px, 48%); column-gap: 22px; }
-.range-setting > span { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.range-setting output { flex: 0 0 auto; color: var(--muted); font-size: 11px; }
-.range-setting input { width: 100%; accent-color: var(--accent); }
+/* Discrete numeric preferences share the top-bar compact-control family. */
+.stepper-setting-label { display: grid; min-width: 0; gap: 2px; }
+.stepper-setting-label small { color: var(--muted); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+.stepper { display: flex; flex: 0 0 auto; height: 30px; align-items: center; overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); font-size: 12px; }
+.stepper-button { display: flex; width: 30px; height: 100%; align-items: center; justify-content: center; border: 0; background: transparent; color: var(--muted); cursor: pointer; }
+.stepper-button:hover:not(:disabled) { background: var(--surface-hover); color: var(--text); }
+.stepper-button:focus-visible { outline: 0; box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent), transparent 72%); }
+.stepper-button:disabled { cursor: not-allowed; opacity: .35; }
+.stepper-button svg { width: 13px; height: 13px; }
+.stepper-value { display: flex; min-width: 64px; height: 100%; align-items: center; justify-content: center; padding: 0 8px; border: 0; border-left: 1px solid var(--line); border-right: 1px solid var(--line); background: transparent; color: var(--text); cursor: text; font: inherit; font-variant-numeric: tabular-nums; }
+.stepper-value:hover { background: var(--surface-hover); }
+.stepper-value:focus-visible { outline: 0; box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent), transparent 72%); }
+.stepper-input { width: 72px; height: 100%; padding: 0 6px; border: 0; border-left: 1px solid var(--line); border-right: 1px solid var(--line); outline: 0; background: var(--surface-soft); color: var(--text); font: inherit; font-variant-numeric: tabular-nums; text-align: center; }
+.stepper-input:focus-visible { box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent), transparent 72%); }
 .markdown-css-settings { margin-top: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-soft); }
 .markdown-css-settings > summary { padding: 9px 11px; cursor: pointer; color: var(--text); font-size: 11px; font-weight: 650; }
 .markdown-css-settings > p { margin: 0; padding: 0 13px 10px; color: var(--muted); font-size: 10.5px; line-height: 1.6; }
@@ -655,7 +665,7 @@ button:disabled { cursor: not-allowed; opacity: .56; }
   .topbar-indicators { gap: 6px; padding-right: 8px; }
   .thinking-select { min-width: 72px; }
   .model-menu-trigger { max-width: 42vw; }
-  .range-setting { grid-template-columns: 1fr; gap: 10px; }
+  .stepper-setting { align-items: flex-start; flex-direction: column; gap: 8px; }
   :root { --chat-column-gutter: 24px; }
   .timeline-inner { padding: 20px 0 26px; }
   .composer-wrap { padding: 8px 0 10px; }
