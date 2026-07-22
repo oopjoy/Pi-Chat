@@ -500,10 +500,14 @@ test("control-change SSE marks only the owning browser window as writable", asyn
   const ownerFrames: string[] = [];
   const observerFrames: string[] = [];
   const clients = (app as unknown as { sseClients: Map<{ write: (frame: string) => void }, string> }).sseClients;
+  const sessionControl = (app as unknown as { sessionControl: { clientConnected: (id: string) => void } }).sessionControl;
   const owner = "11111111-1111-4111-8111-111111111111";
   const observer = "22222222-2222-4222-8222-222222222222";
+  // Presence comes from live SSE leases; seed both broadcast targets and connected maps.
   clients.set({ write: (frame) => { ownerFrames.push(frame); } }, owner);
   clients.set({ write: (frame) => { observerFrames.push(frame); } }, observer);
+  sessionControl.clientConnected(owner);
+  sessionControl.clientConnected(observer);
   const server = createServer((request, response) => void app.handle(request, response));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();

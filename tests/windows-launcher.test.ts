@@ -51,8 +51,10 @@ test("launcher scripts derive paths dynamically and avoid unsafe PowerShell inte
   assert.match(ui, /launcherExitCode -ne 0/);
   assert.match(ui, /server-\$runId\.stdout\.log/);
   assert.match(ui, /server-\$runId\.stderr\.log/);
-  assert.match(ui, /Open log/);
-  assert.match(ui, /Close/);
+  assert.match(ui, /Pi Chat 启动失败/);
+  assert.match(ui, /打开日志/);
+  assert.match(ui, /重试/);
+  assert.match(ui, /关闭/);
   assert.match(ui, /PI_CHAT_SKIP_OPEN/);
   assert.match(ui, /Open-PiChatWindow/);
   assert.match(ui, /\$form\.Hide\(\)/);

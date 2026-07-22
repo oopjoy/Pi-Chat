@@ -1,6 +1,6 @@
 {
   "name": "pi-chat",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "A local-first Web/PWA client for Pi RPC",

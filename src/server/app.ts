@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
 import { stat, unlink } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -15,15 +15,15 @@ import { asCommands, asMessages, asModels, asSessionStats, asState, messageWindo
 import { idForPath, SessionIndex, type SessionUsageSnapshot } from "./session-index.js";
 import { RuntimePool, type PendingTurnSettings, type SecondaryRuntime } from "./runtime-pool.js";
 import { SessionControl, SessionControlConflictError } from "./session-control.js";
+import { PromptScheduler, PROMPT_PREPARE_TIMEOUT_MS } from "./prompt-scheduler.js";
+import { SseHub } from "./sse-hub.js";
 import { saveWorkspace } from "./workspace-state.js";
 import { requestGuardError } from "./request-guard.js";
 
 export { messageWindow, promptImages, RECENT_TURN_WINDOW_SIZE } from "./pi-data.js";
+export { PROMPT_PREPARE_TIMEOUT_MS } from "./prompt-scheduler.js";
 export const TURN_WINDOW_INCREMENT = 10;
 const MAX_TURN_WINDOW_SIZE = 10_000;
-// A prompt RPC resolves only after Pi preflight. That phase may auto-compact a
-// long session, so it needs a larger budget than normal RPC state operations.
-const PROMPT_PREPARE_TIMEOUT_MS = 200_000;
 const DEFAULT_SECONDARY_RUNTIME_SWEEP_MS = 60 * 1_000;
 const DEFAULT_GATE_REQUEST_TIMEOUT_MS = 10 * 60 * 1_000;
 const BUILTIN_COMMANDS: SlashCommand[] = [
@@ -31,9 +31,6 @@ const BUILTIN_COMMANDS: SlashCommand[] = [
   { name: "compact", description: "压缩当前会话上下文，可附加指令", source: "builtin" },
   { name: "abort", description: "停止当前生成", source: "builtin" },
 ];
-interface InternalQueuedPrompt extends QueuedPrompt {
-  images: PromptImage[];
-}
 
 export interface PreparedApplicationRestart {
   promote(): Promise<void>;
@@ -65,13 +62,12 @@ export interface PiChatAppOptions {
 }
 
 export class PiChatApp {
-  private readonly sseClients = new Map<ServerResponse, string>();
+  private readonly sseHub = new SseHub();
+  /** Same Map as SseHub; dual-session tests seed write stubs here. */
+  private readonly sseClients: Map<ServerResponse, string>;
+  private readonly scheduler: PromptScheduler;
   private readonly unsubscribe: () => void;
-  private readonly promptQueue: InternalQueuedPrompt[] = [];
-  private running = false;
   private lastPrimaryState: PiState = { model: null, isStreaming: false };
-  private queuePaused = false;
-  private dispatching = false;
   private closed = false;
   private currentCwd: string;
   private activeSessionId = "";
@@ -92,18 +88,31 @@ export class PiChatApp {
   private readonly secondaryRuntimeSweepTimer: NodeJS.Timeout;
   private readonly requestToken: string;
   private allowedHosts: string[];
-  private liveMessage: PiMessage | undefined;
-  private toolStatus = "";
-  private pendingTurnSettings: PendingTurnSettings = {};
-  private pendingExtensionRequest: ExtensionUiRequest | undefined;
   private readonly lifecycleCoordinator: ApplicationLifecycleCoordinator;
   /** A compaction changes the prompt structure; wait for a later completed turn before reporting occupancy again. */
   private readonly modelContextWindows = new Map<string, number>();
   private readonly contextUsagePendingRefresh = new Set<string>();
   private readonly contextUsageRefreshTurn = new Set<string>();
 
+  // Primary queue/runtime flags live on PromptScheduler; aliases keep route handlers stable.
+  private get promptQueue() { return this.scheduler.primaryQueue; }
+  private get running() { return this.scheduler.primaryRunning; }
+  private set running(value: boolean) { this.scheduler.primaryRunning = value; }
+  private get queuePaused() { return this.scheduler.primaryQueuePaused; }
+  private set queuePaused(value: boolean) { this.scheduler.primaryQueuePaused = value; }
+  private get dispatching() { return this.scheduler.primaryDispatching; }
+  private set dispatching(value: boolean) { this.scheduler.primaryDispatching = value; }
+  private get liveMessage() { return this.scheduler.primaryLiveMessage; }
+  private set liveMessage(value: PiMessage | undefined) { this.scheduler.primaryLiveMessage = value; }
+  private get toolStatus() { return this.scheduler.primaryToolStatus; }
+  private set toolStatus(value: string) { this.scheduler.primaryToolStatus = value; }
+  private get pendingTurnSettings() { return this.scheduler.primaryPendingTurnSettings; }
+  private get pendingExtensionRequest() { return this.scheduler.primaryPendingExtensionRequest; }
+  private set pendingExtensionRequest(value: ExtensionUiRequest | undefined) { this.scheduler.primaryPendingExtensionRequest = value; }
+
   constructor(private readonly options: PiChatAppOptions) {
     this.currentCwd = resolve(options.cwd);
+    this.sseClients = this.sseHub.clientMap;
     this.lifecycleCoordinator = new ApplicationLifecycleCoordinator(() => this.broadcastLifecycle());
     this.requestToken = options.requestToken || randomBytes(32).toString("base64url");
     // Bare loopback names are used only by in-process test apps. The production
@@ -118,6 +127,25 @@ export class PiChatApp {
     this.sessionControllers = this.sessionControl.sessionControllers;
     this.connectedClients = this.sessionControl.connectedClients;
     this.viewedSessionsByClient = this.sessionControl.viewedSessionsByClient;
+    this.scheduler = new PromptScheduler({
+      isClosed: () => this.closed,
+      isLifecycleIdle: () => this.applicationLifecycle === "idle",
+      primaryRpc: () => this.options.rpc,
+      activeSessionId: () => this.activeSessionId,
+      ensurePrimaryRuntime: () => this.ensurePrimaryRuntime(),
+      recoverRuntime: (runtime) => this.recoverRuntime(runtime),
+      touchRuntime: (runtime) => this.runtimePool.touch(runtime),
+      applyPendingTurnSettings: (rpc, pending) => this.applyPendingTurnSettings(rpc, pending),
+      broadcast: (event) => this.broadcast(event),
+      onPrimaryPromptAccepted: (sessionId) => {
+        this.broadcast({ type: "pi_chat_sessions_changed", action: "created", sessionId });
+      },
+      onSecondaryPromptAccepted: (runtime) => {
+        runtime.draftSession = undefined;
+        runtime.draftSessionPath = undefined;
+        this.broadcast({ type: "pi_chat_sessions_changed", action: "created", sessionId: runtime.id });
+      },
+    });
     this.runtimePool = new RuntimePool({
       now: this.now,
       maxIdleSecondaryRuntimes: options.maxIdleSecondaryRuntimes,
@@ -208,31 +236,32 @@ export class PiChatApp {
     // windows made shutdown/restart scale by roughly three seconds per worker.
     await this.runtimePool.stopAll({ cleanupDrafts: true });
     this.sessionControl.clear();
+    this.scheduler.clearPrimary();
     for (const timer of this.pendingExtensionTimers.values()) clearTimeout(timer);
     this.pendingExtensionTimers.clear();
-    for (const client of this.sseClients.keys()) client.end();
-    this.sseClients.clear();
+    this.sseHub.closeAll();
   }
 
   private broadcast(event: Record<string, unknown>): void {
-    const frame = `event: pi\ndata: ${JSON.stringify(event)}\n\n`;
-    for (const client of this.sseClients.keys()) client.write(frame);
+    this.sseHub.broadcast(event);
   }
 
   private broadcastControlState(sessionId: string): void {
-    for (const [client, clientId] of this.sseClients) {
-      const event = { type: "pi_chat_session_control_changed", sessionId, ...this.sessionControl.controlState(sessionId, clientId) };
-      client.write(`event: pi\ndata: ${JSON.stringify(event)}\n\n`);
-    }
+    this.sseHub.broadcastEach((clientId) => ({
+      type: "pi_chat_session_control_changed",
+      sessionId,
+      ...this.sessionControl.controlState(sessionId, clientId),
+    }));
   }
 
   private publicQueue(queue = this.promptQueue): QueuedPrompt[] {
-    return queue.map(({ id, message, imageCount, createdAt }) => ({ id, message, imageCount, createdAt }));
+    return this.scheduler.publicQueue(queue);
   }
 
   private broadcastQueue(sessionId = this.activeSessionId): void {
     const runtime = this.runtimePool.get(sessionId);
-    this.broadcast({ type: "pi_chat_queue_update", queue: this.publicQueue(runtime?.promptQueue || this.promptQueue), paused: runtime?.queuePaused ?? this.queuePaused, piChatSessionId: sessionId });
+    if (runtime) this.scheduler.broadcastRuntimeQueue(runtime);
+    else this.scheduler.broadcastPrimaryQueue();
   }
 
   private activeSessionIds(): string[] {
@@ -486,68 +515,15 @@ export class PiChatApp {
   }
 
   private async sendPrompt(message: string, images: PromptImage[]): Promise<void> {
-    await this.ensurePrimaryRuntime();
-    await this.applyPendingTurnSettings(this.options.rpc, this.pendingTurnSettings);
-    this.running = true;
-    try {
-      await this.options.rpc.send({ type: "prompt", message: message || "请查看这些图片。", ...(images.length ? { images } : {}) }, PROMPT_PREPARE_TIMEOUT_MS);
-      // Pi persists the user message before prompt resolves. Refresh sidebar metadata so
-      // this formerly empty composer immediately becomes a normal saved conversation.
-      this.broadcast({ type: "pi_chat_sessions_changed", action: "created", sessionId: this.activeSessionId });
-    } catch (error) {
-      this.running = false;
-      throw error;
-    }
+    await this.scheduler.sendPrimaryPrompt(message, images);
   }
 
   private async dispatchRuntimeNext(runtime: SecondaryRuntime): Promise<void> {
-    this.runtimePool.touch(runtime);
-    if (this.closed || this.applicationLifecycle !== "idle" || runtime.running || runtime.dispatching || runtime.queuePaused || !runtime.promptQueue.length) return;
-    if (runtime.failed || runtime.rpc.isRunning?.() === false) {
-      try {
-        await this.recoverRuntime(runtime);
-      } catch (error) {
-        runtime.queuePaused = true;
-        this.broadcastQueue(runtime.id);
-        this.broadcast({ type: "pi_chat_queue_error", error: error instanceof Error ? error.message : String(error), piChatSessionId: runtime.id });
-        return;
-      }
-    }
-    const next = runtime.promptQueue.shift();
-    if (!next) return;
-    runtime.dispatching = true;
-    this.broadcastQueue(runtime.id);
-    this.broadcast({ type: "pi_chat_queue_dispatch", id: next.id, message: next.message, imageCount: next.imageCount, piChatSessionId: runtime.id });
-    try {
-      await this.applyPendingTurnSettings(runtime.rpc, runtime.pendingTurnSettings);
-      runtime.running = true;
-      await runtime.rpc.send({ type: "prompt", message: next.message || "请查看这些图片。", ...(next.images.length ? { images: next.images } : {}) }, PROMPT_PREPARE_TIMEOUT_MS);
-    } catch (error) {
-      runtime.running = false;
-      runtime.dispatching = false;
-      runtime.queuePaused = true;
-      runtime.promptQueue.unshift(next);
-      this.broadcastQueue(runtime.id);
-      this.broadcast({ type: "pi_chat_queue_error", error: error instanceof Error ? error.message : String(error), piChatSessionId: runtime.id });
-    }
+    await this.scheduler.dispatchRuntimeNext(runtime);
   }
 
   private async dispatchNext(): Promise<void> {
-    if (this.closed || this.applicationLifecycle !== "idle" || this.running || this.dispatching || this.queuePaused || !this.promptQueue.length) return;
-    const next = this.promptQueue.shift();
-    if (!next) return;
-    this.dispatching = true;
-    this.broadcastQueue();
-    this.broadcast({ type: "pi_chat_queue_dispatch", id: next.id, message: next.message, imageCount: next.imageCount, piChatSessionId: this.activeSessionId });
-    try {
-      await this.sendPrompt(next.message, next.images);
-    } catch (error) {
-      this.dispatching = false;
-      this.queuePaused = true;
-      this.promptQueue.unshift(next);
-      this.broadcastQueue();
-      this.broadcast({ type: "pi_chat_queue_error", error: error instanceof Error ? error.message : String(error) });
-    }
+    await this.scheduler.dispatchPrimaryNext();
   }
 
   private sessionSummaries(sessions: BootstrapData["sessions"], _state: PiState, clientId = ""): BootstrapData["sessions"] {
@@ -928,12 +904,12 @@ export class PiChatApp {
         "x-accel-buffering": "no",
       });
       response.write(`event: ready\ndata: ${JSON.stringify({ ok: true, lifecycle: this.applicationLifecycle })}\n\n`);
-      this.sseClients.set(response, clientId);
+      this.sseHub.add(response, clientId);
       this.clientConnected(clientId);
       const timer = setInterval(() => response.write(": ping\n\n"), 20_000);
       request.once("close", () => {
         clearInterval(timer);
-        this.sseClients.delete(response);
+        this.sseHub.remove(response);
         this.clientDisconnected(clientId);
       });
       return;
@@ -1042,23 +1018,17 @@ export class PiChatApp {
         return;
       }
       if (secondaryRuntime) {
-        if (secondaryRuntime.running || secondaryRuntime.dispatching || secondaryRuntime.promptQueue.length || secondaryRuntime.queuePaused) {
-          if (secondaryRuntime.promptQueue.length >= 20) return json(response, 409, { error: "队列已满，最多保留 20 条" });
-          const queuedImageChars = secondaryRuntime.promptQueue.reduce((total, item) => total + item.images.reduce((sum, image) => sum + image.data.length, 0), 0);
-          const incomingImageChars = images.reduce((total, image) => total + image.data.length, 0);
-          if (queuedImageChars + incomingImageChars > 45_000_000) return json(response, 409, { error: "队列中的图片总量超过约 32 MB，请先等待或撤销部分消息" });
-          const queued: InternalQueuedPrompt = { id: randomUUID(), message, images, imageCount: images.length, createdAt: Date.now() };
-          secondaryRuntime.promptQueue.push(queued);
-          this.broadcastQueue(secondaryRuntime.id);
+        if (this.scheduler.runtimeBusyForQueue(secondaryRuntime)) {
+          const enqueueError = this.scheduler.assertCanEnqueue(secondaryRuntime.promptQueue, images);
+          if (enqueueError) return json(response, 409, { error: enqueueError });
+          const queued = this.scheduler.enqueueRuntime(secondaryRuntime, message, images);
           return json(response, 202, { accepted: true, queued: true, id: queued.id, queue: this.publicQueue(secondaryRuntime.promptQueue) });
         }
         try {
           await this.applyPendingTurnSettings(secondaryRuntime.rpc, secondaryRuntime.pendingTurnSettings);
           secondaryRuntime.running = true;
           await secondaryRuntime.rpc.send({ type: "prompt", message: message || "请查看这些图片。", ...(images.length ? { images } : {}) }, PROMPT_PREPARE_TIMEOUT_MS);
-          secondaryRuntime.draftSession = undefined;
-          secondaryRuntime.draftSessionPath = undefined;
-          this.broadcast({ type: "pi_chat_sessions_changed", action: "created", sessionId: secondaryRuntime.id });
+          this.scheduler.notifySecondaryPromptAccepted(secondaryRuntime);
           json(response, 202, { accepted: true, queued: false });
         } catch (error) {
           secondaryRuntime.running = false;
@@ -1066,14 +1036,10 @@ export class PiChatApp {
         }
         return;
       }
-      if (this.running || this.dispatching || this.promptQueue.length || this.queuePaused) {
-        if (this.promptQueue.length >= 20) return json(response, 409, { error: "队列已满，最多保留 20 条" });
-        const queuedImageChars = this.promptQueue.reduce((total, item) => total + item.images.reduce((sum, image) => sum + image.data.length, 0), 0);
-        const incomingImageChars = images.reduce((total, image) => total + image.data.length, 0);
-        if (queuedImageChars + incomingImageChars > 45_000_000) return json(response, 409, { error: "队列中的图片总量超过约 32 MB，请先等待或撤销部分消息" });
-        const queued: InternalQueuedPrompt = { id: randomUUID(), message, images, imageCount: images.length, createdAt: Date.now() };
-        this.promptQueue.push(queued);
-        this.broadcastQueue();
+      if (this.scheduler.primaryBusyForQueue()) {
+        const enqueueError = this.scheduler.assertCanEnqueue(this.promptQueue, images);
+        if (enqueueError) return json(response, 409, { error: enqueueError });
+        const queued = this.scheduler.enqueuePrimary(message, images);
         json(response, 202, { accepted: true, queued: true, id: queued.id, queue: this.publicQueue() });
         return;
       }
@@ -1151,7 +1117,7 @@ export class PiChatApp {
     }
 
     // Local/automation path only (scripts, future local CLI). Browser UI uses /api/workspace/pick.
-    // Not a remote-access surface; the service itself is loopback-only in 0.2.x.
+    // Not a remote-access surface; the service itself is loopback-only.
     if (url.pathname === "/api/workspace/set") {
       if (request.method !== "POST") return methodNotAllowed(response);
       const body = await bodyJson(request);

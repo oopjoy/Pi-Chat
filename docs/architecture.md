@@ -27,7 +27,7 @@ Three lifetimes must stay distinct:
 
 Closing a browser window must not be confused with stopping the Node service. Stopping the service stops hosted RPC workers.
 
-## Hard product boundaries (0.2.x)
+## Hard product boundaries (0.3.x)
 
 ### In scope
 
@@ -67,16 +67,18 @@ Current ownership still centers on `src/server/app.ts` (`PiChatApp`), with progr
 | `rpc-client.ts` | Global Pi process + capability probe |
 | `runtime-pool.ts` | Secondary Runtime maps, capacity mutex, ensure/draft/recover/reclaim/sweep/stopAll |
 | `session-control.ts` | Multi-window presence, exclusive control owner, delayed release timers |
+| `prompt-scheduler.ts` | Primary queue/dispatch, secondary queue dispatch, enqueue limits |
+| `sse-hub.ts` | SSE client map, broadcast / broadcastEach |
 
 ### Extraction order
 
 Extract **state ownership**, not only functions:
 
-1. **RuntimePool** — done (`runtime-pool.ts`); `PiChatApp` still handles secondary event → queue dispatch glue
-2. **SessionControl / WindowPresence** — done (`session-control.ts`); SSE control fan-out still in app
-3. **PromptScheduler** — queues, dispatch, abort/resume, pending model/thinking
-4. **SseHub** — subscribe/broadcast only
-5. **HttpRoutes** — last, after domain services have stable interfaces
+1. **RuntimePool** — done (`runtime-pool.ts`)
+2. **SessionControl / WindowPresence** — done (`session-control.ts`)
+3. **PromptScheduler** — done (`prompt-scheduler.ts`); primary/secondary queue + dispatch
+4. **SseHub** — done (`sse-hub.ts`); subscribe/broadcast only
+5. **HttpRoutes** — next wave; keep routes in `app.ts` until domain services stabilize further
 
 Acceptance for a real extraction:
 
@@ -108,15 +110,25 @@ Prefer small hooks and pure libs over growing `App.tsx` further.
 - Viewed idle runtimes may be reclaimed (not permanent pins)
 - Model/Thinking changes do not auto-claim control; foreign owners are rejected
 
+## Session control (0.3)
+
+- Observing banner only when a **live** foreign SSE owner exists
+- Sole live window auto-claims; never stuck behind a ghost owner
+- Disconnect grace defaults to 1.5s (reconnect safety without long takeover flash)
+- Frontend banner debounced (~400ms) to suppress reconnect flaps
+- Multi-window exclusive write control remains enforced
+
 ## Compatibility
 
-Prefer **RPC capability probe** over a hard Pi version allowlist. Document in release notes:
+Prefer **RPC capability probe** over a hard Pi version allowlist.
 
-- minimum tested Pi version;
-- last verified Pi version;
-- required capabilities.
+| Field | Value (0.3.0) |
+|---|---|
+| Required capabilities | `get_state`, `get_messages`, `get_available_models`, `get_commands`, `get_session_stats` |
+| Last verified Pi | 0.81.1 |
+| Minimum practical | Recent Pi with full RPC surface above |
 
-Missing required capabilities → fail startup clearly. Unverified-but-capable Pi may start with a non-blocking notice later if needed.
+Missing required capabilities → fail startup clearly.
 
 ## Security posture
 
@@ -124,4 +136,4 @@ Missing required capabilities → fail startup clearly. Unverified-but-capable P
 - Rotating in-memory request token
 - Strict Host / Origin checks
 - System Gate is installed and self-healed; not a user-removable ordinary extension
-- No public network deployment story in 0.2.x
+- No public network deployment story in 0.3.x

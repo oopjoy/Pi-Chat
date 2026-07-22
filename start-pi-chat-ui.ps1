@@ -49,6 +49,7 @@ public sealed class PiChatSpinner : Control {
 '@
 
 $project = Split-Path -Parent $MyInvocation.MyCommand.Path
+$uiScriptPath = $MyInvocation.MyCommand.Path
 $launcher = Join-Path $project 'pi-chat-launch.cmd'
 $launcherProcessHelper = Join-Path $project 'scripts\pi-chat-launch-process.ps1'
 . $launcherProcessHelper
@@ -115,19 +116,77 @@ $label.Size = New-Object System.Drawing.Size(180, 28)
 $label.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
 $form.Controls.Add($label)
 
-$openLogButton = New-Object System.Windows.Forms.Button
-$openLogButton.Text = 'Open log'
-$openLogButton.Location = New-Object System.Drawing.Point(130, 70)
-$openLogButton.Size = New-Object System.Drawing.Size(88, 28)
-$openLogButton.Visible = $false
+$detailLabel = New-Object System.Windows.Forms.Label
+$detailLabel.Text = ''
+$detailLabel.Font = New-Object System.Drawing.Font('Segoe UI', 8.5, [System.Drawing.FontStyle]::Regular)
+$detailLabel.ForeColor = [System.Drawing.Color]::FromArgb(110, 120, 135)
+$detailLabel.Location = New-Object System.Drawing.Point(86, 48)
+$detailLabel.Size = New-Object System.Drawing.Size(230, 34)
+$detailLabel.TextAlign = [System.Drawing.ContentAlignment]::TopLeft
+$detailLabel.Visible = $false
+$form.Controls.Add($detailLabel)
+
+function New-PiChatActionButton {
+  param(
+    [string]$Text,
+    [System.Drawing.Point]$Location,
+    [System.Drawing.Size]$Size,
+    [System.Drawing.Color]$ForeColor,
+    [System.Drawing.Color]$BackColor,
+    [System.Drawing.Color]$BorderColor
+  )
+  $button = New-Object System.Windows.Forms.Button
+  $button.Text = $Text
+  $button.Location = $Location
+  $button.Size = $Size
+  $button.FlatStyle = 'Flat'
+  $button.FlatAppearance.BorderSize = 1
+  $button.FlatAppearance.BorderColor = $BorderColor
+  $button.BackColor = $BackColor
+  $button.ForeColor = $ForeColor
+  $button.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Regular)
+  $button.Cursor = [System.Windows.Forms.Cursors]::Hand
+  $button.Visible = $false
+  $button.UseVisualStyleBackColor = $false
+  return $button
+}
+
+$openLogButton = New-PiChatActionButton `
+  -Text '打开日志' `
+  -Location (New-Object System.Drawing.Point(86, 90)) `
+  -Size (New-Object System.Drawing.Size(100, 30)) `
+  -ForeColor ([System.Drawing.Color]::FromArgb(42, 108, 221)) `
+  -BackColor ([System.Drawing.Color]::FromArgb(245, 248, 252)) `
+  -BorderColor ([System.Drawing.Color]::FromArgb(180, 200, 230))
 $openLogButton.Add_Click({ Start-Process -FilePath "$env:SystemRoot\System32\notepad.exe" -ArgumentList @($logPath) })
 $form.Controls.Add($openLogButton)
 
-$closeButton = New-Object System.Windows.Forms.Button
-$closeButton.Text = 'Close'
-$closeButton.Location = New-Object System.Drawing.Point(228, 70)
-$closeButton.Size = New-Object System.Drawing.Size(88, 28)
-$closeButton.Visible = $false
+$retryButton = New-PiChatActionButton `
+  -Text '重试' `
+  -Location (New-Object System.Drawing.Point(194, 90)) `
+  -Size (New-Object System.Drawing.Size(64, 30)) `
+  -ForeColor ([System.Drawing.Color]::White) `
+  -BackColor ([System.Drawing.Color]::FromArgb(42, 108, 221)) `
+  -BorderColor ([System.Drawing.Color]::FromArgb(42, 108, 221))
+$retryButton.Add_Click({
+  $form.Hide()
+  $retry = Start-Process -FilePath 'powershell.exe' -ArgumentList @(
+    '-NoProfile',
+    '-ExecutionPolicy', 'Bypass',
+    '-File', $uiScriptPath,
+    '-Mode', $Mode
+  ) -WorkingDirectory $project -PassThru
+  if ($retry) { $form.Close() } else { $form.Show() }
+})
+$form.Controls.Add($retryButton)
+
+$closeButton = New-PiChatActionButton `
+  -Text '关闭' `
+  -Location (New-Object System.Drawing.Point(266, 90)) `
+  -Size (New-Object System.Drawing.Size(50, 30)) `
+  -ForeColor ([System.Drawing.Color]::FromArgb(70, 80, 95)) `
+  -BackColor ([System.Drawing.Color]::White) `
+  -BorderColor ([System.Drawing.Color]::FromArgb(210, 216, 224))
 $closeButton.Add_Click({ $form.Close() })
 $form.Controls.Add($closeButton)
 
@@ -198,13 +257,30 @@ $exitTimer.Add_Tick({
     if (Test-Path -LiteralPath $serverErrPath) { Get-Content -LiteralPath $serverErrPath | Add-Content -LiteralPath $logPath }
     $animationTimer.Stop()
     $spinner.Visible = $false
-    $label.Text = 'Pi Chat failed to start'
+
+    $summary = "退出代码 $($script:launcherExitCode)"
+    foreach ($candidate in @($launcherErrPath, $serverErrPath, $launcherOutPath, $serverOutPath)) {
+      if (-not (Test-Path -LiteralPath $candidate)) { continue }
+      $lines = @(Get-Content -LiteralPath $candidate -ErrorAction SilentlyContinue | Where-Object { $_.Trim() })
+      if ($lines.Count -gt 0) {
+        $tail = [string]$lines[-1]
+        if ($tail.Length -gt 90) { $tail = $tail.Substring(0, 87) + '...' }
+        $summary = $tail
+        break
+      }
+    }
+
+    $label.Text = 'Pi Chat 启动失败'
     $label.ForeColor = [System.Drawing.Color]::FromArgb(176, 32, 37)
-    $label.Location = New-Object System.Drawing.Point(86, 20)
-    $label.Size = New-Object System.Drawing.Size(230, 35)
+    $label.Font = New-Object System.Drawing.Font('Segoe UI', 11, [System.Drawing.FontStyle]::Bold)
+    $label.Location = New-Object System.Drawing.Point(86, 18)
+    $label.Size = New-Object System.Drawing.Size(230, 26)
+    $detailLabel.Text = $summary
+    $detailLabel.Visible = $true
     $openLogButton.Visible = $true
+    $retryButton.Visible = $true
     $closeButton.Visible = $true
-    $form.ClientSize = New-Object System.Drawing.Size(340, 116)
+    $form.ClientSize = New-Object System.Drawing.Size(340, 136)
     $form.Activate()
     return
   }

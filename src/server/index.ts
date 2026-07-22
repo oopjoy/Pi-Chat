@@ -54,7 +54,7 @@ function findProjectRoot(start: string): string {
 
 const options = parseArgs(process.argv.slice(2));
 const loopbackHosts = new Set(["127.0.0.1", "localhost", "::1"]);
-// Remote access is intentionally out of scope for 0.2.x (no auth/HTTPS/audit).
+// Remote access is intentionally out of scope (no auth/HTTPS/audit).
 // Reserved for a future dedicated design — do not reintroduce a half-open host escape hatch.
 if (!loopbackHosts.has(options.host)) {
   throw new Error("Pi Chat 当前只支持本机回环监听（127.0.0.1 / localhost / ::1）。远程访问不是当前产品能力；请勿绑定非回环地址或暴露到公网。");

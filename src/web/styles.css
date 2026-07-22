@@ -183,14 +183,14 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .session-name { display: block; font-size: 13px; font-weight: 590; }
 .session-item.is-active .session-name { color: var(--accent); }
 .session-meta { display: flex; align-items: center; gap: 6px; margin-top: 4px; overflow: visible; color: var(--muted); font-size: 10.5px; text-overflow: clip; }
-/* Session state lives beside the timestamp: neutral is cold, green is ready,
+/* Session state lives beside the timestamp only (not the title color): neutral is cold, green is ready,
    yellow needs attention, red is reserved for a future session-level failure. */
 .session-status { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: #a6afbc; }
 .session-status.is-ready { background: #24a36a; box-shadow: 0 0 0 3px color-mix(in srgb, #24a36a, transparent 84%); }
 .session-status.is-pending { background: #d89318; box-shadow: 0 0 0 3px color-mix(in srgb, #d89318, transparent 84%); }
 .session-status.is-error { background: var(--danger); box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger), transparent 84%); }
 .session-status.is-running { width: 11px; height: 11px; border: 1.7px solid color-mix(in srgb, var(--accent), transparent 58%); border-top-color: var(--accent); background: transparent; animation: spin .75s linear infinite; }
-.session-item.is-running:not(.is-active) .session-name { color: #16875a; }
+
 .session-item-actions { position: absolute; z-index: 2; top: 50%; right: 6px; display: flex; gap: 4px; transform: translateY(-50%); opacity: 0; pointer-events: none; transition: opacity .12s ease; }
 .session-row:hover .session-item-actions, .session-row:focus-within .session-item-actions { opacity: 1; pointer-events: auto; }
 .session-item-actions button { display: grid; width: 29px; height: 29px; place-items: center; padding: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--muted); box-shadow: 0 2px 7px rgba(23, 34, 54, .07); cursor: pointer; }
@@ -418,8 +418,25 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .attachment-menu-icon { grid-row: 1 / 3; align-self: center; width: 20px; height: 20px; color: var(--accent); }
 .attachment-menu strong { font-size: 11px; }
 .attachment-menu small { color: var(--muted); font-size: 9px; }
-.composer textarea { min-width: 0; min-height: 34px; max-height: 180px; flex: 1; resize: none; padding: 6px 2px; border: 0; outline: 0; background: transparent; color: var(--text); line-height: 1.5; }
-.composer textarea::placeholder { color: var(--muted); }
+/* Composer keeps a fixed UI size so appearance “reading size” does not bloat typing. */
+.composer textarea {
+  min-width: 0;
+  min-height: 34px;
+  max-height: 180px;
+  flex: 1;
+  resize: none;
+  padding: 6px 2px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--app-font);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.55;
+  letter-spacing: 0.02em;
+}
+.composer textarea::placeholder { color: var(--muted); font-size: 13.5px; letter-spacing: 0.015em; }
 .image-previews { display: flex; gap: 8px; overflow-x: auto; padding: 2px 2px 5px; }
 .image-preview { position: relative; width: 92px; flex: 0 0 92px; }
 .image-preview img { display: block; width: 92px; height: 72px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-soft); object-fit: cover; }

@@ -6,7 +6,11 @@ export interface SessionControlState {
 }
 
 export interface SessionControlOptions {
-  /** Grace period after the last SSE close before ownership is released. */
+  /**
+   * Grace after the last SSE close before dropping ownership.
+   * During grace, other windows without sole-live status still get 409 on writes.
+   * The observing banner only appears when the owner still has a live SSE.
+   */
   controllerReleaseMs?: number;
   /** Notify host to push per-window control SSE frames for this session. */
   onControlChanged: (sessionId: string) => void;
@@ -25,14 +29,41 @@ export class SessionControl {
   private readonly controllerReleaseMs: number;
 
   constructor(private readonly options: SessionControlOptions) {
-    this.controllerReleaseMs = Math.max(0, options.controllerReleaseMs ?? 5_000);
+    // Short grace: enough for same-window SSE reconnect, short enough to limit
+    // post-close write lock for a second window.
+    this.controllerReleaseMs = Math.max(0, options.controllerReleaseMs ?? 1_500);
+  }
+
+  /** Active EventSource / SSE lease. */
+  isClientConnected(clientId: string): boolean {
+    return Boolean(clientId) && this.connectedClients.has(clientId);
+  }
+
+  /** Connected or still inside disconnect grace (ownership not yet released). */
+  isClientHeld(clientId: string): boolean {
+    return this.isClientConnected(clientId) || this.controllerReleaseTimers.has(clientId);
   }
 
   controlState(sessionId: string, clientId = ""): SessionControlState {
     const controlOwner = this.sessionControllers.get(sessionId);
+    if (!controlOwner) {
+      return clientId ? { controlledByThisWindow: false } : {};
+    }
+
+    // Self always sees own ownership (bootstrap/prompt may race ahead of SSE).
+    if (clientId && controlOwner === clientId) {
+      return { controlOwner, controlledByThisWindow: true };
+    }
+
+    // Observing banner only for a *live* foreign owner. Grace/ghost owners must not
+    // flash “接管控制” when a sole PWA reconnects or a closed window is draining.
+    if (!this.isClientConnected(controlOwner)) {
+      return clientId ? { controlledByThisWindow: false } : {};
+    }
+
     return {
-      ...(controlOwner ? { controlOwner } : {}),
-      ...(clientId ? { controlledByThisWindow: controlOwner === clientId } : {}),
+      controlOwner,
+      ...(clientId ? { controlledByThisWindow: false } : {}),
     };
   }
 
@@ -45,9 +76,15 @@ export class SessionControl {
   assertNoForeignController(sessionId: string, clientId: string): void {
     if (!clientId) return;
     const current = this.sessionControllers.get(sessionId);
-    if (current && current !== clientId) {
-      throw new SessionControlConflictError("此对话正在另一窗口中控制；请先接管控制权");
-    }
+    if (!current || current === clientId) return;
+
+    // The only live browser window may displace any foreign owner (ghost, grace,
+    // or API-only). A single PWA must never need “接管控制”.
+    // Multi-window clients without SSE still use the map as exclusive ownership
+    // (prompt/takeover tests); they are not sole-live and stay blocked.
+    if (this.isClientConnected(clientId) && this.otherWindowCount(clientId) === 0) return;
+
+    throw new SessionControlConflictError("此对话正在另一窗口中控制；请先接管控制权");
   }
 
   requireControl(sessionId: string, clientId: string): void {
@@ -104,7 +141,20 @@ export class SessionControl {
     // by the browser window's live SSE lease and disappears after disconnect.
     if (clientId && sessionId && this.connectedClients.has(clientId)) {
       this.viewedSessionsByClient.set(clientId, sessionId);
+      this.claimIfSoleLiveWindow(sessionId, clientId);
     }
+  }
+
+  /**
+   * When only one browser window has a live SSE, claim control immediately so a
+   * single PWA never sits behind a ghost or grace-period foreign owner.
+   */
+  claimIfSoleLiveWindow(sessionId: string, clientId: string): void {
+    if (!clientId || !sessionId || !this.isClientConnected(clientId)) return;
+    if (this.otherWindowCount(clientId) > 0) return;
+    const current = this.sessionControllers.get(sessionId);
+    if (current === clientId) return;
+    this.setController(sessionId, clientId);
   }
 
   isViewed(sessionId: string): boolean {
