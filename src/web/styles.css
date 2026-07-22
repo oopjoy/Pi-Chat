@@ -302,7 +302,7 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 /* Keep the model slot stable as models change; only its label ellipsizes. */
 .model-menu { position: relative; width: 168px; min-width: 0; flex: 0 0 168px; }
 .model-menu-trigger { display: flex; width: 100%; max-width: none; height: 26px; min-width: 0; align-items: center; gap: 6px; padding: 2px 4px 2px 1px; border: 0; border-radius: 6px; outline: 0; background: transparent; color: var(--text); cursor: pointer; font: inherit; font-size: 12px; }
-.model-menu-trigger > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-menu-trigger > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .model-menu-trigger:hover:not(:disabled) { background: var(--surface-hover); }
 .model-menu-trigger:focus-visible { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent), transparent 72%); }
 .model-menu-trigger:disabled { cursor: not-allowed; }
