@@ -553,11 +553,13 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .setting-row strong, .setting-row small { display: block; }
 .setting-row strong, .stepper-setting-label strong { font-size: 13px; }
 .setting-row small { margin-top: 3px; color: var(--muted); font-size: 10.5px; }
-.setting-row select { min-width: 138px; height: 34px; padding: 6px 28px 6px 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-soft); color: var(--text); font-size: 11.5px; }
+.setting-row select { min-width: 138px; height: 32px; padding: 5px 26px 5px 10px; border: 1px solid var(--line); border-radius: 8px; outline: 0; background: var(--surface); color: var(--text); font-size: 12px; }
+.setting-row select:hover { background: var(--surface-hover); }
+.setting-row select:focus-visible { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent), transparent 72%); }
 /* Discrete numeric preferences share the top-bar compact-control family. */
 .stepper-setting-label { display: grid; min-width: 0; gap: 2px; }
 .stepper-setting-label small { color: var(--muted); font-size: 10.5px; font-variant-numeric: tabular-nums; }
-.stepper { display: flex; flex: 0 0 auto; height: 30px; align-items: center; overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); font-size: 12px; }
+.stepper { display: flex; flex: 0 0 auto; height: 32px; align-items: center; overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); font-size: 12px; }
 .stepper-button { display: flex; width: 30px; height: 100%; align-items: center; justify-content: center; border: 0; background: transparent; color: var(--muted); cursor: pointer; }
 .stepper-button:hover:not(:disabled) { background: var(--surface-hover); color: var(--text); }
 .stepper-button:focus-visible { outline: 0; box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent), transparent 72%); }
