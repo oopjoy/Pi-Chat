@@ -12,50 +12,19 @@ import { SessionControlBanner } from "./components/SessionControlBanner";
 import { SessionDialog, type SessionDialogState } from "./components/SessionDialog";
 import { SessionSidebar } from "./components/SessionSidebar";
 import { TopBar } from "./components/TopBar";
+import { useLiveMessageScheduler } from "./hooks/use-live-message";
+import { usePiEventSource } from "./hooks/use-pi-event-source";
 import { activeSessionIdsFromEvent, applyActiveSessionIds } from "./lib/active-sessions";
 import { adjacentUserMessageOffset } from "./lib/conversation-navigation";
 import { groupConversation } from "./lib/conversation-process";
 import { extensionExecutionNotice } from "./lib/extension-notice";
 import { gateModeFromCommand, gateModeFromNotice, type GateMode } from "./lib/gate-mode";
+import { assistantMessage, lifecycleFromEvent, parseEventData, userMessage } from "./lib/pi-events";
 import { applyAppearance, loadAppearance, loadSidebarOpen, loadSidebarWidth, saveAppearance, saveSidebarOpen, saveSidebarWidth, type AppearancePreferences } from "./lib/preferences";
 import { rememberedSessionId, rememberSessionId } from "./lib/session-location";
+import { SessionViewCache } from "./lib/session-view-cache";
 
 const EMPTY_STATE: PiState = { model: null, isStreaming: false };
-const VIEW_CACHE_LIMIT = 5;
-
-type SessionViewSnapshot = SessionViewData & { cachedAt: number };
-
-function rememberView(cache: Map<string, SessionViewSnapshot>, view: SessionViewData): void {
-  cache.delete(view.session.id);
-  cache.set(view.session.id, { ...view, cachedAt: Date.now() });
-  while (cache.size > VIEW_CACHE_LIMIT) {
-    const oldest = cache.keys().next().value;
-    if (!oldest) break;
-    cache.delete(oldest);
-  }
-}
-
-function forgetView(cache: Map<string, SessionViewSnapshot>, id: string): void {
-  cache.delete(id);
-}
-
-function assistantMessage(event: Record<string, unknown>): PiMessage | null {
-  const message = event.message;
-  if (!message || typeof message !== "object" || (message as PiMessage).role !== "assistant") return null;
-  return message as PiMessage;
-}
-
-function userMessage(text: string, images: PromptImage[]): PiMessage {
-  if (!images.length) return { role: "user", content: text, timestamp: Date.now() };
-  return {
-    role: "user",
-    content: [
-      ...(text ? [{ type: "text", text }] : []),
-      ...images.map(({ data, mimeType }) => ({ type: "image", data, mimeType })),
-    ],
-    timestamp: Date.now(),
-  };
-}
 
 export function App() {
   const [state, setState] = useState<PiState>(EMPTY_STATE);
@@ -103,35 +72,12 @@ export function App() {
   const viewedSessionIdRef = useRef("");
   const applicationLifecycleRef = useRef<ApplicationLifecycle>("idle");
   const handoffWaitRef = useRef<Promise<void> | null>(null);
-  const liveMessageTimerRef = useRef<number | null>(null);
-  const pendingLiveMessageRef = useRef<PiMessage | null>(null);
-  const lastLiveMessageCommitRef = useRef(0);
   const sessionRefreshTimerRef = useRef<number | null>(null);
   const sessionRefreshInFlightRef = useRef(false);
   const sessionRefreshRequestedRef = useRef(false);
-  const viewCacheRef = useRef(new Map<string, SessionViewSnapshot>());
-
-  const clearPendingLiveMessage = useCallback(() => {
-    if (liveMessageTimerRef.current !== null) window.clearTimeout(liveMessageTimerRef.current);
-    liveMessageTimerRef.current = null;
-    pendingLiveMessageRef.current = null;
-  }, []);
-
-  const scheduleLiveMessage = useCallback((message: PiMessage) => {
-    pendingLiveMessageRef.current = message;
-    if (liveMessageTimerRef.current !== null) return;
-    const elapsed = performance.now() - lastLiveMessageCommitRef.current;
-    const commit = () => {
-      liveMessageTimerRef.current = null;
-      const latest = pendingLiveMessageRef.current;
-      pendingLiveMessageRef.current = null;
-      if (!latest) return;
-      lastLiveMessageCommitRef.current = performance.now();
-      setLiveMessage(latest);
-    };
-    if (elapsed >= 50) commit();
-    else liveMessageTimerRef.current = window.setTimeout(commit, 50 - elapsed);
-  }, []);
+  const viewCacheRef = useRef(new SessionViewCache());
+  const commitLiveMessage = useCallback((message: PiMessage) => setLiveMessage(message), []);
+  const { clearPendingLiveMessage, scheduleLiveMessage } = useLiveMessageScheduler(commitLiveMessage);
 
   const setViewedId = useCallback((id: string) => {
     clearPendingLiveMessage();
@@ -167,7 +113,7 @@ export function App() {
     setRuntimeStatus("active");
     const activeViewId = data.activeSessionId || data.sessions.find((item) => item.active)?.id || "";
     const activeViewSession = data.sessions.find((session) => session.id === activeViewId);
-    if (activeViewSession) rememberView(viewCacheRef.current, {
+    if (activeViewSession) viewCacheRef.current.remember({
       session: activeViewSession,
       state: data.state,
       messages: data.messages,
@@ -219,7 +165,7 @@ export function App() {
     if (wantedId && wantedId !== activeId) {
       try {
         const view = await api.viewSession(wantedId);
-        rememberView(viewCacheRef.current, view);
+        viewCacheRef.current.remember(view);
         applySessionView(view);
       } catch (cause) {
         // Another window may have deleted this Session while this page was refreshing.
@@ -267,17 +213,13 @@ export function App() {
 
   useEffect(() => saveSidebarOpen(sidebarOpen), [sidebarOpen]);
   useEffect(() => saveSidebarWidth(sidebarWidth), [sidebarWidth]);
-  useEffect(() => clearPendingLiveMessage, [clearPendingLiveMessage]);
 
-  useEffect(() => {
-    // Bootstrap obtains the per-start token before SSE is allowed to connect.
-    if (loading) return;
-    const source = new EventSource(api.eventsUrl());
-    // EventSource reconnects after a server restart, but it cannot replay the events missed
-    // while disconnected. Reload the requested Session as soon as the new stream is ready.
-    source.addEventListener("ready", (rawEvent) => {
-      const ready = JSON.parse((rawEvent as MessageEvent<string>).data || "{}") as { lifecycle?: ApplicationLifecycle };
-      if (ready.lifecycle === "restarting") {
+  // EventSource reconnects after a server restart, but it cannot replay events
+  // missed while disconnected. Keep transport ownership in usePiEventSource;
+  // this component remains responsible only for translating events into UI state.
+  const handleEventSourceReady = useCallback((rawEvent: Event, source: EventSource) => {
+      const ready = parseEventData(rawEvent);
+      if (lifecycleFromEvent(ready) === "restarting") {
         applicationLifecycleRef.current = "restarting";
         setApplicationLifecycle("restarting");
         setNotice("Pi Chat 正在构建并重启，暂时停止接收新操作…");
@@ -288,15 +230,16 @@ export function App() {
         });
         return;
       }
-      if (ready.lifecycle && ready.lifecycle !== "idle") {
-        applicationLifecycleRef.current = ready.lifecycle;
-        setApplicationLifecycle(ready.lifecycle);
-        if (ready.lifecycle === "shutting-down") {
+      const readyLifecycle = lifecycleFromEvent(ready);
+      if (readyLifecycle !== "idle") {
+        applicationLifecycleRef.current = readyLifecycle;
+        setApplicationLifecycle(readyLifecycle);
+        if (readyLifecycle === "shutting-down") {
           source.close();
           setCloseComplete("application");
           window.setTimeout(() => window.close(), 40);
         } else {
-          setNotice(ready.lifecycle === "workspace-changing" ? "正在切换工作目录…" : "正在更新配置并重载 Runtime…");
+          setNotice(readyLifecycle === "workspace-changing" ? "正在切换工作目录…" : "正在更新配置并重载 Runtime…");
         }
         return;
       }
@@ -304,13 +247,14 @@ export function App() {
         const id = viewedSessionIdRef.current;
         if (id) void api.markSessionViewed(id).catch(() => undefined);
       }).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
-    });
-    source.addEventListener("pi", (rawEvent) => {
-      const event = JSON.parse((rawEvent as MessageEvent<string>).data) as Record<string, unknown>;
+  }, [refresh]);
+
+  const handlePiEvent = useCallback((rawEvent: Event, source: EventSource) => {
+      const event = parseEventData(rawEvent);
       const type = String(event.type || "");
       const eventSessionId = typeof event.piChatSessionId === "string" ? event.piChatSessionId : "";
       const viewingEventSession = !eventSessionId || eventSessionId === viewedSessionIdRef.current;
-      if (eventSessionId && ["agent_start", "agent_settled", "message_start", "message_update", "message_end", "tool_execution_start", "tool_execution_end"].includes(type)) forgetView(viewCacheRef.current, eventSessionId);
+      if (eventSessionId && ["agent_start", "agent_settled", "message_start", "message_update", "message_end", "tool_execution_start", "tool_execution_end"].includes(type)) viewCacheRef.current.forget(eventSessionId);
       if (type === "pi_chat_application_closing") {
         source.close();
         setManagementSection(null);
@@ -385,7 +329,7 @@ export function App() {
           void refresh().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
         }
       } else if (type === "pi_chat_sessions_changed") {
-        if (typeof event.sessionId === "string") forgetView(viewCacheRef.current, event.sessionId);
+        if (typeof event.sessionId === "string") viewCacheRef.current.forget(event.sessionId);
         if (event.action === "deleted" && event.sessionId === viewedSessionIdRef.current) {
           viewedSessionIdRef.current = "";
           void refresh().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
@@ -433,8 +377,9 @@ export function App() {
         stoppingRef.current = false;
         setStopping(false);
       }
-    });
-    source.onerror = () => {
+  }, [applySessionView, clearPendingLiveMessage, refresh, scheduleLiveMessage, scheduleSidebarRefresh]);
+
+  const handleEventSourceError = useCallback((source: EventSource) => {
       if (applicationLifecycleRef.current === "restarting") {
         source.close();
         handoffWaitRef.current ||= api.waitForApplicationHandoff().then(() => window.location.reload()).catch((cause) => {
@@ -444,9 +389,16 @@ export function App() {
         return;
       }
       setError("与 Pi Chat 服务的事件连接已断开，浏览器将自动重连。");
-    };
-    return () => source.close();
-  }, [clearPendingLiveMessage, loading, refresh, scheduleLiveMessage, scheduleSidebarRefresh]);
+  }, []);
+
+  const eventsUrl = useCallback(() => api.eventsUrl(), []);
+  usePiEventSource({
+    enabled: !loading,
+    url: eventsUrl,
+    onReady: handleEventSourceReady,
+    onPi: handlePiEvent,
+    onError: handleEventSourceError,
+  });
 
   useEffect(() => {
     if (loading || !viewedSessionId) return;
@@ -537,7 +489,7 @@ export function App() {
         if (runtimeStatus !== "active") {
           setRuntimeStatus("restoring");
           const view = await api.activateSession(viewedSessionId);
-          forgetView(viewCacheRef.current, view.session.id);
+          viewCacheRef.current.forget(view.session.id);
           applySessionView(view);
         }
         await api.compact(command[2] || "", viewedSessionId);
@@ -552,7 +504,7 @@ export function App() {
       if (runtimeStatus !== "active") {
         setRuntimeStatus("restoring");
         const view = await api.activateSession(viewedSessionId);
-        forgetView(viewCacheRef.current, view.session.id);
+        viewCacheRef.current.forget(view.session.id);
         applySessionView(view);
       }
       const result = await api.prompt(message, images, viewedSessionId);
@@ -616,8 +568,8 @@ export function App() {
     setBusy(true);
     try {
       const view = await api.viewSession(id);
-      if (!view.isActive) rememberView(viewCacheRef.current, view);
-      else forgetView(viewCacheRef.current, view.session.id);
+      if (!view.isActive) viewCacheRef.current.remember(view);
+      else viewCacheRef.current.forget(view.session.id);
       applySessionView(view);
       stickToBottomRef.current = true;
     } catch (cause) {
@@ -645,7 +597,7 @@ export function App() {
     if (!viewedSessionId || runtimeStatus === "active") return;
     setRuntimeStatus("restoring");
     const view = await api.activateSession(viewedSessionId);
-    forgetView(viewCacheRef.current, view.session.id);
+    viewCacheRef.current.forget(view.session.id);
     applySessionView(view);
   };
 

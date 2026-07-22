@@ -135,11 +135,11 @@ test("closing one window does not rest its Session while an admitted mutation is
   const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
   const first = "11111111-1111-4111-8111-111111111111";
   const second = "22222222-2222-4222-8222-222222222222";
-  const internals = app as unknown as { connectedClients: Map<string, number>; viewedSessionsByClient: Map<string, string>; activeMutationRequests: number };
+  const internals = app as unknown as { connectedClients: Map<string, number>; viewedSessionsByClient: Map<string, string>; lifecycleCoordinator: { beginMutation(): () => void } };
   internals.connectedClients.set(first, 1);
   internals.connectedClients.set(second, 1);
   internals.viewedSessionsByClient.set(first, id);
-  internals.activeMutationRequests = 1;
+  const releaseMutation = internals.lifecycleCoordinator.beginMutation();
   const server = createServer((request, response) => void app.handle(request, response));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
@@ -151,7 +151,7 @@ test("closing one window does not rest its Session while an admitted mutation is
     assert.equal((await response.json() as { rested?: boolean }).rested, false);
     assert.equal(primary.stopCount, 0);
   } finally {
-    internals.activeMutationRequests = 0;
+    releaseMutation();
     server.close();
     await app.close();
   }

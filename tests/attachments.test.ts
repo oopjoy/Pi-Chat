@@ -12,7 +12,7 @@ test("production web entry advertises standalone install metadata", async () => 
   const html = await (await import("node:fs/promises")).readFile(new URL("../src/web/index.html", import.meta.url), "utf8");
   const manifest = JSON.parse(await (await import("node:fs/promises")).readFile(new URL("../src/web/public/manifest.webmanifest", import.meta.url), "utf8")) as { display: string; start_url: string; icons: Array<{ src: string }> };
   assert.match(html, /rel="manifest" href="\/manifest\.webmanifest(?:\?[^\"]+)?"/);
-  assert.match(html, /rel="icon" href="\/icons\/pi-chat-[^\"]+\.png"/);
+  assert.match(html, /rel="icon" href="\/icons\/pi-chat-[^\"]+\.png(?:\?[^\"]+)?"/);
   assert.equal(manifest.display, "standalone");
   assert.equal(manifest.start_url, "/");
   assert.equal(manifest.icons.length >= 2, true);

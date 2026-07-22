@@ -4,23 +4,19 @@ import { stat, unlink } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { basename, extname, join, normalize, resolve } from "node:path";
 import type { ApplicationLifecycle, BootstrapData, ExtensionUiRequest, ModelInfo, PiMessage, PiState, PromptImage, QueuedPrompt, SessionStats, SessionSummary, SessionViewData, SlashCommand, ThinkingLevel } from "../shared/types.js";
+import { ApplicationBusyError, ApplicationLifecycleConflictError, ApplicationLifecycleCoordinator, lifecycleMessage } from "./application-lifecycle.js";
 import { pickLocalFiles, pickWorkspaceFolder, readClipboardFiles } from "./file-picker.js";
 import { type FileSnapshot, restoreSnapshots, snapshotFile } from "./file-transaction.js";
+import { bodyJson, json, methodNotAllowed, MIME_TYPES, requestClientId, SECURITY_HEADERS } from "./http-transport.js";
 import { ModelManager } from "./model-manager.js";
 import { ResourceManager } from "./resource-manager.js";
 import { PiRpcClient, rpcData } from "./rpc-client.js";
+import { asCommands, asMessages, asModels, asSessionStats, asState, messageWindow, promptImages, RECENT_TURN_WINDOW_SIZE } from "./pi-data.js";
 import { idForPath, readSessionMessages, SessionIndex } from "./session-index.js";
 import { saveWorkspace } from "./workspace-state.js";
 import { requestGuardError } from "./request-guard.js";
 
-const SECURITY_HEADERS = {
-  "x-content-type-options": "nosniff",
-  "referrer-policy": "no-referrer",
-  "x-frame-options": "DENY",
-  "content-security-policy": "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'",
-};
-const JSON_HEADERS = { ...SECURITY_HEADERS, "content-type": "application/json; charset=utf-8", "cache-control": "no-store" };
-export const RECENT_TURN_WINDOW_SIZE = 20;
+export { messageWindow, promptImages, RECENT_TURN_WINDOW_SIZE } from "./pi-data.js";
 export const TURN_WINDOW_INCREMENT = 10;
 const MAX_TURN_WINDOW_SIZE = 10_000;
 const DEFAULT_SECONDARY_RUNTIME_IDLE_MS = 10 * 60 * 1_000;
@@ -37,101 +33,7 @@ const BUILTIN_COMMANDS: SlashCommand[] = [
   { name: "abort", description: "停止当前生成", source: "builtin" },
 ];
 class SessionControlConflictError extends Error {}
-class ApplicationBusyError extends Error {}
-class ApplicationLifecycleConflictError extends Error {
-  constructor(readonly lifecycle: ApplicationLifecycle, message: string) { super(message); }
-}
 
-const MIME_TYPES: Record<string, string> = {
-  ".css": "text/css; charset=utf-8",
-  ".html": "text/html; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".webmanifest": "application/manifest+json; charset=utf-8",
-  ".png": "image/png",
-  ".json": "application/json; charset=utf-8",
-  ".svg": "image/svg+xml",
-  ".woff2": "font/woff2",
-};
-
-function json(response: ServerResponse, status: number, value: unknown): void {
-  response.writeHead(status, JSON_HEADERS);
-  response.end(JSON.stringify(value));
-}
-
-function methodNotAllowed(response: ServerResponse): void {
-  json(response, 405, { error: "Method not allowed" });
-}
-
-function requestClientId(request: IncomingMessage): string {
-  const value = request.headers["x-pi-chat-client"];
-  const clientId = Array.isArray(value) ? value[0] : value;
-  return typeof clientId === "string" && /^[a-f0-9-]{20,64}$/i.test(clientId) ? clientId : "";
-}
-
-async function bodyJson(request: IncomingMessage, maximumBytes = 1_000_000): Promise<Record<string, unknown>> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of request) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    size += buffer.length;
-    if (size > maximumBytes) throw new Error(`请求内容超过 ${Math.round(maximumBytes / 1_000_000)} MB`);
-    chunks.push(buffer);
-  }
-  if (!chunks.length) return {};
-  const value: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("请求必须是 JSON 对象");
-  return value as Record<string, unknown>;
-}
-
-export function promptImages(value: unknown): PromptImage[] {
-  if (value === undefined) return [];
-  if (!Array.isArray(value) || value.length > 4) throw new Error("一次最多发送 4 张图片");
-  return value.map((entry) => {
-    if (!entry || typeof entry !== "object") throw new Error("图片数据无效");
-    const image = entry as Record<string, unknown>;
-    const mimeType = typeof image.mimeType === "string" ? image.mimeType.toLowerCase() : "";
-    const data = typeof image.data === "string" ? image.data : "";
-    if (!["image/png", "image/jpeg", "image/webp", "image/gif"].includes(mimeType)) throw new Error("仅支持 PNG、JPEG、WebP 和 GIF 图片");
-    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(data)) throw new Error("图片 Base64 数据无效");
-    const approximateBytes = Math.floor(data.length * 3 / 4) - (data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0);
-    if (approximateBytes <= 0 || approximateBytes > 8 * 1024 * 1024) throw new Error("单张图片必须小于 8 MB");
-    return { type: "image", data, mimeType };
-  });
-}
-
-function asState(response: Record<string, unknown>): PiState {
-  return rpcData<PiState>(response);
-}
-
-function asMessages(response: Record<string, unknown>): PiMessage[] {
-  return rpcData<{ messages: PiMessage[] }>(response).messages;
-}
-
-/**
- * A conversation turn starts at a user message and includes every following Pi
- * message/tool result up to the next user message. Keep the newest twenty user
- * initiated turns, rather than an arbitrary number of raw Pi message entries.
- */
-export function messageWindow(messages: PiMessage[], turnLimit = RECENT_TURN_WINDOW_SIZE): { messages: PiMessage[]; total: number; turns: number; visibleTurns: number; truncated: boolean } {
-  const total = messages.length;
-  const userStarts = messages.flatMap((message, index) => message.role === "user" ? [index] : []);
-  const turns = userStarts.length;
-  const visibleTurns = Math.min(turns, Math.max(RECENT_TURN_WINDOW_SIZE, Math.floor(turnLimit)));
-  const start = turns > visibleTurns ? userStarts.at(-visibleTurns) || 0 : 0;
-  return { messages: start ? messages.slice(start) : messages, total, turns, visibleTurns, truncated: start > 0 };
-}
-
-function asModels(response: Record<string, unknown>): ModelInfo[] {
-  return rpcData<{ models: ModelInfo[] }>(response).models;
-}
-
-function asCommands(response: Record<string, unknown>): SlashCommand[] {
-  return rpcData<{ commands: SlashCommand[] }>(response).commands;
-}
-
-function asSessionStats(response: Record<string, unknown>): SessionStats {
-  return rpcData<SessionStats>(response);
-}
 
 interface InternalQueuedPrompt extends QueuedPrompt {
   images: PromptImage[];
@@ -232,14 +134,14 @@ export class PiChatApp {
   private toolStatus = "";
   private pendingTurnSettings: PendingTurnSettings = {};
   private pendingExtensionRequest: ExtensionUiRequest | undefined;
-  private applicationLifecycle: ApplicationLifecycle = "idle";
-  private activeMutationRequests = 0;
+  private readonly lifecycleCoordinator: ApplicationLifecycleCoordinator;
   /** A compaction changes the prompt structure; wait for a later completed turn before reporting occupancy again. */
   private readonly contextUsagePendingRefresh = new Set<string>();
   private readonly contextUsageRefreshTurn = new Set<string>();
 
   constructor(private readonly options: PiChatAppOptions) {
     this.currentCwd = resolve(options.cwd);
+    this.lifecycleCoordinator = new ApplicationLifecycleCoordinator(() => this.broadcastLifecycle());
     this.requestToken = options.requestToken || randomBytes(32).toString("base64url");
     // Bare loopback names are used only by in-process test apps. The production
     // entrypoint replaces them with one exact host:port after listen().
@@ -297,41 +199,18 @@ export class PiChatApp {
     this.allowedHosts = [...allowedHosts];
   }
 
-  private lifecycleMessage(lifecycle = this.applicationLifecycle): string {
-    if (lifecycle === "restarting") return "Pi Chat 正在构建并重启，暂时不能提交新操作";
-    if (lifecycle === "shutting-down") return "Pi Chat 正在关闭，暂时不能提交新操作";
-    if (lifecycle === "workspace-changing") return "Pi Chat 正在切换工作目录，暂时不能提交新操作";
-    if (lifecycle === "resources-reloading") return "Pi Chat 正在更新配置并重载 Runtime，暂时不能提交新操作";
-    return "Pi Chat 当前不能提交新操作";
-  }
+  private get applicationLifecycle(): ApplicationLifecycle { return this.lifecycleCoordinator.lifecycle; }
+  private get activeMutationRequests(): number { return this.lifecycleCoordinator.activeMutations; }
+
+  private lifecycleMessage(lifecycle = this.applicationLifecycle): string { return lifecycleMessage(lifecycle); }
 
   private broadcastLifecycle(): void {
     this.broadcast({ type: "pi_chat_application_lifecycle", lifecycle: this.applicationLifecycle });
   }
 
-  private beginLifecycle(lifecycle: Exclude<ApplicationLifecycle, "idle">): void {
-    if (this.applicationLifecycle !== "idle") throw new ApplicationLifecycleConflictError(this.applicationLifecycle, this.lifecycleMessage());
-    if (this.activeMutationRequests > 0) throw new ApplicationBusyError(`仍有 ${this.activeMutationRequests} 个写操作正在完成，请稍后重试`);
-    this.applicationLifecycle = lifecycle;
-    this.broadcastLifecycle();
-  }
-
-  private endLifecycle(lifecycle: Exclude<ApplicationLifecycle, "idle">): void {
-    if (this.applicationLifecycle !== lifecycle) return;
-    this.applicationLifecycle = "idle";
-    this.broadcastLifecycle();
-  }
-
-  private beginMutation(): () => void {
-    if (this.applicationLifecycle !== "idle") throw new ApplicationLifecycleConflictError(this.applicationLifecycle, this.lifecycleMessage());
-    this.activeMutationRequests += 1;
-    let released = false;
-    return () => {
-      if (released) return;
-      released = true;
-      this.activeMutationRequests = Math.max(0, this.activeMutationRequests - 1);
-    };
-  }
+  private beginLifecycle(lifecycle: Exclude<ApplicationLifecycle, "idle">): void { this.lifecycleCoordinator.begin(lifecycle); }
+  private endLifecycle(lifecycle: Exclude<ApplicationLifecycle, "idle">): void { this.lifecycleCoordinator.end(lifecycle); }
+  private beginMutation(): () => void { return this.lifecycleCoordinator.beginMutation(); }
 
   private async withLifecycle<T>(lifecycle: Exclude<ApplicationLifecycle, "idle">, action: string, operation: () => Promise<T>): Promise<T> {
     this.beginLifecycle(lifecycle);
