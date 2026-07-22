@@ -130,6 +130,20 @@ Prefer **RPC capability probe** over a hard Pi version allowlist.
 
 Missing required capabilities → fail startup clearly.
 
+## Application restart (0.3.1)
+
+Windows often returns `EPERM` if `dist/` is renamed while the live Node process still has open handles (loaded modules under `dist/server`).
+
+**Policy:**
+
+1. Build into `.pi-chat-dist-staging-*` (never touches live `dist` during build)
+2. Quiescence checks still run in-process
+3. HTTP 202, then spawn `restart-handoff`
+4. Parent shuts down and exits
+5. Handoff waits for parent PID exit → **promote** staged → live `dist` (with rename retries) → start new server
+
+Startup best-effort removes orphaned staging/previous trees.
+
 ## Security posture
 
 - Loopback listen only

@@ -11,7 +11,7 @@ import { PiRpcClient } from "./rpc-client.js";
 import { SessionIndex } from "./session-index.js";
 import { loadWorkspace } from "./workspace-state.js";
 import { ensurePiChatSystemGate } from "./system-gate-installer.js";
-import { buildPiChat, handOffApplicationRestart } from "./application-restart.js";
+import { buildPiChat, cleanupStaleDistArtifacts, handOffApplicationRestart } from "./application-restart.js";
 
 interface CliOptions {
   host: string;
@@ -61,6 +61,8 @@ if (!loopbackHosts.has(options.host)) {
 }
 options.cwd = await loadWorkspace(options.cwd);
 const projectRoot = findProjectRoot(dirname(fileURLToPath(import.meta.url)));
+const cleaned = await cleanupStaleDistArtifacts(projectRoot);
+if (cleaned > 0) console.log(`[Pi Chat] 已清理 ${cleaned} 个残留的 dist 暂存/备份目录。`);
 const agentDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 const gateComponent = await ensurePiChatSystemGate({
   agentDir,
@@ -95,7 +97,9 @@ async function prepareApplicationRestart() {
   console.log("[Pi Chat] 正在 staging 目录构建本地更新…");
   const build = await buildPiChat(projectRoot);
   return {
-    promote: () => build.promote(),
+    // Do not rename live dist while this process still holds module handles under it.
+    // Promotion runs in restart-handoff after the parent PID exits (Windows EPERM fix).
+    promote: async () => {},
     discard: () => build.discard(),
     handoff: () => {
       // Yield one event-loop turn so the browser receives the 202 response before
@@ -103,11 +107,19 @@ async function prepareApplicationRestart() {
       setTimeout(() => {
         handOffApplicationRestart({
           projectRoot,
-          serverEntry: fileURLToPath(import.meta.url),
+          // Always hand off to the compiled entry under live dist. After promote,
+          // that tree contains the freshly built server; during promote-after-exit
+          // the helper swaps dist before spawning this path.
+          serverEntry: resolve(projectRoot, "dist", "server", "server", "index.js"),
           host: options.host,
           port: options.port,
           cwd: options.cwd,
           dev: options.dev,
+          promoteAfterExit: {
+            liveDist: build.liveDist,
+            stagedDist: build.distPath,
+            previousDist: build.previousDist,
+          },
         });
         void shutdown().then(() => process.exit(0));
       }, 0);

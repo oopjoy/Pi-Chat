@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildPiChat, promoteStagedDist, restartServerArgs } from "../src/server/application-restart";
+import { buildPiChat, cleanupStaleDistArtifacts, promoteStagedDist, restartServerArgs } from "../src/server/application-restart";
 
 test("local application build stages a complete replacement without touching live dist", { skip: process.platform !== "win32", timeout: 120_000 }, async () => {
   const liveIndex = join(process.cwd(), "dist", "web", "index.html");
@@ -47,4 +47,33 @@ test("application handoff restarts the same Pi Chat entry with its listener and 
   });
   assert.deepEqual(args, ["C:/work/pi-chat/dist/server/server/index.js", "--host", "127.0.0.1", "--port", "30170", "--cwd", "C:/work"]);
   assert.deepEqual(restartServerArgs({ projectRoot: "x", serverEntry: "entry", host: "::1", port: 12, cwd: "y", dev: true }).slice(-1), ["--dev"]);
+});
+
+test("cleanup removes abandoned staging and previous dist trees", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-dist-cleanup-"));
+  try {
+    await mkdir(join(root, ".pi-chat-dist-staging-1"));
+    await mkdir(join(root, ".pi-chat-dist-previous-2"));
+    await mkdir(join(root, "dist"));
+    await writeFile(join(root, "keep.txt"), "ok", "utf8");
+    const removed = await cleanupStaleDistArtifacts(root);
+    assert.equal(removed, 2);
+    await assert.rejects(readFile(join(root, ".pi-chat-dist-staging-1", "x"), "utf8"));
+    assert.equal(await readFile(join(root, "keep.txt"), "utf8"), "ok");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("promoteStagedDist fails clearly when staged tree is missing", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-dist-missing-"));
+  try {
+    await mkdir(join(root, "dist"));
+    await assert.rejects(
+      () => promoteStagedDist(join(root, "dist"), join(root, "missing-staged"), join(root, "previous")),
+      /暂存目录不存在/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

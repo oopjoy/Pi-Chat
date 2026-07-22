@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.1
+
+### Stability (Windows restart)
+
+- **Fix `EPERM` on “应用更新并重启”**: live `dist` is no longer renamed while the running Node process still holds handles under it
+- Dist promote now runs in `restart-handoff` **after the parent PID exits**, then the new server starts
+- Rename retries on `EPERM` / `EBUSY` / `EACCES` with short backoff
+- Startup cleans abandoned `.pi-chat-dist-staging-*` / `.pi-chat-dist-previous-*` trees
+- Clearer promote error hints when a lock remains
+
+### Safety
+
+- Handoff always targets `dist/server/server/index.js` after promote (compiled entry), not a mid-lifecycle `import.meta.url` under a tree about to move
+- Parent exit wait extended slightly; brief settle delay before promote on Windows
+
 ## 0.3.0
 
 ### Stability & safety

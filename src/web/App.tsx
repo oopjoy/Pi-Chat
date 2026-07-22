@@ -426,11 +426,13 @@ export function App() {
     return () => window.clearTimeout(timer);
   }, [error, notice]);
 
+  const loadingEarlierRef = useRef(false);
   const loadEarlierTurns = useCallback(async () => {
     const id = viewedSessionIdRef.current;
-    if (!id || !messagesTruncated || loadingEarlier) return;
+    if (!id || !messagesTruncated || loadingEarlierRef.current) return;
     const timeline = scrollRef.current;
     const previousHeight = timeline?.scrollHeight || 0;
+    loadingEarlierRef.current = true;
     setLoadingEarlier(true);
     setError("");
     stickToBottomRef.current = false;
@@ -443,16 +445,17 @@ export function App() {
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
+      loadingEarlierRef.current = false;
       setLoadingEarlier(false);
     }
-  }, [applySessionView, loadingEarlier, messagesTruncated, visibleTurnCount]);
+  }, [applySessionView, messagesTruncated, visibleTurnCount]);
 
   const onScroll = () => {
     const element = scrollRef.current;
     if (!element) return;
     stickToBottomRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 120;
     // Near the top of a truncated history: load earlier turns without requiring the button.
-    if (messagesTruncated && !loadingEarlier && element.scrollTop < 72) {
+    if (messagesTruncated && !loadingEarlierRef.current && element.scrollTop < 72) {
       void loadEarlierTurns();
     }
   };

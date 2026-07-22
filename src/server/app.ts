@@ -33,6 +33,11 @@ const BUILTIN_COMMANDS: SlashCommand[] = [
 ];
 
 export interface PreparedApplicationRestart {
+  /**
+   * Optional in-process promote. Production defers the real dist swap to
+   * restart-handoff (after exit) so Windows can release file locks; tests may
+   * still promote synchronously here.
+   */
   promote(): Promise<void>;
   handoff(): void;
   discard(): Promise<void>;
