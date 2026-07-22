@@ -18,12 +18,18 @@ function summarize(entries: ProcessEntry[], streaming = false): string {
 export function ConversationProcess({ entries, streaming = false }: { entries: ProcessEntry[]; streaming?: boolean }) {
   const summary = useMemo(() => summarize(entries, streaming), [entries, streaming]);
   const hasFailures = entries.some((entry) => entry.kind === "tool" && entry.isError);
-  return (
-    <div className={`conversation-process${streaming ? " is-streaming" : ""}`}>
-      <span className="conversation-process-summary process-summary-label">
-        {hasFailures ? <AlertIcon className="process-status-icon is-error" /> : streaming ? <span className="process-status-icon is-running" aria-hidden="true" /> : <CheckIcon className="process-status-icon" />}
-        {summary}
-      </span>
+  const thoughts = entries.filter((entry): entry is Extract<ProcessEntry, { kind: "thinking" }> => entry.kind === "thinking");
+  const status = hasFailures ? <AlertIcon className="process-status-icon is-error" /> : streaming ? <span className="process-status-icon is-running" aria-hidden="true" /> : <CheckIcon className="process-status-icon" />;
+  const label = <span className="conversation-process-summary process-summary-label">{status}{summary}</span>;
+  const className = `conversation-process${streaming ? " is-streaming" : ""}`;
+
+  // The summary remains concise; only private thinking is available on expand.
+  // Tool completion rows, arguments, and results intentionally stay hidden.
+  if (!thoughts.length) return <div className={className}>{label}</div>;
+  return <details className={className}>
+    <summary>{label}<span className="conversation-process-chevron" aria-hidden="true"><svg className="chevron-collapsed" viewBox="0 0 16 16"><path d="M10 3.5 5.5 8 10 12.5" /></svg><svg className="chevron-expanded" viewBox="0 0 16 16"><path d="M3.5 6 8 10.5 12.5 6" /></svg></span></summary>
+    <div className="conversation-process-body">
+      {thoughts.map((thought, index) => <pre className="process-thinking" key={`thinking-${index}`}>{thought.text}</pre>)}
     </div>
-  );
+  </details>;
 }

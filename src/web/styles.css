@@ -404,6 +404,19 @@ button:disabled { cursor: not-allowed; opacity: .56; }
   background: transparent;
   animation: spin .75s linear infinite;
 }
+/* A process can expand to private thinking only; tool execution rows remain hidden. */
+details.conversation-process { display: block; padding: 0; }
+.conversation-process > summary { display: flex; min-height: 30px; align-items: center; justify-content: space-between; gap: 10px; padding: 5px 8px; cursor: pointer; list-style: none; user-select: none; }
+.conversation-process > summary::-webkit-details-marker { display: none; }
+.conversation-process > summary .conversation-process-summary { flex: 1; }
+.conversation-process-chevron { display: grid; width: 20px; height: 20px; flex: 0 0 auto; place-items: center; border: 1px solid color-mix(in srgb, var(--line), transparent 12%); border-radius: 5px; background: var(--surface); color: var(--muted); }
+.conversation-process-chevron svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; }
+.conversation-process-chevron .chevron-expanded { display: none; }
+.conversation-process[open] > summary { border-bottom: 1px solid var(--line); }
+.conversation-process[open] .conversation-process-chevron .chevron-collapsed { display: none; }
+.conversation-process[open] .conversation-process-chevron .chevron-expanded { display: block; }
+.conversation-process-body { display: grid; gap: 7px; padding: 8px; }
+.process-thinking { max-height: 340px; margin: 0; overflow: auto; padding: 8px 9px; border-radius: 6px; background: color-mix(in srgb, var(--surface), var(--surface-soft) 34%); color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.6 ui-monospace, Consolas, monospace; }
 
 .prompt-queue { box-sizing: border-box; width: min(calc(100% - var(--chat-column-gutter)), var(--reading-width), var(--chat-column-max)); max-height: 170px; margin: 0 auto 4px; overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); box-shadow: 0 4px 16px rgba(27, 44, 70, .06); }
 .prompt-queue > header { display: flex; min-height: 31px; align-items: center; gap: 7px; padding: 5px 9px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 10px; }
