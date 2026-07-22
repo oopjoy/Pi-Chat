@@ -1428,6 +1428,8 @@ export class PiChatApp {
       return;
     }
 
+    // Local/automation path only (scripts, future local CLI). Browser UI uses /api/workspace/pick.
+    // Not a remote-access surface; the service itself is loopback-only in 0.2.x.
     if (url.pathname === "/api/workspace/set") {
       if (request.method !== "POST") return methodNotAllowed(response);
       const body = await bodyJson(request);

@@ -1,7 +1,7 @@
 {
   "name": "Pi Chat",
   "short_name": "Pi Chat",
-  "description": "A lightweight local-first web chat client for Pi",
+  "description": "A local-first Web/PWA client for Pi RPC",
   "lang": "zh-CN",
   "start_url": "/",
   "scope": "/",

@@ -1,6 +1,6 @@
 # Pi Chat
 
-Pi Chat 是一个独立、轻量、local-first 的 Pi Web 聊天客户端。它不嵌入完整 Pi SDK，而是启动全局安装的 `pi --mode rpc`，通过本地 HTTP API 与 SSE 将 Pi 的会话和流式事件连接到浏览器。
+Pi Chat 是一个连接本机 Pi RPC 的 local-first Web/PWA 客户端。它提供浏览器中的聊天、会话管理与本地运行协调，不替代 Pi 的 agent、模型、工具或扩展内核。服务启动全局安装的 `pi --mode rpc`，通过本地 HTTP API 与 SSE 连接浏览器；不捆绑 Electron/Chromium，也不嵌入完整 Pi SDK。
 
 ## 当前基础版
 
@@ -77,6 +77,18 @@ node dist/server/server/index.js --host 127.0.0.1 --port 30170 --cwd C:\\work
 
 ## 安全说明
 
-基础版默认只监听 `127.0.0.1`。每次服务启动会轮换内存请求 token，并校验精确 Host、同源 Origin 与 token，阻止普通跨站网页调用本机 Pi 接口。启动时还会探测 Pi RPC 的必要能力；若 Pi 升级导致协议不兼容，服务会给出明确错误而不是带着部分失效功能启动。文件权限 Gate 的执行钩子虽然技术上运行于 Pi Extension API，但由 Pi Chat 自动管理、不可通过普通扩展列表停用或移除；这确保网页 UI 保持内置体验，同时真实工具调用前仍有可靠拦截。`POST /api/workspace/set` 保留为未来受认证远程客户端的非交互式工作目录切换入口；当前网页只使用本机文件夹选择器 `/api/workspace/pick`。远程认证、HTTPS 和访问审计尚未完成，请勿将当前版本直接暴露到公网。
+基础版只监听本机回环地址（默认 `127.0.0.1`）。每次服务启动会轮换内存请求 token，并校验精确 Host、同源 Origin 与 token，阻止普通跨站网页调用本机 Pi 接口。启动时还会探测 Pi RPC 的必要能力；若 Pi 升级导致协议不兼容，服务会给出明确错误而不是带着部分失效功能启动。文件权限 Gate 的执行钩子虽然技术上运行于 Pi Extension API，但由 Pi Chat 自动管理、不可通过普通扩展列表停用或移除；这确保网页 UI 保持内置体验，同时真实工具调用前仍有可靠拦截。
+
+网页 UI 使用本机文件夹选择器 `POST /api/workspace/pick`。`POST /api/workspace/set` 是本地/自动化工作目录切换入口（例如脚本或后续本机 CLI），不是远程访问能力。当前版本不提供远程多用户、HTTPS 公网暴露或跨机器访问；请勿将服务绑定到非回环地址或暴露到公网。
 
 Skills 可以向模型注入指令，Plugins/Packages 可以用当前用户的完整权限执行代码。安装来源必须可信；删除操作会在界面中二次确认。Skills/Plugins 配置变化后，Pi Chat 会重启 RPC 并恢复当前会话。
+
+## 产品边界
+
+**Pi Chat 负责：** 会话展示与输入、本地 Session 切换、Runtime 按需启动与回收、多窗口控制权、Gate/确认交互、Pi 原生资源的有限管理，以及本地 Web/PWA 启动体验。
+
+**Pi Chat 不负责：** 重写 agent loop、模型和工具执行、自建插件运行时、Electron 桌面壳、远程多用户服务、公网部署，或通用 agent 编排平台。
+
+**当前不在路线图的伪需求：** 远程访问。代码与文档中可预留扩展点，但 0.2.x 不做半成品远程开关。若未来需要，应作为独立设计（认证、HTTPS、审计）而不是放开监听地址。
+
+更完整的模块边界与拆分优先级见 `docs/architecture.md`。

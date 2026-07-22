@@ -54,8 +54,10 @@ function findProjectRoot(start: string): string {
 
 const options = parseArgs(process.argv.slice(2));
 const loopbackHosts = new Set(["127.0.0.1", "localhost", "::1"]);
-if (!loopbackHosts.has(options.host) && process.env.PI_CHAT_ALLOW_REMOTE !== "1") {
-  throw new Error("基础版 Pi Chat 尚未实现远程认证。为避免未授权访问，非回环监听需要显式设置 PI_CHAT_ALLOW_REMOTE=1。");
+// Remote access is intentionally out of scope for 0.2.x (no auth/HTTPS/audit).
+// Reserved for a future dedicated design — do not reintroduce a half-open host escape hatch.
+if (!loopbackHosts.has(options.host)) {
+  throw new Error("Pi Chat 当前只支持本机回环监听（127.0.0.1 / localhost / ::1）。远程访问不是当前产品能力；请勿绑定非回环地址或暴露到公网。");
 }
 options.cwd = await loadWorkspace(options.cwd);
 const projectRoot = findProjectRoot(dirname(fileURLToPath(import.meta.url)));
@@ -137,9 +139,6 @@ const port = typeof address === "object" && address ? address.port : options.por
 const authority = options.host.includes(":") ? `[${options.host}]:${port}` : `${options.host}:${port}`;
 app.setAllowedHosts([authority]);
 console.log(`[Pi Chat] 已启动：http://${options.host}:${port}`);
-if (!loopbackHosts.has(options.host)) {
-  console.warn("[Pi Chat] 警告：已显式启用未认证远程监听；只可在受信任网络中临时使用，严禁暴露到公网。");
-}
 
 let shuttingDown = false;
 async function shutdown(): Promise<void> {

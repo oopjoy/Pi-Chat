@@ -3,7 +3,7 @@
   "version": "0.2.2",
   "private": true,
   "type": "module",
-  "description": "A lightweight local-first web chat for Pi",
+  "description": "A local-first Web/PWA client for Pi RPC",
   "bin": {
     "pi-chat": "dist/server/server/index.js"
   },
