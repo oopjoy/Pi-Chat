@@ -5,6 +5,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { basename, extname, join, normalize, resolve } from "node:path";
 import type { ApplicationLifecycle, BootstrapData, ExtensionUiRequest, ModelInfo, PiMessage, PiState, PromptImage, QueuedPrompt, SessionStats, SessionSummary, SessionViewData, SlashCommand, ThinkingLevel } from "../shared/types.js";
 import { pickLocalFiles, pickWorkspaceFolder, readClipboardFiles } from "./file-picker.js";
+import { type FileSnapshot, restoreSnapshots, snapshotFile } from "./file-transaction.js";
 import { ModelManager } from "./model-manager.js";
 import { ResourceManager } from "./resource-manager.js";
 import { PiRpcClient, rpcData } from "./rpc-client.js";
@@ -988,9 +989,9 @@ export class PiChatApp {
     })).sort((left, right) => right.updatedAt - left.updatedAt);
   }
 
-  private async reloadRpc(): Promise<void> {
+  private async reloadRpc(knownState?: PiState): Promise<void> {
     this.assertApplicationQuiescent("修改资源配置");
-    const state = asState(await this.options.rpc.send({ type: "get_state" }));
+    const state = knownState || asState(await this.options.rpc.send({ type: "get_state" }));
     if (state.isStreaming) throw new Error("请先停止所有并行生成，再修改资源配置");
     for (const runtime of this.runtimes.values()) {
       runtime.unsubscribe();
@@ -1001,21 +1002,57 @@ export class PiChatApp {
     this.broadcast({ type: "pi_chat_reloaded" });
   }
 
+  private async applyResourceFileTransaction<T>(snapshots: FileSnapshot[], mutation: () => Promise<T>): Promise<T> {
+    const state = asState(await this.options.rpc.send({ type: "get_state" }));
+    if (state.isStreaming) throw new Error("请先停止所有并行生成，再修改资源配置");
+    let changed = false;
+    try {
+      const result = await mutation();
+      changed = true;
+      await this.reloadRpc(state);
+      return result;
+    } catch (error) {
+      if (!changed) throw error;
+      const original = error instanceof Error ? error.message : String(error);
+      try {
+        await restoreSnapshots(snapshots);
+        await this.options.rpc.restart(state.sessionFile);
+        this.broadcast({ type: "pi_chat_reloaded" });
+      } catch (rollbackError) {
+        throw new Error(`资源修改失败，自动恢复也失败：${original}；恢复错误：${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
+      }
+      throw new Error(`资源修改失败，原配置已自动恢复：${original}`);
+    }
+  }
+
   private async changeWorkspace(selected: string): Promise<{ workspaceName: string; data: BootstrapData }> {
     this.assertApplicationQuiescent("切换工作目录");
+    const selectedCwd = resolve(selected);
+    if (!(await stat(selectedCwd)).isDirectory()) throw new Error("所选工作目录不存在或不是文件夹");
+    const previousCwd = this.currentCwd;
+    const state = asState(await this.options.rpc.send({ type: "get_state" }));
     for (const runtime of this.runtimes.values()) {
       runtime.unsubscribe();
       await runtime.rpc.stop();
     }
     this.runtimes.clear();
-    const selectedCwd = resolve(selected);
-    if (!(await stat(selectedCwd)).isDirectory()) throw new Error("所选工作目录不存在或不是文件夹");
-    if (selectedCwd.toLowerCase() !== this.currentCwd.toLowerCase()) {
-      await this.options.rpc.restart(undefined, selectedCwd);
+    if (selectedCwd.toLowerCase() !== previousCwd.toLowerCase()) {
+      try {
+        await this.options.rpc.restart(undefined, selectedCwd);
+        await saveWorkspace(selectedCwd);
+      } catch (error) {
+        const original = error instanceof Error ? error.message : String(error);
+        try { await this.options.rpc.restart(state.sessionFile, previousCwd); }
+        catch (rollbackError) {
+          throw new Error(`工作目录切换失败，恢复旧 Runtime 也失败：${original}；恢复错误：${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
+        }
+        throw new Error(`工作目录切换失败，已恢复原工作目录：${original}`);
+      }
       this.currentCwd = selectedCwd;
       this.broadcast({ type: "pi_chat_workspace_changed", cwd: selectedCwd });
+    } else {
+      await saveWorkspace(selectedCwd);
     }
-    await saveWorkspace(selectedCwd);
     return { workspaceName: basename(selectedCwd), data: await this.bootstrap() };
   }
 
@@ -1704,8 +1741,8 @@ export class PiChatApp {
           const body = await bodyJson(request);
           const state = asState(await this.options.rpc.send({ type: "get_state" }));
           const wasActive = state.model?.provider === provider && state.model?.id === modelId;
-          const updated = await this.options.modelManager!.update(provider, modelId, body);
-          await this.reloadRpc();
+          const snapshot = await snapshotFile(this.options.modelManager!.path);
+          const updated = await this.applyResourceFileTransaction([snapshot], () => this.options.modelManager!.update(provider, modelId, body));
           // A rename invalidates the session's model reference; reselect the new
           // key so the UI never points at a model that no longer exists.
           if (wasActive && (updated.provider !== provider || updated.id !== modelId)) {
@@ -1729,14 +1766,14 @@ export class PiChatApp {
       if (request.method !== "POST" && request.method !== "DELETE") return methodNotAllowed(response);
       const result = await this.withLifecycle("resources-reloading", "更新模型配置", async () => {
         const body = await bodyJson(request);
+        const snapshot = await snapshotFile(this.options.modelManager!.path);
         if (request.method === "POST") {
-          await this.options.modelManager!.add(body);
+          await this.applyResourceFileTransaction([snapshot], () => this.options.modelManager!.add(body));
         } else {
           const state = asState(await this.options.rpc.send({ type: "get_state" }));
           if (state.model?.provider === body.provider && state.model?.id === body.modelId) throw new Error("请先切换到其他模型，再删除当前模型");
-          await this.options.modelManager!.remove(body.provider, body.modelId);
+          await this.applyResourceFileTransaction([snapshot], () => this.options.modelManager!.remove(body.provider, body.modelId));
         }
-        await this.reloadRpc();
         return this.bootstrap();
       });
       json(response, 200, result);
@@ -1817,12 +1854,13 @@ export class PiChatApp {
           await this.options.resources.installSkill(sourcePath);
         } else if (request.method === "PATCH") {
           if (typeof body.id !== "string" || typeof body.enabled !== "boolean") throw new Error("id 和 enabled 必填");
-          await this.options.resources.setSkillEnabled(body.id, body.enabled, this.currentCwd);
+          const snapshot = await this.options.resources.snapshotSkill(body.id, this.currentCwd);
+          await this.applyResourceFileTransaction([snapshot], () => this.options.resources.setSkillEnabled(body.id as string, body.enabled as boolean, this.currentCwd));
         } else {
           if (typeof body.id !== "string") throw new Error("id 必填");
           await this.options.resources.removeSkill(body.id, this.currentCwd);
         }
-        await this.reloadRpc();
+        if (request.method !== "PATCH") await this.reloadRpc();
         return this.options.resources.listSkills(this.currentCwd);
       });
       json(response, 200, { ...result, reloaded: true });
@@ -1836,12 +1874,13 @@ export class PiChatApp {
         const body = await bodyJson(request);
         if (request.method === "PATCH") {
           if (typeof body.id !== "string" || typeof body.enabled !== "boolean") throw new Error("id 和 enabled 必填");
-          await this.options.resources.setExtensionEnabled(body.id, body.enabled, this.currentCwd);
+          const snapshot = await this.options.resources.snapshotSettings();
+          await this.applyResourceFileTransaction([snapshot], () => this.options.resources.setExtensionEnabled(body.id as string, body.enabled as boolean, this.currentCwd));
         } else {
           if (typeof body.id !== "string") throw new Error("id 必填");
           await this.options.resources.removeExtension(body.id, this.currentCwd);
         }
-        await this.reloadRpc();
+        if (request.method !== "PATCH") await this.reloadRpc();
         return this.options.resources.listExtensions(this.currentCwd);
       });
       json(response, 200, { ...result, reloaded: true });
@@ -1859,12 +1898,13 @@ export class PiChatApp {
           await this.options.resources.installPackage(source);
         } else if (request.method === "PATCH") {
           if (typeof body.id !== "string" || typeof body.enabled !== "boolean") throw new Error("id 和 enabled 必填");
-          await this.options.resources.setPackageEnabled(body.id, body.enabled, this.currentCwd);
+          const snapshot = await this.options.resources.snapshotSettings();
+          await this.applyResourceFileTransaction([snapshot], () => this.options.resources.setPackageEnabled(body.id as string, body.enabled as boolean, this.currentCwd));
         } else {
           if (typeof body.id !== "string") throw new Error("id 必填");
           await this.options.resources.removePackage(body.id, this.currentCwd);
         }
-        await this.reloadRpc();
+        if (request.method !== "PATCH") await this.reloadRpc();
         return this.options.resources.listPackages(this.currentCwd);
       });
       json(response, 200, { ...result, reloaded: true });

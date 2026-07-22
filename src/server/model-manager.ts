@@ -1,8 +1,9 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import type { CustomModelInput, ModelInfo } from "../shared/types.js";
+import { writeFileAtomic } from "./file-transaction.js";
 
 export const MODEL_APIS = ["openai-completions", "openai-responses", "anthropic-messages", "google-generative-ai"] as const;
 export type ModelApi = typeof MODEL_APIS[number];
@@ -79,10 +80,7 @@ export class ModelManager {
   }
 
   private async write(value: ModelsFile): Promise<void> {
-    await mkdir(dirname(this.path), { recursive: true });
-    const temporary = `${this.path}.pi-chat-${process.pid}-${Date.now()}.tmp`;
-    await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-    await rename(temporary, this.path);
+    await writeFileAtomic(this.path, `${JSON.stringify(value, null, 2)}\n`, 0o600);
   }
 
   async customKeys(): Promise<Set<string>> {

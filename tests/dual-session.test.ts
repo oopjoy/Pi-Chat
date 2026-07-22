@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import { createServer, request as httpRequest } from "node:http";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { PiChatApp } from "../src/server/app";
 import type { PiRpcClient } from "../src/server/rpc-client";
 import { idForPath } from "../src/server/session-index";
 import type { SessionIndex } from "../src/server/session-index";
 import type { ResourceManager } from "../src/server/resource-manager";
+import { ModelManager } from "../src/server/model-manager";
 
 class FakeRpc {
   readonly commands: Record<string, unknown>[] = [];
@@ -13,6 +17,7 @@ class FakeRpc {
   streaming = false;
   stopCount = 0;
   restartCount = 0;
+  restartFailures = 0;
   alive = true;
 
   constructor(readonly path: string, readonly sessionId: string) {}
@@ -21,7 +26,16 @@ class FakeRpc {
   async start() { this.alive = true; }
   async stop() { this.stopCount += 1; this.alive = false; }
   isRunning() { return this.alive; }
-  async restart() { this.restartCount += 1; this.alive = true; this.streaming = false; }
+  async restart() {
+    this.restartCount += 1;
+    if (this.restartFailures > 0) {
+      this.restartFailures -= 1;
+      this.alive = false;
+      throw new Error("simulated restart failure");
+    }
+    this.alive = true;
+    this.streaming = false;
+  }
   sendRaw(command: Record<string, unknown>) { this.commands.push(command); }
   crash() { this.alive = false; this.emit({ type: "pi_chat_process_error", error: "worker crashed" }); }
   async send(command: Record<string, unknown>) {
@@ -334,6 +348,40 @@ test("paused Secondary queue blocks workspace and resource reload operations", a
   } finally {
     server.close();
     await app.close();
+  }
+});
+
+test("model file mutation rolls back and restores the primary Runtime when reload fails", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-model-rollback-"));
+  const path = "C:\\sessions\\primary.jsonl";
+  const primary = new FakeRpc(path, "primary");
+  const models = new ModelManager(root);
+  await models.add({ provider: "local", id: "old", baseUrl: "http://127.0.0.1:1", api: "openai-completions" });
+  const before = await readFile(models.path, "utf8");
+  primary.restartFailures = 1;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, modelManager: models, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    const response = await fetch(`${origin}/api/models`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ provider: "local", id: "new", baseUrl: "http://127.0.0.1:1", api: "openai-completions" }),
+    });
+    assert.equal(response.status, 500);
+    assert.match((await response.json() as { error: string }).error, /原配置已自动恢复/);
+    assert.equal(await readFile(models.path, "utf8"), before);
+    assert.equal(primary.restartCount, 2);
+    assert.equal(primary.alive, true);
+    const health = await fetch(`${origin}/api/health`);
+    assert.equal((await health.json() as { lifecycle: string }).lifecycle, "idle");
+  } finally {
+    server.close();
+    await app.close();
+    await rm(root, { recursive: true, force: true });
   }
 });
 

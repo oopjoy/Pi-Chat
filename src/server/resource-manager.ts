@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import type { ExtensionResource, PackageResource, PluginResourceItem, ResourceResponse, SkillResource } from "../shared/types.js";
+import { type FileSnapshot, snapshotFile, writeFileAtomic } from "./file-transaction.js";
 import { resolvePiEntry } from "./rpc-client.js";
 
 interface PackageFilter {
@@ -63,10 +64,7 @@ async function readSettings(path: string): Promise<PiSettings> {
 }
 
 async function writeSettingsAtomic(path: string, settings: PiSettings): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  const temp = `${path}.pi-chat-${process.pid}-${Date.now()}.tmp`;
-  await writeFile(temp, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
-  await rename(temp, path);
+  await writeFileAtomic(path, `${JSON.stringify(settings, null, 2)}\n`);
 }
 
 async function walkFiles(root: string, predicate: (path: string) => boolean, depth = 8): Promise<string[]> {
@@ -221,7 +219,17 @@ export class ResourceManager {
     else if (keyPattern.test(content)) updated = content.replace(keyPattern, "disable-model-invocation: true\n");
     else if (/^---\r?\n/.test(content)) updated = content.replace(/^---\r?\n/, "---\ndisable-model-invocation: true\n");
     else updated = `---\ndisable-model-invocation: true\n---\n${content}`;
-    await writeFile(realPath, updated, "utf8");
+    await writeFileAtomic(realPath, updated);
+  }
+
+  async snapshotSkill(id: string, cwd: string): Promise<FileSnapshot> {
+    const realPath = await this.skillPathFromId(id, cwd);
+    if (!realPath) throw new Error("Skill path not found");
+    return snapshotFile(realPath);
+  }
+
+  async snapshotSettings(): Promise<FileSnapshot> {
+    return snapshotFile(this.settingsPath);
   }
 
   private async skillPathFromId(id: string, cwd: string): Promise<string | null> {
