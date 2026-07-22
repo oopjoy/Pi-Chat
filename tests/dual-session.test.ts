@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer, request as httpRequest } from "node:http";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -378,6 +378,37 @@ test("model file mutation rolls back and restores the primary Runtime when reloa
     assert.equal(primary.alive, true);
     const health = await fetch(`${origin}/api/health`);
     assert.equal((await health.json() as { lifecycle: string }).lifecycle, "idle");
+  } finally {
+    server.close();
+    await app.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("workspace change restores the previous Runtime when the new workspace restart fails", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-workspace-rollback-"));
+  const previousCwd = join(root, "old");
+  const nextCwd = join(root, "new");
+  await Promise.all([mkdir(previousCwd), mkdir(nextCwd)]);
+  const path = "C:\\sessions\\primary.jsonl";
+  const primary = new FakeRpc(path, "primary");
+  primary.restartFailures = 1;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: previousCwd, webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/workspace/set`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path: nextCwd }),
+    });
+    assert.equal(response.status, 500);
+    assert.match((await response.json() as { error: string }).error, /已恢复原工作目录/);
+    assert.equal((app as unknown as { currentCwd: string }).currentCwd, previousCwd);
+    assert.equal(primary.restartCount, 2);
+    assert.equal(primary.alive, true);
   } finally {
     server.close();
     await app.close();
