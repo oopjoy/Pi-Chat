@@ -37,11 +37,13 @@ function ResizeHandle({ width, onWidthChange }: { width: number; onWidthChange: 
     const startX = event.clientX;
     const startWidth = width;
     handle.setPointerCapture(event.pointerId);
+    document.body.classList.add("sidebar-resizing");
     const onMove = (move: PointerEvent) => {
       const next = Math.min(SIDEBAR_WIDTH_MAX, Math.max(SIDEBAR_WIDTH_MIN, Math.round(startWidth + move.clientX - startX)));
       onWidthChange(next);
     };
     const onEnd = () => {
+      document.body.classList.remove("sidebar-resizing");
       handle.removeEventListener("pointermove", onMove);
       handle.removeEventListener("pointerup", onEnd);
       handle.removeEventListener("pointercancel", onEnd);

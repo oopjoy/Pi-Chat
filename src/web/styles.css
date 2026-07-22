@@ -115,8 +115,13 @@ button:focus-visible, textarea:focus-visible, select:focus-visible, input:focus-
   padding: 12px 10px 10px;
   border-right: 1px solid var(--line);
   background: color-mix(in srgb, var(--surface-soft), var(--page) 24%);
+  /* Simple push layout: the chat shell reflows with the margin. */
+  transition: margin-left .22s ease;
+  will-change: margin-left;
 }
 .sidebar.is-open { margin-left: 0; }
+/* Drag-resizing must not fight the open/close transition. */
+body.sidebar-resizing .sidebar { transition: none; will-change: auto; }
 .sidebar-resize-handle { position: absolute; z-index: 3; top: 0; right: 0; width: 6px; height: 100%; padding: 0; border: 0; background: transparent; cursor: col-resize; touch-action: none; }
 .sidebar-resize-handle::after { content: ""; position: absolute; top: 0; right: 1px; width: 3px; height: 100%; background: transparent; transition: background .15s ease; }
 .sidebar-resize-handle:hover::after, .sidebar-resize-handle:active::after, .sidebar-resize-handle:focus-visible::after { background: color-mix(in srgb, var(--accent), transparent 55%); }
@@ -242,9 +247,13 @@ button:disabled { cursor: not-allowed; opacity: .56; }
   border-bottom: 1px solid var(--line);
   background: color-mix(in srgb, var(--surface), transparent 4%);
 }
-.sidebar-restore { position: fixed; z-index: 18; left: 0; top: 50%; display: grid; place-items: center; width: 25px; height: 68px; padding: 0; transform: translateY(-50%); border: 1px solid var(--line); border-left: 0; border-radius: 0 9px 9px 0; background: var(--surface); color: var(--muted); box-shadow: var(--shadow); cursor: pointer; }
+.sidebar-restore { position: fixed; z-index: 18; left: 0; top: 50%; display: grid; place-items: center; width: 25px; height: 68px; padding: 0; transform: translateY(-50%); border: 1px solid var(--line); border-left: 0; border-radius: 0 9px 9px 0; background: var(--surface); color: var(--muted); box-shadow: var(--shadow); cursor: pointer; opacity: 0; animation: sidebar-restore-in .18s ease .08s forwards; }
 .sidebar-restore svg { width: 17px; height: 17px; }
 .sidebar-restore:hover { color: var(--accent); }
+@keyframes sidebar-restore-in {
+  from { opacity: 0; transform: translateY(-50%) translateX(-6px); }
+  to { opacity: 1; transform: translateY(-50%) translateX(0); }
+}
 .topbar-context { display: flex; min-width: 0; flex: 1 1 auto; align-items: baseline; overflow: hidden; }
 .topbar-title { min-width: 0; overflow: hidden; color: var(--text); font-size: 13px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .topbar-indicators { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; padding-right: 10px; border-right: 1px solid var(--line); }
@@ -665,11 +674,18 @@ details.conversation-process { display: block; padding: 0; }
 @keyframes pulse { 50% { opacity: .3; transform: scale(.75); } }
 @keyframes fade-in { from { opacity: 0; } }
 
+@media (prefers-reduced-motion: reduce) {
+  .sidebar,
+  .sidebar-restore,
+  .sidebar-scrim { transition: none !important; animation: none !important; will-change: auto; }
+}
+
 @media (max-width: 760px) {
-  .sidebar { position: fixed; inset: 0 auto 0 0; width: min(86vw, 300px); margin-left: 0 !important; transform: translateX(-102%); transition: none !important; box-shadow: var(--shadow); }
+  .sidebar { position: fixed; inset: 0 auto 0 0; width: min(86vw, 300px); margin-left: 0 !important; transform: translateX(-102%); transition: transform .22s ease; will-change: transform; box-shadow: var(--shadow); }
   .sidebar-resize-handle { display: none; }
   .sidebar.is-open { margin-left: 0 !important; transform: translateX(0); }
-  .sidebar-scrim { position: fixed; z-index: 19; inset: 0; display: block; border: 0; background: rgba(6, 11, 20, .45); }
+  .sidebar-scrim { position: fixed; z-index: 19; inset: 0; display: block; border: 0; background: rgba(6, 11, 20, .45); animation: fade-in .18s ease; }
+  body.sidebar-resizing .sidebar { transition: none; will-change: auto; }
   .topbar { min-height: 46px; gap: 8px; padding: 5px 10px; }
   .topbar-indicators { gap: 6px; padding-right: 8px; }
   .thinking-select { min-width: 72px; }
