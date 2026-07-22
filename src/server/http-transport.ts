@@ -28,23 +28,48 @@ export function methodNotAllowed(response: ServerResponse): void {
   json(response, 405, { error: "Method not allowed" });
 }
 
+const CLIENT_ID_PATTERN = /^[a-f0-9-]{20,64}$/i;
+
 export function requestClientId(request: IncomingMessage): string {
   const value = request.headers["x-pi-chat-client"];
-  const clientId = Array.isArray(value) ? value[0] : value;
-  return typeof clientId === "string" && /^[a-f0-9-]{20,64}$/i.test(clientId) ? clientId : "";
+  const headerClientId = Array.isArray(value) ? value[0] : value;
+  if (typeof headerClientId === "string" && CLIENT_ID_PATTERN.test(headerClientId)) return headerClientId;
+  // Native EventSource cannot set X-Pi-Chat-Client, so SSE carries the same
+  // non-secret window identity in its guarded same-origin query string.
+  try {
+    const url = new URL(request.url || "/", "http://127.0.0.1");
+    if (url.pathname !== "/api/events") return "";
+    const queryClientId = url.searchParams.get("client") || "";
+    return CLIENT_ID_PATTERN.test(queryClientId) ? queryClientId : "";
+  } catch {
+    return "";
+  }
+}
+
+export class HttpRequestError extends Error {
+  constructor(readonly status: 400 | 413, message: string) { super(message); }
 }
 
 export async function bodyJson(request: IncomingMessage, maximumBytes = 1_000_000): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
   let size = 0;
+  let tooLarge = false;
   for await (const chunk of request) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     size += buffer.length;
-    if (size > maximumBytes) throw new Error(`请求内容超过 ${Math.round(maximumBytes / 1_000_000)} MB`);
+    if (size > maximumBytes) {
+      // Keep draining the local request instead of destroying its socket, so
+      // the browser reliably receives 413 rather than ECONNRESET.
+      tooLarge = true;
+      continue;
+    }
     chunks.push(buffer);
   }
+  if (tooLarge) throw new HttpRequestError(413, `请求内容超过 ${Math.round(maximumBytes / 1_000_000)} MB`);
   if (!chunks.length) return {};
-  const value: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("请求必须是 JSON 对象");
+  let value: unknown;
+  try { value = JSON.parse(Buffer.concat(chunks).toString("utf8")); }
+  catch { throw new HttpRequestError(400, "请求内容不是有效 JSON"); }
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new HttpRequestError(400, "请求必须是 JSON 对象");
   return value as Record<string, unknown>;
 }

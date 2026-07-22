@@ -21,6 +21,28 @@ function storeRequestToken(value: unknown): void {
   if (typeof value === "string" && value) requestToken = value;
 }
 
+async function recoverConnection(): Promise<void> {
+  const deadline = Date.now() + APPLICATION_HANDOFF_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    try {
+      // Omit the possibly stale token. Bootstrap is the guarded same-origin
+      // handshake that returns the current process token after a crash/restart.
+      const response = await fetch("/api/bootstrap", {
+        cache: "no-store",
+        headers: { "x-pi-chat-client": clientId },
+        signal: AbortSignal.timeout(3_000),
+      });
+      const value = await response.json().catch(() => ({})) as { requestToken?: string };
+      storeRequestToken(value.requestToken);
+      if (response.ok && value.requestToken) return;
+    } catch {
+      // Listener is unavailable or still starting.
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 350));
+  }
+  throw new Error("无法重新连接 Pi Chat 服务，请通过桌面快捷方式重新打开");
+}
+
 async function waitForApplicationHandoff(previousToken = requestToken): Promise<void> {
   const deadline = Date.now() + APPLICATION_HANDOFF_TIMEOUT_MS;
   while (Date.now() < deadline) {
@@ -75,6 +97,7 @@ export const api = {
   takeSessionControl: (sessionId: string) => request<{ controlOwner: string; controlledByThisWindow: boolean }>(`/api/sessions/${sessionId}/control`, { method: "POST" }),
   restart: () => request<{ restarting: true }>("/api/restart", { method: "POST" }, APPLICATION_RESTART_TIMEOUT_MS),
   waitForApplicationHandoff,
+  recoverConnection,
   closeWindow: () => request<{ shuttingDown: boolean; closeWindow: true; sessionId?: string; rested?: boolean; remainingWindows: number }>("/api/window/close", { method: "POST" }),
   shutdown: () => request<{ shuttingDown: true }>("/api/shutdown", { method: "POST" }),
   prompt: (message: string, images: PromptImage[] = [], sessionId = "") => request<{ accepted: boolean; queued: boolean; extension?: boolean; command?: string; description?: string; isStreaming?: boolean; id?: string; queue?: QueuedPrompt[] }>("/api/chat/prompt", {

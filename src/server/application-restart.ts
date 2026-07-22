@@ -2,7 +2,8 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { access, readdir, rename, rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 
 export interface ApplicationRestartOptions {
   projectRoot: string;
@@ -94,7 +95,7 @@ async function validateBuild(distPath: string): Promise<void> {
  * Atomically replace live dist with a staged tree.
  * Retries rename on Windows lock races; rolls live back if the staged swap fails.
  */
-export async function promoteStagedDist(liveDist: string, stagedDist: string, previousDist: string): Promise<void> {
+export async function promoteStagedDist(liveDist: string, stagedDist: string, previousDist: string, options: { keepPrevious?: boolean } = {}): Promise<void> {
   if (!existsSync(stagedDist)) {
     throw new Error(`Pi Chat 无法切换到已完成的构建：暂存目录不存在（${stagedDist}）`);
   }
@@ -117,12 +118,33 @@ export async function promoteStagedDist(liveDist: string, stagedDist: string, pr
       : "";
     throw new Error(`Pi Chat 无法切换到已完成的构建：${detail}${hint}`);
   }
-  // Antivirus/indexers may briefly retain a handle to the old tree on Windows.
-  // The completed live swap remains valid; backup cleanup is best effort.
-  await rm(previousDist, { recursive: true, force: true }).catch(() => undefined);
+  // Production handoff retains the old tree until the candidate server answers
+  // /api/health. Direct/manual promotions keep the previous best-effort cleanup.
+  if (!options.keepPrevious) await rm(previousDist, { recursive: true, force: true }).catch(() => undefined);
 }
 
-/** Remove abandoned staging / previous trees left by failed restarts. */
+/** Restore the retained old dist after a promoted candidate fails to start. */
+export async function rollbackPromotedDist(liveDist: string, previousDist: string): Promise<void> {
+  if (!existsSync(previousDist)) throw new Error(`Pi Chat 无法回滚：旧版本备份不存在（${previousDist}）`);
+  const failedDist = join(dirname(liveDist), `.pi-chat-dist-failed-${process.pid}-${Date.now()}`);
+  const hadCandidate = existsSync(liveDist);
+  try {
+    if (hadCandidate) await renameWithRetry(liveDist, failedDist);
+    try {
+      await renameWithRetry(previousDist, liveDist);
+    } catch (error) {
+      if (hadCandidate && existsSync(failedDist) && !existsSync(liveDist)) {
+        await renameWithRetry(failedDist, liveDist).catch(() => undefined);
+      }
+      throw error;
+    }
+  } catch (error) {
+    throw new Error(`Pi Chat 自动回滚旧版本失败：${error instanceof Error ? error.message : String(error)}`);
+  }
+  await rm(failedDist, { recursive: true, force: true }).catch(() => undefined);
+}
+
+/** Remove abandoned staging / previous / failed trees left by restarts. */
 export async function cleanupStaleDistArtifacts(projectRoot: string): Promise<number> {
   const root = resolve(projectRoot);
   let removed = 0;
@@ -133,7 +155,7 @@ export async function cleanupStaleDistArtifacts(projectRoot: string): Promise<nu
     return 0;
   }
   for (const name of entries) {
-    if (!name.startsWith(".pi-chat-dist-staging-") && !name.startsWith(".pi-chat-dist-previous-")) continue;
+    if (!name.startsWith(".pi-chat-dist-staging-") && !name.startsWith(".pi-chat-dist-previous-") && !name.startsWith(".pi-chat-dist-failed-")) continue;
     try {
       await rm(join(root, name), { recursive: true, force: true });
       removed += 1;
@@ -191,11 +213,14 @@ export function restartServerArgs(options: ApplicationRestartOptions): string[] 
  */
 export function handOffApplicationRestart(options: ApplicationRestartOptions): void {
   const handoff = fileURLToPath(new URL("./restart-handoff.js", import.meta.url));
+  const authority = options.host.includes(":") ? `[${options.host}]:${options.port}` : `${options.host}:${options.port}`;
   const payload = JSON.stringify({
     parentPid: options.parentPid || process.pid,
     command: process.execPath,
     args: restartServerArgs(options),
     cwd: options.projectRoot,
+    healthUrl: `http://${authority}/api/health`,
+    logPath: join(tmpdir(), "pi-chat-restart-handoff.log"),
     ...(options.promoteAfterExit ? { promoteAfterExit: options.promoteAfterExit } : {}),
   });
   const helper = spawn(process.execPath, [handoff, payload], { cwd: options.projectRoot, detached: true, stdio: "ignore", windowsHide: true });

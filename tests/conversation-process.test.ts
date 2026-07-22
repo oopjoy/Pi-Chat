@@ -77,3 +77,42 @@ test("does not create a process for ordinary user and assistant messages", () =>
   assert.equal(items.length, 2);
   assert.ok(items.every((item) => item.kind === "message"));
 });
+
+test("streaming thinking-only assistant turns fold into a process without a body message", () => {
+  const items = groupConversation([{
+    role: "assistant",
+    content: [{ type: "thinking", thinking: "先规划再动手。" }],
+  }]);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].kind, "process");
+  if (items[0].kind !== "process") throw new Error("Expected process");
+  assert.deepEqual(items[0].entries, [{ kind: "thinking", text: "先规划再动手。" }]);
+});
+
+test("streaming thinking plus final text keeps thinking folded and text as the body", () => {
+  const items = groupConversation([{
+    role: "assistant",
+    content: [
+      { type: "thinking", thinking: "内部推理" },
+      { type: "text", text: "这是给用户看的答案。" },
+    ],
+  }]);
+  assert.equal(items.length, 2);
+  assert.equal(items[0].kind, "process");
+  assert.equal(items[1].kind, "message");
+  if (items[1].kind !== "message") throw new Error("Expected message");
+  assert.deepEqual(items[1].message.content, [{ type: "text", text: "这是给用户看的答案。" }]);
+});
+
+test("contiguous persisted tools and a live thought combine into one process card", () => {
+  const items = groupConversation([
+    { role: "assistant", content: [{ type: "thinking", thinking: "先调用工具" }, { type: "toolCall", id: "call-1", name: "bash", arguments: { command: "dir" } }] },
+    { role: "toolResult", toolCallId: "call-1", toolName: "bash", content: [{ type: "text", text: "ok" }] },
+    { role: "assistant", content: [{ type: "thinking", thinking: "继续分析" }] },
+  ]);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].kind, "process");
+  if (items[0].kind !== "process") throw new Error("Expected process");
+  assert.equal(items[0].entries.filter((entry) => entry.kind === "thinking").length, 2);
+  assert.equal(items[0].entries.filter((entry) => entry.kind === "tool").length, 1);
+});

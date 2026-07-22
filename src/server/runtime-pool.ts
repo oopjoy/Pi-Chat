@@ -1,6 +1,6 @@
 import { unlink } from "node:fs/promises";
 import type { ExtensionUiRequest, PiMessage, PromptImage, SessionSummary, ThinkingLevel } from "../shared/types.js";
-import { asState } from "./pi-data.js";
+import { asMessages, asState } from "./pi-data.js";
 import { idForPath, readSessionMessages } from "./session-index.js";
 import type { PiRpcClient } from "./rpc-client.js";
 
@@ -39,12 +39,15 @@ export interface SecondaryRuntime {
   recovery?: Promise<void>;
   /** File allocated by Pi for an as-yet empty draft. It is not indexed until a prompt is sent. */
   draftSession?: SessionSummary;
+  /** Empty drafts may be reused only by the browser window that created them. */
+  draftOwnerClientId?: string;
   /** Pi's JSONL path, available even before SessionIndex first observes the Session. */
   sessionPath?: string;
   draftSessionPath?: string;
 }
 
 export type RuntimeReclaimReason = "idle" | "capacity";
+export class RuntimeCapacityError extends Error {}
 
 export interface RuntimePoolOptions {
   now: () => number;
@@ -58,6 +61,8 @@ export interface RuntimePoolOptions {
   isClosed: () => boolean;
   /** Sweep only while the application admits background maintenance. */
   canSweep: () => boolean;
+  /** Live empty drafts have no indexed history fallback and cannot be reclaimed. */
+  isViewed?: (sessionId: string) => boolean;
   onSecondaryEvent: (runtime: SecondaryRuntime, event: Record<string, unknown>) => void;
   /** Host merges primary + secondary IDs for SSE payloads. */
   activeSessionIds: () => string[];
@@ -97,12 +102,15 @@ export class RuntimePool {
   }
 
   isIdle(runtime: SecondaryRuntime): boolean {
-    return !runtime.running && !runtime.dispatching && !runtime.queuePaused && runtime.promptQueue.length === 0 && !runtime.extensionUiPending;
+    return !runtime.running && !runtime.dispatching && !runtime.queuePaused && runtime.promptQueue.length === 0 && !runtime.extensionUiPending && !runtime.recovery;
   }
 
-  /** Viewing history is not a pin; idle workers may always be reclaimed for capacity. */
+  /**
+   * Saved history can fall back to JSONL when reclaimed. A live empty draft
+   * has no indexed fallback, so keep it until its window leaves or disconnects.
+   */
   canReclaim(runtime: SecondaryRuntime): boolean {
-    return this.isIdle(runtime);
+    return this.isIdle(runtime) && !(runtime.draftSession && this.options.isViewed?.(runtime.id));
   }
 
   busyCount(): number {
@@ -274,13 +282,72 @@ export class RuntimePool {
     }
   }
 
-  async createDraft(): Promise<SecondaryRuntime> {
+  private async draftHasMessages(runtime: SecondaryRuntime): Promise<boolean | null> {
+    if (runtime.draftSessionPath) {
+      try { return (await readSessionMessages(runtime.draftSessionPath)).length > 0; }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") return null;
+      }
+    }
+    try { return asMessages(await runtime.rpc.send({ type: "get_messages" }, 3_000)).length > 0; }
+    catch { return null; }
+  }
+
+  /** Reuse only this window's verified-empty draft. */
+  private async findReusableDraft(clientId: string): Promise<SecondaryRuntime | undefined> {
+    const candidates = [...this.runtimes.values()].filter((runtime) =>
+      Boolean(runtime.draftSession)
+      && runtime.draftOwnerClientId === clientId
+      && this.isIdle(runtime)
+      && !runtime.failed
+      && runtime.rpc.isRunning?.() !== false
+    );
+    for (const runtime of candidates) {
+      // Do not trust the marker alone: an Extension command can persist a turn
+      // through a different response path.
+      const hasMessages = await this.draftHasMessages(runtime);
+      if (hasMessages === false) return runtime;
+      if (hasMessages === true) {
+        runtime.draftSession = undefined;
+        runtime.draftSessionPath = undefined;
+        runtime.draftOwnerClientId = undefined;
+        this.options.broadcast({ type: "pi_chat_sessions_changed", action: "created", sessionId: runtime.id });
+      }
+    }
+    return undefined;
+  }
+
+  async commitDraftIfPersisted(runtime: SecondaryRuntime): Promise<boolean> {
+    if (!runtime.draftSession || await this.draftHasMessages(runtime) !== true) return false;
+    runtime.draftSession = undefined;
+    runtime.draftSessionPath = undefined;
+    runtime.draftOwnerClientId = undefined;
+    return true;
+  }
+
+  async createDraft(clientId = ""): Promise<SecondaryRuntime> {
     if (!this.options.createRpc) throw new Error("当前服务未启用多会话运行");
     return this.withCapacity(async () => {
-      for (const draft of [...this.runtimes.values()].filter((runtime) => Boolean(runtime.draftSession))) {
+      const reusable = await this.findReusableDraft(clientId);
+      if (reusable) {
+        this.touch(reusable);
+        this.options.broadcast({
+          type: "pi_chat_active_session_changed",
+          sessionId: reusable.id,
+          activeSessionIds: this.options.activeSessionIds(),
+        });
+        return reusable;
+      }
+      // Clean only this window's residual draft. Another live window owns an
+      // independent composer and must never be silently redirected to ours.
+      for (const draft of [...this.runtimes.values()].filter((runtime) => runtime.draftSession && runtime.draftOwnerClientId === clientId)) {
         await this.reclaim(draft.id, "capacity");
       }
       await this.makeRoomForSecondary();
+      const idleCount = [...this.runtimes.values()].filter((runtime) => this.isIdle(runtime)).length;
+      if (idleCount >= this.maxIdleSecondaryRuntimes) {
+        throw new RuntimeCapacityError(`已有 ${idleCount} 个窗口保留空白新对话，请先使用或关闭其中一个再新建`);
+      }
       const rpc = this.options.createRpc!(this.options.cwd());
       const runtime: SecondaryRuntime = {
         id: "",
@@ -294,6 +361,7 @@ export class RuntimePool {
         lastUsedAt: this.options.now(),
         unsubscribe: () => {},
         pendingTurnSettings: {},
+        draftOwnerClientId: clientId,
       };
       runtime.unsubscribe = rpc.onEvent((event) => this.options.onSecondaryEvent(runtime, event));
       try {
@@ -334,6 +402,7 @@ export class RuntimePool {
     await Promise.allSettled(this.runtimeStarts.values());
     await Promise.allSettled(this.runtimeStops.values());
     const runtimes = [...this.runtimes.values()];
+    await Promise.allSettled(runtimes.map((runtime) => runtime.recovery).filter((recovery): recovery is Promise<void> => Boolean(recovery)));
     this.runtimes.clear();
     for (const runtime of runtimes) runtime.unsubscribe();
     await Promise.allSettled(runtimes.map(async (runtime) => {

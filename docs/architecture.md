@@ -140,9 +140,17 @@ Windows often returns `EPERM` if `dist/` is renamed while the live Node process 
 2. Quiescence checks still run in-process
 3. HTTP 202, then spawn `restart-handoff`
 4. Parent shuts down and exits
-5. Handoff waits for parent PID exit → **promote** staged → live `dist` (with rename retries) → start new server
+5. Handoff waits for parent PID exit → **promote** staged → live `dist` (with rename retries, keep previous backup)
+6. Start candidate server and wait for `/api/health`
+7. On health success, drop the previous tree; on failure, **rollback** previous → live and start the old build
 
-Startup best-effort removes orphaned staging/previous trees.
+Startup best-effort removes orphaned staging/previous/failed trees (unless a handoff is still protecting a rollback backup).
+
+### Empty New drafts
+
+- Drafts are owned by the creating browser window (`draftOwnerClientId`)
+- Idle empty drafts are reused within the same window; other windows never share them
+- A draft with real messages (including Extension commands) is committed into the session list before the next New
 
 ## Security posture
 

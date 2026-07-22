@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildPiChat, cleanupStaleDistArtifacts, promoteStagedDist, restartServerArgs } from "../src/server/application-restart";
+import { buildPiChat, cleanupStaleDistArtifacts, promoteStagedDist, rollbackPromotedDist, restartServerArgs } from "../src/server/application-restart";
 
 test("local application build stages a complete replacement without touching live dist", { skip: process.platform !== "win32", timeout: 120_000 }, async () => {
   const liveIndex = join(process.cwd(), "dist", "web", "index.html");
@@ -36,6 +36,26 @@ test("staged dist promotion replaces the live tree only after an explicit commit
   }
 });
 
+test("retained promotion backup restores the old dist after candidate failure", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-dist-rollback-"));
+  const live = join(root, "dist");
+  const staged = join(root, "staged");
+  const previous = join(root, "previous");
+  try {
+    await mkdir(live);
+    await mkdir(staged);
+    await writeFile(join(live, "version.txt"), "old", "utf8");
+    await writeFile(join(staged, "version.txt"), "new", "utf8");
+    await promoteStagedDist(live, staged, previous, { keepPrevious: true });
+    assert.equal(await readFile(join(live, "version.txt"), "utf8"), "new");
+    assert.equal(await readFile(join(previous, "version.txt"), "utf8"), "old");
+    await rollbackPromotedDist(live, previous);
+    assert.equal(await readFile(join(live, "version.txt"), "utf8"), "old");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("application handoff restarts the same Pi Chat entry with its listener and workspace arguments", () => {
   const args = restartServerArgs({
     projectRoot: "C:/work/pi-chat",
@@ -54,10 +74,11 @@ test("cleanup removes abandoned staging and previous dist trees", async () => {
   try {
     await mkdir(join(root, ".pi-chat-dist-staging-1"));
     await mkdir(join(root, ".pi-chat-dist-previous-2"));
+    await mkdir(join(root, ".pi-chat-dist-failed-3"));
     await mkdir(join(root, "dist"));
     await writeFile(join(root, "keep.txt"), "ok", "utf8");
     const removed = await cleanupStaleDistArtifacts(root);
-    assert.equal(removed, 2);
+    assert.equal(removed, 3);
     await assert.rejects(readFile(join(root, ".pi-chat-dist-staging-1", "x"), "utf8"));
     assert.equal(await readFile(join(root, "keep.txt"), "utf8"), "ok");
   } finally {

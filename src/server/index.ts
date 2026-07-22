@@ -61,7 +61,9 @@ if (!loopbackHosts.has(options.host)) {
 }
 options.cwd = await loadWorkspace(options.cwd);
 const projectRoot = findProjectRoot(dirname(fileURLToPath(import.meta.url)));
-const cleaned = await cleanupStaleDistArtifacts(projectRoot);
+const protectRollbackBackup = process.env.PI_CHAT_SKIP_STALE_DIST_CLEANUP === "1";
+delete process.env.PI_CHAT_SKIP_STALE_DIST_CLEANUP;
+const cleaned = protectRollbackBackup ? 0 : await cleanupStaleDistArtifacts(projectRoot);
 if (cleaned > 0) console.log(`[Pi Chat] 已清理 ${cleaned} 个残留的 dist 暂存/备份目录。`);
 const agentDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 const gateComponent = await ensurePiChatSystemGate({

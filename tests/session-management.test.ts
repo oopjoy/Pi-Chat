@@ -41,26 +41,122 @@ test("empty draft stays out of the sidebar and is reclaimed when another New rep
     const draftId = idForPath(draftPath);
     const primary = new SessionWorker(primaryPath) as unknown as PiRpcClient;
     const draft = new SessionWorker(draftPath);
+    let createCount = 0;
     const sessions = {
       list: async () => [{ id: primaryId, sessionId: "primary", name: "Saved", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
       pathForId: (id: string) => id === primaryId ? primaryPath : null,
       messagesForId: async () => [],
     } as unknown as SessionIndex;
-    const app = new PiChatApp({ rpc: primary, createRpc: () => draft as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+    const app = new PiChatApp({
+      rpc: primary,
+      createRpc: () => {
+        createCount += 1;
+        return draft as unknown as PiRpcClient;
+      },
+      sessions,
+      resources: {} as ResourceManager,
+      cwd: process.cwd(),
+      webRoot: process.cwd(),
+    });
     const server = createServer((request, response) => void app.handle(request, response));
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const address = server.address();
     assert.ok(address && typeof address === "object");
     const origin = `http://127.0.0.1:${address.port}`;
     try {
-      const created = await (await fetch(`${origin}/api/sessions/new`, { method: "POST" })).json() as { session: { id: string } };
+      const created = await (await fetch(`${origin}/api/sessions/new`, { method: "POST" })).json() as { session: { id: string }; messages: unknown[] };
       assert.equal(created.session.id, draftId);
+      assert.deepEqual(created.messages, []);
+      // Second New reuses the same idle empty draft worker (no second spawn).
+      const again = await (await fetch(`${origin}/api/sessions/new`, { method: "POST" })).json() as { session: { id: string } };
+      assert.equal(again.session.id, draftId);
+      assert.equal(createCount, 1);
       const sidebar = await (await fetch(`${origin}/api/sessions`)).json() as { sessions: Array<{ id: string; messageCount: number }> };
       assert.equal(sidebar.sessions.some((session) => session.id === draftId), false);
       const renamed = await fetch(`${origin}/api/sessions/${draftId}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "Should not save" }) });
       assert.equal(renamed.status, 500);
       const after = await (await fetch(`${origin}/api/sessions`)).json() as { sessions: Array<{ id: string }> };
       assert.equal(after.sessions.some((session) => session.id === draftId), false);
+    } finally {
+      server.close();
+      await app.close();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an Extension command commits a draft before the next New", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-extension-draft-"));
+  try {
+    class ExtensionDraftWorker extends SessionWorker {
+      private hasMessage = false;
+      override async send(command: Record<string, unknown>) {
+        if (command.type === "get_commands") return { type: "response", success: true, data: { commands: [{ name: "gate", source: "extension" }] } };
+        if (command.type === "get_messages") return { type: "response", success: true, data: { messages: this.hasMessage ? [{ role: "user", content: "/gate open" }] : [] } };
+        if (command.type === "prompt") { this.hasMessage = true; return { type: "response", success: true }; }
+        return super.send(command);
+      }
+    }
+    const primaryPath = join(root, "primary.jsonl");
+    const firstPath = join(root, "first.jsonl");
+    const secondPath = join(root, "second.jsonl");
+    const workers = [new ExtensionDraftWorker(firstPath), new ExtensionDraftWorker(secondPath)];
+    const primary = new SessionWorker(primaryPath) as unknown as PiRpcClient;
+    const sessions = {
+      list: async () => [{ id: idForPath(primaryPath), sessionId: "primary", name: "Saved", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+      pathForId: () => null,
+      messagesForId: async () => [],
+    } as unknown as SessionIndex;
+    const app = new PiChatApp({ rpc: primary, createRpc: () => workers.shift() as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+    const server = createServer((request, response) => void app.handle(request, response));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const origin = `http://127.0.0.1:${address.port}`;
+    const client = "11111111-1111-4111-8111-111111111111";
+    try {
+      const first = await (await fetch(`${origin}/api/sessions/new`, { method: "POST", headers: { "x-pi-chat-client": client } })).json() as { session: { id: string } };
+      const command = await fetch(`${origin}/api/chat/prompt`, { method: "POST", headers: { "content-type": "application/json", "x-pi-chat-client": client }, body: JSON.stringify({ message: "/gate open", sessionId: first.session.id }) });
+      assert.equal(command.status, 202);
+      assert.equal((await command.json() as { extension?: boolean }).extension, true);
+      const next = await (await fetch(`${origin}/api/sessions/new`, { method: "POST", headers: { "x-pi-chat-client": client } })).json() as { session: { id: string } };
+      assert.equal(first.session.id, idForPath(firstPath));
+      assert.equal(next.session.id, idForPath(secondPath));
+    } finally {
+      server.close();
+      await app.close();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("different browser windows never share the same empty New draft", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-window-drafts-"));
+  try {
+    const primaryPath = join(root, "primary.jsonl");
+    const draftAPath = join(root, "draft-a.jsonl");
+    const draftBPath = join(root, "draft-b.jsonl");
+    const workers = [new SessionWorker(draftAPath), new SessionWorker(draftBPath)];
+    const primary = new SessionWorker(primaryPath) as unknown as PiRpcClient;
+    const sessions = {
+      list: async () => [{ id: idForPath(primaryPath), sessionId: "primary", name: "Saved", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+      pathForId: () => null,
+      messagesForId: async () => [],
+    } as unknown as SessionIndex;
+    const app = new PiChatApp({ rpc: primary, createRpc: () => workers.shift() as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+    const server = createServer((request, response) => void app.handle(request, response));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const origin = `http://127.0.0.1:${address.port}`;
+    try {
+      const first = await (await fetch(`${origin}/api/sessions/new`, { method: "POST", headers: { "x-pi-chat-client": "11111111-1111-4111-8111-111111111111" } })).json() as { session: { id: string } };
+      const second = await (await fetch(`${origin}/api/sessions/new`, { method: "POST", headers: { "x-pi-chat-client": "22222222-2222-4222-8222-222222222222" } })).json() as { session: { id: string } };
+      assert.equal(first.session.id, idForPath(draftAPath));
+      assert.equal(second.session.id, idForPath(draftBPath));
+      assert.notEqual(first.session.id, second.session.id);
     } finally {
       server.close();
       await app.close();

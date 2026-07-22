@@ -8,13 +8,13 @@ import type { ApplicationLifecycle, BootstrapData, ExtensionUiRequest, ModelInfo
 import { ApplicationBusyError, ApplicationLifecycleConflictError, ApplicationLifecycleCoordinator, lifecycleMessage } from "./application-lifecycle.js";
 import { pickLocalFiles, pickWorkspaceFolder, readClipboardFiles } from "./file-picker.js";
 import { type FileSnapshot, restoreSnapshots, snapshotFile } from "./file-transaction.js";
-import { bodyJson, json, methodNotAllowed, MIME_TYPES, requestClientId, SECURITY_HEADERS } from "./http-transport.js";
+import { bodyJson, HttpRequestError, json, methodNotAllowed, MIME_TYPES, requestClientId, SECURITY_HEADERS } from "./http-transport.js";
 import { ModelManager } from "./model-manager.js";
 import { ResourceManager } from "./resource-manager.js";
 import { PiRpcClient, rpcData } from "./rpc-client.js";
 import { asCommands, asMessages, asModels, asSessionStats, asState, messageWindow, promptImages, RECENT_TURN_WINDOW_SIZE } from "./pi-data.js";
 import { idForPath, SessionIndex, type SessionUsageSnapshot } from "./session-index.js";
-import { RuntimePool, type PendingTurnSettings, type SecondaryRuntime } from "./runtime-pool.js";
+import { RuntimeCapacityError, RuntimePool, type PendingTurnSettings, type SecondaryRuntime } from "./runtime-pool.js";
 import { SessionControl, SessionControlConflictError } from "./session-control.js";
 import { PromptScheduler, PROMPT_PREPARE_TIMEOUT_MS } from "./prompt-scheduler.js";
 import { SseHub } from "./sse-hub.js";
@@ -87,6 +87,9 @@ export class PiChatApp {
   private readonly connectedClients: Map<string, number>;
   private readonly viewedSessionsByClient: Map<string, string>;
   private readonly pendingExtensionTimers = new Map<string, NodeJS.Timeout>();
+  private readonly claimingExtensionRequests = new Set<string>();
+  /** FIFO admission per Session prevents simultaneous prompt requests bypassing the queue. */
+  private readonly promptAdmissionTails = new Map<string, Promise<void>>();
   private primaryFailed = false;
   private primaryRecovery: Promise<void> | null = null;
   private readonly now: () => number;
@@ -149,6 +152,7 @@ export class PiChatApp {
       onSecondaryPromptAccepted: (runtime) => {
         runtime.draftSession = undefined;
         runtime.draftSessionPath = undefined;
+        runtime.draftOwnerClientId = undefined;
         this.broadcast({ type: "pi_chat_sessions_changed", action: "created", sessionId: runtime.id });
       },
     });
@@ -162,6 +166,7 @@ export class PiChatApp {
       pathForId: (id) => this.options.sessions.pathForId(id),
       isClosed: () => this.closed,
       canSweep: () => this.applicationLifecycle === "idle",
+      isViewed: (sessionId) => this.sessionControl.isViewed(sessionId),
       onSecondaryEvent: (runtime, event) => this.handleSecondaryEvent(runtime, event),
       activeSessionIds: () => this.activeSessionIds(),
       broadcast: (event) => this.broadcast(event),
@@ -189,6 +194,23 @@ export class PiChatApp {
   private beginLifecycle(lifecycle: Exclude<ApplicationLifecycle, "idle">): void { this.lifecycleCoordinator.begin(lifecycle); }
   private endLifecycle(lifecycle: Exclude<ApplicationLifecycle, "idle">): void { this.lifecycleCoordinator.end(lifecycle); }
   private beginMutation(): () => void { return this.lifecycleCoordinator.beginMutation(); }
+
+  private async beginPromptAdmission(sessionId: string): Promise<() => void> {
+    const key = sessionId || "primary";
+    const previous = this.promptAdmissionTails.get(key) || Promise.resolve();
+    let releaseCurrent!: () => void;
+    const current = new Promise<void>((resolveCurrent) => { releaseCurrent = resolveCurrent; });
+    const tail = previous.catch(() => undefined).then(() => current);
+    this.promptAdmissionTails.set(key, tail);
+    await previous.catch(() => undefined);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      releaseCurrent();
+      if (this.promptAdmissionTails.get(key) === tail) this.promptAdmissionTails.delete(key);
+    };
+  }
 
   private async withLifecycle<T>(lifecycle: Exclude<ApplicationLifecycle, "idle">, action: string, operation: () => Promise<T>): Promise<T> {
     this.beginLifecycle(lifecycle);
@@ -245,6 +267,8 @@ export class PiChatApp {
     this.scheduler.clearPrimary();
     for (const timer of this.pendingExtensionTimers.values()) clearTimeout(timer);
     this.pendingExtensionTimers.clear();
+    this.claimingExtensionRequests.clear();
+    this.promptAdmissionTails.clear();
     this.sseHub.closeAll();
   }
 
@@ -403,6 +427,7 @@ export class PiChatApp {
     if (type === "agent_start" || type === "message_start") this.broadcast({ type: "pi_chat_sessions_changed", action: "created", sessionId: runtime.id });
     if (type === "agent_settled") {
       this.completeContextUsageRefreshTurn(runtime.id);
+      void this.finalizePersistedDraft(runtime);
       runtime.running = false;
       runtime.dispatching = false;
       runtime.liveMessage = undefined;
@@ -425,8 +450,51 @@ export class PiChatApp {
     return this.runtimePool.recover(runtime);
   }
 
-  private createDraftRuntime(): Promise<SecondaryRuntime> {
-    return this.runtimePool.createDraft();
+  private createDraftRuntime(clientId = ""): Promise<SecondaryRuntime> {
+    return this.runtimePool.createDraft(clientId);
+  }
+
+  private async finalizePersistedDraft(runtime: SecondaryRuntime): Promise<boolean> {
+    if (!await this.runtimePool.commitDraftIfPersisted(runtime)) return false;
+    this.broadcast({ type: "pi_chat_sessions_changed", action: "created", sessionId: runtime.id });
+    return true;
+  }
+
+  /**
+   * Empty New drafts have no messages and no real session stats. Avoid a full
+   * sessionView round-trip (get_messages / stats / commands) on every New click.
+   */
+  private async draftSessionView(runtime: SecondaryRuntime, clientId = ""): Promise<SessionViewData> {
+    this.runtimePool.touch(runtime);
+    this.markSessionViewed(clientId, runtime.id);
+    const draft = runtime.draftSession;
+    if (!draft) throw new Error("新会话草稿状态丢失");
+    let model: ModelInfo | null = this.lastPrimaryState.model;
+    let thinkingLevel = this.lastPrimaryState.thinkingLevel;
+    try {
+      const state = asState(await runtime.rpc.send({ type: "get_state" }, 3_000));
+      model = state.model;
+      thinkingLevel = state.thinkingLevel;
+    } catch {
+      // Reused draft may still answer; a slow get_state must not block New UX.
+    }
+    return {
+      session: { ...draft, ...this.controlState(runtime.id, clientId) },
+      state: { model, thinkingLevel, isStreaming: false, sessionFile: runtime.sessionPath, sessionId: draft.sessionId, messageCount: 0 },
+      messages: [],
+      messageTotal: 0,
+      turnTotal: 0,
+      visibleTurnCount: 0,
+      messagesTruncated: false,
+      isActive: true,
+      runtimeStatus: "active",
+      isStreaming: false,
+      queue: [],
+      queuePaused: false,
+      toolStatus: "",
+      pendingExtensionRequest: this.pendingRequestForSession(runtime.id),
+      ...this.controlState(runtime.id, clientId),
+    };
   }
 
   private handleRpcEvent(event: Record<string, unknown>): void {
@@ -866,7 +934,7 @@ export class PiChatApp {
         });
         return;
       }
-      await this.serveStatic(response, url.pathname);
+      await this.serveStatic(request, response, url.pathname);
     } catch (error) {
       if (error instanceof ApplicationLifecycleConflictError) {
         response.setHeader("retry-after", "2");
@@ -874,7 +942,8 @@ export class PiChatApp {
         return json(response, 503, { error: error.message, code: "APPLICATION_LIFECYCLE_BLOCKED", lifecycle: error.lifecycle, retryable: true, ...(isBootstrap ? { requestToken: this.requestToken } : {}) });
       }
       if (error instanceof ApplicationBusyError) return json(response, 409, { error: error.message, code: "APPLICATION_BUSY" });
-      if (error instanceof SessionControlConflictError) return json(response, 409, { error: error.message });
+      if (error instanceof SessionControlConflictError || error instanceof RuntimeCapacityError) return json(response, 409, { error: error.message });
+      if (error instanceof HttpRequestError) return json(response, error.status, { error: error.message });
       if (response.headersSent) {
         response.end();
         return;
@@ -1001,6 +1070,9 @@ export class PiChatApp {
       const requestedSessionId = typeof body.sessionId === "string" ? body.sessionId : "";
       const images = promptImages(body.images);
       if (!message && !images.length) return json(response, 400, { error: "消息或图片不能为空" });
+      const admittedSessionId = requestedSessionId || this.activeSessionId || "primary";
+      const releasePromptAdmission = await this.beginPromptAdmission(admittedSessionId);
+      try {
       this.requireSessionControl(requestedSessionId || this.activeSessionId, clientId);
       // A browser tab can outlive a Pi Chat restart. Restore its requested Session on demand
       // instead of rejecting the prompt because the old in-memory worker map was lost.
@@ -1018,8 +1090,10 @@ export class PiChatApp {
         if (images.length) return json(response, 400, { error: "Extension 指令不能同时附加图片" });
         await targetRpc.send({ type: "prompt", message }, PROMPT_PREPARE_TIMEOUT_MS);
         const state = asState(await targetRpc.send({ type: "get_state" }));
-        if (secondaryRuntime) secondaryRuntime.running = state.isStreaming;
-        else this.running = state.isStreaming;
+        if (secondaryRuntime) {
+          secondaryRuntime.running = state.isStreaming;
+          await this.finalizePersistedDraft(secondaryRuntime);
+        } else this.running = state.isStreaming;
         json(response, 202, { accepted: true, queued: false, extension: true, command: extensionCommand.name, description: extensionCommand.description, isStreaming: state.isStreaming });
         return;
       }
@@ -1052,6 +1126,9 @@ export class PiChatApp {
       await this.sendPrompt(message, images);
       json(response, 202, { accepted: true, queued: false });
       return;
+      } finally {
+        releasePromptAdmission();
+      }
     }
 
     const queueCancelMatch = /^\/api\/chat\/queue\/([a-f0-9-]{36})$/.exec(url.pathname);
@@ -1272,9 +1349,8 @@ export class PiChatApp {
 
     if (url.pathname === "/api/sessions/new") {
       if (request.method !== "POST") return methodNotAllowed(response);
-      const runtime = await this.createDraftRuntime();
-      const view = await this.sessionView(runtime.id, RECENT_TURN_WINDOW_SIZE, clientId);
-      if (!view) throw new Error("新会话创建后无法读取");
+      const runtime = await this.createDraftRuntime(clientId);
+      const view = await this.draftSessionView(runtime, clientId);
       json(response, 200, view);
       return;
     }
@@ -1472,31 +1548,45 @@ export class PiChatApp {
       const runtime = this.runtimePool.get(sessionId);
       const targetRpc = runtime?.rpc || (sessionId === this.activeSessionId ? this.options.rpc : null);
       if (!targetRpc) return json(response, 409, { error: "Extension 对应的会话已经关闭" });
-      // Claim the request synchronously before forwarding it. A second browser tab
-      // cannot turn an already accepted Allow into Block (or the reverse).
-      if (!this.clearPendingRequest(sessionId, body.id)) return json(response, 409, { error: "该确认已在另一窗口处理，或已失效" });
-      if (runtime) this.runtimePool.touch(runtime);
-      const command: Record<string, unknown> = { type: "extension_ui_response", id: body.id };
-      if (body.cancelled === true) command.cancelled = true;
-      else if (typeof body.confirmed === "boolean") command.confirmed = body.confirmed;
-      else if (typeof body.value === "string") command.value = body.value;
-      else command.cancelled = true;
-      targetRpc.sendRaw(command);
-      json(response, 200, { ok: true });
+      // Claim synchronously so two windows cannot answer the same request. Keep
+      // the authoritative pending state until sendRaw succeeds; a transport
+      // failure must leave the dialog retryable.
+      const claimKey = `${sessionId}\u0000${body.id}`;
+      const pending = this.pendingRequestForSession(sessionId);
+      if (!pending || pending.id !== body.id || this.claimingExtensionRequests.has(claimKey)) return json(response, 409, { error: "该确认已在另一窗口处理，或已失效" });
+      this.claimingExtensionRequests.add(claimKey);
+      try {
+        if (runtime) this.runtimePool.touch(runtime);
+        const command: Record<string, unknown> = { type: "extension_ui_response", id: body.id };
+        if (body.cancelled === true) command.cancelled = true;
+        else if (typeof body.confirmed === "boolean") command.confirmed = body.confirmed;
+        else if (typeof body.value === "string") command.value = body.value;
+        else command.cancelled = true;
+        targetRpc.sendRaw(command);
+        this.clearPendingRequest(sessionId, body.id);
+        json(response, 200, { ok: true });
+      } finally {
+        this.claimingExtensionRequests.delete(claimKey);
+      }
       return;
     }
 
     json(response, 404, { error: "API not found" });
   }
 
-  private async serveStatic(response: ServerResponse, pathname: string): Promise<void> {
+  private async serveStatic(request: IncomingMessage, response: ServerResponse, pathname: string): Promise<void> {
     const root = resolve(this.options.webRoot);
     const requestPath = pathname === "/" ? "index.html" : normalize(decodeURIComponent(pathname)).replace(/^[/\\]+/, "");
     let filePath = resolve(root, requestPath);
     if (!filePath.startsWith(`${root}${process.platform === "win32" ? "\\" : "/"}`) && filePath !== root) {
       return json(response, 403, { error: "Forbidden" });
     }
-    if (!existsSync(filePath) || !(await stat(filePath)).isFile()) filePath = join(root, "index.html");
+    if (!existsSync(filePath) || !(await stat(filePath)).isFile()) {
+      const acceptsHtml = String(request.headers.accept || "").includes("text/html");
+      const looksLikeAsset = Boolean(extname(requestPath));
+      if (!acceptsHtml || looksLikeAsset) return json(response, 404, { error: "Not found" });
+      filePath = join(root, "index.html");
+    }
     if (!existsSync(filePath)) return json(response, 404, { error: "前端尚未构建，请先运行 npm run build" });
     response.writeHead(200, {
       ...SECURITY_HEADERS,

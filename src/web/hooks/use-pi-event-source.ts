@@ -2,13 +2,14 @@ import { useEffect } from "react";
 
 interface PiEventSourceHandlers {
   enabled: boolean;
+  generation?: number;
   url: () => string;
   onReady(event: Event, source: EventSource): void;
   onPi(event: Event, source: EventSource): void;
   onError(source: EventSource): void;
 }
 
-export function usePiEventSource({ enabled, url, onReady, onPi, onError }: PiEventSourceHandlers): void {
+export function usePiEventSource({ enabled, generation = 0, url, onReady, onPi, onError }: PiEventSourceHandlers): void {
   useEffect(() => {
     if (!enabled) return;
     const source = new EventSource(url());
@@ -22,5 +23,5 @@ export function usePiEventSource({ enabled, url, onReady, onPi, onError }: PiEve
       source.removeEventListener("pi", pi);
       source.close();
     };
-  }, [enabled, onError, onPi, onReady, url]);
+  }, [enabled, generation, onError, onPi, onReady, url]);
 }
