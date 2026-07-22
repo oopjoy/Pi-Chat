@@ -103,7 +103,7 @@ export function ManagementPanel({ section, appearance, models, state, busy, onCl
                   </button>
                 ))}
               </div>
-              <button type="button" className="settings-shutdown" disabled={busy} onClick={onShutdown} title="关闭 Pi Chat 服务和全部 Pi Chat 会话进程">关闭 Pi Chat</button>
+              <button type="button" className="settings-shutdown" disabled={busy} onClick={onShutdown} title="检查全部对话后，关闭所有 Pi Chat 窗口、服务和会话进程">关闭 Pi Chat</button>
             </nav>
             <div className="settings-content">
               {settingsTab === "appearance" && <AppearancePanel value={appearance} onChange={onAppearance} />}
@@ -240,7 +240,7 @@ function ModelsPanel({ models, state, busy, filter, onFilter, onModel, onReloade
       return <article className={`model-card ${active ? "is-active" : ""} ${isEditing ? "is-editing" : ""}`} key={`${model.provider}/${model.id}`}>
         <div className="model-card-main">
           <button type="button" className="model-card-select" disabled={busy || modelBusy || active} onClick={() => onModel(model.provider, model.id)}>
-            <strong>{model.name || model.id}</strong><small>{model.id}</small><span className="model-capabilities">{model.reasoning ? "Reasoning" : "Chat"}{model.contextWindow ? ` · ${Math.round(model.contextWindow / 1000)}k` : ""}</span>
+            <strong>{model.name || model.id}</strong><small><span className="model-id-label">Model ID</span>{model.id}</small>{model.contextWindow && <span className="model-capabilities">{Math.round(model.contextWindow / 1000)}k</span>}
           </button>
           {model.custom && <div className="model-card-actions">
             <button type="button" disabled={busy || modelBusy} title="编辑 models.json 中的模型配置" onClick={() => void edit(model)}>{isEditing ? "收起" : "编辑"}</button>
@@ -262,8 +262,8 @@ function Search({ value, onChange, placeholder }: { value: string; onChange: (va
   return <input className="panel-search" value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} />;
 }
 
-function PanelIntro({ title, description, count }: { title: string; description: string; count?: number }) {
-  return <div className="panel-intro"><div><h3>{title}</h3><p>{description}</p></div>{typeof count === "number" && <span className="count-badge">{count}</span>}</div>;
+function PanelIntro({ title, description, count }: { title: string; description?: string; count?: number }) {
+  return <div className="panel-intro"><div><h3>{title}</h3>{description && <p>{description}</p>}</div>{typeof count === "number" && <span className="count-badge">{count}</span>}</div>;
 }
 
 function packageSummary(item: PackageResource): string {
@@ -306,11 +306,11 @@ function AppearancePanel({ value, onChange }: { value: AppearancePreferences; on
   const isDefault = Object.keys(DEFAULT_APPEARANCE).every((key) => value[key as keyof AppearancePreferences] === DEFAULT_APPEARANCE[key as keyof AppearancePreferences]);
   return <div className="panel-body appearance-panel">
     <div className="appearance-panel-heading">
-      <PanelIntro title="外观与阅读" description="修改会即时生效，并保存在当前浏览器中。" />
+      <PanelIntro title="外观与阅读" />
       <button type="button" className="appearance-reset" disabled={isDefault} onClick={() => onChange({ ...DEFAULT_APPEARANCE })}>重置外观</button>
     </div>
-    <SettingRow title="主题" description="跟随系统或固定明暗主题"><select value={value.theme} onChange={(event) => update("theme", event.target.value as ThemePreference)}><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></SettingRow>
-    <SettingRow title="聊天字体" description="仅控制对话正文，不影响界面控件"><select value={value.font} onChange={(event) => update("font", event.target.value as FontPreference)}><option value="system">系统字体</option><option value="serif">衬线阅读字体</option><option value="mono">等宽字体</option></select></SettingRow>
+    <SettingRow title="主题"><select value={value.theme} onChange={(event) => update("theme", event.target.value as ThemePreference)}><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></SettingRow>
+    <SettingRow title="聊天字体"><select value={value.font} onChange={(event) => update("font", event.target.value as FontPreference)}><option value="system">系统字体</option><option value="serif">衬线阅读字体</option><option value="mono">等宽字体</option></select></SettingRow>
     <RangeSetting title="字号" value={value.fontSize} minimum={13} maximum={22} step={1} suffix="px" onChange={(next) => update("fontSize", next)} />
     <RangeSetting title="行间距" value={value.lineHeight} minimum={1.35} maximum={2.2} step={0.05} suffix="" onChange={(next) => update("lineHeight", next)} />
     <RangeSetting title="对话宽度" value={value.chatWidth} minimum={700} maximum={1500} step={50} suffix="px" onChange={(next) => update("chatWidth", next)} />
@@ -323,8 +323,8 @@ function AppearancePanel({ value, onChange }: { value: AppearancePreferences; on
   </div>;
 }
 
-function SettingRow({ title, description, children }: { title: string; description: string; children: React.ReactNode }) {
-  return <label className="setting-row"><span><strong>{title}</strong><small>{description}</small></span>{children}</label>;
+function SettingRow({ title, description, children }: { title: string; description?: string; children: React.ReactNode }) {
+  return <label className="setting-row"><span><strong>{title}</strong>{description && <small>{description}</small>}</span>{children}</label>;
 }
 
 function RangeSetting({ title, value, minimum, maximum, step, suffix, onChange }: { title: string; value: number; minimum: number; maximum: number; step: number; suffix: string; onChange: (value: number) => void }) {

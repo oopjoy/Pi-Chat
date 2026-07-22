@@ -37,6 +37,20 @@ test("groups thinking, tool calls and matching tool results into one collapsed p
   assert.deepEqual(items[2].message.content, [{ type: "text", text: "项目状态正常。" }]);
 });
 
+test("removes leaked analysis markers from tool-process notes", () => {
+  const items = groupConversation([{
+    role: "assistant",
+    content: [
+      { type: "text", text: "code**/analysis code**/analysis code**/analysis\n code**/analysis" },
+      { type: "toolCall", id: "call-leak", name: "bash", arguments: { command: "dir" } },
+    ],
+  }]);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].kind, "process");
+  if (items[0].kind !== "process") throw new Error("Expected process");
+  assert.equal(items[0].entries.some((entry) => entry.kind === "note"), false);
+});
+
 test("keeps a failed tool result visible inside the process", () => {
   const items = groupConversation([
     { role: "assistant", content: [{ type: "toolCall", id: "call-2", name: "bash", arguments: { command: "npm test" } }] },

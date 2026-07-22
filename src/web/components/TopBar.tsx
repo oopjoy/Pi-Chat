@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import type { ModelInfo, PiState, SessionStats, ThinkingLevel } from "../../shared/types";
 import type { GateMode } from "../lib/gate-mode";
+import { CompactSelect } from "./CompactSelect";
 import { GateControl } from "./GateControl";
 import { CheckIcon, ChipIcon } from "./Icons";
 import { contextUsageTone } from "../lib/context-usage";
@@ -40,7 +41,8 @@ function UsageStats({ stats, isCompacting }: { stats?: SessionStats; isCompactin
   const pendingRefresh = stats?.contextUsagePendingRefresh === true;
   const percent = pendingRefresh ? null : typeof context?.percent === "number" ? Math.max(0, Math.min(100, context.percent)) : null;
   const tone = pendingRefresh ? "normal" : contextUsageTone(percent, isCompacting);
-  const text = pendingRefresh ? "?" : formatPercent(percent);
+  const percentText = formatPercent(percent);
+  const text = `${pendingRefresh ? "?" : percentText}/${compactTokens(context?.contextWindow)}`;
   const ringPercent = pendingRefresh ? 33.333 : percent ?? 0;
   return (
     <div className={`usage-pill is-${tone}`} tabIndex={0} aria-label={`会话上下文用量 ${pendingRefresh ? "待更新" : text}`}>
@@ -48,7 +50,7 @@ function UsageStats({ stats, isCompacting }: { stats?: SessionStats; isCompactin
       <span>{text}</span>
       <div className="usage-card" role="tooltip">
         <dl>
-          <div><dt>上下文</dt><dd>{pendingRefresh ? "?" : compactTokens(context?.tokens)} / {compactTokens(context?.contextWindow)}（{pendingRefresh ? "待更新" : text}）</dd></div>
+          <div><dt>上下文</dt><dd>{pendingRefresh ? "?" : compactTokens(context?.tokens)} / {compactTokens(context?.contextWindow)}（{pendingRefresh ? "待更新" : percentText}）</dd></div>
           <div><dt>累计输入</dt><dd>{compactTokens(usage?.input)}</dd></div>
           <div><dt>累计输出</dt><dd>{compactTokens(usage?.output)}</dd></div>
           <div><dt>缓存读取</dt><dd>{compactTokens(usage?.cacheRead)}</dd></div>
@@ -119,11 +121,7 @@ export function TopBar({ state, models, stats, conversationName, workspacePath, 
               })}
             </div>}
           </div>
-          <label className="thinking-select" title="思考强度">
-            <select aria-label="思考强度" value={state.thinkingLevel || "off"} disabled={disabled || !state.model?.reasoning} onChange={(event) => onThinking(event.target.value as ThinkingLevel)}>
-              {THINKING_LEVELS.map((level) => <option key={level.value} value={level.value}>{level.label}</option>)}
-            </select>
-          </label>
+          <CompactSelect value={(state.thinkingLevel || "off") as ThinkingLevel} options={THINKING_LEVELS} disabled={disabled || !state.model?.reasoning} ariaLabel="思考强度" title="思考强度" align="right" className="thinking-select" onChange={onThinking} />
         </div>
       </div>
     </header>

@@ -1,4 +1,5 @@
 import type { PiContentBlock, PiMessage } from "../../shared/types";
+import { sanitizeAssistantText } from "./assistant-text";
 
 export type ProcessEntry =
   | { kind: "thinking"; text: string }
@@ -52,7 +53,9 @@ function processFromMessage(message: PiMessage): { entries: ProcessEntry[]; visi
   const content = blocks(message);
   const hasToolCall = content.some((block) => block.type === "toolCall");
   const thinking = content.filter((block) => block.type === "thinking" && block.thinking)
-    .map((block) => ({ kind: "thinking" as const, text: block.thinking as string }));
+    .map((block) => sanitizeAssistantText(block.thinking as string))
+    .filter(Boolean)
+    .map((text) => ({ kind: "thinking" as const, text }));
   if (!hasToolCall && thinking.length === 0) return { entries: [], visibleMessage: message };
 
   const entries: ProcessEntry[] = [...thinking];
@@ -60,7 +63,8 @@ function processFromMessage(message: PiMessage): { entries: ProcessEntry[]; visi
     if (block.type === "toolCall") {
       entries.push({ kind: "tool", id: block.id, name: block.name || "工具", arguments: detail(block.arguments) });
     } else if (hasToolCall && block.type === "text" && block.text?.trim()) {
-      entries.push({ kind: "note", text: block.text });
+      const text = sanitizeAssistantText(block.text);
+      if (text) entries.push({ kind: "note", text });
     }
   }
 

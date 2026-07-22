@@ -25,7 +25,7 @@ function sessionStatus(session: SessionSummary, warming: boolean, failed: boolea
   if (session.queued) return { kind: "pending", label: "消息等待发送" };
   if (session.running) return { kind: "running", label: "正在生成" };
   if (warming) return { kind: "running", label: "正在预热会话" };
-  if (failed) return { kind: "error", label: "会话预热失败" };
+  if (failed) return { kind: "error", label: "会话运行异常" };
   if (session.writable) return { kind: "ready", label: "已就绪" };
   return { kind: "dormant", label: "按需启动" };
 }
@@ -118,7 +118,7 @@ export function SessionSidebar({ sessions, viewedSessionId, workspaceCwd, open, 
                 title={`${session.cwd}\n${session.preview}`}
               >
                 <span className="session-name">{session.name}</span>
-                <span className="session-meta"><i className={`session-status is-${status.kind}`} role="img" aria-label={status.label} title={status.label} />{relativeTime(session.updatedAt)} · {session.messageCount} 条</span>
+                <span className="session-meta"><i className={`session-status is-${status.kind}`} role="img" aria-label={status.label} title={status.label} />{relativeTime(session.updatedAt)} · {session.turnCount ?? session.messageCount} 轮</span>
               </button>
               <span className="session-item-actions">
                 <button type="button" onClick={() => onRename(session)} title="重命名对话" aria-label={`重命名 ${session.name}`}>

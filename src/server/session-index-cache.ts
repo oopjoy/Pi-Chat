@@ -27,7 +27,8 @@ function validEntry(value: unknown): value is SessionCacheEntry {
     && typeof summary.preview === "string"
     && typeof summary.cwd === "string"
     && typeof summary.updatedAt === "number"
-    && typeof summary.messageCount === "number";
+    && typeof summary.messageCount === "number"
+    && typeof summary.turnCount === "number";
 }
 
 export async function loadSessionCache(path: string): Promise<Map<string, SessionCacheEntry>> {

@@ -6,6 +6,8 @@ export interface SessionSummary {
   cwd: string;
   updatedAt: number;
   messageCount: number;
+  /** Number of user-initiated turns, including turns later aborted or failed. */
+  turnCount?: number;
   active: boolean;
   writable?: boolean;
   running?: boolean;
@@ -145,6 +147,8 @@ export interface SessionViewData {
   controlledByThisWindow?: boolean;
 }
 
+export type ApplicationLifecycle = "idle" | "restarting" | "shutting-down" | "workspace-changing" | "resources-reloading";
+
 export interface BootstrapData {
   state: PiState;
   messages: PiMessage[];
@@ -169,6 +173,7 @@ export interface BootstrapData {
   pendingExtensionRequest?: ExtensionUiRequest;
   controlOwner?: string;
   controlledByThisWindow?: boolean;
+  applicationLifecycle?: ApplicationLifecycle;
 }
 
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";

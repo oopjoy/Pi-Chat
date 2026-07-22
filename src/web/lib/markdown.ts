@@ -15,6 +15,7 @@ const markdownSanitizeSchema = {
   strip: [...(defaultSchema.strip || []), "iframe", "object", "style", "form"],
 };
 
+export const streamingMarkdownRemarkPlugins: ReactMarkdownOptions["remarkPlugins"] = [remarkGfm];
 export const markdownRemarkPlugins: ReactMarkdownOptions["remarkPlugins"] = [remarkGfm, remarkMath];
 
 export function createMarkdownRehypePlugins(mapOffset: (offset: number) => number): ReactMarkdownOptions["rehypePlugins"] {

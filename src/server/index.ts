@@ -89,22 +89,26 @@ if (options.dev) {
   });
 }
 
-async function requestApplicationRestart(): Promise<void> {
+async function prepareApplicationRestart(): Promise<() => void> {
   console.log("[Pi Chat] 正在构建本地更新…");
   await buildPiChat(projectRoot);
-  // The handler sends its 202 response synchronously after this returns. Yield
-  // one event-loop turn so the browser receives it before this listener closes.
-  setTimeout(() => {
-    handOffApplicationRestart({
-      projectRoot,
-      serverEntry: fileURLToPath(import.meta.url),
-      host: options.host,
-      port: options.port,
-      cwd: options.cwd,
-      dev: options.dev,
-    });
-    void shutdown().then(() => process.exit(0));
-  }, 0);
+  // Building is reversible; handoff and shutdown are not. PiChatApp performs a
+  // second authoritative quiescence check before invoking this commit closure.
+  return () => {
+    // Yield one event-loop turn so the browser receives the 202 response before
+    // the listener and its SSE streams close.
+    setTimeout(() => {
+      handOffApplicationRestart({
+        projectRoot,
+        serverEntry: fileURLToPath(import.meta.url),
+        host: options.host,
+        port: options.port,
+        cwd: options.cwd,
+        dev: options.dev,
+      });
+      void shutdown().then(() => process.exit(0));
+    }, 0);
+  };
 }
 
 const app = new PiChatApp({
@@ -117,7 +121,7 @@ const app = new PiChatApp({
   webRoot: resolve(projectRoot, "dist", "web"),
   devMiddleware: vite ? (request, response, next) => vite.middlewares(request, response, next) : undefined,
   allowedHosts: [],
-  applicationRestart: requestApplicationRestart,
+  applicationRestart: prepareApplicationRestart,
   applicationShutdown: () => setTimeout(() => void shutdown().then(() => process.exit(0)), 0),
 });
 const server = createHttpServer((request, response) => void app.handle(request, response));

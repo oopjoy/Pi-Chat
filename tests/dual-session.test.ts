@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createServer } from "node:http";
+import { createServer, request as httpRequest } from "node:http";
 import test from "node:test";
 import { PiChatApp } from "../src/server/app";
 import type { PiRpcClient } from "../src/server/rpc-client";
@@ -69,6 +69,330 @@ test("one browser window controls a Session until another explicitly takes over"
     assert.deepEqual(primary.commands.filter((command) => command.type === "prompt").map((command) => command.message), ["owned by first", "owned by second"]);
   } finally {
     server.close();
+    await app.close();
+  }
+});
+
+test("closing one of multiple windows rests its exclusive idle Session without shutting down Pi Chat", async () => {
+  const path = "C:\\sessions\\primary.jsonl";
+  const id = idForPath(path);
+  const primary = new FakeRpc(path, "primary");
+  let shutdowns = 0;
+  const sessions = {
+    list: async () => [{ id, sessionId: "primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+    pathForId: () => path,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), applicationShutdown: () => { shutdowns += 1; } });
+  const first = "11111111-1111-4111-8111-111111111111";
+  const second = "22222222-2222-4222-8222-222222222222";
+  const internals = app as unknown as { connectedClients: Map<string, number>; viewedSessionsByClient: Map<string, string> };
+  internals.connectedClients.set(first, 1);
+  internals.connectedClients.set(second, 1);
+  internals.viewedSessionsByClient.set(first, id);
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    assert.equal((await fetch(`http://127.0.0.1:${address.port}/api/bootstrap`, { headers: { "x-pi-chat-client": first } })).status, 200);
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/window/close`, { method: "POST", headers: { "x-pi-chat-client": first } });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { shuttingDown: false, closeWindow: true, sessionId: id, rested: true, remainingWindows: 1 });
+    assert.equal(shutdowns, 0);
+    assert.equal(primary.stopCount, 1);
+    assert.equal(internals.connectedClients.has(first), false);
+    assert.equal(internals.connectedClients.has(second), true);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("closing one window does not rest its Session while an admitted mutation is in flight", async () => {
+  const path = "C:\\sessions\\primary.jsonl";
+  const id = idForPath(path);
+  const primary = new FakeRpc(path, "primary");
+  const sessions = {
+    list: async () => [{ id, sessionId: "primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+    pathForId: () => path,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const first = "11111111-1111-4111-8111-111111111111";
+  const second = "22222222-2222-4222-8222-222222222222";
+  const internals = app as unknown as { connectedClients: Map<string, number>; viewedSessionsByClient: Map<string, string>; activeMutationRequests: number };
+  internals.connectedClients.set(first, 1);
+  internals.connectedClients.set(second, 1);
+  internals.viewedSessionsByClient.set(first, id);
+  internals.activeMutationRequests = 1;
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    assert.equal((await fetch(`http://127.0.0.1:${address.port}/api/bootstrap`)).status, 200);
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/window/close`, { method: "POST", headers: { "x-pi-chat-client": first } });
+    assert.equal(response.status, 200);
+    assert.equal((await response.json() as { rested?: boolean }).rested, false);
+    assert.equal(primary.stopCount, 0);
+  } finally {
+    internals.activeMutationRequests = 0;
+    server.close();
+    await app.close();
+  }
+});
+
+test("closing the last connected window shuts down the Pi Chat application", async () => {
+  const path = "C:\\sessions\\primary.jsonl";
+  const id = idForPath(path);
+  const primary = new FakeRpc(path, "primary");
+  let shutdowns = 0;
+  const sessions = {
+    list: async () => [{ id, sessionId: "primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+    pathForId: () => path,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), applicationShutdown: () => { shutdowns += 1; } });
+  const client = "11111111-1111-4111-8111-111111111111";
+  (app as unknown as { connectedClients: Map<string, number> }).connectedClients.set(client, 1);
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/window/close`, { method: "POST", headers: { "x-pi-chat-client": client } });
+    assert.equal(response.status, 202);
+    assert.deepEqual(await response.json(), { shuttingDown: true, closeWindow: true, remainingWindows: 0 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(shutdowns, 1);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("restart barrier rejects new mutations throughout a long build and commits only after recheck", async () => {
+  const path = "C:\\sessions\\primary.jsonl";
+  const id = idForPath(path);
+  const primary = new FakeRpc(path, "primary");
+  let resolveBuild: (() => void) | undefined;
+  let commits = 0;
+  const build = new Promise<void>((resolve) => { resolveBuild = resolve; });
+  const sessions = {
+    list: async () => [{ id, sessionId: "primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+    pathForId: () => path,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({
+    rpc: primary as unknown as PiRpcClient,
+    sessions,
+    resources: {} as ResourceManager,
+    cwd: process.cwd(),
+    webRoot: process.cwd(),
+    applicationRestart: async () => { await build; return () => { commits += 1; }; },
+  });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    assert.equal((await fetch(`${origin}/api/bootstrap`)).status, 200);
+    const restart = fetch(`${origin}/api/restart`, { method: "POST" });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const health = await fetch(`${origin}/api/health`);
+    assert.equal(health.status, 200);
+    assert.deepEqual(await health.json(), { ok: true, service: "pi-chat", lifecycle: "restarting" });
+    const maintenanceBootstrap = await fetch(`${origin}/api/bootstrap`);
+    assert.equal(maintenanceBootstrap.status, 503);
+    const maintenanceData = await maintenanceBootstrap.json() as { lifecycle?: string; requestToken?: string };
+    assert.equal(maintenanceData.lifecycle, "restarting");
+    assert.ok(maintenanceData.requestToken);
+    assert.equal((await fetch(`${origin}/api/sessions`)).status, 200);
+    assert.equal((await fetch(`${origin}/api/sessions/${id}/view`)).status, 200);
+    for (const [url, body] of [
+      ["/api/chat/prompt", { message: "must be rejected", sessionId: id }],
+      ["/api/thinking/set", { level: "high", sessionId: id }],
+      [`/api/sessions/${id}/activate`, {}],
+      ["/api/extension-ui/respond", { id: "pending", sessionId: id, confirmed: true }],
+    ] as const) {
+      const blocked = await fetch(`${origin}${url}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      assert.equal(blocked.status, 503, `${url} should be blocked`);
+      assert.equal((await blocked.json() as { code?: string }).code, "APPLICATION_LIFECYCLE_BLOCKED");
+    }
+    assert.equal(primary.commands.some((command) => command.type === "prompt"), false);
+    resolveBuild?.();
+    const response = await restart;
+    assert.equal(response.status, 202);
+    assert.equal(commits, 1);
+  } finally {
+    resolveBuild?.();
+    server.close();
+    await app.close();
+  }
+});
+
+test("an in-flight mutation lease prevents restart before the Prompt body is complete", async () => {
+  const path = "C:\\sessions\\primary.jsonl";
+  const primary = new FakeRpc(path, "primary");
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), applicationRestart: async () => () => undefined });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const slowPrompt = httpRequest(`${origin}/api/chat/prompt`, { method: "POST", headers: { "content-type": "application/json", "transfer-encoding": "chunked" } });
+  slowPrompt.on("error", () => undefined);
+  slowPrompt.write('{"message":"still uploading"');
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const restart = await fetch(`${origin}/api/restart`, { method: "POST" });
+    assert.equal(restart.status, 409);
+    assert.equal((await restart.json() as { code?: string }).code, "APPLICATION_BUSY");
+    const health = await fetch(`${origin}/api/health`);
+    assert.equal((await health.json() as { lifecycle: string }).lifecycle, "idle");
+  } finally {
+    slowPrompt.destroy();
+    server.close();
+    await app.close();
+  }
+});
+
+test("restart build failure restores idle admission", async () => {
+  const path = "C:\\sessions\\primary.jsonl";
+  const id = idForPath(path);
+  const primary = new FakeRpc(path, "primary");
+  const sessions = {
+    list: async () => [{ id, sessionId: "primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+    pathForId: () => path,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), applicationRestart: async () => { throw new Error("build failed"); } });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    assert.equal((await fetch(`${origin}/api/bootstrap`)).status, 200);
+    assert.equal((await fetch(`${origin}/api/restart`, { method: "POST" })).status, 500);
+    const health = await fetch(`${origin}/api/health`);
+    assert.equal((await health.json() as { lifecycle: string }).lifecycle, "idle");
+    assert.equal((await fetch(`${origin}/api/chat/prompt`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message: "works after failure", sessionId: id }) })).status, 202);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("paused Secondary queue blocks workspace and resource reload operations", async () => {
+  const primaryPath = "C:\\sessions\\primary.jsonl";
+  const secondaryPath = "C:\\sessions\\secondary.jsonl";
+  const primaryId = idForPath(primaryPath);
+  const secondaryId = idForPath(secondaryPath);
+  const primary = new FakeRpc(primaryPath, "primary");
+  const secondary = new FakeRpc(secondaryPath, "secondary");
+  const summaries = [
+    { id: primaryId, sessionId: "primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 2, messageCount: 1, active: true },
+    { id: secondaryId, sessionId: "secondary", name: "Secondary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: false },
+  ];
+  const sessions = {
+    list: async () => summaries,
+    pathForId: (id: string) => id === primaryId ? primaryPath : id === secondaryId ? secondaryPath : null,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, createRpc: () => secondary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    assert.equal((await fetch(`${origin}/api/bootstrap`)).status, 200);
+    assert.equal((await fetch(`${origin}/api/sessions/${secondaryId}/activate`, { method: "POST" })).status, 200);
+    const runtime = (app as unknown as { runtimes: Map<string, { queuePaused: boolean; promptQueue: object[] }> }).runtimes.get(secondaryId);
+    assert.ok(runtime);
+    runtime.queuePaused = true;
+    runtime.promptQueue.push({ id: "queued" });
+    const workspace = await fetch(`${origin}/api/workspace/set`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: process.cwd() }) });
+    assert.equal(workspace.status, 409);
+    const resource = await fetch(`${origin}/api/resources/skills`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "skill", enabled: true }) });
+    assert.equal(resource.status, 409);
+    assert.equal(secondary.stopCount, 0);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("last-window close refuses while a prompt is dispatching", async () => {
+  const path = "C:\\sessions\\primary.jsonl";
+  const primary = new FakeRpc(path, "primary");
+  let shutdowns = 0;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), applicationShutdown: () => { shutdowns += 1; } });
+  const client = "11111111-1111-4111-8111-111111111111";
+  const internals = app as unknown as { connectedClients: Map<string, number>; dispatching: boolean };
+  internals.connectedClients.set(client, 1);
+  internals.dispatching = true;
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/window/close`, { method: "POST", headers: { "x-pi-chat-client": client } });
+    assert.equal(response.status, 409);
+    assert.equal(shutdowns, 0);
+    assert.equal(internals.connectedClients.has(client), true);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("global shutdown refuses while any conversation is still busy", async () => {
+  const path = "C:\\sessions\\primary.jsonl";
+  const primary = new FakeRpc(path, "primary");
+  let shutdowns = 0;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), applicationShutdown: () => { shutdowns += 1; } });
+  (app as unknown as { dispatching: boolean }).dispatching = true;
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/shutdown`, { method: "POST" });
+    assert.equal(response.status, 409);
+    assert.match((await response.json() as { error: string }).error, /仍有 1 个对话/);
+    assert.equal(shutdowns, 0);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("global shutdown broadcasts to every window before stopping the application", async () => {
+  const path = "C:\\sessions\\primary.jsonl";
+  const primary = new FakeRpc(path, "primary");
+  let shutdowns = 0;
+  const frames: string[] = [];
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), applicationShutdown: () => { shutdowns += 1; } });
+  const clients = (app as unknown as { sseClients: Map<{ write: (frame: string) => void }, string> }).sseClients;
+  clients.set({ write: (frame) => { frames.push(frame); } }, "11111111-1111-4111-8111-111111111111");
+  clients.set({ write: (frame) => { frames.push(frame); } }, "22222222-2222-4222-8222-222222222222");
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/shutdown`, { method: "POST" });
+    assert.equal(response.status, 202);
+    assert.deepEqual(await response.json(), { shuttingDown: true });
+    assert.equal(shutdowns, 1);
+    assert.equal(frames.filter((frame) => frame.includes("pi_chat_application_closing")).length, 2);
+  } finally {
+    server.close();
+    clients.clear();
     await app.close();
   }
 });
@@ -240,7 +564,7 @@ test("a crashed primary RPC clears stale state and recovers on the next bootstra
   }
 });
 
-test("a crashed primary RPC also recovers through Session list and view endpoints", async () => {
+test("Session list recovers a crashed primary while cold history view stays read-only", async () => {
   for (const endpoint of ["/api/sessions", "view"] as const) {
     const path = "C:\\sessions\\primary.jsonl";
     const id = idForPath(path);
@@ -261,7 +585,7 @@ test("a crashed primary RPC also recovers through Session list and view endpoint
       primary.crash();
       const url = endpoint === "view" ? `/api/sessions/${id}/view` : endpoint;
       assert.equal((await fetch(`${origin}${url}`)).status, 200);
-      assert.equal(primary.restartCount, 1);
+      assert.equal(primary.restartCount, endpoint === "view" ? 0 : 1);
     } finally {
       server.close();
       await app.close();
@@ -337,6 +661,45 @@ test("running Sessions stage model and thinking changes until their next prompt"
     assert.equal(prompt.status, 202);
     const types = primary.commands.map((command) => command.type);
     assert.deepEqual(types.slice(-3), ["set_model", "set_thinking_level", "prompt"]);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("model and thinking changes do not claim or transfer Session control", async () => {
+  const path = "C:\\sessions\\primary.jsonl";
+  const id = idForPath(path);
+  const primary = new FakeRpc(path, "primary");
+  primary.streaming = true;
+  const sessions = {
+    list: async () => [{ id, sessionId: "primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+    pathForId: () => path,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const first = "11111111-1111-4111-8111-111111111111";
+  const second = "22222222-2222-4222-8222-222222222222";
+  const post = (url: string, client: string, body: object) => fetch(`${origin}${url}`, { method: "POST", headers: { "content-type": "application/json", "x-pi-chat-client": client }, body: JSON.stringify(body) });
+  const controllers = (app as unknown as { sessionControllers: Map<string, string> }).sessionControllers;
+  try {
+    assert.equal((await fetch(`${origin}/api/bootstrap`, { headers: { "x-pi-chat-client": first } })).status, 200);
+    assert.equal((await post("/api/models/set", first, { provider: "test", modelId: "next", sessionId: id })).status, 200);
+    assert.equal((await post("/api/thinking/set", first, { level: "high", sessionId: id })).status, 200);
+    assert.equal(controllers.has(id), false);
+    assert.equal((await post("/api/thinking/set", second, { level: "low", sessionId: id })).status, 200);
+    assert.equal(controllers.has(id), false);
+    assert.equal((await post("/api/chat/prompt", second, { message: "claim by sending", sessionId: id })).status, 202);
+    assert.equal(controllers.get(id), second);
+    const foreignThinking = await post("/api/thinking/set", first, { level: "max", sessionId: id });
+    assert.equal(foreignThinking.status, 409);
+    assert.match((await foreignThinking.json() as { error: string }).error, /另一窗口/);
+    assert.equal(controllers.get(id), second);
   } finally {
     server.close();
     await app.close();
@@ -429,6 +792,112 @@ test("idle secondary workers use LRU capacity reclamation without stopping activ
     const bootstrap = await (await fetch(`${origin}/api/bootstrap`)).json() as { activeSessionIds: string[] };
     assert.deepEqual(new Set(bootstrap.activeSessionIds), new Set([idA, idB, idC]));
   } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("four viewed idle Sessions still obey the hard cap of three Secondary Runtimes", async () => {
+  const paths = ["C:\\sessions\\primary.jsonl", "C:\\sessions\\one.jsonl", "C:\\sessions\\two.jsonl", "C:\\sessions\\three.jsonl", "C:\\sessions\\four.jsonl"];
+  const ids = paths.map(idForPath);
+  const primary = new FakeRpc(paths[0], "primary");
+  const workers = paths.slice(1).map((path, index) => new FakeRpc(path, `secondary-${index}`));
+  const pendingWorkers = [...workers];
+  const summaries = paths.map((path, index) => ({ id: ids[index], sessionId: `s${index}`, name: `S${index}`, preview: "", cwd: process.cwd(), updatedAt: 10 - index, messageCount: 1, active: index === 0 }));
+  const sessions = {
+    list: async () => summaries,
+    pathForId: (id: string) => paths[ids.indexOf(id)] || null,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({
+    rpc: primary as unknown as PiRpcClient,
+    createRpc: () => pendingWorkers.shift() as unknown as PiRpcClient,
+    sessions,
+    resources: {} as ResourceManager,
+    cwd: process.cwd(),
+    webRoot: process.cwd(),
+    maxIdleSecondaryRuntimes: 3,
+    secondaryRuntimeIdleMs: 60_000,
+    secondaryRuntimeSweepMs: 60_000,
+  });
+  const internals = app as unknown as { connectedClients: Map<string, number>; viewedSessionsByClient: Map<string, string>; runtimes: Map<string, unknown> };
+  for (let index = 1; index <= 4; index += 1) {
+    const client = `${index}`.repeat(8) + "-1111-4111-8111-111111111111";
+    internals.connectedClients.set(client, 1);
+    internals.viewedSessionsByClient.set(client, ids[index]);
+  }
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    const activations = await Promise.all(ids.slice(1).map((id) => fetch(`${origin}/api/sessions/${id}/activate`, { method: "POST" })));
+    assert.ok(activations.every((response) => response.status === 200));
+    assert.equal(internals.runtimes.size, 3);
+    assert.equal(workers.reduce((count, worker) => count + worker.stopCount, 0), 1);
+    const reclaimedIndex = workers.findIndex((worker) => worker.stopCount === 1);
+    assert.ok(reclaimedIndex >= 0);
+    const reclaimedId = ids[reclaimedIndex + 1];
+    assert.equal(internals.runtimes.has(reclaimedId), false);
+    const oldHistory = await fetch(`${origin}/api/sessions/${reclaimedId}/view`);
+    assert.equal(oldHistory.status, 200);
+    assert.equal((await oldHistory.json() as { runtimeStatus?: string }).runtimeStatus, "view-only");
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("a visible cold history remains readable after its idle Runtime is reclaimed", async () => {
+  const pathA = "C:\\sessions\\a.jsonl";
+  const pathB = "C:\\sessions\\b.jsonl";
+  const idA = idForPath(pathA);
+  const idB = idForPath(pathB);
+  const primary = new FakeRpc(pathA, "a");
+  const secondary = new FakeRpc(pathB, "b");
+  const summaries = [
+    { id: idA, sessionId: "a", name: "A", preview: "A", cwd: process.cwd(), updatedAt: 2, messageCount: 1, active: true },
+    { id: idB, sessionId: "b", name: "B", preview: "B", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: false },
+  ];
+  const sessions = {
+    list: async (activePath?: string) => summaries.map((session) => ({ ...session, active: session.id === idForPath(activePath || pathA) })),
+    pathForId: (id: string) => id === idA ? pathA : id === idB ? pathB : null,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({
+    rpc: primary as unknown as PiRpcClient,
+    createRpc: () => secondary as unknown as PiRpcClient,
+    sessions,
+    resources: {} as ResourceManager,
+    cwd: process.cwd(),
+    webRoot: process.cwd(),
+    secondaryRuntimeIdleMs: 0,
+    secondaryRuntimeSweepMs: 100,
+    controllerReleaseMs: 10,
+  });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const client = "11111111-1111-4111-8111-111111111111";
+  const controller = new AbortController();
+  try {
+    assert.equal((await fetch(`${origin}/api/bootstrap`, { headers: { "x-pi-chat-client": client } })).status, 200);
+    const events = fetch(`${origin}/api/events`, { headers: { "x-pi-chat-client": client }, signal: controller.signal }).catch(() => null);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal((await fetch(`${origin}/api/sessions/${idB}/view`, { headers: { "x-pi-chat-client": client } })).status, 200);
+    assert.equal((await fetch(`${origin}/api/sessions/${idB}/activate`, { method: "POST", headers: { "x-pi-chat-client": client } })).status, 200);
+    await new Promise((resolve) => setTimeout(resolve, 180));
+    assert.equal(secondary.stopCount, 1);
+    const history = await fetch(`${origin}/api/sessions/${idB}/view`, { headers: { "x-pi-chat-client": client } });
+    assert.equal(history.status, 200);
+    assert.equal((await history.json() as { runtimeStatus?: string }).runtimeStatus, "view-only");
+    controller.abort();
+    await events;
+  } finally {
+    controller.abort();
     server.close();
     await app.close();
   }

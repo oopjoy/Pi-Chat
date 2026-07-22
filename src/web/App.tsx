@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { BootstrapData, ExtensionUiRequest, ModelInfo, PiMessage, PiState, PromptImage, QueuedPrompt, SessionStats, SessionSummary, SessionViewData, SlashCommand, ThinkingLevel } from "../shared/types";
+import type { ApplicationLifecycle, BootstrapData, ExtensionUiRequest, ModelInfo, PiMessage, PiState, PromptImage, QueuedPrompt, SessionStats, SessionSummary, SessionViewData, SlashCommand, ThinkingLevel } from "../shared/types";
 import { api } from "./api";
 import { ChatInput } from "./components/ChatInput";
 import { ChatMessage } from "./components/ChatMessage";
@@ -12,11 +12,13 @@ import { SessionControlBanner } from "./components/SessionControlBanner";
 import { SessionDialog, type SessionDialogState } from "./components/SessionDialog";
 import { SessionSidebar } from "./components/SessionSidebar";
 import { TopBar } from "./components/TopBar";
+import { activeSessionIdsFromEvent, applyActiveSessionIds } from "./lib/active-sessions";
 import { adjacentUserMessageOffset } from "./lib/conversation-navigation";
 import { groupConversation } from "./lib/conversation-process";
 import { extensionExecutionNotice } from "./lib/extension-notice";
 import { gateModeFromCommand, gateModeFromNotice, type GateMode } from "./lib/gate-mode";
 import { applyAppearance, loadAppearance, loadSidebarOpen, loadSidebarWidth, saveAppearance, saveSidebarOpen, saveSidebarWidth, type AppearancePreferences } from "./lib/preferences";
+import { rememberedSessionId, rememberSessionId } from "./lib/session-location";
 
 const EMPTY_STATE: PiState = { model: null, isStreaming: false };
 const VIEW_CACHE_LIMIT = 5;
@@ -83,6 +85,7 @@ export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(loadSidebarOpen);
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
   const [managementSection, setManagementSection] = useState<ManagementSection | null>(null);
+  const [closeComplete, setCloseComplete] = useState<"window" | "application" | null>(null);
   const [sessionDialog, setSessionDialog] = useState<SessionDialogState>(null);
   const [sessionActionBusy, setSessionActionBusy] = useState(false);
   const [appearance, setAppearance] = useState<AppearancePreferences>(loadAppearance);
@@ -91,27 +94,51 @@ export function App() {
   const [toolStatus, setToolStatus] = useState("");
   const [extensionRequest, setExtensionRequest] = useState<ExtensionUiRequest | null>(null);
   const [runtimeStatus, setRuntimeStatus] = useState<"active" | "restoring" | "view-only">("active");
+  const [applicationLifecycle, setApplicationLifecycle] = useState<ApplicationLifecycle>("idle");
   const [gateModes, setGateModes] = useState<Record<string, GateMode>>({});
-  const [warmingSessionIds, setWarmingSessionIds] = useState<string[]>([]);
   const [failedSessionIds, setFailedSessionIds] = useState<string[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const stoppingRef = useRef(false);
   const viewedSessionIdRef = useRef("");
-  const warmingSessionIdsRef = useRef(new Set<string>());
+  const applicationLifecycleRef = useRef<ApplicationLifecycle>("idle");
+  const handoffWaitRef = useRef<Promise<void> | null>(null);
+  const liveMessageTimerRef = useRef<number | null>(null);
+  const pendingLiveMessageRef = useRef<PiMessage | null>(null);
+  const lastLiveMessageCommitRef = useRef(0);
   const sessionRefreshTimerRef = useRef<number | null>(null);
   const sessionRefreshInFlightRef = useRef(false);
   const sessionRefreshRequestedRef = useRef(false);
   const viewCacheRef = useRef(new Map<string, SessionViewSnapshot>());
 
+  const clearPendingLiveMessage = useCallback(() => {
+    if (liveMessageTimerRef.current !== null) window.clearTimeout(liveMessageTimerRef.current);
+    liveMessageTimerRef.current = null;
+    pendingLiveMessageRef.current = null;
+  }, []);
+
+  const scheduleLiveMessage = useCallback((message: PiMessage) => {
+    pendingLiveMessageRef.current = message;
+    if (liveMessageTimerRef.current !== null) return;
+    const elapsed = performance.now() - lastLiveMessageCommitRef.current;
+    const commit = () => {
+      liveMessageTimerRef.current = null;
+      const latest = pendingLiveMessageRef.current;
+      pendingLiveMessageRef.current = null;
+      if (!latest) return;
+      lastLiveMessageCommitRef.current = performance.now();
+      setLiveMessage(latest);
+    };
+    if (elapsed >= 50) commit();
+    else liveMessageTimerRef.current = window.setTimeout(commit, 50 - elapsed);
+  }, []);
+
   const setViewedId = useCallback((id: string) => {
+    clearPendingLiveMessage();
     viewedSessionIdRef.current = id;
     setViewedSessionId(id);
-    const url = new URL(window.location.href);
-    if (id) url.searchParams.set("session", id);
-    else url.searchParams.delete("session");
-    window.history.replaceState(null, "", url);
-  }, []);
+    rememberSessionId(id);
+  }, [clearPendingLiveMessage]);
 
   const applyBootstrap = useCallback((data: BootstrapData) => {
     setState(data.state);
@@ -128,6 +155,8 @@ export function App() {
     setViewedId(activeId);
     setModels(data.models);
     setWorkspaceCwd(data.workspaceCwd);
+    applicationLifecycleRef.current = data.applicationLifecycle || "idle";
+    setApplicationLifecycle(data.applicationLifecycle || "idle");
     setCommands(data.commands);
     setQueue(data.queue);
     setQueuePaused(data.queuePaused);
@@ -183,7 +212,7 @@ export function App() {
   }, [setViewedId]);
 
   const refresh = useCallback(async () => {
-    const wantedId = viewedSessionIdRef.current || new URL(window.location.href).searchParams.get("session") || "";
+    const wantedId = viewedSessionIdRef.current || rememberedSessionId();
     const data = await api.bootstrap();
     applyBootstrap(data);
     const activeId = data.activeSessionId || data.sessions.find((session) => session.active)?.id || "";
@@ -238,6 +267,7 @@ export function App() {
 
   useEffect(() => saveSidebarOpen(sidebarOpen), [sidebarOpen]);
   useEffect(() => saveSidebarWidth(sidebarWidth), [sidebarWidth]);
+  useEffect(() => clearPendingLiveMessage, [clearPendingLiveMessage]);
 
   useEffect(() => {
     // Bootstrap obtains the per-start token before SSE is allowed to connect.
@@ -245,8 +275,35 @@ export function App() {
     const source = new EventSource(api.eventsUrl());
     // EventSource reconnects after a server restart, but it cannot replay the events missed
     // while disconnected. Reload the requested Session as soon as the new stream is ready.
-    source.addEventListener("ready", () => {
-      void refresh().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+    source.addEventListener("ready", (rawEvent) => {
+      const ready = JSON.parse((rawEvent as MessageEvent<string>).data || "{}") as { lifecycle?: ApplicationLifecycle };
+      if (ready.lifecycle === "restarting") {
+        applicationLifecycleRef.current = "restarting";
+        setApplicationLifecycle("restarting");
+        setNotice("Pi Chat 正在构建并重启，暂时停止接收新操作…");
+        source.close();
+        handoffWaitRef.current ||= api.waitForApplicationHandoff().then(() => window.location.reload()).catch((cause) => {
+          setError(cause instanceof Error ? cause.message : String(cause));
+          handoffWaitRef.current = null;
+        });
+        return;
+      }
+      if (ready.lifecycle && ready.lifecycle !== "idle") {
+        applicationLifecycleRef.current = ready.lifecycle;
+        setApplicationLifecycle(ready.lifecycle);
+        if (ready.lifecycle === "shutting-down") {
+          source.close();
+          setCloseComplete("application");
+          window.setTimeout(() => window.close(), 40);
+        } else {
+          setNotice(ready.lifecycle === "workspace-changing" ? "正在切换工作目录…" : "正在更新配置并重载 Runtime…");
+        }
+        return;
+      }
+      void refresh().then(() => {
+        const id = viewedSessionIdRef.current;
+        if (id) void api.markSessionViewed(id).catch(() => undefined);
+      }).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
     });
     source.addEventListener("pi", (rawEvent) => {
       const event = JSON.parse((rawEvent as MessageEvent<string>).data) as Record<string, unknown>;
@@ -254,7 +311,12 @@ export function App() {
       const eventSessionId = typeof event.piChatSessionId === "string" ? event.piChatSessionId : "";
       const viewingEventSession = !eventSessionId || eventSessionId === viewedSessionIdRef.current;
       if (eventSessionId && ["agent_start", "agent_settled", "message_start", "message_update", "message_end", "tool_execution_start", "tool_execution_end"].includes(type)) forgetView(viewCacheRef.current, eventSessionId);
-      if (type === "agent_start") {
+      if (type === "pi_chat_application_closing") {
+        source.close();
+        setManagementSection(null);
+        setCloseComplete("application");
+        window.setTimeout(() => window.close(), 40);
+      } else if (type === "agent_start") {
         if (eventSessionId) setSessions((current) => current.map((session) => ({ ...session, running: session.id === eventSessionId ? true : session.running })));
         if (viewingEventSession) {
           setRuntimeStatus("active");
@@ -283,8 +345,9 @@ export function App() {
         }
       } else if ((type === "message_start" || type === "message_update") && viewingEventSession) {
         const assistant = assistantMessage(event);
-        if (assistant) setLiveMessage(assistant);
+        if (assistant) scheduleLiveMessage(assistant);
       } else if (type === "message_end" && viewingEventSession) {
+        clearPendingLiveMessage();
         const assistant = assistantMessage(event);
         if (assistant) setMessages((current) => [...current, assistant]);
         setLiveMessage(null);
@@ -304,14 +367,23 @@ export function App() {
         }
         scheduleSidebarRefresh();
       } else if (type === "pi_chat_active_session_changed") {
-        const ids = Array.isArray(event.activeSessionIds) ? event.activeSessionIds.filter((id): id is string => typeof id === "string") : [];
-        if (ids.length) {
-          setActiveSessionIds(ids);
-          setSessions((current) => current.map((session) => ({ ...session, writable: ids.includes(session.id) })));
-        }
+        const ids = activeSessionIdsFromEvent(event.activeSessionIds);
+        setActiveSessionIds(ids);
+        setSessions((current) => applyActiveSessionIds(current, ids));
         const id = typeof event.sessionId === "string" ? event.sessionId : "";
-        if (!ids.length && id) setActiveSessionId(id);
+        if (id === viewedSessionIdRef.current && !ids.includes(id)) setRuntimeStatus("view-only");
         scheduleSidebarRefresh();
+      } else if (type === "pi_chat_application_lifecycle") {
+        const lifecycle = String(event.lifecycle || "idle") as ApplicationLifecycle;
+        applicationLifecycleRef.current = lifecycle;
+        setApplicationLifecycle(lifecycle);
+        if (lifecycle === "restarting") setNotice("Pi Chat 正在构建并重启，暂时停止接收新操作…");
+        else if (lifecycle === "workspace-changing") setNotice("正在切换工作目录…");
+        else if (lifecycle === "resources-reloading") setNotice("正在更新配置并重载 Runtime…");
+        else if (lifecycle === "idle") {
+          setNotice("");
+          void refresh().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+        }
       } else if (type === "pi_chat_sessions_changed") {
         if (typeof event.sessionId === "string") forgetView(viewCacheRef.current, event.sessionId);
         if (event.action === "deleted" && event.sessionId === viewedSessionIdRef.current) {
@@ -345,7 +417,8 @@ export function App() {
       } else if (type === "pi_chat_session_control_changed") {
         const id = typeof event.sessionId === "string" ? event.sessionId : "";
         const owner = typeof event.controlOwner === "string" ? event.controlOwner : undefined;
-        if (id) setSessions((current) => current.map((session) => session.id === id ? { ...session, controlOwner: owner, controlledByThisWindow: false } : session));
+        const controlledByThisWindow = event.controlledByThisWindow === true;
+        if (id) setSessions((current) => current.map((session) => session.id === id ? { ...session, controlOwner: owner, controlledByThisWindow } : session));
       } else if (type === "pi_chat_extension_request_resolved") {
         if (viewingEventSession) setExtensionRequest((current) => current?.id === event.id ? null : current);
         if (eventSessionId) setSessions((current) => current.map((session) => session.id === eventSessionId ? { ...session, pendingConfirmation: false } : session));
@@ -361,9 +434,24 @@ export function App() {
         setStopping(false);
       }
     });
-    source.onerror = () => setError("与 Pi Chat 服务的事件连接已断开，浏览器将自动重连。");
+    source.onerror = () => {
+      if (applicationLifecycleRef.current === "restarting") {
+        source.close();
+        handoffWaitRef.current ||= api.waitForApplicationHandoff().then(() => window.location.reload()).catch((cause) => {
+          setError(cause instanceof Error ? cause.message : String(cause));
+          handoffWaitRef.current = null;
+        });
+        return;
+      }
+      setError("与 Pi Chat 服务的事件连接已断开，浏览器将自动重连。");
+    };
     return () => source.close();
-  }, [loading, refresh, scheduleSidebarRefresh]);
+  }, [clearPendingLiveMessage, loading, refresh, scheduleLiveMessage, scheduleSidebarRefresh]);
+
+  useEffect(() => {
+    if (loading || !viewedSessionId) return;
+    void api.markSessionViewed(viewedSessionId).catch(() => undefined);
+  }, [loading, viewedSessionId]);
 
   useEffect(() => {
     if (!stickToBottomRef.current) return;
@@ -513,31 +601,6 @@ export function App() {
     }
   };
 
-  const prewarmSession = (id: string) => {
-    if (warmingSessionIdsRef.current.has(id) || activeSessionIds.includes(id)) return;
-    warmingSessionIdsRef.current.add(id);
-    setWarmingSessionIds((current) => [...new Set([...current, id])]);
-    setFailedSessionIds((current) => current.filter((sessionId) => sessionId !== id));
-    // Activation starts an independent Pi runtime only; it does not send a prompt
-    // or alter the session JSONL. History remains available while this runs.
-    void api.activateSession(id).then((view) => {
-      forgetView(viewCacheRef.current, id);
-      if (viewedSessionIdRef.current === id) {
-        applySessionView(view);
-        stickToBottomRef.current = true;
-      } else {
-        setSessions((current) => current.map((session) => session.id === id ? { ...session, ...view.session } : session));
-        if (view.isActive) setActiveSessionIds((current) => [...new Set([...current, id])]);
-      }
-    }).catch((cause) => {
-      setFailedSessionIds((current) => [...new Set([...current, id])]);
-      if (viewedSessionIdRef.current === id) setError(`会话预热失败：${cause instanceof Error ? cause.message : String(cause)}`);
-    }).finally(() => {
-      warmingSessionIdsRef.current.delete(id);
-      setWarmingSessionIds((current) => current.filter((sessionId) => sessionId !== id));
-    });
-  };
-
   const viewSession = async (id: string) => {
     if (id === viewedSessionIdRef.current) return;
     setError("");
@@ -548,15 +611,6 @@ export function App() {
     if (cached) {
       applySessionView(cached);
       stickToBottomRef.current = true;
-      const cachedStatus = cached.runtimeStatus || (cached.isActive ? "active" : "view-only");
-      if (cachedStatus !== "active") {
-        prewarmSession(id);
-        void api.viewSession(id).then((view) => {
-          if (!view.isActive) rememberView(viewCacheRef.current, view);
-          else forgetView(viewCacheRef.current, view.session.id);
-          if (viewedSessionIdRef.current === id) applySessionView(view);
-        }).catch(() => undefined);
-      }
       return;
     }
     setBusy(true);
@@ -566,7 +620,6 @@ export function App() {
       else forgetView(viewCacheRef.current, view.session.id);
       applySessionView(view);
       stickToBottomRef.current = true;
-      if (!view.isActive) prewarmSession(id);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -670,9 +723,10 @@ export function App() {
     setNotice("正在结束 Pi Chat 进程、构建本地更新并启动全新服务…");
     try {
       await api.restart();
-      // The server briefly disappears while the handoff process replaces it.
-      // A delayed full reload obtains the new per-start token and hashed bundle.
-      window.setTimeout(() => window.location.reload(), 700);
+      // Wait for a different startup token so this and every observing window
+      // reload only after the replacement listener is actually ready.
+      await api.waitForApplicationHandoff();
+      window.location.reload();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -681,16 +735,17 @@ export function App() {
   };
 
   const shutdownPiChat = async () => {
-    if (!window.confirm("关闭 Pi Chat？\n\n将结束 Pi Chat 服务及其管理的全部 Pi RPC 会话进程。聊天记录和设置会保留。\n\n之后请通过桌面上的“Pi Chat（网页）”或“Pi Chat（Edge PWA）”重新启动。")) return;
+    if (!window.confirm("关闭全部 Pi Chat？\n\n将先检查所有窗口中的对话。只要任一对话仍在执行、排队或等待确认，就不会关闭。\n\n确认空闲后，将关闭所有浏览器/PWA 窗口、本地服务和全部 Pi RPC。聊天记录和设置会保留。")) return;
     setBusy(true);
     setError("");
-    setNotice("正在关闭 Pi Chat 服务和会话进程…");
+    setNotice("正在检查全部对话并关闭 Pi Chat…");
     try {
       await api.shutdown();
-      window.setTimeout(() => window.location.reload(), 700);
+      setManagementSection(null);
+      setCloseComplete("application");
+      window.close();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
       setBusy(false);
     }
   };
@@ -756,7 +811,8 @@ export function App() {
   const anySessionRunning = sessions.some((session) => session.running);
   const anySessionPendingConfirmation = sessions.some((session) => session.pendingConfirmation);
   const anySessionQueued = sessions.some((session) => session.queued);
-  const globalMutationBlocked = anySessionRunning || anySessionQueued || anySessionPendingConfirmation;
+  const lifecycleBlocked = applicationLifecycle !== "idle";
+  const globalMutationBlocked = lifecycleBlocked || anySessionRunning || anySessionQueued || anySessionPendingConfirmation;
   const primaryQueueBusy = viewedSessionId === activeSessionId && queue.length > 0;
   const viewedSession = sessions.find((session) => session.id === viewedSessionId);
   const conversationName = viewedSession?.name || (state.messageCount ? state.sessionName || "已保存对话" : "新对话");
@@ -777,6 +833,16 @@ export function App() {
     }
   };
 
+  if (closeComplete) {
+    const applicationClosed = closeComplete === "application";
+    return <main className="shutdown-screen">
+      <span className="shutdown-mark"><PiMarkIcon /></span>
+      <h1>{applicationClosed ? "Pi Chat 已关闭" : "当前窗口已退出"}</h1>
+      <p>{applicationClosed ? "本地服务和会话进程已经结束。现在可以关闭此窗口。" : "其他 Pi Chat 窗口仍在运行。现在可以关闭此窗口。"}</p>
+      <button type="button" onClick={() => window.close()}>关闭窗口</button>
+    </main>;
+  }
+
   return (
     <div className="app-shell">
       <SessionSidebar
@@ -786,13 +852,13 @@ export function App() {
         open={sidebarOpen}
         width={sidebarWidth}
         onWidthChange={setSidebarWidth}
-        newDisabled={loading || busy}
+        newDisabled={loading || busy || lifecycleBlocked}
         refreshDisabled={loading || refreshing}
         restartDisabled={loading || busy || refreshing || globalMutationBlocked}
         workspaceDisabled={loading || busy || workspacePicking || globalMutationBlocked}
         viewBusy={loading || busy}
         refreshing={refreshing}
-        warmingSessionIds={warmingSessionIds}
+        warmingSessionIds={[]}
         failedSessionIds={failedSessionIds}
         workspacePicking={workspacePicking}
         onClose={() => setSidebarOpen(false)}
@@ -814,7 +880,7 @@ export function App() {
           stats={stats}
           conversationName={conversationName}
           workspacePath={conversationWorkspace}
-          disabled={busy || observing}
+          disabled={busy || observing || lifecycleBlocked}
           streaming={state.isStreaming}
           gateAvailable={gateAvailable}
           gateMode={gateMode}
@@ -859,19 +925,19 @@ export function App() {
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 16h12M10 4v9M7.2 10.2 10 13l2.8-2.8" /></svg>
           </button>
         </nav>
-        <SessionControlBanner observing={observing} onTakeOver={() => void takeControl()} />
+        <SessionControlBanner observing={observing} disabled={lifecycleBlocked} onTakeOver={() => void takeControl()} />
         <PromptQueue
           queue={queue}
           paused={queuePaused}
-          busy={busy || observing}
+          busy={busy || observing || lifecycleBlocked}
           onCancel={(id) => void api.cancelQueued(id, viewedSessionId).then((result) => { setQueue(result.queue); setQueuePaused(result.paused); }).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))}
           onResume={() => void api.resumeQueue(viewedSessionId).then((result) => { setQueue(result.queue); setQueuePaused(result.paused); }).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))}
         />
         <ChatInput
           streaming={state.isStreaming}
           stopping={stopping}
-          disabled={loading || busy || observing || Boolean(state.isCompacting)}
-          disabledPlaceholder={observing ? "此对话正在另一窗口中控制；点击“接管控制”后可操作" : state.isCompacting ? "正在压缩上下文，完成后可继续发送…" : runtimeStatus === "restoring" || (busy && runtimeStatus !== "active") ? "正在恢复 Pi Runtime，就绪后即可发送…" : runtimeStatus === "view-only" ? "当前为只读查看；发送时会自动恢复 Pi Runtime" : undefined}
+          disabled={loading || busy || observing || lifecycleBlocked || Boolean(state.isCompacting)}
+          disabledPlaceholder={lifecycleBlocked ? "Pi Chat 正在执行全局维护，暂时不能提交新操作" : observing ? "此对话正在另一窗口中控制；点击“接管控制”后可操作" : state.isCompacting ? "正在压缩上下文，完成后可继续发送…" : runtimeStatus === "restoring" || (busy && runtimeStatus !== "active") ? "正在恢复 Pi Runtime，就绪后即可发送…" : runtimeStatus === "view-only" ? "当前为只读查看；发送时会自动恢复 Pi Runtime" : undefined}
           acceptsImages={state.model?.input?.includes("image") === true}
           commands={commands}
           onSend={send}

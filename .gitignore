@@ -1,6 +1,7 @@
 node_modules/
 dist/
 *.log
+*.lnk
 .env
 .DS_Store
 src/web/generated/

@@ -75,6 +75,7 @@ test("compiled server starts against fake RPC, probes capabilities, serves guard
     assert.ok(data.requestToken);
     const guarded = await fetch(`${origin}/api/health`, { headers: { "x-pi-chat-token": data.requestToken } });
     assert.equal(guarded.status, 200);
+    assert.equal((await guarded.json() as { service?: string }).service, "pi-chat");
     const rpcCommands = await readFile(rpcLog, "utf8");
     for (const command of ["get_state", "get_messages", "get_available_models", "get_commands", "get_session_stats"]) assert.match(rpcCommands, new RegExp(`^${command}$`, "m"));
   } finally {

@@ -1,6 +1,6 @@
 {
   "name": "pi-chat",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "type": "module",
   "description": "A lightweight local-first web chat for Pi",
@@ -13,6 +13,8 @@
     "README.md",
     "start-pi-chat.cmd",
     "pi-chat-launch.cmd",
+    "start-pi-chat-ui.ps1",
+    "scripts/install-shortcuts.ps1",
     "scripts/pi-chat-port-ready.ps1",
     "scripts/clean-dist.mjs"
   ],
@@ -26,7 +28,8 @@
     "copy:resources": "node scripts/copy-runtime-resources.mjs",
     "start": "node dist/server/server/index.js",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit",
-    "test": "node --test --import tsx tests/*.test.ts"
+    "test": "node --test --import tsx tests/*.test.ts",
+    "install:shortcuts": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-shortcuts.ps1"
   },
   "dependencies": {},
   "devDependencies": {

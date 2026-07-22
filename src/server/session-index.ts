@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { createReadStream, existsSync } from "node:fs";
+import { createReadStream, existsSync, type Stats } from "node:fs";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { extname, join, resolve } from "node:path";
@@ -153,6 +153,7 @@ async function parseSession(path: string, modifiedAt: number): Promise<Omit<Sess
   let name = "";
   let preview = "";
   let messageCount = 0;
+  let turnCount = 0;
 
   for await (const line of lines) {
     if (!header) {
@@ -170,8 +171,9 @@ async function parseSession(path: string, modifiedAt: number): Promise<Omit<Sess
       if (entry.type === "session_info") name = cleanPreview(entry.name || "", 120);
       if (entry.type === "message") {
         messageCount += 1;
-        if (!preview && entry.message?.role === "user") {
-          preview = cleanPreview(textFromContent(entry.message.content));
+        if (entry.message?.role === "user") {
+          turnCount += 1;
+          if (!preview) preview = cleanPreview(textFromContent(entry.message.content));
         }
       }
     } catch {
@@ -193,6 +195,7 @@ async function parseSession(path: string, modifiedAt: number): Promise<Omit<Sess
     cwd: header.cwd || "",
     updatedAt: modifiedAt,
     messageCount,
+    turnCount,
   };
 }
 
@@ -203,10 +206,12 @@ export class SessionIndex {
   private pathsById = new Map<string, string>();
   private refreshPromise: Promise<SessionSummary[]> | null = null;
   private refreshKey = "";
+  private readonly statFile: (path: string) => Promise<Stats>;
 
-  constructor(root?: string, cachePath?: string) {
+  constructor(root?: string, cachePath?: string, statFile: (path: string) => Promise<Stats> = stat) {
     this.root = root || process.env.PI_CODING_AGENT_SESSION_DIR || join(homedir(), ".pi", "agent", "sessions");
     this.cachePath = cachePath || (root ? join(this.root, ".pi-chat-session-index.json") : join(homedir(), ".pi", "agent", "pi-chat-session-index.json"));
+    this.statFile = statFile;
   }
 
   async list(activePath?: string, cwd?: string): Promise<SessionSummary[]> {
@@ -242,8 +247,17 @@ export class SessionIndex {
     this.pathsById.clear();
 
     for (const path of files) {
-      const fileStat = await stat(path);
       const normalized = resolve(path);
+      let fileStat;
+      try {
+        fileStat = await this.statFile(path);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        // Another request may delete a Session after enumeration but before
+        // stat(). Drop stale metadata and continue refreshing the remaining files.
+        if (this.cache.delete(normalized)) cacheChanged = true;
+        continue;
+      }
       const isActive = normalized.toLowerCase() === normalizedActive;
       let cached = this.cache.get(normalized);
       if (!cached || cached.mtimeMs !== fileStat.mtimeMs || cached.size !== fileStat.size) {

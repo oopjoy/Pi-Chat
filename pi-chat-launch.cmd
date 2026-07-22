@@ -29,9 +29,13 @@ if exist "%~dp0src\server\index.ts" (
 )
 
 echo Starting Pi Chat service...
-rem The server defaults its workspace to the current user's home directory.
-rem Omit --cwd here to avoid cmd.exe nested-quote corruption on Windows.
-start "Pi Chat Server" /min cmd.exe /d /c "node dist\server\server\index.js --port 30170"
+rem Pass the working directory through the environment. Embedding %%~dp0 in
+rem PowerShell source breaks when the checkout path contains an apostrophe.
+set "PI_CHAT_PROJECT_DIR=%~dp0"
+if not defined PI_CHAT_SERVER_OUT set "PI_CHAT_SERVER_OUT=%TEMP%\pi-chat-server.stdout.log"
+if not defined PI_CHAT_SERVER_ERR set "PI_CHAT_SERVER_ERR=%TEMP%\pi-chat-server.stderr.log"
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; Start-Process -FilePath 'node.exe' -ArgumentList @('dist\server\server\index.js','--port','30170') -WorkingDirectory $env:PI_CHAT_PROJECT_DIR -WindowStyle Hidden -RedirectStandardOutput $env:PI_CHAT_SERVER_OUT -RedirectStandardError $env:PI_CHAT_SERVER_ERR | Out-Null"
+if errorlevel 1 exit /b 1
 
 set /a ATTEMPTS=0
 :wait
@@ -52,7 +56,7 @@ exit /b 0
 
 :pwa
 if exist "%EDGE_PWA%" (
-  start "Pi Chat Edge PWA" "%EDGE_PWA%" --profile-directory=Default --app-id=%PWA_APP_ID% --app-url=%URL% --app-launch-source=4
+  start "Pi Chat Edge PWA" "%EDGE_PWA%" --profile-directory=Default --app-id=%PWA_APP_ID% --app-url=%URL% --app-launch-source=4 --new-window
   exit /b 0
 )
 echo Edge PWA launcher was not found. Opening the web version instead.

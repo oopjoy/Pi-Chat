@@ -1,5 +1,6 @@
 import { memo } from "react";
 import type { PiContentBlock, PiMessage } from "../../shared/types";
+import { sanitizeAssistantText } from "../lib/assistant-text";
 import { MarkdownBody } from "./MarkdownBody";
 
 function blocks(message: PiMessage): PiContentBlock[] {
@@ -24,7 +25,8 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
       <div className="message-content">
         {content.map((block, index) => {
           if (block.type === "text" && block.text) {
-            return <MarkdownBody key={index} streaming={streaming}>{block.text}</MarkdownBody>;
+            const text = message.role === "assistant" ? sanitizeAssistantText(block.text) : block.text;
+            return text ? <MarkdownBody key={index} streaming={streaming}>{text}</MarkdownBody> : null;
           }
           if (block.type === "image" && block.data && block.mimeType) {
             return <img className="message-image" key={index} src={`data:${block.mimeType};base64,${block.data}`} alt="用户附加图片" />;

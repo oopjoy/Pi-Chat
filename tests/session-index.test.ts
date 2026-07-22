@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { SessionIndex, cleanPreview, idForPath, readSessionMessages, readSessionUsage, textFromContent } from "../src/server/session-index";
 
-test("session index extracts header, title, preview and message count", async () => {
+test("session index extracts header, title, preview, message count and user turn count", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-sessions-"));
   try {
     const directory = join(root, "--project--");
@@ -26,6 +26,7 @@ test("session index extracts header, title, preview and message count", async ()
     assert.equal(sessions[0].name, "Named conversation");
     assert.equal(sessions[0].preview, "First question");
     assert.equal(sessions[0].messageCount, 2);
+    assert.equal(sessions[0].turnCount, 1);
     assert.equal(sessions[0].active, true);
     assert.equal(index.pathForId(sessions[0].id), path);
     assert.equal((await index.list(path, "C:\\work")).length, 1);
@@ -209,6 +210,29 @@ test("session index persists metadata and refreshes only changed session files",
     const updated = await restarted.list();
     assert.equal(updated.find((item) => item.sessionId === "first")?.name, "First title");
     assert.equal(updated.find((item) => item.sessionId === "second")?.name, "Updated second title");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("session refresh tolerates a JSONL deleted after enumeration", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-delete-race-"));
+  try {
+    const path = join(root, "vanishing.jsonl");
+    await writeFile(path, `${JSON.stringify({ type: "session", version: 3, id: "vanishing", cwd: root })}\n${JSON.stringify({ type: "message", message: { role: "user", content: "hello" } })}\n`);
+    let first = true;
+    const index = new SessionIndex(root, join(root, "cache.json"), async (candidate) => {
+      if (first && candidate === path) {
+        first = false;
+        await rm(path);
+        const error = new Error("deleted after enumeration") as NodeJS.ErrnoException;
+        error.code = "ENOENT";
+        throw error;
+      }
+      return stat(candidate);
+    });
+    assert.deepEqual(await index.list(), []);
+    assert.equal(index.pathForId(idForPath(path)), null);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
