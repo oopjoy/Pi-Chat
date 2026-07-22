@@ -14,6 +14,7 @@ import { PiRpcClient, rpcData } from "./rpc-client.js";
 import { asCommands, asMessages, asModels, asSessionStats, asState, messageWindow, promptImages, RECENT_TURN_WINDOW_SIZE } from "./pi-data.js";
 import { idForPath, SessionIndex, type SessionUsageSnapshot } from "./session-index.js";
 import { RuntimePool, type PendingTurnSettings, type SecondaryRuntime } from "./runtime-pool.js";
+import { SessionControl, SessionControlConflictError } from "./session-control.js";
 import { saveWorkspace } from "./workspace-state.js";
 import { requestGuardError } from "./request-guard.js";
 
@@ -30,9 +31,6 @@ const BUILTIN_COMMANDS: SlashCommand[] = [
   { name: "compact", description: "压缩当前会话上下文，可附加指令", source: "builtin" },
   { name: "abort", description: "停止当前生成", source: "builtin" },
 ];
-class SessionControlConflictError extends Error {}
-
-
 interface InternalQueuedPrompt extends QueuedPrompt {
   images: PromptImage[];
 }
@@ -81,17 +79,15 @@ export class PiChatApp {
   private readonly runtimePool: RuntimePool;
   /** Same Map instance as RuntimePool; kept for tests that inspect app.runtimes. */
   private readonly runtimes: Map<string, SecondaryRuntime>;
-  /** Ephemeral browser-window ownership. It is reset when Pi Chat restarts. */
-  private readonly sessionControllers = new Map<string, string>();
-  private readonly connectedClients = new Map<string, number>();
-  /** Session currently visible in each live browser/PWA window. */
-  private readonly viewedSessionsByClient = new Map<string, string>();
-  private readonly controllerReleaseTimers = new Map<string, NodeJS.Timeout>();
+  private readonly sessionControl: SessionControl;
+  /** Same Map instances as SessionControl; kept for dual-session presence tests. */
+  private readonly sessionControllers: Map<string, string>;
+  private readonly connectedClients: Map<string, number>;
+  private readonly viewedSessionsByClient: Map<string, string>;
   private readonly pendingExtensionTimers = new Map<string, NodeJS.Timeout>();
   private primaryFailed = false;
   private primaryRecovery: Promise<void> | null = null;
   private readonly now: () => number;
-  private readonly controllerReleaseMs: number;
   private readonly gateRequestTimeoutMs: number;
   private readonly secondaryRuntimeSweepTimer: NodeJS.Timeout;
   private readonly requestToken: string;
@@ -114,8 +110,14 @@ export class PiChatApp {
     // entrypoint replaces them with one exact host:port after listen().
     this.allowedHosts = options.allowedHosts || ["127.0.0.1", "localhost", "::1"];
     this.now = options.now || Date.now;
-    this.controllerReleaseMs = Math.max(0, options.controllerReleaseMs ?? 5_000);
     this.gateRequestTimeoutMs = Math.max(1, options.gateRequestTimeoutMs ?? DEFAULT_GATE_REQUEST_TIMEOUT_MS);
+    this.sessionControl = new SessionControl({
+      controllerReleaseMs: options.controllerReleaseMs,
+      onControlChanged: (sessionId) => this.broadcastControlState(sessionId),
+    });
+    this.sessionControllers = this.sessionControl.sessionControllers;
+    this.connectedClients = this.sessionControl.connectedClients;
+    this.viewedSessionsByClient = this.sessionControl.viewedSessionsByClient;
     this.runtimePool = new RuntimePool({
       now: this.now,
       maxIdleSecondaryRuntimes: options.maxIdleSecondaryRuntimes,
@@ -205,12 +207,9 @@ export class PiChatApp {
     // Distinct Session workers can stop concurrently. Sequential forced-stop
     // windows made shutdown/restart scale by roughly three seconds per worker.
     await this.runtimePool.stopAll({ cleanupDrafts: true });
-    for (const timer of this.controllerReleaseTimers.values()) clearTimeout(timer);
-    this.controllerReleaseTimers.clear();
+    this.sessionControl.clear();
     for (const timer of this.pendingExtensionTimers.values()) clearTimeout(timer);
     this.pendingExtensionTimers.clear();
-    this.connectedClients.clear();
-    this.viewedSessionsByClient.clear();
     for (const client of this.sseClients.keys()) client.end();
     this.sseClients.clear();
   }
@@ -222,7 +221,7 @@ export class PiChatApp {
 
   private broadcastControlState(sessionId: string): void {
     for (const [client, clientId] of this.sseClients) {
-      const event = { type: "pi_chat_session_control_changed", sessionId, ...this.controlState(sessionId, clientId) };
+      const event = { type: "pi_chat_session_control_changed", sessionId, ...this.sessionControl.controlState(sessionId, clientId) };
       client.write(`event: pi\ndata: ${JSON.stringify(event)}\n\n`);
     }
   }
@@ -242,55 +241,31 @@ export class PiChatApp {
   }
 
   private controlState(sessionId: string, clientId = ""): { controlOwner?: string; controlledByThisWindow?: boolean } {
-    const controlOwner = this.sessionControllers.get(sessionId);
-    return { ...(controlOwner ? { controlOwner } : {}), ...(clientId ? { controlledByThisWindow: controlOwner === clientId } : {}) };
+    return this.sessionControl.controlState(sessionId, clientId);
   }
 
   private setController(sessionId: string, clientId: string): void {
-    if (!clientId || this.sessionControllers.get(sessionId) === clientId) return;
-    this.sessionControllers.set(sessionId, clientId);
-    this.broadcastControlState(sessionId);
+    this.sessionControl.setController(sessionId, clientId);
   }
 
   private assertNoForeignController(sessionId: string, clientId: string): void {
-    if (!clientId) return;
-    const current = this.sessionControllers.get(sessionId);
-    if (current && current !== clientId) throw new SessionControlConflictError("此对话正在另一窗口中控制；请先接管控制权");
+    this.sessionControl.assertNoForeignController(sessionId, clientId);
   }
 
   private requireSessionControl(sessionId: string, clientId: string): void {
-    // Non-browser integrations deliberately have no client identity. The Pi Chat
-    // browser supplies X-Pi-Chat-Client for every request after bootstrap.
-    this.assertNoForeignController(sessionId, clientId);
-    if (clientId) this.setController(sessionId, clientId);
+    this.sessionControl.requireControl(sessionId, clientId);
   }
 
   private clientConnected(clientId: string): void {
-    if (!clientId) return;
-    const timer = this.controllerReleaseTimers.get(clientId);
-    if (timer) clearTimeout(timer);
-    this.controllerReleaseTimers.delete(clientId);
-    this.connectedClients.set(clientId, (this.connectedClients.get(clientId) || 0) + 1);
+    this.sessionControl.clientConnected(clientId);
   }
 
   private releaseClient(clientId: string): string {
-    if (!clientId) return "";
-    const viewedSessionId = this.viewedSessionsByClient.get(clientId) || "";
-    const timer = this.controllerReleaseTimers.get(clientId);
-    if (timer) clearTimeout(timer);
-    this.controllerReleaseTimers.delete(clientId);
-    this.connectedClients.delete(clientId);
-    this.viewedSessionsByClient.delete(clientId);
-    for (const [sessionId, owner] of this.sessionControllers) {
-      if (owner !== clientId) continue;
-      this.sessionControllers.delete(sessionId);
-      this.broadcastControlState(sessionId);
-    }
-    return viewedSessionId;
+    return this.sessionControl.releaseClient(clientId);
   }
 
   private async restSessionAfterWindowClose(sessionId: string): Promise<boolean> {
-    if (!sessionId || this.isSessionViewed(sessionId)) return false;
+    if (!sessionId || this.sessionControl.isViewed(sessionId)) return false;
     if (sessionId === this.activeSessionId) {
       if (this.running || this.dispatching || this.promptQueue.length || this.pendingExtensionRequest) return false;
       await this.options.rpc.stop();
@@ -304,38 +279,11 @@ export class PiChatApp {
   }
 
   private clientDisconnected(clientId: string): void {
-    if (!clientId) return;
-    const remaining = Math.max(0, (this.connectedClients.get(clientId) || 1) - 1);
-    if (remaining) {
-      this.connectedClients.set(clientId, remaining);
-      return;
-    }
-    this.connectedClients.delete(clientId);
-    const timer = setTimeout(() => {
-      this.controllerReleaseTimers.delete(clientId);
-      if (this.connectedClients.has(clientId)) return;
-      this.viewedSessionsByClient.delete(clientId);
-      for (const [sessionId, owner] of this.sessionControllers) {
-        if (owner !== clientId) continue;
-        this.sessionControllers.delete(sessionId);
-        this.broadcastControlState(sessionId);
-      }
-    }, this.controllerReleaseMs);
-    timer.unref();
-    this.controllerReleaseTimers.set(clientId, timer);
+    this.sessionControl.clientDisconnected(clientId);
   }
 
   private markSessionViewed(clientId: string, sessionId: string): void {
-    // A one-off HTTP request must not pin a worker forever. Presence is backed
-    // by the browser window's live SSE lease and disappears after disconnect.
-    if (clientId && sessionId && this.connectedClients.has(clientId)) this.viewedSessionsByClient.set(clientId, sessionId);
-  }
-
-  private isSessionViewed(sessionId: string): boolean {
-    for (const viewedId of this.viewedSessionsByClient.values()) {
-      if (viewedId === sessionId) return true;
-    }
-    return false;
+    this.sessionControl.markViewed(clientId, sessionId);
   }
 
   private pendingRequestForSession(sessionId: string): ExtensionUiRequest | undefined {
@@ -716,10 +664,7 @@ export class PiChatApp {
       }
     }
     if (path && existsSync(path)) await unlink(path);
-    this.sessionControllers.delete(id);
-    for (const [clientId, viewedId] of this.viewedSessionsByClient) {
-      if (viewedId === id) this.viewedSessionsByClient.delete(clientId);
-    }
+    this.sessionControl.clearSession(id);
     this.broadcast({ type: "pi_chat_sessions_changed", action: "deleted", sessionId: id });
     return this.bootstrap();
   }
@@ -1005,7 +950,7 @@ export class PiChatApp {
       if (request.method !== "POST") return methodNotAllowed(response);
       if (!clientId) return json(response, 400, { error: "缺少窗口标识，无法安全关闭" });
       if (this.applicationLifecycle !== "idle") throw new ApplicationLifecycleConflictError(this.applicationLifecycle, this.lifecycleMessage());
-      const otherWindowCount = [...this.connectedClients.keys()].filter((id) => id !== clientId).length;
+      const otherWindowCount = this.sessionControl.otherWindowCount(clientId);
       if (otherWindowCount > 0) {
         const viewedSessionId = this.releaseClient(clientId);
         // A Prompt may already hold an admission lease while its request body is

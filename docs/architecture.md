@@ -66,13 +66,14 @@ Current ownership still centers on `src/server/app.ts` (`PiChatApp`), with progr
 | `application-restart.ts` | Staging build, promote, handoff |
 | `rpc-client.ts` | Global Pi process + capability probe |
 | `runtime-pool.ts` | Secondary Runtime maps, capacity mutex, ensure/draft/recover/reclaim/sweep/stopAll |
+| `session-control.ts` | Multi-window presence, exclusive control owner, delayed release timers |
 
 ### Extraction order
 
 Extract **state ownership**, not only functions:
 
 1. **RuntimePool** — done (`runtime-pool.ts`); `PiChatApp` still handles secondary event → queue dispatch glue
-2. **SessionControl / WindowPresence** — client connect maps, control owner, release timers
+2. **SessionControl / WindowPresence** — done (`session-control.ts`); SSE control fan-out still in app
 3. **PromptScheduler** — queues, dispatch, abort/resume, pending model/thinking
 4. **SseHub** — subscribe/broadcast only
 5. **HttpRoutes** — last, after domain services have stable interfaces
