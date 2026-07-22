@@ -132,14 +132,36 @@ $closeButton.Add_Click({ $form.Close() })
 $form.Controls.Add($closeButton)
 
 $script:launcherExitCode = 0
-$script:launcherExitedAt = $null
 $script:failureShown = $false
+$script:successHandled = $false
 $process = $null
+
+function Open-PiChatWindow {
+  param([ValidateSet('web', 'pwa')][string]$OpenMode)
+  $url = 'http://127.0.0.1:30170'
+  if ($OpenMode -eq 'pwa') {
+    $edgePwa = Join-Path ${env:ProgramFiles(x86)} 'Microsoft\Edge\Application\msedge_proxy.exe'
+    if (Test-Path -LiteralPath $edgePwa) {
+      Start-Process -FilePath $edgePwa -ArgumentList @(
+        '--profile-directory=Default',
+        '--app-id=geogmfmioogonffbmpjonolpkgepgafd',
+        "--app-url=$url",
+        '--app-launch-source=4',
+        '--new-window'
+      ) | Out-Null
+      return
+    }
+  }
+  Start-Process -FilePath $url | Out-Null
+}
+
 try {
   # Keep project paths out of cmd.exe source. Quoted environment expansion is safe
   # for checkout paths containing spaces, ampersands, parentheses, or apostrophes.
   $env:PI_CHAT_SERVER_OUT = $serverOutPath
   $env:PI_CHAT_SERVER_ERR = $serverErrPath
+  # Splash owns the browser open so it can hide before Chat appears.
+  $env:PI_CHAT_SKIP_OPEN = '1'
   $process = Start-PiChatLauncherProcess `
     -ProjectDirectory $project `
     -LauncherPath $launcher `
@@ -159,9 +181,9 @@ $animationTimer.Add_Tick({
 })
 
 $exitTimer = New-Object System.Windows.Forms.Timer
-$exitTimer.Interval = 80
+$exitTimer.Interval = 50
 $exitTimer.Add_Tick({
-  if ($script:failureShown) { return }
+  if ($script:failureShown -or $script:successHandled) { return }
   if ($process -and -not $process.HasExited) { return }
   if ($process) { $script:launcherExitCode = Get-PiChatLauncherExitCode -Process $process }
   if ($script:launcherExitCode -ne 0) {
@@ -186,8 +208,14 @@ $exitTimer.Add_Tick({
     $form.Activate()
     return
   }
-  if ($null -eq $script:launcherExitedAt) { $script:launcherExitedAt = [DateTime]::UtcNow }
-  if (([DateTime]::UtcNow - $script:launcherExitedAt).TotalMilliseconds -ge 280) { $form.Close() }
+  # Service is ready: hide splash first, then open Chat so the window does not
+  # linger over the browser for an extra fixed delay.
+  $script:successHandled = $true
+  $animationTimer.Stop()
+  $exitTimer.Stop()
+  $form.Hide()
+  try { Open-PiChatWindow -OpenMode $Mode } catch { Add-Content -LiteralPath $logPath -Value $_.Exception.ToString(); $script:launcherExitCode = 1 }
+  $form.Close()
 })
 
 $form.Add_Shown({

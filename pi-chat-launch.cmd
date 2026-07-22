@@ -50,6 +50,8 @@ powershell.exe -NoProfile -NonInteractive -Command "Start-Sleep -Seconds 1"
 goto :wait
 
 :open
+rem The WinForms start UI may own browser/PWA open so the splash can hide first.
+if /i "%PI_CHAT_SKIP_OPEN%"=="1" exit /b 0
 if /i "%MODE%"=="pwa" goto :pwa
 start "" "%URL%"
 exit /b 0

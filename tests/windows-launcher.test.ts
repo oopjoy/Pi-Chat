@@ -53,6 +53,11 @@ test("launcher scripts derive paths dynamically and avoid unsafe PowerShell inte
   assert.match(ui, /server-\$runId\.stderr\.log/);
   assert.match(ui, /Open log/);
   assert.match(ui, /Close/);
+  assert.match(ui, /PI_CHAT_SKIP_OPEN/);
+  assert.match(ui, /Open-PiChatWindow/);
+  assert.match(ui, /\$form\.Hide\(\)/);
+  assert.doesNotMatch(ui, /TotalMilliseconds -ge 280/);
+  assert.match(cmd, /PI_CHAT_SKIP_OPEN/);
   assert.match(installer, /Split-Path -Parent \$PSScriptRoot/);
   assert.match(installer, /-WindowStyle Hidden/);
   assert.match(installer, /\$shortcut\.WindowStyle = 7/);
