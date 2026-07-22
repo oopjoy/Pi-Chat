@@ -50,6 +50,8 @@ public sealed class PiChatSpinner : Control {
 
 $project = Split-Path -Parent $MyInvocation.MyCommand.Path
 $launcher = Join-Path $project 'pi-chat-launch.cmd'
+$launcherProcessHelper = Join-Path $project 'scripts\pi-chat-launch-process.ps1'
+. $launcherProcessHelper
 $iconPath = Join-Path $project 'resources\icons\pi-chat.ico'
 $logoPath = Join-Path $project 'src\web\public\icons\pi-chat-512.png'
 if (-not (Test-Path -LiteralPath $logoPath)) { $logoPath = Join-Path $project 'dist\web\icons\pi-chat-512.png' }
@@ -57,6 +59,8 @@ $logDirectory = Join-Path ([Environment]::GetFolderPath('LocalApplicationData'))
 [void](New-Item -ItemType Directory -Force -Path $logDirectory)
 $logPath = Join-Path $logDirectory 'launcher.log'
 $runId = '{0:yyyyMMdd-HHmmss}-{1}' -f [DateTime]::Now, $PID
+$launcherOutPath = Join-Path $logDirectory ("launcher-$runId.stdout.log")
+$launcherErrPath = Join-Path $logDirectory ("launcher-$runId.stderr.log")
 $serverOutPath = Join-Path $logDirectory ("server-$runId.stdout.log")
 $serverErrPath = Join-Path $logDirectory ("server-$runId.stderr.log")
 Set-Content -LiteralPath $logPath -Value ("Pi Chat launcher started at {0:u}" -f [DateTime]::Now)
@@ -134,12 +138,14 @@ $process = $null
 try {
   # Keep project paths out of cmd.exe source. Quoted environment expansion is safe
   # for checkout paths containing spaces, ampersands, parentheses, or apostrophes.
-  $env:PI_CHAT_LAUNCHER = $launcher
-  $env:PI_CHAT_LAUNCH_LOG = $logPath
   $env:PI_CHAT_SERVER_OUT = $serverOutPath
   $env:PI_CHAT_SERVER_ERR = $serverErrPath
-  $command = '"%PI_CHAT_LAUNCHER%" ' + $Mode + ' >> "%PI_CHAT_LAUNCH_LOG%" 2>&1'
-  $process = Start-Process -FilePath "$env:SystemRoot\System32\cmd.exe" -ArgumentList @('/d', '/c', $command) -WorkingDirectory $project -WindowStyle Hidden -PassThru
+  $process = Start-PiChatLauncherProcess `
+    -ProjectDirectory $project `
+    -LauncherPath $launcher `
+    -Mode $Mode `
+    -StandardOutputPath $launcherOutPath `
+    -StandardErrorPath $launcherErrPath
 } catch {
   Add-Content -LiteralPath $logPath -Value $_.Exception.ToString()
   $script:launcherExitCode = 1
@@ -157,9 +163,13 @@ $exitTimer.Interval = 80
 $exitTimer.Add_Tick({
   if ($script:failureShown) { return }
   if ($process -and -not $process.HasExited) { return }
-  if ($process) { $script:launcherExitCode = $process.ExitCode }
+  if ($process) { $script:launcherExitCode = Get-PiChatLauncherExitCode -Process $process }
   if ($script:launcherExitCode -ne 0) {
     $script:failureShown = $true
+    Add-Content -LiteralPath $logPath -Value "`r`n--- Pi Chat Launcher stdout ---"
+    if (Test-Path -LiteralPath $launcherOutPath) { Get-Content -LiteralPath $launcherOutPath | Add-Content -LiteralPath $logPath }
+    Add-Content -LiteralPath $logPath -Value "`r`n--- Pi Chat Launcher stderr ---"
+    if (Test-Path -LiteralPath $launcherErrPath) { Get-Content -LiteralPath $launcherErrPath | Add-Content -LiteralPath $logPath }
     Add-Content -LiteralPath $logPath -Value "`r`n--- Pi Chat Server stdout ---"
     if (Test-Path -LiteralPath $serverOutPath) { Get-Content -LiteralPath $serverOutPath | Add-Content -LiteralPath $logPath }
     Add-Content -LiteralPath $logPath -Value "`r`n--- Pi Chat Server stderr ---"
