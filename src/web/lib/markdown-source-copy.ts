@@ -187,6 +187,24 @@ function nodeInside(element: Element, node: Node | null): boolean {
   return parent === element || Boolean(parent && element.contains(parent));
 }
 
+function elementFromNode(node: Node | null): Element | null {
+  if (!node) return null;
+  return node.nodeType === Node.ELEMENT_NODE ? node as Element : node.parentElement;
+}
+
+/**
+ * Fenced code is rendered as a React code-block inside an atomic source wrapper
+ * (so full-block source mapping still works for mixed selections). When the user
+ * only paints a line inside that pre, return plain browser text instead of the
+ * whole ``` fence — the corner “复制” button still copies the full block.
+ */
+export function selectionInsideSingleCodeBlock(content: HTMLElement, range: Range): boolean {
+  const startBlock = elementFromNode(range.startContainer)?.closest(".code-block");
+  const endBlock = elementFromNode(range.endContainer)?.closest(".code-block");
+  if (!startBlock || startBlock !== endBlock || !content.contains(startBlock)) return false;
+  return startBlock.contains(range.startContainer) && startBlock.contains(range.endContainer);
+}
+
 function pointInside(element: Element, node: Node, offset: number): boolean {
   if (!nodeInside(element, node)) return false;
   if (node !== element) return true;
@@ -290,6 +308,8 @@ export function sourceForSelection(content: HTMLElement, selection: Selection | 
     return null;
   }
   if (clipped.collapsed) return null;
+  // Partial/full paint inside one code fence → plain text via the browser path.
+  if (startsHere && endsHere && selectionInsideSingleCodeBlock(content, clipped)) return null;
 
   const fragments = [...content.querySelectorAll<HTMLElement>("[data-source-start][data-source-end]")]
     .filter((fragment) => {
