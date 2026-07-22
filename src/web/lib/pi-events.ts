@@ -1,3 +1,4 @@
+import { normalizeStreamingAssistantMessage } from "../../shared/streaming-assistant";
 import type { ApplicationLifecycle, PiMessage, PromptImage } from "../../shared/types";
 
 export function parseEventData(rawEvent: Event): Record<string, unknown> {
@@ -13,7 +14,7 @@ export function lifecycleFromEvent(event: Record<string, unknown>): ApplicationL
 export function assistantMessage(event: Record<string, unknown>): PiMessage | null {
   const message = event.message;
   if (!message || typeof message !== "object" || (message as PiMessage).role !== "assistant") return null;
-  return message as PiMessage;
+  return normalizeStreamingAssistantMessage(message as PiMessage, event.assistantMessageEvent);
 }
 
 export function userMessage(text: string, images: PromptImage[]): PiMessage {

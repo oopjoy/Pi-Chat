@@ -3,6 +3,7 @@ import { createReadStream, existsSync } from "node:fs";
 import { stat, unlink } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { basename, extname, join, normalize, resolve } from "node:path";
+import { normalizeStreamingAssistantMessage } from "../shared/streaming-assistant.js";
 import type { ApplicationLifecycle, BootstrapData, ExtensionUiRequest, ModelInfo, PiMessage, PiState, PromptImage, QueuedPrompt, SessionStats, SessionSummary, SessionViewData, SlashCommand, ThinkingLevel } from "../shared/types.js";
 import { ApplicationBusyError, ApplicationLifecycleConflictError, ApplicationLifecycleCoordinator, lifecycleMessage } from "./application-lifecycle.js";
 import { pickLocalFiles, pickWorkspaceFolder, readClipboardFiles } from "./file-picker.js";
@@ -374,7 +375,7 @@ export class PiChatApp {
     }
     if (type === "compaction_end" && event.aborted === false) this.markContextUsagePendingRefresh(runtime.id);
     if ((type === "message_start" || type === "message_update") && event.message && typeof event.message === "object" && (event.message as PiMessage).role === "assistant") {
-      runtime.liveMessage = event.message as PiMessage;
+      runtime.liveMessage = normalizeStreamingAssistantMessage(event.message as PiMessage, event.assistantMessageEvent);
     }
     if (type === "message_end" && event.message && typeof event.message === "object" && (event.message as PiMessage).role === "assistant") runtime.liveMessage = undefined;
     if (type === "tool_execution_start") runtime.toolStatus = `正在运行工具：${String(event.toolName || "unknown")}`;
@@ -437,7 +438,7 @@ export class PiChatApp {
     }
     if (type === "compaction_end" && event.aborted === false) this.markContextUsagePendingRefresh(this.activeSessionId);
     if ((type === "message_start" || type === "message_update") && event.message && typeof event.message === "object" && (event.message as PiMessage).role === "assistant") {
-      this.liveMessage = event.message as PiMessage;
+      this.liveMessage = normalizeStreamingAssistantMessage(event.message as PiMessage, event.assistantMessageEvent);
     }
     if (type === "message_end" && event.message && typeof event.message === "object" && (event.message as PiMessage).role === "assistant") {
       this.liveMessage = undefined;
