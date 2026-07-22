@@ -63,6 +63,8 @@ export function App() {
   const [toolStatus, setToolStatus] = useState("");
   const [extensionRequest, setExtensionRequest] = useState<ExtensionUiRequest | null>(null);
   const [runtimeStatus, setRuntimeStatus] = useState<"active" | "restoring" | "view-only">("active");
+  const [viewControl, setViewControl] = useState<{ controlOwner?: string; controlledByThisWindow?: boolean }>({});
+  const [eventSourceGeneration, setEventSourceGeneration] = useState(0);
   const [applicationLifecycle, setApplicationLifecycle] = useState<ApplicationLifecycle>("idle");
   const [gateModes, setGateModes] = useState<Record<string, GateMode>>({});
   const [failedSessionIds, setFailedSessionIds] = useState<string[]>([]);
@@ -76,17 +78,39 @@ export function App() {
   const sessionRefreshInFlightRef = useRef(false);
   const sessionRefreshRequestedRef = useRef(false);
   const viewCacheRef = useRef(new SessionViewCache());
+  const desiredSessionIdRef = useRef("");
+  const navigationEpochRef = useRef(0);
+  const refreshEpochRef = useRef(0);
+  const recoveringConnectionRef = useRef<Promise<void> | null>(null);
   const commitLiveMessage = useCallback((message: PiMessage) => setLiveMessage(message), []);
   const { clearPendingLiveMessage, scheduleLiveMessage } = useLiveMessageScheduler(commitLiveMessage);
 
   const setViewedId = useCallback((id: string) => {
     clearPendingLiveMessage();
     viewedSessionIdRef.current = id;
+    desiredSessionIdRef.current = id;
     setViewedSessionId(id);
     rememberSessionId(id);
   }, [clearPendingLiveMessage]);
 
+  // Bootstrap owns application-wide metadata. Keep it separate from the selected
+  // view so a refresh can restore a remembered cold Session without briefly
+  // committing the Primary Runtime's blank draft to the timeline.
+  const applyBootstrapMetadata = useCallback((data: BootstrapData) => {
+    setSessions(data.sessions);
+    const activeId = data.activeSessionId || data.sessions.find((session) => session.active)?.id || "";
+    setActiveSessionId(activeId);
+    setActiveSessionIds(data.activeSessionIds || (activeId ? [activeId] : []));
+    setModels(data.models);
+    setWorkspaceCwd(data.workspaceCwd);
+    applicationLifecycleRef.current = data.applicationLifecycle || "idle";
+    setApplicationLifecycle(data.applicationLifecycle || "idle");
+  }, []);
+
   const applyBootstrap = useCallback((data: BootstrapData) => {
+    applyBootstrapMetadata(data);
+    setGateAvailableOverride(null);
+    setViewControl({ controlOwner: data.controlOwner, controlledByThisWindow: data.controlledByThisWindow });
     setState(data.state);
     setMessages(data.messages);
     setMessageTotal(data.messageTotal ?? data.messages.length);
@@ -94,15 +118,7 @@ export function App() {
     setVisibleTurnCount(data.visibleTurnCount ?? data.messages.filter((message) => message.role === "user").length);
     setMessagesTruncated(data.messagesTruncated === true);
     setStats(data.stats);
-    setSessions(data.sessions);
-    const activeId = data.activeSessionId || data.sessions.find((session) => session.active)?.id || "";
-    setActiveSessionId(activeId);
-    setActiveSessionIds(data.activeSessionIds || (activeId ? [activeId] : []));
-    setViewedId(activeId);
-    setModels(data.models);
-    setWorkspaceCwd(data.workspaceCwd);
-    applicationLifecycleRef.current = data.applicationLifecycle || "idle";
-    setApplicationLifecycle(data.applicationLifecycle || "idle");
+    setViewedId(data.activeSessionId || data.sessions.find((session) => session.active)?.id || "");
     setCommands(data.commands);
     setQueue(data.queue);
     setQueuePaused(data.queuePaused);
@@ -132,10 +148,11 @@ export function App() {
       commands: data.commands,
       pendingExtensionRequest: data.pendingExtensionRequest,
     });
-  }, [setViewedId]);
+  }, [applyBootstrapMetadata, setViewedId]);
 
   const applySessionView = useCallback((view: SessionViewData) => {
     setGateAvailableOverride(typeof view.gateAvailable === "boolean" ? view.gateAvailable : null);
+    setViewControl({ controlOwner: view.controlOwner ?? view.session.controlOwner, controlledByThisWindow: view.controlledByThisWindow ?? view.session.controlledByThisWindow });
     setState(view.state);
     setMessages(view.messages);
     setMessageTotal(view.messageTotal);
@@ -158,22 +175,35 @@ export function App() {
   }, [setViewedId]);
 
   const refresh = useCallback(async () => {
-    const wantedId = viewedSessionIdRef.current || rememberedSessionId();
+    const refreshEpoch = ++refreshEpochRef.current;
+    const navigationEpoch = navigationEpochRef.current;
+    const wantedId = desiredSessionIdRef.current || viewedSessionIdRef.current || rememberedSessionId();
     const data = await api.bootstrap();
-    applyBootstrap(data);
+    if (refreshEpochRef.current !== refreshEpoch || navigationEpochRef.current !== navigationEpoch) return;
     const activeId = data.activeSessionId || data.sessions.find((session) => session.active)?.id || "";
     if (wantedId && wantedId !== activeId) {
+      desiredSessionIdRef.current = wantedId;
       try {
         const view = await api.viewSession(wantedId);
+        if (refreshEpochRef.current !== refreshEpoch || navigationEpochRef.current !== navigationEpoch || desiredSessionIdRef.current !== wantedId) return;
         viewCacheRef.current.remember(view);
+        // Commit metadata and the wanted view together. Do not render the Primary
+        // draft in between: EventSource readiness also calls refresh after F5.
+        applyBootstrapMetadata(data);
         applySessionView(view);
+        return;
       } catch (cause) {
         // Another window may have deleted this Session while this page was refreshing.
         // Bootstrap has already selected the current writable Session, so treat that 404 as recovery.
-        if (!(cause instanceof Error) || !cause.message.includes("会话不存在")) throw cause;
+        if (!(cause instanceof Error) || !cause.message.includes("会话不存在")) {
+          applyBootstrap(data);
+          throw cause;
+        }
+        desiredSessionIdRef.current = activeId;
       }
     }
-  }, [applyBootstrap, applySessionView]);
+    applyBootstrap(data);
+  }, [applyBootstrap, applyBootstrapMetadata, applySessionView]);
 
   const refreshSidebarSessions = useCallback(async () => {
     if (sessionRefreshInFlightRef.current) {
@@ -362,6 +392,7 @@ export function App() {
         const id = typeof event.sessionId === "string" ? event.sessionId : "";
         const owner = typeof event.controlOwner === "string" ? event.controlOwner : undefined;
         const controlledByThisWindow = event.controlledByThisWindow === true;
+        if (id === viewedSessionIdRef.current) setViewControl({ controlOwner: owner, controlledByThisWindow });
         if (id) setSessions((current) => current.map((session) => session.id === id ? { ...session, controlOwner: owner, controlledByThisWindow } : session));
       } else if (type === "pi_chat_extension_request_resolved") {
         if (viewingEventSession) setExtensionRequest((current) => current?.id === event.id ? null : current);
@@ -371,29 +402,43 @@ export function App() {
       } else if (type === "pi_chat_process_recovered") {
         if (eventSessionId) setFailedSessionIds((current) => current.filter((id) => id !== eventSessionId));
       } else if (type === "pi_chat_process_error") {
-        if (eventSessionId) setFailedSessionIds((current) => [...new Set([...current, eventSessionId])]);
-        setError(String(event.error || "Pi RPC 已退出"));
-        setState((current) => ({ ...current, isStreaming: false }));
-        stoppingRef.current = false;
-        setStopping(false);
+        if (eventSessionId) {
+          setFailedSessionIds((current) => [...new Set([...current, eventSessionId])]);
+          setSessions((current) => current.map((session) => session.id === eventSessionId ? { ...session, running: false } : session));
+        }
+        if (viewingEventSession) {
+          setError(String(event.error || "Pi RPC 已退出"));
+          setState((current) => ({ ...current, isStreaming: false }));
+          stoppingRef.current = false;
+          setStopping(false);
+        }
       }
   }, [applySessionView, clearPendingLiveMessage, refresh, scheduleLiveMessage, scheduleSidebarRefresh]);
 
   const handleEventSourceError = useCallback((source: EventSource) => {
+      source.close();
       if (applicationLifecycleRef.current === "restarting") {
-        source.close();
         handoffWaitRef.current ||= api.waitForApplicationHandoff().then(() => window.location.reload()).catch((cause) => {
           setError(cause instanceof Error ? cause.message : String(cause));
           handoffWaitRef.current = null;
         });
         return;
       }
-      setError("与 Pi Chat 服务的事件连接已断开，浏览器将自动重连。");
-  }, []);
+      setError("与 Pi Chat 服务的事件连接已断开，正在重新连接…");
+      recoveringConnectionRef.current ||= api.recoverConnection().then(() => {
+        recoveringConnectionRef.current = null;
+        setEventSourceGeneration((generation) => generation + 1);
+        return refresh();
+      }).catch((cause) => {
+        setError(cause instanceof Error ? cause.message : String(cause));
+        recoveringConnectionRef.current = null;
+      });
+  }, [refresh]);
 
   const eventsUrl = useCallback(() => api.eventsUrl(), []);
   usePiEventSource({
     enabled: !loading,
+    generation: eventSourceGeneration,
     url: eventsUrl,
     onReady: handleEventSourceReady,
     onPi: handlePiEvent,
@@ -437,13 +482,17 @@ export function App() {
     setError("");
     stickToBottomRef.current = false;
     try {
-      applySessionView(await api.viewSession(id, visibleTurnCount + 10));
+      const view = await api.viewSession(id, visibleTurnCount + 10);
+      if (viewedSessionIdRef.current !== id) return;
+      applySessionView(view);
       requestAnimationFrame(() => {
         const element = scrollRef.current;
         if (element) element.scrollTop = Math.max(0, element.scrollHeight - previousHeight);
       });
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      if (viewedSessionIdRef.current === id) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
     } finally {
       loadingEarlierRef.current = false;
       setLoadingEarlier(false);
@@ -454,10 +503,6 @@ export function App() {
     const element = scrollRef.current;
     if (!element) return;
     stickToBottomRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 120;
-    // Near the top of a truncated history: load earlier turns without requiring the button.
-    if (messagesTruncated && !loadingEarlierRef.current && element.scrollTop < 72) {
-      void loadEarlierTurns();
-    }
   };
 
   const navigateConversation = (direction: "top" | "previous" | "next" | "bottom") => {
@@ -562,31 +607,42 @@ export function App() {
 
   const viewSession = async (id: string) => {
     if (id === viewedSessionIdRef.current) return;
+    const epoch = ++navigationEpochRef.current;
+    desiredSessionIdRef.current = id;
     setError("");
     // Keep the current conversation visible until the destination view has
     // arrived. This avoids a blank timeline while an active Session is waiting
     // for a Gate confirmation or its runtime is answering state requests.
     const cached = viewCacheRef.current.get(id);
     if (cached) {
+      if (navigationEpochRef.current !== epoch || desiredSessionIdRef.current !== id) return;
       applySessionView(cached);
       stickToBottomRef.current = true;
+      // This cached navigation supersedes any older in-flight cold request.
+      setBusy(false);
       return;
     }
     setBusy(true);
     try {
       const view = await api.viewSession(id);
+      if (navigationEpochRef.current !== epoch || desiredSessionIdRef.current !== id) return;
       if (!view.isActive) viewCacheRef.current.remember(view);
       else viewCacheRef.current.forget(view.session.id);
       applySessionView(view);
       stickToBottomRef.current = true;
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      if (navigationEpochRef.current === epoch) {
+        desiredSessionIdRef.current = viewedSessionIdRef.current;
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
     } finally {
-      setBusy(false);
+      if (navigationEpochRef.current === epoch) setBusy(false);
     }
   };
 
   const createSession = async () => {
+    // The server is authoritative: it cheaply reuses this window's verified
+    // empty draft, but creates a fresh Session if an Extension already persisted.
     setBusy(true);
     setError("");
     try {
@@ -756,17 +812,35 @@ export function App() {
   };
 
   const respondToExtension = async (body: Record<string, unknown>) => {
-    const sessionId = extensionRequest?.piChatSessionId;
+    const submittedRequest = extensionRequest;
+    if (!submittedRequest) return;
+    const sessionId = submittedRequest.piChatSessionId || viewedSessionIdRef.current;
     setExtensionRequest(null);
     try {
       await api.respondToExtension({ ...body, ...(sessionId ? { sessionId } : {}) });
     } catch (cause) {
+      // Re-read the authoritative pending request. This distinguishes a real
+      // delivery failure from a lost HTTP response after Pi already accepted it.
+      try {
+        if (sessionId) {
+          const view = await api.viewSession(sessionId);
+          if (viewedSessionIdRef.current === sessionId) setExtensionRequest(view.pendingExtensionRequest || null);
+        } else setExtensionRequest(submittedRequest);
+      } catch {
+        if (viewedSessionIdRef.current === sessionId) setExtensionRequest(submittedRequest);
+      }
       setError(cause instanceof Error ? cause.message : String(cause));
     }
   };
 
   const viewingActiveSession = Boolean(viewedSessionId) && activeSessionIds.includes(viewedSessionId);
-  const conversationItems = useMemo(() => groupConversation(messages), [messages]);
+  // Group persisted and in-flight messages as one contiguous transcript. Splitting
+  // them made a completed tool segment and the next streaming thought render as
+  // two adjacent “过程” cards during one agent turn.
+  const conversationItems = useMemo(
+    () => groupConversation(liveMessage ? [...messages, liveMessage] : messages),
+    [messages, liveMessage],
+  );
   const anySessionRunning = sessions.some((session) => session.running);
   const anySessionPendingConfirmation = sessions.some((session) => session.pendingConfirmation);
   const anySessionQueued = sessions.some((session) => session.queued);
@@ -779,12 +853,14 @@ export function App() {
   // Cold view-only sessions carry no RPC command list; the server reports Gate availability explicitly.
   const gateAvailable = gateAvailableOverride ?? commands.some((command) => command.name === "gate" && command.source === "extension");
   const gateMode = gateModes[viewedSessionId] || "strict";
-  const observing = Boolean(viewedSession?.controlOwner && !viewedSession?.controlledByThisWindow);
+  const effectiveControl = { ...viewedSession, ...viewControl };
+  const observing = Boolean(effectiveControl.controlOwner && !effectiveControl.controlledByThisWindow);
   const takeControl = async () => {
     if (!viewedSessionId) return;
     try {
       if (runtimeStatus !== "active") await ensureRuntimeActive();
       const result = await api.takeSessionControl(viewedSessionId);
+      setViewControl(result);
       setSessions((current) => current.map((session) => session.id === viewedSessionId ? { ...session, ...result } : session));
       setNotice("已接管此对话控制权");
     } catch (cause) {
@@ -861,11 +937,10 @@ export function App() {
               <>
                 {messagesTruncated && <div className="message-window-notice" role="status"><span>当前显示最近 {visibleTurnCount} 轮（共 {turnTotal} 轮、{messageTotal} 条消息）</span><button type="button" onClick={() => void loadEarlierTurns()} disabled={loadingEarlier}>{loadingEarlier ? "正在加载…" : "加载更早 10 轮"}</button></div>}
                 {conversationItems.map((item, index) => item.kind === "process"
-                  ? <ConversationProcess key={`process-${index}`} entries={item.entries} />
-                  : <ChatMessage key={`message-${item.message.timestamp || 0}-${index}`} message={item.message} />)}
+                  ? <ConversationProcess key={`process-${index}`} entries={item.entries} streaming={state.isStreaming && index === conversationItems.length - 1} />
+                  : <ChatMessage key={`message-${item.message.timestamp || 0}-${index}`} message={item.message} streaming={state.isStreaming && index === conversationItems.length - 1 && Boolean(liveMessage)} />)}
               </>
             )}
-            {liveMessage && <ChatMessage message={liveMessage} streaming />}
             {state.isCompacting && <div className="agent-status is-compacting" role="status"><span className="loader small" />{toolStatus || "正在压缩上下文，当前消息会在完成后继续发送…"}</div>}
             {state.isStreaming && !state.isCompacting && toolStatus && <div className="agent-status"><span className="loader small" />{toolStatus}</div>}
           </div>
