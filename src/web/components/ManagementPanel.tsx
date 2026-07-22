@@ -337,7 +337,8 @@ function AppearancePanel({ value, onChange }: { value: AppearancePreferences; on
 }
 
 function SettingRow({ title, description, children }: { title: string; description?: string; children: React.ReactNode }) {
-  return <label className="setting-row"><span><strong>{title}</strong>{description && <small>{description}</small>}</span>{children}</label>;
+  // Custom controls contain buttons/listboxes, so a label wrapper would create invalid nested interactive content.
+  return <div className="setting-row"><span><strong>{title}</strong>{description && <small>{description}</small>}</span>{children}</div>;
 }
 
 function StepperSetting({ title, hint, value, minimum, maximum, step, suffix, decimals = 0, onChange }: {

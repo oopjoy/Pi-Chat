@@ -554,9 +554,13 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .setting-row strong, .setting-row small { display: block; }
 .setting-row strong, .stepper-setting-label strong { font-size: 13px; }
 .setting-row small { margin-top: 3px; color: var(--muted); font-size: 10.5px; }
-/* Theme and font use the shared CompactSelect, the same trigger/hover family as top-bar controls. */
-.appearance-select { min-width: 148px; }
-.appearance-select .compact-select-trigger { padding-left: 10px; }
+/* Theme and font use the shared CompactSelect. Keep the outer white board neutral:
+   only a pointer directly over its trigger may show the hover fill. */
+.appearance-select,
+.appearance-select:hover,
+.appearance-select:focus-within { min-width: 148px; background: var(--surface); }
+.appearance-select .compact-select-trigger { padding-left: 10px; background: transparent; }
+.appearance-select .compact-select-trigger:hover:not(:disabled) { background: var(--surface-hover); }
 /* Discrete numeric preferences share the top-bar compact-control family. */
 .stepper-setting-label { display: grid; min-width: 0; gap: 2px; }
 .stepper-setting-label small { color: var(--muted); font-size: 10.5px; font-variant-numeric: tabular-nums; }
