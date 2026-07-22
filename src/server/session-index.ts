@@ -81,21 +81,6 @@ async function readSessionBranch(path: string): Promise<SessionEntry[]> {
   return branch.reverse();
 }
 
-export async function readSessionMessages(path: string): Promise<PiMessage[]> {
-  const branch = await readSessionBranch(path);
-  return branch.flatMap((entry) => {
-    if (entry.type !== "message" || !entry.message) return [];
-    const timestamp = typeof entry.message.timestamp === "number"
-      ? entry.message.timestamp
-      : typeof entry.timestamp === "number"
-        ? entry.timestamp
-        : typeof entry.timestamp === "string"
-          ? Date.parse(entry.timestamp)
-          : undefined;
-    return [{ ...entry.message, ...(Number.isFinite(timestamp) ? { timestamp } : {}) }];
-  });
-}
-
 export interface SessionUsageSnapshot {
   tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
   /** Last successful assistant turn: the live context it consumed plus its model. */
@@ -110,12 +95,27 @@ const usageNumber = (value: unknown): number => typeof value === "number" && Num
  * every successful assistant turn; the context occupancy is the final turn's
  * input + cache reads/writes, which is what the next prompt would resend.
  */
-export async function readSessionUsage(path: string): Promise<SessionUsageSnapshot> {
+export interface SessionFileSnapshot {
+  messages: PiMessage[];
+  usage: SessionUsageSnapshot;
+}
+
+/** Parse the active JSONL branch once for both conversation messages and usage. */
+export async function readSessionSnapshot(path: string): Promise<SessionFileSnapshot> {
   const branch = await readSessionBranch(path);
+  const messages: PiMessage[] = [];
   const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
   let context: SessionUsageSnapshot["context"] = null;
   for (const entry of branch) {
     if (entry.type !== "message" || !entry.message) continue;
+    const timestamp = typeof entry.message.timestamp === "number"
+      ? entry.message.timestamp
+      : typeof entry.timestamp === "number"
+        ? entry.timestamp
+        : typeof entry.timestamp === "string"
+          ? Date.parse(entry.timestamp)
+          : undefined;
+    messages.push({ ...entry.message, ...(Number.isFinite(timestamp) ? { timestamp } : {}) });
     const message = entry.message as unknown as Record<string, unknown>;
     if (message.role !== "assistant" || message.stopReason === "error") continue;
     const usage = message.usage;
@@ -137,7 +137,15 @@ export async function readSessionUsage(path: string): Promise<SessionUsageSnapsh
     };
   }
   tokens.total = tokens.input + tokens.output + tokens.cacheRead + tokens.cacheWrite;
-  return { tokens, context };
+  return { messages, usage: { tokens, context } };
+}
+
+export async function readSessionMessages(path: string): Promise<PiMessage[]> {
+  return (await readSessionSnapshot(path)).messages;
+}
+
+export async function readSessionUsage(path: string): Promise<SessionUsageSnapshot> {
+  return (await readSessionSnapshot(path)).usage;
 }
 
 function isSubagentSession(path: string, name: string): boolean {
@@ -207,6 +215,8 @@ export class SessionIndex {
   private refreshPromise: Promise<SessionSummary[]> | null = null;
   private refreshKey = "";
   private readonly statFile: (path: string) => Promise<Stats>;
+  private readonly snapshotCache = new Map<string, { mtimeMs: number; size: number; snapshot: SessionFileSnapshot }>();
+  private readonly snapshotReads = new Map<string, Promise<SessionFileSnapshot | null>>();
 
   constructor(root?: string, cachePath?: string, statFile: (path: string) => Promise<Stats> = stat) {
     this.root = root || process.env.PI_CODING_AGENT_SESSION_DIR || join(homedir(), ".pi", "agent", "sessions");
@@ -215,7 +225,7 @@ export class SessionIndex {
   }
 
   async list(activePath?: string, cwd?: string): Promise<SessionSummary[]> {
-    // Bootstrap, sidebar refresh and background preheat often arrive together.
+    // Bootstrap and sidebar refresh may arrive together.
     // Share identical scans and serialize different scans so pathsById/cache are
     // never mutated concurrently by callers released from the same await.
     const key = `${activePath ? resolve(activePath).toLowerCase() : ""}\0${cwd ? resolve(cwd).toLowerCase() : ""}`;
@@ -295,14 +305,42 @@ export class SessionIndex {
     return this.pathsById.get(id) ?? null;
   }
 
-  async messagesForId(id: string): Promise<PiMessage[] | null> {
+  summaryForId(id: string): SessionSummary | null {
     const path = this.pathForId(id);
-    return path ? readSessionMessages(path) : null;
+    const cached = path && this.cache?.get(resolve(path));
+    return cached ? { ...cached.summary, active: false } : null;
+  }
+
+  async snapshotForId(id: string): Promise<SessionFileSnapshot | null> {
+    const path = this.pathForId(id);
+    if (!path) return null;
+    const inFlight = this.snapshotReads.get(id);
+    if (inFlight) return inFlight;
+    const read = (async () => {
+      let fileStat: Stats;
+      try { fileStat = await this.statFile(path); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") this.snapshotCache.delete(id);
+        else throw error;
+        return null;
+      }
+      const cached = this.snapshotCache.get(id);
+      if (cached && cached.mtimeMs === fileStat.mtimeMs && cached.size === fileStat.size) return cached.snapshot;
+      const snapshot = await readSessionSnapshot(path);
+      this.snapshotCache.set(id, { mtimeMs: fileStat.mtimeMs, size: fileStat.size, snapshot });
+      return snapshot;
+    })();
+    this.snapshotReads.set(id, read);
+    try { return await read; }
+    finally { if (this.snapshotReads.get(id) === read) this.snapshotReads.delete(id); }
+  }
+
+  async messagesForId(id: string): Promise<PiMessage[] | null> {
+    return (await this.snapshotForId(id))?.messages ?? null;
   }
 
   async usageForId(id: string): Promise<SessionUsageSnapshot | null> {
-    const path = this.pathForId(id);
-    return path ? readSessionUsage(path) : null;
+    return (await this.snapshotForId(id))?.usage ?? null;
   }
 }
 

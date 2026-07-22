@@ -137,9 +137,6 @@ const port = typeof address === "object" && address ? address.port : options.por
 const authority = options.host.includes(":") ? `[${options.host}]:${port}` : `${options.host}:${port}`;
 app.setAllowedHosts([authority]);
 console.log(`[Pi Chat] 已启动：http://${options.host}:${port}`);
-void app.preheatRecentSessions().then((ids) => {
-  if (ids.length) console.log(`[Pi Chat] 已后台预热最近 ${ids.length} 个历史会话。`);
-}).catch((error) => console.warn(`[Pi Chat] 历史会话预热失败：${error instanceof Error ? error.message : String(error)}`));
 if (!loopbackHosts.has(options.host)) {
   console.warn("[Pi Chat] 警告：已显式启用未认证远程监听；只可在受信任网络中临时使用，严禁暴露到公网。");
 }

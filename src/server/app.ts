@@ -12,7 +12,7 @@ import { ModelManager } from "./model-manager.js";
 import { ResourceManager } from "./resource-manager.js";
 import { PiRpcClient, rpcData } from "./rpc-client.js";
 import { asCommands, asMessages, asModels, asSessionStats, asState, messageWindow, promptImages, RECENT_TURN_WINDOW_SIZE } from "./pi-data.js";
-import { idForPath, readSessionMessages, SessionIndex } from "./session-index.js";
+import { idForPath, readSessionMessages, SessionIndex, type SessionUsageSnapshot } from "./session-index.js";
 import { saveWorkspace } from "./workspace-state.js";
 import { requestGuardError } from "./request-guard.js";
 
@@ -26,7 +26,6 @@ const PROMPT_PREPARE_TIMEOUT_MS = 200_000;
 const DEFAULT_MAX_IDLE_SECONDARY_RUNTIMES = 3;
 const DEFAULT_SECONDARY_RUNTIME_SWEEP_MS = 60 * 1_000;
 const DEFAULT_GATE_REQUEST_TIMEOUT_MS = 10 * 60 * 1_000;
-export const DEFAULT_RECENT_SESSION_PREHEAT_COUNT = 3;
 const BUILTIN_COMMANDS: SlashCommand[] = [
   { name: "new", description: "新建会话", source: "builtin" },
   { name: "compact", description: "压缩当前会话上下文，可附加指令", source: "builtin" },
@@ -102,6 +101,7 @@ export class PiChatApp {
   private readonly unsubscribe: () => void;
   private readonly promptQueue: InternalQueuedPrompt[] = [];
   private running = false;
+  private lastPrimaryState: PiState = { model: null, isStreaming: false };
   private queuePaused = false;
   private dispatching = false;
   private closed = false;
@@ -119,7 +119,6 @@ export class PiChatApp {
   private readonly viewedSessionsByClient = new Map<string, string>();
   private readonly controllerReleaseTimers = new Map<string, NodeJS.Timeout>();
   private readonly pendingExtensionTimers = new Map<string, NodeJS.Timeout>();
-  private preheatPromise: Promise<string[]> | null = null;
   private primaryFailed = false;
   private primaryRecovery: Promise<void> | null = null;
   private readonly now: () => number;
@@ -136,6 +135,7 @@ export class PiChatApp {
   private pendingExtensionRequest: ExtensionUiRequest | undefined;
   private readonly lifecycleCoordinator: ApplicationLifecycleCoordinator;
   /** A compaction changes the prompt structure; wait for a later completed turn before reporting occupancy again. */
+  private readonly modelContextWindows = new Map<string, number>();
   private readonly contextUsagePendingRefresh = new Set<string>();
   private readonly contextUsageRefreshTurn = new Set<string>();
 
@@ -155,44 +155,6 @@ export class PiChatApp {
     this.secondaryRuntimeSweepTimer = setInterval(() => void this.sweepSecondaryRuntimes(), sweepMs);
     this.secondaryRuntimeSweepTimer.unref();
     this.unsubscribe = options.rpc.onEvent((event) => this.handleRpcEvent(event));
-  }
-
-  /**
-   * Sequentially starts the most recently updated saved Sessions in the background.
-   * The primary Session is deliberately excluded; `ensureRuntime` deduplicates an
-   * overlapping user click so preheating never creates two writers for one JSONL.
-   */
-  async preheatRecentSessions(limit = DEFAULT_RECENT_SESSION_PREHEAT_COUNT): Promise<string[]> {
-    const count = Math.min(Math.max(0, Math.floor(limit)), this.maxIdleSecondaryRuntimes);
-    if (!count || this.closed || !this.options.createRpc) return [];
-    if (this.preheatPromise) return this.preheatPromise;
-    const run = (async () => {
-      const state = asState(await this.options.rpc.send({ type: "get_state" }));
-      this.running = state.isStreaming;
-      this.activeSessionId = state.sessionFile ? idForPath(state.sessionFile) : state.sessionId || "";
-      this.activeSessionPath = state.sessionFile;
-      const recent = await this.options.sessions.list(state.sessionFile, this.currentCwd);
-      const started: string[] = [];
-      for (const session of recent) {
-        if (this.closed || this.applicationLifecycle !== "idle" || started.length >= count) break;
-        if (session.id === this.activeSessionId) continue;
-        try {
-          await this.ensureRuntime(session.id);
-          started.push(session.id);
-        } catch (error) {
-          // A deleted/corrupt historical Session must not prevent newer candidates
-          // from warming. It remains available for an explicit user retry later.
-          this.broadcast({ type: "pi_chat_preheat_error", sessionId: session.id, error: error instanceof Error ? error.message : String(error) });
-        }
-      }
-      return started;
-    })();
-    this.preheatPromise = run;
-    try {
-      return await run;
-    } finally {
-      if (this.preheatPromise === run) this.preheatPromise = null;
-    }
   }
 
   setAllowedHosts(allowedHosts: string[]): void {
@@ -985,18 +947,50 @@ export class PiChatApp {
     return this.bootstrap();
   }
 
+  private async coldSessionView(id: string, session: SessionSummary, turnLimit: number, clientId: string): Promise<SessionViewData | null> {
+    const snapshot = await this.options.sessions.snapshotForId?.(id);
+    const messages = snapshot?.messages ?? await this.options.sessions.messagesForId(id);
+    if (!messages) return null;
+    const windowed = messageWindow(messages, turnLimit);
+    return {
+      session: { ...session, active: false, writable: false, running: false, queued: false },
+      state: { ...this.lastPrimaryState, isStreaming: false, isCompacting: false },
+      messages: windowed.messages,
+      messageTotal: windowed.total,
+      turnTotal: windowed.turns,
+      visibleTurnCount: windowed.visibleTurns,
+      messagesTruncated: windowed.truncated,
+      isActive: false,
+      runtimeStatus: "view-only",
+      isStreaming: false,
+      stats: await this.offlineStatsForId(id, snapshot?.usage),
+      gateAvailable: await this.gateExtensionEnabled(),
+      commands: [],
+      pendingExtensionRequest: this.pendingRequestForSession(id),
+      ...this.controlState(id, clientId),
+    };
+  }
+
   private async sessionView(id: string, turnLimit = RECENT_TURN_WINDOW_SIZE, clientId = ""): Promise<SessionViewData | null> {
+    const knownRuntime = this.runtimes.get(id);
+    // Cold history is a pure JSONL read. Avoid waking or querying the Primary RPC
+    // and avoid rescanning every Session when the index already knows this ID.
+    if (id !== this.activeSessionId && !knownRuntime) {
+      const knownSession = this.options.sessions.summaryForId?.(id);
+      if (knownSession) return this.coldSessionView(id, knownSession, turnLimit, clientId);
+    }
     const primaryAvailable = this.applicationLifecycle === "idle" && !this.primaryFailed && this.options.rpc.isRunning?.() !== false;
     const state = primaryAvailable
       ? asState(await this.options.rpc.send({ type: "get_state" }))
       : { model: null, isStreaming: false } satisfies PiState;
     if (primaryAvailable) {
+      this.lastPrimaryState = state;
       this.running = state.isStreaming;
       this.activeSessionId = state.sessionFile ? idForPath(state.sessionFile) : state.sessionId || this.activeSessionId;
       this.activeSessionPath = state.sessionFile || this.activeSessionPath;
     }
     const sessions = this.sessionSummaries(await this.options.sessions.list(this.activeSessionPath, this.currentCwd), state, clientId);
-    const secondaryRuntime = this.runtimes.get(id);
+    const secondaryRuntime = knownRuntime;
     // A fresh New view is valid even though it is deliberately absent from the
     // sidebar until its first user message is persisted.
     const session = sessions.find((item) => item.id === id) || secondaryRuntime?.draftSession;
@@ -1040,26 +1034,7 @@ export class PiChatApp {
         ...this.controlState(id, clientId),
       };
     }
-    const messages = await this.options.sessions.messagesForId(id);
-    if (!messages) return null;
-    const windowed = messageWindow(messages, turnLimit);
-    return {
-      session,
-      state: { ...state, isStreaming: false },
-      messages: windowed.messages,
-      messageTotal: windowed.total,
-      turnTotal: windowed.turns,
-      visibleTurnCount: windowed.visibleTurns,
-      messagesTruncated: windowed.truncated,
-      isActive: false,
-      runtimeStatus: "view-only",
-      isStreaming: false,
-      stats: await this.offlineStatsForId(id),
-      gateAvailable: await this.gateExtensionEnabled(),
-      commands: [],
-      pendingExtensionRequest: this.pendingRequestForSession(id),
-      ...this.controlState(id, clientId),
-    };
+    return this.coldSessionView(id, session, turnLimit, clientId);
   }
 
   /**
@@ -1080,22 +1055,20 @@ export class PiChatApp {
     this.contextUsagePendingRefresh.delete(id);
   }
 
-  private async offlineStatsForId(id: string): Promise<SessionStats | undefined> {
+  private rememberModelContextWindows(models: ModelInfo[]): void {
+    for (const model of models) {
+      if (typeof model.contextWindow === "number" && model.contextWindow > 0) this.modelContextWindows.set(`${model.provider}\u0000${model.id}`, model.contextWindow);
+    }
+  }
+
+  private async offlineStatsForId(id: string, knownUsage?: SessionUsageSnapshot): Promise<SessionStats | undefined> {
     // Optional-chained: test doubles and older indexes may not implement usageForId.
-    const usage = await Promise.resolve(this.options.sessions.usageForId?.(id)).catch(() => null);
+    const usage = knownUsage ?? await Promise.resolve(this.options.sessions.usageForId?.(id)).catch(() => null);
     if (!usage) return undefined;
     const stats: SessionStats = { tokens: usage.tokens };
     if (usage.context) {
-      let contextWindow = 0;
-      try {
-        const modelsResponse = await this.options.rpc.send({ type: "get_available_models" });
-        const models = this.options.modelManager ? await this.options.modelManager.annotate(asModels(modelsResponse)) : asModels(modelsResponse);
-        contextWindow = models.find((model) => model.provider === usage.context?.provider && model.id === usage.context?.model)?.contextWindow || 0;
-        if (!contextWindow) console.warn(`[Pi Chat] 冷会话上下文用量：未找到模型 ${usage.context.provider}/${usage.context.model} 的 contextWindow`);
-      } catch (error) {
-        console.warn("[Pi Chat] 冷会话上下文用量：模型目录查询失败", error);
-        contextWindow = 0;
-      }
+      const contextWindow = this.modelContextWindows.get(`${usage.context.provider || ""}\u0000${usage.context.model || ""}`) || 0;
+      if (!contextWindow) console.warn(`[Pi Chat] 冷会话上下文用量：未找到模型 ${usage.context.provider}/${usage.context.model} 的 contextWindow`);
       if (contextWindow > 0) {
         const pendingRefresh = this.contextUsagePendingRefresh.has(id);
         stats.contextUsage = pendingRefresh
@@ -1142,6 +1115,9 @@ export class PiChatApp {
       this.options.rpc.send({ type: "get_session_stats" }),
     ]);
     const state = asState(stateResponse);
+    this.lastPrimaryState = state;
+    const availableModels = this.options.modelManager ? await this.options.modelManager.annotate(asModels(modelsResponse)) : asModels(modelsResponse);
+    this.rememberModelContextWindows(availableModels);
     const windowedMessages = messageWindow(asMessages(messagesResponse));
     this.running = state.isStreaming;
     this.activeSessionId = state.sessionFile ? idForPath(state.sessionFile) : state.sessionId || "";
@@ -1159,7 +1135,7 @@ export class PiChatApp {
       liveMessage: this.liveMessage,
       toolStatus: this.toolStatus,
       stats: await this.statsForSession(this.activeSessionId, statsResponse),
-      models: this.options.modelManager ? await this.options.modelManager.annotate(asModels(modelsResponse)) : asModels(modelsResponse),
+      models: availableModels,
       commands: [...BUILTIN_COMMANDS, ...asCommands(commandsResponse)],
       queue: this.publicQueue(),
       queuePaused: this.queuePaused,
@@ -1555,11 +1531,6 @@ export class PiChatApp {
     const viewMatch = /^\/api\/sessions\/([a-f0-9]{20})\/view$/.exec(url.pathname);
     if (viewMatch) {
       if (request.method !== "GET") return methodNotAllowed(response);
-      if (!this.activeSessionId) {
-        const state = asState(await this.options.rpc.send({ type: "get_state" }));
-        this.running = state.isStreaming;
-        this.activeSessionId = state.sessionFile ? idForPath(state.sessionFile) : state.sessionId || "";
-      }
       // Reading a cold history is deliberately view-only: do not wake a Pi process
       // just because the user is inspecting its JSONL. Runtime creation is explicit
       // on /activate (send, model/thinking changes, compaction, or taking control).
@@ -1590,6 +1561,12 @@ export class PiChatApp {
     if (activateMatch) {
       if (request.method !== "POST") return methodNotAllowed(response);
       const id = activateMatch[1];
+      if (!this.activeSessionId) {
+        const state = asState(await this.options.rpc.send({ type: "get_state" }));
+        this.running = state.isStreaming;
+        this.activeSessionId = state.sessionFile ? idForPath(state.sessionFile) : state.sessionId || "";
+        this.activeSessionPath = state.sessionFile;
+      }
       if (id !== this.activeSessionId) await this.ensureRuntime(id);
       const view = await this.sessionView(id, RECENT_TURN_WINDOW_SIZE, clientId);
       if (!view) return json(response, 404, { error: "会话不存在" });

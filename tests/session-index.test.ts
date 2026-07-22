@@ -131,6 +131,33 @@ test("usage reader follows only the current branch", async () => {
   }
 });
 
+test("session snapshots reuse one parsed branch until the JSONL file changes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-session-snapshot-"));
+  try {
+    const path = join(root, "session.jsonl");
+    const initial = [
+      { type: "session", id: "snapshot", cwd: process.cwd() },
+      { type: "message", id: "u1", parentId: null, message: { role: "user", content: "one" } },
+      { type: "message", id: "a1", parentId: "u1", message: { role: "assistant", content: "answer", provider: "p", model: "m", usage: { input: 2, output: 1, cacheRead: 3, cacheWrite: 0 } } },
+    ];
+    await writeFile(path, initial.map(JSON.stringify).join("\n"));
+    const index = new SessionIndex(root, join(root, "cache.json"));
+    const [session] = await index.list();
+    const first = await index.snapshotForId(session.id);
+    const second = await index.snapshotForId(session.id);
+    assert.equal(first, second);
+    assert.equal(first?.messages.length, 2);
+    assert.equal(first?.usage.tokens.total, 6);
+
+    await writeFile(path, [...initial, { type: "message", id: "u2", parentId: "a1", message: { role: "user", content: "two with a different file size" } }].map(JSON.stringify).join("\n"));
+    const changed = await index.snapshotForId(session.id);
+    assert.notEqual(changed, first);
+    assert.equal(changed?.messages.length, 3);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("session index coalesces identical concurrent refreshes without losing path lookups", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-session-concurrent-"));
   try {

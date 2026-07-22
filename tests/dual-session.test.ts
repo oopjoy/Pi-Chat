@@ -796,38 +796,6 @@ test("model and thinking changes do not claim or transfer Session control", asyn
   }
 });
 
-test("startup preheats the three most recent saved secondary sessions sequentially", async () => {
-  const paths = ["C:\\sessions\\primary.jsonl", "C:\\sessions\\newest.jsonl", "C:\\sessions\\next.jsonl", "C:\\sessions\\third.jsonl", "C:\\sessions\\older.jsonl"];
-  const ids = paths.map(idForPath);
-  const primary = new FakeRpc(paths[0], "primary");
-  const workers = [new FakeRpc(paths[1], "newest"), new FakeRpc(paths[2], "next"), new FakeRpc(paths[3], "third")];
-  const created: FakeRpc[] = [];
-  const summaries = paths.map((path, index) => ({ id: ids[index], sessionId: `s${index}`, name: `S${index}`, preview: `S${index}`, cwd: process.cwd(), updatedAt: 100 - index, messageCount: 1, active: index === 0 }));
-  const sessions = {
-    list: async (activePath?: string) => summaries.map((session) => ({ ...session, active: session.id === idForPath(activePath || paths[0]) })),
-    pathForId: (id: string) => paths[ids.indexOf(id)] || null,
-    messagesForId: async () => [],
-  } as unknown as SessionIndex;
-  const app = new PiChatApp({
-    rpc: primary as unknown as PiRpcClient,
-    createRpc: () => { const worker = workers.shift(); if (!worker) throw new Error("unexpected worker"); created.push(worker); return worker as unknown as PiRpcClient; },
-    sessions,
-    resources: {} as ResourceManager,
-    cwd: process.cwd(),
-    webRoot: process.cwd(),
-    maxIdleSecondaryRuntimes: 3,
-  });
-  try {
-    assert.deepEqual(await app.preheatRecentSessions(), ids.slice(1, 4));
-    assert.equal(created.length, 3);
-    assert.deepEqual(created.map((worker) => worker.path), paths.slice(1, 4));
-    assert.deepEqual(await app.preheatRecentSessions(), ids.slice(1, 4));
-    assert.equal(created.length, 3);
-  } finally {
-    await app.close();
-  }
-});
-
 test("idle secondary workers use LRU capacity reclamation without stopping active work", async () => {
   const pathA = "C:\\sessions\\a.jsonl";
   const pathB = "C:\\sessions\\b.jsonl";

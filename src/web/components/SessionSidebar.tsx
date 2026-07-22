@@ -24,7 +24,7 @@ function sessionStatus(session: SessionSummary, warming: boolean, failed: boolea
   if (session.pendingConfirmation) return { kind: "pending", label: "等待权限确认" };
   if (session.queued) return { kind: "pending", label: "消息等待发送" };
   if (session.running) return { kind: "running", label: "正在生成" };
-  if (warming) return { kind: "running", label: "正在预热会话" };
+  if (warming) return { kind: "running", label: "正在启动会话" };
   if (failed) return { kind: "error", label: "会话运行异常" };
   if (session.writable) return { kind: "ready", label: "已就绪" };
   return { kind: "dormant", label: "按需启动" };

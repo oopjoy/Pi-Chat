@@ -164,13 +164,17 @@ test("viewing a cold session returns history before its runtime finishes restori
       throw new Error(`Unexpected worker RPC command: ${String(command.type)}`);
     },
   } as unknown as PiRpcClient;
+  const historySummary = { id: historyId, sessionId: "history", name: "History", preview: "old", cwd: process.cwd(), updatedAt: 1, messageCount: 2, active: false };
+  const historyMessages = [
+    { role: "user", content: "old question" },
+    { role: "assistant", content: "new answer written outside Pi Chat" },
+  ];
   const sessions = {
-    list: async () => [{ id: historyId, sessionId: "history", name: "History", preview: "old", cwd: process.cwd(), updatedAt: 1, messageCount: 2, active: false }],
+    list: async () => [historySummary],
     pathForId: (id: string) => id === historyId ? historyPath : null,
-    messagesForId: async (id: string) => id === historyId ? [
-      { role: "user", content: "old question" },
-      { role: "assistant", content: "new answer written outside Pi Chat" },
-    ] : null,
+    summaryForId: (id: string) => id === historyId ? historySummary : null,
+    snapshotForId: async (id: string) => id === historyId ? { messages: historyMessages, usage: { tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, context: null } } : null,
+    messagesForId: async (id: string) => id === historyId ? historyMessages : null,
   } as unknown as SessionIndex;
   let workerCreations = 0;
   const app = new PiChatApp({ rpc: mainRpc, createRpc: () => { workerCreations += 1; return workerRpc; }, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
@@ -187,6 +191,7 @@ test("viewing a cold session returns history before its runtime finishes restori
     assert.equal(response.status, 200);
     assert.equal(concurrentResponse.status, 200);
     assert.equal(workerCreations, 0);
+    assert.deepEqual(mainCommands, []);
     const view = await response.json() as { isActive: boolean; runtimeStatus: string; messages: Array<{ content: string }> };
     assert.equal(view.isActive, false);
     assert.equal(view.runtimeStatus, "view-only");
