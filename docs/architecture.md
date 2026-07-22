@@ -54,7 +54,7 @@ Closing a browser window must not be confused with stopping the Node service. St
 
 ## Server module map
 
-Current ownership still centers on `src/server/app.ts` (`PiChatApp`). Already extracted:
+Current ownership still centers on `src/server/app.ts` (`PiChatApp`), with progressive state extraction. Already extracted:
 
 | Module | Responsibility |
 |---|---|
@@ -65,12 +65,13 @@ Current ownership still centers on `src/server/app.ts` (`PiChatApp`). Already ex
 | `session-index.ts` | JSONL index, cold snapshots, usage |
 | `application-restart.ts` | Staging build, promote, handoff |
 | `rpc-client.ts` | Global Pi process + capability probe |
+| `runtime-pool.ts` | Secondary Runtime maps, capacity mutex, ensure/draft/recover/reclaim/sweep/stopAll |
 
-### Recommended extraction order
+### Extraction order
 
 Extract **state ownership**, not only functions:
 
-1. **RuntimePool** — secondary create/start/stop, capacity mutex, idle sweep, reclaim, draft cleanup
+1. **RuntimePool** — done (`runtime-pool.ts`); `PiChatApp` still handles secondary event → queue dispatch glue
 2. **SessionControl / WindowPresence** — client connect maps, control owner, release timers
 3. **PromptScheduler** — queues, dispatch, abort/resume, pending model/thinking
 4. **SseHub** — subscribe/broadcast only
