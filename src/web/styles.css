@@ -553,9 +553,9 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .setting-row strong, .setting-row small { display: block; }
 .setting-row strong, .stepper-setting-label strong { font-size: 13px; }
 .setting-row small { margin-top: 3px; color: var(--muted); font-size: 10.5px; }
-.setting-row select { min-width: 138px; height: 32px; padding: 5px 26px 5px 10px; border: 1px solid var(--line); border-radius: 8px; outline: 0; background: var(--surface); color: var(--text); font-size: 12px; }
-.setting-row select:hover { background: var(--surface-hover); }
-.setting-row select:focus-visible { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent), transparent 72%); }
+/* Theme and font use the shared CompactSelect, the same trigger/hover family as top-bar controls. */
+.appearance-select { min-width: 148px; }
+.appearance-select .compact-select-trigger { padding-left: 10px; }
 /* Discrete numeric preferences share the top-bar compact-control family. */
 .stepper-setting-label { display: grid; min-width: 0; gap: 2px; }
 .stepper-setting-label small { color: var(--muted); font-size: 10.5px; font-variant-numeric: tabular-nums; }

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { BootstrapData, CustomModelInput, ExtensionResource, ModelInfo, PackageResource, PiState, SkillResource } from "../../shared/types";
 import { api } from "../api";
 import { DEFAULT_APPEARANCE, snapToStep, type AppearancePreferences, type FontPreference, type ThemePreference } from "../lib/preferences";
+import { CompactSelect, type CompactSelectOption } from "./CompactSelect";
 import { CloseIcon, MinusIcon, PlusIcon } from "./Icons";
 
 export type ManagementSection = "settings" | "models";
@@ -13,6 +14,18 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string }> = [
   { id: "skills", label: "Skills" },
   { id: "extensions", label: "Extensions" },
   { id: "packages", label: "Packages" },
+];
+
+const THEME_OPTIONS: Array<CompactSelectOption<ThemePreference>> = [
+  { value: "system", label: "跟随系统" },
+  { value: "light", label: "浅色" },
+  { value: "dark", label: "深色" },
+];
+
+const FONT_OPTIONS: Array<CompactSelectOption<FontPreference>> = [
+  { value: "system", label: "系统字体" },
+  { value: "serif", label: "衬线阅读字体" },
+  { value: "mono", label: "等宽字体" },
 ];
 
 export function ManagementPanel({ section, appearance, models, state, busy, onClose, onAppearance, onModel, onReloaded, onShutdown }: {
@@ -309,8 +322,8 @@ function AppearancePanel({ value, onChange }: { value: AppearancePreferences; on
       <PanelIntro title="外观与阅读" />
       <button type="button" className="appearance-reset" disabled={isDefault} onClick={() => onChange({ ...DEFAULT_APPEARANCE })}>重置外观</button>
     </div>
-    <SettingRow title="主题"><select value={value.theme} onChange={(event) => update("theme", event.target.value as ThemePreference)}><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></SettingRow>
-    <SettingRow title="聊天字体"><select value={value.font} onChange={(event) => update("font", event.target.value as FontPreference)}><option value="system">系统字体</option><option value="serif">衬线阅读字体</option><option value="mono">等宽字体</option></select></SettingRow>
+    <SettingRow title="主题"><CompactSelect value={value.theme} options={THEME_OPTIONS} ariaLabel="主题" title="主题" align="right" className="appearance-select" onChange={(next) => update("theme", next)} /></SettingRow>
+    <SettingRow title="聊天字体"><CompactSelect value={value.font} options={FONT_OPTIONS} ariaLabel="聊天字体" title="聊天字体" align="right" className="appearance-select" onChange={(next) => update("font", next)} /></SettingRow>
     <StepperSetting title="字号" hint="10 ~ 30 px" value={value.fontSize} minimum={10} maximum={30} step={1} onChange={(next) => update("fontSize", next)} />
     <StepperSetting title="行间距" hint="1.0 ~ 3.0" value={value.lineHeight} minimum={1.0} maximum={3.0} step={0.1} decimals={1} onChange={(next) => update("lineHeight", next)} />
     <StepperSetting title="对话宽度" hint="600 ~ 1500 px" value={value.chatWidth} minimum={600} maximum={1500} step={50} onChange={(next) => update("chatWidth", next)} />
