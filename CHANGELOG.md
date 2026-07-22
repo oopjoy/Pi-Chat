@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.2
+
+### UX
+
+- Changing model / thinking no longer freezes the whole shell (`settingsBusy` only locks those controls)
+- Conversation process/message React keys stay stable while streaming thinking text grows (less remount flicker)
+
+### Stability (carried on 0.3.1 line, released as 0.3.2)
+
+- Restart handoff health-check + automatic rollback to previous `dist` on candidate failure
+- Empty New reuses this window’s idle blank draft; drafts are never shared across windows
+- Contiguous tool/thinking steps fold into one process card during streaming
+- Selected session survives refresh / reconnect; connection recovery after restart
+- Appearance steppers, process disclosure, sidebar open animation, and related polish
+
 ## 0.3.1
 
 ### Stability (Windows restart)

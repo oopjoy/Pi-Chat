@@ -130,7 +130,7 @@ Prefer **RPC capability probe** over a hard Pi version allowlist.
 
 Missing required capabilities → fail startup clearly.
 
-## Application restart (0.3.1)
+## Application restart (0.3.1+)
 
 Windows often returns `EPERM` if `dist/` is renamed while the live Node process still has open handles (loaded modules under `dist/server`).
 
