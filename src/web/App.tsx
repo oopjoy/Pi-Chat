@@ -49,6 +49,8 @@ export function App() {
   const [stopping, setStopping] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  /** Model / thinking only — must not freeze composer, sidebar, or the whole shell. */
+  const [settingsBusy, setSettingsBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [workspacePicking, setWorkspacePicking] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(loadSidebarOpen);
@@ -665,8 +667,8 @@ export function App() {
   };
 
   const changeModel = async (provider: string, modelId: string) => {
-    if (!provider || !modelId) return;
-    setBusy(true);
+    if (!provider || !modelId || settingsBusy) return;
+    setSettingsBusy(true);
     setError("");
     try {
       await ensureRuntimeActive();
@@ -676,12 +678,13 @@ export function App() {
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      setBusy(false);
+      setSettingsBusy(false);
     }
   };
 
   const changeThinking = async (level: ThinkingLevel) => {
-    setBusy(true);
+    if (settingsBusy) return;
+    setSettingsBusy(true);
     setError("");
     try {
       await ensureRuntimeActive();
@@ -691,7 +694,7 @@ export function App() {
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      setBusy(false);
+      setSettingsBusy(false);
     }
   };
 
@@ -916,6 +919,7 @@ export function App() {
           conversationName={conversationName}
           workspacePath={conversationWorkspace}
           disabled={busy || observing || lifecycleBlocked}
+          settingsBusy={settingsBusy}
           streaming={state.isStreaming}
           gateAvailable={gateAvailable}
           gateMode={gateMode}
@@ -937,8 +941,8 @@ export function App() {
               <>
                 {messagesTruncated && <div className="message-window-notice" role="status"><span>当前显示最近 {visibleTurnCount} 轮（共 {turnTotal} 轮、{messageTotal} 条消息）</span><button type="button" onClick={() => void loadEarlierTurns()} disabled={loadingEarlier}>{loadingEarlier ? "正在加载…" : "加载更早 10 轮"}</button></div>}
                 {conversationItems.map((item, index) => item.kind === "process"
-                  ? <ConversationProcess key={`process-${index}`} entries={item.entries} streaming={state.isStreaming && index === conversationItems.length - 1} />
-                  : <ChatMessage key={`message-${item.message.timestamp || 0}-${index}`} message={item.message} streaming={state.isStreaming && index === conversationItems.length - 1 && Boolean(liveMessage)} />)}
+                  ? <ConversationProcess key={item.key} entries={item.entries} streaming={state.isStreaming && index === conversationItems.length - 1} />
+                  : <ChatMessage key={item.key} message={item.message} streaming={state.isStreaming && index === conversationItems.length - 1 && Boolean(liveMessage)} />)}
               </>
             )}
             {state.isCompacting && <div className="agent-status is-compacting" role="status"><span className="loader small" />{toolStatus || "正在压缩上下文，当前消息会在完成后继续发送…"}</div>}

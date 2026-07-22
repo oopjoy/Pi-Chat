@@ -116,3 +116,33 @@ test("contiguous persisted tools and a live thought combine into one process car
   assert.equal(items[0].entries.filter((entry) => entry.kind === "thinking").length, 2);
   assert.equal(items[0].entries.filter((entry) => entry.kind === "tool").length, 1);
 });
+
+test("conversation item keys stay stable while streaming thinking text grows", () => {
+  const early = groupConversation([{ role: "assistant", content: [{ type: "thinking", thinking: "先" }] }]);
+  const later = groupConversation([{ role: "assistant", content: [{ type: "thinking", thinking: "先想清楚再调用工具" }] }]);
+  assert.equal(early[0]?.kind, "process");
+  assert.equal(later[0]?.kind, "process");
+  if (early[0]?.kind !== "process" || later[0]?.kind !== "process") throw new Error("Expected process");
+  assert.equal(early[0].key, later[0].key);
+
+  const withTool = groupConversation([
+    { role: "assistant", content: [{ type: "thinking", thinking: "计划" }, { type: "toolCall", id: "t1", name: "bash", arguments: {} }] },
+    { role: "toolResult", toolCallId: "t1", toolName: "bash", content: [{ type: "text", text: "ok" }] },
+  ]);
+  const withToolAndThought = groupConversation([
+    { role: "assistant", content: [{ type: "thinking", thinking: "计划" }, { type: "toolCall", id: "t1", name: "bash", arguments: {} }] },
+    { role: "toolResult", toolCallId: "t1", toolName: "bash", content: [{ type: "text", text: "ok" }] },
+    { role: "assistant", content: [{ type: "thinking", thinking: "继续" }] },
+  ]);
+  assert.equal(withTool[0]?.kind, "process");
+  assert.equal(withToolAndThought[0]?.kind, "process");
+  if (withTool[0]?.kind !== "process" || withToolAndThought[0]?.kind !== "process") throw new Error("Expected process");
+  // New thinking entry changes structure, so the key may change; tool id segment stays present.
+  assert.match(withTool[0].key, /tool:t1/);
+  assert.match(withToolAndThought[0].key, /tool:t1/);
+
+  const user = groupConversation([{ role: "user", content: "hi", timestamp: 42 }]);
+  assert.equal(user[0]?.kind, "message");
+  if (user[0]?.kind !== "message") throw new Error("Expected message");
+  assert.equal(user[0].key, "message:user:42");
+});

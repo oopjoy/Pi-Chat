@@ -315,6 +315,7 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .model-menu-trigger:hover:not(:disabled) { background: var(--surface-hover); }
 .model-menu-trigger:focus-visible { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent), transparent 72%); }
 .model-menu-trigger:disabled { cursor: not-allowed; }
+.model-menu-trigger.is-busy { opacity: 0.72; }
 .model-menu .model-icon { width: 15px; height: 15px; }
 /* Anchor to the trigger's right edge so the menu sits under the model chip, not stretched wide left. */
 .model-menu-popover { position: absolute; z-index: 40; top: calc(100% + 6px); right: 0; left: auto; display: grid; width: max-content; min-width: 100%; max-width: min(200px, calc(100vw - 24px)); max-height: min(320px, calc(100vh - 90px)); overflow-x: hidden; overflow-y: auto; padding: 4px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--surface); box-shadow: 0 10px 28px rgba(27, 44, 70, .16); }

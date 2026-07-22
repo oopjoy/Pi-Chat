@@ -61,13 +61,16 @@ function UsageStats({ stats, isCompacting }: { stats?: SessionStats; isCompactin
   );
 }
 
-export function TopBar({ state, models, stats, conversationName, workspacePath, disabled, streaming, gateAvailable, gateMode, onGate, onModel, onThinking }: {
+export function TopBar({ state, models, stats, conversationName, workspacePath, disabled, settingsBusy = false, streaming, gateAvailable, gateMode, onGate, onModel, onThinking }: {
   state: PiState;
   models: ModelInfo[];
   stats?: SessionStats;
   conversationName: string;
   workspacePath: string;
+  /** Gate / foreign control / lifecycle — may lock all top-bar controls. */
   disabled: boolean;
+  /** Model / thinking only: cold Runtime activate should not freeze the whole page. */
+  settingsBusy?: boolean;
   streaming: boolean;
   gateAvailable: boolean;
   gateMode: GateMode;
@@ -77,6 +80,7 @@ export function TopBar({ state, models, stats, conversationName, workspacePath, 
 }) {
   const current = state.model ? modelValue(state.model) : "";
   const currentModel = models.find((model) => modelValue(model) === current);
+  const modelControlsDisabled = disabled || settingsBusy;
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const modelMenuRef = useRef<HTMLDivElement>(null);
 
@@ -105,9 +109,9 @@ export function TopBar({ state, models, stats, conversationName, workspacePath, 
       </div>
       <div className="topbar-controls">
         {gateAvailable && <GateControl mode={gateMode} disabled={disabled} onChange={onGate} />}
-        <div className="model-controls" title={streaming ? "当前回复不会中断；新设置将在下一轮对话生效" : undefined}>
+        <div className="model-controls" title={settingsBusy ? "正在切换模型或思考强度…" : streaming ? "当前回复不会中断；新设置将在下一轮对话生效" : undefined}>
           <div className="model-menu" ref={modelMenuRef}>
-            <button type="button" className="model-menu-trigger" disabled={disabled || !models.length} aria-label="模型" aria-haspopup="listbox" aria-expanded={modelMenuOpen} onClick={() => setModelMenuOpen((open) => !open)}>
+            <button type="button" className={`model-menu-trigger${settingsBusy ? " is-busy" : ""}`} disabled={modelControlsDisabled || !models.length} aria-label="模型" aria-busy={settingsBusy || undefined} aria-haspopup="listbox" aria-expanded={modelMenuOpen} onClick={() => setModelMenuOpen((open) => !open)}>
               <ChipIcon className="model-icon" />
               <span>{currentModel?.name || state.model?.id || "未选择"}</span>
               <i className="model-menu-chevron" aria-hidden="true" />
@@ -115,13 +119,13 @@ export function TopBar({ state, models, stats, conversationName, workspacePath, 
             {modelMenuOpen && <div className="model-menu-popover" role="listbox" aria-label="选择模型">
               {models.map((model) => {
                 const selected = modelValue(model) === current;
-                return <button type="button" key={modelValue(model)} className={selected ? "is-selected" : ""} role="option" aria-selected={selected} onClick={() => { setModelMenuOpen(false); onModel(model.provider, model.id); }}>
+                return <button type="button" key={modelValue(model)} className={selected ? "is-selected" : ""} role="option" aria-selected={selected} disabled={settingsBusy} onClick={() => { setModelMenuOpen(false); onModel(model.provider, model.id); }}>
                   <span>{model.name || model.id}</span>{selected && <CheckIcon />}
                 </button>;
               })}
             </div>}
           </div>
-          <CompactSelect value={(state.thinkingLevel || "off") as ThinkingLevel} options={THINKING_LEVELS} disabled={disabled || !state.model?.reasoning} ariaLabel="思考强度" title="思考强度" align="right" className="thinking-select" onChange={onThinking} />
+          <CompactSelect value={(state.thinkingLevel || "off") as ThinkingLevel} options={THINKING_LEVELS} disabled={modelControlsDisabled || !state.model?.reasoning} ariaLabel="思考强度" title="思考强度" align="right" className="thinking-select" onChange={onThinking} />
         </div>
       </div>
     </header>

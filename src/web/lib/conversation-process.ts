@@ -7,8 +7,31 @@ export type ProcessEntry =
   | { kind: "tool"; id?: string; name: string; arguments?: string; result?: string; isError?: boolean };
 
 export type ConversationItem =
-  | { kind: "message"; message: PiMessage }
-  | { kind: "process"; entries: ProcessEntry[] };
+  | { kind: "message"; message: PiMessage; key: string }
+  | { kind: "process"; entries: ProcessEntry[]; key: string };
+
+/**
+ * Stable list keys for React. Intentionally ignore growing thinking/note text so
+ * streaming updates do not remount process cards or open/close state.
+ */
+export function processItemKey(entries: ProcessEntry[], ordinal = 0): string {
+  let thinkingIndex = 0;
+  let noteIndex = 0;
+  const parts = entries.map((entry) => {
+    if (entry.kind === "tool") return `tool:${entry.id || entry.name}`;
+    if (entry.kind === "thinking") return `think:${thinkingIndex++}`;
+    return `note:${noteIndex++}`;
+  });
+  return `process:${ordinal}:${parts.join("+") || "empty"}`;
+}
+
+export function messageItemKey(message: PiMessage, ordinal = 0): string {
+  if (message.role === "toolResult" && message.toolCallId) return `message:toolResult:${message.toolCallId}`;
+  if (typeof message.timestamp === "number" && Number.isFinite(message.timestamp)) {
+    return `message:${message.role}:${message.timestamp}`;
+  }
+  return `message:${message.role}:${ordinal}`;
+}
 
 function blocks(message: PiMessage): PiContentBlock[] {
   return typeof message.content === "string" ? [{ type: "text", text: message.content }] : message.content || [];
@@ -95,8 +118,12 @@ function mergeProcessEntries(entries: ProcessEntry[]): ProcessEntry[] {
 export function groupConversation(messages: PiMessage[]): ConversationItem[] {
   const items: ConversationItem[] = [];
   let processEntries: ProcessEntry[] = [];
+  let processOrdinal = 0;
+  let messageOrdinal = 0;
   const flushProcess = () => {
-    if (processEntries.length) items.push({ kind: "process", entries: mergeProcessEntries(processEntries) });
+    if (!processEntries.length) return;
+    const entries = mergeProcessEntries(processEntries);
+    items.push({ kind: "process", entries, key: processItemKey(entries, processOrdinal++) });
     processEntries = [];
   };
 
@@ -105,7 +132,7 @@ export function groupConversation(messages: PiMessage[]): ConversationItem[] {
     processEntries.push(...entries);
     if (visibleMessage) {
       flushProcess();
-      items.push({ kind: "message", message: visibleMessage });
+      items.push({ kind: "message", message: visibleMessage, key: messageItemKey(visibleMessage, messageOrdinal++) });
     }
   }
   flushProcess();
