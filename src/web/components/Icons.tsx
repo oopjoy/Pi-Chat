@@ -68,6 +68,10 @@ export function ShieldIcon(props: IconProps) {
   return <LineIcon {...props}><path d="M12 3.2 19 6v5.3c0 4.6-2.8 7.7-7 9.5-4.2-1.8-7-4.9-7-9.5V6Z" /><path d="M9.2 12.1 11 14l3.9-4.2" /></LineIcon>;
 }
 
+export function ExtensionIcon(props: IconProps) {
+  return <LineIcon {...props}><path d="M8.5 4.5h3v3a1.5 1.5 0 0 0 3 0v-3h3a2 2 0 0 1 2 2v3h-3a1.5 1.5 0 0 0 0 3h3v5a2 2 0 0 1-2 2h-5v-3a1.5 1.5 0 0 0-3 0v3h-3a2 2 0 0 1-2-2v-3h3a1.5 1.5 0 0 0 0-3h-3v-5a2 2 0 0 1 2-2Z" /></LineIcon>;
+}
+
 export function ImageIcon(props: IconProps) {
   return <LineIcon {...props}><rect x="4" y="4" width="16" height="16" rx="2" /><circle cx="9" cy="9" r="1.4" /><path d="m5 17 4.6-4.6 3 3L15 13l4 4" /></LineIcon>;
 }

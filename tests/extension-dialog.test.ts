@@ -63,9 +63,32 @@ test("Gate dialog exposes only Block and Allow, with Escape safely choosing Bloc
   assert.equal(dom.window.document.body.textContent?.includes("取消"), false);
   assert.equal(dom.window.document.body.textContent?.includes("Pi Chat Gate"), true);
   assert.equal(dom.window.document.activeElement?.textContent, "Block");
+  assert.ok(dom.window.document.querySelector(".extension-dialog-header"));
+  assert.ok(dom.window.document.querySelector(".extension-dialog-body"));
+  assert.ok(dom.window.document.querySelector(".extension-dialog-actions"));
 
   await act(async () => buttonElements[1].click());
   await act(async () => dom.window.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
   assert.deepEqual(responses, [{ id: "gate", value: "✅ Allow" }, { id: "gate", value: "❌ Block" }]);
+  await act(async () => root.unmount());
+});
+
+test("ordinary Extension requests use the same frame while retaining Cancel semantics", async () => {
+  const dom = installDom();
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  const responses: Array<Record<string, unknown>> = [];
+  await act(async () => root.render(createElement(ExtensionDialog, {
+    request: { type: "extension_ui_request", id: "extension", method: "select", title: "Choose a mode", message: "Select one option", options: ["First", "Second"] },
+    onRespond: (body: Record<string, unknown>) => responses.push(body),
+  })));
+  assert.equal(dom.window.document.querySelector(".extension-dialog-header > div > span")?.textContent, "Pi Extension");
+  assert.equal(dom.window.document.querySelector("#extension-dialog-title")?.textContent, "Choose a mode");
+  assert.ok(dom.window.document.querySelector(".extension-dialog-icon.is-extension"));
+  assert.ok(dom.window.document.querySelector(".extension-dialog-body"));
+  assert.ok(dom.window.document.querySelector(".extension-dialog-actions"));
+  assert.deepEqual([...dom.window.document.querySelectorAll("button")].map((button) => button.textContent), ["First", "Second", "取消"]);
+
+  await act(async () => dom.window.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+  assert.deepEqual(responses, [{ id: "extension", cancelled: true }]);
   await act(async () => root.unmount());
 });

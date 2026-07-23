@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
 import type { ExtensionUiRequest } from "../../shared/types";
-import { ShieldIcon } from "./Icons";
+import { ExtensionIcon, ShieldIcon } from "./Icons";
 
 export type { ExtensionUiRequest } from "../../shared/types";
 
@@ -50,24 +50,53 @@ export function describeGateRequest(request: ExtensionUiRequest): GateRequestDet
   return null;
 }
 
+function ExtensionDialogFrame({ gate, title, children, actions }: {
+  gate: boolean;
+  title: string;
+  children: ReactNode;
+  actions: ReactNode;
+}) {
+  return (
+    <div className="dialog-backdrop" role="presentation">
+      <section className="dialog extension-dialog" role="dialog" aria-modal="true" aria-labelledby="extension-dialog-title">
+        <header className="extension-dialog-header">
+          <span className={`extension-dialog-icon ${gate ? "is-gate" : "is-extension"}`}>
+            {gate ? <ShieldIcon /> : <ExtensionIcon />}
+          </span>
+          <div>
+            <span>{gate ? "Pi Chat Gate" : "Pi Extension"}</span>
+            <h2 id="extension-dialog-title">{title}</h2>
+          </div>
+        </header>
+        <div className="extension-dialog-body">{children}</div>
+        <footer className="extension-dialog-actions">{actions}</footer>
+      </section>
+    </div>
+  );
+}
+
 export function ExtensionDialog({ request, onRespond }: {
   request: ExtensionUiRequest | null;
   onRespond: (body: Record<string, unknown>) => void;
 }) {
   const [value, setValue] = useState("");
-  const gateDetails = request ? describeGateRequest(request) : null;
+  const gateDetails = useMemo(() => request ? describeGateRequest(request) : null, [request]);
+  const supported = Boolean(request && ["select", "confirm", "input", "editor"].includes(request.method));
+
   useEffect(() => setValue(request?.prefill || ""), [request]);
   useEffect(() => {
-    if (!request || !gateDetails) return;
+    if (!request || !supported) return;
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
-      onRespond({ id: request.id, value: gateDetails.blockValue });
+      if (gateDetails) onRespond({ id: request.id, value: gateDetails.blockValue });
+      else onRespond({ id: request.id, cancelled: true });
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [gateDetails, onRespond, request]);
-  if (!request || !["select", "confirm", "input", "editor"].includes(request.method)) return null;
+  }, [gateDetails, onRespond, request, supported]);
+
+  if (!request || !supported) return null;
 
   const cancel = () => onRespond({ id: request.id, cancelled: true });
   const submit = () => {
@@ -75,41 +104,44 @@ export function ExtensionDialog({ request, onRespond }: {
     else onRespond({ id: request.id, value });
   };
 
+  if (gateDetails) {
+    return (
+      <ExtensionDialogFrame
+        gate
+        title="权限确认"
+        actions={
+          <>
+            <button type="button" className="gate-block" autoFocus onClick={() => onRespond({ id: request.id, value: gateDetails.blockValue })}>Block</button>
+            <button type="button" className="gate-allow" onClick={() => onRespond({ id: request.id, value: gateDetails.allowValue })}>Allow</button>
+          </>
+        }
+      >
+        <div className="gate-request-heading"><strong>{gateDetails.action}</strong><span>{gateDetails.tool}</span></div>
+        <pre className="gate-request-target"><code>{gateDetails.target}</code></pre>
+        <p className="gate-confirmation-note">Gate 严格模式已拦截此操作。只有 Allow 后，Pi 才会继续执行。</p>
+      </ExtensionDialogFrame>
+    );
+  }
+
   return (
-    <div className="dialog-backdrop" role="presentation">
-      <section className={`dialog ${gateDetails ? "gate-confirmation" : ""}`} role="dialog" aria-modal="true" aria-labelledby="extension-dialog-title">
-        {gateDetails ? (
-          <>
-            <header className="gate-dialog-header">
-              <span className="gate-dialog-icon"><ShieldIcon /></span>
-              <div><span>Pi Chat Gate</span><h2 id="extension-dialog-title">权限确认</h2></div>
-            </header>
-            <div className="gate-request-heading"><strong>{gateDetails.action}</strong><span>{gateDetails.tool}</span></div>
-            <pre className="gate-request-target"><code>{gateDetails.target}</code></pre>
-            <p className="gate-confirmation-note">Gate 严格模式已拦截此操作。只有 Allow 后，Pi 才会继续执行。</p>
-            <footer className="gate-dialog-actions">
-              <button type="button" className="gate-block" autoFocus onClick={() => onRespond({ id: request.id, value: gateDetails.blockValue })}>Block</button>
-              <button type="button" className="gate-allow" onClick={() => onRespond({ id: request.id, value: gateDetails.allowValue })}>Allow</button>
-            </footer>
-          </>
-        ) : (
-          <>
-            <h2 id="extension-dialog-title">{request.title || "Pi 需要你的输入"}</h2>
-            {request.message && <p>{request.message}</p>}
-            {request.method === "select" && (
-              <div className="dialog-options">
-                {(request.options || []).map((option) => <button type="button" key={option} onClick={() => onRespond({ id: request.id, value: option })}>{option}</button>)}
-              </div>
-            )}
-            {request.method === "input" && <input autoFocus value={value} placeholder={request.placeholder} onChange={(event) => setValue(event.target.value)} />}
-            {request.method === "editor" && <textarea autoFocus rows={8} value={value} placeholder={request.placeholder} onChange={(event) => setValue(event.target.value)} />}
-            <footer>
-              <button type="button" onClick={cancel}>取消</button>
-              {request.method !== "select" && <button type="button" className="primary" onClick={submit}>确定</button>}
-            </footer>
-          </>
-        )}
-      </section>
-    </div>
+    <ExtensionDialogFrame
+      gate={false}
+      title={request.title || "Pi 需要你的输入"}
+      actions={
+        <>
+          <button type="button" onClick={cancel}>取消</button>
+          {request.method !== "select" && <button type="button" className="primary" onClick={submit}>确定</button>}
+        </>
+      }
+    >
+      {request.message && <p className="extension-dialog-message">{request.message}</p>}
+      {request.method === "select" && (
+        <div className="dialog-options">
+          {(request.options || []).map((option) => <button type="button" key={option} onClick={() => onRespond({ id: request.id, value: option })}>{option}</button>)}
+        </div>
+      )}
+      {request.method === "input" && <input autoFocus value={value} placeholder={request.placeholder} onChange={(event) => setValue(event.target.value)} />}
+      {request.method === "editor" && <textarea autoFocus rows={8} value={value} placeholder={request.placeholder} onChange={(event) => setValue(event.target.value)} />}
+    </ExtensionDialogFrame>
   );
 }
