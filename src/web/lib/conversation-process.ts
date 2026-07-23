@@ -14,15 +14,11 @@ export type ConversationItem =
  * Stable list keys for React. Intentionally ignore growing thinking/note text so
  * streaming updates do not remount process cards or open/close state.
  */
-export function processItemKey(entries: ProcessEntry[], ordinal = 0): string {
-  let thinkingIndex = 0;
-  let noteIndex = 0;
-  const parts = entries.map((entry) => {
-    if (entry.kind === "tool") return `tool:${entry.id || entry.name}`;
-    if (entry.kind === "thinking") return `think:${thinkingIndex++}`;
-    return `note:${noteIndex++}`;
-  });
-  return `process:${ordinal}:${parts.join("+") || "empty"}`;
+export function processItemKey(anchor: string, ordinal = 0): string {
+  // A process grows as thinking/tool events arrive. Its key must not include
+  // entries, otherwise every read/edit completion remounts <details> and closes
+  // a process card the user explicitly opened.
+  return `process:${anchor || "start"}:${ordinal}`;
 }
 
 export function messageItemKey(message: PiMessage, ordinal = 0): string {
@@ -120,10 +116,11 @@ export function groupConversation(messages: PiMessage[]): ConversationItem[] {
   let processEntries: ProcessEntry[] = [];
   let processOrdinal = 0;
   let messageOrdinal = 0;
+  let precedingMessageKey = "start";
   const flushProcess = () => {
     if (!processEntries.length) return;
     const entries = mergeProcessEntries(processEntries);
-    items.push({ kind: "process", entries, key: processItemKey(entries, processOrdinal++) });
+    items.push({ kind: "process", entries, key: processItemKey(precedingMessageKey, processOrdinal++) });
     processEntries = [];
   };
 
@@ -132,7 +129,9 @@ export function groupConversation(messages: PiMessage[]): ConversationItem[] {
     processEntries.push(...entries);
     if (visibleMessage) {
       flushProcess();
-      items.push({ kind: "message", message: visibleMessage, key: messageItemKey(visibleMessage, messageOrdinal++) });
+      const key = messageItemKey(visibleMessage, messageOrdinal++);
+      items.push({ kind: "message", message: visibleMessage, key });
+      precedingMessageKey = key;
     }
   }
   flushProcess();

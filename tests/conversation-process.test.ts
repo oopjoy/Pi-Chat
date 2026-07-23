@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
+import { JSDOM } from "jsdom";
 import type { PiMessage } from "../src/shared/types";
+import { ConversationProcess } from "../src/web/components/ConversationProcess";
 import { groupConversation } from "../src/web/lib/conversation-process";
 
 test("groups thinking, tool calls and matching tool results into one collapsed process", () => {
@@ -137,12 +141,57 @@ test("conversation item keys stay stable while streaming thinking text grows", (
   assert.equal(withTool[0]?.kind, "process");
   assert.equal(withToolAndThought[0]?.kind, "process");
   if (withTool[0]?.kind !== "process" || withToolAndThought[0]?.kind !== "process") throw new Error("Expected process");
-  // New thinking entry changes structure, so the key may change; tool id segment stays present.
-  assert.match(withTool[0].key, /tool:t1/);
-  assert.match(withToolAndThought[0].key, /tool:t1/);
+  // Tool completion and additional thought must not remount the outer <details>.
+  assert.equal(withTool[0].key, withToolAndThought[0].key);
+
+  const userAnchoredEarly = groupConversation([
+    { role: "user", content: "检查", timestamp: 40 },
+    { role: "assistant", content: [{ type: "thinking", thinking: "计划" }] },
+  ]);
+  const userAnchoredLater = groupConversation([
+    { role: "user", content: "检查", timestamp: 40 },
+    { role: "assistant", content: [{ type: "thinking", thinking: "计划" }, { type: "toolCall", id: "t2", name: "read", arguments: {} }] },
+    { role: "toolResult", toolCallId: "t2", toolName: "read", content: [{ type: "text", text: "done" }] },
+  ]);
+  assert.equal(userAnchoredEarly[1]?.key, userAnchoredLater[1]?.key);
 
   const user = groupConversation([{ role: "user", content: "hi", timestamp: 42 }]);
   assert.equal(user[0]?.kind, "message");
   if (user[0]?.kind !== "message") throw new Error("Expected message");
   assert.equal(user[0].key, "message:user:42");
+});
+
+test("an opened process card stays open when a tool completes", async () => {
+  const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", { url: "http://localhost" });
+  Object.assign(globalThis, {
+    window: dom.window,
+    document: dom.window.document,
+    Node: dom.window.Node,
+    HTMLElement: dom.window.HTMLElement,
+    IS_REACT_ACT_ENVIRONMENT: true,
+  });
+  const root = createRoot(dom.window.document.querySelector<HTMLElement>("#root")!);
+  const early = groupConversation([
+    { role: "user", content: "检查", timestamp: 40 },
+    { role: "assistant", content: [{ type: "thinking", thinking: "计划" }, { type: "toolCall", id: "read-1", name: "read", arguments: {} }] },
+  ]);
+  const later = groupConversation([
+    { role: "user", content: "检查", timestamp: 40 },
+    { role: "assistant", content: [{ type: "thinking", thinking: "计划" }, { type: "toolCall", id: "read-1", name: "read", arguments: {} }] },
+    { role: "toolResult", toolCallId: "read-1", toolName: "read", content: [{ type: "text", text: "done" }] },
+  ]);
+  const earlyProcess = early.find((item) => item.kind === "process");
+  const laterProcess = later.find((item) => item.kind === "process");
+  assert.ok(earlyProcess?.kind === "process" && laterProcess?.kind === "process");
+  assert.equal(earlyProcess.key, laterProcess.key);
+
+  await act(async () => root.render(createElement(ConversationProcess, { key: earlyProcess.key, entries: earlyProcess.entries, streaming: true })));
+  const details = dom.window.document.querySelector<HTMLDetailsElement>(".conversation-process")!;
+  details.open = true;
+  assert.equal(details.open, true);
+
+  await act(async () => root.render(createElement(ConversationProcess, { key: laterProcess.key, entries: laterProcess.entries, streaming: true })));
+  assert.equal(dom.window.document.querySelector<HTMLDetailsElement>(".conversation-process"), details);
+  assert.equal(details.open, true);
+  await act(async () => root.unmount());
 });
