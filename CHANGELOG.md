@@ -4,8 +4,25 @@
 
 ### UX
 
+- Gate permission requests now use a compact `Pi Chat Gate` dialog with explicit `Block` / `Allow` actions and no redundant Cancel button
+- Gate and ordinary Extension requests share one dialog frame, with only provenance, content controls, and response semantics varying
+- Long commands wrap inside the permission details area without producing a dialog-level horizontal scrollbar
+- An expanded process card stays open while streaming tool steps complete
+- Partial selections inside code blocks copy the selected plain text instead of the entire source block
 - Changing model / thinking no longer freezes the whole shell (`settingsBusy` only locks those controls)
 - Conversation process/message React keys stay stable while streaming thinking text grows (less remount flicker)
+
+### Runtime safety
+
+- Hot conversations are capped at five total: one Primary plus at most four Secondary Runtimes
+- Capacity admission is serialized; the least-recently-used reclaimable idle Secondary is rested before a new activation
+- When all Secondary Runtimes are busy or protected, the next activation receives HTTP `409` instead of interrupting live work
+- Cold JSONL history views remain outside the hot Runtime limit
+
+### Compatibility
+
+- Gate dialogs recognize the stable `Pi Chat Gate · <tool>` protocol, the previous bundled Gate format, and current `Tool requires permission` requests
+- Windows launch documentation now distinguishes shortcut installation from direct launch and reports a missing Pi executable clearly
 
 ### Stability (carried on 0.3.1 line, released as 0.3.2)
 
