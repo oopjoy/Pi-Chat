@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ApplicationLifecycle, BootstrapData, ExtensionUiRequest, ModelInfo, PiMessage, PiState, PromptImage, QueuedPrompt, SessionStats, SessionSummary, SessionViewData, SlashCommand, ThinkingLevel } from "../shared/types";
 import { api } from "./api";
 import { ChatInput } from "./components/ChatInput";
@@ -22,6 +22,7 @@ import { gateModeFromCommand, gateModeFromNotice, type GateMode } from "./lib/ga
 import { assistantMessage, lifecycleFromEvent, parseEventData, userMessage } from "./lib/pi-events";
 import { applyAppearance, loadAppearance, loadSidebarOpen, loadSidebarWidth, saveAppearance, saveSidebarOpen, saveSidebarWidth, type AppearancePreferences } from "./lib/preferences";
 import { rememberedSessionId, rememberSessionId } from "./lib/session-location";
+import { SessionScrollMemory } from "./lib/session-scroll-memory";
 import { SessionViewCache } from "./lib/session-view-cache";
 
 const EMPTY_STATE: PiState = { model: null, isStreaming: false };
@@ -75,6 +76,8 @@ export function App() {
   const [failedSessionIds, setFailedSessionIds] = useState<string[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
+  const scrollMemoryRef = useRef(new SessionScrollMemory());
+  const pendingScrollRestoreRef = useRef("");
   const stoppingRef = useRef(false);
   const viewedSessionIdRef = useRef("");
   const localDraftRef = useRef(false);
@@ -541,6 +544,17 @@ export function App() {
     void api.markSessionViewed(viewedSessionId).catch(() => undefined);
   }, [loading, viewedSessionId]);
 
+  useLayoutEffect(() => {
+    const sessionId = pendingScrollRestoreRef.current;
+    if (!sessionId || sessionId !== viewedSessionId) return;
+    const timeline = scrollRef.current;
+    if (!timeline) return;
+    const target = scrollMemoryRef.current.target(sessionId, timeline.scrollHeight, timeline.clientHeight);
+    timeline.scrollTop = target.top;
+    stickToBottomRef.current = target.stickToBottom;
+    pendingScrollRestoreRef.current = "";
+  }, [viewedSessionId, messages]);
+
   useEffect(() => {
     if (!stickToBottomRef.current) return;
     // Tool status updates are deliberately excluded: they are frequent during streaming
@@ -590,10 +604,19 @@ export function App() {
     }
   }, [applySessionView, messagesTruncated, visibleTurnCount]);
 
+  const rememberCurrentScroll = () => {
+    const element = scrollRef.current;
+    const sessionId = viewedSessionIdRef.current;
+    if (!element || !sessionId) return;
+    scrollMemoryRef.current.remember(sessionId, element.scrollTop, element.scrollHeight, element.clientHeight, visibleTurnCount);
+  };
+
   const onScroll = () => {
     const element = scrollRef.current;
     if (!element) return;
+    if (pendingScrollRestoreRef.current === viewedSessionIdRef.current) return;
     stickToBottomRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 120;
+    rememberCurrentScroll();
   };
 
   const navigateConversation = (direction: "top" | "previous" | "next" | "bottom") => {
@@ -778,6 +801,8 @@ export function App() {
 
   const viewSession = async (id: string) => {
     if (id === viewedSessionIdRef.current) return;
+    rememberCurrentScroll();
+    const rememberedTurns = scrollMemoryRef.current.turns(id);
     const epoch = ++navigationEpochRef.current;
     desiredSessionIdRef.current = id;
     setError("");
@@ -785,22 +810,23 @@ export function App() {
     // arrived. This avoids a blank timeline while an active Session is waiting
     // for a Gate confirmation or its runtime is answering state requests.
     const cached = viewCacheRef.current.get(id);
-    if (cached) {
+    const cachedTurns = cached?.visibleTurnCount ?? cached?.turnTotal ?? 0;
+    if (cached && (!rememberedTurns || cachedTurns >= rememberedTurns)) {
       if (navigationEpochRef.current !== epoch || desiredSessionIdRef.current !== id) return;
+      pendingScrollRestoreRef.current = id;
       applySessionView(cached);
-      stickToBottomRef.current = true;
       // This cached navigation supersedes any older in-flight cold request.
       setBusy(false);
       return;
     }
     setBusy(true);
     try {
-      const view = await api.viewSession(id);
+      const view = await api.viewSession(id, rememberedTurns);
       if (navigationEpochRef.current !== epoch || desiredSessionIdRef.current !== id) return;
       if (!view.isActive) viewCacheRef.current.remember(view);
       else viewCacheRef.current.forget(view.session.id);
+      pendingScrollRestoreRef.current = id;
       applySessionView(view);
-      stickToBottomRef.current = true;
     } catch (cause) {
       if (navigationEpochRef.current === epoch) {
         desiredSessionIdRef.current = viewedSessionIdRef.current;
@@ -812,6 +838,8 @@ export function App() {
   };
 
   const createSession = () => {
+    rememberCurrentScroll();
+    pendingScrollRestoreRef.current = "";
     // New is a local blank composer only. Starting a Secondary Pi process here
     // made a no-op UI action block on cold RPC startup and stale draft probes.
     navigationEpochRef.current += 1;
@@ -989,6 +1017,7 @@ export function App() {
     setError("");
     try {
       const data = await api.deleteSession(deletingId);
+      scrollMemoryRef.current.forget(deletingId);
       setSessionDialog(null);
       if (viewedSessionIdRef.current === deletingId) applyBootstrap(data);
       else await refresh();
