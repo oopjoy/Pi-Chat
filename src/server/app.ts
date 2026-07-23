@@ -54,6 +54,8 @@ export interface PiChatAppOptions {
   modelManager?: ModelManager;
   devMiddleware?: (request: IncomingMessage, response: ServerResponse, next: () => void) => void;
   secondaryRuntimeIdleMs?: number;
+  /** Primary counts separately; default 4 Secondary workers means 5 hot conversations total. */
+  maxSecondaryRuntimes?: number;
   maxIdleSecondaryRuntimes?: number;
   secondaryRuntimeSweepMs?: number;
   controllerReleaseMs?: number;
@@ -158,6 +160,7 @@ export class PiChatApp {
     });
     this.runtimePool = new RuntimePool({
       now: this.now,
+      maxSecondaryRuntimes: options.maxSecondaryRuntimes,
       maxIdleSecondaryRuntimes: options.maxIdleSecondaryRuntimes,
       secondaryRuntimeIdleMs: options.secondaryRuntimeIdleMs,
       createRpc: options.createRpc,

@@ -5,7 +5,9 @@ import { idForPath, readSessionMessages } from "./session-index.js";
 import type { PiRpcClient } from "./rpc-client.js";
 
 const DEFAULT_SECONDARY_RUNTIME_IDLE_MS = 10 * 60 * 1_000;
-const DEFAULT_MAX_IDLE_SECONDARY_RUNTIMES = 3;
+/** Primary + four Secondary workers = five hot conversations total. */
+const DEFAULT_MAX_SECONDARY_RUNTIMES = 4;
+const DEFAULT_MAX_IDLE_SECONDARY_RUNTIMES = 4;
 
 export interface PendingTurnSettings {
   model?: { provider: string; modelId: string };
@@ -51,6 +53,8 @@ export class RuntimeCapacityError extends Error {}
 
 export interface RuntimePoolOptions {
   now: () => number;
+  /** Hard Secondary worker cap; Primary is owned by PiChatApp and counts separately. */
+  maxSecondaryRuntimes?: number;
   maxIdleSecondaryRuntimes?: number;
   secondaryRuntimeIdleMs?: number;
   createRpc?: (cwd: string) => PiRpcClient;
@@ -79,11 +83,13 @@ export class RuntimePool {
   private readonly runtimeStarts = new Map<string, Promise<SecondaryRuntime>>();
   private readonly runtimeStops = new Map<string, Promise<void>>();
   private runtimeCapacityTail: Promise<void> = Promise.resolve();
+  private readonly maxSecondaryRuntimes: number;
   private readonly maxIdleSecondaryRuntimes: number;
   private readonly secondaryRuntimeIdleMs: number;
 
   constructor(private readonly options: RuntimePoolOptions) {
-    this.maxIdleSecondaryRuntimes = Math.max(0, Math.floor(options.maxIdleSecondaryRuntimes ?? DEFAULT_MAX_IDLE_SECONDARY_RUNTIMES));
+    this.maxSecondaryRuntimes = Math.max(0, Math.floor(options.maxSecondaryRuntimes ?? DEFAULT_MAX_SECONDARY_RUNTIMES));
+    this.maxIdleSecondaryRuntimes = Math.min(this.maxSecondaryRuntimes, Math.max(0, Math.floor(options.maxIdleSecondaryRuntimes ?? DEFAULT_MAX_IDLE_SECONDARY_RUNTIMES)));
     this.secondaryRuntimeIdleMs = Math.max(0, options.secondaryRuntimeIdleMs ?? DEFAULT_SECONDARY_RUNTIME_IDLE_MS);
   }
 
@@ -177,11 +183,31 @@ export class RuntimePool {
     return true;
   }
 
+  private capacityError(): RuntimeCapacityError {
+    return new RuntimeCapacityError(`已达到 ${this.maxSecondaryRuntimes + 1} 个热对话上限。请等待一个对话结束运行，或关闭受保护的空白新对话后重试`);
+  }
+
+  private async reclaimOldestAvailable(): Promise<boolean> {
+    const candidates = [...this.runtimes.values()]
+      .filter((runtime) => this.canReclaim(runtime))
+      .sort((left, right) => left.lastUsedAt - right.lastUsedAt);
+    for (const runtime of candidates) {
+      if (await this.reclaim(runtime.id, "capacity")) return true;
+    }
+    return false;
+  }
+
   async makeRoomForSecondary(): Promise<void> {
     const idleCount = [...this.runtimes.values()].filter((runtime) => this.isIdle(runtime)).length;
     const reclaimable = [...this.runtimes.values()].filter((runtime) => this.canReclaim(runtime)).sort((left, right) => left.lastUsedAt - right.lastUsedAt);
-    const excess = Math.max(0, idleCount - this.maxIdleSecondaryRuntimes + 1);
-    for (const runtime of reclaimable.slice(0, excess)) await this.reclaim(runtime.id, "capacity");
+    const idleExcess = Math.max(0, idleCount - this.maxIdleSecondaryRuntimes + 1);
+    for (const runtime of reclaimable.slice(0, idleExcess)) await this.reclaim(runtime.id, "capacity");
+
+    // withCapacity serializes all creation paths, so the map size plus the
+    // worker about to be created is an authoritative hard-cap check.
+    while (this.runtimes.size >= this.maxSecondaryRuntimes) {
+      if (!await this.reclaimOldestAvailable()) throw this.capacityError();
+    }
   }
 
   async sweep(): Promise<void> {
@@ -192,7 +218,10 @@ export class RuntimePool {
     const expired = reclaimable.filter((runtime) => now - runtime.lastUsedAt >= this.secondaryRuntimeIdleMs);
     const reclaim = new Map<string, RuntimeReclaimReason>(expired.map((runtime) => [runtime.id, "idle"]));
     const retainedIdleCount = allIdle.length - expired.length;
-    const excess = Math.max(0, retainedIdleCount - this.maxIdleSecondaryRuntimes);
+    const idleExcess = Math.max(0, retainedIdleCount - this.maxIdleSecondaryRuntimes);
+    const retainedRuntimeCount = this.runtimes.size - expired.length;
+    const hardCapExcess = Math.max(0, retainedRuntimeCount - this.maxSecondaryRuntimes);
+    const excess = Math.max(idleExcess, hardCapExcess);
     for (const runtime of reclaimable.filter((runtime) => !reclaim.has(runtime.id)).slice(0, excess)) reclaim.set(runtime.id, "capacity");
     for (const [id, reason] of reclaim) await this.reclaim(id, reason);
   }

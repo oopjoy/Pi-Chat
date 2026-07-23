@@ -859,7 +859,7 @@ test("idle secondary workers use LRU capacity reclamation without stopping activ
   }
 });
 
-test("four viewed idle Sessions still obey the hard cap of three Secondary Runtimes", async () => {
+test("four viewed idle Sessions still obey a configured cap of three idle Secondary Runtimes", async () => {
   const paths = ["C:\\sessions\\primary.jsonl", "C:\\sessions\\one.jsonl", "C:\\sessions\\two.jsonl", "C:\\sessions\\three.jsonl", "C:\\sessions\\four.jsonl"];
   const ids = paths.map(idForPath);
   const primary = new FakeRpc(paths[0], "primary");
@@ -905,6 +905,73 @@ test("four viewed idle Sessions still obey the hard cap of three Secondary Runti
     const oldHistory = await fetch(`${origin}/api/sessions/${reclaimedId}/view`);
     assert.equal(oldHistory.status, 200);
     assert.equal((await oldHistory.json() as { runtimeStatus?: string }).runtimeStatus, "view-only");
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("concurrent activation never exceeds four Secondary workers or five hot conversations total", async () => {
+  const paths = [
+    "C:\\sessions\\primary-cap.jsonl",
+    "C:\\sessions\\hot-one.jsonl",
+    "C:\\sessions\\hot-two.jsonl",
+    "C:\\sessions\\hot-three.jsonl",
+    "C:\\sessions\\hot-four.jsonl",
+    "C:\\sessions\\hot-five.jsonl",
+  ];
+  const ids = paths.map(idForPath);
+  const primary = new FakeRpc(paths[0], "primary-cap");
+  const workers = paths.slice(1).map((path, index) => {
+    const worker = new FakeRpc(path, `hot-${index + 1}`);
+    worker.streaming = true;
+    return worker;
+  });
+  let created = 0;
+  const summaries = paths.map((path, index) => ({ id: ids[index], sessionId: `cap-${index}`, name: `Cap ${index}`, preview: "", cwd: process.cwd(), updatedAt: 10 - index, messageCount: 1, active: index === 0 }));
+  const sessions = {
+    list: async () => summaries,
+    pathForId: (id: string) => paths[ids.indexOf(id)] || null,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({
+    rpc: primary as unknown as PiRpcClient,
+    createRpc: () => workers[created++] as unknown as PiRpcClient,
+    sessions,
+    resources: {} as ResourceManager,
+    cwd: process.cwd(),
+    webRoot: process.cwd(),
+    secondaryRuntimeIdleMs: 60_000,
+    secondaryRuntimeSweepMs: 60_000,
+  });
+  const internals = app as unknown as { runtimes: Map<string, { rpc: FakeRpc }> };
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    const responses = await Promise.all(ids.slice(1).map((id) => fetch(`${origin}/api/sessions/${id}/activate`, { method: "POST" })));
+    assert.equal(responses.filter((response) => response.status === 200).length, 4);
+    assert.equal(responses.filter((response) => response.status === 409).length, 1);
+    const rejectedIndex = responses.findIndex((response) => response.status === 409);
+    const rejected = responses[rejectedIndex];
+    assert.ok(rejected);
+    assert.match((await rejected.json() as { error: string }).error, /5 个热对话上限/);
+    assert.equal(internals.runtimes.size, 4);
+    assert.equal(created, 4);
+    assert.equal(workers.slice(0, 4).every((worker) => worker.stopCount === 0), true);
+
+    const releasedIndex = responses.findIndex((response) => response.status === 200);
+    const releasedWorker = internals.runtimes.get(ids[releasedIndex + 1])?.rpc;
+    assert.ok(releasedWorker);
+    releasedWorker.streaming = false;
+    releasedWorker.emit({ type: "agent_settled" });
+    const admitted = await fetch(`${origin}/api/sessions/${ids[rejectedIndex + 1]}/activate`, { method: "POST" });
+    assert.equal(admitted.status, 200);
+    assert.equal(releasedWorker.stopCount, 1);
+    assert.equal(internals.runtimes.size, 4);
+    assert.equal(created, 5);
   } finally {
     server.close();
     await app.close();

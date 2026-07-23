@@ -33,7 +33,7 @@ Closing a browser window must not be confused with stopping the Node service. St
 
 - Chat UI, streaming, markdown, attachments
 - Session list, cold JSONL history view, on-demand Runtime activation
-- Primary + at most 3 idle Secondary Runtimes
+- At most 5 hot conversations total: Primary + at most 4 Secondary Runtimes
 - Multi-window observation with single-writer control
 - Gate confirmation UX
 - Models list / custom models
@@ -106,7 +106,10 @@ Prefer small hooks and pure libs over growing `App.tsx` further.
 
 - Cold history view: JSONL only, gray status, no Secondary Runtime
 - Activation on real work: send, compact, model/thinking, explicit activate
-- Hard cap: Primary + ≤3 idle Secondary Runtimes
+- Hard cap: at most 5 hot conversations total (Primary + at most 4 Secondary Runtimes)
+- Cold JSONL history views do not count toward the hot limit
+- At capacity, the least-recently-used reclaimable idle Secondary is rested first
+- If every Secondary is busy or protects a live empty draft, the next activation is rejected with HTTP `409`
 - Viewed idle runtimes may be reclaimed (not permanent pins)
 - Model/Thinking changes do not auto-claim control; foreign owners are rejected
 
