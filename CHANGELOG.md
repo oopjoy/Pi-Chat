@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.3
+
+### PWA recovery
+
+- New opens an instant local draft and starts a Secondary Pi Runtime only on the first real send
+- Cold-start progress now distinguishes Runtime startup, prompt preparation, and Pi thinking without showing Stop prematurely
+- Returning to a long-idle PWA proactively replaces a potentially half-open EventSource and refreshes the authoritative Session view
+- Accepted prompts reconcile with persisted Session state when SSE frames are missed, so completed replies appear without a manual page refresh
+- A compare-and-clear viewed-Session pin prevents delayed local-draft cleanup from unpinning a newer conversation
+
+### Streaming stability
+
+- Visible SSE heartbeats let the frontend detect stale foreground connections instead of relying only on `EventSource.onerror`
+- Cumulative `tool_execution_update.partialResult` snapshots no longer enter browser SSE fanout
+- Oversized SSE events are replaced with bounded diagnostics, while socket backpressure drops intermediate frames and requests authoritative resynchronization
+- The frontend rejects unused cumulative tool snapshots before JSON parsing and safely reconnects after an unexpected oversized frame
+
 ## 0.3.2
 
 ### UX

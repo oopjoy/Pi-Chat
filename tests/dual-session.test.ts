@@ -223,10 +223,15 @@ test("restart barrier rejects new mutations throughout a long build and commits 
   try {
     assert.equal((await fetch(`${origin}/api/bootstrap`)).status, 200);
     const restart = fetch(`${origin}/api/restart`, { method: "POST" });
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    const health = await fetch(`${origin}/api/health`);
-    assert.equal(health.status, 200);
-    assert.deepEqual(await health.json(), { ok: true, service: "pi-chat", lifecycle: "restarting" });
+    let healthData: { ok?: boolean; service?: string; lifecycle?: string } = {};
+    const healthDeadline = Date.now() + 1_000;
+    do {
+      const health = await fetch(`${origin}/api/health`);
+      assert.equal(health.status, 200);
+      healthData = await health.json() as typeof healthData;
+      if (healthData.lifecycle !== "restarting") await new Promise((resolve) => setTimeout(resolve, 5));
+    } while (healthData.lifecycle !== "restarting" && Date.now() < healthDeadline);
+    assert.deepEqual(healthData, { ok: true, service: "pi-chat", lifecycle: "restarting" });
     const maintenanceBootstrap = await fetch(`${origin}/api/bootstrap`);
     assert.equal(maintenanceBootstrap.status, 503);
     const maintenanceData = await maintenanceBootstrap.json() as { lifecycle?: string; requestToken?: string };
