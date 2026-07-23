@@ -87,19 +87,13 @@ export default function (pi: ExtensionAPI) {
 				return { block: true, reason: "File write/edit blocked: no UI for confirmation" };
 			}
 
-			const actionLabel = tool === "write"
-				? (isDelete ? "⚠️ Write (contains deletion)" : "📝 Write")
-				: "✏️ Edit";
-			const detail = tool === "write"
-				? `Write to ${fullPath}`
-				: `Edit ${fullPath}`;
-
+			const qualifier = tool === "write" && isDelete ? " · contains deletion" : "";
 			const choice = await ctx.ui.select(
-				`${actionLabel}\n\n${detail}`,
-				["✅ Allow", "❌ Block"],
+				`Pi Chat Gate · ${tool}${qualifier}\n\n${fullPath}`,
+				["Allow", "Block"],
 			);
 
-			if (choice !== "✅ Allow") {
+			if (choice !== "Allow") {
 				return { block: true, reason: `Blocked by user: ${tool} ${displayName}` };
 			}
 
@@ -125,11 +119,11 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const choice = await ctx.ui.select(
-				`⚠️ Destructive bash command:\n\n  ${command}\n\nAllow?`,
-				["✅ Allow", "❌ Block"],
+				`Pi Chat Gate · bash\n\n${command}`,
+				["Allow", "Block"],
 			);
 
-			if (choice !== "✅ Allow") {
+			if (choice !== "Allow") {
 				return { block: true, reason: "Blocked by user" };
 			}
 

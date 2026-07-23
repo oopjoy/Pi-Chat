@@ -64,6 +64,10 @@ export function AlertIcon(props: IconProps) {
   return <LineIcon {...props}><path d="M11 4.3 3.5 18a1.3 1.3 0 0 0 1.14 1.95h14.72A1.3 1.3 0 0 0 20.5 18L13 4.3a1.15 1.15 0 0 0-2 0Z" /><path d="M12 9v4.3M12 16.5v.1" /></LineIcon>;
 }
 
+export function ShieldIcon(props: IconProps) {
+  return <LineIcon {...props}><path d="M12 3.2 19 6v5.3c0 4.6-2.8 7.7-7 9.5-4.2-1.8-7-4.9-7-9.5V6Z" /><path d="M9.2 12.1 11 14l3.9-4.2" /></LineIcon>;
+}
+
 export function ImageIcon(props: IconProps) {
   return <LineIcon {...props}><rect x="4" y="4" width="16" height="16" rx="2" /><circle cx="9" cy="9" r="1.4" /><path d="m5 17 4.6-4.6 3 3L15 13l4 4" /></LineIcon>;
 }
