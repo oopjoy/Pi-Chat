@@ -565,6 +565,60 @@ test("a closed browser window releases Session control after its SSE lease expir
   }
 });
 
+test("SSE emits visible heartbeats and a local New composer can release its viewed Session pin", async () => {
+  const path = "C:\\sessions\\primary-heartbeat.jsonl";
+  const id = idForPath(path);
+  const primary = new FakeRpc(path, "primary-heartbeat");
+  const client = "11111111-1111-4111-8111-111111111111";
+  const sessions = {
+    list: async () => [{ id, sessionId: "primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+    pathForId: () => path,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), sseHeartbeatMs: 10 });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const controller = new AbortController();
+  try {
+    const response = await fetch(`${origin}/api/events`, { headers: { "x-pi-chat-client": client }, signal: controller.signal });
+    assert.ok(response.body);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let frames = "";
+    const deadline = Date.now() + 1_000;
+    while (!frames.includes("pi_chat_heartbeat") && Date.now() < deadline) {
+      const next = await reader.read();
+      if (next.done) break;
+      frames += decoder.decode(next.value, { stream: true });
+    }
+    assert.match(frames, /event: ready/);
+    assert.match(frames, /"type":"pi_chat_heartbeat"/);
+    assert.equal((await fetch(`${origin}/api/sessions/${id}/viewing`, { method: "POST", headers: { "x-pi-chat-client": client } })).status, 200);
+    const internals = app as unknown as { viewedSessionsByClient: Map<string, string> };
+    assert.equal(internals.viewedSessionsByClient.get(client), id);
+    const headers = { "content-type": "application/json", "x-pi-chat-client": client };
+    const cleared = await fetch(`${origin}/api/sessions/viewing/clear`, { method: "POST", headers, body: JSON.stringify({ sessionId: id }) });
+    assert.equal(cleared.status, 200);
+    assert.deepEqual(await cleared.json(), { viewing: "" });
+    assert.equal(internals.viewedSessionsByClient.has(client), false);
+
+    const newerId = "fedcba9876543210abcd";
+    internals.viewedSessionsByClient.set(client, newerId);
+    const staleClear = await fetch(`${origin}/api/sessions/viewing/clear`, { method: "POST", headers, body: JSON.stringify({ sessionId: id }) });
+    assert.equal(staleClear.status, 200);
+    assert.deepEqual(await staleClear.json(), { viewing: newerId });
+    assert.equal(internals.viewedSessionsByClient.get(client), newerId);
+    await reader.cancel();
+  } finally {
+    controller.abort();
+    server.close();
+    await app.close();
+  }
+});
+
 test("an abandoned Gate confirmation is safely cancelled after its timeout", async () => {
   const path = "C:\\sessions\\primary.jsonl";
   const id = idForPath(path);

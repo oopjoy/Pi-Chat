@@ -13,7 +13,7 @@ import { SessionDialog, type SessionDialogState } from "./components/SessionDial
 import { SessionSidebar } from "./components/SessionSidebar";
 import { TopBar } from "./components/TopBar";
 import { useLiveMessageScheduler } from "./hooks/use-live-message";
-import { usePiEventSource } from "./hooks/use-pi-event-source";
+import { shouldReconnectEventSource, usePiEventSource } from "./hooks/use-pi-event-source";
 import { activeSessionIdsFromEvent, applyActiveSessionIds } from "./lib/active-sessions";
 import { adjacentUserMessageOffset } from "./lib/conversation-navigation";
 import { groupConversation } from "./lib/conversation-process";
@@ -29,6 +29,7 @@ const EMPTY_STATE: PiState = { model: null, isStreaming: false };
 export function App() {
   const [state, setState] = useState<PiState>(EMPTY_STATE);
   const [messages, setMessages] = useState<PiMessage[]>([]);
+  const [pendingUserMessage, setPendingUserMessage] = useState<PiMessage | null>(null);
   const [messageTotal, setMessageTotal] = useState(0);
   const [turnTotal, setTurnTotal] = useState(0);
   const [visibleTurnCount, setVisibleTurnCount] = useState(20);
@@ -47,6 +48,7 @@ export function App() {
   const [queue, setQueue] = useState<QueuedPrompt[]>([]);
   const [queuePaused, setQueuePaused] = useState(false);
   const [stopping, setStopping] = useState(false);
+  const [promptStarting, setPromptStarting] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   /** Model / thinking only — must not freeze composer, sidebar, or the whole shell. */
@@ -64,7 +66,8 @@ export function App() {
   const [notice, setNotice] = useState("");
   const [toolStatus, setToolStatus] = useState("");
   const [extensionRequest, setExtensionRequest] = useState<ExtensionUiRequest | null>(null);
-  const [runtimeStatus, setRuntimeStatus] = useState<"active" | "restoring" | "view-only">("active");
+  const [runtimeStatus, setRuntimeStatus] = useState<"active" | "restoring" | "view-only" | "draft">("active");
+  const [localDraft, setLocalDraft] = useState(false);
   const [viewControl, setViewControl] = useState<{ controlOwner?: string; controlledByThisWindow?: boolean }>({});
   const [eventSourceGeneration, setEventSourceGeneration] = useState(0);
   const [applicationLifecycle, setApplicationLifecycle] = useState<ApplicationLifecycle>("idle");
@@ -74,6 +77,12 @@ export function App() {
   const stickToBottomRef = useRef(true);
   const stoppingRef = useRef(false);
   const viewedSessionIdRef = useRef("");
+  const localDraftRef = useRef(false);
+  const lastEventFrameAtRef = useRef(Date.now());
+  const sessionEventVersionRef = useRef(new Map<string, number>());
+  const lastSessionEventTypeRef = useRef(new Map<string, string>());
+  const promptReconcileTimerRef = useRef<number | null>(null);
+  const clearViewedPromiseRef = useRef<Promise<unknown> | null>(null);
   const applicationLifecycleRef = useRef<ApplicationLifecycle>("idle");
   const handoffWaitRef = useRef<Promise<void> | null>(null);
   const sessionRefreshTimerRef = useRef<number | null>(null);
@@ -110,11 +119,15 @@ export function App() {
   }, []);
 
   const applyBootstrap = useCallback((data: BootstrapData) => {
+    localDraftRef.current = false;
+    setLocalDraft(false);
+    setPromptStarting(false);
     applyBootstrapMetadata(data);
     setGateAvailableOverride(null);
     setViewControl({ controlOwner: data.controlOwner, controlledByThisWindow: data.controlledByThisWindow });
     setState(data.state);
     setMessages(data.messages);
+    setPendingUserMessage(null);
     setMessageTotal(data.messageTotal ?? data.messages.length);
     setTurnTotal(data.turnTotal ?? data.messages.filter((message) => message.role === "user").length);
     setVisibleTurnCount(data.visibleTurnCount ?? data.messages.filter((message) => message.role === "user").length);
@@ -153,10 +166,14 @@ export function App() {
   }, [applyBootstrapMetadata, setViewedId]);
 
   const applySessionView = useCallback((view: SessionViewData) => {
+    localDraftRef.current = false;
+    setLocalDraft(false);
+    setPromptStarting(false);
     setGateAvailableOverride(typeof view.gateAvailable === "boolean" ? view.gateAvailable : null);
     setViewControl({ controlOwner: view.controlOwner ?? view.session.controlOwner, controlledByThisWindow: view.controlledByThisWindow ?? view.session.controlledByThisWindow });
     setState(view.state);
     setMessages(view.messages);
+    setPendingUserMessage(null);
     setMessageTotal(view.messageTotal);
     setTurnTotal(view.turnTotal ?? view.messages.filter((message) => message.role === "user").length);
     setVisibleTurnCount(view.visibleTurnCount ?? view.messages.filter((message) => message.role === "user").length);
@@ -182,6 +199,12 @@ export function App() {
     const wantedId = desiredSessionIdRef.current || viewedSessionIdRef.current || rememberedSessionId();
     const data = await api.bootstrap();
     if (refreshEpochRef.current !== refreshEpoch || navigationEpochRef.current !== navigationEpoch) return;
+    // A local New draft intentionally has no Pi Session yet. Reconnect/bootstrap
+    // may refresh global metadata, but must not replace its unsent composer.
+    if (localDraftRef.current) {
+      applyBootstrapMetadata(data);
+      return;
+    }
     const activeId = data.activeSessionId || data.sessions.find((session) => session.active)?.id || "";
     if (wantedId && wantedId !== activeId) {
       desiredSessionIdRef.current = wantedId;
@@ -250,6 +273,7 @@ export function App() {
   // missed while disconnected. Keep transport ownership in usePiEventSource;
   // this component remains responsible only for translating events into UI state.
   const handleEventSourceReady = useCallback((rawEvent: Event, source: EventSource) => {
+      lastEventFrameAtRef.current = Date.now();
       const ready = parseEventData(rawEvent);
       if (lifecycleFromEvent(ready) === "restarting") {
         applicationLifecycleRef.current = "restarting";
@@ -282,9 +306,15 @@ export function App() {
   }, [refresh]);
 
   const handlePiEvent = useCallback((rawEvent: Event, source: EventSource) => {
+      lastEventFrameAtRef.current = Date.now();
       const event = parseEventData(rawEvent);
       const type = String(event.type || "");
+      if (type === "pi_chat_heartbeat") return;
       const eventSessionId = typeof event.piChatSessionId === "string" ? event.piChatSessionId : "";
+      if (eventSessionId && ["agent_start", "agent_settled", "message_start", "message_update", "message_end", "tool_execution_start", "tool_execution_end", "pi_chat_process_error"].includes(type)) {
+        sessionEventVersionRef.current.set(eventSessionId, (sessionEventVersionRef.current.get(eventSessionId) || 0) + 1);
+        lastSessionEventTypeRef.current.set(eventSessionId, type);
+      }
       const viewingEventSession = !eventSessionId || eventSessionId === viewedSessionIdRef.current;
       if (eventSessionId && ["agent_start", "agent_settled", "message_start", "message_update", "message_end", "tool_execution_start", "tool_execution_end"].includes(type)) viewCacheRef.current.forget(eventSessionId);
       if (type === "pi_chat_application_closing") {
@@ -295,6 +325,7 @@ export function App() {
       } else if (type === "agent_start") {
         if (eventSessionId) setSessions((current) => current.map((session) => ({ ...session, running: session.id === eventSessionId ? true : session.running })));
         if (viewingEventSession) {
+          setPromptStarting(false);
           setRuntimeStatus("active");
           setState((current) => ({ ...current, isStreaming: true }));
           setToolStatus("Pi 正在思考…");
@@ -334,6 +365,9 @@ export function App() {
       } else if (type === "agent_settled") {
         if (eventSessionId) setSessions((current) => current.map((session) => session.id === eventSessionId ? { ...session, running: false } : session));
         if (viewingEventSession) {
+          if (promptReconcileTimerRef.current !== null) window.clearTimeout(promptReconcileTimerRef.current);
+          promptReconcileTimerRef.current = null;
+          setPromptStarting(false);
           setState((current) => ({ ...current, isStreaming: false }));
           setToolStatus("");
           // A post-compaction turn has now persisted its new usage snapshot.
@@ -409,6 +443,9 @@ export function App() {
           setSessions((current) => current.map((session) => session.id === eventSessionId ? { ...session, running: false } : session));
         }
         if (viewingEventSession) {
+          if (promptReconcileTimerRef.current !== null) window.clearTimeout(promptReconcileTimerRef.current);
+          promptReconcileTimerRef.current = null;
+          setPromptStarting(false);
           setError(String(event.error || "Pi RPC 已退出"));
           setState((current) => ({ ...current, isStreaming: false }));
           stoppingRef.current = false;
@@ -446,6 +483,36 @@ export function App() {
     onPi: handlePiEvent,
     onError: handleEventSourceError,
   });
+
+  useEffect(() => {
+    if (loading) return;
+    const resume = (event?: Event) => {
+      if (document.visibilityState === "hidden") return;
+      // Chromium may preserve a half-open EventSource while a standalone PWA is
+      // frozen. A real visibility/pageshow resume always gets a fresh socket;
+      // focus/online/watchdog only reconnect after a missed heartbeat window.
+      if (!shouldReconnectEventSource(event?.type, document.visibilityState, lastEventFrameAtRef.current, Date.now())) return;
+      lastEventFrameAtRef.current = Date.now();
+      setEventSourceGeneration((generation) => generation + 1);
+      void refresh().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+    };
+    const watchdog = window.setInterval(() => resume(), 10_000);
+    document.addEventListener("visibilitychange", resume);
+    window.addEventListener("pageshow", resume);
+    window.addEventListener("focus", resume);
+    window.addEventListener("online", resume);
+    return () => {
+      window.clearInterval(watchdog);
+      document.removeEventListener("visibilitychange", resume);
+      window.removeEventListener("pageshow", resume);
+      window.removeEventListener("focus", resume);
+      window.removeEventListener("online", resume);
+    };
+  }, [loading, refresh]);
+
+  useEffect(() => () => {
+    if (promptReconcileTimerRef.current !== null) window.clearTimeout(promptReconcileTimerRef.current);
+  }, []);
 
   useEffect(() => {
     if (loading || !viewedSessionId) return;
@@ -528,18 +595,45 @@ export function App() {
     }
   };
 
+  const schedulePromptReconcile = (sessionId: string, eventVersion = sessionEventVersionRef.current.get(sessionId) || 0, failedAttempts = 0): void => {
+    if (promptReconcileTimerRef.current !== null) window.clearTimeout(promptReconcileTimerRef.current);
+    promptReconcileTimerRef.current = window.setTimeout(() => {
+      promptReconcileTimerRef.current = null;
+      if (viewedSessionIdRef.current !== sessionId) return;
+      const latestVersion = sessionEventVersionRef.current.get(sessionId) || 0;
+      if (latestVersion !== eventVersion) {
+        schedulePromptReconcile(sessionId, latestVersion);
+        return;
+      }
+      void api.viewSession(sessionId).then((view) => {
+        if (viewedSessionIdRef.current !== sessionId) return;
+        applySessionView(view);
+        setPromptStarting(false);
+        if (view.isStreaming) schedulePromptReconcile(sessionId, sessionEventVersionRef.current.get(sessionId) || 0);
+      }).catch((cause) => {
+        if (viewedSessionIdRef.current !== sessionId) return;
+        if (failedAttempts < 4) schedulePromptReconcile(sessionId, latestVersion, failedAttempts + 1);
+        else setError(cause instanceof Error ? cause.message : String(cause));
+      });
+    }, 4_000);
+  };
+
   const send = async (message: string, images: PromptImage[]) => {
     setError("");
     stickToBottomRef.current = true;
     setBusy(true);
+    const alreadyStreaming = state.isStreaming;
+    const previousToolStatus = toolStatus;
+    const optimisticMessage = alreadyStreaming || message.startsWith("/") ? null : userMessage(message, images);
+    setPendingUserMessage(optimisticMessage);
     try {
       const command = /^\/(new|compact|abort)(?:\s+([\s\S]*))?$/.exec(message);
       if (command?.[1] === "new") {
-        applySessionView(await api.newSession());
-        setNotice("已新建独立会话");
+        createSession();
         return;
       }
       if (command?.[1] === "compact") {
+        if (localDraftRef.current) throw new Error("新对话尚未发送消息，无需压缩上下文");
         if (runtimeStatus !== "active") {
           setRuntimeStatus("restoring");
           const view = await api.activateSession(viewedSessionId);
@@ -555,26 +649,79 @@ export function App() {
         await stopGeneration();
         return;
       }
-      if (runtimeStatus !== "active") {
+
+      let targetSessionId = viewedSessionIdRef.current;
+      if (localDraftRef.current) {
+        const draftModel = state.model;
+        const draftThinking = state.thinkingLevel as ThinkingLevel | undefined;
+        setPromptStarting(true);
+        setToolStatus("正在启动 Pi 内核…");
+        await clearViewedPromiseRef.current;
+        clearViewedPromiseRef.current = null;
+        const view = await api.newSession();
+        targetSessionId = view.session.id;
+        applySessionView(view);
+        setPendingUserMessage(optimisticMessage);
+        setPromptStarting(true);
+        setToolStatus("Pi 内核已就绪，正在准备消息…");
+        if (draftModel && (view.state.model?.provider !== draftModel.provider || view.state.model?.id !== draftModel.id)) {
+          const selected = await api.setModel(draftModel.provider, draftModel.id, targetSessionId);
+          setState((current) => ({ ...current, model: selected.model }));
+        }
+        if (draftThinking && view.state.thinkingLevel !== draftThinking) {
+          const selected = await api.setThinking(draftThinking, targetSessionId);
+          setState((current) => ({ ...current, thinkingLevel: selected.level }));
+        }
+      } else if (runtimeStatus !== "active") {
+        setPromptStarting(true);
+        setToolStatus("正在启动 Pi 内核…");
         setRuntimeStatus("restoring");
-        const view = await api.activateSession(viewedSessionId);
+        const view = await api.activateSession(targetSessionId);
         viewCacheRef.current.forget(view.session.id);
         applySessionView(view);
+        setPendingUserMessage(optimisticMessage);
+        setPromptStarting(true);
+        setToolStatus("Pi 内核已就绪，正在准备消息…");
+      } else if (!alreadyStreaming) {
+        setPromptStarting(true);
+        setToolStatus("正在向 Pi 提交消息…");
       }
-      const result = await api.prompt(message, images, viewedSessionId);
+
+      const eventVersionBeforePrompt = sessionEventVersionRef.current.get(targetSessionId) || 0;
+      const result = await api.prompt(message, images, targetSessionId);
+      setPromptStarting(false);
       if (result.extension) {
+        setPendingUserMessage(null);
+        setToolStatus(alreadyStreaming ? previousToolStatus : "");
         if (typeof result.isStreaming === "boolean") setState((current) => ({ ...current, isStreaming: result.isStreaming as boolean }));
         const gateMode = result.command === "gate" ? gateModeFromCommand(message) : null;
-        if (gateMode && viewedSessionId) setGateModes((current) => ({ ...current, [viewedSessionId]: gateMode }));
+        if (gateMode && targetSessionId) setGateModes((current) => ({ ...current, [targetSessionId]: gateMode }));
         setNotice(extensionExecutionNotice(message, result.command || "extension", result.description ? [...commands, { name: result.command || "extension", description: result.description, source: "extension" }] : commands));
       } else if (result.queued) {
+        setPendingUserMessage(null);
+        setToolStatus(alreadyStreaming ? previousToolStatus : "");
         if (result.queue) setQueue(result.queue);
         setNotice("消息已加入队列");
       } else {
-        setMessages((current) => [...current, userMessage(message, images)]);
-        setState((current) => ({ ...current, isStreaming: true }));
+        const eventVersionAfterPrompt = sessionEventVersionRef.current.get(targetSessionId) || 0;
+        const terminalEvent = lastSessionEventTypeRef.current.get(targetSessionId);
+        const settledBeforeAcknowledgement = eventVersionAfterPrompt > eventVersionBeforePrompt && (terminalEvent === "agent_settled" || terminalEvent === "pi_chat_process_error");
+        if (settledBeforeAcknowledgement) {
+          setPendingUserMessage(null);
+          const view = await api.viewSession(targetSessionId);
+          if (viewedSessionIdRef.current === targetSessionId) applySessionView(view);
+        } else {
+          setMessages((current) => [...current, optimisticMessage || userMessage(message, images)]);
+          setPendingUserMessage(null);
+          setState((current) => ({ ...current, isStreaming: true }));
+          setToolStatus("Pi 正在思考…");
+          schedulePromptReconcile(targetSessionId);
+        }
       }
     } catch (cause) {
+      setPendingUserMessage(null);
+      setPromptStarting(false);
+      if (!state.isStreaming) setToolStatus("");
       const messageText = cause instanceof Error ? cause.message : String(cause);
       setError(messageText);
       throw cause;
@@ -642,20 +789,38 @@ export function App() {
     }
   };
 
-  const createSession = async () => {
-    // The server is authoritative: it cheaply reuses this window's verified
-    // empty draft, but creates a fresh Session if an Extension already persisted.
-    setBusy(true);
+  const createSession = () => {
+    // New is a local blank composer only. Starting a Secondary Pi process here
+    // made a no-op UI action block on cold RPC startup and stale draft probes.
+    navigationEpochRef.current += 1;
+    refreshEpochRef.current += 1;
+    if (promptReconcileTimerRef.current !== null) window.clearTimeout(promptReconcileTimerRef.current);
+    promptReconcileTimerRef.current = null;
+    const previousViewedSessionId = viewedSessionIdRef.current;
+    localDraftRef.current = true;
+    setLocalDraft(true);
+    setViewedId("");
+    setViewControl({});
+    setState({ ...EMPTY_STATE, model: state.model, thinkingLevel: state.thinkingLevel });
+    setMessages([]);
+    setPendingUserMessage(null);
+    setMessageTotal(0);
+    setTurnTotal(0);
+    setVisibleTurnCount(0);
+    setMessagesTruncated(false);
+    setStats(undefined);
+    setQueue([]);
+    setQueuePaused(false);
+    setLiveMessage(null);
+    setToolStatus("");
+    setExtensionRequest(null);
+    setRuntimeStatus("draft");
+    stickToBottomRef.current = true;
     setError("");
-    try {
-      applySessionView(await api.newSession());
-      stickToBottomRef.current = true;
-      setNotice("已新建独立会话");
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setBusy(false);
-    }
+    setNotice("已新建独立会话");
+    // Keep the request asynchronous so New remains instant, but retain its
+    // promise: first Send must not let a delayed clear unpin the new Runtime.
+    clearViewedPromiseRef.current = previousViewedSessionId ? api.clearSessionViewed(previousViewedSessionId).catch(() => undefined) : null;
   };
 
   const ensureRuntimeActive = async () => {
@@ -668,6 +833,12 @@ export function App() {
 
   const changeModel = async (provider: string, modelId: string) => {
     if (!provider || !modelId || settingsBusy) return;
+    if (localDraftRef.current) {
+      const model = models.find((candidate) => candidate.provider === provider && candidate.id === modelId);
+      if (model) setState((current) => ({ ...current, model }));
+      setNotice(`已为新对话选择 ${model?.name || modelId}`);
+      return;
+    }
     setSettingsBusy(true);
     setError("");
     try {
@@ -684,6 +855,11 @@ export function App() {
 
   const changeThinking = async (level: ThinkingLevel) => {
     if (settingsBusy) return;
+    if (localDraftRef.current) {
+      setState((current) => ({ ...current, thinkingLevel: level }));
+      setNotice(`已为新对话选择 ${level} 思考强度`);
+      return;
+    }
     setSettingsBusy(true);
     setError("");
     try {
@@ -841,8 +1017,12 @@ export function App() {
   // them made a completed tool segment and the next streaming thought render as
   // two adjacent “过程” cards during one agent turn.
   const conversationItems = useMemo(
-    () => groupConversation(liveMessage ? [...messages, liveMessage] : messages),
-    [messages, liveMessage],
+    () => groupConversation([
+      ...messages,
+      ...(pendingUserMessage ? [pendingUserMessage] : []),
+      ...(liveMessage ? [liveMessage] : []),
+    ]),
+    [messages, pendingUserMessage, liveMessage],
   );
   const anySessionRunning = sessions.some((session) => session.running);
   const anySessionPendingConfirmation = sessions.some((session) => session.pendingConfirmation);
@@ -851,7 +1031,7 @@ export function App() {
   const globalMutationBlocked = lifecycleBlocked || anySessionRunning || anySessionQueued || anySessionPendingConfirmation;
   const primaryQueueBusy = viewedSessionId === activeSessionId && queue.length > 0;
   const viewedSession = sessions.find((session) => session.id === viewedSessionId);
-  const conversationName = viewedSession?.name || (state.messageCount ? state.sessionName || "已保存对话" : "新对话");
+  const conversationName = localDraft ? "新对话" : viewedSession?.name || (state.messageCount ? state.sessionName || "已保存对话" : "新对话");
   const conversationWorkspace = viewedSession?.cwd || workspaceCwd;
   // Cold view-only sessions carry no RPC command list; the server reports Gate availability explicitly.
   const gateAvailable = gateAvailableOverride ?? commands.some((command) => command.name === "gate" && command.source === "extension");
@@ -931,7 +1111,7 @@ export function App() {
           <div className="timeline-inner">
             {loading ? (
               <div className="center-state"><span className="loader" />正在连接 Pi…</div>
-            ) : !messages.length && !liveMessage ? (
+            ) : !messages.length && !pendingUserMessage && !liveMessage ? (
               <section className="welcome">
                 <span className="welcome-mark"><PiMarkIcon /></span>
                 <h1>开始与 Pi 对话</h1>
@@ -946,6 +1126,7 @@ export function App() {
               </>
             )}
             {state.isCompacting && <div className="agent-status is-compacting" role="status"><span className="loader small" />{toolStatus || "正在压缩上下文，当前消息会在完成后继续发送…"}</div>}
+            {promptStarting && !state.isStreaming && toolStatus && <div className="agent-status"><span className="loader small" />{toolStatus}</div>}
             {state.isStreaming && !state.isCompacting && toolStatus && <div className="agent-status"><span className="loader small" />{toolStatus}</div>}
           </div>
         </div>

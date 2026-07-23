@@ -145,6 +145,15 @@ export class SessionControl {
     }
   }
 
+  /** Compare-and-clear so a delayed local-New request cannot unpin a newer view. */
+  clearViewed(clientId: string, expectedSessionId: string): string {
+    if (!clientId) return "";
+    const current = this.viewedSessionsByClient.get(clientId) || "";
+    if (!expectedSessionId || current !== expectedSessionId) return current;
+    this.viewedSessionsByClient.delete(clientId);
+    return "";
+  }
+
   /**
    * When only one browser window has a live SSE, claim control immediately so a
    * single PWA never sits behind a ghost or grace-period foreign owner.

@@ -114,6 +114,7 @@ export const api = {
   newSession: () => request<SessionViewData>("/api/sessions/new", { method: "POST" }),
   viewSession: (id: string, turns?: number) => request<SessionViewData>(`/api/sessions/${id}/view${turns ? `?turns=${turns}` : ""}`),
   markSessionViewed: (id: string) => request<{ viewing: string }>(`/api/sessions/${id}/viewing`, { method: "POST" }),
+  clearSessionViewed: (sessionId: string) => request<{ viewing: string }>("/api/sessions/viewing/clear", { method: "POST", body: JSON.stringify({ sessionId }) }),
   activateSession: (id: string) => request<SessionViewData>(`/api/sessions/${id}/activate`, { method: "POST" }),
   sessions: () => request<{ sessions: SessionSummary[] }>("/api/sessions"),
   renameSession: (id: string, name: string) => request<BootstrapData>(`/api/sessions/${id}`, { method: "PATCH", body: JSON.stringify({ name }) }),

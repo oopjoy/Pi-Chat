@@ -1,5 +1,11 @@
 import { useEffect } from "react";
 
+export function shouldReconnectEventSource(eventType: string | undefined, visibilityState: DocumentVisibilityState, lastFrameAt: number, now: number): boolean {
+  if (visibilityState === "hidden") return false;
+  if (eventType === "visibilitychange" || eventType === "pageshow") return true;
+  return now - lastFrameAt >= 45_000;
+}
+
 interface PiEventSourceHandlers {
   enabled: boolean;
   generation?: number;

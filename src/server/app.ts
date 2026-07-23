@@ -60,6 +60,7 @@ export interface PiChatAppOptions {
   secondaryRuntimeSweepMs?: number;
   controllerReleaseMs?: number;
   gateRequestTimeoutMs?: number;
+  sseHeartbeatMs?: number;
   now?: () => number;
   allowedHosts?: string[];
   requestToken?: string;
@@ -96,6 +97,7 @@ export class PiChatApp {
   private primaryRecovery: Promise<void> | null = null;
   private readonly now: () => number;
   private readonly gateRequestTimeoutMs: number;
+  private readonly sseHeartbeatMs: number;
   private readonly secondaryRuntimeSweepTimer: NodeJS.Timeout;
   private readonly requestToken: string;
   private allowedHosts: string[];
@@ -131,6 +133,7 @@ export class PiChatApp {
     this.allowedHosts = options.allowedHosts || ["127.0.0.1", "localhost", "::1"];
     this.now = options.now || Date.now;
     this.gateRequestTimeoutMs = Math.max(1, options.gateRequestTimeoutMs ?? DEFAULT_GATE_REQUEST_TIMEOUT_MS);
+    this.sseHeartbeatMs = Math.max(10, options.sseHeartbeatMs ?? 20_000);
     this.sessionControl = new SessionControl({
       controllerReleaseMs: options.controllerReleaseMs,
       onControlChanged: (sessionId) => this.broadcastControlState(sessionId),
@@ -255,7 +258,7 @@ export class PiChatApp {
     if (["/api/restart", "/api/shutdown", "/api/window/close", "/api/workspace/pick", "/api/workspace/set", "/api/local-files/pick", "/api/local-files/clipboard"].includes(url.pathname)) return false;
     if (url.pathname === "/api/models" || url.pathname.startsWith("/api/resources/")) return false;
     if (/^\/api\/models\/[A-Za-z0-9._-]{1,80}\//.test(url.pathname)) return false;
-    if (/^\/api\/sessions\/[a-f0-9]{20}\/viewing$/.test(url.pathname)) return false;
+    if (url.pathname === "/api/sessions/viewing/clear" || /^\/api\/sessions\/[a-f0-9]{20}\/viewing$/.test(url.pathname)) return false;
     return true;
   }
 
@@ -984,7 +987,7 @@ export class PiChatApp {
       response.write(`event: ready\ndata: ${JSON.stringify({ ok: true, lifecycle: this.applicationLifecycle })}\n\n`);
       this.sseHub.add(response, clientId);
       this.clientConnected(clientId);
-      const timer = setInterval(() => response.write(": ping\n\n"), 20_000);
+      const timer = setInterval(() => response.write(`event: pi\ndata: ${JSON.stringify({ type: "pi_chat_heartbeat", at: Date.now() })}\n\n`), this.sseHeartbeatMs);
       request.once("close", () => {
         clearInterval(timer);
         this.sseHub.remove(response);
@@ -1288,6 +1291,21 @@ export class PiChatApp {
         return;
       }
       return methodNotAllowed(response);
+    }
+
+    if (url.pathname === "/api/sessions/viewing/clear") {
+      if (request.method !== "POST") return methodNotAllowed(response);
+      if (!clientId) return json(response, 400, { error: "浏览器窗口标识无效" });
+      const body = await bodyJson(request);
+      const expectedSessionId = typeof body.sessionId === "string" ? body.sessionId : "";
+      if (!/^[a-f0-9]{20}$/.test(expectedSessionId)) return json(response, 400, { error: "待清除的会话标识无效" });
+      const viewing = this.sessionControl.clearViewed(clientId, expectedSessionId);
+      if (!viewing) {
+        const runtime = this.runtimePool.get(expectedSessionId);
+        if (runtime && this.runtimePool.canReclaim(runtime)) void this.runtimePool.sweep();
+      }
+      json(response, 200, { viewing });
+      return;
     }
 
     const viewingMatch = /^\/api\/sessions\/([a-f0-9]{20})\/viewing$/.exec(url.pathname);
