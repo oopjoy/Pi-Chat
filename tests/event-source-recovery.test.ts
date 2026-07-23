@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { shouldReconnectEventSource } from "../src/web/hooks/use-pi-event-source";
+import { isIgnoredEventSourceFrame, isOversizedEventSourceFrame, shouldReconnectEventSource } from "../src/web/hooks/use-pi-event-source";
 
 test("standalone PWA resume replaces a potentially half-open EventSource", () => {
   const now = 100_000;
@@ -15,4 +15,12 @@ test("foreground watchdog reconnects only after a missed heartbeat window", () =
   assert.equal(shouldReconnectEventSource(undefined, "visible", now - 45_000, now), true);
   assert.equal(shouldReconnectEventSource("focus", "visible", now - 60_000, now), true);
   assert.equal(shouldReconnectEventSource("online", "hidden", now - 60_000, now), false);
+});
+
+test("cumulative tool snapshots are rejected before JSON parsing and huge unknown frames trigger recovery", () => {
+  const toolUpdate = JSON.stringify({ type: "tool_execution_update", partialResult: { content: "x".repeat(100_000) } });
+  assert.equal(isIgnoredEventSourceFrame(toolUpdate), true);
+  assert.equal(isIgnoredEventSourceFrame(JSON.stringify({ type: "message_update", message: { role: "assistant", content: "mentions tool_execution_update" } })), false);
+  assert.equal(isOversizedEventSourceFrame("x".repeat(1_000_001)), true);
+  assert.equal(isOversizedEventSourceFrame("x".repeat(1_000_000)), false);
 });

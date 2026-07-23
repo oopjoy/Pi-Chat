@@ -282,6 +282,14 @@ export class PiChatApp {
     this.sseHub.broadcast(event);
   }
 
+  private broadcastRpcEvent(event: Record<string, unknown>, sessionId: string): void {
+    // Pi emits cumulative tool partialResult snapshots. The web client does not
+    // render them; forwarding every snapshot creates quadratic SSE traffic and
+    // can freeze Chromium's main thread during long or self-referential output.
+    if (event.type === "tool_execution_update") return;
+    this.broadcast({ ...event, piChatSessionId: sessionId });
+  }
+
   private broadcastControlState(sessionId: string): void {
     this.sseHub.broadcastEach((clientId) => ({
       type: "pi_chat_session_control_changed",
@@ -429,7 +437,7 @@ export class PiChatApp {
       this.broadcastQueue(runtime.id);
       this.broadcast({ type: "pi_chat_sessions_changed", action: "status", sessionId: runtime.id });
     }
-    this.broadcast({ ...event, piChatSessionId: runtime.id });
+    this.broadcastRpcEvent(event, runtime.id);
     if (type === "agent_start" || type === "message_start") this.broadcast({ type: "pi_chat_sessions_changed", action: "created", sessionId: runtime.id });
     if (type === "agent_settled") {
       this.completeContextUsageRefreshTurn(runtime.id);
@@ -537,8 +545,7 @@ export class PiChatApp {
       this.broadcastQueue();
       this.broadcast({ type: "pi_chat_sessions_changed", action: "status", sessionId: this.activeSessionId });
     }
-    const taggedEvent = { ...event, piChatSessionId: this.activeSessionId };
-    this.broadcast(taggedEvent);
+    this.broadcastRpcEvent(event, this.activeSessionId);
     if (type === "agent_start" || type === "message_start") this.broadcast({ type: "pi_chat_sessions_changed", action: "created", sessionId: this.activeSessionId });
     if (type === "agent_settled") {
       this.completeContextUsageRefreshTurn(this.activeSessionId);

@@ -565,6 +565,26 @@ test("a closed browser window releases Session control after its SSE lease expir
   }
 });
 
+test("cumulative tool execution updates never enter the browser SSE fanout", async () => {
+  const path = "C:\\sessions\\primary-tool-flood.jsonl";
+  const primary = new FakeRpc(path, "primary-tool-flood");
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const frames: string[] = [];
+  const clients = (app as unknown as { sseClients: Map<{ write: (frame: string) => boolean }, string> }).sseClients;
+  clients.set({ write: (frame) => { frames.push(frame); return true; } }, "11111111-1111-4111-8111-111111111111");
+  try {
+    primary.emit({ type: "tool_execution_start", toolCallId: "call-1", toolName: "bash" });
+    primary.emit({ type: "tool_execution_update", toolCallId: "call-1", toolName: "bash", partialResult: { content: "x".repeat(600_000) } });
+    primary.emit({ type: "tool_execution_end", toolCallId: "call-1", toolName: "bash", result: { content: "done" }, isError: false });
+    assert.equal(frames.some((frame) => frame.includes("tool_execution_update")), false);
+    assert.equal(frames.some((frame) => frame.includes("tool_execution_start")), true);
+    assert.equal(frames.some((frame) => frame.includes("tool_execution_end")), true);
+  } finally {
+    clients.clear();
+    await app.close();
+  }
+});
+
 test("SSE emits visible heartbeats and a local New composer can release its viewed Session pin", async () => {
   const path = "C:\\sessions\\primary-heartbeat.jsonl";
   const id = idForPath(path);

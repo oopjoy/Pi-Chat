@@ -82,6 +82,8 @@ export function App() {
   const sessionEventVersionRef = useRef(new Map<string, number>());
   const lastSessionEventTypeRef = useRef(new Map<string, string>());
   const promptReconcileTimerRef = useRef<number | null>(null);
+  const sseReconnectTimerRef = useRef<number | null>(null);
+  const sseFloodCountRef = useRef(0);
   const clearViewedPromiseRef = useRef<Promise<unknown> | null>(null);
   const applicationLifecycleRef = useRef<ApplicationLifecycle>("idle");
   const handoffWaitRef = useRef<Promise<void> | null>(null);
@@ -309,7 +311,12 @@ export function App() {
       lastEventFrameAtRef.current = Date.now();
       const event = parseEventData(rawEvent);
       const type = String(event.type || "");
+      sseFloodCountRef.current = 0;
       if (type === "pi_chat_heartbeat") return;
+      if (type === "pi_chat_sse_resync" || type === "pi_chat_oversized_event") {
+        void refresh().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+        return;
+      }
       const eventSessionId = typeof event.piChatSessionId === "string" ? event.piChatSessionId : "";
       if (eventSessionId && ["agent_start", "agent_settled", "message_start", "message_update", "message_end", "tool_execution_start", "tool_execution_end", "pi_chat_process_error"].includes(type)) {
         sessionEventVersionRef.current.set(eventSessionId, (sessionEventVersionRef.current.get(eventSessionId) || 0) + 1);
@@ -474,6 +481,19 @@ export function App() {
       });
   }, [refresh]);
 
+  const handleOversizedEventSourceFrame = useCallback((source: EventSource) => {
+    source.close();
+    lastEventFrameAtRef.current = Date.now();
+    sseFloodCountRef.current += 1;
+    const delay = Math.min(30_000, 1_000 * 2 ** Math.min(sseFloodCountRef.current - 1, 5));
+    if (sseReconnectTimerRef.current !== null) window.clearTimeout(sseReconnectTimerRef.current);
+    void refresh().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+    sseReconnectTimerRef.current = window.setTimeout(() => {
+      sseReconnectTimerRef.current = null;
+      setEventSourceGeneration((generation) => generation + 1);
+    }, delay);
+  }, [refresh]);
+
   const eventsUrl = useCallback(() => api.eventsUrl(), []);
   usePiEventSource({
     enabled: !loading,
@@ -482,6 +502,7 @@ export function App() {
     onReady: handleEventSourceReady,
     onPi: handlePiEvent,
     onError: handleEventSourceError,
+    onOversized: handleOversizedEventSourceFrame,
   });
 
   useEffect(() => {
@@ -512,6 +533,7 @@ export function App() {
 
   useEffect(() => () => {
     if (promptReconcileTimerRef.current !== null) window.clearTimeout(promptReconcileTimerRef.current);
+    if (sseReconnectTimerRef.current !== null) window.clearTimeout(sseReconnectTimerRef.current);
   }, []);
 
   useEffect(() => {
