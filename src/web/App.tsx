@@ -606,7 +606,11 @@ export function App() {
 
   const rememberCurrentScroll = () => {
     const element = scrollRef.current;
-    const sessionId = viewedSessionIdRef.current;
+    // Scroll DOM and visibleTurnCount belong to the last committed React view.
+    // The routing ref can already point at the destination while the old view
+    // is still painted, which would save the cold Session position under the
+    // hot Session ID during a fast switch.
+    const sessionId = viewedSessionId;
     if (!element || !sessionId) return;
     scrollMemoryRef.current.remember(sessionId, element.scrollTop, element.scrollHeight, element.clientHeight, visibleTurnCount);
   };

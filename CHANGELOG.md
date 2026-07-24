@@ -2,6 +2,12 @@
 
 ## 0.3.3
 
+### Follow-up fixes
+
+- SSE backpressure now coalesces and replays the latest cumulative assistant snapshot per Session instead of starving visible streaming until final resynchronization
+- Rapid Session switches save scroll state against the conversation currently committed to the DOM, preventing positions from being assigned to the destination Session
+- Remembered history windows are normalized to the server-supported 20-turn base and 10-turn increments, with the 10,000-turn maximum enforced
+
 ### PWA recovery
 
 - New opens an instant local draft and starts a Secondary Pi Runtime only on the first real send

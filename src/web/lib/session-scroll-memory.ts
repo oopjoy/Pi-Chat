@@ -10,6 +10,18 @@ export interface SessionScrollTarget {
 }
 
 const BOTTOM_THRESHOLD = 120;
+const INITIAL_TURN_WINDOW = 20;
+const TURN_WINDOW_STEP = 10;
+const MAX_TURN_WINDOW = 10_000;
+
+/** Convert an observed turn count into a value accepted by the Session view API. */
+export function sessionTurnWindow(visibleTurnCount: number): number | undefined {
+  if (!Number.isFinite(visibleTurnCount) || visibleTurnCount <= 0) return undefined;
+  const turns = Math.floor(visibleTurnCount);
+  if (turns <= INITIAL_TURN_WINDOW) return INITIAL_TURN_WINDOW;
+  const rounded = INITIAL_TURN_WINDOW + Math.ceil((turns - INITIAL_TURN_WINDOW) / TURN_WINDOW_STEP) * TURN_WINDOW_STEP;
+  return Math.min(MAX_TURN_WINDOW, rounded);
+}
 
 export class SessionScrollMemory {
   private readonly positions = new Map<string, SessionScrollPosition>();
@@ -22,8 +34,7 @@ export class SessionScrollMemory {
   }
 
   turns(sessionId: string): number | undefined {
-    const turns = this.positions.get(sessionId)?.visibleTurnCount;
-    return turns && turns > 0 ? turns : undefined;
+    return sessionTurnWindow(this.positions.get(sessionId)?.visibleTurnCount || 0);
   }
 
   target(sessionId: string, scrollHeight: number, clientHeight: number): SessionScrollTarget {

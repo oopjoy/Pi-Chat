@@ -21,6 +21,8 @@ function eventFrame(event: Record<string, unknown>): string {
 export class SseHub {
   private readonly clients = new Map<ServerResponse, string>();
   private readonly backpressured = new Set<ServerResponse>();
+  /** Latest cumulative assistant snapshot per Session while a socket is congested. */
+  private readonly pendingMessageFrames = new Map<ServerResponse, Map<string, string>>();
 
   get size(): number {
     return this.clients.size;
@@ -39,6 +41,7 @@ export class SseHub {
     const clientId = this.clients.get(response) || "";
     this.clients.delete(response);
     this.backpressured.delete(response);
+    this.pendingMessageFrames.delete(response);
     return clientId;
   }
 
@@ -48,7 +51,10 @@ export class SseHub {
 
   broadcast(event: Record<string, unknown>): void {
     const frame = eventFrame(event);
-    for (const client of this.clients.keys()) this.write(client, frame);
+    const retainKey = event.type === "message_start" || event.type === "message_update"
+      ? String(event.piChatSessionId || "primary")
+      : "";
+    for (const client of this.clients.keys()) this.write(client, frame, retainKey);
   }
 
   /**
@@ -73,16 +79,37 @@ export class SseHub {
     }
     this.clients.clear();
     this.backpressured.clear();
+    this.pendingMessageFrames.clear();
   }
 
-  private write(client: ServerResponse, frame: string): void {
-    if (this.backpressured.has(client)) return;
+  private write(client: ServerResponse, frame: string, retainKey = ""): void {
+    if (this.backpressured.has(client)) {
+      // Assistant updates are cumulative snapshots. Coalesce the latest one per
+      // Session instead of dropping every visible update until drain; other
+      // intermediate frames remain disposable because resync is authoritative.
+      if (retainKey) {
+        const pending = this.pendingMessageFrames.get(client) || new Map<string, string>();
+        pending.set(retainKey, frame);
+        this.pendingMessageFrames.set(client, pending);
+      }
+      return;
+    }
     try {
       if (client.write(frame) !== false) return;
       this.backpressured.add(client);
       client.once("drain", () => {
         if (!this.clients.has(client)) return;
         this.backpressured.delete(client);
+        const pending = this.pendingMessageFrames.get(client);
+        while (pending?.size) {
+          const [sessionId, latestMessage] = pending.entries().next().value as [string, string];
+          pending.delete(sessionId);
+          if (!pending.size) this.pendingMessageFrames.delete(client);
+          this.write(client, latestMessage);
+          // A retained snapshot may fill the socket again. Leave snapshots for
+          // other Sessions queued so its next drain can continue the replay.
+          if (this.backpressured.has(client)) return;
+        }
         this.write(client, eventFrame({ type: "pi_chat_sse_resync" }));
       });
     } catch {
