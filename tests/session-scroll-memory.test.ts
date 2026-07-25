@@ -15,8 +15,9 @@ test("a conversation restores its previous reading position inside one window", 
 test("remembered turn counts always use a Session view API window", () => {
   assert.equal(sessionTurnWindow(0), undefined);
   assert.equal(sessionTurnWindow(Number.NaN), undefined);
-  assert.equal(sessionTurnWindow(4), 20);
-  assert.equal(sessionTurnWindow(10), 20);
+  assert.equal(sessionTurnWindow(4), 10);
+  assert.equal(sessionTurnWindow(10), 10);
+  assert.equal(sessionTurnWindow(11), 20);
   assert.equal(sessionTurnWindow(20), 20);
   assert.equal(sessionTurnWindow(21), 30);
   assert.equal(sessionTurnWindow(25), 30);
@@ -26,7 +27,7 @@ test("remembered turn counts always use a Session view API window", () => {
 
   const memory = new SessionScrollMemory();
   memory.remember("short-hot-session", 0, 800, 800, 4);
-  assert.equal(memory.turns("short-hot-session"), 20);
+  assert.equal(memory.turns("short-hot-session"), 10);
 });
 
 test("restoration clamps positions after content shrinks and unknown sessions start at the bottom", () => {

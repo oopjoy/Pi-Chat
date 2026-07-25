@@ -62,8 +62,10 @@ function ResizeHandle({ width, onWidthChange }: { width: number; onWidthChange: 
   return <div className="sidebar-resize-handle" role="separator" aria-orientation="vertical" aria-label="拖动调整会话栏宽度" aria-valuemin={SIDEBAR_WIDTH_MIN} aria-valuemax={SIDEBAR_WIDTH_MAX} aria-valuenow={Math.round(width)} tabIndex={0} onPointerDown={onPointerDown} onKeyDown={onKeyDown} />;
 }
 
-export function SessionSidebar({ sessions, viewedSessionId, workspaceCwd, open, width, newDisabled, refreshDisabled, restartDisabled, workspaceDisabled, viewBusy, refreshing, warmingSessionIds, failedSessionIds, workspacePicking, onClose, onCollapse, onNew, onRefresh, onRestart, onView, onRename, onDelete, onPickWorkspace, onManage, onWidthChange }: {
+export function SessionSidebar({ sessions, sessionsTotal, loadingAllSessions, viewedSessionId, workspaceCwd, open, width, newDisabled, refreshDisabled, restartDisabled, workspaceDisabled, viewBusy, refreshing, warmingSessionIds, failedSessionIds, workspacePicking, onClose, onCollapse, onNew, onRefresh, onLoadAllSessions, onRestart, onView, onRename, onDelete, onPickWorkspace, onManage, onWidthChange }: {
   sessions: SessionSummary[];
+  sessionsTotal: number;
+  loadingAllSessions: boolean;
   viewedSessionId: string;
   workspaceCwd: string;
   open: boolean;
@@ -81,6 +83,7 @@ export function SessionSidebar({ sessions, viewedSessionId, workspaceCwd, open, 
   onCollapse: () => void;
   onNew: () => void;
   onRefresh: () => void;
+  onLoadAllSessions: () => void;
   onRestart: () => void;
   onView: (id: string) => void;
   onRename: (session: SessionSummary) => void;
@@ -106,7 +109,7 @@ export function SessionSidebar({ sessions, viewedSessionId, workspaceCwd, open, 
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.6v7.1M5.15 5.55a6.45 6.45 0 1 0 9.7 0" /></svg>
           </button>
         </div>
-        <div className="session-heading"><span>对话</span><span>{sessions.length}</span></div>
+        <div className="session-heading"><span>对话</span><span>{sessions.length < sessionsTotal ? `${sessions.length}/${sessionsTotal}` : sessionsTotal}</span></div>
         <nav className="session-list" aria-label="会话列表">
           {sessions.map((session) => {
             const unavailable = viewBusy || session.id === viewedSessionId;
@@ -133,6 +136,7 @@ export function SessionSidebar({ sessions, viewedSessionId, workspaceCwd, open, 
               </span>
             </div>;
           })}
+          {sessions.length < sessionsTotal && <button type="button" className="load-all-sessions" disabled={loadingAllSessions} onClick={onLoadAllSessions}>{loadingAllSessions ? "正在加载…" : `加载全部对话（共 ${sessionsTotal} 个）`}</button>}
           {!sessions.length && <p className="empty-list">还没有历史会话</p>}
         </nav>
         <button type="button" className="workspace-picker" disabled={workspaceDisabled} onClick={onPickWorkspace} title="设置工作路径" aria-label="设置工作路径"><FolderIcon className="workspace-picker-icon" /><span title={workspaceCwd || "未设置工作路径"}>{workspacePicking ? "正在打开目录窗口…" : workspaceCwd || "未设置工作路径"}</span></button>

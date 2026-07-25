@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer, request as httpRequest } from "node:http";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -569,6 +569,78 @@ test("a closed browser window releases Session control after its SSE lease expir
     controller.abort();
     server.close();
     await app.close();
+  }
+});
+
+test("sidebar strictly defaults to twenty recent Sessions and can explicitly load the complete snapshot", async () => {
+  const path = "C:\\sessions\\old-active.jsonl";
+  const activeId = idForPath(path);
+  const primary = new FakeRpc(path, "old-active");
+  const summaries = Array.from({ length: 25 }, (_, index) => ({
+    id: index === 24 ? activeId : index.toString(16).padStart(20, "0"),
+    sessionId: `session-${index}`,
+    name: `Session ${index}`,
+    preview: "",
+    cwd: process.cwd(),
+    updatedAt: index === 24 ? 0 : 100 - index,
+    messageCount: 1,
+    active: index === 24,
+  }));
+  const sessions = {
+    list: async () => summaries,
+    pathForId: () => path,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    const recent = await (await fetch(`${origin}/api/sessions`)).json() as { sessions: Array<{ id: string }>; total: number };
+    assert.equal(recent.total, 25);
+    assert.equal(recent.sessions.length, 20);
+    assert.equal(recent.sessions.some((session) => session.id === activeId), false);
+    const all = await (await fetch(`${origin}/api/sessions?all=1`)).json() as { sessions: Array<{ id: string }>; total: number };
+    assert.equal(all.total, 25);
+    assert.equal(all.sessions.length, 25);
+    assert.equal(all.sessions.some((session) => session.id === activeId), true);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("busy bootstrap uses persisted JSONL history without queueing get_messages", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-busy-bootstrap-"));
+  const path = join(root, "primary.jsonl");
+  const id = idForPath(path);
+  const persisted = [{ role: "user", content: [{ type: "text", text: "persisted" }] }];
+  await writeFile(path, [
+    { type: "session", version: 3, id: "primary-busy-bootstrap", timestamp: "2026-01-01T00:00:00Z", cwd: process.cwd() },
+    { type: "message", id: "1", message: persisted[0] },
+  ].map(JSON.stringify).join("\n") + "\n");
+  const primary = new FakeRpc(path, "primary-busy-bootstrap");
+  primary.streaming = true;
+  const sessions = {
+    list: async () => [{ id, sessionId: "primary-busy-bootstrap", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+    pathForId: () => path,
+    messagesForId: async () => persisted,
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    const result = await (await fetch(`http://127.0.0.1:${address.port}/api/bootstrap`)).json() as { messages: unknown[] };
+    assert.deepEqual(result.messages, persisted);
+    assert.equal(primary.commands.some((command) => command.type === "get_messages"), false);
+  } finally {
+    server.close();
+    await app.close();
+    await rm(root, { recursive: true, force: true });
   }
 });
 

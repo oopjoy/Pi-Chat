@@ -1,7 +1,7 @@
 import type { ModelInfo, PiMessage, PiState, PromptImage, SessionStats, SlashCommand } from "../shared/types.js";
 import { rpcData } from "./rpc-client.js";
 
-export const RECENT_TURN_WINDOW_SIZE = 20;
+export const RECENT_TURN_WINDOW_SIZE = 10;
 
 export function promptImages(value: unknown): PromptImage[] {
   if (value === undefined) return [];

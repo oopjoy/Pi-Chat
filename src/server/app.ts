@@ -25,6 +25,7 @@ export { messageWindow, promptImages, RECENT_TURN_WINDOW_SIZE } from "./pi-data.
 export { PROMPT_PREPARE_TIMEOUT_MS } from "./prompt-scheduler.js";
 export const TURN_WINDOW_INCREMENT = 10;
 const MAX_TURN_WINDOW_SIZE = 10_000;
+const DEFAULT_SESSION_LIST_SIZE = 20;
 const DEFAULT_SECONDARY_RUNTIME_SWEEP_MS = 60 * 1_000;
 const DEFAULT_GATE_REQUEST_TIMEOUT_MS = 10 * 60 * 1_000;
 const BUILTIN_COMMANDS: SlashCommand[] = [
@@ -106,6 +107,9 @@ export class PiChatApp {
   private readonly modelContextWindows = new Map<string, number>();
   /** Current model catalogue, retained so cold JSONL settings get a display name without waking Pi. */
   private readonly knownModels = new Map<string, ModelInfo>();
+  private lastAvailableModels: ModelInfo[] = [];
+  private lastPrimaryCommands: SlashCommand[] = [];
+  private lastPrimaryStats: { sessionId: string; value: SessionStats } | undefined;
   private readonly contextUsagePendingRefresh = new Set<string>();
   private readonly contextUsageRefreshTurn = new Set<string>();
 
@@ -658,6 +662,19 @@ export class PiChatApp {
     return listed.sort((left, right) => right.updatedAt - left.updatedAt);
   }
 
+  private sidebarSessions(sessions: SessionSummary[], clientId: string, all = false): { sessions: SessionSummary[]; total: number } {
+    const enriched = this.sessionSummaries(sessions, clientId);
+    return {
+      sessions: all ? enriched : enriched.slice(0, DEFAULT_SESSION_LIST_SIZE),
+      total: enriched.length,
+    };
+  }
+
+  private cachedSessionList(activePath?: string): Promise<SessionSummary[]> {
+    const cached = (this.options.sessions as SessionIndex & { listCached?: (activePath?: string, cwd?: string) => Promise<SessionSummary[]> }).listCached;
+    return cached ? cached.call(this.options.sessions, activePath, this.currentCwd) : this.options.sessions.list(activePath, this.currentCwd);
+  }
+
   private async reloadRpc(knownState?: PiState): Promise<void> {
     this.assertApplicationQuiescent("修改资源配置");
     const state = knownState || asState(await this.options.rpc.send({ type: "get_state" }));
@@ -732,6 +749,7 @@ export class PiChatApp {
       await runtime.rpc.stop();
       this.runtimePool.detach(id);
     }
+    await this.options.sessions.list(this.activeSessionPath, this.currentCwd);
     this.broadcast({ type: "pi_chat_sessions_changed", action: "renamed", sessionId: id });
     return this.bootstrap();
   }
@@ -761,6 +779,7 @@ export class PiChatApp {
     }
     if (path && existsSync(path)) await unlink(path);
     this.sessionControl.clearSession(id);
+    await this.options.sessions.list(this.activeSessionPath, this.currentCwd);
     this.broadcast({ type: "pi_chat_sessions_changed", action: "deleted", sessionId: id });
     return this.bootstrap();
   }
@@ -1011,36 +1030,53 @@ export class PiChatApp {
       throw new ApplicationLifecycleConflictError(this.applicationLifecycle, this.lifecycleMessage());
     }
     await this.ensurePrimaryRuntime();
-    // Resolve state first so message history can come from the session JSONL.
-    // Parallel get_messages against a streaming Primary RPC is the main source of
-    // the browser's 65s refresh timeout while a long answer is still generating.
-    const stateResponse = await this.options.rpc.send({ type: "get_state" }, 12_000);
-    const state = asState(stateResponse);
-    this.lastPrimaryState = state;
-    this.running = state.isStreaming;
-    this.activeSessionId = state.sessionFile ? idForPath(state.sessionFile) : state.sessionId || "";
-    this.activeSessionPath = state.sessionFile;
-    const [modelsResponse, commandsResponse, statsResponse, diskMessages] = await Promise.all([
-      this.options.rpc.send({ type: "get_available_models" }, 12_000),
-      this.options.rpc.send({ type: "get_commands" }, 12_000),
-      this.options.rpc.send({ type: "get_session_stats" }, 12_000),
-      state.sessionFile
-        ? readSessionMessages(state.sessionFile).catch(() => null)
-        : Promise.resolve(null),
-    ]);
-    let messages = diskMessages;
-    if (!messages || state.isStreaming) {
+    // During a live turn the event stream already owns current running state.
+    // Reuse it instead of queueing another get_state behind a busy Pi process.
+    let state = this.lastPrimaryState;
+    if (!(this.running && this.activeSessionPath)) {
       try {
-        const rpcMessages = asMessages(await this.options.rpc.send({ type: "get_messages" }, state.isStreaming ? 8_000 : 12_000));
-        if (!messages || rpcMessages.length >= messages.length) messages = rpcMessages;
+        state = asState(await this.options.rpc.send({ type: "get_state" }, this.activeSessionPath ? 4_000 : 12_000));
+        this.lastPrimaryState = state;
+        this.running = state.isStreaming;
+        this.activeSessionId = state.sessionFile ? idForPath(state.sessionFile) : state.sessionId || this.activeSessionId;
+        this.activeSessionPath = state.sessionFile || this.activeSessionPath;
       } catch (error) {
-        if (!messages) throw error;
+        if (!this.activeSessionPath) throw error;
+        state = { ...this.lastPrimaryState, isStreaming: this.running };
       }
+    } else state = { ...state, isStreaming: true };
+
+    const busy = this.running || state.isStreaming;
+    if (!this.lastAvailableModels.length && state.model) {
+      this.rememberModelContextWindows([state.model]);
+      this.lastAvailableModels = [state.model];
     }
-    const availableModels = this.options.modelManager ? await this.options.modelManager.annotate(asModels(modelsResponse)) : asModels(modelsResponse);
-    this.rememberModelContextWindows(availableModels);
+    const diskMessages = this.activeSessionPath
+      ? await readSessionMessages(this.activeSessionPath).catch(() => null)
+      : null;
+    let messages = diskMessages;
+    // JSONL is authoritative enough for an immediately readable bootstrap.
+    // An empty brand-new busy Session can render its live/optimistic message;
+    // never hold the whole shell open waiting for get_messages.
+    if (!messages && !busy) messages = asMessages(await this.options.rpc.send({ type: "get_messages" }, 12_000));
+
+    if (!busy) {
+      const [modelsResponse, commandsResponse, statsResponse] = await Promise.all([
+        this.options.rpc.send({ type: "get_available_models" }, 8_000).catch(() => null),
+        this.options.rpc.send({ type: "get_commands" }, 8_000).catch(() => null),
+        this.options.rpc.send({ type: "get_session_stats" }, 8_000).catch(() => null),
+      ]);
+      if (modelsResponse) {
+        const models = this.options.modelManager ? await this.options.modelManager.annotate(asModels(modelsResponse)) : asModels(modelsResponse);
+        this.rememberModelContextWindows(models);
+        this.lastAvailableModels = models;
+      }
+      if (commandsResponse) this.lastPrimaryCommands = asCommands(commandsResponse);
+      if (statsResponse) this.lastPrimaryStats = { sessionId: this.activeSessionId, value: await this.statsForSession(this.activeSessionId, statsResponse) };
+    }
+    const availableModels = this.lastAvailableModels;
     const windowedMessages = messageWindow(messages || []);
-    const sessions = this.sessionSummaries(await this.options.sessions.list(state.sessionFile, this.currentCwd), clientId);
+    const sidebar = this.sidebarSessions(await this.cachedSessionList(state.sessionFile), clientId);
     return {
       state,
       messages: windowedMessages.messages,
@@ -1052,15 +1088,18 @@ export class PiChatApp {
       activeSessionIds: this.activeSessionIds(),
       liveMessage: this.liveMessage,
       toolStatus: this.toolStatus,
-      stats: await this.statsForSession(this.activeSessionId, statsResponse),
+      stats: this.lastPrimaryStats?.sessionId === this.activeSessionId
+        ? this.lastPrimaryStats.value
+        : await this.offlineStatsForId(this.activeSessionId),
       models: availableModels,
-      commands: [...BUILTIN_COMMANDS, ...asCommands(commandsResponse)],
+      commands: [...BUILTIN_COMMANDS, ...this.lastPrimaryCommands],
       queue: this.publicQueue(),
       queuePaused: this.queuePaused,
       pendingExtensionRequest: this.pendingRequestForSession(this.activeSessionId),
       ...this.controlState(this.activeSessionId, clientId),
       workspaceCwd: this.currentCwd,
-      sessions,
+      sessions: sidebar.sessions,
+      sessionsTotal: sidebar.total,
       applicationLifecycle: this.applicationLifecycle,
     };
   }
@@ -1418,10 +1457,10 @@ export class PiChatApp {
 
     if (url.pathname === "/api/sessions") {
       if (request.method !== "GET") return methodNotAllowed(response);
+      const all = url.searchParams.get("all") === "1";
       if (this.applicationLifecycle !== "idle") {
-        const state: PiState = { model: null, isStreaming: false };
-        const sessions = this.sessionSummaries(await this.options.sessions.list(this.activeSessionPath, this.currentCwd), clientId);
-        json(response, 200, { sessions, applicationLifecycle: this.applicationLifecycle });
+        const sidebar = this.sidebarSessions(await this.cachedSessionList(this.activeSessionPath), clientId, all);
+        json(response, 200, { sessions: sidebar.sessions, total: sidebar.total, applicationLifecycle: this.applicationLifecycle });
         return;
       }
       // Recover a crashed Primary if needed, but do not block the sidebar on a
@@ -1437,8 +1476,8 @@ export class PiChatApp {
           // Keep lastPrimaryState / path so secondary draft injection still works.
         }
       }
-      const sessions = this.sessionSummaries(await this.options.sessions.list(this.activeSessionPath || state.sessionFile, this.currentCwd), clientId);
-      json(response, 200, { sessions, applicationLifecycle: this.applicationLifecycle });
+      const sidebar = this.sidebarSessions(await this.cachedSessionList(this.activeSessionPath || state.sessionFile), clientId, all);
+      json(response, 200, { sessions: sidebar.sessions, total: sidebar.total, applicationLifecycle: this.applicationLifecycle });
       return;
     }
 

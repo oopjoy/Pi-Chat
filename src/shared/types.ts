@@ -153,6 +153,8 @@ export interface BootstrapData {
   state: PiState;
   messages: PiMessage[];
   sessions: SessionSummary[];
+  /** Total matching Sessions before the default recent-list limit. */
+  sessionsTotal?: number;
   models: ModelInfo[];
   commands: SlashCommand[];
   queue: QueuedPrompt[];

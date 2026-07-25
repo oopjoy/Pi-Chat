@@ -244,6 +244,7 @@ export class SessionIndex {
   private pathsById = new Map<string, string>();
   private refreshPromise: Promise<SessionSummary[]> | null = null;
   private refreshKey = "";
+  private latestList: { activePath: string; cwd: string; sessions: SessionSummary[]; refreshedAt: number } | null = null;
   private readonly statFile: (path: string) => Promise<Stats>;
   private readonly snapshotCache = new Map<string, { mtimeMs: number; size: number; snapshot: SessionFileSnapshot }>();
   private readonly snapshotReads = new Map<string, Promise<SessionFileSnapshot | null>>();
@@ -252,6 +253,24 @@ export class SessionIndex {
     this.root = root || process.env.PI_CODING_AGENT_SESSION_DIR || join(homedir(), ".pi", "agent", "sessions");
     this.cachePath = cachePath || (root ? join(this.root, ".pi-chat-session-index.json") : join(homedir(), ".pi", "agent", "pi-chat-session-index.json"));
     this.statFile = statFile;
+  }
+
+  snapshot(activePath?: string, cwd?: string): SessionSummary[] | null {
+    if (!this.latestList) return null;
+    const active = activePath ? resolve(activePath).toLowerCase() : "";
+    const workspace = cwd ? resolve(cwd).toLowerCase() : "";
+    if (this.latestList.activePath !== active || this.latestList.cwd !== workspace) return null;
+    return this.latestList.sessions.map((session) => ({ ...session }));
+  }
+
+  /** Return the latest complete snapshot immediately and refresh it periodically in the background. */
+  async listCached(activePath?: string, cwd?: string, maxAgeMs = 5_000): Promise<SessionSummary[]> {
+    const snapshot = this.snapshot(activePath, cwd);
+    if (!snapshot) return this.list(activePath, cwd);
+    if (this.latestList && Date.now() - this.latestList.refreshedAt >= maxAgeMs) {
+      void this.list(activePath, cwd).catch(() => undefined);
+    }
+    return snapshot;
   }
 
   async list(activePath?: string, cwd?: string): Promise<SessionSummary[]> {
@@ -267,7 +286,14 @@ export class SessionIndex {
     this.refreshPromise = refresh;
     this.refreshKey = key;
     try {
-      return await refresh;
+      const sessions = await refresh;
+      this.latestList = {
+        activePath: activePath ? resolve(activePath).toLowerCase() : "",
+        cwd: cwd ? resolve(cwd).toLowerCase() : "",
+        sessions,
+        refreshedAt: Date.now(),
+      };
+      return sessions;
     } finally {
       if (this.refreshPromise === refresh) {
         this.refreshPromise = null;

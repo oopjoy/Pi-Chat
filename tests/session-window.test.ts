@@ -12,37 +12,37 @@ function turn(index: number): PiMessage[] {
   ];
 }
 
-test("message window keeps the newest twenty complete user-initiated turns", () => {
+test("message window keeps the newest ten complete user-initiated turns", () => {
   const messages = Array.from({ length: 25 }, (_, index) => turn(index)).flat();
   const windowed = messageWindow(messages);
-  assert.equal(RECENT_TURN_WINDOW_SIZE, 20);
+  assert.equal(RECENT_TURN_WINDOW_SIZE, 10);
   assert.equal(windowed.total, 100);
   assert.equal(windowed.turns, 25);
   assert.equal(windowed.truncated, true);
-  assert.equal(windowed.messages.length, 80);
+  assert.equal(windowed.messages.length, 40);
   assert.equal(windowed.messages[0].role, "user");
-  assert.equal(windowed.messages[0].content, "question 5");
+  assert.equal(windowed.messages[0].content, "question 15");
   assert.equal(windowed.messages.at(-1)?.content, "answer 24");
-  assert.equal(windowed.messages.some((message) => message.content === "question 4"), false);
-  assert.equal(windowed.messages.some((message) => message.content === "result 5"), true);
+  assert.equal(windowed.messages.some((message) => message.content === "question 14"), false);
+  assert.equal(windowed.messages.some((message) => message.content === "result 15"), true);
 });
 
 test("message window expands by ten requested complete turns", () => {
   const messages = Array.from({ length: 35 }, (_, index) => turn(index)).flat();
   const initial = messageWindow(messages);
   const expanded = messageWindow(messages, RECENT_TURN_WINDOW_SIZE + 10);
-  assert.equal(initial.visibleTurns, 20);
-  assert.equal(initial.messages[0].content, "question 15");
-  assert.equal(expanded.visibleTurns, 30);
-  assert.equal(expanded.messages[0].content, "question 5");
-  assert.equal(expanded.messages.length, 120);
+  assert.equal(initial.visibleTurns, 10);
+  assert.equal(initial.messages[0].content, "question 25");
+  assert.equal(expanded.visibleTurns, 20);
+  assert.equal(expanded.messages[0].content, "question 15");
+  assert.equal(expanded.messages.length, 80);
   assert.equal(expanded.truncated, true);
 });
 
-test("message window leaves conversations with twenty or fewer user turns intact", () => {
-  const messages = Array.from({ length: 20 }, (_, index) => turn(index)).flat();
+test("message window leaves conversations with ten or fewer user turns intact", () => {
+  const messages = Array.from({ length: 10 }, (_, index) => turn(index)).flat();
   const windowed = messageWindow(messages);
-  assert.equal(windowed.turns, 20);
+  assert.equal(windowed.turns, 10);
   assert.equal(windowed.truncated, false);
   assert.deepEqual(windowed.messages, messages);
 });

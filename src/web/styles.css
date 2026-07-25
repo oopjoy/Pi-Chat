@@ -167,6 +167,9 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .session-list::-webkit-scrollbar-track { background: transparent; }
 .session-list::-webkit-scrollbar-thumb { min-height: 44px; border: 2px solid transparent; border-radius: 999px; background: #b4bac3; background-clip: padding-box; }
 .session-list:hover::-webkit-scrollbar-thumb { background: #929aa6; background-clip: padding-box; }
+.load-all-sessions { width: calc(100% - 8px); margin: 8px 4px 12px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--muted); font-size: 12px; font-weight: 650; }
+.load-all-sessions:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.load-all-sessions:disabled { opacity: .65; cursor: wait; }
 .session-row { position: relative; margin: 2px 0; border-radius: 9px; }
 .session-item {
   display: block;

@@ -212,6 +212,34 @@ test("session index coalesces identical concurrent refreshes without losing path
   }
 });
 
+test("session index returns a complete cached snapshot without waiting for the next scan", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-session-cached-list-"));
+  try {
+    const sessionPath = join(root, "session.jsonl");
+    await writeFile(sessionPath, [
+      { type: "session", id: "cached-list", cwd: process.cwd() },
+      { type: "message", id: "m1", parentId: null, message: { role: "user", content: "hello" } },
+    ].map(JSON.stringify).join("\n"));
+    const index = new SessionIndex(root, join(root, "cache.json"));
+    const initial = await index.list(undefined, process.cwd());
+    const originalRefresh = (index as unknown as { refresh: (activePath?: string, cwd?: string) => Promise<unknown> }).refresh.bind(index);
+    let refreshFinished = false;
+    (index as unknown as { refresh: (activePath?: string, cwd?: string) => Promise<unknown> }).refresh = async (activePath?: string, cwd?: string) => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const result = await originalRefresh(activePath, cwd);
+      refreshFinished = true;
+      return result;
+    };
+    const cached = await index.listCached(undefined, process.cwd(), 0);
+    assert.deepEqual(cached, initial);
+    assert.equal(refreshFinished, false);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal(refreshFinished, true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("session index serializes concurrent refreshes with different keys", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-session-different-keys-"));
   try {

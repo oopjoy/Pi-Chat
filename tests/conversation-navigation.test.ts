@@ -14,6 +14,14 @@ test("previous and next conversation navigation selects only user-message offset
   assert.equal(adjacentUserMessageOffset(userOffsets, 386, "previous"), 0);
 });
 
+test("rapid repeated navigation advances from the pending smooth-scroll target", () => {
+  const userOffsets = [0, 400, 800, 1200];
+  const first = adjacentUserMessageOffset(userOffsets, 20, "next");
+  assert.equal(first, 400);
+  assert.equal(adjacentUserMessageOffset(userOffsets, first as number, "next"), 800);
+  assert.equal(adjacentUserMessageOffset(userOffsets, 800, "previous"), 400);
+});
+
 test("conversation navigation stops cleanly at first and last user messages", () => {
   assert.equal(adjacentUserMessageOffset([0, 400], 450, "next"), null);
   assert.equal(adjacentUserMessageOffset([0, 400], 0, "previous"), null);

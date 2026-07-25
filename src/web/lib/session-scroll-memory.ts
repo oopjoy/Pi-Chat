@@ -10,7 +10,7 @@ export interface SessionScrollTarget {
 }
 
 const BOTTOM_THRESHOLD = 120;
-const INITIAL_TURN_WINDOW = 20;
+const INITIAL_TURN_WINDOW = 10;
 const TURN_WINDOW_STEP = 10;
 const MAX_TURN_WINDOW = 10_000;
 

@@ -55,6 +55,9 @@ export class PiRpcClient {
   private child: ChildProcessWithoutNullStreams | null = null;
   private listeners = new Set<EventListener>();
   private pending = new Map<string, PendingRequest>();
+  private readonly readQueries = new Map<string, Promise<Record<string, unknown>>>();
+  /** Read queries can outlive the caller timeout because the RPC protocol has no cancellation. */
+  private readonly outstandingReadQueryIds = new Map<string, string>();
   private requestId = 0;
   private stderrTail = "";
 
@@ -140,15 +143,22 @@ export class PiRpcClient {
       return;
     }
 
-    if (data.type === "response" && typeof data.id === "string") {
-      const pending = this.pending.get(data.id);
-      if (pending) {
-        clearTimeout(pending.timer);
-        this.pending.delete(data.id);
-        if (data.success === false) pending.reject(new Error(String(data.error || "Pi RPC 请求失败")));
-        else pending.resolve(data);
-        return;
+    if (data.type === "response") {
+      if (typeof data.id === "string") {
+        for (const [type, id] of this.outstandingReadQueryIds) {
+          if (id === data.id) this.outstandingReadQueryIds.delete(type);
+        }
+        const pending = this.pending.get(data.id);
+        if (pending) {
+          clearTimeout(pending.timer);
+          this.pending.delete(data.id);
+          if (data.success === false) pending.reject(new Error(String(data.error || "Pi RPC 请求失败")));
+          else pending.resolve(data);
+        }
       }
+      // A response can arrive after its caller timed out. It remains an RPC
+      // response and must never leak into the unsolicited event/SSE channel.
+      return;
     }
     for (const listener of this.listeners) listener(data);
   }
@@ -159,6 +169,8 @@ export class PiRpcClient {
       pending.reject(error);
     }
     this.pending.clear();
+    this.readQueries.clear();
+    this.outstandingReadQueryIds.clear();
   }
 
   private handleExit(error: Error): void {
@@ -183,12 +195,32 @@ export class PiRpcClient {
     child.stdin.write(`${JSON.stringify(command)}\n`);
   }
 
+  private waitForReadQuery(query: Promise<Record<string, unknown>>, type: string, timeoutMs: number): Promise<Record<string, unknown>> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`Pi RPC 请求超时：${type}`)), timeoutMs);
+      query.then(
+        (value) => { clearTimeout(timer); resolve(value); },
+        (error) => { clearTimeout(timer); reject(error); },
+      );
+    });
+  }
+
   async send(command: Record<string, unknown>, timeoutMs = 30_000): Promise<Record<string, unknown>> {
     const child = this.child;
     if (!child || child.exitCode !== null) throw new Error("Pi RPC 未运行");
+    const type = typeof command.type === "string" ? command.type : "";
+    const readOnly = Object.keys(command).length === 1 && ["get_state", "get_messages", "get_available_models", "get_commands", "get_session_stats"].includes(type);
+    if (readOnly) {
+      const existing = this.readQueries.get(type);
+      if (existing) return this.waitForReadQuery(existing, type, timeoutMs);
+      // A timed-out query is still inside Pi until its late response arrives.
+      // Do not enqueue duplicates behind it and progressively clog the RPC pipe.
+      if (this.outstandingReadQueryIds.has(type)) throw new Error(`Pi RPC 查询仍在处理中：${type}`);
+    }
     const id = `pi-chat-${++this.requestId}`;
+    if (readOnly) this.outstandingReadQueryIds.set(type, id);
     const payload = { ...command, id };
-    return new Promise((resolve, reject) => {
+    const request = new Promise<Record<string, unknown>>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`Pi RPC 请求超时：${String(command.type)}`));
@@ -198,9 +230,16 @@ export class PiRpcClient {
         if (!error) return;
         clearTimeout(timer);
         this.pending.delete(id);
+        if (readOnly && this.outstandingReadQueryIds.get(type) === id) this.outstandingReadQueryIds.delete(type);
         reject(error);
       });
     });
+    if (readOnly) {
+      this.readQueries.set(type, request);
+      const clear = () => { if (this.readQueries.get(type) === request) this.readQueries.delete(type); };
+      request.then(clear, clear);
+    }
+    return request;
   }
 
   async probeCompatibility(): Promise<PiRpcCompatibility> {

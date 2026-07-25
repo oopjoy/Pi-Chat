@@ -27,6 +27,10 @@ import { SessionViewCache } from "./lib/session-view-cache";
 
 const EMPTY_STATE: PiState = { model: null, isStreaming: false };
 
+function recoverableRefreshError(message: string): boolean {
+  return /请求超时|RPC 请求超时|RPC 查询仍在处理中/.test(message);
+}
+
 export function App() {
   const [state, setState] = useState<PiState>(EMPTY_STATE);
   const [messages, setMessages] = useState<PiMessage[]>([]);
@@ -39,6 +43,9 @@ export function App() {
   const [stats, setStats] = useState<SessionStats | undefined>();
   const [liveMessage, setLiveMessage] = useState<PiMessage | null>(null);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [sessionsTotal, setSessionsTotal] = useState(0);
+  const [loadingAllSessions, setLoadingAllSessions] = useState(false);
+  const showAllSessionsRef = useRef(false);
   const [activeSessionId, setActiveSessionId] = useState("");
   const [activeSessionIds, setActiveSessionIds] = useState<string[]>([]);
   const [viewedSessionId, setViewedSessionId] = useState("");
@@ -84,6 +91,7 @@ export function App() {
   const stickToBottomRef = useRef(true);
   const scrollMemoryRef = useRef(new SessionScrollMemory());
   const pendingScrollRestoreRef = useRef("");
+  const conversationNavigationTargetRef = useRef<number | null>(null);
   const stoppingRef = useRef(false);
   const viewedSessionIdRef = useRef("");
   const localDraftRef = useRef(false);
@@ -106,12 +114,21 @@ export function App() {
   const pendingSessionPrefsRef = useRef(new Map<string, { model?: ModelInfo | null; thinkingLevel?: ThinkingLevel }>());
   const DRAFT_PREFS_KEY = "__local_draft__";
   const refreshEpochRef = useRef(0);
+  const bootstrapInFlightRef = useRef<Promise<BootstrapData> | null>(null);
   const recoveringConnectionRef = useRef<Promise<void> | null>(null);
   const commitLiveMessage = useCallback((message: PiMessage) => setLiveMessage(message), []);
   const { clearPendingLiveMessage, scheduleLiveMessage } = useLiveMessageScheduler(commitLiveMessage);
+  const reportBackgroundRefreshError = useCallback((cause: unknown) => {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    // Automatic reconciliation is best-effort. History is already readable from
+    // JSONL, so a busy/still-pending RPC query must not become a fatal red banner.
+    if (recoverableRefreshError(message)) return;
+    setError(message);
+  }, []);
 
   const setViewedId = useCallback((id: string) => {
     clearPendingLiveMessage();
+    conversationNavigationTargetRef.current = null;
     viewedSessionIdRef.current = id;
     desiredSessionIdRef.current = id;
     setViewedSessionId(id);
@@ -122,7 +139,12 @@ export function App() {
   // view so a refresh can restore a remembered cold Session without briefly
   // committing the Primary Runtime's blank draft to the timeline.
   const applyBootstrapMetadata = useCallback((data: BootstrapData) => {
-    setSessions(data.sessions);
+    setSessions((current) => {
+      if (!showAllSessionsRef.current) return data.sessions;
+      const updates = new Map(data.sessions.map((session) => [session.id, session]));
+      return current.map((session) => updates.get(session.id) || session);
+    });
+    setSessionsTotal(data.sessionsTotal ?? data.sessions.length);
     const activeId = data.activeSessionId || data.sessions.find((session) => session.active)?.id || "";
     setActiveSessionId(activeId);
     setActiveSessionIds(data.activeSessionIds || (activeId ? [activeId] : []));
@@ -229,16 +251,26 @@ export function App() {
     setViewedId(view.session.id);
   }, [setViewedId, tryAutoAllowGate]);
 
+  const loadBootstrap = useCallback(() => {
+    if (bootstrapInFlightRef.current) return bootstrapInFlightRef.current;
+    const request = api.bootstrap().finally(() => {
+      if (bootstrapInFlightRef.current === request) bootstrapInFlightRef.current = null;
+    });
+    bootstrapInFlightRef.current = request;
+    return request;
+  }, []);
+
   const refresh = useCallback(async () => {
     const refreshEpoch = ++refreshEpochRef.current;
     const navigationEpoch = navigationEpochRef.current;
     const wantedId = desiredSessionIdRef.current || viewedSessionIdRef.current || rememberedSessionId();
-    const data = await api.bootstrap();
+    const data = await loadBootstrap();
     if (refreshEpochRef.current !== refreshEpoch || navigationEpochRef.current !== navigationEpoch) return;
     // A local New draft intentionally has no Pi Session yet. Reconnect/bootstrap
     // may refresh global metadata, but must not replace its unsent composer.
     if (localDraftRef.current) {
       applyBootstrapMetadata(data);
+      setError((current) => recoverableRefreshError(current) ? "" : current);
       return;
     }
     const activeId = data.activeSessionId || data.sessions.find((session) => session.active)?.id || "";
@@ -252,6 +284,7 @@ export function App() {
         // draft in between: EventSource readiness also calls refresh after F5.
         applyBootstrapMetadata(data);
         applySessionView(view);
+        setError((current) => recoverableRefreshError(current) ? "" : current);
         return;
       } catch (cause) {
         // Another window may have deleted this Session while this page was refreshing.
@@ -264,7 +297,8 @@ export function App() {
       }
     }
     applyBootstrap(data);
-  }, [applyBootstrap, applyBootstrapMetadata, applySessionView]);
+    setError((current) => recoverableRefreshError(current) ? "" : current);
+  }, [applyBootstrap, applyBootstrapMetadata, applySessionView, loadBootstrap]);
 
   const refreshSidebarSessions = useCallback(async () => {
     if (sessionRefreshInFlightRef.current) {
@@ -273,8 +307,9 @@ export function App() {
     }
     sessionRefreshInFlightRef.current = true;
     try {
-      const result = await api.sessions();
+      const result = await api.sessions(showAllSessionsRef.current);
       setSessions(result.sessions);
+      setSessionsTotal(result.total ?? result.sessions.length);
     } finally {
       sessionRefreshInFlightRef.current = false;
       if (sessionRefreshRequestedRef.current) {
@@ -283,6 +318,22 @@ export function App() {
       }
     }
   }, []);
+
+  const loadAllSessions = useCallback(async () => {
+    if (showAllSessionsRef.current || loadingAllSessions) return;
+    setLoadingAllSessions(true);
+    setError("");
+    try {
+      const result = await api.sessions(true);
+      showAllSessionsRef.current = true;
+      setSessions(result.sessions);
+      setSessionsTotal(result.total ?? result.sessions.length);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLoadingAllSessions(false);
+    }
+  }, [loadingAllSessions]);
 
   const scheduleSidebarRefresh = useCallback(() => {
     if (sessionRefreshTimerRef.current !== null) window.clearTimeout(sessionRefreshTimerRef.current);
@@ -338,8 +389,8 @@ export function App() {
       void refresh().then(() => {
         const id = viewedSessionIdRef.current;
         if (id) void api.markSessionViewed(id).catch(() => undefined);
-      }).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
-  }, [refresh]);
+      }).catch(reportBackgroundRefreshError);
+  }, [refresh, reportBackgroundRefreshError]);
 
   const handlePiEvent = useCallback((rawEvent: Event, source: EventSource) => {
       lastEventFrameAtRef.current = Date.now();
@@ -348,7 +399,7 @@ export function App() {
       sseFloodCountRef.current = 0;
       if (type === "pi_chat_heartbeat") return;
       if (type === "pi_chat_sse_resync" || type === "pi_chat_oversized_event") {
-        void refresh().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+        void refresh().catch(reportBackgroundRefreshError);
         return;
       }
       const eventSessionId = typeof event.piChatSessionId === "string" ? event.piChatSessionId : "";
@@ -435,13 +486,13 @@ export function App() {
         else if (lifecycle === "resources-reloading") setNotice("正在更新配置并重载 Runtime…");
         else if (lifecycle === "idle") {
           setNotice("");
-          void refresh().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+          void refresh().catch(reportBackgroundRefreshError);
         }
       } else if (type === "pi_chat_sessions_changed") {
         if (typeof event.sessionId === "string") viewCacheRef.current.forget(event.sessionId);
         if (event.action === "deleted" && event.sessionId === viewedSessionIdRef.current) {
           viewedSessionIdRef.current = "";
-          void refresh().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+          void refresh().catch(reportBackgroundRefreshError);
         } else {
           scheduleSidebarRefresh();
         }
@@ -508,7 +559,7 @@ export function App() {
           setStopping(false);
         }
       }
-  }, [applySessionView, clearPendingLiveMessage, refresh, scheduleLiveMessage, scheduleSidebarRefresh, tryAutoAllowGate, updateGateMode]);
+  }, [applySessionView, clearPendingLiveMessage, refresh, reportBackgroundRefreshError, scheduleLiveMessage, scheduleSidebarRefresh, tryAutoAllowGate, updateGateMode]);
 
   const handleEventSourceError = useCallback((source: EventSource) => {
       source.close();
@@ -522,13 +573,14 @@ export function App() {
       setError("与 Pi Chat 服务的事件连接已断开，正在重新连接…");
       recoveringConnectionRef.current ||= api.recoverConnection().then(() => {
         recoveringConnectionRef.current = null;
+        setError("");
         setEventSourceGeneration((generation) => generation + 1);
         return refresh();
       }).catch((cause) => {
-        setError(cause instanceof Error ? cause.message : String(cause));
+        reportBackgroundRefreshError(cause);
         recoveringConnectionRef.current = null;
       });
-  }, [refresh]);
+  }, [refresh, reportBackgroundRefreshError]);
 
   const handleOversizedEventSourceFrame = useCallback((source: EventSource) => {
     source.close();
@@ -536,12 +588,12 @@ export function App() {
     sseFloodCountRef.current += 1;
     const delay = Math.min(30_000, 1_000 * 2 ** Math.min(sseFloodCountRef.current - 1, 5));
     if (sseReconnectTimerRef.current !== null) window.clearTimeout(sseReconnectTimerRef.current);
-    void refresh().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+    void refresh().catch(reportBackgroundRefreshError);
     sseReconnectTimerRef.current = window.setTimeout(() => {
       sseReconnectTimerRef.current = null;
       setEventSourceGeneration((generation) => generation + 1);
     }, delay);
-  }, [refresh]);
+  }, [refresh, reportBackgroundRefreshError]);
 
   const eventsUrl = useCallback(() => api.eventsUrl(), []);
   usePiEventSource({
@@ -564,7 +616,7 @@ export function App() {
       if (!shouldReconnectEventSource(event?.type, document.visibilityState, lastEventFrameAtRef.current, Date.now())) return;
       lastEventFrameAtRef.current = Date.now();
       setEventSourceGeneration((generation) => generation + 1);
-      void refresh().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+      void refresh().catch(reportBackgroundRefreshError);
     };
     const watchdog = window.setInterval(() => resume(), 10_000);
     document.addEventListener("visibilitychange", resume);
@@ -578,7 +630,7 @@ export function App() {
       window.removeEventListener("focus", resume);
       window.removeEventListener("online", resume);
     };
-  }, [loading, refresh]);
+  }, [loading, refresh, reportBackgroundRefreshError]);
 
   useEffect(() => () => {
     if (promptReconcileTimerRef.current !== null) window.clearTimeout(promptReconcileTimerRef.current);
@@ -669,24 +721,34 @@ export function App() {
     rememberCurrentScroll();
   };
 
+  const clearConversationNavigationTarget = () => {
+    conversationNavigationTargetRef.current = null;
+  };
+
   const navigateConversation = (direction: "top" | "previous" | "next" | "bottom") => {
     const timeline = scrollRef.current;
     if (!timeline) return;
     if (direction === "top") {
       stickToBottomRef.current = false;
+      conversationNavigationTargetRef.current = 0;
       timeline.scrollTo({ top: 0, behavior: "smooth" });
       return;
     }
     if (direction === "bottom") {
       stickToBottomRef.current = true;
+      conversationNavigationTargetRef.current = timeline.scrollHeight;
       timeline.scrollTo({ top: timeline.scrollHeight, behavior: "smooth" });
       return;
     }
-    const messagesInView = [...timeline.querySelectorAll<HTMLElement>(".message-user")];
-    const target = adjacentUserMessageOffset(messagesInView.map((message) => message.offsetTop), timeline.scrollTop, direction);
+    const timelineTop = timeline.getBoundingClientRect().top;
+    const offsets = [...timeline.querySelectorAll<HTMLElement>(".message-user")]
+      .map((message) => message.getBoundingClientRect().top - timelineTop + timeline.scrollTop);
+    const currentAnchor = conversationNavigationTargetRef.current ?? timeline.scrollTop + 14;
+    const target = adjacentUserMessageOffset(offsets, currentAnchor, direction);
     if (target !== null) {
       stickToBottomRef.current = false;
-      timeline.scrollTo({ top: target - 14, behavior: "smooth" });
+      conversationNavigationTargetRef.current = target;
+      timeline.scrollTo({ top: Math.max(0, target - 14), behavior: "smooth" });
     }
   };
 
@@ -1040,6 +1102,7 @@ export function App() {
     try {
       const result = await api.pickWorkspace();
       if (result.cancelled || !result.data) return;
+      showAllSessionsRef.current = false;
       applyBootstrap(result.data);
       setNotice(`已切换工作目录：${result.workspaceName || result.data.workspaceCwd}`);
       stickToBottomRef.current = true;
@@ -1125,12 +1188,20 @@ export function App() {
       viewCacheRef.current.forget(deletingId);
       setSessionDialog(null);
       if (viewedSessionIdRef.current === deletingId) {
+        // The mutation Bootstrap returns a fresh recent snapshot. Reset the
+        // expanded list so the deleted row cannot survive full-list merging.
+        showAllSessionsRef.current = false;
         applyBootstrap(data);
+      } else if (showAllSessionsRef.current) {
+        setSessions((current) => current.filter((session) => session.id !== deletingId));
+        setSessionsTotal((current) => Math.max(0, current - 1));
+        void refreshSidebarSessions().catch(reportBackgroundRefreshError);
       } else {
         // Do not call full refresh() here: it can block for a long time while
         // another Session is streaming. The delete response already has the
         // updated sidebar list.
         setSessions(data.sessions);
+        setSessionsTotal(data.sessionsTotal ?? data.sessions.length);
       }
       setNotice("对话已删除");
     } catch (cause) {
@@ -1227,6 +1298,8 @@ export function App() {
     <div className="app-shell">
       <SessionSidebar
         sessions={sessions}
+        sessionsTotal={sessionsTotal}
+        loadingAllSessions={loadingAllSessions}
         viewedSessionId={viewedSessionId}
         workspaceCwd={workspaceCwd}
         open={sidebarOpen}
@@ -1245,6 +1318,7 @@ export function App() {
         onCollapse={() => setSidebarOpen(false)}
         onNew={() => void createSession()}
         onRefresh={() => void refreshManually()}
+        onLoadAllSessions={() => void loadAllSessions()}
         onRestart={() => void restartPi()}
         onView={(id) => void viewSession(id)}
         onRename={(session) => setSessionDialog({ mode: "rename", session })}
@@ -1269,7 +1343,7 @@ export function App() {
           onModel={(provider, id) => void changeModel(provider, id)}
           onThinking={(level) => void changeThinking(level)}
         />
-        <div className="timeline" ref={scrollRef} onScroll={onScroll}>
+        <div className="timeline" ref={scrollRef} onScroll={onScroll} onWheel={clearConversationNavigationTarget} onPointerDown={clearConversationNavigationTarget}>
           <div className="timeline-inner">
             {loading ? (
               <div className="center-state"><span className="loader" />正在连接 Pi…</div>
