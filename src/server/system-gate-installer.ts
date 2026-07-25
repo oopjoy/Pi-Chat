@@ -33,7 +33,18 @@ async function ensureGateEnabled(agentDir: string): Promise<void> {
   try { settings = JSON.parse(await readFile(settingsPath, "utf8")) as Record<string, unknown>; } catch {}
   const relativeTarget = `extensions/${PI_CHAT_GATE_TARGET}`;
   const extensions = Array.isArray(settings.extensions) ? settings.extensions.filter((entry): entry is string => typeof entry === "string") : [];
-  settings.extensions = [...extensions.filter((entry) => entry.replace(/^[+\-!]/, "").replace(/\\/g, "/") !== relativeTarget), `+${relativeTarget}`];
+  // Drop stale bare legacy names (file-permission-gate.ts) so only the Pi Chat
+  // owned adapter remains enabled. Two /gate handlers make "放行" look active
+  // while a second strict gate still pops confirmation dialogs.
+  settings.extensions = [
+    ...extensions.filter((entry) => {
+      const normalized = entry.replace(/^[+\-!]/, "").replace(/\\/g, "/");
+      if (normalized === relativeTarget) return false;
+      if (normalized === "file-permission-gate.ts" || normalized === "extensions/file-permission-gate.ts") return false;
+      return true;
+    }),
+    `+${relativeTarget}`,
+  ];
   const temporary = `${settingsPath}.pi-chat-${process.pid}-${Date.now()}.tmp`;
   await writeFile(temporary, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
   await rename(temporary, settingsPath);

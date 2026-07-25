@@ -132,16 +132,10 @@ export const api = {
     body: JSON.stringify({ level, sessionId }),
   }),
   skills: () => request<ResourceResponse<SkillResource>>("/api/resources/skills"),
-  installSkill: (sourcePath: string) => request<ResourceResponse<SkillResource>>("/api/resources/skills", { method: "POST", body: JSON.stringify({ sourcePath }) }),
-  toggleSkill: (id: string, enabled: boolean) => request<ResourceResponse<SkillResource>>("/api/resources/skills", { method: "PATCH", body: JSON.stringify({ id, enabled }) }),
-  removeSkill: (id: string) => request<ResourceResponse<SkillResource>>("/api/resources/skills", { method: "DELETE", body: JSON.stringify({ id }) }),
   extensions: () => request<ResourceResponse<ExtensionResource>>("/api/resources/extensions"),
-  toggleExtension: (id: string, enabled: boolean) => request<ResourceResponse<ExtensionResource>>("/api/resources/extensions", { method: "PATCH", body: JSON.stringify({ id, enabled }) }),
-  removeExtension: (id: string) => request<ResourceResponse<ExtensionResource>>("/api/resources/extensions", { method: "DELETE", body: JSON.stringify({ id }) }),
   packages: () => request<ResourceResponse<PackageResource>>("/api/resources/packages"),
-  installPackage: (source: string) => request<ResourceResponse<PackageResource>>("/api/resources/packages", { method: "POST", body: JSON.stringify({ source }) }),
-  togglePackage: (id: string, enabled: boolean) => request<ResourceResponse<PackageResource>>("/api/resources/packages", { method: "PATCH", body: JSON.stringify({ id, enabled }) }),
-  removePackage: (id: string) => request<ResourceResponse<PackageResource>>("/api/resources/packages", { method: "DELETE", body: JSON.stringify({ id }) }),
+  browseResource: (kind: "skills-root" | "extensions-root" | "packages-root") =>
+    request<{ ok: true; path: string }>("/api/resources/browse", { method: "POST", body: JSON.stringify({ kind }) }),
   respondToExtension: (body: Record<string, unknown>) => request<{ ok: boolean }>("/api/extension-ui/respond", {
     method: "POST",
     body: JSON.stringify(body),

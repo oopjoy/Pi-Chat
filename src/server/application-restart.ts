@@ -144,7 +144,17 @@ export async function rollbackPromotedDist(liveDist: string, previousDist: strin
   await rm(failedDist, { recursive: true, force: true }).catch(() => undefined);
 }
 
-/** Remove abandoned staging / previous / failed trees left by restarts. */
+function processIsAlive(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/** Remove abandoned staging / previous / failed trees left by dead restart processes. */
 export async function cleanupStaleDistArtifacts(projectRoot: string): Promise<number> {
   const root = resolve(projectRoot);
   let removed = 0;
@@ -155,7 +165,11 @@ export async function cleanupStaleDistArtifacts(projectRoot: string): Promise<nu
     return 0;
   }
   for (const name of entries) {
-    if (!name.startsWith(".pi-chat-dist-staging-") && !name.startsWith(".pi-chat-dist-previous-") && !name.startsWith(".pi-chat-dist-failed-")) continue;
+    const match = /^\.pi-chat-dist-(?:staging|previous|failed)-(\d+)(?:-|$)/.exec(name);
+    if (!match) continue;
+    // Another Pi Chat process may be building or promoting this tree right now.
+    // Deleting by prefix alone races concurrent windows and corrupts the build.
+    if (processIsAlive(Number(match[1]))) continue;
     try {
       await rm(join(root, name), { recursive: true, force: true });
       removed += 1;

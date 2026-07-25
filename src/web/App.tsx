@@ -4,7 +4,7 @@ import { api } from "./api";
 import { ChatInput } from "./components/ChatInput";
 import { ChatMessage } from "./components/ChatMessage";
 import { ConversationProcess } from "./components/ConversationProcess";
-import { ExtensionDialog } from "./components/ExtensionDialog";
+import { describeGateRequest, ExtensionDialog } from "./components/ExtensionDialog";
 import { ChevronRightIcon, PiMarkIcon } from "./components/Icons";
 import { ManagementPanel, type ManagementSection } from "./components/ManagementPanel";
 import { PromptQueue } from "./components/PromptQueue";
@@ -73,6 +73,12 @@ export function App() {
   const [eventSourceGeneration, setEventSourceGeneration] = useState(0);
   const [applicationLifecycle, setApplicationLifecycle] = useState<ApplicationLifecycle>("idle");
   const [gateModes, setGateModes] = useState<Record<string, GateMode>>({});
+  const gateModesRef = useRef<Record<string, GateMode>>({});
+  const updateGateMode = useCallback((sessionId: string, mode: GateMode) => {
+    const next = { ...gateModesRef.current, [sessionId]: mode };
+    gateModesRef.current = next;
+    setGateModes(next);
+  }, []);
   const [failedSessionIds, setFailedSessionIds] = useState<string[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
@@ -96,6 +102,9 @@ export function App() {
   const viewCacheRef = useRef(new SessionViewCache());
   const desiredSessionIdRef = useRef("");
   const navigationEpochRef = useRef(0);
+  /** Model/thinking chosen on a cold session or local draft before Runtime starts. */
+  const pendingSessionPrefsRef = useRef(new Map<string, { model?: ModelInfo | null; thinkingLevel?: ThinkingLevel }>());
+  const DRAFT_PREFS_KEY = "__local_draft__";
   const refreshEpochRef = useRef(0);
   const recoveringConnectionRef = useRef<Promise<void> | null>(null);
   const commitLiveMessage = useCallback((message: PiMessage) => setLiveMessage(message), []);
@@ -170,13 +179,31 @@ export function App() {
     });
   }, [applyBootstrapMetadata, setViewedId]);
 
+  const tryAutoAllowGate = useCallback((request: ExtensionUiRequest, sessionId: string): boolean => {
+    const details = gateModesRef.current[sessionId] === "open" ? describeGateRequest(request) : null;
+    if (!details) return false;
+    setExtensionRequest(null);
+    void api.respondToExtension({ id: request.id, value: details.allowValue, sessionId })
+      .then(() => setNotice("已按放行模式自动允许受保护操作"))
+      .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+    return true;
+  }, []);
+
   const applySessionView = useCallback((view: SessionViewData) => {
     localDraftRef.current = false;
     setLocalDraft(false);
     setPromptStarting(false);
     setGateAvailableOverride(typeof view.gateAvailable === "boolean" ? view.gateAvailable : null);
     setViewControl({ controlOwner: view.controlOwner ?? view.session.controlOwner, controlledByThisWindow: view.controlledByThisWindow ?? view.session.controlledByThisWindow });
-    setState(view.state);
+    const nextRuntimeStatus = view.runtimeStatus || (view.isActive ? "active" : "view-only");
+    // Cold views use primary defaults for model/thinking; keep any staged send-time prefs.
+    const staged = nextRuntimeStatus !== "active" ? pendingSessionPrefsRef.current.get(view.session.id) : undefined;
+    if (nextRuntimeStatus === "active") pendingSessionPrefsRef.current.delete(view.session.id);
+    setState({
+      ...view.state,
+      ...(staged?.model !== undefined ? { model: staged.model } : null),
+      ...(staged?.thinkingLevel !== undefined ? { thinkingLevel: staged.thinkingLevel } : null),
+    });
     setMessages(view.messages);
     setPendingUserMessage(null);
     setMessageTotal(view.messageTotal);
@@ -189,14 +216,18 @@ export function App() {
     if (view.commands) setCommands(view.commands);
     setLiveMessage(view.liveMessage || null);
     setToolStatus(view.toolStatus || "");
-    setExtensionRequest(view.pendingExtensionRequest || null);
-    setRuntimeStatus(view.runtimeStatus || (view.isActive ? "active" : "view-only"));
+    // Same open-mode auto-allow path for pending requests restored via view/bootstrap.
+    const pending = view.pendingExtensionRequest || null;
+    if (pending) {
+      if (!tryAutoAllowGate(pending, view.session.id)) setExtensionRequest(pending);
+    } else setExtensionRequest(null);
+    setRuntimeStatus(nextRuntimeStatus);
     // A blank New draft has no persisted user message and intentionally stays
     // out of sidebar history until its first successful prompt.
     if (view.session.messageCount > 0) setSessions((current) => current.some((session) => session.id === view.session.id) ? current.map((session) => session.id === view.session.id ? { ...session, ...view.session } : session) : [...current, view.session]);
     if (view.isActive) setActiveSessionIds((current) => [...new Set([...current, view.session.id])]);
     setViewedId(view.session.id);
-  }, [setViewedId]);
+  }, [setViewedId, tryAutoAllowGate]);
 
   const refresh = useCallback(async () => {
     const refreshEpoch = ++refreshEpochRef.current;
@@ -248,7 +279,7 @@ export function App() {
       sessionRefreshInFlightRef.current = false;
       if (sessionRefreshRequestedRef.current) {
         sessionRefreshRequestedRef.current = false;
-        void refreshSidebarSessions();
+        void refreshSidebarSessions().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
       }
     }
   }, []);
@@ -354,7 +385,9 @@ export function App() {
           if (errorMessage) setError(errorMessage);
           else if (event.aborted === false) {
             setNotice("上下文压缩完成");
-            // The server now reports the compacted context as ready-but-unknown.
+            // Refresh usage/history in the background. Never surface a 65s view
+            // timeout here — compaction often ends while the model turn continues,
+            // and a busy RPC used to paint a false-red error long after success.
             void api.viewSession(eventSessionId).then((view) => {
               if (viewedSessionIdRef.current === eventSessionId) applySessionView(view);
             }).catch(() => undefined);
@@ -427,11 +460,16 @@ export function App() {
         const request = event as unknown as ExtensionUiRequest;
         if (["select", "confirm", "input", "editor"].includes(request.method)) {
           if (eventSessionId) setSessions((current) => current.map((session) => session.id === eventSessionId ? { ...session, pendingConfirmation: true } : session));
-          if (viewingEventSession) setExtensionRequest(request);
+          // UI "放行" can outlive a Pi RPC restart (extension state resets to strict).
+          // Auto-allow Gate confirms so the top-right mode remains authoritative.
+          if (viewingEventSession) {
+            const sessionId = eventSessionId || viewedSessionIdRef.current;
+            if (!sessionId || !tryAutoAllowGate(request, sessionId)) setExtensionRequest(request);
+          }
         }
         else if (request.method === "notify") {
           const mode = gateModeFromNotice(request.message);
-          if (mode && eventSessionId) setGateModes((current) => ({ ...current, [eventSessionId]: mode }));
+          if (mode && eventSessionId) updateGateMode(eventSessionId, mode);
           setNotice(request.message || "Pi 通知");
         }
       } else if (type === "pi_chat_session_control_changed") {
@@ -447,6 +485,14 @@ export function App() {
         setError(String(event.error || "扩展执行失败"));
       } else if (type === "pi_chat_process_recovered") {
         if (eventSessionId) setFailedSessionIds((current) => current.filter((id) => id !== eventSessionId));
+        // Extension in-memory gateMode resets to strict on RPC restart. Re-apply
+        // the UI preference so "放行" does not silently become strict again.
+        if (eventSessionId) {
+          const desired = gateModesRef.current[eventSessionId];
+          if (desired && desired !== "strict") {
+            void api.prompt(`/gate ${desired}`, [], eventSessionId).catch(() => undefined);
+          }
+        }
       } else if (type === "pi_chat_process_error") {
         if (eventSessionId) {
           setFailedSessionIds((current) => [...new Set([...current, eventSessionId])]);
@@ -462,7 +508,7 @@ export function App() {
           setStopping(false);
         }
       }
-  }, [applySessionView, clearPendingLiveMessage, refresh, scheduleLiveMessage, scheduleSidebarRefresh]);
+  }, [applySessionView, clearPendingLiveMessage, refresh, scheduleLiveMessage, scheduleSidebarRefresh, tryAutoAllowGate, updateGateMode]);
 
   const handleEventSourceError = useCallback((source: EventSource) => {
       source.close();
@@ -661,8 +707,13 @@ export function App() {
         if (view.isStreaming) schedulePromptReconcile(sessionId, sessionEventVersionRef.current.get(sessionId) || 0);
       }).catch((cause) => {
         if (viewedSessionIdRef.current !== sessionId) return;
+        // Background reconcile must not paint a red timeout while Pi is still
+        // compacting or running tools. SSE agent_settled will refresh the view.
         if (failedAttempts < 4) schedulePromptReconcile(sessionId, latestVersion, failedAttempts + 1);
-        else setError(cause instanceof Error ? cause.message : String(cause));
+        else {
+          const message = cause instanceof Error ? cause.message : String(cause);
+          if (!/请求超时|RPC 请求超时/.test(message)) setError(message);
+        }
       });
     }, 4_000);
   };
@@ -700,9 +751,12 @@ export function App() {
       }
 
       let targetSessionId = viewedSessionIdRef.current;
+      // Preferences chosen while cold/draft are local until the first send starts a Runtime.
+      const prefsKey = localDraftRef.current ? DRAFT_PREFS_KEY : targetSessionId;
+      const staged = pendingSessionPrefsRef.current.get(prefsKey);
+      const preferredModel = staged?.model !== undefined ? staged.model : state.model;
+      const preferredThinking = staged?.thinkingLevel !== undefined ? staged.thinkingLevel : state.thinkingLevel as ThinkingLevel | undefined;
       if (localDraftRef.current) {
-        const draftModel = state.model;
-        const draftThinking = state.thinkingLevel as ThinkingLevel | undefined;
         setPromptStarting(true);
         setToolStatus("正在启动 Pi 内核…");
         await clearViewedPromiseRef.current;
@@ -713,14 +767,15 @@ export function App() {
         setPendingUserMessage(optimisticMessage);
         setPromptStarting(true);
         setToolStatus("Pi 内核已就绪，正在准备消息…");
-        if (draftModel && (view.state.model?.provider !== draftModel.provider || view.state.model?.id !== draftModel.id)) {
-          const selected = await api.setModel(draftModel.provider, draftModel.id, targetSessionId);
+        if (preferredModel && (view.state.model?.provider !== preferredModel.provider || view.state.model?.id !== preferredModel.id)) {
+          const selected = await api.setModel(preferredModel.provider, preferredModel.id, targetSessionId);
           setState((current) => ({ ...current, model: selected.model }));
         }
-        if (draftThinking && view.state.thinkingLevel !== draftThinking) {
-          const selected = await api.setThinking(draftThinking, targetSessionId);
+        if (preferredThinking && view.state.thinkingLevel !== preferredThinking) {
+          const selected = await api.setThinking(preferredThinking, targetSessionId);
           setState((current) => ({ ...current, thinkingLevel: selected.level }));
         }
+        pendingSessionPrefsRef.current.delete(DRAFT_PREFS_KEY);
       } else if (runtimeStatus !== "active") {
         setPromptStarting(true);
         setToolStatus("正在启动 Pi 内核…");
@@ -731,6 +786,16 @@ export function App() {
         setPendingUserMessage(optimisticMessage);
         setPromptStarting(true);
         setToolStatus("Pi 内核已就绪，正在准备消息…");
+        // Re-apply any model/thinking chosen while the conversation was view-only.
+        if (preferredModel && (view.state.model?.provider !== preferredModel.provider || view.state.model?.id !== preferredModel.id)) {
+          const selected = await api.setModel(preferredModel.provider, preferredModel.id, targetSessionId);
+          setState((current) => ({ ...current, model: selected.model }));
+        }
+        if (preferredThinking && view.state.thinkingLevel !== preferredThinking) {
+          const selected = await api.setThinking(preferredThinking, targetSessionId);
+          setState((current) => ({ ...current, thinkingLevel: selected.level }));
+        }
+        pendingSessionPrefsRef.current.delete(targetSessionId);
       } else if (!alreadyStreaming) {
         setPromptStarting(true);
         setToolStatus("正在向 Pi 提交消息…");
@@ -744,7 +809,7 @@ export function App() {
         setToolStatus(alreadyStreaming ? previousToolStatus : "");
         if (typeof result.isStreaming === "boolean") setState((current) => ({ ...current, isStreaming: result.isStreaming as boolean }));
         const gateMode = result.command === "gate" ? gateModeFromCommand(message) : null;
-        if (gateMode && targetSessionId) setGateModes((current) => ({ ...current, [targetSessionId]: gateMode }));
+        if (gateMode && targetSessionId) updateGateMode(targetSessionId, gateMode);
         setNotice(extensionExecutionNotice(message, result.command || "extension", result.description ? [...commands, { name: result.command || "extension", description: result.description, source: "extension" }] : commands));
       } else if (result.queued) {
         setPendingUserMessage(null);
@@ -757,8 +822,13 @@ export function App() {
         const settledBeforeAcknowledgement = eventVersionAfterPrompt > eventVersionBeforePrompt && (terminalEvent === "agent_settled" || terminalEvent === "pi_chat_process_error");
         if (settledBeforeAcknowledgement) {
           setPendingUserMessage(null);
-          const view = await api.viewSession(targetSessionId);
-          if (viewedSessionIdRef.current === targetSessionId) applySessionView(view);
+          try {
+            const view = await api.viewSession(targetSessionId);
+            if (viewedSessionIdRef.current === targetSessionId) applySessionView(view);
+          } catch {
+            // History already includes the optimistic user turn; a busy view RPC
+            // must not turn a completed prompt into a red timeout banner.
+          }
         } else {
           setMessages((current) => [...current, optimisticMessage || userMessage(message, images)]);
           setPendingUserMessage(null);
@@ -784,14 +854,24 @@ export function App() {
     stoppingRef.current = true;
     setStopping(true);
     setError("");
+    const sessionId = viewedSessionIdRef.current;
     try {
-      const result = await api.abort(viewedSessionId);
+      const result = await api.abort(sessionId);
       setState((current) => ({ ...current, isStreaming: result.isStreaming }));
       setQueuePaused(result.queuePaused);
       if (!result.isStreaming) {
+        setPromptStarting(false);
         setToolStatus("");
         setLiveMessage(null);
-        await refresh();
+        // Never await full bootstrap/refresh here: while the worker is still
+        // draining after abort, get_messages/bootstrap can hang for the full
+        // API timeout and leave the UI stuck on "停止中…".
+        scheduleSidebarRefresh();
+        if (sessionId) {
+          void api.viewSession(sessionId).then((view) => {
+            if (viewedSessionIdRef.current === sessionId) applySessionView(view);
+          }).catch(() => undefined);
+        }
       }
       setNotice(result.queuePaused ? "已停止；队列保持暂停，可撤销或继续" : "已停止生成");
     } catch (cause) {
@@ -855,6 +935,11 @@ export function App() {
     setLocalDraft(true);
     setViewedId("");
     setViewControl({});
+    // Carry over the currently displayed model/thinking as the draft defaults.
+    pendingSessionPrefsRef.current.set(DRAFT_PREFS_KEY, {
+      model: state.model,
+      thinkingLevel: state.thinkingLevel as ThinkingLevel | undefined,
+    });
     setState({ ...EMPTY_STATE, model: state.model, thinkingLevel: state.thinkingLevel });
     setMessages([]);
     setPendingUserMessage(null);
@@ -883,20 +968,35 @@ export function App() {
     const view = await api.activateSession(viewedSessionId);
     viewCacheRef.current.forget(view.session.id);
     applySessionView(view);
+    // Fresh Secondary workers start Gate in strict; re-apply the UI selection.
+    const desired = gateModesRef.current[view.session.id];
+    if (desired && desired !== "strict") {
+      void api.prompt(`/gate ${desired}`, [], view.session.id).catch(() => undefined);
+    }
+  };
+
+  const stageSessionPref = (patch: { model?: ModelInfo | null; thinkingLevel?: ThinkingLevel }) => {
+    const key = localDraftRef.current ? DRAFT_PREFS_KEY : viewedSessionId;
+    if (!key) return;
+    const current = pendingSessionPrefsRef.current.get(key) || {};
+    pendingSessionPrefsRef.current.set(key, { ...current, ...patch });
   };
 
   const changeModel = async (provider: string, modelId: string) => {
     if (!provider || !modelId || settingsBusy) return;
-    if (localDraftRef.current) {
-      const model = models.find((candidate) => candidate.provider === provider && candidate.id === modelId);
-      if (model) setState((current) => ({ ...current, model }));
-      setNotice(`已为新对话选择 ${model?.name || modelId}`);
+    const model = models.find((candidate) => candidate.provider === provider && candidate.id === modelId);
+    // Cold history and local New drafts only stage preferences until the first send.
+    if (localDraftRef.current || runtimeStatus !== "active") {
+      if (model) {
+        stageSessionPref({ model });
+        setState((current) => ({ ...current, model }));
+      }
+      setNotice(`已选择 ${model?.name || modelId}，发送时生效`);
       return;
     }
     setSettingsBusy(true);
     setError("");
     try {
-      await ensureRuntimeActive();
       const result = await api.setModel(provider, modelId, viewedSessionId);
       setState((current) => ({ ...current, model: result.model }));
       setNotice(result.pending ? `已选择 ${result.model?.name || modelId}，下一轮对话生效` : `已切换到 ${result.model?.name || modelId}`);
@@ -909,15 +1009,15 @@ export function App() {
 
   const changeThinking = async (level: ThinkingLevel) => {
     if (settingsBusy) return;
-    if (localDraftRef.current) {
+    if (localDraftRef.current || runtimeStatus !== "active") {
+      stageSessionPref({ thinkingLevel: level });
       setState((current) => ({ ...current, thinkingLevel: level }));
-      setNotice(`已为新对话选择 ${level} 思考强度`);
+      setNotice(`已选择 ${level} 思考强度，发送时生效`);
       return;
     }
     setSettingsBusy(true);
     setError("");
     try {
-      await ensureRuntimeActive();
       const result = await api.setThinking(level, viewedSessionId);
       setState((current) => ({ ...current, thinkingLevel: result.level }));
       setNotice(result.pending ? `已选择 ${result.level}，下一轮对话生效` : `思考强度已切换为 ${result.level}`);
@@ -1022,9 +1122,16 @@ export function App() {
     try {
       const data = await api.deleteSession(deletingId);
       scrollMemoryRef.current.forget(deletingId);
+      viewCacheRef.current.forget(deletingId);
       setSessionDialog(null);
-      if (viewedSessionIdRef.current === deletingId) applyBootstrap(data);
-      else await refresh();
+      if (viewedSessionIdRef.current === deletingId) {
+        applyBootstrap(data);
+      } else {
+        // Do not call full refresh() here: it can block for a long time while
+        // another Session is streaming. The delete response already has the
+        // updated sidebar list.
+        setSessions(data.sessions);
+      }
       setNotice("对话已删除");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -1036,12 +1143,12 @@ export function App() {
   const changeGate = async (mode: GateMode) => {
     const sessionId = viewedSessionIdRef.current;
     if (!sessionId) return;
-    const previous = gateModes[sessionId] || "strict";
-    setGateModes((current) => ({ ...current, [sessionId]: mode }));
+    const previous = gateModesRef.current[sessionId] || "strict";
+    updateGateMode(sessionId, mode);
     try {
       await send(`/gate ${mode}`, []);
     } catch {
-      setGateModes((current) => ({ ...current, [sessionId]: previous }));
+      updateGateMode(sessionId, previous);
     }
   };
 

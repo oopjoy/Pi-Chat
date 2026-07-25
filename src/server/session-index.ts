@@ -4,7 +4,7 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { extname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
-import type { PiMessage, SessionSummary } from "../shared/types.js";
+import type { PiMessage, SessionSummary, ThinkingLevel } from "../shared/types.js";
 import { loadSessionCache, saveSessionCache, type SessionCacheEntry } from "./session-index-cache.js";
 
 interface SessionHeader {
@@ -20,6 +20,9 @@ interface SessionEntry {
   parentId?: string | null;
   timestamp?: string | number;
   name?: string;
+  provider?: string;
+  modelId?: string;
+  thinkingLevel?: ThinkingLevel;
   message?: PiMessage;
 }
 
@@ -95,18 +98,37 @@ const usageNumber = (value: unknown): number => typeof value === "number" && Num
  * every successful assistant turn; the context occupancy is the final turn's
  * input + cache reads/writes, which is what the next prompt would resend.
  */
+export interface SessionSettingsSnapshot {
+  provider?: string;
+  modelId?: string;
+  thinkingLevel?: ThinkingLevel;
+}
+
 export interface SessionFileSnapshot {
   messages: PiMessage[];
   usage: SessionUsageSnapshot;
+  /** Last model/thinking selections recorded by Pi on the active JSONL branch. */
+  settings: SessionSettingsSnapshot;
 }
 
-/** Parse the active JSONL branch once for both conversation messages and usage. */
+/** Parse the active JSONL branch once for messages, usage, and last-used settings. */
 export async function readSessionSnapshot(path: string): Promise<SessionFileSnapshot> {
   const branch = await readSessionBranch(path);
   const messages: PiMessage[] = [];
   const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
   let context: SessionUsageSnapshot["context"] = null;
+  let lastAssistantModel: { provider?: string; modelId?: string } = {};
+  const settings: SessionSettingsSnapshot = {};
   for (const entry of branch) {
+    if (entry.type === "model_change" && typeof entry.provider === "string" && typeof entry.modelId === "string") {
+      settings.provider = entry.provider;
+      settings.modelId = entry.modelId;
+      continue;
+    }
+    if (entry.type === "thinking_level_change" && typeof entry.thinkingLevel === "string") {
+      settings.thinkingLevel = entry.thinkingLevel;
+      continue;
+    }
     if (entry.type !== "message" || !entry.message) continue;
     const timestamp = typeof entry.message.timestamp === "number"
       ? entry.message.timestamp
@@ -118,6 +140,8 @@ export async function readSessionSnapshot(path: string): Promise<SessionFileSnap
     messages.push({ ...entry.message, ...(Number.isFinite(timestamp) ? { timestamp } : {}) });
     const message = entry.message as unknown as Record<string, unknown>;
     if (message.role !== "assistant" || message.stopReason === "error") continue;
+    if (typeof message.provider === "string") lastAssistantModel.provider = message.provider;
+    if (typeof message.model === "string") lastAssistantModel.modelId = message.model;
     const usage = message.usage;
     if (!usage || typeof usage !== "object") continue;
     const record = usage as Record<string, unknown>;
@@ -137,7 +161,11 @@ export async function readSessionSnapshot(path: string): Promise<SessionFileSnap
     };
   }
   tokens.total = tokens.input + tokens.output + tokens.cacheRead + tokens.cacheWrite;
-  return { messages, usage: { tokens, context } };
+  // Older Pi session files may omit model_change; the last successful reply
+  // still carries the model that actually produced it.
+  if (!settings.provider) settings.provider = context?.provider || lastAssistantModel.provider;
+  if (!settings.modelId) settings.modelId = context?.model || lastAssistantModel.modelId;
+  return { messages, usage: { tokens, context }, settings };
 }
 
 export async function readSessionMessages(path: string): Promise<PiMessage[]> {
@@ -149,10 +177,12 @@ export async function readSessionUsage(path: string): Promise<SessionUsageSnapsh
 }
 
 function isSubagentSession(path: string, name: string): boolean {
-  // Pi stores child runs beneath the parent session directory and gives them a
-  // generated `subagent-*` session name. They are process details, not user
-  // conversations, so the main sidebar deliberately excludes them.
-  return /(?:^|[\\/])run-\d+(?:[\\/]|$)/i.test(path) && /^subagent-/i.test(name);
+  // Pi has used both nested run-N/session.jsonl children and newer top-level
+  // generated names such as subagent-planner-40b9af6d-1. They are process
+  // details, not user conversations, so the main sidebar excludes both forms.
+  const nestedChild = /(?:^|[\\/])run-\d+(?:[\\/]|$)/i.test(path) && /^subagent-/i.test(name);
+  const generatedSubagentName = /^subagent-[a-z0-9_-]+-[a-f0-9]{6,}-\d+$/i.test(name);
+  return nestedChild || generatedSubagentName;
 }
 
 async function parseSession(path: string, modifiedAt: number): Promise<Omit<SessionSummary, "active"> | null> {

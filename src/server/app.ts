@@ -6,14 +6,14 @@ import { basename, extname, join, normalize, resolve } from "node:path";
 import { normalizeStreamingAssistantMessage } from "../shared/streaming-assistant.js";
 import type { ApplicationLifecycle, BootstrapData, ExtensionUiRequest, ModelInfo, PiMessage, PiState, PromptImage, QueuedPrompt, SessionStats, SessionSummary, SessionViewData, SlashCommand, ThinkingLevel } from "../shared/types.js";
 import { ApplicationBusyError, ApplicationLifecycleConflictError, ApplicationLifecycleCoordinator, lifecycleMessage } from "./application-lifecycle.js";
-import { pickLocalFiles, pickWorkspaceFolder, readClipboardFiles } from "./file-picker.js";
+import { pickLocalFiles, pickWorkspaceFolder, readClipboardFiles, revealInExplorer } from "./file-picker.js";
 import { type FileSnapshot, restoreSnapshots, snapshotFile } from "./file-transaction.js";
 import { bodyJson, HttpRequestError, json, methodNotAllowed, MIME_TYPES, requestClientId, SECURITY_HEADERS } from "./http-transport.js";
 import { ModelManager } from "./model-manager.js";
 import { ResourceManager } from "./resource-manager.js";
 import { PiRpcClient, rpcData } from "./rpc-client.js";
 import { asCommands, asMessages, asModels, asSessionStats, asState, messageWindow, promptImages, RECENT_TURN_WINDOW_SIZE } from "./pi-data.js";
-import { idForPath, SessionIndex, type SessionUsageSnapshot } from "./session-index.js";
+import { idForPath, readSessionMessages, SessionIndex, type SessionSettingsSnapshot, type SessionUsageSnapshot } from "./session-index.js";
 import { RuntimeCapacityError, RuntimePool, type PendingTurnSettings, type SecondaryRuntime } from "./runtime-pool.js";
 import { SessionControl, SessionControlConflictError } from "./session-control.js";
 import { PromptScheduler, PROMPT_PREPARE_TIMEOUT_MS } from "./prompt-scheduler.js";
@@ -104,6 +104,8 @@ export class PiChatApp {
   private readonly lifecycleCoordinator: ApplicationLifecycleCoordinator;
   /** A compaction changes the prompt structure; wait for a later completed turn before reporting occupancy again. */
   private readonly modelContextWindows = new Map<string, number>();
+  /** Current model catalogue, retained so cold JSONL settings get a display name without waking Pi. */
+  private readonly knownModels = new Map<string, ModelInfo>();
   private readonly contextUsagePendingRefresh = new Set<string>();
   private readonly contextUsageRefreshTurn = new Set<string>();
 
@@ -155,9 +157,11 @@ export class PiChatApp {
         this.broadcast({ type: "pi_chat_sessions_changed", action: "created", sessionId });
       },
       onSecondaryPromptAccepted: (runtime) => {
-        runtime.draftSession = undefined;
-        runtime.draftSessionPath = undefined;
-        runtime.draftOwnerClientId = undefined;
+        // Keep draftSession until agent_settled confirms JSONL has the user turn.
+        // Mark prompted so sessionSummaries can inject a sidebar row immediately —
+        // SessionIndex only lists files after at least one message is on disk, which
+        // for long answers used to mean "only after the whole reply finished".
+        runtime.prompted = true;
         this.broadcast({ type: "pi_chat_sessions_changed", action: "created", sessionId: runtime.id });
       },
     });
@@ -613,17 +617,45 @@ export class PiChatApp {
     await this.scheduler.dispatchPrimaryNext();
   }
 
-  private sessionSummaries(sessions: BootstrapData["sessions"], _state: PiState, clientId = ""): BootstrapData["sessions"] {
-    // Drafts are intentionally absent: the sidebar contains only conversations
-    // with at least one persisted user message.
-    return sessions.map((session) => ({
+  private sessionSummaries(sessions: BootstrapData["sessions"], clientId = ""): BootstrapData["sessions"] {
+    // Empty drafts stay out of the sidebar. Prompted drafts that SessionIndex has
+    // not yet scanned must still appear as soon as the first send is accepted.
+    const listed = sessions.map((session) => ({
       ...session,
       writable: this.activeSessionIds().includes(session.id),
       running: (this.running && session.id === this.activeSessionId) || this.runtimePool.get(session.id)?.running === true,
       queued: session.id === this.activeSessionId ? this.promptQueue.length > 0 : (this.runtimePool.get(session.id)?.promptQueue.length || 0) > 0,
       pendingConfirmation: Boolean(this.pendingRequestForSession(session.id)),
       ...this.controlState(session.id, clientId),
-    })).sort((left, right) => right.updatedAt - left.updatedAt);
+    }));
+    const known = new Set(listed.map((session) => session.id));
+    for (const runtime of this.runtimePool.runtimes.values()) {
+      if (known.has(runtime.id)) continue;
+      if (!runtime.prompted && !runtime.running && !runtime.dispatching && !runtime.liveMessage) continue;
+      const base = runtime.draftSession || {
+        id: runtime.id,
+        sessionId: runtime.id,
+        name: "新会话",
+        preview: "新会话",
+        cwd: this.currentCwd,
+        updatedAt: runtime.lastUsedAt,
+        messageCount: 1,
+        active: true,
+      };
+      listed.push({
+        ...base,
+        messageCount: Math.max(base.messageCount || 0, 1),
+        updatedAt: Math.max(base.updatedAt || 0, runtime.lastUsedAt),
+        active: true,
+        writable: true,
+        running: runtime.running || runtime.dispatching || Boolean(runtime.liveMessage),
+        queued: runtime.promptQueue.length > 0,
+        pendingConfirmation: Boolean(this.pendingRequestForSession(runtime.id)),
+        ...this.controlState(runtime.id, clientId),
+      });
+      known.add(runtime.id);
+    }
+    return listed.sort((left, right) => right.updatedAt - left.updatedAt);
   }
 
   private async reloadRpc(knownState?: PiState): Promise<void> {
@@ -707,17 +739,18 @@ export class PiChatApp {
   private async deleteSession(id: string): Promise<BootstrapData> {
     await this.options.sessions.list(undefined, this.currentCwd);
     const isPrimary = id === this.activeSessionId;
-    const state = isPrimary ? asState(await this.options.rpc.send({ type: "get_state" })) : null;
-    // Empty New sessions stay out of the sidebar and SessionIndex. The runtime
-    // still owns the authoritative draft path if cleanup is requested directly.
+    const state = isPrimary ? asState(await this.options.rpc.send({ type: "get_state" }, 12_000)) : null;
+    // Prefer the live worker path. A brand-new Session may still be absent from
+    // SessionIndex when the user deletes it from the sidebar or current view.
     const runtime = this.runtimePool.get(id);
-    const path = isPrimary ? state?.sessionFile : this.options.sessions.pathForId(id) || runtime?.draftSessionPath;
-    if (!isPrimary && !path) throw new Error("会话不存在");
+    const path = isPrimary
+      ? state?.sessionFile
+      : runtime?.sessionPath || runtime?.draftSessionPath || this.options.sessions.pathForId(id);
+    if (!isPrimary && !path && !runtime) throw new Error("会话不存在");
     if (isPrimary) {
       if (this.running || this.promptQueue.length || this.pendingExtensionRequest) throw new Error("请先停止当前生成、处理权限确认并清空队列，再删除此会话");
-      const result = rpcData<{ cancelled: boolean }>(await this.options.rpc.send({ type: "new_session" }));
+      const result = rpcData<{ cancelled: boolean }>(await this.options.rpc.send({ type: "new_session" }, 30_000));
       if (result.cancelled) throw new Error("扩展取消了新建会话，无法删除当前会话");
-      await this.bootstrap();
     } else {
       if (runtime?.running || runtime?.promptQueue.length || runtime?.extensionUiPending) throw new Error("请先停止该会话的生成、处理权限确认并清空队列，再删除对话");
       if (runtime) {
@@ -737,9 +770,21 @@ export class PiChatApp {
     const messages = snapshot?.messages ?? await this.options.sessions.messagesForId(id);
     if (!messages) return null;
     const windowed = messageWindow(messages, turnLimit);
+    const settings = snapshot?.settings || {};
     return {
       session: { ...session, active: false, writable: false, running: false, queued: false },
-      state: { ...this.lastPrimaryState, isStreaming: false, isCompacting: false },
+      // Never borrow Primary's active settings for history. Pi persists these
+      // change events in each JSONL, so reading them keeps cold views truthful.
+      state: {
+        model: this.modelFromSessionSettings(settings),
+        thinkingLevel: settings.thinkingLevel,
+        isStreaming: false,
+        isCompacting: false,
+        sessionFile: undefined,
+        sessionId: session.sessionId,
+        sessionName: session.name,
+        messageCount: session.messageCount,
+      },
       messages: windowed.messages,
       messageTotal: windowed.total,
       turnTotal: windowed.turns,
@@ -764,17 +809,37 @@ export class PiChatApp {
       const knownSession = this.options.sessions.summaryForId?.(id);
       if (knownSession) return this.coldSessionView(id, knownSession, turnLimit, clientId);
     }
+    // Browser /api/sessions/:id/view has a 65s client budget. Several default 30s
+    // Pi RPC calls used to stack past that during compaction or long tool turns,
+    // producing a late red "请求超时（65 秒）" even after compaction finished.
+    const SHORT_RPC_MS = 4_000;
+    const MESSAGES_RPC_MS = 6_000;
     const primaryAvailable = this.applicationLifecycle === "idle" && !this.primaryFailed && this.options.rpc.isRunning?.() !== false;
-    const state = primaryAvailable
-      ? asState(await this.options.rpc.send({ type: "get_state" }))
-      : { model: null, isStreaming: false } satisfies PiState;
+    let state: PiState = this.lastPrimaryState;
     if (primaryAvailable) {
-      this.lastPrimaryState = state;
-      this.running = state.isStreaming;
-      this.activeSessionId = state.sessionFile ? idForPath(state.sessionFile) : state.sessionId || this.activeSessionId;
-      this.activeSessionPath = state.sessionFile || this.activeSessionPath;
+      // Skip get_state only when we already know which Primary Session is live.
+      // A view that arrives before bootstrap (or after a restart) still needs one
+      // short probe so activeSessionId/path are bound; otherwise we mis-route to cold.
+      const canSkipStateProbe = this.running && Boolean(this.activeSessionId) && Boolean(this.activeSessionPath);
+      if (canSkipStateProbe) {
+        state = { ...this.lastPrimaryState, isStreaming: true };
+      } else {
+        try {
+          state = asState(await this.options.rpc.send({ type: "get_state" }, SHORT_RPC_MS));
+          this.lastPrimaryState = state;
+          this.running = state.isStreaming;
+          this.activeSessionId = state.sessionFile ? idForPath(state.sessionFile) : state.sessionId || this.activeSessionId;
+          this.activeSessionPath = state.sessionFile || this.activeSessionPath;
+        } catch {
+          state = this.running
+            ? { ...this.lastPrimaryState, isStreaming: true }
+            : this.lastPrimaryState;
+        }
+      }
+    } else {
+      state = { model: null, isStreaming: false };
     }
-    const sessions = this.sessionSummaries(await this.options.sessions.list(this.activeSessionPath, this.currentCwd), state, clientId);
+    const sessions = this.sessionSummaries(await this.options.sessions.list(this.activeSessionPath, this.currentCwd), clientId);
     const secondaryRuntime = knownRuntime;
     // A fresh New view is valid even though it is deliberately absent from the
     // sidebar until its first user message is persisted.
@@ -786,21 +851,65 @@ export class PiChatApp {
       : secondaryReadable;
     if (runtime) {
       if (id !== this.activeSessionId) this.runtimePool.touch(runtime as SecondaryRuntime);
-      const [stateResponse, statsResponse, commandsResponse] = await Promise.all([
-        runtime.rpc.send({ type: "get_state" }),
-        runtime.rpc.send({ type: "get_session_stats" }),
-        runtime.rpc.send({ type: "get_commands" }).catch(() => null),
-      ]);
-      // A secondary RPC only knows changes made through that process. Once it is idle,
-      // the JSONL is the shared source of truth: another Pi window may have continued
-      // the same Session after this runtime was opened. Keep RPC messages only while
-      // streaming so the UI can show the not-yet-persisted live answer.
-      const persistedMessages = runtime.running ? null : await this.options.sessions.messagesForId(id);
-      const messages = persistedMessages || asMessages(await runtime.rpc.send({ type: "get_messages" }));
+      const busy = runtime.running || Boolean(runtime.liveMessage);
+      // Prefer JSONL first so a busy worker never blocks the whole view path.
+      let messages: PiMessage[] | null = typeof this.options.sessions.messagesForId === "function"
+        ? await this.options.sessions.messagesForId(id)
+        : null;
+      if (!messages) {
+        const path = (typeof this.options.sessions.pathForId === "function" ? this.options.sessions.pathForId(id) : null)
+          || (runtime as SecondaryRuntime).sessionPath
+          || (runtime as SecondaryRuntime).draftSessionPath;
+        if (path) {
+          try { messages = await readSessionMessages(path); } catch { messages = null; }
+        }
+      }
+      let stateResponse: Record<string, unknown> | null = null;
+      let statsResponse: Record<string, unknown> | null = null;
+      let commandsResponse: Record<string, unknown> | null = null;
+      try {
+        const probes = await Promise.all([
+          runtime.rpc.send({ type: "get_state" }, SHORT_RPC_MS).catch(() => null),
+          // Stats are nice-to-have while streaming; offline JSONL usage is enough.
+          busy
+            ? Promise.resolve(null)
+            : runtime.rpc.send({ type: "get_session_stats" }, SHORT_RPC_MS).catch(() => null),
+          runtime.rpc.send({ type: "get_commands" }, SHORT_RPC_MS).catch(() => null),
+        ]);
+        stateResponse = probes[0];
+        statsResponse = probes[1];
+        commandsResponse = probes[2];
+      } catch {
+        // Disk history + last known liveMessage still form a usable view.
+      }
+      const liveState = stateResponse ? asState(stateResponse) : {
+        ...(id === this.activeSessionId ? this.lastPrimaryState : { model: null }),
+        isStreaming: busy,
+      } satisfies PiState;
+      if (stateResponse && id === this.activeSessionId) {
+        this.lastPrimaryState = liveState;
+        this.running = liveState.isStreaming;
+      } else if (stateResponse && secondaryRuntime) {
+        secondaryRuntime.running = liveState.isStreaming;
+      }
+      // Only hit get_messages when disk is empty (brand-new draft) or the worker
+      // is idle and might have a slightly newer branch. Never wait long while busy.
+      if (!messages || (!busy && !liveState.isStreaming)) {
+        try {
+          const rpcMessages = asMessages(await runtime.rpc.send({ type: "get_messages" }, busy ? 3_000 : MESSAGES_RPC_MS));
+          if (!messages || rpcMessages.length >= messages.length) messages = rpcMessages;
+        } catch (error) {
+          if (!messages) throw error;
+        }
+      }
+      if (!messages) throw new Error("无法读取会话消息");
       const windowed = messageWindow(messages, turnLimit);
+      const stats = statsResponse
+        ? await this.statsForSession(id, statsResponse)
+        : await this.offlineStatsForId(id);
       return {
         session,
-        state: asState(stateResponse),
+        state: liveState,
         messages: windowed.messages,
         messageTotal: windowed.total,
         turnTotal: windowed.turns,
@@ -808,10 +917,10 @@ export class PiChatApp {
         messagesTruncated: windowed.truncated,
         isActive: true,
         runtimeStatus: "active",
-        isStreaming: runtime.running,
+        isStreaming: runtime.running || liveState.isStreaming,
         liveMessage: runtime.liveMessage,
         toolStatus: runtime.toolStatus,
-        stats: await this.statsForSession(id, statsResponse),
+        stats,
         queue: id === this.activeSessionId ? this.publicQueue() : this.publicQueue((runtime as SecondaryRuntime).promptQueue),
         queuePaused: id === this.activeSessionId ? this.queuePaused : (runtime as SecondaryRuntime).queuePaused,
         commands: commandsResponse ? [...BUILTIN_COMMANDS, ...asCommands(commandsResponse)] : undefined,
@@ -842,8 +951,18 @@ export class PiChatApp {
 
   private rememberModelContextWindows(models: ModelInfo[]): void {
     for (const model of models) {
-      if (typeof model.contextWindow === "number" && model.contextWindow > 0) this.modelContextWindows.set(`${model.provider}\u0000${model.id}`, model.contextWindow);
+      const key = `${model.provider}\u0000${model.id}`;
+      this.knownModels.set(key, model);
+      if (typeof model.contextWindow === "number" && model.contextWindow > 0) this.modelContextWindows.set(key, model.contextWindow);
     }
+  }
+
+  private modelFromSessionSettings(settings: SessionSettingsSnapshot): ModelInfo | null {
+    if (!settings.provider || !settings.modelId) return null;
+    return this.knownModels.get(`${settings.provider}\u0000${settings.modelId}`)
+      // Keep the actual persisted identifier visible if a model was later removed
+      // from the current catalogue; this is still more truthful than Primary's model.
+      || { provider: settings.provider, id: settings.modelId, name: settings.modelId };
   }
 
   private async offlineStatsForId(id: string, knownUsage?: SessionUsageSnapshot): Promise<SessionStats | undefined> {
@@ -892,22 +1011,36 @@ export class PiChatApp {
       throw new ApplicationLifecycleConflictError(this.applicationLifecycle, this.lifecycleMessage());
     }
     await this.ensurePrimaryRuntime();
-    const [stateResponse, messagesResponse, modelsResponse, commandsResponse, statsResponse] = await Promise.all([
-      this.options.rpc.send({ type: "get_state" }),
-      this.options.rpc.send({ type: "get_messages" }),
-      this.options.rpc.send({ type: "get_available_models" }),
-      this.options.rpc.send({ type: "get_commands" }),
-      this.options.rpc.send({ type: "get_session_stats" }),
-    ]);
+    // Resolve state first so message history can come from the session JSONL.
+    // Parallel get_messages against a streaming Primary RPC is the main source of
+    // the browser's 65s refresh timeout while a long answer is still generating.
+    const stateResponse = await this.options.rpc.send({ type: "get_state" }, 12_000);
     const state = asState(stateResponse);
     this.lastPrimaryState = state;
-    const availableModels = this.options.modelManager ? await this.options.modelManager.annotate(asModels(modelsResponse)) : asModels(modelsResponse);
-    this.rememberModelContextWindows(availableModels);
-    const windowedMessages = messageWindow(asMessages(messagesResponse));
     this.running = state.isStreaming;
     this.activeSessionId = state.sessionFile ? idForPath(state.sessionFile) : state.sessionId || "";
     this.activeSessionPath = state.sessionFile;
-    const sessions = this.sessionSummaries(await this.options.sessions.list(state.sessionFile, this.currentCwd), state, clientId);
+    const [modelsResponse, commandsResponse, statsResponse, diskMessages] = await Promise.all([
+      this.options.rpc.send({ type: "get_available_models" }, 12_000),
+      this.options.rpc.send({ type: "get_commands" }, 12_000),
+      this.options.rpc.send({ type: "get_session_stats" }, 12_000),
+      state.sessionFile
+        ? readSessionMessages(state.sessionFile).catch(() => null)
+        : Promise.resolve(null),
+    ]);
+    let messages = diskMessages;
+    if (!messages || state.isStreaming) {
+      try {
+        const rpcMessages = asMessages(await this.options.rpc.send({ type: "get_messages" }, state.isStreaming ? 8_000 : 12_000));
+        if (!messages || rpcMessages.length >= messages.length) messages = rpcMessages;
+      } catch (error) {
+        if (!messages) throw error;
+      }
+    }
+    const availableModels = this.options.modelManager ? await this.options.modelManager.annotate(asModels(modelsResponse)) : asModels(modelsResponse);
+    this.rememberModelContextWindows(availableModels);
+    const windowedMessages = messageWindow(messages || []);
+    const sessions = this.sessionSummaries(await this.options.sessions.list(state.sessionFile, this.currentCwd), clientId);
     return {
       state,
       messages: windowedMessages.messages,
@@ -1105,7 +1238,9 @@ export class PiChatApp {
         const state = asState(await targetRpc.send({ type: "get_state" }));
         if (secondaryRuntime) {
           secondaryRuntime.running = state.isStreaming;
+          secondaryRuntime.prompted = true;
           await this.finalizePersistedDraft(secondaryRuntime);
+          this.broadcast({ type: "pi_chat_sessions_changed", action: "created", sessionId: secondaryRuntime.id });
         } else this.running = state.isStreaming;
         json(response, 202, { accepted: true, queued: false, extension: true, command: extensionCommand.name, description: extensionCommand.description, isStreaming: state.isStreaming });
         return;
@@ -1250,20 +1385,34 @@ export class PiChatApp {
         this.runtimePool.touch(runtime);
         if (runtime.failed || runtime.rpc.isRunning?.() === false) return json(response, 200, { ok: true, isStreaming: false, queuePaused: runtime.queuePaused });
         if (runtime.promptQueue.length) runtime.queuePaused = true;
-        await runtime.rpc.send({ type: "abort" }, 10_000);
-        const state = asState(await runtime.rpc.send({ type: "get_state" }));
-        runtime.running = state.isStreaming;
+        await runtime.rpc.send({ type: "abort" }, 5_000);
+        // Abort itself is enough; a long get_state after abort was a common freeze.
+        // Prefer a short probe, then fall back to "stopped" and let agent_settled finish.
+        let isStreaming = false;
+        try {
+          const state = asState(await runtime.rpc.send({ type: "get_state" }, 2_000));
+          isStreaming = state.isStreaming;
+        } catch {
+          isStreaming = false;
+        }
+        runtime.running = isStreaming;
         this.broadcastQueue(sessionId);
-        return json(response, 200, { ok: true, isStreaming: state.isStreaming, queuePaused: runtime.queuePaused });
+        return json(response, 200, { ok: true, isStreaming, queuePaused: runtime.queuePaused });
       }
       if (sessionId !== this.activeSessionId) return json(response, 409, { error: "该会话不是活动运行会话" });
       if (this.primaryFailed || this.options.rpc.isRunning?.() === false) return json(response, 200, { ok: true, isStreaming: false, queuePaused: this.queuePaused });
       if (this.promptQueue.length) this.queuePaused = true;
-      await this.options.rpc.send({ type: "abort" }, 10_000);
+      await this.options.rpc.send({ type: "abort" }, 5_000);
       this.broadcastQueue();
-      const state = asState(await this.options.rpc.send({ type: "get_state" }));
-      this.running = state.isStreaming;
-      json(response, 200, { ok: true, isStreaming: state.isStreaming, queuePaused: this.queuePaused });
+      let isStreaming = false;
+      try {
+        const state = asState(await this.options.rpc.send({ type: "get_state" }, 2_000));
+        isStreaming = state.isStreaming;
+      } catch {
+        isStreaming = false;
+      }
+      this.running = isStreaming;
+      json(response, 200, { ok: true, isStreaming, queuePaused: this.queuePaused });
       return;
     }
 
@@ -1271,13 +1420,24 @@ export class PiChatApp {
       if (request.method !== "GET") return methodNotAllowed(response);
       if (this.applicationLifecycle !== "idle") {
         const state: PiState = { model: null, isStreaming: false };
-        const sessions = this.sessionSummaries(await this.options.sessions.list(this.activeSessionPath, this.currentCwd), state, clientId);
+        const sessions = this.sessionSummaries(await this.options.sessions.list(this.activeSessionPath, this.currentCwd), clientId);
         json(response, 200, { sessions, applicationLifecycle: this.applicationLifecycle });
         return;
       }
+      // Recover a crashed Primary if needed, but do not block the sidebar on a
+      // long get_state while the healthy Primary is still streaming.
       await this.ensurePrimaryRuntime();
-      const state = asState(await this.options.rpc.send({ type: "get_state" }));
-      const sessions = this.sessionSummaries(await this.options.sessions.list(state.sessionFile, this.currentCwd), state, clientId);
+      let state = this.lastPrimaryState;
+      if (!this.running) {
+        try {
+          state = asState(await this.options.rpc.send({ type: "get_state" }, 4_000));
+          this.lastPrimaryState = state;
+          this.activeSessionPath = state.sessionFile || this.activeSessionPath;
+        } catch {
+          // Keep lastPrimaryState / path so secondary draft injection still works.
+        }
+      }
+      const sessions = this.sessionSummaries(await this.options.sessions.list(this.activeSessionPath || state.sessionFile, this.currentCwd), clientId);
       json(response, 200, { sessions, applicationLifecycle: this.applicationLifecycle });
       return;
     }
@@ -1499,72 +1659,35 @@ export class PiChatApp {
       return;
     }
 
-    if (url.pathname === "/api/resources/skills") {
-      if (request.method === "GET") return json(response, 200, await this.options.resources.listSkills(this.currentCwd));
-      if (!["POST", "PATCH", "DELETE"].includes(request.method || "")) return methodNotAllowed(response);
-      const result = await this.withLifecycle("resources-reloading", "更新 Skills", async () => {
-        const body = await bodyJson(request);
-        if (request.method === "POST") {
-          const sourcePath = typeof body.sourcePath === "string" ? body.sourcePath.trim() : "";
-          if (!sourcePath) throw new Error("sourcePath 必填");
-          await this.options.resources.installSkill(sourcePath);
-        } else if (request.method === "PATCH") {
-          if (typeof body.id !== "string" || typeof body.enabled !== "boolean") throw new Error("id 和 enabled 必填");
-          const snapshot = await this.options.resources.snapshotSkill(body.id, this.currentCwd);
-          await this.applyResourceFileTransaction([snapshot], () => this.options.resources.setSkillEnabled(body.id as string, body.enabled as boolean, this.currentCwd));
-        } else {
-          if (typeof body.id !== "string") throw new Error("id 必填");
-          await this.options.resources.removeSkill(body.id, this.currentCwd);
-        }
-        if (request.method !== "PATCH") await this.reloadRpc();
-        return this.options.resources.listSkills(this.currentCwd);
-      });
-      json(response, 200, { ...result, reloaded: true });
+    if (url.pathname === "/api/resources/browse") {
+      if (request.method !== "POST") return methodNotAllowed(response);
+      const body = await bodyJson(request);
+      const kind = typeof body.kind === "string" ? body.kind : "";
+      if (!["skills-root", "extensions-root", "packages-root"].includes(kind)) {
+        return json(response, 400, { error: "kind 无效" });
+      }
+      const path = this.options.resources.resolveBrowsePath(kind as "skills-root" | "extensions-root" | "packages-root");
+      await revealInExplorer(path);
+      json(response, 200, { ok: true, path });
       return;
+    }
+
+    if (url.pathname === "/api/resources/skills") {
+      if (request.method !== "GET") return methodNotAllowed(response);
+      const result = await this.options.resources.listSkills(this.currentCwd);
+      return json(response, 200, { ...result, resources: result.resources.filter((item) => item.enabled) });
     }
 
     if (url.pathname === "/api/resources/extensions") {
-      if (request.method === "GET") return json(response, 200, await this.options.resources.listExtensions(this.currentCwd));
-      if (request.method !== "PATCH" && request.method !== "DELETE") return methodNotAllowed(response);
-      const result = await this.withLifecycle("resources-reloading", "更新 Extensions", async () => {
-        const body = await bodyJson(request);
-        if (request.method === "PATCH") {
-          if (typeof body.id !== "string" || typeof body.enabled !== "boolean") throw new Error("id 和 enabled 必填");
-          const snapshot = await this.options.resources.snapshotSettings();
-          await this.applyResourceFileTransaction([snapshot], () => this.options.resources.setExtensionEnabled(body.id as string, body.enabled as boolean, this.currentCwd));
-        } else {
-          if (typeof body.id !== "string") throw new Error("id 必填");
-          await this.options.resources.removeExtension(body.id, this.currentCwd);
-        }
-        if (request.method !== "PATCH") await this.reloadRpc();
-        return this.options.resources.listExtensions(this.currentCwd);
-      });
-      json(response, 200, { ...result, reloaded: true });
-      return;
+      if (request.method !== "GET") return methodNotAllowed(response);
+      const result = await this.options.resources.listExtensions(this.currentCwd);
+      return json(response, 200, { ...result, resources: result.resources.filter((item) => item.enabled) });
     }
 
     if (url.pathname === "/api/resources/packages") {
-      if (request.method === "GET") return json(response, 200, await this.options.resources.listPackages(this.currentCwd));
-      if (!["POST", "PATCH", "DELETE"].includes(request.method || "")) return methodNotAllowed(response);
-      const result = await this.withLifecycle("resources-reloading", "更新 Packages", async () => {
-        const body = await bodyJson(request);
-        if (request.method === "POST") {
-          const source = typeof body.source === "string" ? body.source.trim() : "";
-          if (!source) throw new Error("source 必填");
-          await this.options.resources.installPackage(source);
-        } else if (request.method === "PATCH") {
-          if (typeof body.id !== "string" || typeof body.enabled !== "boolean") throw new Error("id 和 enabled 必填");
-          const snapshot = await this.options.resources.snapshotSettings();
-          await this.applyResourceFileTransaction([snapshot], () => this.options.resources.setPackageEnabled(body.id as string, body.enabled as boolean, this.currentCwd));
-        } else {
-          if (typeof body.id !== "string") throw new Error("id 必填");
-          await this.options.resources.removePackage(body.id, this.currentCwd);
-        }
-        if (request.method !== "PATCH") await this.reloadRpc();
-        return this.options.resources.listPackages(this.currentCwd);
-      });
-      json(response, 200, { ...result, reloaded: true });
-      return;
+      if (request.method !== "GET") return methodNotAllowed(response);
+      const result = await this.options.resources.listPackages(this.currentCwd);
+      return json(response, 200, { ...result, resources: result.resources.filter((item) => item.enabled) });
     }
 
     if (url.pathname === "/api/extension-ui/respond") {

@@ -1,12 +1,11 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { cp, mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
-import { spawn } from "node:child_process";
 import type { ExtensionResource, PackageResource, PluginResourceItem, ResourceResponse, SkillResource } from "../shared/types.js";
-import { type FileSnapshot, snapshotFile, writeFileAtomic } from "./file-transaction.js";
-import { resolvePiEntry } from "./rpc-client.js";
+
+export type ResourceBrowseKind = "skills-root" | "extensions-root" | "packages-root";
 
 interface PackageFilter {
   source: string;
@@ -61,10 +60,6 @@ function parseFrontmatter(content: string): { name: string; description: string;
 
 async function readSettings(path: string): Promise<PiSettings> {
   try { return JSON.parse(await readFile(path, "utf8")) as PiSettings; } catch { return {}; }
-}
-
-async function writeSettingsAtomic(path: string, settings: PiSettings): Promise<void> {
-  await writeFileAtomic(path, `${JSON.stringify(settings, null, 2)}\n`);
 }
 
 async function walkFiles(root: string, predicate: (path: string) => boolean, depth = 8): Promise<string[]> {
@@ -147,7 +142,6 @@ async function resourceItems(root: string, key: typeof RESOURCE_KEYS[number]): P
 export class ResourceManager {
   readonly agentDir: string;
   readonly settingsPath: string;
-  private readonly skillPaths = new Map<string, string>();
 
   constructor(agentDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent")) {
     this.agentDir = agentDir;
@@ -156,21 +150,21 @@ export class ResourceManager {
 
   async listSkills(cwd: string): Promise<ResourceResponse<SkillResource>> {
     const settings = await readSettings(this.settingsPath);
-    const candidates: Array<{ path: string; source: SkillResource["source"]; packageSource?: string; enabled: boolean; removable: boolean }> = [];
+    const candidates: Array<{ path: string; source: SkillResource["source"]; packageSource?: string; enabled: boolean }> = [];
     const userSkills = join(this.agentDir, "skills");
     const agentsSkills = join(homedir(), ".agents", "skills");
     for (const path of await walkFiles(userSkills, (file) => basename(file).toLowerCase() === "skill.md" || (dirname(file) === userSkills && extname(file).toLowerCase() === ".md"))) {
-      candidates.push({ path, source: "user", enabled: true, removable: true });
+      candidates.push({ path, source: "user", enabled: true });
     }
     for (const path of await walkFiles(agentsSkills, (file) => basename(file).toLowerCase() === "skill.md")) {
-      candidates.push({ path, source: "agents", enabled: true, removable: true });
+      candidates.push({ path, source: "agents", enabled: true });
     }
     for (const configured of settings.skills ?? []) {
       if (/^[+\-!]/.test(configured)) continue;
       const root = resolve(this.agentDir, configured);
       const info = existsSync(root) ? await stat(root) : null;
       const files = info?.isDirectory() ? await walkFiles(root, (file) => basename(file).toLowerCase() === "skill.md" || extname(file).toLowerCase() === ".md") : info?.isFile() ? [root] : [];
-      for (const path of files) candidates.push({ path, source: "custom", enabled: true, removable: false });
+      for (const path of files) candidates.push({ path, source: "custom", enabled: true });
     }
     for (const entry of settings.packages ?? []) {
       const source = packageSource(entry);
@@ -179,19 +173,17 @@ export class ResourceManager {
       for (const resource of await manifestResources(packageRoot)) {
         if (resource.key !== "skills") continue;
         const files = await walkFiles(resource.path, (file) => basename(file).toLowerCase() === "skill.md" || (dirname(file) === resource.path && extname(file).toLowerCase() === ".md"));
-        for (const path of files) candidates.push({ path, source: "package", packageSource: source, enabled: !packageDisabled(entry), removable: false });
+        for (const path of files) candidates.push({ path, source: "package", packageSource: source, enabled: !packageDisabled(entry) });
       }
     }
 
     const unique = new Map<string, SkillResource>();
-    this.skillPaths.clear();
     for (const candidate of candidates) {
       const normalized = resolve(candidate.path);
       if (unique.has(normalized.toLowerCase())) continue;
       const content = await readFile(normalized, "utf8");
       const frontmatter = parseFrontmatter(content);
       const id = hashId(normalized);
-      this.skillPaths.set(id, normalized);
       unique.set(normalized.toLowerCase(), {
         id,
         name: frontmatter.name || (basename(normalized).toLowerCase() === "skill.md" ? basename(dirname(normalized)) : basename(normalized, extname(normalized))),
@@ -200,72 +192,10 @@ export class ResourceManager {
         source: candidate.source,
         packageSource: candidate.packageSource,
         enabled: candidate.enabled && !frontmatter.disabled,
-        removable: candidate.removable,
         content: content.slice(0, 200_000),
       });
     }
     return { resources: [...unique.values()].sort((a, b) => a.name.localeCompare(b.name)), diagnostics: [] };
-  }
-
-  async setSkillEnabled(id: string, enabled: boolean, cwd: string): Promise<void> {
-    const skill = (await this.listSkills(cwd)).resources.find((item) => item.id === id);
-    if (!skill) throw new Error("Skill not found");
-    const realPath = await this.skillPathFromId(id, cwd);
-    if (!realPath) throw new Error("Skill path not found");
-    const content = await readFile(realPath, "utf8");
-    const keyPattern = /^disable-model-invocation\s*:.*\r?\n/m;
-    let updated = content;
-    if (enabled) updated = content.replace(keyPattern, "");
-    else if (keyPattern.test(content)) updated = content.replace(keyPattern, "disable-model-invocation: true\n");
-    else if (/^---\r?\n/.test(content)) updated = content.replace(/^---\r?\n/, "---\ndisable-model-invocation: true\n");
-    else updated = `---\ndisable-model-invocation: true\n---\n${content}`;
-    await writeFileAtomic(realPath, updated);
-  }
-
-  async snapshotSkill(id: string, cwd: string): Promise<FileSnapshot> {
-    const realPath = await this.skillPathFromId(id, cwd);
-    if (!realPath) throw new Error("Skill path not found");
-    return snapshotFile(realPath);
-  }
-
-  async snapshotSettings(): Promise<FileSnapshot> {
-    return snapshotFile(this.settingsPath);
-  }
-
-  private async skillPathFromId(id: string, cwd: string): Promise<string | null> {
-    await this.listSkills(cwd);
-    return this.skillPaths.get(id) ?? null;
-  }
-
-  async installSkill(sourcePath: string): Promise<void> {
-    const source = resolve(sourcePath);
-    if (!existsSync(source)) throw new Error("Skill source path does not exist");
-    const info = await stat(source);
-    const targetRoot = join(this.agentDir, "skills");
-    await mkdir(targetRoot, { recursive: true });
-    if (info.isDirectory()) {
-      if (!existsSync(join(source, "SKILL.md"))) throw new Error("Skill directory must contain SKILL.md");
-      const target = join(targetRoot, basename(source));
-      if (existsSync(target)) throw new Error(`Skill already exists: ${basename(source)}`);
-      await cp(source, target, { recursive: true, errorOnExist: true });
-    } else if (info.isFile() && extname(source).toLowerCase() === ".md") {
-      const target = join(targetRoot, basename(source));
-      if (existsSync(target)) throw new Error(`Skill already exists: ${basename(source)}`);
-      await cp(source, target, { errorOnExist: true });
-    } else throw new Error("Skill source must be a directory or Markdown file");
-  }
-
-  async removeSkill(id: string, cwd: string): Promise<void> {
-    const resource = (await this.listSkills(cwd)).resources.find((item) => item.id === id);
-    if (!resource?.removable) throw new Error("This skill cannot be removed here");
-    const path = await this.skillPathFromId(id, cwd);
-    if (!path) throw new Error("Skill path not found");
-    const userRoot = resolve(this.agentDir, "skills").toLowerCase();
-    const agentsRoot = resolve(homedir(), ".agents", "skills").toLowerCase();
-    const normalized = resolve(path).toLowerCase();
-    if (!normalized.startsWith(`${userRoot}\\`) && !normalized.startsWith(`${agentsRoot}\\`) && process.platform === "win32") throw new Error("Refusing to remove a skill outside managed directories");
-    if (!normalized.startsWith(`${userRoot}/`) && !normalized.startsWith(`${agentsRoot}/`) && process.platform !== "win32") throw new Error("Refusing to remove a skill outside managed directories");
-    await rm(basename(path).toLowerCase() === "skill.md" ? dirname(path) : path, { recursive: true, force: true });
   }
 
   async listPackages(cwd: string): Promise<ResourceResponse<PackageResource>> {
@@ -282,7 +212,7 @@ export class ResourceManager {
       if (installed) for (const resource of await manifestResources(installed)) packageResources.push(...await resourceItems(resource.path, resource.key));
       resources.push({
         id: hashId(`global\0${source}`), name: metadata.name || source.replace(/^npm:/, ""), source, scope: "global",
-        enabled: !packageDisabled(entry), removable: true, installedPath: installed ? pathLabel(installed) : undefined,
+        enabled: !packageDisabled(entry), installedPath: installed ? pathLabel(installed) : undefined,
         version: metadata.version, description: metadata.description, resources: packageResources,
       });
     }
@@ -306,7 +236,7 @@ export class ResourceManager {
       resources.push({
         id: hashId(`extension\0${resolve(path)}`), name,
         source: pathLabel(path), scope: "global", enabled: !override?.startsWith("-") && !override?.startsWith("!"),
-        removable: true, installedPath: pathLabel(path),
+        installedPath: pathLabel(path),
       });
     }
     for (const entry of settings.packages ?? []) {
@@ -322,11 +252,18 @@ export class ResourceManager {
         resources.push({
           id: hashId(`package-extension\0${source}\0${item.relativePath}`), name: label,
           source: `${source} · ${item.relativePath}`, scope: "global", enabled: !packageDisabled(entry),
-          removable: false, packageSource: source,
+          packageSource: source,
         });
       }
     }
     return { resources: resources.sort((a, b) => a.name.localeCompare(b.name)), diagnostics };
+  }
+
+  /** Managed local root folder used by the read-only resource inventory. */
+  resolveBrowsePath(kind: ResourceBrowseKind): string {
+    if (kind === "skills-root") return join(this.agentDir, "skills");
+    if (kind === "extensions-root") return join(this.agentDir, "extensions");
+    return join(this.agentDir, "npm", "node_modules");
   }
 
   async systemGateEnabled(): Promise<boolean> {
@@ -338,87 +275,4 @@ export class ResourceManager {
     return !override?.startsWith("-") && !override?.startsWith("!");
   }
 
-  async setPackageEnabled(id: string, enabled: boolean, cwd: string): Promise<void> {
-    if (!(await this.listPackages(cwd)).resources.some((item) => item.id === id)) throw new Error("Package not found");
-    const settings = await readSettings(this.settingsPath);
-    let found = false;
-    settings.packages = (settings.packages ?? []).map((entry): PackageSetting => {
-      if (hashId(`global\0${packageSource(entry)}`) !== id) return entry;
-      found = true;
-      return enabled ? packageSource(entry) : { ...(typeof entry === "string" ? { source: entry } : entry), extensions: [], skills: [], prompts: [], themes: [] };
-    });
-    if (!found) throw new Error("Package setting not found");
-    await writeSettingsAtomic(this.settingsPath, settings);
-  }
-
-  private async extensionPathFromId(id: string): Promise<string | null> {
-    const root = join(this.agentDir, "extensions");
-    const files = await walkFiles(root, (path) => EXTENSION_PATTERN.test(path) && (dirname(path) === root || /^index\.(?:ts|js)$/i.test(basename(path))), 3);
-    return files.find((path) => hashId(`extension\0${resolve(path)}`) === id) ?? null;
-  }
-
-  async setExtensionEnabled(id: string, enabled: boolean, cwd: string): Promise<void> {
-    const extension = (await this.listExtensions(cwd)).resources.find((item) => item.id === id);
-    if (!extension) throw new Error("Extension not found");
-    if (extension.systemComponent) throw new Error("Pi Chat 内置安全执行组件由 Pi Chat 自动管理，不能在扩展列表中停用");
-    if (extension.packageSource) throw new Error("Package-provided extensions are controlled by their Package switch");
-    const realPath = await this.extensionPathFromId(id);
-    if (!realPath) throw new Error("Extension path not found");
-    const pattern = relative(this.agentDir, realPath);
-    const settings = await readSettings(this.settingsPath);
-    settings.extensions = (settings.extensions ?? []).filter((entry) => entry.replace(/^[+\-!]/, "") !== pattern && resolve(this.agentDir, entry.replace(/^[+\-!]/, "")) !== resolve(realPath));
-    settings.extensions.push(`${enabled ? "+" : "-"}${pattern}`);
-    await writeSettingsAtomic(this.settingsPath, settings);
-  }
-
-  async installPackage(source: string): Promise<void> {
-    if (!source || source.length > 2_000 || source.startsWith("-") || /[\u0000-\u001f\u007f]/.test(source)) throw new Error("Package source 格式无效");
-    await runPiPackageCommand(["install", source], this.agentDir);
-  }
-
-  async removePackage(id: string, cwd: string): Promise<void> {
-    const resource = (await this.listPackages(cwd)).resources.find((item) => item.id === id);
-    if (!resource?.removable) throw new Error("Package cannot be removed");
-    await runPiPackageCommand(["remove", resource.source], this.agentDir);
-  }
-
-  async removeExtension(id: string, cwd: string): Promise<void> {
-    const extension = (await this.listExtensions(cwd)).resources.find((item) => item.id === id);
-    if (extension?.systemComponent) throw new Error("Pi Chat 内置安全执行组件由 Pi Chat 自动管理，不能移除");
-    if (!extension?.removable || extension.packageSource) throw new Error("Package-provided extensions must be removed with their Package");
-    const path = await this.extensionPathFromId(id);
-    if (!path) throw new Error("Extension path not found");
-    const root = resolve(this.agentDir, "extensions").toLowerCase();
-    const normalized = resolve(path).toLowerCase();
-    const separator = process.platform === "win32" ? "\\" : "/";
-    if (!normalized.startsWith(`${root}${separator}`)) throw new Error("Refusing to remove extension outside managed directory");
-    await rm(/^index\./i.test(basename(path)) ? dirname(path) : path, { recursive: true, force: true });
-    const settings = await readSettings(this.settingsPath);
-    settings.extensions = (settings.extensions ?? []).filter((entry) => resolve(this.agentDir, entry.replace(/^[+\-!]/, "")) !== resolve(path) && resolve(this.agentDir, entry.replace(/^[+\-!]/, "")) !== resolve(dirname(path)));
-    await writeSettingsAtomic(this.settingsPath, settings);
-  }
-}
-
-async function runPiPackageCommand(args: string[], agentDir: string): Promise<void> {
-  const rpcEntry = resolvePiEntry();
-  if (!rpcEntry) throw new Error("Global Pi was not found");
-  const cliEntry = join(dirname(rpcEntry), "cli.js");
-  await new Promise<void>((resolvePromise, reject) => {
-    const child = spawn(process.execPath, [cliEntry, ...args], {
-      cwd: agentDir,
-      env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, FORCE_COLOR: "0", GIT_TERMINAL_PROMPT: "0" },
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
-    });
-    let output = "";
-    const append = (chunk: Buffer) => { output = `${output}${chunk.toString("utf8")}`.slice(-20_000); };
-    child.stdout.on("data", append);
-    child.stderr.on("data", append);
-    const timer = setTimeout(() => child.kill(), 5 * 60_000);
-    child.once("error", (error) => { clearTimeout(timer); reject(error); });
-    child.once("exit", (code, signal) => {
-      clearTimeout(timer);
-      code === 0 ? resolvePromise() : reject(new Error(output.trim() || `Pi command exited with ${signal || `code ${code}`}`));
-    });
-  });
 }

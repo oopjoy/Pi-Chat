@@ -194,7 +194,6 @@ export interface SkillResource {
   source: "user" | "agents" | "package" | "custom";
   packageSource?: string;
   enabled: boolean;
-  removable: boolean;
   content: string;
 }
 
@@ -210,12 +209,9 @@ export interface ExtensionResource {
   source: string;
   scope: "global" | "project";
   enabled: boolean;
-  removable: boolean;
   installedPath?: string;
   /** Package-owned extensions inherit the package switch and are intentionally read-only here. */
   packageSource?: string;
-  /** Pi Chat-owned safety adapter; intentionally hidden from normal extension management. */
-  systemComponent?: boolean;
 }
 
 export interface PackageResource {
@@ -224,20 +220,15 @@ export interface PackageResource {
   source: string;
   scope: "global" | "project";
   enabled: boolean;
-  removable: boolean;
   installedPath?: string;
   version?: string;
   description?: string;
   resources: PluginResourceItem[];
 }
 
-/** @deprecated Use PackageResource. Kept as a compatibility alias for API consumers. */
-export type PluginResource = PackageResource;
-
 export interface ResourceResponse<T> {
   resources: T[];
   diagnostics: string[];
-  reloaded?: boolean;
 }
 
 export interface ApiError {

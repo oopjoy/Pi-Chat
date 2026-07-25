@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.4
+
+### Session and runtime reliability
+
+- New drafts appear in the sidebar as soon as their first prompt is accepted, without waiting for a long-running response to settle
+- Cold Sessions retain their own Model and Thinking preferences without eagerly starting a Runtime
+- Rapid switching, stopping, deleting, compaction recovery, and background reconciliation no longer block the shell on slow Runtime probes
+- Session sidebar status keeps running, queued, failed, and pending-confirmation states aligned with authoritative server state
+
+### Gate, Markdown, and resource simplification
+
+- Gate preferences survive Runtime recovery and update synchronously across UI and event handlers
+- Streaming Markdown renders completed math incrementally without repeatedly building final source-copy offset maps
+- Skills, Extensions, and Packages are now a read-only enabled-resource inventory; changes are made directly in their displayed folders while Model management remains editable
+- Concurrent builds no longer delete another live Pi Chat process's staging tree
+
 ## 0.3.3
 
 ### Follow-up fixes

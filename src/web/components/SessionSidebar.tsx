@@ -19,12 +19,13 @@ const managementItems: Array<{ section: ManagementSection; label: string }> = [
 
 type SessionStatus = "dormant" | "ready" | "pending" | "running" | "error";
 
-function sessionStatus(session: SessionSummary, warming: boolean, failed: boolean): { kind: SessionStatus; label: string } {
+export function sessionStatus(session: SessionSummary, warming: boolean, failed: boolean): { kind: SessionStatus; label: string } {
   // A confirmation pauses an in-flight turn but needs user attention first.
   if (session.pendingConfirmation) return { kind: "pending", label: "等待权限确认" };
-  if (session.queued) return { kind: "pending", label: "消息等待发送" };
+  // A queued follow-up must not hide the reply currently being generated.
   if (session.running) return { kind: "running", label: "正在生成" };
   if (warming) return { kind: "running", label: "正在启动会话" };
+  if (session.queued) return { kind: "pending", label: "消息等待发送" };
   if (failed) return { kind: "error", label: "会话运行异常" };
   if (session.writable) return { kind: "ready", label: "已就绪" };
   return { kind: "dormant", label: "按需启动" };

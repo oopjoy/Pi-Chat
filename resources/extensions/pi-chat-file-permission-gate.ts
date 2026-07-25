@@ -38,8 +38,9 @@ export default function (pi: ExtensionAPI) {
 
 			if (["open", "off", "allow", "disable"].includes(command)) {
 				gateMode = "open";
+				// Always lead with "Gate mode: …" so Pi Chat UI can resync after RPC restart.
 				ctx.ui.notify(
-					"Gate opened for this Pi runtime. write/edit and destructive bash will be allowed without prompts. Use /gate strict to re-enable prompts.",
+					"Gate mode: open\nwrite/edit and destructive bash will be allowed without prompts. Use /gate strict to re-enable prompts.",
 					"warning",
 				);
 				return;
@@ -47,13 +48,13 @@ export default function (pi: ExtensionAPI) {
 
 			if (["strict", "on", "close", "closed", "enable"].includes(command)) {
 				gateMode = "strict";
-				ctx.ui.notify("Gate strict mode enabled. write/edit and destructive bash will ask for confirmation.", "info");
+				ctx.ui.notify("Gate mode: strict\nwrite/edit and destructive bash will ask for confirmation.", "info");
 				return;
 			}
 
 			if (["once", "next"].includes(command)) {
 				gateMode = "once";
-				ctx.ui.notify("Gate will allow the next write/edit/destructive bash call, then return to strict mode.", "warning");
+				ctx.ui.notify("Gate mode: once\nThe next write/edit/destructive bash call will be allowed, then return to strict mode.", "warning");
 				return;
 			}
 

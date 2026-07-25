@@ -14,10 +14,16 @@ test("Pi Chat system Gate installs, self-heals, and remains explicitly enabled",
     const agentDir = join(root, "agent");
     const sourcePath = join(root, "gate.ts");
     await writeFile(sourcePath, source());
+    await mkdir(join(agentDir, "extensions"), { recursive: true });
+    // Stale bare legacy entries must be removed so only one /gate handler remains.
+    await writeFile(join(agentDir, "settings.json"), `${JSON.stringify({ extensions: ["file-permission-gate.ts", "preview-all.ts"] }, null, 2)}\n`);
     assert.equal((await ensurePiChatSystemGate({ agentDir, sourcePath })).status, "installed");
     const target = join(agentDir, "extensions", PI_CHAT_GATE_TARGET);
     assert.equal(await readFile(target, "utf8"), source());
-    assert.match(await readFile(join(agentDir, "settings.json"), "utf8"), /\+extensions\/pi-chat-file-permission-gate\.ts/);
+    const settings = await readFile(join(agentDir, "settings.json"), "utf8");
+    assert.match(settings, /\+extensions\/pi-chat-file-permission-gate\.ts/);
+    assert.doesNotMatch(settings, /"file-permission-gate\.ts"/);
+    assert.match(settings, /preview-all\.ts/);
     await writeFile(target, `${source()}// damaged\n`);
     assert.equal((await ensurePiChatSystemGate({ agentDir, sourcePath })).status, "repaired");
     assert.equal(await readFile(target, "utf8"), source());

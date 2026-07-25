@@ -316,7 +316,7 @@ test("restart build failure restores idle admission", async () => {
   }
 });
 
-test("paused Secondary queue blocks workspace and resource reload operations", async () => {
+test("paused Secondary queue blocks workspace changes while resources stay read-only", async () => {
   const primaryPath = "C:\\sessions\\primary.jsonl";
   const secondaryPath = "C:\\sessions\\secondary.jsonl";
   const primaryId = idForPath(primaryPath);
@@ -347,8 +347,10 @@ test("paused Secondary queue blocks workspace and resource reload operations", a
     runtime.promptQueue.push({ id: "queued" });
     const workspace = await fetch(`${origin}/api/workspace/set`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: process.cwd() }) });
     assert.equal(workspace.status, 409);
-    const resource = await fetch(`${origin}/api/resources/skills`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "skill", enabled: true }) });
-    assert.equal(resource.status, 409);
+    for (const kind of ["skills", "extensions", "packages"]) {
+      const resource = await fetch(`${origin}/api/resources/${kind}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "resource", enabled: true }) });
+      assert.equal(resource.status, 405);
+    }
     assert.equal(secondary.stopCount, 0);
   } finally {
     server.close();

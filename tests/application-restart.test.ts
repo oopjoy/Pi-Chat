@@ -72,15 +72,19 @@ test("application handoff restarts the same Pi Chat entry with its listener and 
 test("cleanup removes abandoned staging and previous dist trees", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-dist-cleanup-"));
   try {
-    await mkdir(join(root, ".pi-chat-dist-staging-1"));
-    await mkdir(join(root, ".pi-chat-dist-previous-2"));
-    await mkdir(join(root, ".pi-chat-dist-failed-3"));
+    await mkdir(join(root, ".pi-chat-dist-staging-999999991"));
+    await mkdir(join(root, ".pi-chat-dist-previous-999999992"));
+    await mkdir(join(root, ".pi-chat-dist-failed-999999993"));
+    const active = join(root, `.pi-chat-dist-staging-${process.pid}-${Date.now()}`);
+    await mkdir(active);
+    await writeFile(join(active, "in-use.txt"), "active", "utf8");
     await mkdir(join(root, "dist"));
     await writeFile(join(root, "keep.txt"), "ok", "utf8");
     const removed = await cleanupStaleDistArtifacts(root);
     assert.equal(removed, 3);
-    await assert.rejects(readFile(join(root, ".pi-chat-dist-staging-1", "x"), "utf8"));
+    await assert.rejects(readFile(join(root, ".pi-chat-dist-staging-999999991", "x"), "utf8"));
     assert.equal(await readFile(join(root, "keep.txt"), "utf8"), "ok");
+    assert.equal(await readFile(join(active, "in-use.txt"), "utf8"), "active");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

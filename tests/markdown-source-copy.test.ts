@@ -4,7 +4,21 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { JSDOM } from "jsdom";
 import { MarkdownBody } from "../src/web/components/MarkdownBody";
-import { normalizeDisplayMathWithSourceMap, selectionInsideSingleCodeBlock, sourceForSelection } from "../src/web/lib/markdown-source-copy";
+import { createMarkdownRehypePlugins, markdownRemarkPlugins } from "../src/web/lib/markdown";
+import { normalizeDisplayMathForRender, normalizeDisplayMathWithSourceMap, selectionInsideSingleCodeBlock, sourceForSelection } from "../src/web/lib/markdown-source-copy";
+
+test("streaming Markdown keeps math plugins while skipping source-range mapping", () => {
+  assert.equal(markdownRemarkPlugins.length, 3);
+  const streamingPlugins = createMarkdownRehypePlugins();
+  const finalPlugins = createMarkdownRehypePlugins((offset) => offset);
+  assert.equal(streamingPlugins.length, 3);
+  assert.equal(finalPlugins.length, 4);
+});
+
+test("streaming display-math normalization matches the final mapped Markdown", () => {
+  const source = "before\n$$x + y$$\nafter";
+  assert.equal(normalizeDisplayMathForRender(source), normalizeDisplayMathWithSourceMap(source).markdown);
+});
 
 function renderDom(markdown: string) {
   const html = renderToStaticMarkup(React.createElement(MarkdownBody, null, markdown));
@@ -27,6 +41,14 @@ function selectContents(dom: JSDOM, node: Node) {
   selection.addRange(range);
   return selection;
 }
+
+test("adjacent CJK prose after strong text ending in punctuation still renders bold", () => {
+  const markdown = "**理由：**在中间插入精确外推值 $x$。";
+  const final = renderDom(markdown).root.querySelector("strong");
+  assert.equal(final?.textContent, "理由：");
+  const streamingHtml = renderToStaticMarkup(React.createElement(MarkdownBody, { streaming: true }, markdown));
+  assert.match(streamingHtml, /<strong>理由：<\/strong>在中间/);
+});
 
 test("rendered inline KaTeX maps back to exact LaTeX", () => {
   const formula = String.raw`$\widehat{A_h^n}$`;

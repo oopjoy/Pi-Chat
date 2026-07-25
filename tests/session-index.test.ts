@@ -60,6 +60,21 @@ test("session index keeps auto-created subagent child sessions out of sidebar hi
   }
 });
 
+test("session index keeps generated top-level subagent sessions out of sidebar history", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-top-level-subagent-index-"));
+  try {
+    const path = join(root, "subagent.jsonl");
+    await writeFile(path, [
+      { type: "session", id: "child", cwd: "C:\\work" },
+      { type: "session_info", id: "name", parentId: null, name: "subagent-planner-40b9af6d-1" },
+      { type: "message", id: "m1", parentId: "name", message: { role: "user", content: "child task" } },
+    ].map(JSON.stringify).join("\n"));
+    assert.deepEqual(await new SessionIndex(root, join(root, "cache.json")).list(), []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("session index keeps empty draft JSONL files out of sidebar history", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-empty-draft-"));
   try {
@@ -89,6 +104,27 @@ test("session message reader follows only the current JSONL branch", async () =>
     const messages = await readSessionMessages(path);
     assert.deepEqual(messages.map((message) => message.content), ["kept user", "current user", "current answer"]);
     assert.equal(messages[0].timestamp, Date.parse("2026-01-01T00:00:00Z"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("session snapshot retains its last persisted model and thinking selections", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-settings-snapshot-"));
+  try {
+    const path = join(root, "settings.jsonl");
+    await writeFile(path, [
+      { type: "session", id: "session", cwd: "C:\\work" },
+      { type: "model_change", id: "m1", parentId: null, provider: "one", modelId: "first" },
+      { type: "thinking_level_change", id: "t1", parentId: "m1", thinkingLevel: "low" },
+      { type: "message", id: "u1", parentId: "t1", message: { role: "user", content: "hi" } },
+      { type: "model_change", id: "m2", parentId: "u1", provider: "two", modelId: "last" },
+      { type: "thinking_level_change", id: "t2", parentId: "m2", thinkingLevel: "xhigh" },
+      { type: "message", id: "a1", parentId: "t2", message: { role: "assistant", content: "answer", provider: "two", model: "last" } },
+    ].map(JSON.stringify).join("\n"));
+    const index = new SessionIndex(root, join(root, "cache.json"));
+    const [session] = await index.list();
+    assert.deepEqual((await index.snapshotForId(session.id))?.settings, { provider: "two", modelId: "last", thinkingLevel: "xhigh" });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -204,6 +240,39 @@ test("session index serializes concurrent refreshes with different keys", async 
       index.list(undefined, join(process.cwd(), "other")),
     ]);
     assert.equal(maximumConcurrentRefreshes, 1);
+    assert.equal(index.pathForId(idForPath(sessionPath)), sessionPath);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("session index joins a same-key refresh that starts while waiting on another scan", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-session-join-after-wait-"));
+  try {
+    const sessionPath = join(root, "session.jsonl");
+    await writeFile(sessionPath, [
+      { type: "session", id: "join-after-wait", cwd: process.cwd() },
+      { type: "message", id: "m1", parentId: null, message: { role: "user", content: "hello" } },
+    ].map(JSON.stringify).join("\n"));
+    const index = new SessionIndex(root, join(root, "cache.json"));
+    const originalRefresh = (index as unknown as { refresh: (activePath?: string, cwd?: string) => Promise<unknown> }).refresh.bind(index);
+    let refreshStarts = 0;
+    (index as unknown as { refresh: (activePath?: string, cwd?: string) => Promise<unknown> }).refresh = async (activePath?: string, cwd?: string) => {
+      refreshStarts += 1;
+      await new Promise((resolve) => setTimeout(resolve, refreshStarts === 1 ? 30 : 5));
+      return originalRefresh(activePath, cwd);
+    };
+    // First caller starts key A. While it is still running, two key-B callers
+    // wait. After A finishes they must share one B refresh, not race two.
+    const first = index.list(undefined, join(process.cwd(), "other"));
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const [second, third] = await Promise.all([
+      index.list(undefined, process.cwd()),
+      index.list(undefined, process.cwd()),
+    ]);
+    await first;
+    assert.equal(refreshStarts, 2);
+    assert.deepEqual(second, third);
     assert.equal(index.pathForId(idForPath(sessionPath)), sessionPath);
   } finally {
     await rm(root, { recursive: true, force: true });

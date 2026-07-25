@@ -47,6 +47,7 @@ export function ManagementPanel({ section, appearance, models, state, busy, onCl
   const [packages, setPackages] = useState<PackageResource[]>([]);
   const [resourceBusy, setResourceBusy] = useState(false);
   const [resourceError, setResourceError] = useState("");
+  const [resourceNotice, setResourceNotice] = useState("");
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
@@ -66,6 +67,7 @@ export function ManagementPanel({ section, appearance, models, state, busy, onCl
 
   useEffect(() => {
     setResourceError("");
+    setResourceNotice("");
     if (!section || !["skills", "extensions", "packages"].includes(settingsTab)) return;
     setLoading(true);
     const load = settingsTab === "skills" ? api.skills() : settingsTab === "extensions" ? api.extensions() : api.packages();
@@ -77,23 +79,19 @@ export function ManagementPanel({ section, appearance, models, state, busy, onCl
   }, [section, settingsTab]);
   if (!section) return null;
 
-  const runResource = async <T extends SkillResource | ExtensionResource | PackageResource>(operation: () => Promise<{ resources: T[] }>, apply: (items: T[]) => void) => {
+  const browseResource = async (kind: "skills-root" | "extensions-root" | "packages-root") => {
     setResourceBusy(true);
     setResourceError("");
+    setResourceNotice("");
     try {
-      const result = await operation();
-      apply(result.resources);
-      onReloaded();
+      const result = await api.browseResource(kind);
+      setResourceNotice(`已在资源管理器中打开：${result.path}`);
     } catch (error) {
       setResourceError(error instanceof Error ? error.message : String(error));
     } finally {
       setResourceBusy(false);
     }
   };
-
-  const applySkills = (items: SkillResource[]) => setSkills(items);
-  const applyExtensions = (items: ExtensionResource[]) => setExtensions(items);
-  const applyPackages = (items: PackageResource[]) => setPackages(items);
 
   return (
     <div className="panel-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
@@ -122,20 +120,40 @@ export function ManagementPanel({ section, appearance, models, state, busy, onCl
               {settingsTab === "appearance" && <AppearancePanel value={appearance} onChange={onAppearance} />}
               {settingsTab === "models" && <ModelsPanel models={models} state={state} busy={busy} filter={filter} onFilter={setFilter} onModel={onModel} onReloaded={onReloaded} />}
               {settingsTab === "skills" && <SettingsResourceList
-                title="Skills" description="面向模型的 Markdown 工作流与说明。包内 Skill 在这里按资源显示一次。" loading={loading} error={resourceError} resources={skills} busy={resourceBusy}
+                title="Skills"
+                description="仅显示当前已启用的 Skill。管理请在本地 agent 目录中进行。"
+                loading={loading}
+                error={resourceError}
+                notice={resourceNotice}
+                resources={skills}
+                busy={resourceBusy}
                 pathFor={(item) => item.packageSource ? `${item.pathLabel} · 来自 ${item.packageSource}` : item.pathLabel}
-                onToggle={(item) => void runResource(() => api.toggleSkill(item.id, !item.enabled), applySkills)}
+                onBrowseRoot={() => void browseResource("skills-root")}
+                rootLabel="打开 Skills 目录"
               />}
               {settingsTab === "extensions" && <SettingsResourceList
-                title="Extensions" description="可执行的 Pi 工具、命令与事件扩展。包内扩展由所属 Package 统一管理。" loading={loading} error={resourceError} resources={extensions} busy={resourceBusy}
-                pathFor={(item) => item.packageSource ? `${item.source} · 由 Package 管理` : item.installedPath || item.source}
-                onToggle={(item) => void runResource(() => api.toggleExtension(item.id, !item.enabled), applyExtensions)}
-                toggleDisabled={(item) => Boolean(item.packageSource)}
+                title="Extensions"
+                description="仅显示当前已启用的 Extension。启停与安装请直接编辑本地扩展目录。"
+                loading={loading}
+                error={resourceError}
+                notice={resourceNotice}
+                resources={extensions}
+                busy={resourceBusy}
+                pathFor={(item) => item.packageSource ? `${item.source} · 来自 Package` : item.installedPath || item.source}
+                onBrowseRoot={() => void browseResource("extensions-root")}
+                rootLabel="打开 Extensions 目录"
               />}
               {settingsTab === "packages" && <SettingsResourceList
-                title="Packages" description="安装来源与资源集合。启停 Package 会同时影响其中的 Skills、Extensions、Prompts 和 Themes。" loading={loading} error={resourceError} resources={packages} busy={resourceBusy}
+                title="Packages"
+                description="仅显示当前已启用的 Package。安装来源与集合请在本地 agent/npm 目录管理。"
+                loading={loading}
+                error={resourceError}
+                notice={resourceNotice}
+                resources={packages}
+                busy={resourceBusy}
                 pathFor={(item) => packageSummary(item)}
-                onToggle={(item) => void runResource(() => api.togglePackage(item.id, !item.enabled), applyPackages)}
+                onBrowseRoot={() => void browseResource("packages-root")}
+                rootLabel="打开 Packages 目录"
               />}
             </div>
           </div>
@@ -285,33 +303,32 @@ function packageSummary(item: PackageResource): string {
   return `${item.source}${item.version ? ` · v${item.version}` : ""}${labels.length ? ` · 含 ${labels.join(" · ")}` : ""}`;
 }
 
-function SettingsResourceList<T extends { id: string; name: string; enabled: boolean }>({ title, description, loading, error, resources, busy, pathFor, onToggle, toggleDisabled }: {
+function SettingsResourceList<T extends { id: string; name: string }>({ title, description, loading, error, notice, resources, busy, pathFor, onBrowseRoot, rootLabel }: {
   title: string;
   description: string;
   loading: boolean;
   error: string;
+  notice?: string;
   resources: T[];
   busy: boolean;
   pathFor: (item: T) => string;
-  onToggle: (item: T) => void;
-  toggleDisabled?: (item: T) => boolean;
+  onBrowseRoot: () => void;
+  rootLabel: string;
 }) {
   return <div className="settings-resource-panel">
-    <PanelIntro title={title} description={description} count={resources.length} />
+    <div className="settings-resource-heading">
+      <div className="settings-resource-title"><h3>{title}<span className="count-badge">{resources.length}</span></h3><p>{description}</p></div>
+      <button type="button" className="resource-browse-root" disabled={busy || loading} onClick={onBrowseRoot}>{rootLabel}</button>
+    </div>
     {error && <div className="resource-error">{error}</div>}
+    {notice && !error && <div className="resource-notice">{notice}</div>}
     <div className="settings-resource-list">
       {loading ? <p className="resource-loading">正在扫描…</p> : resources.map((item) => <article key={item.id} className="settings-resource-row">
         <div><strong>{item.name}</strong><code title={pathFor(item)}>{pathFor(item)}</code></div>
-        <Toggle enabled={item.enabled} busy={busy || toggleDisabled?.(item) === true} onClick={() => onToggle(item)} />
       </article>)}
-      {!loading && !resources.length && <p className="resource-loading">未发现 {title}</p>}
+      {!loading && !resources.length && <p className="resource-loading">当前没有已启用的 {title}</p>}
     </div>
   </div>;
-}
-
-function Toggle({ enabled, busy, onClick }: { enabled: boolean; busy: boolean; onClick: () => void }) {
-  const label = enabled ? "已启用，点击停用" : "已停用，点击启用";
-  return <button type="button" className={`resource-toggle ${enabled ? "is-enabled" : ""}`} disabled={busy} onClick={onClick} role="switch" aria-checked={enabled} aria-label={label} title={label}><span className="resource-toggle-knob" /></button>;
 }
 
 function AppearancePanel({ value, onChange }: { value: AppearancePreferences; onChange: (value: AppearancePreferences) => void }) {

@@ -1,7 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
-import { createMarkdownRehypePlugins, markdownRemarkPlugins, streamingMarkdownRemarkPlugins } from "../lib/markdown";
-import { normalizeDisplayMathWithSourceMap, registerSourceCopyRoot } from "../lib/markdown-source-copy";
+import { createMarkdownRehypePlugins, markdownRemarkPlugins } from "../lib/markdown";
+import { normalizeDisplayMathForRender, normalizeDisplayMathWithSourceMap, registerSourceCopyRoot } from "../lib/markdown-source-copy";
 
 interface MarkdownBodyProps {
   children: string;
@@ -9,12 +9,15 @@ interface MarkdownBodyProps {
 }
 
 export const MarkdownBody = memo(function MarkdownBody({ children, streaming = false }: MarkdownBodyProps) {
-  // Streaming text changes constantly. Keep that path cheap, then perform one
-  // exact Markdown/KaTeX/source-map render when message_end arrives.
+  // Streaming still runs remark-math + KaTeX so formulas appear as they complete.
+  // Only the exact source-map copy pass waits until message_end.
   const sourceMapped = useMemo(() => streaming
-    ? { markdown: children, source: children, mapOffset: (offset: number) => offset }
+    ? { markdown: normalizeDisplayMathForRender(children), source: children, mapOffset: undefined }
     : normalizeDisplayMathWithSourceMap(children), [children, streaming]);
-  const rehypePlugins = useMemo(() => streaming ? [] : createMarkdownRehypePlugins(sourceMapped.mapOffset), [sourceMapped, streaming]);
+  const rehypePlugins = useMemo(
+    () => createMarkdownRehypePlugins(streaming ? undefined : sourceMapped.mapOffset),
+    [sourceMapped, streaming],
+  );
   const rootRef = useRef<HTMLDivElement>(null);
   const [sourceCopied, setSourceCopied] = useState(false);
   const timerRef = useRef<number | null>(null);
@@ -39,7 +42,7 @@ export const MarkdownBody = memo(function MarkdownBody({ children, streaming = f
   return (
     <div ref={rootRef} className="markdown-body markdown-source-copy">
       <ReactMarkdown
-        remarkPlugins={streaming ? streamingMarkdownRemarkPlugins : markdownRemarkPlugins}
+        remarkPlugins={markdownRemarkPlugins}
         rehypePlugins={rehypePlugins}
         components={{
           code({ className, children: codeChildren, ...props }) {

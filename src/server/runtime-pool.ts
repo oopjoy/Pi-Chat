@@ -43,6 +43,8 @@ export interface SecondaryRuntime {
   draftSession?: SessionSummary;
   /** Empty drafts may be reused only by the browser window that created them. */
   draftOwnerClientId?: string;
+  /** True once the first prompt (or extension command) was accepted for this draft. */
+  prompted?: boolean;
   /** Pi's JSONL path, available even before SessionIndex first observes the Session. */
   sessionPath?: string;
   draftSessionPath?: string;
@@ -367,10 +369,17 @@ export class RuntimePool {
         });
         return reusable;
       }
-      // Clean only this window's residual draft. Another live window owns an
-      // independent composer and must never be silently redirected to ours.
+      // Clean only this window's residual empty drafts. Never reclaim a busy draft
+      // or one that already has a user message: the next New used to wipe the
+      // previous conversation while it was still streaming or still unindexed.
       for (const draft of [...this.runtimes.values()].filter((runtime) => runtime.draftSession && runtime.draftOwnerClientId === clientId)) {
-        await this.reclaim(draft.id, "capacity");
+        if (!this.isIdle(draft)) continue;
+        const hasMessages = await this.draftHasMessages(draft);
+        if (hasMessages === true) {
+          await this.commitDraftIfPersisted(draft);
+          continue;
+        }
+        if (hasMessages === false) await this.reclaim(draft.id, "capacity");
       }
       await this.makeRoomForSecondary();
       const idleCount = [...this.runtimes.values()].filter((runtime) => this.isIdle(runtime)).length;

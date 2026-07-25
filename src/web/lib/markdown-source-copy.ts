@@ -24,20 +24,20 @@ function identityOffset(offset: number): number {
  * one-line display-math compatibility while retaining a boundary map back to
  * the exact Markdown supplied by the model.
  */
-export function normalizeDisplayMathWithSourceMap(source: string): SourceMappedMarkdown {
+function normalizeDisplayMath(source: string, trackOffsets: boolean): SourceMappedMarkdown {
   const lineBreak = source.includes("\r\n") ? "\r\n" : "\n";
   const linePattern = /.*(?:\r\n|\n|$)/g;
   const output: string[] = [];
-  const boundaries: number[] = [0];
+  const boundaries: number[] | null = trackOffsets ? [0] : null;
   let changed = false;
 
   const appendOriginal = (text: string, sourceStart: number) => {
     output.push(text);
-    for (let index = 1; index <= text.length; index += 1) boundaries.push(sourceStart + index);
+    if (boundaries) for (let index = 1; index <= text.length; index += 1) boundaries.push(sourceStart + index);
   };
   const appendInserted = (text: string, sourceOffset: number) => {
     output.push(text);
-    for (let index = 0; index < text.length; index += 1) boundaries.push(sourceOffset);
+    if (boundaries) for (let index = 0; index < text.length; index += 1) boundaries.push(sourceOffset);
   };
 
   let fence: { marker: string; size: number } | null = null;
@@ -76,7 +76,7 @@ export function normalizeDisplayMathWithSourceMap(source: string): SourceMappedM
     appendOriginal(math, mathStart);
     appendInserted(lineBreak + indent, closeStart);
     appendOriginal("$$", closeStart);
-    boundaries[boundaries.length - 1] = sourceStart + line.length;
+    if (boundaries) boundaries[boundaries.length - 1] = sourceStart + line.length;
     if (eol) appendOriginal(eol, sourceStart + line.length);
   }
 
@@ -86,10 +86,20 @@ export function normalizeDisplayMathWithSourceMap(source: string): SourceMappedM
     markdown,
     source,
     mapOffset(offset: number) {
+      if (!boundaries) return offset;
       const safeOffset = Math.max(0, Math.min(offset, boundaries.length - 1));
       return boundaries[safeOffset] ?? source.length;
     },
   };
+}
+
+/** Lightweight normalization for streaming renders that do not need copy offsets. */
+export function normalizeDisplayMathForRender(source: string): string {
+  return normalizeDisplayMath(source, false).markdown;
+}
+
+export function normalizeDisplayMathWithSourceMap(source: string): SourceMappedMarkdown {
+  return normalizeDisplayMath(source, true);
 }
 
 const atomicTags = new Set([

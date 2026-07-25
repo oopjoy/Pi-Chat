@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import { stat } from "node:fs/promises";
 import { spawn } from "node:child_process";
 
 const PICKER_SCRIPT = String.raw`
@@ -184,4 +186,29 @@ export async function pickWorkspaceFolder(initialPath?: string): Promise<string 
     if (error instanceof SyntaxError) throw new Error("无法读取 Windows 文件夹选择器结果");
     throw error;
   }
+}
+
+/** Open a local file or folder through the Windows shell. Loopback-only helper for settings. */
+export async function revealInExplorer(targetPath: string): Promise<void> {
+  if (process.platform !== "win32") throw new Error("打开本地目录目前仅支持 Windows");
+  if (!targetPath || !/^[A-Za-z]:[\\/]/.test(targetPath)) throw new Error("路径无效");
+  if (!existsSync(targetPath)) throw new Error("路径不存在");
+  const isDir = (await stat(targetPath)).isDirectory();
+  // ShellExecute via PowerShell is more reliable than spawning explorer.exe
+  // directly from a detached/background Node process. It also preserves paths
+  // containing spaces, CJK characters, and shell metacharacters.
+  const script = isDir
+    ? "Start-Process -FilePath $env:PI_CHAT_REVEAL_PATH"
+    : "Start-Process -FilePath explorer.exe -ArgumentList ('/select,\"{0}\"' -f $env:PI_CHAT_REVEAL_PATH)";
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+      windowsHide: true,
+      env: { ...process.env, PI_CHAT_REVEAL_PATH: targetPath },
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); });
+    child.once("error", reject);
+    child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(stderr.trim() || "无法启动 Windows 资源管理器")));
+  });
 }
