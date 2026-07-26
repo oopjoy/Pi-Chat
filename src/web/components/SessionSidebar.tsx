@@ -1,4 +1,5 @@
-import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { createPortal } from "react-dom";
 import type { SessionSummary } from "../../shared/types";
 import { SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN } from "../lib/preferences";
 import { ChipIcon, FolderIcon, PanelLeftIcon, PiMarkIcon, PlusIcon, RefreshIcon, SettingsIcon } from "./Icons";
@@ -92,6 +93,32 @@ export function SessionSidebar({ sessions, sessionsTotal, loadingAllSessions, vi
   onManage: (section: ManagementSection) => void;
   onWidthChange: (width: number) => void;
 }) {
+  const [sessionMenuId, setSessionMenuId] = useState("");
+  const [sessionMenuPosition, setSessionMenuPosition] = useState({ top: 0, left: 0 });
+  const sessionMenuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!sessionMenuId) return;
+    const closeOnOutside = (event: PointerEvent) => {
+      const target = event.target as Element;
+      if (!sessionMenuRef.current?.contains(target) && !target.closest(".session-menu-trigger")) setSessionMenuId("");
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSessionMenuId("");
+    };
+    const closeOnLayoutChange = () => setSessionMenuId("");
+    document.addEventListener("pointerdown", closeOnOutside);
+    window.addEventListener("keydown", closeOnEscape);
+    window.addEventListener("resize", closeOnLayoutChange);
+    document.addEventListener("scroll", closeOnLayoutChange, true);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutside);
+      window.removeEventListener("keydown", closeOnEscape);
+      window.removeEventListener("resize", closeOnLayoutChange);
+      document.removeEventListener("scroll", closeOnLayoutChange, true);
+    };
+  }, [sessionMenuId]);
+  const menuSession = sessions.find((session) => session.id === sessionMenuId);
+
   return (
     <>
       {open && <button type="button" className="sidebar-scrim" aria-label="关闭会话栏" onClick={onClose} />}
@@ -126,14 +153,20 @@ export function SessionSidebar({ sessions, sessionsTotal, loadingAllSessions, vi
                 <span className="session-name">{session.name}</span>
                 <span className="session-meta"><i className={`session-status is-${status.kind}`} role="img" aria-label={status.label} title={status.label} />{relativeTime(session.updatedAt)} · {session.turnCount ?? session.messageCount} 轮</span>
               </button>
-              <span className="session-item-actions">
-                <button type="button" onClick={() => onRename(session)} title="重命名对话" aria-label={`重命名 ${session.name}`}>
-                  <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 13.8-.7 3 3-.7L15 7.4 12.6 5 4 13.8Z" /><path d="m11.7 5.9 2.4 2.4" /></svg>
+              <div className={`session-item-actions${sessionMenuId === session.id ? " is-open" : ""}`}>
+                <button type="button" className="session-menu-trigger" onClick={(event) => {
+                  if (sessionMenuId === session.id) return setSessionMenuId("");
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  const menuHeight = 72;
+                  setSessionMenuPosition({
+                    top: rect.bottom + menuHeight + 6 <= window.innerHeight ? rect.bottom + 4 : Math.max(4, rect.top - menuHeight - 4),
+                    left: Math.max(4, rect.right - 108),
+                  });
+                  setSessionMenuId(session.id);
+                }} title="对话操作" aria-label={`${session.name} 的操作菜单`} aria-haspopup="menu" aria-expanded={sessionMenuId === session.id}>
+                  <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="4.5" cy="10" r="1" /><circle cx="10" cy="10" r="1" /><circle cx="15.5" cy="10" r="1" /></svg>
                 </button>
-                <button type="button" disabled={session.running || session.queued || session.pendingConfirmation} onClick={() => onDelete(session)} title={session.running ? "该对话正在生成，停止后才能删除" : session.queued ? "该对话有待发送消息，清空队列后才能删除" : session.pendingConfirmation ? "该对话正在等待确认，处理后才能删除" : "删除对话"} aria-label={`删除 ${session.name}`}>
-                  <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4.5 6h11M8 3.8h4M6 6l.7 10h6.6L14 6M8.2 8.5v5M11.8 8.5v5" /></svg>
-                </button>
-              </span>
+              </div>
             </div>;
           })}
           {sessions.length < sessionsTotal && <button type="button" className="load-all-sessions" disabled={loadingAllSessions} onClick={onLoadAllSessions}>{loadingAllSessions ? "正在加载…" : `加载全部对话（共 ${sessionsTotal} 个）`}</button>}
@@ -145,6 +178,10 @@ export function SessionSidebar({ sessions, sessionsTotal, loadingAllSessions, vi
         </nav>
         <ResizeHandle width={width} onWidthChange={onWidthChange} />
       </aside>
+      {menuSession && createPortal(<div className="session-item-menu" ref={sessionMenuRef} role="menu" style={sessionMenuPosition}>
+        <button type="button" role="menuitem" onClick={() => { setSessionMenuId(""); onRename(menuSession); }}>重命名</button>
+        <button type="button" role="menuitem" className="is-danger" disabled={menuSession.running || menuSession.queued || menuSession.pendingConfirmation} onClick={() => { setSessionMenuId(""); onDelete(menuSession); }} title={menuSession.running ? "该对话正在生成，停止后才能删除" : menuSession.queued ? "该对话有待发送消息，清空队列后才能删除" : menuSession.pendingConfirmation ? "该对话正在等待确认，处理后才能删除" : undefined}>删除</button>
+      </div>, document.body)}
     </>
   );
 }

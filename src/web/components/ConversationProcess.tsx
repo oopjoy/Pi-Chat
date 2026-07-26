@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import type { ProcessEntry } from "../lib/conversation-process";
 import { AlertIcon, CheckIcon } from "./Icons";
 import { openEditDiffSidebar } from "./EditToolDiff";
+import { compactEditPath } from "../lib/tool-edit-diff";
 import { MarkdownBody } from "./MarkdownBody";
 
 function summarize(entries: ProcessEntry[], streaming = false): string {
@@ -40,7 +41,7 @@ export function ConversationProcess({ entries, streaming = false }: { entries: P
         if (entry.kind === "note") return <div className="process-entry process-note" key={`note-${index}`}><MarkdownBody>{entry.text}</MarkdownBody></div>;
         if (entry.editDiff) {
           const editDiff = entry.editDiff;
-          const name = editDiff.path.split(/[\\/]/).at(-1) || editDiff.path;
+          const name = compactEditPath(editDiff.path);
           const completed = Boolean(entry.result) && !entry.isError;
           return <div className={`process-entry process-tool process-edit-entry${entry.isError ? " is-error" : ""}`} key={entry.id || `tool-${index}`}>
             <button type="button" title={editDiff.path} disabled={!completed} onClick={() => { if (completed) openEditDiffSidebar(editDiff); }}>

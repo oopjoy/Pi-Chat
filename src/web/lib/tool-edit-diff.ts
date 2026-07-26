@@ -19,6 +19,12 @@ export interface ToolEditDiff {
 const MAX_DIFF_LINES = 400;
 const MAX_DIFF_CHARACTERS = 40_000;
 
+export function compactEditPath(path: string, maxSegments = 3): string {
+  const parts = path.replace(/\\/g, "/").split("/").filter(Boolean);
+  if (!parts.length) return path;
+  if (parts.length <= maxSegments) return parts.join("/");
+  return `…/${parts.slice(-maxSegments).join("/")}`;
+}
 
 function lines(value: string): string[] {
   if (!value) return [];

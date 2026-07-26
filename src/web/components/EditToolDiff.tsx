@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import type { ToolEditDiff } from "../lib/tool-edit-diff";
+import { compactEditPath, type ToolEditDiff } from "../lib/tool-edit-diff";
 
 const OPEN_DIFF_EVENT = "pi-chat-open-edit-diff";
 
@@ -7,16 +7,12 @@ export function openEditDiffSidebar(diff: ToolEditDiff): void {
   window.dispatchEvent(new window.CustomEvent<ToolEditDiff>(OPEN_DIFF_EVENT, { detail: diff }));
 }
 
-function fileName(path: string): string {
-  return path.split(/[\\/]/).at(-1) || path;
-}
-
 export function EditToolDiff({ diff }: { diff: ToolEditDiff }) {
   if (diff.sensitive) return <p className="edit-tool-diff-note">敏感文件仅显示修改摘要。</p>;
   return <div className="edit-tool-diff-body">
     {diff.hunks.map((hunk, index) => <section key={index}>
       <header>@@</header>
-      <pre>{hunk.lines.map((line, lineIndex) => <span className={`is-${line.kind}`} key={lineIndex}>{line.kind === "add" ? "+" : "-"}{line.text}{"\n"}</span>)}</pre>
+      <pre>{hunk.lines.map((line, lineIndex) => <span className={`is-${line.kind}`} key={lineIndex}>{line.text}{"\n"}</span>)}</pre>
     </section>)}
     {diff.truncated && <p className="edit-tool-diff-note">Diff 过大，已截断显示。</p>}
   </div>;
@@ -57,7 +53,7 @@ export function EditDiffSidebar({ open, width, onOpenChange, onWidthChange }: { 
   return <aside className="edit-diff-sidebar" style={{ width }} aria-label="文件修改对比侧栏">
     <div className="edit-diff-sidebar-resize" role="separator" aria-label="调整 Diff 侧栏宽度" onPointerDown={startResize} onPointerMove={moveResize} onPointerUp={endResize} onPointerCancel={endResize} />
     <header className="edit-diff-sidebar-header">
-      <span title={diff?.path}>{diff ? <><strong>{fileName(diff.path)}</strong><b>+{diff.additions}</b><i>-{diff.deletions}</i></> : "修改对比"}</span>
+      <span title={diff?.path}>{diff ? <><strong>{compactEditPath(diff.path)}</strong><b>+{diff.additions}</b><i>-{diff.deletions}</i></> : "修改对比"}</span>
       <button type="button" onClick={() => onOpenChange(false)} aria-label="收起修改对比侧栏">×</button>
     </header>
     {diff ? <EditToolDiff diff={diff} /> : <div className="edit-diff-sidebar-empty">点击过程中的 edit 查看修改内容</div>}

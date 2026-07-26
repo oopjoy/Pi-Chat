@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { editDiffFromToolCall } from "../src/web/lib/tool-edit-diff";
+import { compactEditPath, editDiffFromToolCall } from "../src/web/lib/tool-edit-diff";
 
 test("edit arguments derive independent line-number-free diff hunks", () => {
   const diff = editDiffFromToolCall("edit", {
@@ -31,6 +31,12 @@ test("sensitive edit paths expose only counts", () => {
   assert.deepEqual(diff.hunks, []);
   assert.equal(diff.additions, 1);
   assert.equal(diff.deletions, 1);
+});
+
+test("edit paths keep useful trailing context without exposing a full absolute path", () => {
+  assert.equal(compactEditPath("styles.css"), "styles.css");
+  assert.equal(compactEditPath("src/web/styles.css"), "src/web/styles.css");
+  assert.equal(compactEditPath("C:\\Users\\name\\project\\src\\web\\styles.css"), "…/src/web/styles.css");
 });
 
 test("non-edit and malformed calls do not derive a diff", () => {

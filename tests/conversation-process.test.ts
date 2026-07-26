@@ -218,8 +218,10 @@ test("a completed edit opens the diff sidebar while a failed edit does not", asy
   assert.equal(sidebarOpen, true);
   assert.equal(dom.window.document.querySelectorAll(".edit-diff-sidebar").length, 1);
   assert.match(dom.window.document.querySelector(".edit-diff-sidebar-header")?.textContent || "", /app\.ts\+1-1/);
-  assert.match(dom.window.document.querySelector(".edit-diff-sidebar .edit-tool-diff-body")?.textContent || "", /-old/);
-  assert.match(dom.window.document.querySelector(".edit-diff-sidebar .edit-tool-diff-body")?.textContent || "", /\+new/);
+  const diffBody = dom.window.document.querySelector(".edit-diff-sidebar .edit-tool-diff-body")?.textContent || "";
+  assert.match(diffBody, /old/);
+  assert.match(diffBody, /new/);
+  assert.doesNotMatch(diffBody, /-old|\+new/);
   const panel = dom.window.document.querySelector<HTMLElement>(".edit-diff-sidebar")!;
   const initialWidth = Number.parseFloat(panel.style.width);
   const resize = panel.querySelector<HTMLElement>(".edit-diff-sidebar-resize")!;
