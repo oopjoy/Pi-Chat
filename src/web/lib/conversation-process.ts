@@ -1,10 +1,11 @@
 import type { PiContentBlock, PiMessage } from "../../shared/types";
 import { sanitizeAssistantText } from "./assistant-text";
+import { editDiffFromToolCall, type ToolEditDiff } from "./tool-edit-diff";
 
 export type ProcessEntry =
   | { kind: "thinking"; text: string }
   | { kind: "note"; text: string }
-  | { kind: "tool"; id?: string; name: string; arguments?: string; result?: string; isError?: boolean };
+  | { kind: "tool"; id?: string; name: string; arguments?: string; editDiff?: ToolEditDiff; result?: string; isError?: boolean };
 
 export type ConversationItem =
   | { kind: "message"; message: PiMessage; key: string }
@@ -80,7 +81,14 @@ function processFromMessage(message: PiMessage): { entries: ProcessEntry[]; visi
   const entries: ProcessEntry[] = [...thinking];
   for (const block of content) {
     if (block.type === "toolCall") {
-      entries.push({ kind: "tool", id: block.id, name: block.name || "工具", arguments: detail(block.arguments) });
+      const editDiff = editDiffFromToolCall(block.name || "", block.arguments);
+      entries.push({
+        kind: "tool",
+        id: block.id,
+        name: block.name || "工具",
+        arguments: detail(block.arguments),
+        ...(editDiff ? { editDiff } : null),
+      });
     } else if (hasToolCall && block.type === "text" && block.text?.trim()) {
       const text = sanitizeAssistantText(block.text);
       if (text) entries.push({ kind: "note", text });

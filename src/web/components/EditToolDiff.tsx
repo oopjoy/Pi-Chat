@@ -1,0 +1,65 @@
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import type { ToolEditDiff } from "../lib/tool-edit-diff";
+
+const OPEN_DIFF_EVENT = "pi-chat-open-edit-diff";
+
+export function openEditDiffSidebar(diff: ToolEditDiff): void {
+  window.dispatchEvent(new window.CustomEvent<ToolEditDiff>(OPEN_DIFF_EVENT, { detail: diff }));
+}
+
+function fileName(path: string): string {
+  return path.split(/[\\/]/).at(-1) || path;
+}
+
+export function EditToolDiff({ diff }: { diff: ToolEditDiff }) {
+  if (diff.sensitive) return <p className="edit-tool-diff-note">敏感文件仅显示修改摘要。</p>;
+  return <div className="edit-tool-diff-body">
+    {diff.hunks.map((hunk, index) => <section key={index}>
+      <header>@@</header>
+      <pre>{hunk.lines.map((line, lineIndex) => <span className={`is-${line.kind}`} key={lineIndex}>{line.kind === "add" ? "+" : "-"}{line.text}{"\n"}</span>)}</pre>
+    </section>)}
+    {diff.truncated && <p className="edit-tool-diff-note">Diff 过大，已截断显示。</p>}
+  </div>;
+}
+
+export function EditDiffSidebar({ open, width, onOpenChange, onWidthChange }: { open: boolean; width: number; onOpenChange: (open: boolean) => void; onWidthChange: (width: number) => void }) {
+  const [diff, setDiff] = useState<ToolEditDiff | null>(null);
+  const resizeRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
+
+  useEffect(() => {
+    const listener = (event: Event) => {
+      const next = (event as CustomEvent<ToolEditDiff>).detail;
+      if (!next) return;
+      setDiff(next);
+      onOpenChange(true);
+    };
+    window.addEventListener(OPEN_DIFF_EVENT, listener);
+    return () => window.removeEventListener(OPEN_DIFF_EVENT, listener);
+  }, [onOpenChange]);
+
+  const startResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    event.currentTarget.setPointerCapture(event.pointerId);
+    resizeRef.current = { pointerId: event.pointerId, startX: event.clientX, startWidth: width };
+  };
+  const moveResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const resize = resizeRef.current;
+    if (!resize || resize.pointerId !== event.pointerId) return;
+    const max = Math.min(760, Math.max(360, window.innerWidth - 280));
+    onWidthChange(Math.max(320, Math.min(max, resize.startWidth + resize.startX - event.clientX)));
+  };
+  const endResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (resizeRef.current?.pointerId !== event.pointerId) return;
+    resizeRef.current = null;
+    event.currentTarget.releasePointerCapture(event.pointerId);
+  };
+
+  if (!open) return null;
+  return <aside className="edit-diff-sidebar" style={{ width }} aria-label="文件修改对比侧栏">
+    <div className="edit-diff-sidebar-resize" role="separator" aria-label="调整 Diff 侧栏宽度" onPointerDown={startResize} onPointerMove={moveResize} onPointerUp={endResize} onPointerCancel={endResize} />
+    <header className="edit-diff-sidebar-header">
+      <span title={diff?.path}>{diff ? <><strong>{fileName(diff.path)}</strong><b>+{diff.additions}</b><i>-{diff.deletions}</i></> : "修改对比"}</span>
+      <button type="button" onClick={() => onOpenChange(false)} aria-label="收起修改对比侧栏">×</button>
+    </header>
+    {diff ? <EditToolDiff diff={diff} /> : <div className="edit-diff-sidebar-empty">点击过程中的 edit 查看修改内容</div>}
+  </aside>;
+}

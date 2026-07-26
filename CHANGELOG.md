@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.5
+
+### Diff review and session safety
+
+- Added a docked, resizable Diff sidebar that opens from completed `edit` rows without using floating windows or additional protocol data
+- Kept Diff details bounded and isolated in the main chat layout, with matching top-bar controls and navigation positioning
+- Preserved edit rows during streaming so in-progress, completed, and failed edits do not remount between different element types
+- Prevented a failed prompt from a previous Session from restoring its draft text into the newly selected Session
+- Unified process-row typography and removed redundant successful-tool completion labels
+
 ## 0.3.4
 
 ### Session and runtime reliability

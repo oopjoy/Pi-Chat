@@ -4,7 +4,8 @@ import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { JSDOM } from "jsdom";
 import type { PiMessage } from "../src/shared/types";
-import { ConversationProcess } from "../src/web/components/ConversationProcess";
+import { ConversationProcess, toolLabel } from "../src/web/components/ConversationProcess";
+import { EditDiffSidebar } from "../src/web/components/EditToolDiff";
 import { groupConversation } from "../src/web/lib/conversation-process";
 
 test("groups thinking, tool calls and matching tool results into one collapsed process", () => {
@@ -71,6 +72,24 @@ test("keeps a failed tool result visible inside the process", () => {
     result: "tests failed",
     isError: true,
   }]);
+});
+
+test("completed read, bash and subagent rows omit redundant completion text", () => {
+  const items = groupConversation([
+    { role: "assistant", content: [
+      { type: "toolCall", id: "read-1", name: "read", arguments: {} },
+      { type: "toolCall", id: "bash-1", name: "bash", arguments: {} },
+      { type: "toolCall", id: "sub-1", name: "subagent", arguments: {} },
+    ] },
+    { role: "toolResult", toolCallId: "read-1", toolName: "read", content: "ok" },
+    { role: "toolResult", toolCallId: "bash-1", toolName: "bash", content: "ok" },
+    { role: "toolResult", toolCallId: "sub-1", toolName: "subagent", content: "ok" },
+  ]);
+  assert.equal(items.length, 1);
+  if (items[0]?.kind !== "process") throw new Error("Expected process");
+  for (const entry of items[0].entries) {
+    if (entry.kind === "tool") assert.equal(toolLabel(entry), entry.name);
+  }
 });
 
 test("does not create a process for ordinary user and assistant messages", () => {
@@ -159,6 +178,75 @@ test("conversation item keys stay stable while streaming thinking text grows", (
   assert.equal(user[0]?.kind, "message");
   if (user[0]?.kind !== "message") throw new Error("Expected message");
   assert.equal(user[0].key, "message:user:42");
+});
+
+test("a completed edit opens the diff sidebar while a failed edit does not", async () => {
+  const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", { url: "http://localhost" });
+  Object.assign(globalThis, {
+    window: dom.window,
+    document: dom.window.document,
+    Node: dom.window.Node,
+    HTMLElement: dom.window.HTMLElement,
+    IS_REACT_ACT_ENVIRONMENT: true,
+  });
+  Object.defineProperty(dom.window.HTMLElement.prototype, "setPointerCapture", { value() {}, configurable: true });
+  Object.defineProperty(dom.window.HTMLElement.prototype, "releasePointerCapture", { value() {}, configurable: true });
+  const root = createRoot(dom.window.document.querySelector<HTMLElement>("#root")!);
+  const messages: PiMessage[] = [
+    { role: "assistant", content: [{ type: "toolCall", id: "edit-1", name: "edit", arguments: { path: "src/app.ts", edits: [{ oldText: "old", newText: "new" }] } }] },
+    { role: "toolResult", toolCallId: "edit-1", toolName: "edit", content: "done" },
+  ];
+  const item = groupConversation(messages)[0];
+  assert.equal(item?.kind, "process");
+  if (item?.kind !== "process") throw new Error("Expected process");
+  await act(async () => root.render(createElement(ConversationProcess, { entries: item.entries })));
+  await act(async () => root.render(createElement(ConversationProcess, { entries: item.entries })));
+  const summary = dom.window.document.querySelector<HTMLButtonElement>(".process-edit-entry > button");
+  assert.ok(summary);
+  assert.equal(summary.title, "src/app.ts");
+  assert.match(summary.textContent || "", /edit/);
+  assert.match(summary.textContent || "", /app\.ts/);
+  assert.match(summary.textContent || "", /\+1/);
+  assert.equal(dom.window.document.querySelector(".process-tool-detail"), null);
+
+  const sidebarRoot = createRoot(dom.window.document.body.appendChild(dom.window.document.createElement("div")));
+  let sidebarOpen = false;
+  let sidebarWidth = 460;
+  const renderSidebar = () => void sidebarRoot.render(createElement(EditDiffSidebar, { open: sidebarOpen, width: sidebarWidth, onWidthChange: (next: number) => { sidebarWidth = next; renderSidebar(); }, onOpenChange: (next: boolean) => { sidebarOpen = next; renderSidebar(); } }));
+  await act(async () => renderSidebar());
+  await act(async () => summary.click());
+  assert.equal(sidebarOpen, true);
+  assert.equal(dom.window.document.querySelectorAll(".edit-diff-sidebar").length, 1);
+  assert.match(dom.window.document.querySelector(".edit-diff-sidebar-header")?.textContent || "", /app\.ts\+1-1/);
+  assert.match(dom.window.document.querySelector(".edit-diff-sidebar .edit-tool-diff-body")?.textContent || "", /-old/);
+  assert.match(dom.window.document.querySelector(".edit-diff-sidebar .edit-tool-diff-body")?.textContent || "", /\+new/);
+  const panel = dom.window.document.querySelector<HTMLElement>(".edit-diff-sidebar")!;
+  const initialWidth = Number.parseFloat(panel.style.width);
+  const resize = panel.querySelector<HTMLElement>(".edit-diff-sidebar-resize")!;
+  const pointer = (type: string, x: number) => {
+    const event = new dom.window.MouseEvent(type, { bubbles: true, clientX: x });
+    Object.defineProperty(event, "pointerId", { value: 1 });
+    return event;
+  };
+  await act(async () => resize.dispatchEvent(pointer("pointerdown", 100)));
+  await act(async () => resize.dispatchEvent(pointer("pointermove", 50)));
+  await act(async () => resize.dispatchEvent(pointer("pointerup", 50)));
+  assert.ok(Number.parseFloat(panel.style.width) > initialWidth);
+  const close = dom.window.document.querySelector<HTMLButtonElement>(".edit-diff-sidebar-header > button");
+  assert.ok(close);
+  await act(async () => close.click());
+  assert.equal(sidebarOpen, false);
+
+  const failed = groupConversation([
+    messages[0],
+    { role: "toolResult", toolCallId: "edit-1", toolName: "edit", content: "failed", isError: true },
+  ])[0];
+  if (failed?.kind !== "process") throw new Error("Expected process");
+  await act(async () => root.render(createElement(ConversationProcess, { entries: failed.entries })));
+  assert.ok(dom.window.document.querySelector(".process-edit-entry"));
+  assert.match(dom.window.document.querySelector(".process-edit-entry")?.textContent || "", /失败/);
+  await act(async () => sidebarRoot.unmount());
+  await act(async () => root.unmount());
 });
 
 test("an opened process card stays open when a tool completes", async () => {

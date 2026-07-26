@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import type { ApplicationLifecycle, BootstrapData, ExtensionUiRequest, ModelInfo, PiMessage, PiState, PromptImage, QueuedPrompt, SessionStats, SessionSummary, SessionViewData, SlashCommand, ThinkingLevel } from "../shared/types";
 import { api } from "./api";
 import { ChatInput } from "./components/ChatInput";
 import { ChatMessage } from "./components/ChatMessage";
 import { ConversationProcess } from "./components/ConversationProcess";
+import { EditDiffSidebar } from "./components/EditToolDiff";
 import { describeGateRequest, ExtensionDialog } from "./components/ExtensionDialog";
 import { ChevronRightIcon, PiMarkIcon } from "./components/Icons";
 import { ManagementPanel, type ManagementSection } from "./components/ManagementPanel";
@@ -22,6 +23,7 @@ import { gateModeFromCommand, gateModeFromNotice, type GateMode } from "./lib/ga
 import { assistantMessage, lifecycleFromEvent, parseEventData, userMessage } from "./lib/pi-events";
 import { applyAppearance, loadAppearance, loadSidebarOpen, loadSidebarWidth, saveAppearance, saveSidebarOpen, saveSidebarWidth, type AppearancePreferences } from "./lib/preferences";
 import { rememberedSessionId, rememberSessionId } from "./lib/session-location";
+import { refreshFailureKeepsCommittedView, sidebarNavigationBlocked } from "./lib/refresh-navigation-guards";
 import { SessionScrollMemory } from "./lib/session-scroll-memory";
 import { SessionViewCache } from "./lib/session-view-cache";
 
@@ -59,6 +61,9 @@ export function App() {
   const [promptStarting, setPromptStarting] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [viewSwitching, setViewSwitching] = useState(false);
+  const [diffSidebarOpen, setDiffSidebarOpen] = useState(false);
+  const [diffSidebarWidth, setDiffSidebarWidth] = useState(460);
   /** Model / thinking only — must not freeze composer, sidebar, or the whole shell. */
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -287,8 +292,13 @@ export function App() {
         setError((current) => recoverableRefreshError(current) ? "" : current);
         return;
       } catch (cause) {
-        // Another window may have deleted this Session while this page was refreshing.
-        // Bootstrap has already selected the current writable Session, so treat that 404 as recovery.
+        // A busy Runtime can make this best-effort view refresh time out. Keep the
+        // already committed conversation painted; Bootstrap owns only global
+        // metadata unless the server explicitly confirms the Session is gone.
+        if (refreshFailureKeepsCommittedView(cause, viewedSessionIdRef.current)) {
+          applyBootstrapMetadata(data);
+          throw cause;
+        }
         if (!(cause instanceof Error) || !cause.message.includes("会话不存在")) {
           applyBootstrap(data);
           throw cause;
@@ -787,6 +797,7 @@ export function App() {
     const alreadyStreaming = state.isStreaming;
     const previousToolStatus = toolStatus;
     const optimisticMessage = alreadyStreaming || message.startsWith("/") ? null : userMessage(message, images);
+    let targetSessionId = viewedSessionIdRef.current;
     setPendingUserMessage(optimisticMessage);
     try {
       const command = /^\/(new|compact|abort)(?:\s+([\s\S]*))?$/.exec(message);
@@ -812,7 +823,6 @@ export function App() {
         return;
       }
 
-      let targetSessionId = viewedSessionIdRef.current;
       // Preferences chosen while cold/draft are local until the first send starts a Runtime.
       const prefsKey = localDraftRef.current ? DRAFT_PREFS_KEY : targetSessionId;
       const staged = pendingSessionPrefsRef.current.get(prefsKey);
@@ -865,6 +875,13 @@ export function App() {
 
       const eventVersionBeforePrompt = sessionEventVersionRef.current.get(targetSessionId) || 0;
       const result = await api.prompt(message, images, targetSessionId);
+      // An orphaned blank view may let the user escape through the sidebar while
+      // this request is still pending. Its late response belongs to the old
+      // Session and must not overwrite the newly selected conversation.
+      if (viewedSessionIdRef.current !== targetSessionId) {
+        scheduleSidebarRefresh();
+        return;
+      }
       setPromptStarting(false);
       if (result.extension) {
         setPendingUserMessage(null);
@@ -900,12 +917,14 @@ export function App() {
         }
       }
     } catch (cause) {
-      setPendingUserMessage(null);
-      setPromptStarting(false);
-      if (!state.isStreaming) setToolStatus("");
-      const messageText = cause instanceof Error ? cause.message : String(cause);
-      setError(messageText);
-      throw cause;
+      if (viewedSessionIdRef.current === targetSessionId) {
+        setPendingUserMessage(null);
+        setPromptStarting(false);
+        if (!state.isStreaming) setToolStatus("");
+        const messageText = cause instanceof Error ? cause.message : String(cause);
+        setError(messageText);
+      }
+      if (viewedSessionIdRef.current === targetSessionId) throw cause;
     } finally {
       setBusy(false);
     }
@@ -951,6 +970,7 @@ export function App() {
     const rememberedTurns = scrollMemoryRef.current.turns(id);
     const epoch = ++navigationEpochRef.current;
     desiredSessionIdRef.current = id;
+    setViewSwitching(true);
     setError("");
     // Keep the current conversation visible until the destination view has
     // arrived. This avoids a blank timeline while an active Session is waiting
@@ -962,10 +982,9 @@ export function App() {
       pendingScrollRestoreRef.current = id;
       applySessionView(cached);
       // This cached navigation supersedes any older in-flight cold request.
-      setBusy(false);
+      setViewSwitching(false);
       return;
     }
-    setBusy(true);
     try {
       const view = await api.viewSession(id, rememberedTurns);
       if (navigationEpochRef.current !== epoch || desiredSessionIdRef.current !== id) return;
@@ -979,7 +998,7 @@ export function App() {
         setError(cause instanceof Error ? cause.message : String(cause));
       }
     } finally {
-      if (navigationEpochRef.current === epoch) setBusy(false);
+      if (navigationEpochRef.current === epoch) setViewSwitching(false);
     }
   };
 
@@ -990,6 +1009,7 @@ export function App() {
     // made a no-op UI action block on cold RPC startup and stale draft probes.
     navigationEpochRef.current += 1;
     refreshEpochRef.current += 1;
+    setViewSwitching(false);
     if (promptReconcileTimerRef.current !== null) window.clearTimeout(promptReconcileTimerRef.current);
     promptReconcileTimerRef.current = null;
     const previousViewedSessionId = viewedSessionIdRef.current;
@@ -1264,6 +1284,7 @@ export function App() {
   const globalMutationBlocked = lifecycleBlocked || anySessionRunning || anySessionQueued || anySessionPendingConfirmation;
   const primaryQueueBusy = viewedSessionId === activeSessionId && queue.length > 0;
   const viewedSession = sessions.find((session) => session.id === viewedSessionId);
+  const sidebarViewBlocked = sidebarNavigationBlocked(loading, lifecycleBlocked, busy, Boolean(viewedSession));
   const conversationName = localDraft ? "新对话" : viewedSession?.name || (state.messageCount ? state.sessionName || "已保存对话" : "新对话");
   const conversationWorkspace = viewedSession?.cwd || workspaceCwd;
   // Cold view-only sessions carry no RPC command list; the server reports Gate availability explicitly.
@@ -1295,7 +1316,7 @@ export function App() {
   }
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" style={{ "--diff-sidebar-width": diffSidebarOpen ? `${diffSidebarWidth}px` : "0px" } as CSSProperties}>
       <SessionSidebar
         sessions={sessions}
         sessionsTotal={sessionsTotal}
@@ -1309,7 +1330,7 @@ export function App() {
         refreshDisabled={loading || refreshing}
         restartDisabled={loading || busy || refreshing || globalMutationBlocked}
         workspaceDisabled={loading || busy || workspacePicking || globalMutationBlocked}
-        viewBusy={loading || busy}
+        viewBusy={sidebarViewBlocked}
         refreshing={refreshing}
         warmingSessionIds={[]}
         failedSessionIds={failedSessionIds}
@@ -1334,7 +1355,7 @@ export function App() {
           stats={stats}
           conversationName={conversationName}
           workspacePath={conversationWorkspace}
-          disabled={busy || observing || lifecycleBlocked}
+          disabled={busy || viewSwitching || observing || lifecycleBlocked}
           settingsBusy={settingsBusy}
           streaming={state.isStreaming}
           gateAvailable={gateAvailable}
@@ -1342,6 +1363,8 @@ export function App() {
           onGate={(mode) => void changeGate(mode)}
           onModel={(provider, id) => void changeModel(provider, id)}
           onThinking={(level) => void changeThinking(level)}
+          diffSidebarOpen={diffSidebarOpen}
+          onToggleDiffSidebar={() => setDiffSidebarOpen((open) => !open)}
         />
         <div className="timeline" ref={scrollRef} onScroll={onScroll} onWheel={clearConversationNavigationTarget} onPointerDown={clearConversationNavigationTarget}>
           <div className="timeline-inner">
@@ -1384,14 +1407,14 @@ export function App() {
         <PromptQueue
           queue={queue}
           paused={queuePaused}
-          busy={busy || observing || lifecycleBlocked}
+          busy={busy || viewSwitching || observing || lifecycleBlocked}
           onCancel={(id) => void api.cancelQueued(id, viewedSessionId).then((result) => { setQueue(result.queue); setQueuePaused(result.paused); }).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))}
           onResume={() => void api.resumeQueue(viewedSessionId).then((result) => { setQueue(result.queue); setQueuePaused(result.paused); }).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))}
         />
         <ChatInput
           streaming={state.isStreaming}
           stopping={stopping}
-          disabled={loading || busy || observing || lifecycleBlocked || Boolean(state.isCompacting)}
+          disabled={loading || busy || viewSwitching || observing || lifecycleBlocked || Boolean(state.isCompacting)}
           disabledPlaceholder={lifecycleBlocked ? "Pi Chat 正在执行全局维护，暂时不能提交新操作" : observing ? "此对话正在另一窗口中控制；点击“接管控制”后可操作" : state.isCompacting ? "正在压缩上下文，完成后可继续发送…" : runtimeStatus === "restoring" || (busy && runtimeStatus !== "active") ? "正在恢复 Pi Runtime，就绪后即可发送…" : runtimeStatus === "view-only" ? "当前为只读查看；发送时会自动恢复 Pi Runtime" : undefined}
           acceptsImages={state.model?.input?.includes("image") === true}
           commands={commands}
@@ -1423,6 +1446,7 @@ export function App() {
         onDelete={() => void deleteSession()}
       />
       <ExtensionDialog request={extensionRequest} onRespond={(body) => void respondToExtension(body)} />
+      <EditDiffSidebar open={diffSidebarOpen} width={diffSidebarWidth} onOpenChange={setDiffSidebarOpen} onWidthChange={setDiffSidebarWidth} />
     </div>
   );
 }

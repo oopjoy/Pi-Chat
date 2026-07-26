@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import type { ProcessEntry } from "../lib/conversation-process";
 import { AlertIcon, CheckIcon } from "./Icons";
+import { openEditDiffSidebar } from "./EditToolDiff";
 import { MarkdownBody } from "./MarkdownBody";
 
 function summarize(entries: ProcessEntry[], streaming = false): string {
@@ -16,9 +17,9 @@ function summarize(entries: ProcessEntry[], streaming = false): string {
   return `过程 · ${labels.join(" · ")}${failed ? ` · ${failed} 项失败` : ""}`;
 }
 
-function toolLabel(entry: Extract<ProcessEntry, { kind: "tool" }>): string {
-  const state = entry.isError ? "失败" : entry.result ? "完成" : "已调用";
-  return `${entry.name} · ${state}`;
+export function toolLabel(entry: Extract<ProcessEntry, { kind: "tool" }>): string {
+  if (entry.isError) return `${entry.name} · 失败`;
+  return entry.result ? entry.name : `${entry.name} · 已调用`;
 }
 
 export function ConversationProcess({ entries, streaming = false }: { entries: ProcessEntry[]; streaming?: boolean }) {
@@ -37,6 +38,21 @@ export function ConversationProcess({ entries, streaming = false }: { entries: P
           </details>;
         }
         if (entry.kind === "note") return <div className="process-entry process-note" key={`note-${index}`}><MarkdownBody>{entry.text}</MarkdownBody></div>;
+        if (entry.editDiff) {
+          const editDiff = entry.editDiff;
+          const name = editDiff.path.split(/[\\/]/).at(-1) || editDiff.path;
+          const completed = Boolean(entry.result) && !entry.isError;
+          return <div className={`process-entry process-tool process-edit-entry${entry.isError ? " is-error" : ""}`} key={entry.id || `tool-${index}`}>
+            <button type="button" title={editDiff.path} disabled={!completed} onClick={() => { if (completed) openEditDiffSidebar(editDiff); }}>
+              {entry.isError ? <AlertIcon className="process-status-icon is-error" /> : completed ? <CheckIcon className="process-status-icon" /> : <span className="process-status-icon is-running" aria-hidden="true" />}
+              <span>edit</span>
+              <strong>{name}</strong>
+              <span className="process-edit-stats"><b>+{editDiff.additions}</b><i>-{editDiff.deletions}</i></span>
+              {!completed && <em>{entry.isError ? "失败" : "执行中…"}</em>}
+            </button>
+            {entry.isError && entry.result && <div className="process-tool-detail"><section><strong>错误信息</strong><pre>{entry.result}</pre></section></div>}
+          </div>;
+        }
         return <details className={`process-entry process-tool ${entry.isError ? "is-error" : ""}`} key={entry.id || `tool-${index}`}>
           <summary><span className="process-summary-label">{entry.isError ? <AlertIcon className="process-status-icon is-error" /> : <CheckIcon className="process-status-icon" />}{toolLabel(entry)}</span></summary>
           {(entry.arguments || entry.result) && <div className="process-tool-detail">

@@ -23,6 +23,10 @@ export function PanelLeftIcon(props: IconProps) {
   return <LineIcon {...props}><rect x="3.5" y="4" width="17" height="16" rx="2.5" /><path d="M9.75 4v16" /></LineIcon>;
 }
 
+export function PanelRightIcon(props: IconProps) {
+  return <LineIcon {...props}><rect x="3.5" y="4" width="17" height="16" rx="2.5" /><path d="M14.25 4v16" /></LineIcon>;
+}
+
 export function PlusIcon(props: IconProps) {
   return <LineIcon {...props}><path d="M12 5v14M5 12h14" /></LineIcon>;
 }

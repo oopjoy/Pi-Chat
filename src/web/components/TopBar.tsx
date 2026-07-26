@@ -3,7 +3,7 @@ import type { ModelInfo, PiState, SessionStats, ThinkingLevel } from "../../shar
 import type { GateMode } from "../lib/gate-mode";
 import { CompactSelect } from "./CompactSelect";
 import { GateControl } from "./GateControl";
-import { CheckIcon, ChipIcon } from "./Icons";
+import { CheckIcon, ChipIcon, PanelRightIcon } from "./Icons";
 import { contextUsageTone } from "../lib/context-usage";
 
 function modelValue(model: Pick<ModelInfo, "provider" | "id">): string {
@@ -61,7 +61,7 @@ function UsageStats({ stats, isCompacting }: { stats?: SessionStats; isCompactin
   );
 }
 
-export function TopBar({ state, models, stats, conversationName, workspacePath, disabled, settingsBusy = false, streaming, gateAvailable, gateMode, onGate, onModel, onThinking }: {
+export function TopBar({ state, models, stats, conversationName, workspacePath, disabled, settingsBusy = false, streaming, gateAvailable, gateMode, onGate, onModel, onThinking, diffSidebarOpen, onToggleDiffSidebar }: {
   state: PiState;
   models: ModelInfo[];
   stats?: SessionStats;
@@ -77,6 +77,8 @@ export function TopBar({ state, models, stats, conversationName, workspacePath, 
   onGate: (mode: GateMode) => void;
   onModel: (provider: string, id: string) => void;
   onThinking: (level: ThinkingLevel) => void;
+  diffSidebarOpen: boolean;
+  onToggleDiffSidebar: () => void;
 }) {
   const current = state.model ? modelValue(state.model) : "";
   const currentModel = models.find((model) => modelValue(model) === current);
@@ -127,6 +129,9 @@ export function TopBar({ state, models, stats, conversationName, workspacePath, 
           </div>
           <CompactSelect value={(state.thinkingLevel || "off") as ThinkingLevel} options={THINKING_LEVELS} disabled={modelControlsDisabled || !state.model?.reasoning} ariaLabel="思考强度" title="思考强度" align="right" className="thinking-select" onChange={onThinking} />
         </div>
+        <button type="button" className={`diff-sidebar-toggle${diffSidebarOpen ? " is-open" : ""}`} onClick={onToggleDiffSidebar} aria-label={diffSidebarOpen ? "收起 Diff 侧栏" : "展开 Diff 侧栏"} aria-pressed={diffSidebarOpen} title={diffSidebarOpen ? "收起修改对比侧栏" : "展开修改对比侧栏"}>
+          <PanelRightIcon aria-hidden="true" />
+        </button>
       </div>
     </header>
   );
