@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync, type Stats } from "node:fs";
-import { readFile, readdir, stat } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
+import { createInterface } from "node:readline";
 import { homedir } from "node:os";
 import { extname, join, resolve } from "node:path";
-import { createInterface } from "node:readline";
 import type { PiMessage, SessionSummary, ThinkingLevel } from "../shared/types.js";
+import { compareSessionsByLastUserPrompt } from "../shared/session-order.js";
 import { loadSessionCache, saveSessionCache, type SessionCacheEntry } from "./session-index-cache.js";
 
 interface SessionHeader {
@@ -19,6 +20,7 @@ interface SessionEntry {
   id?: string;
   parentId?: string | null;
   timestamp?: string | number;
+  cwd?: string;
   name?: string;
   provider?: string;
   modelId?: string;
@@ -41,6 +43,17 @@ function cleanPreview(value: string, limit = 90): string {
   return clean.length > limit ? `${clean.slice(0, limit - 1)}…` : clean;
 }
 
+function timestampFromEntry(entry: SessionEntry): number | undefined {
+  const messageTime = entry.message?.timestamp;
+  if (typeof messageTime === "number" && Number.isFinite(messageTime)) return messageTime;
+  if (typeof entry.timestamp === "number" && Number.isFinite(entry.timestamp)) return entry.timestamp;
+  if (typeof entry.timestamp === "string") {
+    const parsed = Date.parse(entry.timestamp);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+}
+
 function idForPath(path: string): string {
   return createHash("sha256").update(resolve(path).toLowerCase()).digest("hex").slice(0, 20);
 }
@@ -61,27 +74,75 @@ async function listJsonlFiles(root: string): Promise<string[]> {
   return files;
 }
 
-async function readSessionBranch(path: string): Promise<SessionEntry[]> {
+async function scanSessionEntries(path: string, retain: (entry: SessionEntry) => SessionEntry | null = (entry) => entry): Promise<SessionEntry[]> {
   const entries: SessionEntry[] = [];
-  for (const line of (await readFile(path, "utf8")).split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      const entry = JSON.parse(line) as SessionEntry;
-      if (entry.id) entries.push(entry);
-    } catch {
-      // Ignore an incomplete trailing line while Pi is writing the session.
+  const input = createReadStream(path, { encoding: "utf8" });
+  const lines = createInterface({ input, crlfDelay: Infinity });
+  try {
+    for await (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const retained = retain(JSON.parse(line) as SessionEntry);
+        if (retained) entries.push(retained);
+      } catch {
+        // Ignore an incomplete trailing line while Pi is writing the session.
+      }
     }
+  } finally {
+    lines.close();
+    input.destroy();
   }
-  const byId = new Map(entries.map((entry) => [entry.id as string, entry]));
+  return entries;
+}
+
+async function readSessionEntries(path: string): Promise<SessionEntry[]> {
+  return scanSessionEntries(path);
+}
+
+/** Sidebar scans retain branch identity and compact user facts, never full replies/tool payloads. */
+async function readSessionOutline(path: string): Promise<SessionEntry[]> {
+  return scanSessionEntries(path, (entry) => {
+    if (entry.type === "session") return { type: entry.type, id: entry.id, cwd: entry.cwd };
+    if (entry.type === "session_info") return { type: entry.type, name: entry.name };
+    if (entry.type !== "message") return entry.id || entry.parentId
+      ? { type: entry.type, id: entry.id, parentId: entry.parentId, timestamp: entry.timestamp }
+      : null;
+    const role = entry.message?.role;
+    return {
+      type: entry.type,
+      id: entry.id,
+      parentId: entry.parentId,
+      timestamp: entry.timestamp,
+      message: role === "user"
+        ? { role, content: cleanPreview(textFromContent(entry.message?.content), 90), timestamp: entry.message?.timestamp }
+        : { role: role || "unknown", timestamp: entry.message?.timestamp },
+    };
+  });
+}
+
+/** Follow Pi's current parent chain, excluding file-global session metadata as a leaf. */
+function activeSessionBranch(entries: SessionEntry[]): SessionEntry[] {
+  // Older/handwritten Pi JSONL uses append-only message records without parent
+  // links. It has no branch graph, so its whole conversation remains current.
+  const conversation = entries.filter((entry) => entry.type !== "session" && entry.type !== "session_info");
+  if (!conversation.some((entry) => Boolean(entry.parentId))) return conversation;
+
+  const byId = new Map(entries.flatMap((entry) => entry.id ? [[entry.id, entry] as const] : []));
   const branch: SessionEntry[] = [];
-  let current = entries.at(-1);
+  let current = [...conversation].reverse().find((entry) => Boolean(entry.id));
   const visited = new Set<string>();
   while (current?.id && !visited.has(current.id)) {
     visited.add(current.id);
     branch.push(current);
     current = current.parentId ? byId.get(current.parentId) : undefined;
   }
-  return branch.reverse();
+  // A malformed trailing entry without an ID cannot safely identify a fork;
+  // preserve legacy linear readability rather than silently emptying history.
+  return branch.length ? branch.reverse() : conversation;
+}
+
+async function readSessionBranch(path: string): Promise<SessionEntry[]> {
+  return activeSessionBranch(await readSessionEntries(path));
 }
 
 export interface SessionUsageSnapshot {
@@ -119,6 +180,7 @@ export async function readSessionSnapshot(path: string): Promise<SessionFileSnap
   let context: SessionUsageSnapshot["context"] = null;
   let lastAssistantModel: { provider?: string; modelId?: string } = {};
   const settings: SessionSettingsSnapshot = {};
+  let activeThinkingLevel: ThinkingLevel | undefined;
   for (const entry of branch) {
     if (entry.type === "model_change" && typeof entry.provider === "string" && typeof entry.modelId === "string") {
       settings.provider = entry.provider;
@@ -126,7 +188,8 @@ export async function readSessionSnapshot(path: string): Promise<SessionFileSnap
       continue;
     }
     if (entry.type === "thinking_level_change" && typeof entry.thinkingLevel === "string") {
-      settings.thinkingLevel = entry.thinkingLevel;
+      settings.thinkingLevel = entry.thinkingLevel as ThinkingLevel;
+      activeThinkingLevel = settings.thinkingLevel;
       continue;
     }
     if (entry.type !== "message" || !entry.message) continue;
@@ -137,8 +200,12 @@ export async function readSessionSnapshot(path: string): Promise<SessionFileSnap
         : typeof entry.timestamp === "string"
           ? Date.parse(entry.timestamp)
           : undefined;
-    messages.push({ ...entry.message, ...(Number.isFinite(timestamp) ? { timestamp } : {}) });
     const message = entry.message as unknown as Record<string, unknown>;
+    messages.push({
+      ...entry.message,
+      ...(Number.isFinite(timestamp) ? { timestamp } : {}),
+      ...(message.role === "assistant" && activeThinkingLevel ? { thinkingLevel: activeThinkingLevel } : {}),
+    });
     if (message.role !== "assistant" || message.stopReason === "error") continue;
     if (typeof message.provider === "string") lastAssistantModel.provider = message.provider;
     if (typeof message.model === "string") lastAssistantModel.modelId = message.model;
@@ -163,8 +230,8 @@ export async function readSessionSnapshot(path: string): Promise<SessionFileSnap
   tokens.total = tokens.input + tokens.output + tokens.cacheRead + tokens.cacheWrite;
   // Older Pi session files may omit model_change; the last successful reply
   // still carries the model that actually produced it.
-  if (!settings.provider) settings.provider = context?.provider || lastAssistantModel.provider;
-  if (!settings.modelId) settings.modelId = context?.model || lastAssistantModel.modelId;
+  if (!settings.provider) settings.provider = lastAssistantModel.provider || context?.provider;
+  if (!settings.modelId) settings.modelId = lastAssistantModel.modelId || context?.model;
   return { messages, usage: { tokens, context }, settings };
 }
 
@@ -186,37 +253,30 @@ function isSubagentSession(path: string, name: string): boolean {
 }
 
 async function parseSession(path: string, modifiedAt: number): Promise<Omit<SessionSummary, "active"> | null> {
-  const lines = createInterface({ input: createReadStream(path, { encoding: "utf8" }), crlfDelay: Infinity });
-  let header: SessionHeader | null = null;
-  let name = "";
+  const entries = await readSessionOutline(path);
+  const header = entries.find((entry): entry is SessionEntry & SessionHeader => entry.type === "session" && typeof entry.id === "string");
+  // Session naming is file-global metadata. Conversation summary facts below
+  // deliberately use only the active parent chain, matching rendered history.
+  const name = cleanPreview([...entries].reverse().find((entry) => entry.type === "session_info")?.name || "", 120);
+  const branch = activeSessionBranch(entries);
   let preview = "";
   let messageCount = 0;
   let turnCount = 0;
+  let lastUserPromptAt: number | undefined;
+  let hasUserPrompt = false;
 
-  for await (const line of lines) {
-    if (!header) {
-      try {
-        const candidate = JSON.parse(line) as SessionHeader;
-        if (candidate.type === "session") header = candidate;
-      } catch {
-        return null;
-      }
-      continue;
-    }
-    if (!line.includes('"type":"message"') && !line.includes('"type":"session_info"')) continue;
-    try {
-      const entry = JSON.parse(line) as SessionEntry;
-      if (entry.type === "session_info") name = cleanPreview(entry.name || "", 120);
-      if (entry.type === "message") {
-        messageCount += 1;
-        if (entry.message?.role === "user") {
-          turnCount += 1;
-          if (!preview) preview = cleanPreview(textFromContent(entry.message.content));
-        }
-      }
-    } catch {
-      // Ignore an incomplete trailing line while Pi is writing the session.
-    }
+  for (const entry of branch) {
+    if (entry.type !== "message" || !entry.message) continue;
+    messageCount += 1;
+    if (entry.message.role !== "user") continue;
+    turnCount += 1;
+    hasUserPrompt = true;
+    const timestamp = timestampFromEntry(entry);
+    // Pi writes the user instruction once, then may append many assistant
+    // snapshots/tool events. Keep this independent from file mtime so live
+    // streams never reshuffle the sidebar.
+    lastUserPromptAt = timestamp;
+    if (!preview) preview = cleanPreview(textFromContent(entry.message.content));
   }
 
   if (!header?.id) return null;
@@ -232,6 +292,7 @@ async function parseSession(path: string, modifiedAt: number): Promise<Omit<Sess
     preview: preview || displayName,
     cwd: header.cwd || "",
     updatedAt: modifiedAt,
+    lastUserPromptAt: hasUserPrompt ? (lastUserPromptAt ?? modifiedAt) : modifiedAt,
     messageCount,
     turnCount,
   };
@@ -246,7 +307,10 @@ export class SessionIndex {
   private refreshKey = "";
   private latestList: { activePath: string; cwd: string; sessions: SessionSummary[]; refreshedAt: number } | null = null;
   private readonly statFile: (path: string) => Promise<Stats>;
-  private readonly snapshotCache = new Map<string, { mtimeMs: number; size: number; snapshot: SessionFileSnapshot }>();
+  private readonly snapshotCache = new Map<string, { mtimeMs: number; size: number; snapshot: SessionFileSnapshot; bytes: number }>();
+  private snapshotCacheBytes = 0;
+  private readonly snapshotCacheMaxEntries = 32;
+  private readonly snapshotCacheMaxBytes = 64 * 1024 * 1024;
   private readonly snapshotReads = new Map<string, Promise<SessionFileSnapshot | null>>();
 
   constructor(root?: string, cachePath?: string, statFile: (path: string) => Promise<Stats> = stat) {
@@ -306,6 +370,13 @@ export class SessionIndex {
     if (!this.cache) this.cache = await loadSessionCache(this.cachePath);
     const files = await listJsonlFiles(this.root);
     const livePaths = new Set(files.map((path) => resolve(path)));
+    for (const [id, cached] of this.snapshotCache) {
+      const path = this.pathsById.get(id);
+      if (!path || !livePaths.has(resolve(path))) {
+        this.snapshotCacheBytes -= cached.bytes;
+        this.snapshotCache.delete(id);
+      }
+    }
     const normalizedActive = activePath ? resolve(activePath).toLowerCase() : "";
     const normalizedCwd = cwd ? resolve(cwd).toLowerCase() : "";
     const summaries: SessionSummary[] = [];
@@ -354,7 +425,7 @@ export class SessionIndex {
       }
     }
     if (cacheChanged) await saveSessionCache(this.cachePath, this.cache);
-    return summaries.sort((left, right) => right.updatedAt - left.updatedAt);
+    return summaries.sort(compareSessionsByLastUserPrompt);
   }
 
   pathForId(id: string): string | null {
@@ -367,6 +438,15 @@ export class SessionIndex {
     return cached ? { ...cached.summary, active: false } : null;
   }
 
+  /**
+   * Return the last parsed snapshot without statting/re-reading a JSONL. A busy
+   * Runtime may append on every token; navigation can use this stale-but-valid
+   * history with the live SSE draft, then reconcile at agent_settled.
+   */
+  cachedSnapshotForId(id: string): SessionFileSnapshot | null {
+    return this.snapshotCache.get(id)?.snapshot ?? null;
+  }
+
   async snapshotForId(id: string): Promise<SessionFileSnapshot | null> {
     const path = this.pathForId(id);
     if (!path) return null;
@@ -376,14 +456,29 @@ export class SessionIndex {
       let fileStat: Stats;
       try { fileStat = await this.statFile(path); }
       catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") this.snapshotCache.delete(id);
-        else throw error;
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          const cached = this.snapshotCache.get(id);
+          if (cached) this.snapshotCacheBytes = Math.max(0, this.snapshotCacheBytes - cached.bytes);
+          this.snapshotCache.delete(id);
+        } else throw error;
         return null;
       }
       const cached = this.snapshotCache.get(id);
       if (cached && cached.mtimeMs === fileStat.mtimeMs && cached.size === fileStat.size) return cached.snapshot;
       const snapshot = await readSessionSnapshot(path);
-      this.snapshotCache.set(id, { mtimeMs: fileStat.mtimeMs, size: fileStat.size, snapshot });
+      const bytes = snapshot.messages.reduce((total, message) => total + Buffer.byteLength(JSON.stringify(message), "utf8"), 0);
+      const previous = this.snapshotCache.get(id);
+      if (previous) this.snapshotCacheBytes -= previous.bytes;
+      this.snapshotCache.delete(id);
+      this.snapshotCache.set(id, { mtimeMs: fileStat.mtimeMs, size: fileStat.size, snapshot, bytes });
+      this.snapshotCacheBytes += bytes;
+      while (this.snapshotCache.size > this.snapshotCacheMaxEntries || this.snapshotCacheBytes > this.snapshotCacheMaxBytes) {
+        const oldest = this.snapshotCache.keys().next().value;
+        if (!oldest) break;
+        const evicted = this.snapshotCache.get(oldest);
+        if (evicted) this.snapshotCacheBytes -= evicted.bytes;
+        this.snapshotCache.delete(oldest);
+      }
       return snapshot;
     })();
     this.snapshotReads.set(id, read);

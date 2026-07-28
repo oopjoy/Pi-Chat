@@ -30,7 +30,11 @@ async function contentHash(path: string): Promise<string> {
 async function ensureGateEnabled(agentDir: string): Promise<void> {
   const settingsPath = join(agentDir, "settings.json");
   let settings: Record<string, unknown> = {};
-  try { settings = JSON.parse(await readFile(settingsPath, "utf8")) as Record<string, unknown>; } catch {}
+  try {
+    settings = JSON.parse(await readFile(settingsPath, "utf8")) as Record<string, unknown>;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Error(`Pi 设置文件无法读取或解析，已停止安全组件安装：${settingsPath}`);
+  }
   const relativeTarget = `extensions/${PI_CHAT_GATE_TARGET}`;
   const extensions = Array.isArray(settings.extensions) ? settings.extensions.filter((entry): entry is string => typeof entry === "string") : [];
   // Drop stale bare legacy names (file-permission-gate.ts) so only the Pi Chat

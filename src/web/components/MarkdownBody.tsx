@@ -2,6 +2,7 @@ import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "reac
 import ReactMarkdown from "react-markdown";
 import { createMarkdownRehypePlugins, markdownRemarkPlugins } from "../lib/markdown";
 import { normalizeDisplayMathForRender, normalizeDisplayMathWithSourceMap, registerSourceCopyRoot } from "../lib/markdown-source-copy";
+import { CheckIcon, CopyIcon } from "./Icons";
 
 interface MarkdownBodyProps {
   children: string;
@@ -84,7 +85,7 @@ function CodeBlock({ language, children }: { language: string; children: ReactNo
     <div className="code-block">
       <div className="code-head">
         <span>{language}</span>
-        <button type="button" onClick={copy}>{copied ? "已复制" : "复制"}</button>
+        <button type="button" onClick={copy} aria-label={copied ? "代码已复制" : "复制代码"} title={copied ? "已复制" : "复制代码"}>{copied ? <CheckIcon /> : <CopyIcon />}</button>
       </div>
       <pre><code>{code}</code></pre>
     </div>

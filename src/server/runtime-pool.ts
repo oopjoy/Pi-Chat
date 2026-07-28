@@ -1,10 +1,11 @@
 import { unlink } from "node:fs/promises";
-import type { ExtensionUiRequest, PiMessage, PromptImage, SessionSummary, ThinkingLevel } from "../shared/types.js";
+import type { ExtensionUiRequest, GateMode, PiMessage, PiState, PromptImage, SessionSummary, SlashCommand, ThinkingLevel } from "../shared/types.js";
 import { asMessages, asState } from "./pi-data.js";
 import { idForPath, readSessionMessages } from "./session-index.js";
+import { OperationAdmission } from "./operation-admission.js";
 import type { PiRpcClient } from "./rpc-client.js";
 
-const DEFAULT_SECONDARY_RUNTIME_IDLE_MS = 10 * 60 * 1_000;
+const DEFAULT_SECONDARY_RUNTIME_IDLE_MS = 40 * 60 * 1_000;
 /** Primary + four Secondary workers = five hot conversations total. */
 const DEFAULT_MAX_SECONDARY_RUNTIMES = 4;
 const DEFAULT_MAX_IDLE_SECONDARY_RUNTIMES = 4;
@@ -20,6 +21,13 @@ export interface RuntimeQueuedPrompt {
   imageCount: number;
   createdAt: number;
   images: PromptImage[];
+  /** Gate mode selected for this turn; replayed immediately before dispatch. */
+  gateMode?: GateMode;
+}
+
+export interface DraftRuntimeLease {
+  runtime: SecondaryRuntime;
+  release(): void;
 }
 
 export interface SecondaryRuntime {
@@ -32,10 +40,25 @@ export interface SecondaryRuntime {
   liveMessage?: PiMessage;
   toolStatus: string;
   extensionUiPending: boolean;
+  /** Last responsive state/command snapshot; navigation never waits on a busy Pi worker for these. */
+  lastState?: PiState;
+  commands?: SlashCommand[];
+  /** Last complete persisted message branch, warmed outside the busy navigation path. */
+  messageSnapshot?: PiMessage[];
+  /** Terminal SSE rows not yet confirmed by the persisted JSONL branch. */
+  pendingTerminalMessages: PiMessage[];
+  /** Awaited per-runtime mutations keep capacity reclamation from stopping this worker. */
+  operationLeases: number;
+  /** Atomically blocks new operations while rest/reclaim drains existing work. */
+  operationAdmission: OperationAdmission;
+  /** Incremented by abort to cancel dispatch preflight before prompt is sent. */
+  abortGeneration: number;
   lastUsedAt: number;
   unsubscribe: () => void;
   pendingTurnSettings: PendingTurnSettings;
   pendingExtensionRequest?: ExtensionUiRequest;
+  /** Authoritative in-memory mode of this Runtime's bundled Gate extension. */
+  gateMode: GateMode;
   /** A crashed worker remains addressable while one bounded restart is in flight. */
   failed?: boolean;
   recovery?: Promise<void>;
@@ -45,12 +68,14 @@ export interface SecondaryRuntime {
   draftOwnerClientId?: string;
   /** True once the first prompt (or extension command) was accepted for this draft. */
   prompted?: boolean;
+  /** Last accepted user instruction; sidebar order must not follow streamed output. */
+  lastUserPromptAt?: number;
   /** Pi's JSONL path, available even before SessionIndex first observes the Session. */
   sessionPath?: string;
   draftSessionPath?: string;
 }
 
-export type RuntimeReclaimReason = "idle" | "capacity";
+export type RuntimeReclaimReason = "idle" | "capacity" | "manual";
 export class RuntimeCapacityError extends Error {}
 
 export interface RuntimePoolOptions {
@@ -109,8 +134,50 @@ export class RuntimePool {
     runtime.lastUsedAt = this.options.now();
   }
 
+  acquireOperation(runtime: SecondaryRuntime): () => void {
+    const lease = runtime.operationAdmission.acquire();
+    runtime.operationLeases += 1;
+    this.touch(runtime);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      runtime.operationLeases = Math.max(0, runtime.operationLeases - 1);
+      lease.release();
+      this.touch(runtime);
+    };
+  }
+
+  async withOperation<T>(runtime: SecondaryRuntime, operation: () => Promise<T>): Promise<T> {
+    const release = this.acquireOperation(runtime);
+    try { return await operation(); }
+    finally { release(); }
+  }
+
+  /** Testable primitive shared by reclaim paths: close admission, drain, recheck, then stop. */
+  async stopReclaimable(runtime: SecondaryRuntime, reason: RuntimeReclaimReason = "idle"): Promise<boolean> {
+    const generation = await runtime.operationAdmission.closeAndDrain();
+    if (generation === null) return false;
+    const manuallyReleasable = reason !== "manual" || (!runtime.failed && runtime.rpc.isRunning?.() !== false);
+    // Admission is intentionally closed above, so do not call public
+    // canReclaim() here: that guard is for competing callers and would reject
+    // this stop owner itself. Recheck every other reclaim invariant instead.
+    const retainsEmptyDraft = Boolean(runtime.draftSession && this.options.isViewed?.(runtime.id));
+    if (this.runtimes.get(runtime.id) !== runtime || !manuallyReleasable || !this.isIdle(runtime) || retainsEmptyDraft) {
+      runtime.operationAdmission.reopen(generation);
+      return false;
+    }
+    try {
+      await runtime.rpc.stop();
+      return true;
+    } catch (error) {
+      runtime.operationAdmission.reopen(generation);
+      throw error;
+    }
+  }
+
   isIdle(runtime: SecondaryRuntime): boolean {
-    return !runtime.running && !runtime.dispatching && !runtime.queuePaused && runtime.promptQueue.length === 0 && !runtime.extensionUiPending && !runtime.recovery;
+    return !runtime.running && !runtime.dispatching && runtime.operationLeases === 0 && !runtime.queuePaused && runtime.promptQueue.length === 0 && !runtime.extensionUiPending && !runtime.recovery;
   }
 
   /**
@@ -118,12 +185,23 @@ export class RuntimePool {
    * has no indexed fallback, so keep it until its window leaves or disconnects.
    */
   canReclaim(runtime: SecondaryRuntime): boolean {
-    return this.isIdle(runtime) && !(runtime.draftSession && this.options.isViewed?.(runtime.id));
+    // Once reclaim closes admission, its single stop owner must finish or reopen
+    // before another capacity path can consider this Runtime again.
+    return !runtime.operationAdmission.isClosed
+      && this.isIdle(runtime)
+      && !(runtime.draftSession && this.options.isViewed?.(runtime.id));
+  }
+
+  canManuallyRelease(runtime: SecondaryRuntime): boolean {
+    return !runtime.failed
+      && runtime.rpc.isRunning?.() !== false
+      && !runtime.operationAdmission.isClosed
+      && this.canReclaim(runtime);
   }
 
   busyCount(): number {
     return [...this.runtimes.values()].filter((runtime) =>
-      runtime.running || runtime.dispatching || runtime.queuePaused || runtime.promptQueue.length > 0 || runtime.extensionUiPending || Boolean(runtime.recovery)
+      runtime.running || runtime.dispatching || runtime.operationLeases > 0 || runtime.queuePaused || runtime.promptQueue.length > 0 || runtime.extensionUiPending || Boolean(runtime.recovery)
     ).length;
   }
 
@@ -163,26 +241,39 @@ export class RuntimePool {
   }
 
   async reclaim(id: string, reason: RuntimeReclaimReason): Promise<boolean> {
+    // All concurrent reclaim paths for one Runtime share the first stop owner.
+    // In particular, a second sweep must never overwrite/delete the marker that
+    // makes ensure() wait while the original RPC is still stopping.
+    const alreadyStopping = this.runtimeStops.get(id);
+    if (alreadyStopping) {
+      await alreadyStopping;
+      return this.runtimes.has(id) ? false : true;
+    }
     const runtime = this.runtimes.get(id);
     if (!runtime || !this.canReclaim(runtime)) return false;
-    this.runtimes.delete(id);
-    runtime.unsubscribe();
-    const stopping = runtime.rpc.stop();
-    this.runtimeStops.set(id, stopping);
+    const stopping = (async () => {
+      const stopped = await this.stopReclaimable(runtime, reason);
+      if (!stopped || this.runtimes.get(id) !== runtime) return false;
+      this.runtimes.delete(id);
+      runtime.unsubscribe();
+      await this.cleanupEmptyDraft(runtime);
+      this.options.broadcast({
+        type: "pi_chat_active_session_changed",
+        sessionId: id,
+        activeSessionIds: this.options.activeSessionIds(),
+        reclaimed: true,
+        reason,
+      });
+      return true;
+    })();
+    const marker = stopping.then(() => undefined, () => undefined);
+    this.runtimeStops.set(id, marker);
     try {
-      await stopping;
+      return await stopping;
     } finally {
-      if (this.runtimeStops.get(id) === stopping) this.runtimeStops.delete(id);
+      // Do not erase a later lifecycle marker that this reclaim did not create.
+      if (this.runtimeStops.get(id) === marker) this.runtimeStops.delete(id);
     }
-    await this.cleanupEmptyDraft(runtime);
-    this.options.broadcast({
-      type: "pi_chat_active_session_changed",
-      sessionId: id,
-      activeSessionIds: this.options.activeSessionIds(),
-      reclaimed: true,
-      reason,
-    });
-    return true;
   }
 
   private capacityError(): RuntimeCapacityError {
@@ -253,20 +344,26 @@ export class RuntimePool {
         id,
         rpc,
         sessionPath: path,
+        operationLeases: 0,
+        operationAdmission: new OperationAdmission(),
+        abortGeneration: 0,
         running: false,
         queuePaused: false,
         dispatching: false,
         promptQueue: [],
         toolStatus: "",
         extensionUiPending: false,
+        pendingTerminalMessages: [],
         lastUsedAt: this.options.now(),
         unsubscribe: () => {},
         pendingTurnSettings: {},
+        gateMode: "strict",
       };
       runtime.unsubscribe = rpc.onEvent((event) => this.options.onSecondaryEvent(runtime, event));
       try {
         await rpc.start(["--session", path]);
         const state = asState(await rpc.send({ type: "get_state" }));
+        runtime.lastState = state;
         runtime.running = state.isStreaming;
         this.runtimes.set(id, runtime);
         this.options.broadcast({
@@ -292,13 +389,19 @@ export class RuntimePool {
   async recover(runtime: SecondaryRuntime): Promise<void> {
     if (runtime.recovery) return runtime.recovery;
     if (!runtime.sessionPath) throw new Error("Pi RPC 已退出，且会话路径不可用");
+    const desiredGateMode = runtime.gateMode;
     const recovery = (async () => {
       try {
         await runtime.rpc.restart(runtime.sessionPath, this.options.cwd());
         const state = asState(await runtime.rpc.send({ type: "get_state" }));
+        runtime.lastState = state;
         runtime.running = state.isStreaming;
         runtime.failed = false;
         runtime.toolStatus = "";
+        if (desiredGateMode !== "strict") {
+          await runtime.rpc.send({ type: "prompt", message: `/gate ${desiredGateMode}` });
+        }
+        runtime.gateMode = desiredGateMode;
         this.options.broadcast({ type: "pi_chat_process_recovered", piChatSessionId: runtime.id });
       } catch (error) {
         runtime.failed = true;
@@ -324,8 +427,20 @@ export class RuntimePool {
     catch { return null; }
   }
 
-  /** Reuse only this window's verified-empty draft. */
-  private async findReusableDraft(clientId: string): Promise<SecondaryRuntime | undefined> {
+  private currentReusableDraft(runtime: SecondaryRuntime, clientId: string): boolean {
+    return this.runtimes.get(runtime.id) === runtime
+      && Boolean(runtime.draftSession)
+      && runtime.draftOwnerClientId === clientId
+      && !runtime.failed
+      && runtime.rpc.isRunning?.() !== false;
+  }
+
+  /**
+   * Probe a draft under an operation lease. A successful empty probe transfers
+   * that lease to the caller, so reclaim cannot stop it before the route marks
+   * the browser's draft as viewed.
+   */
+  private async findReusableDraft(clientId: string): Promise<DraftRuntimeLease | undefined> {
     const candidates = [...this.runtimes.values()].filter((runtime) =>
       Boolean(runtime.draftSession)
       && runtime.draftOwnerClientId === clientId
@@ -334,16 +449,30 @@ export class RuntimePool {
       && runtime.rpc.isRunning?.() !== false
     );
     for (const runtime of candidates) {
+      let release: (() => void) | undefined;
+      try {
+        release = this.acquireOperation(runtime);
+      } catch {
+        continue;
+      }
       // Do not trust the marker alone: an Extension command can persist a turn
       // through a different response path.
       const hasMessages = await this.draftHasMessages(runtime);
-      if (hasMessages === false) return runtime;
+      if (!this.currentReusableDraft(runtime, clientId)) {
+        release();
+        continue;
+      }
+      if (hasMessages === false) {
+        this.touch(runtime);
+        return { runtime, release };
+      }
       if (hasMessages === true) {
         runtime.draftSession = undefined;
         runtime.draftSessionPath = undefined;
         runtime.draftOwnerClientId = undefined;
         this.options.broadcast({ type: "pi_chat_sessions_changed", action: "created", sessionId: runtime.id });
       }
+      release();
     }
     return undefined;
   }
@@ -356,15 +485,14 @@ export class RuntimePool {
     return true;
   }
 
-  async createDraft(clientId = ""): Promise<SecondaryRuntime> {
+  async acquireDraft(clientId = ""): Promise<DraftRuntimeLease> {
     if (!this.options.createRpc) throw new Error("当前服务未启用多会话运行");
     return this.withCapacity(async () => {
       const reusable = await this.findReusableDraft(clientId);
       if (reusable) {
-        this.touch(reusable);
         this.options.broadcast({
           type: "pi_chat_active_session_changed",
-          sessionId: reusable.id,
+          sessionId: reusable.runtime.id,
           activeSessionIds: this.options.activeSessionIds(),
         });
         return reusable;
@@ -374,7 +502,13 @@ export class RuntimePool {
       // previous conversation while it was still streaming or still unindexed.
       for (const draft of [...this.runtimes.values()].filter((runtime) => runtime.draftSession && runtime.draftOwnerClientId === clientId)) {
         if (!this.isIdle(draft)) continue;
+        let release: (() => void) | undefined;
+        try { release = this.acquireOperation(draft); }
+        catch { continue; }
         const hasMessages = await this.draftHasMessages(draft);
+        const stillAttached = this.runtimes.get(draft.id) === draft;
+        release();
+        if (!stillAttached) continue;
         if (hasMessages === true) {
           await this.commitDraftIfPersisted(draft);
           continue;
@@ -390,21 +524,27 @@ export class RuntimePool {
       const runtime: SecondaryRuntime = {
         id: "",
         rpc,
+        operationLeases: 0,
+        operationAdmission: new OperationAdmission(),
+        abortGeneration: 0,
         running: false,
         queuePaused: false,
         dispatching: false,
         promptQueue: [],
         toolStatus: "",
         extensionUiPending: false,
+        pendingTerminalMessages: [],
         lastUsedAt: this.options.now(),
         unsubscribe: () => {},
         pendingTurnSettings: {},
+        gateMode: "strict",
         draftOwnerClientId: clientId,
       };
       runtime.unsubscribe = rpc.onEvent((event) => this.options.onSecondaryEvent(runtime, event));
       try {
         await rpc.start();
         const state = asState(await rpc.send({ type: "get_state" }));
+        runtime.lastState = state;
         if (!state.sessionFile) throw new Error("Pi 未返回新会话文件");
         runtime.id = idForPath(state.sessionFile);
         runtime.sessionPath = state.sessionFile;
@@ -421,12 +561,15 @@ export class RuntimePool {
           active: false,
         };
         this.runtimes.set(runtime.id, runtime);
+        // Protect the newly mapped empty draft through the same route handoff
+        // window as a reused draft. It becomes view-pinned before release.
+        const release = this.acquireOperation(runtime);
         this.options.broadcast({
           type: "pi_chat_active_session_changed",
           sessionId: runtime.id,
           activeSessionIds: this.options.activeSessionIds(),
         });
-        return runtime;
+        return { runtime, release };
       } catch (error) {
         runtime.unsubscribe();
         await rpc.stop();

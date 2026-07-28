@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import test from "node:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildPiChat, cleanupStaleDistArtifacts, promoteStagedDist, rollbackPromotedDist, restartServerArgs } from "../src/server/application-restart";
+import { buildPiChat, cleanupStaleDistArtifacts, promoteStagedDist, rollbackPromotedDist, restartServerArgs, terminateProcessTree } from "../src/server/application-restart";
 
 test("local application build stages a complete replacement without touching live dist", { skip: process.platform !== "win32", timeout: 120_000 }, async () => {
   const liveIndex = join(process.cwd(), "dist", "web", "index.html");
@@ -51,6 +52,41 @@ test("retained promotion backup restores the old dist after candidate failure", 
     assert.equal(await readFile(join(previous, "version.txt"), "utf8"), "old");
     await rollbackPromotedDist(live, previous);
     assert.equal(await readFile(join(live, "version.txt"), "utf8"), "old");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("process-tree termination stops a detached build wrapper and its descendant", { timeout: 20_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-process-tree-"));
+  const childPidPath = join(root, "child.pid");
+  const childEntry = join(root, "child.mjs");
+  const wrapperEntry = join(root, "wrapper.mjs");
+  const alive = (pid: number) => {
+    try { process.kill(pid, 0); return true; }
+    catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
+  };
+  try {
+    await writeFile(childEntry, "setInterval(() => undefined, 1000);", "utf8");
+    await writeFile(wrapperEntry, String.raw`import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
+const child = spawn(process.execPath, [process.argv[2]], { detached: false, stdio: "ignore" });
+writeFileSync(process.argv[3], String(child.pid));
+setInterval(() => undefined, 1000);
+`, "utf8");
+    const wrapper = spawn(process.execPath, [wrapperEntry, childEntry, childPidPath], { detached: true, stdio: "ignore" });
+    const until = Date.now() + 5_000;
+    let childPid = 0;
+    while (Date.now() < until && !childPid) {
+      try { childPid = Number(await readFile(childPidPath, "utf8")); }
+      catch { await new Promise((resolve) => setTimeout(resolve, 25)); }
+    }
+    assert.ok(wrapper.pid && childPid > 0);
+    await terminateProcessTree(wrapper, 250);
+    const exitDeadline = Date.now() + 5_000;
+    while (Date.now() < exitDeadline && (alive(wrapper.pid!) || alive(childPid))) await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(alive(wrapper.pid!), false);
+    assert.equal(alive(childPid), false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

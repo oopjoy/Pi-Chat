@@ -1,3 +1,5 @@
+import type { PiContentBlock, PiMessage } from "../../shared/types";
+
 const REPEATED_ANALYSIS_CHANNEL = /code\*\*\/analysis(?:\s*code\*\*\/analysis){2,}/;
 
 /**
@@ -26,4 +28,31 @@ export function sanitizeAssistantText(value: string): string {
   else if (!before && start === 0 && /^[ \t]/.test(after)) after = after.slice(1);
 
   return `${before}${after}`;
+}
+
+/** Content that ChatMessage can actually paint for an assistant response. */
+export function visibleAssistantBlocks(message: PiMessage): PiContentBlock[] {
+  const content = typeof message.content === "string"
+    ? [{ type: "text", text: message.content }]
+    : message.content || [];
+  const visible: PiContentBlock[] = [];
+  for (const block of content) {
+    if (block.type === "text" && typeof block.text === "string") {
+      const text = sanitizeAssistantText(block.text);
+      if (text.trim()) visible.push({ ...block, text });
+    } else if (block.type === "image" && block.data && block.mimeType) {
+      visible.push(block);
+    }
+  }
+  return visible;
+}
+
+export function visibleAssistantMessage(message: PiMessage): PiMessage | undefined {
+  if (message.role !== "assistant") return message;
+  const visible = visibleAssistantBlocks(message);
+  if (!visible.length) return undefined;
+  const content = typeof message.content === "string" && visible.length === 1 && visible[0].type === "text"
+    ? visible[0].text || ""
+    : visible;
+  return { ...message, content };
 }

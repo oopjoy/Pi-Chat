@@ -17,15 +17,20 @@ set "EDGE_PWA=%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge_proxy.exe"
 powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0scripts\pi-chat-port-ready.ps1"
 if not errorlevel 1 goto :open
 
-rem A source checkout rebuilds so local changes apply. The Windows release ZIP
-rem contains a prebuilt dist/ tree and intentionally starts without npm tooling.
-if exist "%~dp0src\server\index.ts" (
-  echo Building current Pi Chat source...
-  call npm run build
-  if errorlevel 1 exit /b 1
-) else if not exist "%~dp0dist\server\server\index.js" (
-  echo Pi Chat distribution is incomplete: dist\server\server\index.js was not found.
-  exit /b 1
+rem Normal startup must use the existing production build. Rebuilding on every
+rem PWA launch turns a 5–10 second cold start into a 30+ second one and briefly
+rem removes dist while a previous browser tab may still request assets. Developers
+rem explicitly run npm run build after source changes; a missing dist is the sole
+rem recovery case here.
+if not exist "%~dp0dist\server\server\index.js" (
+  if exist "%~dp0src\server\index.ts" (
+    echo Pi Chat build is missing; building current source...
+    call npm run build
+    if errorlevel 1 exit /b 1
+  ) else (
+    echo Pi Chat distribution is incomplete: dist\server\server\index.js was not found.
+    exit /b 1
+  )
 )
 
 echo Starting Pi Chat service...

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -32,6 +32,30 @@ test("session index extracts header, title, preview, message count and user turn
     assert.equal((await index.list(path, "C:\\work")).length, 1);
     assert.equal((await index.list(path, "C:\\other")).length, 0);
     assert.equal(index.pathForId(sessions[0].id), path);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("session index orders active streams by their last user instruction rather than JSONL mtime", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-session-prompt-order-"));
+  try {
+    const first = join(root, "first.jsonl");
+    const second = join(root, "second.jsonl");
+    await writeFile(first, [
+      { type: "session", id: "first", cwd: "C:\\work" },
+      { type: "message", id: "u1", timestamp: "2026-01-01T00:00:01.000Z", message: { role: "user", content: "first prompt" } },
+    ].map(JSON.stringify).join("\n"));
+    await writeFile(second, [
+      { type: "session", id: "second", cwd: "C:\\work" },
+      { type: "message", id: "u2", timestamp: "2026-01-01T00:00:02.000Z", message: { role: "user", content: "second prompt" } },
+    ].map(JSON.stringify).join("\n"));
+    // Simulate a later streamed assistant/tool write to the older conversation.
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    await appendFile(first, `\n${JSON.stringify({ type: "message", id: "a1", parentId: "u1", timestamp: "2026-01-01T00:01:00.000Z", message: { role: "assistant", content: "still streaming" } })}`);
+    const sessions = await new SessionIndex(root, join(root, "cache.json")).list();
+    assert.deepEqual(sessions.map((session) => session.sessionId), ["second", "first"]);
+    assert.equal(sessions.find((session) => session.sessionId === "first")?.lastUserPromptAt, Date.parse("2026-01-01T00:00:01.000Z"));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -90,6 +114,29 @@ test("session index keeps empty draft JSONL files out of sidebar history", async
   }
 });
 
+test("session sidebar summary and recency follow only the active JSONL branch", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-summary-branch-"));
+  try {
+    const path = join(root, "branch-summary.jsonl");
+    await writeFile(path, [
+      { type: "session", id: "session", cwd: "C:\\work" },
+      { type: "session_info", id: "info", parentId: null, name: "Branched conversation" },
+      { type: "message", id: "u1", parentId: "info", timestamp: "2026-01-01T00:00:00Z", message: { role: "user", content: "kept prompt" } },
+      { type: "message", id: "abandoned-u2", parentId: "u1", timestamp: "2026-01-01T00:02:00Z", message: { role: "user", content: "abandoned later prompt" } },
+      { type: "message", id: "current-a1", parentId: "u1", timestamp: "2026-01-01T00:01:00Z", message: { role: "assistant", content: "current branch answer" } },
+    ].map(JSON.stringify).join("\n"));
+
+    const [session] = await new SessionIndex(root, join(root, "cache.json")).list();
+    assert.equal(session.name, "Branched conversation");
+    assert.equal(session.preview, "kept prompt");
+    assert.equal(session.messageCount, 2);
+    assert.equal(session.turnCount, 1);
+    assert.equal(session.lastUserPromptAt, Date.parse("2026-01-01T00:00:00Z"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("session message reader follows only the current JSONL branch", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-session-branch-"));
   try {
@@ -124,7 +171,9 @@ test("session snapshot retains its last persisted model and thinking selections"
     ].map(JSON.stringify).join("\n"));
     const index = new SessionIndex(root, join(root, "cache.json"));
     const [session] = await index.list();
-    assert.deepEqual((await index.snapshotForId(session.id))?.settings, { provider: "two", modelId: "last", thinkingLevel: "xhigh" });
+    const snapshot = await index.snapshotForId(session.id);
+    assert.deepEqual(snapshot?.settings, { provider: "two", modelId: "last", thinkingLevel: "xhigh" });
+    assert.equal(snapshot?.messages.find((message) => message.role === "assistant")?.thinkingLevel, "xhigh", "assistant replies inherit the preceding persisted thinking level");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -189,6 +238,28 @@ test("session snapshots reuse one parsed branch until the JSONL file changes", a
     const changed = await index.snapshotForId(session.id);
     assert.notEqual(changed, first);
     assert.equal(changed?.messages.length, 3);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("deleting a cached Session snapshot releases its tracked byte budget", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-snapshot-enoent-"));
+  try {
+    const path = join(root, "cached.jsonl");
+    await writeFile(path, [
+      { type: "session", id: "cached", cwd: "C:\\work" },
+      { type: "message", id: "u1", parentId: null, message: { role: "user", content: "one" } },
+      { type: "message", id: "a1", parentId: "u1", message: { role: "assistant", content: "x".repeat(4_096) } },
+    ].map(JSON.stringify).join("\n"));
+    const index = new SessionIndex(root, join(root, "cache.json"));
+    const [session] = await index.list();
+    await index.snapshotForId(session.id);
+    assert.ok((index as unknown as { snapshotCacheBytes: number }).snapshotCacheBytes > 0);
+    await rm(path);
+    assert.equal(await index.snapshotForId(session.id), null);
+    assert.equal(index.cachedSnapshotForId(session.id), null);
+    assert.equal((index as unknown as { snapshotCacheBytes: number }).snapshotCacheBytes, 0);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

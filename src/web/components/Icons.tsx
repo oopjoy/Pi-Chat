@@ -31,6 +31,14 @@ export function PlusIcon(props: IconProps) {
   return <LineIcon {...props}><path d="M12 5v14M5 12h14" /></LineIcon>;
 }
 
+export function PaperclipIcon(props: IconProps) {
+  return <LineIcon data-icon="paperclip" {...props}><path d="m20.5 11.5-8.9 8.9a5.1 5.1 0 0 1-7.2-7.2l9.4-9.4a3.55 3.55 0 0 1 5 5l-9.4 9.4a2 2 0 0 1-2.8-2.8l8.7-8.7" /></LineIcon>;
+}
+
+export function SendIcon(props: IconProps) {
+  return <LineIcon data-icon="send" {...props} strokeWidth="2.2"><path d="m6.5 10.5 5.5-5.5 5.5 5.5" /><path d="M12 5v14" /></LineIcon>;
+}
+
 export function MinusIcon(props: IconProps) {
   return <LineIcon {...props}><path d="M5 12h14" /></LineIcon>;
 }
@@ -48,6 +56,10 @@ export function SettingsIcon(props: IconProps) {
   return <LineIcon {...props}><path d="M9.61 5.42 10.13 3.2h3.74l.52 2.22 2.11 1.22 2.19-.66 1.87 3.24-1.67 1.56v2.44l1.67 1.56-1.87 3.24-2.19-.66-2.11 1.22-.52 2.22h-3.74l-.52-2.22-2.11-1.22-2.19.66-1.87-3.24 1.67-1.56v-2.44L3.44 9.22l1.87-3.24 2.19.66Z" /><circle cx="12" cy="12" r="3.1" /></LineIcon>;
 }
 
+export function LightbulbIcon(props: IconProps) {
+  return <LineIcon {...props}><path d="M8.4 15.3c-1.25-1.05-2.1-2.55-2.1-4.35a5.7 5.7 0 1 1 11.4 0c0 1.8-.85 3.3-2.1 4.35-.75.63-1.1 1.15-1.2 1.7H9.6c-.1-.55-.45-1.07-1.2-1.7Z" /><path d="M9.7 20h4.6M9.6 17h4.8" /></LineIcon>;
+}
+
 export function FolderIcon(props: IconProps) {
   return <LineIcon {...props}><path d="M3.5 7.5A2.5 2.5 0 0 1 6 5h4.1l2 2.2H18A2.5 2.5 0 0 1 20.5 9.7v7.8A2.5 2.5 0 0 1 18 20H6a2.5 2.5 0 0 1-2.5-2.5Z" /><path d="M3.8 9.3h16.4" /></LineIcon>;
 }
@@ -56,12 +68,20 @@ export function ChevronRightIcon(props: IconProps) {
   return <LineIcon {...props}><path d="m9 5 7 7-7 7" /></LineIcon>;
 }
 
+export function ChevronUpIcon(props: IconProps) {
+  return <LineIcon {...props}><path d="m5 15 7-7 7 7" /></LineIcon>;
+}
+
 export function CloseIcon(props: IconProps) {
   return <LineIcon {...props}><path d="m6 6 12 12M18 6 6 18" /></LineIcon>;
 }
 
 export function CheckIcon(props: IconProps) {
   return <LineIcon {...props} strokeWidth="2"><path d="m5 12.5 4.3 4.2L19 7.5" /></LineIcon>;
+}
+
+export function CopyIcon(props: IconProps) {
+  return <LineIcon {...props}><rect x="8" y="8" width="11" height="11" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></LineIcon>;
 }
 
 export function AlertIcon(props: IconProps) {

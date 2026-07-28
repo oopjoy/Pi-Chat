@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { appendTerminalMessage } from "../shared/streaming-assistant";
 import type { ApplicationLifecycle, BootstrapData, ExtensionUiRequest, ModelInfo, PiMessage, PiState, PromptImage, QueuedPrompt, SessionStats, SessionSummary, SessionViewData, SlashCommand, ThinkingLevel } from "../shared/types";
 import { api } from "./api";
 import { ChatInput } from "./components/ChatInput";
 import { ChatMessage } from "./components/ChatMessage";
+import { ComposerControls } from "./components/ComposerControls";
 import { ConversationProcess } from "./components/ConversationProcess";
 import { EditDiffSidebar } from "./components/EditToolDiff";
 import { describeGateRequest, ExtensionDialog } from "./components/ExtensionDialog";
@@ -23,14 +25,44 @@ import { gateModeFromCommand, gateModeFromNotice, type GateMode } from "./lib/ga
 import { assistantMessage, lifecycleFromEvent, parseEventData, userMessage } from "./lib/pi-events";
 import { applyAppearance, loadAppearance, loadSidebarOpen, loadSidebarWidth, saveAppearance, saveSidebarOpen, saveSidebarWidth, type AppearancePreferences } from "./lib/preferences";
 import { rememberedSessionId, rememberSessionId } from "./lib/session-location";
+import { appendPendingUserMessage, bindQueuedAdmission, bindQueuedDispatch, localTurnBelongsInTranscript, markLocalTurnQueued, nextLocalTurnTotal, protectTranscriptWithLocalTurns, removeLocalTurnAndRebase, type LocalUserTurn } from "./lib/local-user-turn";
 import { refreshFailureKeepsCommittedView, sidebarNavigationBlocked } from "./lib/refresh-navigation-guards";
 import { SessionScrollMemory } from "./lib/session-scroll-memory";
 import { SessionViewCache } from "./lib/session-view-cache";
 
 const EMPTY_STATE: PiState = { model: null, isStreaming: false };
 
+/** SSE events whose state can make an in-flight SessionViewData snapshot stale. */
+const SESSION_VIEW_INVALIDATING_EVENT_TYPES = new Set([
+  "agent_start",
+  "agent_settled",
+  "message_start",
+  "message_update",
+  "message_end",
+  "tool_execution_start",
+  "tool_execution_end",
+  "pi_chat_process_error",
+  "pi_chat_queue_update",
+  "pi_chat_queue_dispatch",
+  "pi_chat_queue_error",
+  "extension_ui_request",
+  "pi_chat_extension_request_resolved",
+  "pi_chat_gate_mode_changed",
+  "pi_chat_session_control_changed",
+  "pi_chat_session_status",
+]);
+
+function invalidatesSessionViewVersion(type: string): boolean {
+  return SESSION_VIEW_INVALIDATING_EVENT_TYPES.has(type);
+}
+
 function recoverableRefreshError(message: string): boolean {
   return /请求超时|RPC 请求超时|RPC 查询仍在处理中/.test(message);
+}
+
+function hasAssistantPayload(message: PiMessage | null): message is PiMessage {
+  if (!message) return false;
+  return typeof message.content === "string" ? message.content.length > 0 : Array.isArray(message.content) && message.content.length > 0;
 }
 
 export function App() {
@@ -84,11 +116,15 @@ export function App() {
   const [viewControl, setViewControl] = useState<{ controlOwner?: string; controlledByThisWindow?: boolean }>({});
   const [eventSourceGeneration, setEventSourceGeneration] = useState(0);
   const [applicationLifecycle, setApplicationLifecycle] = useState<ApplicationLifecycle>("idle");
+  const viewCacheRef = useRef(new SessionViewCache());
   const [gateModes, setGateModes] = useState<Record<string, GateMode>>({});
   const gateModesRef = useRef<Record<string, GateMode>>({});
-  const updateGateMode = useCallback((sessionId: string, mode: GateMode) => {
-    const next = { ...gateModesRef.current, [sessionId]: mode };
+  const updateGateMode = useCallback((sessionId: string, mode: GateMode | undefined) => {
+    const next = { ...gateModesRef.current };
+    if (mode) next[sessionId] = mode;
+    else delete next[sessionId];
     gateModesRef.current = next;
+    viewCacheRef.current.patch(sessionId, { gateMode: mode });
     setGateModes(next);
   }, []);
   const [failedSessionIds, setFailedSessionIds] = useState<string[]>([]);
@@ -112,9 +148,12 @@ export function App() {
   const sessionRefreshTimerRef = useRef<number | null>(null);
   const sessionRefreshInFlightRef = useRef(false);
   const sessionRefreshRequestedRef = useRef(false);
-  const viewCacheRef = useRef(new SessionViewCache());
   const desiredSessionIdRef = useRef("");
   const navigationEpochRef = useRef(0);
+  /** Accepted local user turns remain visible until a JSONL-derived view includes them. */
+  const localUserTurnsRef = useRef(new Map<string, LocalUserTurn[]>());
+  /** Last authoritative turn count from sidebar/view data, safe inside long-lived SSE callbacks. */
+  const sourceTurnTotalsRef = useRef(new Map<string, number>());
   /** Model/thinking chosen on a cold session or local draft before Runtime starts. */
   const pendingSessionPrefsRef = useRef(new Map<string, { model?: ModelInfo | null; thinkingLevel?: ThinkingLevel }>());
   const DRAFT_PREFS_KEY = "__local_draft__";
@@ -122,7 +161,7 @@ export function App() {
   const bootstrapInFlightRef = useRef<Promise<BootstrapData> | null>(null);
   const recoveringConnectionRef = useRef<Promise<void> | null>(null);
   const commitLiveMessage = useCallback((message: PiMessage) => setLiveMessage(message), []);
-  const { clearPendingLiveMessage, scheduleLiveMessage } = useLiveMessageScheduler(commitLiveMessage);
+  const { clearPendingLiveMessage, drainPendingLiveMessage, scheduleLiveMessage } = useLiveMessageScheduler(commitLiveMessage);
   const reportBackgroundRefreshError = useCallback((cause: unknown) => {
     const message = cause instanceof Error ? cause.message : String(cause);
     // Automatic reconciliation is best-effort. History is already readable from
@@ -132,7 +171,10 @@ export function App() {
   }, []);
 
   const setViewedId = useCallback((id: string) => {
-    clearPendingLiveMessage();
+    // Background refreshes repeatedly apply a view for the already selected
+    // Session. Only an actual navigation may discard that Session's throttled
+    // cumulative assistant snapshot.
+    if (viewedSessionIdRef.current !== id) clearPendingLiveMessage();
     conversationNavigationTargetRef.current = null;
     viewedSessionIdRef.current = id;
     desiredSessionIdRef.current = id;
@@ -140,10 +182,23 @@ export function App() {
     rememberSessionId(id);
   }, [clearPendingLiveMessage]);
 
+  // Every session-scoped async action captures the selected view before await.
+  // A later response may update that Session cache, but must never paint over a
+  // different Session the user navigated to in the meantime.
+  const captureViewOperation = () => ({ sessionId: viewedSessionIdRef.current, navigationEpoch: navigationEpochRef.current });
+  const viewOperationIsCurrent = (operation: { sessionId: string; navigationEpoch: number }) =>
+    Boolean(operation.sessionId)
+      && viewedSessionIdRef.current === operation.sessionId
+      && desiredSessionIdRef.current === operation.sessionId
+      && navigationEpochRef.current === operation.navigationEpoch;
+
   // Bootstrap owns application-wide metadata. Keep it separate from the selected
   // view so a refresh can restore a remembered cold Session without briefly
   // committing the Primary Runtime's blank draft to the timeline.
   const applyBootstrapMetadata = useCallback((data: BootstrapData) => {
+    for (const session of data.sessions) {
+      if (typeof session.turnCount === "number" && Number.isFinite(session.turnCount)) sourceTurnTotalsRef.current.set(session.id, session.turnCount);
+    }
     setSessions((current) => {
       if (!showAllSessionsRef.current) return data.sessions;
       const updates = new Map(data.sessions.map((session) => [session.id, session]));
@@ -160,32 +215,9 @@ export function App() {
   }, []);
 
   const applyBootstrap = useCallback((data: BootstrapData) => {
-    localDraftRef.current = false;
-    setLocalDraft(false);
-    setPromptStarting(false);
-    applyBootstrapMetadata(data);
-    setGateAvailableOverride(null);
-    setViewControl({ controlOwner: data.controlOwner, controlledByThisWindow: data.controlledByThisWindow });
-    setState(data.state);
-    setMessages(data.messages);
-    setPendingUserMessage(null);
-    setMessageTotal(data.messageTotal ?? data.messages.length);
-    setTurnTotal(data.turnTotal ?? data.messages.filter((message) => message.role === "user").length);
-    setVisibleTurnCount(data.visibleTurnCount ?? data.messages.filter((message) => message.role === "user").length);
-    setMessagesTruncated(data.messagesTruncated === true);
-    setStats(data.stats);
-    setViewedId(data.activeSessionId || data.sessions.find((session) => session.active)?.id || "");
-    setCommands(data.commands);
-    setQueue(data.queue);
-    setQueuePaused(data.queuePaused);
-    setLiveMessage(null);
-    setLiveMessage(data.liveMessage || null);
-    setToolStatus(data.toolStatus || "");
-    setExtensionRequest(data.pendingExtensionRequest || null);
-    setRuntimeStatus("active");
     const activeViewId = data.activeSessionId || data.sessions.find((item) => item.active)?.id || "";
     const activeViewSession = data.sessions.find((session) => session.id === activeViewId);
-    if (activeViewSession) viewCacheRef.current.remember({
+    const sourceView = activeViewSession ? viewCacheRef.current.remember({
       session: activeViewSession,
       state: data.state,
       messages: data.messages,
@@ -203,8 +235,46 @@ export function App() {
       queuePaused: data.queuePaused,
       commands: data.commands,
       pendingExtensionRequest: data.pendingExtensionRequest,
+    }) : null;
+    const protectedTranscript = protectTranscriptWithLocalTurns(
+      localUserTurnsRef.current.get(activeViewId),
+      sourceView?.messages || data.messages,
+      sourceView?.messageTotal ?? data.messageTotal,
+      sourceView?.turnTotal ?? data.turnTotal,
+    );
+    if (protectedTranscript.pendingTurns.length) {
+      protectedTranscript.pendingTurns.forEach((turn) => { turn.renderedInTranscript = localTurnBelongsInTranscript(turn); });
+      localUserTurnsRef.current.set(activeViewId, protectedTranscript.pendingTurns);
+    } else localUserTurnsRef.current.delete(activeViewId);
+    localDraftRef.current = false;
+    setLocalDraft(false);
+    setPromptStarting(false);
+    applyBootstrapMetadata(data);
+    setGateAvailableOverride(null);
+    if (activeViewId) updateGateMode(activeViewId, data.gateMode);
+    setViewControl({ controlOwner: data.controlOwner, controlledByThisWindow: data.controlledByThisWindow });
+    const staged = activeViewId ? pendingSessionPrefsRef.current.get(activeViewId) : undefined;
+    setState({
+      ...data.state,
+      ...(staged?.model !== undefined ? { model: staged.model } : null),
+      ...(staged?.thinkingLevel !== undefined ? { thinkingLevel: staged.thinkingLevel } : null),
     });
-  }, [applyBootstrapMetadata, setViewedId]);
+    setMessages(protectedTranscript.messages);
+    setPendingUserMessage(null);
+    setMessageTotal(protectedTranscript.messageTotal);
+    setTurnTotal(protectedTranscript.turnTotal);
+    setVisibleTurnCount(data.visibleTurnCount ?? protectedTranscript.messages.filter((message) => message.role === "user").length);
+    setMessagesTruncated(data.messagesTruncated === true);
+    setStats(data.stats);
+    setViewedId(data.activeSessionId || data.sessions.find((session) => session.active)?.id || "");
+    setCommands(data.commands);
+    setQueue(data.queue);
+    setQueuePaused(data.queuePaused);
+    setLiveMessage(sourceView?.liveMessage || data.liveMessage || null);
+    setToolStatus(data.toolStatus || "");
+    setExtensionRequest(data.pendingExtensionRequest || null);
+    setRuntimeStatus("active");
+  }, [applyBootstrapMetadata, setViewedId, updateGateMode]);
 
   const tryAutoAllowGate = useCallback((request: ExtensionUiRequest, sessionId: string): boolean => {
     const details = gateModesRef.current[sessionId] === "open" ? describeGateRequest(request) : null;
@@ -217,32 +287,53 @@ export function App() {
   }, []);
 
   const applySessionView = useCallback((view: SessionViewData) => {
+    // Cache the source view before adding local UI overlays. A cached overlay has
+    // a synthetic turnTotal and must never confirm that its own user message was
+    // persisted when the user switches away and returns.
+    const sourceView = viewCacheRef.current.remember(view);
+    sourceTurnTotalsRef.current.set(sourceView.session.id, sourceView.turnTotal ?? sourceView.messages.filter((message) => message.role === "user").length);
+    const protectedTranscript = protectTranscriptWithLocalTurns(
+      localUserTurnsRef.current.get(sourceView.session.id),
+      sourceView.messages,
+      sourceView.messageTotal,
+      sourceView.turnTotal,
+    );
+    if (protectedTranscript.pendingTurns.length) {
+      protectedTranscript.pendingTurns.forEach((turn) => { turn.renderedInTranscript = localTurnBelongsInTranscript(turn); });
+      localUserTurnsRef.current.set(sourceView.session.id, protectedTranscript.pendingTurns);
+    } else localUserTurnsRef.current.delete(sourceView.session.id);
+    const resolvedView = protectedTranscript.pendingTurns.length
+      ? { ...sourceView, messages: protectedTranscript.messages, messageTotal: protectedTranscript.messageTotal, turnTotal: protectedTranscript.turnTotal }
+      : sourceView;
     localDraftRef.current = false;
     setLocalDraft(false);
     setPromptStarting(false);
     setGateAvailableOverride(typeof view.gateAvailable === "boolean" ? view.gateAvailable : null);
+    updateGateMode(sourceView.session.id, view.gateMode);
     setViewControl({ controlOwner: view.controlOwner ?? view.session.controlOwner, controlledByThisWindow: view.controlledByThisWindow ?? view.session.controlledByThisWindow });
-    const nextRuntimeStatus = view.runtimeStatus || (view.isActive ? "active" : "view-only");
-    // Cold views use primary defaults for model/thinking; keep any staged send-time prefs.
-    const staged = nextRuntimeStatus !== "active" ? pendingSessionPrefsRef.current.get(view.session.id) : undefined;
-    if (nextRuntimeStatus === "active") pendingSessionPrefsRef.current.delete(view.session.id);
+    const nextRuntimeStatus = resolvedView.runtimeStatus || (resolvedView.isActive ? "active" : "view-only");
+    // A cold preference remains authoritative through Runtime activation. Do not
+    // discard it merely because the activation view reports the history's last
+    // persisted settings; send() clears it only after both desired settings are
+    // successfully applied to this Runtime.
+    const staged = pendingSessionPrefsRef.current.get(resolvedView.session.id);
     setState({
-      ...view.state,
+      ...resolvedView.state,
       ...(staged?.model !== undefined ? { model: staged.model } : null),
       ...(staged?.thinkingLevel !== undefined ? { thinkingLevel: staged.thinkingLevel } : null),
     });
-    setMessages(view.messages);
+    setMessages(resolvedView.messages);
     setPendingUserMessage(null);
-    setMessageTotal(view.messageTotal);
-    setTurnTotal(view.turnTotal ?? view.messages.filter((message) => message.role === "user").length);
-    setVisibleTurnCount(view.visibleTurnCount ?? view.messages.filter((message) => message.role === "user").length);
-    setMessagesTruncated(view.messagesTruncated);
-    setStats(view.stats);
-    setQueue(view.queue || []);
-    setQueuePaused(view.queuePaused === true);
-    if (view.commands) setCommands(view.commands);
-    setLiveMessage(view.liveMessage || null);
-    setToolStatus(view.toolStatus || "");
+    setMessageTotal(resolvedView.messageTotal);
+    setTurnTotal(resolvedView.turnTotal ?? resolvedView.messages.filter((message) => message.role === "user").length);
+    setVisibleTurnCount(resolvedView.visibleTurnCount ?? resolvedView.messages.filter((message) => message.role === "user").length);
+    setMessagesTruncated(resolvedView.messagesTruncated);
+    setStats(resolvedView.stats);
+    setQueue(resolvedView.queue || []);
+    setQueuePaused(resolvedView.queuePaused === true);
+    if (resolvedView.commands) setCommands(resolvedView.commands);
+    setLiveMessage(resolvedView.liveMessage || null);
+    setToolStatus(resolvedView.toolStatus || "");
     // Same open-mode auto-allow path for pending requests restored via view/bootstrap.
     const pending = view.pendingExtensionRequest || null;
     if (pending) {
@@ -254,7 +345,7 @@ export function App() {
     if (view.session.messageCount > 0) setSessions((current) => current.some((session) => session.id === view.session.id) ? current.map((session) => session.id === view.session.id ? { ...session, ...view.session } : session) : [...current, view.session]);
     if (view.isActive) setActiveSessionIds((current) => [...new Set([...current, view.session.id])]);
     setViewedId(view.session.id);
-  }, [setViewedId, tryAutoAllowGate]);
+  }, [setViewedId, tryAutoAllowGate, updateGateMode]);
 
   const loadBootstrap = useCallback(() => {
     if (bootstrapInFlightRef.current) return bootstrapInFlightRef.current;
@@ -269,8 +360,13 @@ export function App() {
     const refreshEpoch = ++refreshEpochRef.current;
     const navigationEpoch = navigationEpochRef.current;
     const wantedId = desiredSessionIdRef.current || viewedSessionIdRef.current || rememberedSessionId();
+    const requestVersion = wantedId ? sessionEventVersionRef.current.get(wantedId) || 0 : 0;
     const data = await loadBootstrap();
     if (refreshEpochRef.current !== refreshEpoch || navigationEpochRef.current !== navigationEpoch) return;
+    if (wantedId && viewedSessionIdRef.current === wantedId && (sessionEventVersionRef.current.get(wantedId) || 0) !== requestVersion) {
+      applyBootstrapMetadata(data);
+      return;
+    }
     // A local New draft intentionally has no Pi Session yet. Reconnect/bootstrap
     // may refresh global metadata, but must not replace its unsent composer.
     if (localDraftRef.current) {
@@ -282,9 +378,14 @@ export function App() {
     if (wantedId && wantedId !== activeId) {
       desiredSessionIdRef.current = wantedId;
       try {
+        const viewVersion = sessionEventVersionRef.current.get(wantedId) || 0;
         const view = await api.viewSession(wantedId);
         if (refreshEpochRef.current !== refreshEpoch || navigationEpochRef.current !== navigationEpoch || desiredSessionIdRef.current !== wantedId) return;
-        viewCacheRef.current.remember(view);
+        if ((sessionEventVersionRef.current.get(wantedId) || 0) !== viewVersion) {
+          applyBootstrapMetadata(data);
+          if (viewedSessionIdRef.current === wantedId) schedulePromptReconcile(wantedId, sessionEventVersionRef.current.get(wantedId) || 0);
+          return;
+        }
         // Commit metadata and the wanted view together. Do not render the Primary
         // draft in between: EventSource readiness also calls refresh after F5.
         applyBootstrapMetadata(data);
@@ -318,6 +419,9 @@ export function App() {
     sessionRefreshInFlightRef.current = true;
     try {
       const result = await api.sessions(showAllSessionsRef.current);
+      for (const session of result.sessions) {
+        if (typeof session.turnCount === "number" && Number.isFinite(session.turnCount)) sourceTurnTotalsRef.current.set(session.id, session.turnCount);
+      }
       setSessions(result.sessions);
       setSessionsTotal(result.total ?? result.sessions.length);
     } finally {
@@ -335,6 +439,9 @@ export function App() {
     setError("");
     try {
       const result = await api.sessions(true);
+      for (const session of result.sessions) {
+        if (typeof session.turnCount === "number" && Number.isFinite(session.turnCount)) sourceTurnTotalsRef.current.set(session.id, session.turnCount);
+      }
       showAllSessionsRef.current = true;
       setSessions(result.sessions);
       setSessionsTotal(result.total ?? result.sessions.length);
@@ -413,19 +520,21 @@ export function App() {
         return;
       }
       const eventSessionId = typeof event.piChatSessionId === "string" ? event.piChatSessionId : "";
-      if (eventSessionId && ["agent_start", "agent_settled", "message_start", "message_update", "message_end", "tool_execution_start", "tool_execution_end", "pi_chat_process_error"].includes(type)) {
+      if (eventSessionId && invalidatesSessionViewVersion(type)) {
         sessionEventVersionRef.current.set(eventSessionId, (sessionEventVersionRef.current.get(eventSessionId) || 0) + 1);
         lastSessionEventTypeRef.current.set(eventSessionId, type);
       }
       const viewingEventSession = !eventSessionId || eventSessionId === viewedSessionIdRef.current;
-      if (eventSessionId && ["agent_start", "agent_settled", "message_start", "message_update", "message_end", "tool_execution_start", "tool_execution_end"].includes(type)) viewCacheRef.current.forget(eventSessionId);
+      // View snapshots use stale-while-revalidate: retain them through streaming
+      // and terminal events for instant navigation, then refresh in the background.
+      // Only structural session mutations explicitly discard a snapshot below.
       if (type === "pi_chat_application_closing") {
         source.close();
         setManagementSection(null);
         setCloseComplete("application");
         window.setTimeout(() => window.close(), 40);
       } else if (type === "agent_start") {
-        if (eventSessionId) setSessions((current) => current.map((session) => ({ ...session, running: session.id === eventSessionId ? true : session.running })));
+        if (eventSessionId) setSessions((current) => current.map((session) => session.id === eventSessionId ? { ...session, running: true, releasable: false } : session));
         if (viewingEventSession) {
           setPromptStarting(false);
           setRuntimeStatus("active");
@@ -449,25 +558,44 @@ export function App() {
             // Refresh usage/history in the background. Never surface a 65s view
             // timeout here — compaction often ends while the model turn continues,
             // and a busy RPC used to paint a false-red error long after success.
+            const requestVersion = sessionEventVersionRef.current.get(eventSessionId) || 0;
             void api.viewSession(eventSessionId).then((view) => {
-              if (viewedSessionIdRef.current === eventSessionId) applySessionView(view);
+              if (viewedSessionIdRef.current === eventSessionId && (sessionEventVersionRef.current.get(eventSessionId) || 0) === requestVersion) applySessionView(view);
             }).catch(() => undefined);
           }
         }
       } else if ((type === "message_start" || type === "message_update") && viewingEventSession) {
         const assistant = assistantMessage(event);
-        if (assistant) scheduleLiveMessage(assistant);
-      } else if (type === "message_end" && viewingEventSession) {
-        clearPendingLiveMessage();
-        const assistant = assistantMessage(event);
-        if (assistant) setMessages((current) => [...current, assistant]);
-        setLiveMessage(null);
+        if (assistant) {
+          scheduleLiveMessage(assistant);
+          if (eventSessionId) viewCacheRef.current.patch(eventSessionId, { liveMessage: assistant, isStreaming: true });
+        }
+      } else if (type === "message_end") {
+        const terminal = event.message && typeof event.message === "object" ? event.message as PiMessage : null;
+        if (terminal?.role === "assistant") {
+          const pendingAssistant = viewingEventSession ? drainPendingLiveMessage() : null;
+          const terminalAssistant = assistantMessage(event);
+          const assistant = hasAssistantPayload(terminalAssistant) ? terminalAssistant : pendingAssistant || terminalAssistant;
+          if (assistant && eventSessionId) viewCacheRef.current.appendTerminal(eventSessionId, assistant);
+          if (viewingEventSession) {
+            if (assistant) setMessages((current) => appendTerminalMessage(current, assistant));
+            setLiveMessage(null);
+          }
+        } else {
+          if (terminal && eventSessionId) viewCacheRef.current.appendTerminal(eventSessionId, terminal);
+          if (viewingEventSession && terminal?.role === "toolResult") {
+            setMessages((current) => appendTerminalMessage(current, terminal));
+          }
+        }
       } else if (type === "tool_execution_start" && viewingEventSession) {
         setToolStatus(`正在运行工具：${String(event.toolName || "unknown")}`);
       } else if (type === "tool_execution_end" && viewingEventSession) {
         setToolStatus(`${String(event.toolName || "工具")} ${event.isError ? "执行失败" : "已完成"}`);
       } else if (type === "agent_settled") {
-        if (eventSessionId) setSessions((current) => current.map((session) => session.id === eventSessionId ? { ...session, running: false } : session));
+        if (eventSessionId) {
+          setSessions((current) => current.map((session) => session.id === eventSessionId ? { ...session, running: false } : session));
+          viewCacheRef.current.patch(eventSessionId, { isStreaming: false, liveMessage: undefined, toolStatus: "", state: { ...(viewCacheRef.current.get(eventSessionId)?.state || EMPTY_STATE), isStreaming: false } });
+        }
         if (viewingEventSession) {
           if (promptReconcileTimerRef.current !== null) window.clearTimeout(promptReconcileTimerRef.current);
           promptReconcileTimerRef.current = null;
@@ -475,8 +603,9 @@ export function App() {
           setState((current) => ({ ...current, isStreaming: false }));
           setToolStatus("");
           // A post-compaction turn has now persisted its new usage snapshot.
+          const requestVersion = sessionEventVersionRef.current.get(eventSessionId) || 0;
           void api.viewSession(eventSessionId).then((view) => {
-            if (viewedSessionIdRef.current === eventSessionId) applySessionView(view);
+            if (viewedSessionIdRef.current === eventSessionId && (sessionEventVersionRef.current.get(eventSessionId) || 0) === requestVersion) applySessionView(view);
           }).catch(() => undefined);
         }
         scheduleSidebarRefresh();
@@ -499,28 +628,109 @@ export function App() {
           void refresh().catch(reportBackgroundRefreshError);
         }
       } else if (type === "pi_chat_sessions_changed") {
-        if (typeof event.sessionId === "string") viewCacheRef.current.forget(event.sessionId);
+        // Prompt admission and streaming creation events are frequent. Retain the
+        // old snapshot so returning to a running Session paints immediately; its
+        // background view request then merges the current live draft. Only a
+        // structural mutation makes the cached view semantically invalid.
+        if (typeof event.sessionId === "string" && ["deleted", "renamed"].includes(String(event.action || ""))) viewCacheRef.current.forget(event.sessionId);
         if (event.action === "deleted" && event.sessionId === viewedSessionIdRef.current) {
           viewedSessionIdRef.current = "";
           void refresh().catch(reportBackgroundRefreshError);
         } else {
           scheduleSidebarRefresh();
         }
-      } else if (type === "pi_chat_queue_update" && viewingEventSession) {
-        setQueue(Array.isArray(event.queue) ? event.queue as unknown as QueuedPrompt[] : []);
-        setQueuePaused(event.paused === true);
-      } else if (type === "pi_chat_queue_dispatch") {
-        if (viewingEventSession) {
-          const queuedText = typeof event.message === "string" && event.message ? event.message : Number(event.imageCount) > 0 ? `请查看附加的 ${Number(event.imageCount)} 张图片` : "队列消息";
-          setMessages((current) => [...current, userMessage(queuedText, [])]);
+      } else if (type === "pi_chat_queue_update") {
+        const currentQueue = Array.isArray(event.queue) ? event.queue as unknown as QueuedPrompt[] : [];
+        const admittedId = typeof event.admittedId === "string" ? event.admittedId : "";
+        const admitted = admittedId ? currentQueue.find((item) => item.id === admittedId) : undefined;
+        const localTurns = eventSessionId ? localUserTurnsRef.current.get(eventSessionId) || [] : [];
+        const turn = admitted ? bindQueuedAdmission(localTurns, admitted.id, admitted.message, admitted.imageCount) : undefined;
+        if (turn && viewingEventSession) setPendingUserMessage((current) => current === turn.message ? null : current);
+        if (turn?.renderedInTranscript) {
+          if (viewingEventSession) setMessages((current) => current.filter((candidate) => candidate !== turn.message));
+          turn.renderedInTranscript = false;
         }
+        if (eventSessionId) setSessions((current) => current.map((session) => session.id === eventSessionId ? {
+          ...session,
+          queued: currentQueue.length > 0,
+          ...(currentQueue.length > 0 ? { releasable: false } : null),
+        } : session));
+        if (eventSessionId) viewCacheRef.current.patch(eventSessionId, { queue: currentQueue, queuePaused: event.paused === true });
+        if (viewingEventSession) {
+          setQueue(currentQueue);
+          setQueuePaused(event.paused === true);
+        }
+      } else if (type === "pi_chat_queue_dispatch") {
+        const dispatchedId = typeof event.id === "string" ? event.id : "";
+        const dispatchedMessage = typeof event.message === "string" ? event.message : "";
+        const imageCount = typeof event.imageCount === "number" && Number.isFinite(event.imageCount) ? event.imageCount : 0;
+        const localTurns = eventSessionId ? localUserTurnsRef.current.get(eventSessionId) || [] : [];
+        // Dispatch can beat the enqueue HTTP response. Bind its queue ID to the
+        // already-protected local turn before considering an observer fallback.
+        const knownLocally = bindQueuedDispatch(localTurns, dispatchedId, dispatchedMessage, imageCount);
+        if (knownLocally) {
+          knownLocally.queueState = "dispatched";
+          if (viewingEventSession) setPendingUserMessage((current) => current === knownLocally.message ? null : current);
+          if (viewingEventSession && !knownLocally.renderedInTranscript) {
+            setMessages((current) => current.includes(knownLocally.message) ? current : [...current, knownLocally.message]);
+            knownLocally.renderedInTranscript = true;
+          }
+        }
+        if (eventSessionId && !knownLocally) {
+          const queuedText = dispatchedMessage || (imageCount > 0 ? `请查看附加的 ${imageCount} 张图片` : "队列消息");
+          const message = userMessage(queuedText, []);
+          const source = viewCacheRef.current.get(eventSessionId);
+          const turn: LocalUserTurn = {
+            sessionId: eventSessionId,
+            message,
+            expectedTurnTotal: nextLocalTurnTotal(source?.messages || [], source?.turnTotal ?? sourceTurnTotalsRef.current.get(eventSessionId), localTurns),
+            queueId: dispatchedId || undefined,
+            queueState: "dispatched",
+            confirmByPosition: imageCount > 0,
+            renderedInTranscript: viewingEventSession,
+          };
+          localUserTurnsRef.current.set(eventSessionId, [...localTurns, turn]);
+          if (viewingEventSession) setMessages((current) => [...current, message]);
+        }
+        if (eventSessionId) viewCacheRef.current.patch(eventSessionId, { state: { ...(viewCacheRef.current.get(eventSessionId)?.state || EMPTY_STATE), isStreaming: true }, isStreaming: true });
         if (viewingEventSession) setState((current) => ({ ...current, isStreaming: true }));
-      } else if (type === "pi_chat_queue_error" && viewingEventSession) {
-        setError(String(event.error || "队列消息发送失败"));
+      } else if (type === "pi_chat_queue_error") {
+        const currentQueue = Array.isArray(event.queue) ? event.queue as unknown as QueuedPrompt[] : [];
+        const failedId = typeof event.id === "string" ? event.id : "";
+        const queuedIds = new Set(currentQueue.map((item) => item.id));
+        if (failedId) queuedIds.add(failedId);
+        const localTurns = eventSessionId ? localUserTurnsRef.current.get(eventSessionId) || [] : [];
+        for (const turn of localTurns) {
+          if (!turn.queueId || !queuedIds.has(turn.queueId)) continue;
+          turn.queueState = "waiting";
+          if (turn.renderedInTranscript) {
+            if (viewingEventSession) setMessages((current) => current.filter((candidate) => candidate !== turn.message));
+            turn.renderedInTranscript = false;
+          }
+        }
+        if (eventSessionId) viewCacheRef.current.patch(eventSessionId, {
+          ...(currentQueue.length ? { queue: currentQueue } : null),
+          ...(event.paused === true ? { queuePaused: true } : null),
+          state: { ...(viewCacheRef.current.get(eventSessionId)?.state || EMPTY_STATE), isStreaming: false },
+          isStreaming: false,
+          liveMessage: undefined,
+          toolStatus: "",
+        });
+        if (viewingEventSession) {
+          if (currentQueue.length) setQueue(currentQueue);
+          if (event.paused === true) setQueuePaused(true);
+          setState((current) => ({ ...current, isStreaming: false }));
+          setLiveMessage(null);
+          setToolStatus("");
+          setError(String(event.error || "队列消息发送失败"));
+        }
       } else if (type === "extension_ui_request") {
         const request = event as unknown as ExtensionUiRequest;
         if (["select", "confirm", "input", "editor"].includes(request.method)) {
-          if (eventSessionId) setSessions((current) => current.map((session) => session.id === eventSessionId ? { ...session, pendingConfirmation: true } : session));
+          if (eventSessionId) {
+            setSessions((current) => current.map((session) => session.id === eventSessionId ? { ...session, pendingConfirmation: true, releasable: false } : session));
+            viewCacheRef.current.patch(eventSessionId, { pendingExtensionRequest: request });
+          }
           // UI "放行" can outlive a Pi RPC restart (extension state resets to strict).
           // Auto-allow Gate confirms so the top-right mode remains authoritative.
           if (viewingEventSession) {
@@ -531,33 +741,32 @@ export function App() {
         else if (request.method === "notify") {
           const mode = gateModeFromNotice(request.message);
           if (mode && eventSessionId) updateGateMode(eventSessionId, mode);
-          setNotice(request.message || "Pi 通知");
+          if (viewingEventSession) setNotice(request.message || "Pi 通知");
         }
+      } else if (type === "pi_chat_gate_mode_changed") {
+        const mode = event.mode;
+        if (eventSessionId && (mode === "strict" || mode === "open")) updateGateMode(eventSessionId, mode);
       } else if (type === "pi_chat_session_control_changed") {
         const id = typeof event.sessionId === "string" ? event.sessionId : "";
         const owner = typeof event.controlOwner === "string" ? event.controlOwner : undefined;
         const controlledByThisWindow = event.controlledByThisWindow === true;
+        if (id) viewCacheRef.current.patch(id, { controlOwner: owner, controlledByThisWindow });
         if (id === viewedSessionIdRef.current) setViewControl({ controlOwner: owner, controlledByThisWindow });
         if (id) setSessions((current) => current.map((session) => session.id === id ? { ...session, controlOwner: owner, controlledByThisWindow } : session));
       } else if (type === "pi_chat_extension_request_resolved") {
         if (viewingEventSession) setExtensionRequest((current) => current?.id === event.id ? null : current);
-        if (eventSessionId) setSessions((current) => current.map((session) => session.id === eventSessionId ? { ...session, pendingConfirmation: false } : session));
+        if (eventSessionId) {
+          viewCacheRef.current.patch(eventSessionId, { pendingExtensionRequest: undefined });
+          setSessions((current) => current.map((session) => session.id === eventSessionId ? { ...session, pendingConfirmation: false } : session));
+        }
       } else if (type === "extension_error") {
-        setError(String(event.error || "扩展执行失败"));
+        if (viewingEventSession) setError(String(event.error || "扩展执行失败"));
       } else if (type === "pi_chat_process_recovered") {
         if (eventSessionId) setFailedSessionIds((current) => current.filter((id) => id !== eventSessionId));
-        // Extension in-memory gateMode resets to strict on RPC restart. Re-apply
-        // the UI preference so "放行" does not silently become strict again.
-        if (eventSessionId) {
-          const desired = gateModesRef.current[eventSessionId];
-          if (desired && desired !== "strict") {
-            void api.prompt(`/gate ${desired}`, [], eventSessionId).catch(() => undefined);
-          }
-        }
       } else if (type === "pi_chat_process_error") {
         if (eventSessionId) {
           setFailedSessionIds((current) => [...new Set([...current, eventSessionId])]);
-          setSessions((current) => current.map((session) => session.id === eventSessionId ? { ...session, running: false } : session));
+          setSessions((current) => current.map((session) => session.id === eventSessionId ? { ...session, running: false, releasable: false } : session));
         }
         if (viewingEventSession) {
           if (promptReconcileTimerRef.current !== null) window.clearTimeout(promptReconcileTimerRef.current);
@@ -569,7 +778,7 @@ export function App() {
           setStopping(false);
         }
       }
-  }, [applySessionView, clearPendingLiveMessage, refresh, reportBackgroundRefreshError, scheduleLiveMessage, scheduleSidebarRefresh, tryAutoAllowGate, updateGateMode]);
+  }, [applySessionView, drainPendingLiveMessage, refresh, reportBackgroundRefreshError, scheduleLiveMessage, scheduleSidebarRefresh, tryAutoAllowGate, updateGateMode]);
 
   const handleEventSourceError = useCallback((source: EventSource) => {
       source.close();
@@ -695,8 +904,10 @@ export function App() {
     setError("");
     stickToBottomRef.current = false;
     try {
+      const requestVersion = sessionEventVersionRef.current.get(id) || 0;
       const view = await api.viewSession(id, visibleTurnCount + 10);
       if (viewedSessionIdRef.current !== id) return;
+      if ((sessionEventVersionRef.current.get(id) || 0) !== requestVersion) return;
       applySessionView(view);
       requestAnimationFrame(() => {
         const element = scrollRef.current;
@@ -774,9 +985,14 @@ export function App() {
       }
       void api.viewSession(sessionId).then((view) => {
         if (viewedSessionIdRef.current !== sessionId) return;
+        const completedVersion = sessionEventVersionRef.current.get(sessionId) || 0;
+        if (completedVersion !== latestVersion) {
+          schedulePromptReconcile(sessionId, completedVersion);
+          return;
+        }
         applySessionView(view);
         setPromptStarting(false);
-        if (view.isStreaming) schedulePromptReconcile(sessionId, sessionEventVersionRef.current.get(sessionId) || 0);
+        if (view.isStreaming) schedulePromptReconcile(sessionId, completedVersion);
       }).catch((cause) => {
         if (viewedSessionIdRef.current !== sessionId) return;
         // Background reconcile must not paint a red timeout while Pi is still
@@ -793,11 +1009,30 @@ export function App() {
   const send = async (message: string, images: PromptImage[]) => {
     setError("");
     stickToBottomRef.current = true;
+    const sendNavigationEpoch = navigationEpochRef.current;
     setBusy(true);
     const alreadyStreaming = state.isStreaming;
+    const willQueueLocally = alreadyStreaming || queuePaused || queue.length > 0;
     const previousToolStatus = toolStatus;
-    const optimisticMessage = alreadyStreaming || message.startsWith("/") ? null : userMessage(message, images);
+    const optimisticMessage = willQueueLocally || message.startsWith("/") ? null : userMessage(message, images);
+    const localTurn = optimisticMessage || userMessage(message, images);
     let targetSessionId = viewedSessionIdRef.current;
+    let protectedLocalTurn: LocalUserTurn | null = null;
+    const protectLocalPrompt = (turn: PiMessage | null = localTurn) => {
+      if (!turn || !targetSessionId || protectedLocalTurn) return protectedLocalTurn;
+      const pending = localUserTurnsRef.current.get(targetSessionId) || [];
+      protectedLocalTurn = {
+        sessionId: targetSessionId,
+        message: turn,
+        expectedTurnTotal: nextLocalTurnTotal(messages, turnTotal, pending),
+        queueState: willQueueLocally && !message.startsWith("/") ? "waiting" : undefined,
+        confirmByPosition: images.length > 0,
+      };
+      localUserTurnsRef.current.set(targetSessionId, [...pending, protectedLocalTurn]);
+      return protectedLocalTurn;
+    };
+    const localTurnEntry = (): LocalUserTurn | undefined =>
+      targetSessionId ? (localUserTurnsRef.current.get(targetSessionId) || []).find((turn) => turn.message === localTurn) : undefined;
     setPendingUserMessage(optimisticMessage);
     try {
       const command = /^\/(new|compact|abort)(?:\s+([\s\S]*))?$/.exec(message);
@@ -835,27 +1070,38 @@ export function App() {
         clearViewedPromiseRef.current = null;
         const view = await api.newSession();
         targetSessionId = view.session.id;
-        applySessionView(view);
-        setPendingUserMessage(optimisticMessage);
-        setPromptStarting(true);
-        setToolStatus("Pi 内核已就绪，正在准备消息…");
+        protectLocalPrompt();
+        const stillViewingDraft = navigationEpochRef.current === sendNavigationEpoch && localDraftRef.current;
+        if (stillViewingDraft) {
+          applySessionView(view);
+          setPendingUserMessage(null);
+          setPromptStarting(true);
+          setToolStatus("Pi 内核已就绪，正在准备消息…");
+        } else viewCacheRef.current.remember(view);
         if (preferredModel && (view.state.model?.provider !== preferredModel.provider || view.state.model?.id !== preferredModel.id)) {
           const selected = await api.setModel(preferredModel.provider, preferredModel.id, targetSessionId);
-          setState((current) => ({ ...current, model: selected.model }));
+          if (viewedSessionIdRef.current === targetSessionId) setState((current) => ({ ...current, model: selected.model }));
         }
         if (preferredThinking && view.state.thinkingLevel !== preferredThinking) {
           const selected = await api.setThinking(preferredThinking, targetSessionId);
-          setState((current) => ({ ...current, thinkingLevel: selected.level }));
+          if (viewedSessionIdRef.current === targetSessionId) setState((current) => ({ ...current, thinkingLevel: selected.level }));
         }
         pendingSessionPrefsRef.current.delete(DRAFT_PREFS_KEY);
       } else if (runtimeStatus !== "active") {
         setPromptStarting(true);
         setToolStatus("正在启动 Pi 内核…");
         setRuntimeStatus("restoring");
+        protectLocalPrompt();
+        const activationEpoch = navigationEpochRef.current;
         const view = await api.activateSession(targetSessionId);
-        viewCacheRef.current.forget(view.session.id);
-        applySessionView(view);
-        setPendingUserMessage(optimisticMessage);
+        const activationIsCurrent = viewedSessionIdRef.current === targetSessionId
+          && desiredSessionIdRef.current === targetSessionId
+          && navigationEpochRef.current === activationEpoch;
+        if (activationIsCurrent) {
+          viewCacheRef.current.forget(view.session.id);
+          applySessionView(view);
+        } else viewCacheRef.current.remember(view);
+        setPendingUserMessage(null);
         setPromptStarting(true);
         setToolStatus("Pi 内核已就绪，正在准备消息…");
         // Re-apply any model/thinking chosen while the conversation was view-only.
@@ -871,10 +1117,45 @@ export function App() {
       } else if (!alreadyStreaming) {
         setPromptStarting(true);
         setToolStatus("正在向 Pi 提交消息…");
+        // A staged cold preference can survive a prior explicit activation
+        // (for example, Take control). Apply it here too; otherwise this active
+        // path would prompt with the historical last-turn settings.
+        if (staged) {
+          if (staged.model) {
+            const selected = await api.setModel(staged.model.provider, staged.model.id, targetSessionId);
+            setState((current) => ({ ...current, model: selected.model }));
+          }
+          if (staged.thinkingLevel) {
+            const selected = await api.setThinking(staged.thinkingLevel, targetSessionId);
+            setState((current) => ({ ...current, thinkingLevel: selected.level }));
+          }
+          pendingSessionPrefsRef.current.delete(prefsKey);
+        }
       }
 
       const eventVersionBeforePrompt = sessionEventVersionRef.current.get(targetSessionId) || 0;
-      const result = await api.prompt(message, images, targetSessionId);
+      // Protect the prompt across every asynchronous refresh until a JSONL view
+      // confirms the additional user turn. This also covers active Sessions,
+      // which have no Runtime-start view to pass through above.
+      protectLocalPrompt();
+      const result = await api.prompt(message, images, targetSessionId, gateModesRef.current[targetSessionId]);
+      // Extension commands do not create an ordinary user turn. Queued prompts
+      // do: retain their local bubble immediately, then match its dispatch by ID.
+      if (result.extension && protectedLocalTurn) {
+        const pending = localUserTurnsRef.current.get(targetSessionId) || [];
+        const remaining = removeLocalTurnAndRebase(pending, protectedLocalTurn);
+        if (remaining.length) localUserTurnsRef.current.set(targetSessionId, remaining);
+        else localUserTurnsRef.current.delete(targetSessionId);
+        protectedLocalTurn = null;
+      }
+      if (result.queued && localTurnEntry() && typeof result.id === "string") {
+        const queuedTurn = localTurnEntry()!;
+        // Dispatch SSE may beat this acknowledgement. Never demote a turn that
+        // the scheduler has already started into the waiting-only queue UI.
+        markLocalTurnQueued(queuedTurn, result.id);
+      } else if (!result.extension && localTurnEntry()) {
+        localTurnEntry()!.queueState = "dispatched";
+      }
       // An orphaned blank view may let the user escape through the sidebar while
       // this request is still pending. Its late response belongs to the old
       // Session and must not overwrite the newly selected conversation.
@@ -884,6 +1165,7 @@ export function App() {
       }
       setPromptStarting(false);
       if (result.extension) {
+
         setPendingUserMessage(null);
         setToolStatus(alreadyStreaming ? previousToolStatus : "");
         if (typeof result.isStreaming === "boolean") setState((current) => ({ ...current, isStreaming: result.isStreaming as boolean }));
@@ -891,25 +1173,47 @@ export function App() {
         if (gateMode && targetSessionId) updateGateMode(targetSessionId, gateMode);
         setNotice(extensionExecutionNotice(message, result.command || "extension", result.description ? [...commands, { name: result.command || "extension", description: result.description, source: "extension" }] : commands));
       } else if (result.queued) {
+        // A waiting prompt belongs only in PromptQueue. The dispatch event is
+        // the single transition that makes its local user bubble visible.
+        const queuedTurn = localTurnEntry();
+        if (queuedTurn?.queueState === "waiting" && queuedTurn.renderedInTranscript) {
+          setMessages((current) => current.filter((candidate) => candidate !== queuedTurn.message));
+          queuedTurn.renderedInTranscript = false;
+        }
         setPendingUserMessage(null);
         setToolStatus(alreadyStreaming ? previousToolStatus : "");
-        if (result.queue) setQueue(result.queue);
-        setNotice("消息已加入队列");
+        // A dispatch event can beat this HTTP acknowledgement. In that race the
+        // response contains the old enqueue snapshot, so SSE remains authoritative.
+        if (result.queue && queuedTurn?.queueState !== "dispatched") setQueue(result.queue);
+        setNotice(queuedTurn?.queueState === "dispatched" ? "队列消息已开始执行" : "消息已加入队列");
       } else {
         const eventVersionAfterPrompt = sessionEventVersionRef.current.get(targetSessionId) || 0;
         const terminalEvent = lastSessionEventTypeRef.current.get(targetSessionId);
         const settledBeforeAcknowledgement = eventVersionAfterPrompt > eventVersionBeforePrompt && (terminalEvent === "agent_settled" || terminalEvent === "pi_chat_process_error");
         if (settledBeforeAcknowledgement) {
+          // A very fast turn can settle before the prompt HTTP acknowledgement.
+          // Commit the local bubble before waiting for its final JSONL view.
+          protectLocalPrompt(localTurn);
+          if (!localTurnEntry()?.renderedInTranscript) {
+            setMessages((current) => [...current, localTurn]);
+          }
           setPendingUserMessage(null);
           try {
+            const requestVersion = sessionEventVersionRef.current.get(targetSessionId) || 0;
             const view = await api.viewSession(targetSessionId);
-            if (viewedSessionIdRef.current === targetSessionId) applySessionView(view);
+            if (viewedSessionIdRef.current === targetSessionId && (sessionEventVersionRef.current.get(targetSessionId) || 0) === requestVersion) applySessionView(view);
           } catch {
             // History already includes the optimistic user turn; a busy view RPC
             // must not turn a completed prompt into a red timeout banner.
           }
         } else {
-          setMessages((current) => [...current, optimisticMessage || userMessage(message, images)]);
+          // A reconnect/view refresh may already have moved the protected local
+          // overlay into `messages` while this HTTP acknowledgement was pending.
+          // Do not create a duplicate user bubble in that race.
+          protectLocalPrompt(localTurn);
+          if (!localTurnEntry()?.renderedInTranscript) {
+            setMessages((current) => [...current, localTurn]);
+          }
           setPendingUserMessage(null);
           setState((current) => ({ ...current, isStreaming: true }));
           setToolStatus("Pi 正在思考…");
@@ -917,6 +1221,17 @@ export function App() {
         }
       }
     } catch (cause) {
+      const rejectedTurn = localTurnEntry();
+      if (rejectedTurn) {
+        const pending = localUserTurnsRef.current.get(targetSessionId) || [];
+        const remaining = removeLocalTurnAndRebase(pending, rejectedTurn);
+        if (remaining.length) localUserTurnsRef.current.set(targetSessionId, remaining);
+        else localUserTurnsRef.current.delete(targetSessionId);
+      }
+      viewCacheRef.current.forget(targetSessionId);
+      if (rejectedTurn?.renderedInTranscript && viewedSessionIdRef.current === targetSessionId) {
+        setMessages((current) => current.filter((candidate) => candidate !== rejectedTurn.message));
+      }
       if (viewedSessionIdRef.current === targetSessionId) {
         setPendingUserMessage(null);
         setPromptStarting(false);
@@ -935,9 +1250,16 @@ export function App() {
     stoppingRef.current = true;
     setStopping(true);
     setError("");
-    const sessionId = viewedSessionIdRef.current;
+    const operation = captureViewOperation();
     try {
-      const result = await api.abort(sessionId);
+      const result = await api.abort(operation.sessionId);
+      viewCacheRef.current.patch(operation.sessionId, {
+        state: { ...(viewCacheRef.current.get(operation.sessionId)?.state || EMPTY_STATE), isStreaming: result.isStreaming },
+        isStreaming: result.isStreaming,
+        queuePaused: result.queuePaused,
+        ...(result.isStreaming ? null : { liveMessage: undefined, toolStatus: "" }),
+      });
+      if (!viewOperationIsCurrent(operation)) return;
       setState((current) => ({ ...current, isStreaming: result.isStreaming }));
       setQueuePaused(result.queuePaused);
       if (!result.isStreaming) {
@@ -948,16 +1270,16 @@ export function App() {
         // draining after abort, get_messages/bootstrap can hang for the full
         // API timeout and leave the UI stuck on "停止中…".
         scheduleSidebarRefresh();
-        if (sessionId) {
-          void api.viewSession(sessionId).then((view) => {
-            if (viewedSessionIdRef.current === sessionId) applySessionView(view);
-          }).catch(() => undefined);
-        }
+        const requestVersion = sessionEventVersionRef.current.get(operation.sessionId) || 0;
+        void api.viewSession(operation.sessionId).then((view) => {
+          if (viewOperationIsCurrent(operation) && (sessionEventVersionRef.current.get(operation.sessionId) || 0) === requestVersion) applySessionView(view);
+          else viewCacheRef.current.remember(view);
+        }).catch(() => undefined);
       }
       setNotice(result.queuePaused ? "已停止；队列保持暂停，可撤销或继续" : "已停止生成");
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-      throw cause;
+      if (viewOperationIsCurrent(operation)) setError(cause instanceof Error ? cause.message : String(cause));
+      if (viewOperationIsCurrent(operation)) throw cause;
     } finally {
       stoppingRef.current = false;
       setStopping(false);
@@ -966,6 +1288,31 @@ export function App() {
 
   const viewSession = async (id: string) => {
     if (id === viewedSessionIdRef.current) return;
+    // Snapshot exactly what the user is leaving, including a cumulative SSE
+    // assistant draft. Returning to a running Session can then paint this first
+    // frame immediately instead of waiting on its busy Pi Runtime.
+    const leavingId = viewedSessionIdRef.current;
+    const leavingSession = sessions.find((session) => session.id === leavingId);
+    if (leavingId && leavingSession && !localDraftRef.current) {
+      // `messages` may contain local user overlays. Preserve the cache's original
+      // transcript and update only the transient Runtime/SSE fields here.
+      viewCacheRef.current.patch(leavingId, {
+        session: leavingSession,
+        state,
+        isActive: activeSessionIds.includes(leavingId),
+        runtimeStatus: runtimeStatus === "draft" ? "active" : runtimeStatus,
+        isStreaming: state.isStreaming,
+        liveMessage: liveMessage || undefined,
+        toolStatus,
+        stats,
+        queue,
+        queuePaused,
+        commands,
+        pendingExtensionRequest: extensionRequest || undefined,
+        ...(gateAvailableOverride !== null ? { gateAvailable: gateAvailableOverride } : null),
+        ...viewControl,
+      });
+    }
     rememberCurrentScroll();
     const rememberedTurns = scrollMemoryRef.current.turns(id);
     const epoch = ++navigationEpochRef.current;
@@ -983,15 +1330,43 @@ export function App() {
       applySessionView(cached);
       // This cached navigation supersedes any older in-flight cold request.
       setViewSwitching(false);
+      // Always reconcile behind the already-painted cache. This preserves the
+      // final answer of a Session that settled while it was off-screen, without
+      // making a busy Runtime's RPC latency visible to the user.
+      const requestVersion = sessionEventVersionRef.current.get(id) || 0;
+      void api.viewSession(id, rememberedTurns).then((view) => {
+        if (navigationEpochRef.current !== epoch || desiredSessionIdRef.current !== id || viewedSessionIdRef.current !== id) return;
+        if ((sessionEventVersionRef.current.get(id) || 0) !== requestVersion) {
+          schedulePromptReconcile(id, sessionEventVersionRef.current.get(id) || 0);
+          return;
+        }
+        // An empty busy-runtime read may update transient state, but cached
+        // terminal leases are not evidence that JSONL persisted those rows.
+        // Patch the already-painted cache without promoting its transcript into
+        // the authoritative branch; a later non-empty view performs confirmation.
+        if (!view.messages.length && cached.messages.length) {
+          const patched = viewCacheRef.current.patch(id, view);
+          if (patched) applySessionView(patched);
+        } else applySessionView(view);
+      }).catch(() => undefined);
       return;
     }
     try {
-      const view = await api.viewSession(id, rememberedTurns);
-      if (navigationEpochRef.current !== epoch || desiredSessionIdRef.current !== id) return;
-      if (!view.isActive) viewCacheRef.current.remember(view);
-      else viewCacheRef.current.forget(view.session.id);
+      let view: SessionViewData | null = null;
+      let stable = false;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const requestVersion = sessionEventVersionRef.current.get(id) || 0;
+        view = await api.viewSession(id, rememberedTurns);
+        if (navigationEpochRef.current !== epoch || desiredSessionIdRef.current !== id) return;
+        if ((sessionEventVersionRef.current.get(id) || 0) === requestVersion) {
+          stable = true;
+          break;
+        }
+      }
+      if (!view) return;
       pendingScrollRestoreRef.current = id;
       applySessionView(view);
+      if (!stable && view.isStreaming) schedulePromptReconcile(id, sessionEventVersionRef.current.get(id) || 0);
     } catch (cause) {
       if (navigationEpochRef.current === epoch) {
         desiredSessionIdRef.current = viewedSessionIdRef.current;
@@ -1045,16 +1420,20 @@ export function App() {
   };
 
   const ensureRuntimeActive = async () => {
-    if (!viewedSessionId || runtimeStatus === "active") return;
+    const sessionId = viewedSessionIdRef.current;
+    const activationEpoch = navigationEpochRef.current;
+    if (!sessionId || runtimeStatus === "active") return false;
     setRuntimeStatus("restoring");
-    const view = await api.activateSession(viewedSessionId);
-    viewCacheRef.current.forget(view.session.id);
-    applySessionView(view);
-    // Fresh Secondary workers start Gate in strict; re-apply the UI selection.
-    const desired = gateModesRef.current[view.session.id];
-    if (desired && desired !== "strict") {
-      void api.prompt(`/gate ${desired}`, [], view.session.id).catch(() => undefined);
-    }
+    const view = await api.activateSession(sessionId);
+    const activationIsCurrent = viewedSessionIdRef.current === sessionId
+      && desiredSessionIdRef.current === sessionId
+      && navigationEpochRef.current === activationEpoch;
+    if (activationIsCurrent) {
+      viewCacheRef.current.forget(view.session.id);
+      applySessionView(view);
+      setRuntimeStatus("active");
+    } else viewCacheRef.current.remember(view);
+    return activationIsCurrent;
   };
 
   const stageSessionPref = (patch: { model?: ModelInfo | null; thinkingLevel?: ThinkingLevel }) => {
@@ -1076,14 +1455,17 @@ export function App() {
       setNotice(`已选择 ${model?.name || modelId}，发送时生效`);
       return;
     }
+    const operation = captureViewOperation();
     setSettingsBusy(true);
     setError("");
     try {
-      const result = await api.setModel(provider, modelId, viewedSessionId);
+      const result = await api.setModel(provider, modelId, operation.sessionId);
+      viewCacheRef.current.patch(operation.sessionId, { state: { ...(viewCacheRef.current.get(operation.sessionId)?.state || EMPTY_STATE), model: result.model } });
+      if (!viewOperationIsCurrent(operation)) return;
       setState((current) => ({ ...current, model: result.model }));
       setNotice(result.pending ? `已选择 ${result.model?.name || modelId}，下一轮对话生效` : `已切换到 ${result.model?.name || modelId}`);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      if (viewOperationIsCurrent(operation)) setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setSettingsBusy(false);
     }
@@ -1097,14 +1479,17 @@ export function App() {
       setNotice(`已选择 ${level} 思考强度，发送时生效`);
       return;
     }
+    const operation = captureViewOperation();
     setSettingsBusy(true);
     setError("");
     try {
-      const result = await api.setThinking(level, viewedSessionId);
+      const result = await api.setThinking(level, operation.sessionId);
+      viewCacheRef.current.patch(operation.sessionId, { state: { ...(viewCacheRef.current.get(operation.sessionId)?.state || EMPTY_STATE), thinkingLevel: result.level } });
+      if (!viewOperationIsCurrent(operation)) return;
       setState((current) => ({ ...current, thinkingLevel: result.level }));
       setNotice(result.pending ? `已选择 ${result.level}，下一轮对话生效` : `思考强度已切换为 ${result.level}`);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      if (viewOperationIsCurrent(operation)) setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setSettingsBusy(false);
     }
@@ -1197,6 +1582,38 @@ export function App() {
     }
   };
 
+  const releaseSession = async (session: SessionSummary) => {
+    setSessionActionBusy(true);
+    setError("");
+    try {
+      const result = await api.releaseSession(session.id);
+      const ids = result.activeSessionIds;
+      setActiveSessionIds(ids);
+      setSessions((current) => applyActiveSessionIds(current, ids));
+      const cached = viewCacheRef.current.get(session.id);
+      if (cached) viewCacheRef.current.patch(session.id, {
+        runtimeStatus: "view-only",
+        isActive: false,
+        isStreaming: false,
+        liveMessage: undefined,
+        toolStatus: "",
+        session: { ...cached.session, writable: false, releasable: false, running: false, queued: false },
+        state: { ...cached.state, isStreaming: false },
+      });
+      if (viewedSessionIdRef.current === session.id) {
+        setRuntimeStatus("view-only");
+        setState((current) => ({ ...current, isStreaming: false }));
+        setToolStatus("");
+      }
+      setNotice("已释放对话运行资源");
+      void refreshSidebarSessions().catch(reportBackgroundRefreshError);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSessionActionBusy(false);
+    }
+  };
+
   const deleteSession = async () => {
     if (!sessionDialog) return;
     const deletingId = sessionDialog.session.id;
@@ -1232,15 +1649,10 @@ export function App() {
   };
 
   const changeGate = async (mode: GateMode) => {
-    const sessionId = viewedSessionIdRef.current;
-    if (!sessionId) return;
-    const previous = gateModesRef.current[sessionId] || "strict";
-    updateGateMode(sessionId, mode);
-    try {
-      await send(`/gate ${mode}`, []);
-    } catch {
-      updateGateMode(sessionId, previous);
-    }
+    if (!viewedSessionIdRef.current) return;
+    // Gate changes are security-sensitive: never auto-allow from an optimistic
+    // browser value before the Runtime confirms that the command succeeded.
+    await send(`/gate ${mode}`, []);
   };
 
   const respondToExtension = async (body: Record<string, unknown>) => {
@@ -1270,11 +1682,10 @@ export function App() {
   // them made a completed tool segment and the next streaming thought render as
   // two adjacent “过程” cards during one agent turn.
   const conversationItems = useMemo(
-    () => groupConversation([
-      ...messages,
-      ...(pendingUserMessage ? [pendingUserMessage] : []),
-      ...(liveMessage ? [liveMessage] : []),
-    ]),
+    () => groupConversation(
+      appendPendingUserMessage(messages, pendingUserMessage),
+      { liveMessage: liveMessage || undefined, preserveTrailingAssistantPlaceholder: Boolean(liveMessage) },
+    ),
     [messages, pendingUserMessage, liveMessage],
   );
   const anySessionRunning = sessions.some((session) => session.running);
@@ -1283,22 +1694,26 @@ export function App() {
   const lifecycleBlocked = applicationLifecycle !== "idle";
   const globalMutationBlocked = lifecycleBlocked || anySessionRunning || anySessionQueued || anySessionPendingConfirmation;
   const primaryQueueBusy = viewedSessionId === activeSessionId && queue.length > 0;
+  const composerQueueMode = state.isStreaming || queuePaused || queue.length > 0;
   const viewedSession = sessions.find((session) => session.id === viewedSessionId);
   const sidebarViewBlocked = sidebarNavigationBlocked(loading, lifecycleBlocked, busy, Boolean(viewedSession));
   const conversationName = localDraft ? "新对话" : viewedSession?.name || (state.messageCount ? state.sessionName || "已保存对话" : "新对话");
   const conversationWorkspace = viewedSession?.cwd || workspaceCwd;
   // Cold view-only sessions carry no RPC command list; the server reports Gate availability explicitly.
   const gateAvailable = gateAvailableOverride ?? commands.some((command) => command.name === "gate" && command.source === "extension");
-  const gateMode = gateModes[viewedSessionId] || "strict";
+  const gateMode = gateModes[viewedSessionId];
   const effectiveControl = { ...viewedSession, ...viewControl };
   const observing = Boolean(effectiveControl.controlOwner && !effectiveControl.controlledByThisWindow);
   const takeControl = async () => {
-    if (!viewedSessionId) return;
+    const sessionId = viewedSessionIdRef.current;
+    if (!sessionId) return;
     try {
-      if (runtimeStatus !== "active") await ensureRuntimeActive();
-      const result = await api.takeSessionControl(viewedSessionId);
+      const activatedHere = runtimeStatus === "active" || await ensureRuntimeActive();
+      if (!activatedHere || viewedSessionIdRef.current !== sessionId) return;
+      const result = await api.takeSessionControl(sessionId);
+      if (viewedSessionIdRef.current !== sessionId) return;
       setViewControl(result);
-      setSessions((current) => current.map((session) => session.id === viewedSessionId ? { ...session, ...result } : session));
+      setSessions((current) => current.map((session) => session.id === sessionId ? { ...session, ...result } : session));
       setNotice("已接管此对话控制权");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -1341,28 +1756,22 @@ export function App() {
         onRefresh={() => void refreshManually()}
         onLoadAllSessions={() => void loadAllSessions()}
         onRestart={() => void restartPi()}
-        onView={(id) => void viewSession(id)}
+        onView={(id) => {
+          if (window.matchMedia?.("(max-width: 760px)").matches) setSidebarOpen(false);
+          void viewSession(id);
+        }}
+        onRelease={(session) => void releaseSession(session)}
         onRename={(session) => setSessionDialog({ mode: "rename", session })}
         onDelete={(session) => setSessionDialog({ mode: "delete", session })}
         onPickWorkspace={() => void pickWorkspace()}
-        onManage={setManagementSection}
       />
       {!sidebarOpen && <button type="button" className="sidebar-restore" onClick={() => setSidebarOpen(true)} title="展开会话栏" aria-label="展开会话栏"><ChevronRightIcon /></button>}
       <main className="chat-shell">
         <TopBar
-          state={state}
-          models={models}
-          stats={stats}
           conversationName={conversationName}
           workspacePath={conversationWorkspace}
-          disabled={busy || viewSwitching || observing || lifecycleBlocked}
-          settingsBusy={settingsBusy}
-          streaming={state.isStreaming}
-          gateAvailable={gateAvailable}
-          gateMode={gateMode}
-          onGate={(mode) => void changeGate(mode)}
-          onModel={(provider, id) => void changeModel(provider, id)}
-          onThinking={(level) => void changeThinking(level)}
+          settingsOpen={managementSection !== null}
+          onOpenSettings={() => setManagementSection((current) => current ? null : "settings")}
           diffSidebarOpen={diffSidebarOpen}
           onToggleDiffSidebar={() => setDiffSidebarOpen((open) => !open)}
         />
@@ -1380,7 +1789,7 @@ export function App() {
               <>
                 {messagesTruncated && <div className="message-window-notice" role="status"><span>当前显示最近 {visibleTurnCount} 轮（共 {turnTotal} 轮、{messageTotal} 条消息）</span><button type="button" onClick={() => void loadEarlierTurns()} disabled={loadingEarlier}>{loadingEarlier ? "正在加载…" : "加载更早 10 轮"}</button></div>}
                 {conversationItems.map((item, index) => item.kind === "process"
-                  ? <ConversationProcess key={item.key} entries={item.entries} streaming={state.isStreaming && index === conversationItems.length - 1} />
+                  ? <ConversationProcess key={`${viewedSessionId || "draft"}:${item.key}`} disclosureKey={`${viewedSessionId || "draft"}:${item.key}`} entries={item.entries} streaming={state.isStreaming && index === conversationItems.length - 1} />
                   : <ChatMessage key={item.key} message={item.message} streaming={state.isStreaming && index === conversationItems.length - 1 && Boolean(liveMessage)} />)}
               </>
             )}
@@ -1408,16 +1817,52 @@ export function App() {
           queue={queue}
           paused={queuePaused}
           busy={busy || viewSwitching || observing || lifecycleBlocked}
-          onCancel={(id) => void api.cancelQueued(id, viewedSessionId).then((result) => { setQueue(result.queue); setQueuePaused(result.paused); }).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))}
-          onResume={() => void api.resumeQueue(viewedSessionId).then((result) => { setQueue(result.queue); setQueuePaused(result.paused); }).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))}
+          onCancel={(id) => {
+            const operation = captureViewOperation();
+            void api.cancelQueued(id, operation.sessionId).then((result) => {
+              const pending = localUserTurnsRef.current.get(operation.sessionId) || [];
+              const cancelled = pending.find((turn) => turn.queueId === id);
+              const remaining = cancelled ? removeLocalTurnAndRebase(pending, cancelled) : pending;
+              if (remaining.length) localUserTurnsRef.current.set(operation.sessionId, remaining);
+              else localUserTurnsRef.current.delete(operation.sessionId);
+              viewCacheRef.current.patch(operation.sessionId, { queue: result.queue, queuePaused: result.paused });
+              if (!viewOperationIsCurrent(operation)) return;
+              if (cancelled?.renderedInTranscript) setMessages((current) => current.filter((message) => message !== cancelled.message));
+              setQueue(result.queue);
+              setQueuePaused(result.paused);
+            }).catch((cause) => { if (viewOperationIsCurrent(operation)) setError(cause instanceof Error ? cause.message : String(cause)); });
+          }}
+          onResume={() => {
+            const operation = captureViewOperation();
+            void api.resumeQueue(operation.sessionId).then((result) => {
+              viewCacheRef.current.patch(operation.sessionId, { queue: result.queue, queuePaused: result.paused });
+              if (!viewOperationIsCurrent(operation)) return;
+              setQueue(result.queue);
+              setQueuePaused(result.paused);
+            }).catch((cause) => { if (viewOperationIsCurrent(operation)) setError(cause instanceof Error ? cause.message : String(cause)); });
+          }}
         />
         <ChatInput
-          streaming={state.isStreaming}
+          streaming={composerQueueMode}
+          activelyStreaming={state.isStreaming}
           stopping={stopping}
           disabled={loading || busy || viewSwitching || observing || lifecycleBlocked || Boolean(state.isCompacting)}
           disabledPlaceholder={lifecycleBlocked ? "Pi Chat 正在执行全局维护，暂时不能提交新操作" : observing ? "此对话正在另一窗口中控制；点击“接管控制”后可操作" : state.isCompacting ? "正在压缩上下文，完成后可继续发送…" : runtimeStatus === "restoring" || (busy && runtimeStatus !== "active") ? "正在恢复 Pi Runtime，就绪后即可发送…" : runtimeStatus === "view-only" ? "当前为只读查看；发送时会自动恢复 Pi Runtime" : undefined}
           acceptsImages={state.model?.input?.includes("image") === true}
           commands={commands}
+          controls={<ComposerControls
+            state={state}
+            models={models}
+            stats={stats}
+            disabled={busy || viewSwitching || observing || lifecycleBlocked || Boolean(state.isCompacting)}
+            settingsBusy={settingsBusy}
+            streaming={state.isStreaming}
+            gateAvailable={gateAvailable}
+            gateMode={gateMode}
+            onGate={(mode) => void changeGate(mode)}
+            onModel={(provider, id) => void changeModel(provider, id)}
+            onThinking={(level) => void changeThinking(level)}
+          />}
           onSend={send}
           onPickLocalFiles={async () => (await api.pickLocalFiles()).paths}
           onReadClipboardFiles={async () => (await api.clipboardLocalFiles()).paths}

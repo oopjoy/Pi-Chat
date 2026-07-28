@@ -51,6 +51,12 @@ test("browser API requests require exact localhost host, origin, and startup tok
     assert.equal(bootstrap.status, 200);
     assert.equal((await bootstrap.json() as { requestToken: string }).requestToken, "current-token");
 
+    // The restart handoff is an Origin-less local process; exact-host health is
+    // its one tokenless, fixed-shape liveness probe.
+    const handoffHealth = await fetch(`${origin}/api/health`);
+    assert.equal(handoffHealth.status, 200);
+    assert.deepEqual(await handoffHealth.json(), { ok: true, service: "pi-chat", lifecycle: "idle" });
+
     const allowed = await fetch(`${origin}/api/health`, { headers: { origin, "sec-fetch-site": "same-origin", "x-pi-chat-token": "current-token" } });
     assert.equal(allowed.status, 200);
 
@@ -59,6 +65,8 @@ test("browser API requests require exact localhost host, origin, and startup tok
 
     const staleToken = await fetch(`${origin}/api/health`, { headers: { origin, "sec-fetch-site": "same-origin", "x-pi-chat-token": "old-token" } });
     assert.equal(staleToken.status, 403);
+
+
   });
 });
 
@@ -79,6 +87,53 @@ test("malformed request bodies are client errors and missing assets stay 404", a
     const missingAsset = await fetch(`${origin}/assets/missing.js`, { headers: { accept: "*/*" } });
     assert.equal(missingAsset.status, 404);
   });
+});
+
+test("exact-authority handoff health allows no Origin or token after Host validation", () => {
+  const result = requestGuardError({
+    method: "GET",
+    url: "/api/health",
+    headers: { host: "127.0.0.1:30170" },
+  } as unknown as import("node:http").IncomingMessage, { allowedHosts: ["127.0.0.1:30170"], token: "current-token" });
+  assert.equal(result, null);
+});
+
+test("tokenless health rejects Host values that are URLs or carry credentials", () => {
+  for (const host of ["127.0.0.1:30170/ignored", "user@127.0.0.1:30170", "127.0.0.1:30170?query"]) {
+    const result = requestGuardError({
+      method: "GET",
+      url: "/api/health",
+      headers: { host },
+    } as unknown as import("node:http").IncomingMessage, { allowedHosts: ["127.0.0.1:30170"], token: "current-token" });
+    assert.equal(result, "请求 Host 未获允许", host);
+  }
+});
+
+test("the tokenless health exception does not relax other exact-authority API routes", () => {
+  const result = requestGuardError({
+    method: "GET",
+    url: "/api/sessions",
+    headers: { host: "127.0.0.1:30170" },
+  } as unknown as import("node:http").IncomingMessage, { allowedHosts: ["127.0.0.1:30170"], token: "current-token" });
+  assert.equal(result, "请求缺少同源 Origin");
+});
+
+test("tokenless mutations are rejected in exact-authority mode", () => {
+  const result = requestGuardError({
+    method: "POST",
+    url: "/api/workspace/set",
+    headers: { host: "127.0.0.1:30170", "content-type": "application/json" },
+  } as unknown as import("node:http").IncomingMessage, { allowedHosts: ["127.0.0.1:30170"], token: "current-token" });
+  assert.equal(result, "请求缺少同源 Origin");
+});
+
+test("IPv6 loopback authority is normalized", () => {
+  const result = requestGuardError({
+    method: "GET",
+    url: "/api/bootstrap",
+    headers: { host: "[::1]:30170", origin: "http://[::1]:30170" },
+  } as unknown as import("node:http").IncomingMessage, { allowedHosts: ["[::1]:30170"], token: "current-token" });
+  assert.equal(result, null);
 });
 
 test("host rebinding attempts are rejected before token processing", () => {

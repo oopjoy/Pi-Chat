@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { access, readdir, rename, rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
@@ -56,6 +56,43 @@ async function renameWithRetry(from: string, to: string): Promise<void> {
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
+const delay = (ms: number) => new Promise((resolveWait) => setTimeout(resolveWait, ms));
+
+function childExited(child: ChildProcess): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
+async function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (childExited(child)) return true;
+  return Promise.race([
+    new Promise<boolean>((resolveExit) => child.once("exit", () => resolveExit(true))),
+    delay(timeoutMs).then(() => false),
+  ]);
+}
+
+/** Stop the complete build/server process tree, including Windows cmd/npm descendants. */
+export async function terminateProcessTree(child: ChildProcess, graceMs = 2_000): Promise<void> {
+  if (!child.pid || childExited(child)) return;
+  if (process.platform === "win32") {
+    // Do not kill only the wrapper first: it may exit while npm/node descendants
+    // remain alive, after which Windows can no longer discover the tree by PID.
+    await new Promise<void>((resolveKill) => {
+      const killer = spawn(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", `taskkill /PID ${child.pid} /T /F`], {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      killer.once("error", () => resolveKill());
+      killer.once("exit", () => resolveKill());
+    });
+    await waitForChildExit(child, Math.max(graceMs, 5_000));
+    return;
+  }
+  try { process.kill(-child.pid, "SIGTERM"); } catch { child.kill("SIGTERM"); }
+  if (await waitForChildExit(child, graceMs)) return;
+  try { process.kill(-child.pid, "SIGKILL"); } catch { child.kill("SIGKILL"); }
+  await waitForChildExit(child, 5_000);
+}
+
 function runBuild(projectRoot: string, distPath: string): Promise<void> {
   return new Promise<void>((resolvePromise, reject) => {
     // Node on Windows cannot CreateProcess an npm .cmd shim directly in every
@@ -68,17 +105,33 @@ function runBuild(projectRoot: string, distPath: string): Promise<void> {
       env: { ...process.env, PI_CHAT_DIST_DIR: distPath },
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
+      // Unix needs a separate process group for negative-PID termination.
+      // Windows taskkill /T follows descendants without CREATE_NEW_PROCESS_GROUP,
+      // which can make cmd/npm startup fail in constrained launch contexts.
+      detached: process.platform !== "win32",
     });
+    let settled = false;
+    let timedOut = false;
     let output = "";
     const append = (chunk: Buffer) => { output = `${output}${chunk.toString("utf8")}`.slice(-12_000); };
     child.stdout?.on("data", append);
     child.stderr?.on("data", append);
-    const timer = setTimeout(() => child.kill(), 10 * 60 * 1_000);
-    child.once("error", (error) => { clearTimeout(timer); reject(error); });
-    child.once("exit", (code, signal) => {
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
-      if (code === 0) resolvePromise();
-      else reject(new Error(`Pi Chat 构建失败（${signal || `退出码 ${code ?? "未知"}`}）${output ? `\n${output}` : ""}`));
+      if (error) reject(error);
+      else resolvePromise();
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      void terminateProcessTree(child).finally(() => finish(new Error(`Pi Chat 构建超时，已终止构建进程树${output ? `\n${output}` : ""}`)));
+    }, 10 * 60 * 1_000);
+    child.once("error", (error) => finish(error));
+    child.once("exit", (code, signal) => {
+      if (timedOut) return;
+      if (code === 0) finish();
+      else finish(new Error(`Pi Chat 构建失败（${signal || `退出码 ${code ?? "未知"}`}）${output ? `\n${output}` : ""}`));
     });
   });
 }

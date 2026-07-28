@@ -24,6 +24,17 @@ test("SseHub broadcasts the same frame to every client", () => {
   assert.match(a.frames[0], /"type":"ping"/);
 });
 
+test("heartbeat is an independently parseable SSE frame", () => {
+  const hub = new SseHub();
+  const client = stubClient();
+  hub.add(client as never, "client-a");
+  hub.heartbeat(client as never, 123);
+  hub.broadcast({ type: "after-heartbeat" });
+  assert.equal(client.frames[0], "event: pi\ndata: {\"type\":\"pi_chat_heartbeat\",\"at\":123}\n\n");
+  assert.ok(client.frames[0].includes("\n\n"));
+  assert.match(client.frames.join(""), /\n\nevent: pi\ndata: \{\"type\":\"after-heartbeat\"\}\n\n$/);
+});
+
 test("oversized events are replaced with a bounded diagnostic frame", () => {
   const hub = new SseHub();
   const client = stubClient();
@@ -35,22 +46,22 @@ test("oversized events are replaced with a bounded diagnostic frame", () => {
   assert.match(client.frames[0], /extension_event/);
 });
 
-test("backpressured sockets coalesce the latest assistant snapshot and then resync after drain", () => {
+test("backpressured sockets coalesce adjacent assistant snapshots but retain terminal tool events in order", () => {
   const hub = new SseHub();
   const client = stubClient(false);
   hub.add(client as never, "client-a");
   hub.broadcast({ type: "message_update", n: 1 });
   hub.broadcast({ type: "message_update", n: 2 });
   hub.broadcast({ type: "message_update", n: 3 });
-  hub.broadcast({ type: "tool_execution_end", toolCallId: "discarded" });
+  hub.broadcast({ type: "tool_execution_end", toolCallId: "retained" });
   assert.equal(client.frames.length, 1);
 
   client.write = (frame: string) => { client.frames.push(frame); return true; };
   client.emit("drain");
   assert.equal(client.frames.length, 3);
   assert.match(client.frames[1], /"type":"message_update","n":3/);
-  assert.doesNotMatch(client.frames.join("\n"), /discarded/);
-  assert.match(client.frames[2], /pi_chat_sse_resync/);
+  assert.match(client.frames[2], /"type":"tool_execution_end","toolCallId":"retained"/);
+  assert.doesNotMatch(client.frames.join("\n"), /pi_chat_sse_resync/);
 });
 
 test("a retained assistant snapshot stays bounded if it causes backpressure again", () => {
@@ -66,9 +77,9 @@ test("a retained assistant snapshot stays bounded if it causes backpressure agai
   hub.broadcast({ type: "message_update", n: 3 });
   client.write = (frame: string) => { client.frames.push(frame); return true; };
   client.emit("drain");
-  assert.equal(client.frames.length, 4);
+  assert.equal(client.frames.length, 3);
   assert.match(client.frames[2], /"n":3/);
-  assert.match(client.frames[3], /pi_chat_sse_resync/);
+  assert.doesNotMatch(client.frames.join("\n"), /pi_chat_sse_resync/);
 });
 
 test("retained snapshots for other Sessions survive repeated replay backpressure", () => {
@@ -85,9 +96,9 @@ test("retained snapshots for other Sessions survive repeated replay backpressure
 
   client.write = (frame: string) => { client.frames.push(frame); return true; };
   client.emit("drain");
-  assert.equal(client.frames.length, 4);
+  assert.equal(client.frames.length, 3);
   assert.match(client.frames[2], /"piChatSessionId":"session-b","n":3/);
-  assert.match(client.frames[3], /pi_chat_sse_resync/);
+  assert.doesNotMatch(client.frames.join("\n"), /pi_chat_sse_resync/);
 });
 
 test("removing a congested client prevents retained replay on its old drain", () => {

@@ -32,7 +32,7 @@ function installDom() {
   return dom;
 }
 
-async function renderSelect(disabled = false) {
+async function renderSelect(disabled = false, checkPosition: "start" | "end" = "end") {
   const dom = installDom();
   const container = dom.window.document.querySelector<HTMLElement>("#root")!;
   const root: Root = createRoot(container);
@@ -43,6 +43,7 @@ async function renderSelect(disabled = false) {
       options: [...options],
       disabled,
       ariaLabel: "Test choice",
+      checkPosition,
       onChange: (value: string) => changes.push(value),
     }));
   });
@@ -90,6 +91,21 @@ test("CompactSelect opens on the selected option and supports keyboard selection
   assert.deepEqual(changes, ["charlie"]);
   assert.equal(dom.window.document.querySelector("[role='listbox']"), null);
   assert.equal(dom.window.document.activeElement, trigger);
+
+  await act(async () => root.unmount());
+});
+
+test("CompactSelect can align a leading selected check without shifting labels", async () => {
+  const { dom, root } = await renderSelect(false, "start");
+  const trigger = dom.window.document.querySelector<HTMLButtonElement>(".compact-select-trigger")!;
+
+  await act(async () => trigger.click());
+  const options = [...dom.window.document.querySelectorAll<HTMLElement>(".compact-select-option")];
+  assert.equal(options.length, 4);
+  assert.ok(options.every((option) => option.classList.contains("has-leading-check")));
+  assert.ok(options.every((option) => option.firstElementChild?.classList.contains("compact-select-check")));
+  assert.equal(dom.window.document.querySelectorAll(".compact-select-check svg").length, 1);
+  assert.ok(dom.window.document.querySelector(".compact-select-option[aria-selected='true'] .compact-select-check svg"));
 
   await act(async () => root.unmount());
 });

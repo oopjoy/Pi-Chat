@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { compactEditPath, type ToolEditDiff } from "../lib/tool-edit-diff";
 
 const OPEN_DIFF_EVENT = "pi-chat-open-edit-diff";
@@ -49,8 +49,7 @@ export function EditDiffSidebar({ open, width, onOpenChange, onWidthChange }: { 
     event.currentTarget.releasePointerCapture(event.pointerId);
   };
 
-  if (!open) return null;
-  return <aside className="edit-diff-sidebar" style={{ width }} aria-label="文件修改对比侧栏">
+  return <aside className={`edit-diff-sidebar${open ? " is-open" : ""}`} style={{ "--edit-diff-width": `${width}px` } as CSSProperties} aria-label="文件修改对比侧栏" aria-hidden={!open} inert={!open}>
     <div className="edit-diff-sidebar-resize" role="separator" aria-label="调整 Diff 侧栏宽度" onPointerDown={startResize} onPointerMove={moveResize} onPointerUp={endResize} onPointerCancel={endResize} />
     <header className="edit-diff-sidebar-header">
       <span title={diff?.path}>{diff ? <><strong>{compactEditPath(diff.path)}</strong><b>+{diff.additions}</b><i>-{diff.deletions}</i></> : "修改对比"}</span>

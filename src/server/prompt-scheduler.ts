@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { PromptImage, QueuedPrompt } from "../shared/types.js";
+import type { GateMode, PromptImage, QueuedPrompt } from "../shared/types.js";
 import type { PendingTurnSettings, RuntimeQueuedPrompt, SecondaryRuntime } from "./runtime-pool.js";
 import type { PiRpcClient } from "./rpc-client.js";
 
@@ -10,6 +10,8 @@ const MAX_QUEUED_IMAGE_CHARS = 45_000_000;
 
 export interface InternalQueuedPrompt extends QueuedPrompt {
   images: PromptImage[];
+  /** Gate mode selected for this turn; replayed immediately before dispatch. */
+  gateMode?: GateMode;
 }
 
 export interface PromptSchedulerHost {
@@ -19,11 +21,15 @@ export interface PromptSchedulerHost {
   activeSessionId(): string;
   ensurePrimaryRuntime(): Promise<void>;
   recoverRuntime(runtime: SecondaryRuntime): Promise<void>;
+  acquirePrimaryOperation(): () => void;
+  acquireRuntimeOperation(runtime: SecondaryRuntime): () => void;
   touchRuntime(runtime: SecondaryRuntime): void;
   applyPendingTurnSettings(rpc: PiRpcClient, pending: PendingTurnSettings): Promise<void>;
+  syncGateMode(rpc: PiRpcClient, sessionId: string, mode?: GateMode): Promise<void>;
   broadcast(event: Record<string, unknown>): void;
-  onPrimaryPromptAccepted(sessionId: string): void;
-  onSecondaryPromptAccepted(runtime: SecondaryRuntime): void;
+  /** `promptAt` is the original user-admission time, including queued prompts. */
+  onPrimaryPromptAccepted(sessionId: string, promptAt: number): void;
+  onSecondaryPromptAccepted(runtime: SecondaryRuntime, promptAt: number): void;
 }
 
 /**
@@ -39,6 +45,7 @@ export class PromptScheduler {
   primaryToolStatus = "";
   primaryPendingTurnSettings: PendingTurnSettings = {};
   primaryPendingExtensionRequest: import("../shared/types.js").ExtensionUiRequest | undefined;
+  primaryAbortGeneration = 0;
 
   constructor(private readonly host: PromptSchedulerHost) {}
 
@@ -46,21 +53,22 @@ export class PromptScheduler {
     return queue.map(({ id, message, imageCount, createdAt }) => ({ id, message, imageCount, createdAt }));
   }
 
-  broadcastQueue(sessionId: string, queue: Array<InternalQueuedPrompt | RuntimeQueuedPrompt>, paused: boolean): void {
+  broadcastQueue(sessionId: string, queue: Array<InternalQueuedPrompt | RuntimeQueuedPrompt>, paused: boolean, admittedId = ""): void {
     this.host.broadcast({
       type: "pi_chat_queue_update",
       queue: this.publicQueue(queue),
       paused,
+      ...(admittedId ? { admittedId } : null),
       piChatSessionId: sessionId,
     });
   }
 
-  broadcastPrimaryQueue(): void {
-    this.broadcastQueue(this.host.activeSessionId(), this.primaryQueue, this.primaryQueuePaused);
+  broadcastPrimaryQueue(admittedId = ""): void {
+    this.broadcastQueue(this.host.activeSessionId(), this.primaryQueue, this.primaryQueuePaused, admittedId);
   }
 
-  broadcastRuntimeQueue(runtime: SecondaryRuntime): void {
-    this.broadcastQueue(runtime.id, runtime.promptQueue, runtime.queuePaused);
+  broadcastRuntimeQueue(runtime: SecondaryRuntime, admittedId = ""): void {
+    this.broadcastQueue(runtime.id, runtime.promptQueue, runtime.queuePaused, admittedId);
   }
 
   queuedImageChars(queue: Array<{ images: PromptImage[] }>): number {
@@ -76,29 +84,31 @@ export class PromptScheduler {
     return null;
   }
 
-  enqueuePrimary(message: string, images: PromptImage[]): InternalQueuedPrompt {
+  enqueuePrimary(message: string, images: PromptImage[], createdAt = Date.now(), gateMode?: GateMode): InternalQueuedPrompt {
     const queued: InternalQueuedPrompt = {
       id: randomUUID(),
       message,
       images,
       imageCount: images.length,
-      createdAt: Date.now(),
+      createdAt,
+      ...(gateMode ? { gateMode } : null),
     };
     this.primaryQueue.push(queued);
-    this.broadcastPrimaryQueue();
+    this.broadcastPrimaryQueue(queued.id);
     return queued;
   }
 
-  enqueueRuntime(runtime: SecondaryRuntime, message: string, images: PromptImage[]): RuntimeQueuedPrompt {
+  enqueueRuntime(runtime: SecondaryRuntime, message: string, images: PromptImage[], createdAt = Date.now(), gateMode?: GateMode): RuntimeQueuedPrompt {
     const queued: RuntimeQueuedPrompt = {
       id: randomUUID(),
       message,
       images,
       imageCount: images.length,
-      createdAt: Date.now(),
+      createdAt,
+      ...(gateMode ? { gateMode } : null),
     };
     runtime.promptQueue.push(queued);
-    this.broadcastRuntimeQueue(runtime);
+    this.broadcastRuntimeQueue(runtime, queued.id);
     return queued;
   }
 
@@ -117,25 +127,31 @@ export class PromptScheduler {
     return runtime.running || runtime.dispatching || runtime.promptQueue.length > 0 || runtime.queuePaused;
   }
 
-  async sendPrimaryPrompt(message: string, images: PromptImage[]): Promise<void> {
-    await this.host.ensurePrimaryRuntime();
-    await this.host.applyPendingTurnSettings(this.host.primaryRpc(), this.primaryPendingTurnSettings);
-    this.primaryRunning = true;
+  async sendPrimaryPrompt(message: string, images: PromptImage[], promptAt = Date.now(), gateMode?: GateMode): Promise<void> {
+    const releaseOperation = this.host.acquirePrimaryOperation();
     try {
-      await this.host.primaryRpc().send(
-        { type: "prompt", message: message || "请查看这些图片。", ...(images.length ? { images } : {}) },
-        PROMPT_PREPARE_TIMEOUT_MS,
-      );
-      this.host.onPrimaryPromptAccepted(this.host.activeSessionId());
-    } catch (error) {
-      this.primaryRunning = false;
-      throw error;
-    }
+      await this.host.ensurePrimaryRuntime();
+      const generation = this.primaryAbortGeneration;
+      await this.host.applyPendingTurnSettings(this.host.primaryRpc(), this.primaryPendingTurnSettings);
+      if (generation !== this.primaryAbortGeneration || this.host.isClosed() || !this.host.isLifecycleIdle()) throw new Error("消息发送已取消");
+      await this.host.syncGateMode(this.host.primaryRpc(), this.host.activeSessionId(), gateMode);
+      this.primaryRunning = true;
+      try {
+        await this.host.primaryRpc().send(
+          { type: "prompt", message: message || "请查看这些图片。", ...(images.length ? { images } : {}) },
+          PROMPT_PREPARE_TIMEOUT_MS,
+        );
+        this.host.onPrimaryPromptAccepted(this.host.activeSessionId(), promptAt);
+      } catch (error) {
+        this.primaryRunning = false;
+        throw error;
+      }
+    } finally { releaseOperation(); }
   }
 
   /** Immediate (non-queued) secondary prompt after host already applied settings. */
-  notifySecondaryPromptAccepted(runtime: SecondaryRuntime): void {
-    this.host.onSecondaryPromptAccepted(runtime);
+  notifySecondaryPromptAccepted(runtime: SecondaryRuntime, promptAt = Date.now()): void {
+    this.host.onSecondaryPromptAccepted(runtime, promptAt);
   }
 
   async dispatchPrimaryNext(): Promise<void> {
@@ -161,7 +177,7 @@ export class PromptScheduler {
       piChatSessionId: this.host.activeSessionId(),
     });
     try {
-      await this.sendPrimaryPrompt(next.message, next.images);
+      await this.sendPrimaryPrompt(next.message, next.images, next.createdAt, next.gateMode);
     } catch (error) {
       this.primaryDispatching = false;
       this.primaryQueuePaused = true;
@@ -169,6 +185,10 @@ export class PromptScheduler {
       this.broadcastPrimaryQueue();
       this.host.broadcast({
         type: "pi_chat_queue_error",
+        id: next.id,
+        queue: this.publicQueue(),
+        paused: true,
+        piChatSessionId: this.host.activeSessionId(),
         error: error instanceof Error ? error.message : String(error),
       });
     }
@@ -176,6 +196,10 @@ export class PromptScheduler {
 
   async dispatchRuntimeNext(runtime: SecondaryRuntime): Promise<void> {
     this.host.touchRuntime(runtime);
+    let releaseOperation: (() => void) | null = null;
+    try { releaseOperation = this.host.acquireRuntimeOperation(runtime); }
+    catch { return; }
+    const generation = runtime.abortGeneration;
     if (
       this.host.isClosed()
       || !this.host.isLifecycleIdle()
@@ -184,11 +208,18 @@ export class PromptScheduler {
       || runtime.queuePaused
       || !runtime.promptQueue.length
     ) {
+      releaseOperation();
       return;
     }
     if (runtime.failed || runtime.rpc.isRunning?.() === false) {
       try {
         await this.host.recoverRuntime(runtime);
+        if (generation !== runtime.abortGeneration) {
+          runtime.queuePaused = true;
+          this.broadcastRuntimeQueue(runtime);
+          releaseOperation();
+          return;
+        }
       } catch (error) {
         runtime.queuePaused = true;
         this.broadcastRuntimeQueue(runtime);
@@ -197,11 +228,15 @@ export class PromptScheduler {
           error: error instanceof Error ? error.message : String(error),
           piChatSessionId: runtime.id,
         });
+        releaseOperation();
         return;
       }
     }
     const next = runtime.promptQueue.shift();
-    if (!next) return;
+    if (!next) {
+      releaseOperation();
+      return;
+    }
     runtime.dispatching = true;
     this.broadcastRuntimeQueue(runtime);
     this.host.broadcast({
@@ -213,11 +248,14 @@ export class PromptScheduler {
     });
     try {
       await this.host.applyPendingTurnSettings(runtime.rpc, runtime.pendingTurnSettings);
+      if (generation !== runtime.abortGeneration || this.host.isClosed() || !this.host.isLifecycleIdle()) throw new Error("消息发送已取消");
+      await this.host.syncGateMode(runtime.rpc, runtime.id, next.gateMode);
       runtime.running = true;
       await runtime.rpc.send(
         { type: "prompt", message: next.message || "请查看这些图片。", ...(next.images.length ? { images: next.images } : {}) },
         PROMPT_PREPARE_TIMEOUT_MS,
       );
+      this.host.onSecondaryPromptAccepted(runtime, next.createdAt);
     } catch (error) {
       runtime.running = false;
       runtime.dispatching = false;
@@ -226,10 +264,13 @@ export class PromptScheduler {
       this.broadcastRuntimeQueue(runtime);
       this.host.broadcast({
         type: "pi_chat_queue_error",
+        id: next.id,
+        queue: this.publicQueue(runtime.promptQueue),
+        paused: true,
         error: error instanceof Error ? error.message : String(error),
         piChatSessionId: runtime.id,
       });
-    }
+    } finally { releaseOperation(); }
   }
 
   clearPrimary(): void {
@@ -241,5 +282,6 @@ export class PromptScheduler {
     this.primaryToolStatus = "";
     this.primaryPendingTurnSettings = {};
     this.primaryPendingExtensionRequest = undefined;
+    this.primaryAbortGeneration += 1;
   }
 }

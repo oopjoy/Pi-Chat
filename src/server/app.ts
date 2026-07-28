@@ -3,13 +3,15 @@ import { createReadStream, existsSync } from "node:fs";
 import { stat, unlink } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { basename, extname, join, normalize, resolve } from "node:path";
-import { normalizeStreamingAssistantMessage } from "../shared/streaming-assistant.js";
-import type { ApplicationLifecycle, BootstrapData, ExtensionUiRequest, ModelInfo, PiMessage, PiState, PromptImage, QueuedPrompt, SessionStats, SessionSummary, SessionViewData, SlashCommand, ThinkingLevel } from "../shared/types.js";
+import { appendTerminalMessage, normalizeStreamingAssistantMessage, reconcilePersistedHistory } from "../shared/streaming-assistant.js";
+import { compareSessionsByLastUserPrompt } from "../shared/session-order.js";
+import type { ApplicationLifecycle, BootstrapData, ExtensionUiRequest, GateMode, ModelInfo, PiMessage, PiState, PromptImage, QueuedPrompt, SessionStats, SessionSummary, SessionViewData, SlashCommand, ThinkingLevel } from "../shared/types.js";
 import { ApplicationBusyError, ApplicationLifecycleConflictError, ApplicationLifecycleCoordinator, lifecycleMessage } from "./application-lifecycle.js";
 import { pickLocalFiles, pickWorkspaceFolder, readClipboardFiles, revealInExplorer } from "./file-picker.js";
 import { type FileSnapshot, restoreSnapshots, snapshotFile } from "./file-transaction.js";
 import { bodyJson, HttpRequestError, json, methodNotAllowed, MIME_TYPES, requestClientId, SECURITY_HEADERS } from "./http-transport.js";
 import { ModelManager } from "./model-manager.js";
+import { OperationAdmission, OperationAdmissionClosedError } from "./operation-admission.js";
 import { ResourceManager } from "./resource-manager.js";
 import { PiRpcClient, rpcData } from "./rpc-client.js";
 import { asCommands, asMessages, asModels, asSessionStats, asState, messageWindow, promptImages, RECENT_TURN_WINDOW_SIZE } from "./pi-data.js";
@@ -28,11 +30,28 @@ const MAX_TURN_WINDOW_SIZE = 10_000;
 const DEFAULT_SESSION_LIST_SIZE = 20;
 const DEFAULT_SECONDARY_RUNTIME_SWEEP_MS = 60 * 1_000;
 const DEFAULT_GATE_REQUEST_TIMEOUT_MS = 10 * 60 * 1_000;
+/** Keep page refreshes/PWA wake-ups from looking like a final window close. */
+const DEFAULT_LAST_CLIENT_SHUTDOWN_GRACE_MS = 10_000;
+const DEFAULT_LAST_CLIENT_IDLE_POLL_MS = 500;
 const BUILTIN_COMMANDS: SlashCommand[] = [
   { name: "new", description: "新建会话", source: "builtin" },
   { name: "compact", description: "压缩当前会话上下文，可附加指令", source: "builtin" },
   { name: "abort", description: "停止当前生成", source: "builtin" },
 ];
+
+function gateModeFromCommand(message: string): GateMode | null {
+  const command = /^\/gate\s+([^\s]+)\s*$/i.exec(message.trim())?.[1]?.toLowerCase();
+  if (["strict", "on", "close", "closed", "enable"].includes(command || "")) return "strict";
+  if (["open", "off", "allow", "disable"].includes(command || "")) return "open";
+  return null;
+}
+
+function gateModeFromNotice(message: unknown): GateMode | null {
+  const value = typeof message === "string" ? message : "";
+  const match = /^Gate mode:\s*(strict|open)\b/im.exec(value);
+  if (match) return match[1] as GateMode;
+  return null;
+}
 
 export interface PreparedApplicationRestart {
   /**
@@ -62,6 +81,10 @@ export interface PiChatAppOptions {
   controllerReleaseMs?: number;
   gateRequestTimeoutMs?: number;
   sseHeartbeatMs?: number;
+  /** Stop the local service after this client-free grace period; production default is 10 seconds. */
+  lastClientShutdownGraceMs?: number;
+  /** Internal idle check cadence while waiting for a running Pi task to settle. */
+  lastClientIdlePollMs?: number;
   now?: () => number;
   allowedHosts?: string[];
   requestToken?: string;
@@ -96,10 +119,16 @@ export class PiChatApp {
   private readonly promptAdmissionTails = new Map<string, Promise<void>>();
   private primaryFailed = false;
   private primaryRecovery: Promise<void> | null = null;
+  private readonly primaryOperationAdmission = new OperationAdmission();
   private readonly now: () => number;
   private readonly gateRequestTimeoutMs: number;
   private readonly sseHeartbeatMs: number;
   private readonly secondaryRuntimeSweepTimer: NodeJS.Timeout;
+  private readonly lastClientShutdownGraceMs: number;
+  private readonly lastClientIdlePollMs: number;
+  private lastClientShutdownTimer: NodeJS.Timeout | null = null;
+  private lastClientIdlePollTimer: NodeJS.Timeout | null = null;
+  private autoShutdownStarting = false;
   private readonly requestToken: string;
   private allowedHosts: string[];
   private readonly lifecycleCoordinator: ApplicationLifecycleCoordinator;
@@ -110,8 +139,22 @@ export class PiChatApp {
   private lastAvailableModels: ModelInfo[] = [];
   private lastPrimaryCommands: SlashCommand[] = [];
   private lastPrimaryStats: { sessionId: string; value: SessionStats } | undefined;
+  /** Last persisted Primary branch; busy navigation never waits for a live JSONL read. */
+  private lastPrimaryMessages: PiMessage[] = [];
+  private lastPrimaryMessagesSessionId = "";
+  /** Terminal SSE rows not yet confirmed by Primary JSONL. */
+  private primaryPendingTerminalMessages: PiMessage[] = [];
+  private primaryPendingTerminalSessionId = "";
   private readonly contextUsagePendingRefresh = new Set<string>();
   private readonly contextUsageRefreshTurn = new Set<string>();
+  /** Fresh accepted prompts win over JSONL mtime while a Runtime is alive. */
+  private readonly lastUserPromptAtBySession = new Map<string, number>();
+  /** Preserve arrival order even when two local requests share one Date.now() millisecond. */
+  private lastPromptOrderAt = 0;
+  /** Authoritative mode of the bundled Gate extension in the Primary Runtime. */
+  private primaryGateMode: GateMode = "strict";
+  /** Session preference survives Runtime reclaim, but never outlives the Pi Chat process. */
+  private readonly gateModesBySession = new Map<string, GateMode>();
 
   // Primary queue/runtime flags live on PromptScheduler; aliases keep route handlers stable.
   private get promptQueue() { return this.scheduler.primaryQueue; }
@@ -140,6 +183,8 @@ export class PiChatApp {
     this.now = options.now || Date.now;
     this.gateRequestTimeoutMs = Math.max(1, options.gateRequestTimeoutMs ?? DEFAULT_GATE_REQUEST_TIMEOUT_MS);
     this.sseHeartbeatMs = Math.max(10, options.sseHeartbeatMs ?? 20_000);
+    this.lastClientShutdownGraceMs = Math.max(0, options.lastClientShutdownGraceMs ?? DEFAULT_LAST_CLIENT_SHUTDOWN_GRACE_MS);
+    this.lastClientIdlePollMs = Math.max(10, options.lastClientIdlePollMs ?? DEFAULT_LAST_CLIENT_IDLE_POLL_MS);
     this.sessionControl = new SessionControl({
       controllerReleaseMs: options.controllerReleaseMs,
       onControlChanged: (sessionId) => this.broadcastControlState(sessionId),
@@ -154,13 +199,20 @@ export class PiChatApp {
       activeSessionId: () => this.activeSessionId,
       ensurePrimaryRuntime: () => this.ensurePrimaryRuntime(),
       recoverRuntime: (runtime) => this.recoverRuntime(runtime),
+      acquirePrimaryOperation: () => this.primaryOperationAdmission.acquire().release,
+      acquireRuntimeOperation: (runtime) => this.runtimePool.acquireOperation(runtime),
       touchRuntime: (runtime) => this.runtimePool.touch(runtime),
       applyPendingTurnSettings: (rpc, pending) => this.applyPendingTurnSettings(rpc, pending),
+      syncGateMode: (rpc, sessionId, mode) => this.syncGateMode(rpc, sessionId, mode),
       broadcast: (event) => this.broadcast(event),
-      onPrimaryPromptAccepted: (sessionId) => {
+      onPrimaryPromptAccepted: (sessionId, promptAt) => {
+        this.recordUserPrompt(sessionId, promptAt);
+        this.warmPrimaryMessageSnapshot();
         this.broadcast({ type: "pi_chat_sessions_changed", action: "created", sessionId });
       },
-      onSecondaryPromptAccepted: (runtime) => {
+      onSecondaryPromptAccepted: (runtime, promptAt) => {
+        this.recordUserPrompt(runtime.id, promptAt);
+        this.warmRuntimeMessageSnapshot(runtime);
         // Keep draftSession until agent_settled confirms JSONL has the user turn.
         // Mark prompted so sessionSummaries can inject a sidebar row immediately —
         // SessionIndex only lists files after at least one message is on disk, which
@@ -179,7 +231,7 @@ export class PiChatApp {
       refreshSessions: async () => { await this.options.sessions.list(undefined, this.currentCwd); },
       pathForId: (id) => this.options.sessions.pathForId(id),
       isClosed: () => this.closed,
-      canSweep: () => this.applicationLifecycle === "idle",
+      canSweep: () => this.applicationLifecycle === "idle" && this.activeMutationRequests === 0,
       isViewed: (sessionId) => this.sessionControl.isViewed(sessionId),
       onSecondaryEvent: (runtime, event) => this.handleSecondaryEvent(runtime, event),
       activeSessionIds: () => this.activeSessionIds(),
@@ -272,6 +324,7 @@ export class PiChatApp {
 
   async close(): Promise<void> {
     this.closed = true;
+    this.cancelLastClientShutdown();
     clearInterval(this.secondaryRuntimeSweepTimer);
     this.unsubscribe();
     // Distinct Session workers can stop concurrently. Sequential forced-stop
@@ -337,7 +390,73 @@ export class PiChatApp {
     this.sessionControl.requireControl(sessionId, clientId);
   }
 
+  private cancelLastClientShutdown(): void {
+    if (this.lastClientShutdownTimer) clearTimeout(this.lastClientShutdownTimer);
+    if (this.lastClientIdlePollTimer) clearTimeout(this.lastClientIdlePollTimer);
+    this.lastClientShutdownTimer = null;
+    this.lastClientIdlePollTimer = null;
+  }
+
+  private hasLiveSseClients(): boolean {
+    return this.sseHub.size > 0;
+  }
+
+  private scheduleLastClientShutdownGrace(): void {
+    if (!this.options.applicationShutdown || this.closed || this.autoShutdownStarting || this.hasLiveSseClients() || this.lastClientShutdownTimer) return;
+    this.lastClientShutdownTimer = setTimeout(() => {
+      this.lastClientShutdownTimer = null;
+      void this.tryAutoShutdownAfterLastClient();
+    }, this.lastClientShutdownGraceMs);
+    this.lastClientShutdownTimer.unref();
+  }
+
+  private waitForLastClientIdle(): void {
+    if (!this.options.applicationShutdown || this.closed || this.autoShutdownStarting || this.hasLiveSseClients() || this.lastClientIdlePollTimer) return;
+    this.lastClientIdlePollTimer = setTimeout(() => {
+      this.lastClientIdlePollTimer = null;
+      void this.tryAutoShutdownAfterLastClient(true);
+    }, this.lastClientIdlePollMs);
+    this.lastClientIdlePollTimer.unref();
+  }
+
+  private async tryAutoShutdownAfterLastClient(afterBusyWait = false): Promise<void> {
+    if (!this.options.applicationShutdown || this.closed || this.autoShutdownStarting || this.hasLiveSseClients()) return;
+    try {
+      await this.verifyApplicationQuiescent("自动关闭 Pi Chat");
+    } catch {
+      // A task, queue, Gate confirmation, or compaction remains active. Poll
+      // cheaply until it settles, then give a returning PWA a full grace period.
+      this.waitForLastClientIdle();
+      return;
+    }
+    if (this.closed || this.hasLiveSseClients()) return;
+    if (afterBusyWait) {
+      // A completed task earns a fresh reconnect grace period rather than being
+      // stopped immediately after it settles.
+      this.scheduleLastClientShutdownGrace();
+      return;
+    }
+    this.autoShutdownStarting = true;
+    this.beginLifecycle("shutting-down");
+    try {
+      // Recheck after publishing the lifecycle transition; a concurrent request
+      // or just-reconnected PWA must win over automatic shutdown.
+      await this.verifyApplicationQuiescent("自动关闭 Pi Chat");
+      if (this.closed || this.hasLiveSseClients()) {
+        this.autoShutdownStarting = false;
+        this.endLifecycle("shutting-down");
+        return;
+      }
+      this.options.applicationShutdown();
+    } catch {
+      this.autoShutdownStarting = false;
+      this.endLifecycle("shutting-down");
+      this.waitForLastClientIdle();
+    }
+  }
+
   private clientConnected(clientId: string): void {
+    this.cancelLastClientShutdown();
     this.sessionControl.clientConnected(clientId);
   }
 
@@ -349,10 +468,18 @@ export class PiChatApp {
     if (!sessionId || this.sessionControl.isViewed(sessionId)) return false;
     if (sessionId === this.activeSessionId) {
       if (this.running || this.dispatching || this.promptQueue.length || this.pendingExtensionRequest) return false;
-      await this.options.rpc.stop();
-      this.primaryFailed = true;
-      this.broadcast({ type: "pi_chat_active_session_changed", sessionId, activeSessionIds: this.activeSessionIds(), reclaimed: true, reason: "window-closed" });
-      return true;
+      const generation = await this.primaryOperationAdmission.closeAndDrain();
+      if (generation === null) return false;
+      if (this.sessionControl.isViewed(sessionId) || this.running || this.dispatching || this.promptQueue.length || this.pendingExtensionRequest) {
+        this.primaryOperationAdmission.reopen(generation);
+        return false;
+      }
+      try {
+        await this.options.rpc.stop();
+        this.primaryFailed = true;
+        this.broadcast({ type: "pi_chat_active_session_changed", sessionId, activeSessionIds: this.activeSessionIds(), reclaimed: true, reason: "window-closed" });
+        return true;
+      } finally { this.primaryOperationAdmission.reopen(generation); }
     }
     const runtime = this.runtimePool.get(sessionId);
     if (!runtime || !this.runtimePool.canReclaim(runtime)) return false;
@@ -361,6 +488,9 @@ export class PiChatApp {
 
   private clientDisconnected(clientId: string): void {
     this.sessionControl.clientDisconnected(clientId);
+    // The SSE lease represents a visible PWA/browser window. Wait before
+    // stopping so reloads, wake-ups, and short network interruptions reconnect.
+    if (!this.hasLiveSseClients()) this.scheduleLastClientShutdownGrace();
   }
 
   private markSessionViewed(clientId: string, sessionId: string): void {
@@ -411,6 +541,14 @@ export class PiChatApp {
     return true;
   }
 
+  private terminalMessage(message: PiMessage, liveMessage?: PiMessage): PiMessage {
+    const hasPayload = typeof message.content === "string"
+      ? message.content.length > 0
+      : Array.isArray(message.content) && message.content.length > 0;
+    if (message.role !== "assistant" || hasPayload || !liveMessage) return message;
+    return { ...liveMessage, ...message, content: liveMessage.content };
+  }
+
   private handleSecondaryEvent(runtime: SecondaryRuntime, event: Record<string, unknown>): void {
     const type = String(event.type || "");
     this.runtimePool.touch(runtime);
@@ -423,11 +561,22 @@ export class PiChatApp {
     if ((type === "message_start" || type === "message_update") && event.message && typeof event.message === "object" && (event.message as PiMessage).role === "assistant") {
       runtime.liveMessage = normalizeStreamingAssistantMessage(event.message as PiMessage, event.assistantMessageEvent);
     }
-    if (type === "message_end" && event.message && typeof event.message === "object" && (event.message as PiMessage).role === "assistant") runtime.liveMessage = undefined;
+    let broadcastEvent = event;
+    if (type === "message_end" && event.message && typeof event.message === "object") {
+      const message = this.terminalMessage(event.message as PiMessage, runtime.liveMessage);
+      // Browser clients must receive the same repaired terminal payload used by
+      // the Runtime snapshot; otherwise an empty terminal event can erase an
+      // already rendered cumulative assistant answer.
+      broadcastEvent = { ...event, message };
+      runtime.pendingTerminalMessages = appendTerminalMessage(runtime.pendingTerminalMessages, message);
+      if (message.role === "assistant") runtime.liveMessage = undefined;
+    }
     if (type === "tool_execution_start") runtime.toolStatus = `正在运行工具：${String(event.toolName || "unknown")}`;
     if (type === "tool_execution_end") runtime.toolStatus = `${String(event.toolName || "工具")} ${event.isError ? "执行失败" : "已完成"}`;
     if (type === "extension_ui_request") {
       const method = String(event.method || "");
+      const mode = method === "notify" ? gateModeFromNotice(event.message) : null;
+      if (mode) this.setGateMode(runtime.id, mode);
       runtime.extensionUiPending = ["select", "confirm", "input", "editor"].includes(method);
       if (runtime.extensionUiPending && typeof event.id === "string") {
         runtime.pendingExtensionRequest = { ...(event as unknown as ExtensionUiRequest), piChatSessionId: runtime.id };
@@ -445,11 +594,12 @@ export class PiChatApp {
       this.broadcastQueue(runtime.id);
       this.broadcast({ type: "pi_chat_sessions_changed", action: "status", sessionId: runtime.id });
     }
-    this.broadcastRpcEvent(event, runtime.id);
+    this.broadcastRpcEvent(broadcastEvent, runtime.id);
     if (type === "agent_start" || type === "message_start") this.broadcast({ type: "pi_chat_sessions_changed", action: "created", sessionId: runtime.id });
     if (type === "agent_settled") {
       this.completeContextUsageRefreshTurn(runtime.id);
       void this.finalizePersistedDraft(runtime);
+      setTimeout(() => this.warmRuntimeMessageSnapshot(runtime), 0);
       runtime.running = false;
       runtime.dispatching = false;
       runtime.liveMessage = undefined;
@@ -464,16 +614,23 @@ export class PiChatApp {
     }
   }
 
-  private ensureRuntime(id: string): Promise<SecondaryRuntime> {
-    return this.runtimePool.ensure(id);
+  private async ensureRuntime(id: string): Promise<SecondaryRuntime> {
+    const runtime = await this.runtimePool.ensure(id);
+    const desiredGateMode = this.gateModesBySession.get(id);
+    if (desiredGateMode && runtime.gateMode !== desiredGateMode) {
+      await runtime.rpc.send({ type: "prompt", message: `/gate ${desiredGateMode}` }, PROMPT_PREPARE_TIMEOUT_MS);
+      runtime.gateMode = desiredGateMode;
+    }
+    if (!runtime.messageSnapshot) this.warmRuntimeMessageSnapshot(runtime);
+    return runtime;
   }
 
   private recoverRuntime(runtime: SecondaryRuntime): Promise<void> {
     return this.runtimePool.recover(runtime);
   }
 
-  private createDraftRuntime(clientId = ""): Promise<SecondaryRuntime> {
-    return this.runtimePool.createDraft(clientId);
+  private acquireDraftRuntime(clientId = ""): Promise<import("./runtime-pool.js").DraftRuntimeLease> {
+    return this.runtimePool.acquireDraft(clientId);
   }
 
   private async finalizePersistedDraft(runtime: SecondaryRuntime): Promise<boolean> {
@@ -488,7 +645,6 @@ export class PiChatApp {
    */
   private async draftSessionView(runtime: SecondaryRuntime, clientId = ""): Promise<SessionViewData> {
     this.runtimePool.touch(runtime);
-    this.markSessionViewed(clientId, runtime.id);
     const draft = runtime.draftSession;
     if (!draft) throw new Error("新会话草稿状态丢失");
     let model: ModelInfo | null = this.lastPrimaryState.model;
@@ -514,6 +670,7 @@ export class PiChatApp {
       queue: [],
       queuePaused: false,
       toolStatus: "",
+      gateMode: runtime.gateMode,
       pendingExtensionRequest: this.pendingRequestForSession(runtime.id),
       ...this.controlState(runtime.id, clientId),
     };
@@ -530,13 +687,23 @@ export class PiChatApp {
     if ((type === "message_start" || type === "message_update") && event.message && typeof event.message === "object" && (event.message as PiMessage).role === "assistant") {
       this.liveMessage = normalizeStreamingAssistantMessage(event.message as PiMessage, event.assistantMessageEvent);
     }
-    if (type === "message_end" && event.message && typeof event.message === "object" && (event.message as PiMessage).role === "assistant") {
-      this.liveMessage = undefined;
+    let broadcastEvent = event;
+    if (type === "message_end" && event.message && typeof event.message === "object") {
+      const message = this.terminalMessage(event.message as PiMessage, this.liveMessage);
+      // Keep the externally visible terminal event coherent with the repaired
+      // in-memory terminal tail (see the Secondary Runtime path above).
+      broadcastEvent = { ...event, message };
+      if (this.primaryPendingTerminalSessionId !== this.activeSessionId) this.primaryPendingTerminalMessages = [];
+      this.primaryPendingTerminalSessionId = this.activeSessionId;
+      this.primaryPendingTerminalMessages = appendTerminalMessage(this.primaryPendingTerminalMessages, message);
+      if (message.role === "assistant") this.liveMessage = undefined;
     }
     if (type === "tool_execution_start") this.toolStatus = `正在运行工具：${String(event.toolName || "unknown")}`;
     if (type === "tool_execution_end") this.toolStatus = `${String(event.toolName || "工具")} ${event.isError ? "执行失败" : "已完成"}`;
     if (type === "extension_ui_request") {
       const method = String(event.method || "");
+      const mode = method === "notify" ? gateModeFromNotice(event.message) : null;
+      if (mode && this.activeSessionId) this.setGateMode(this.activeSessionId, mode);
       if (["select", "confirm", "input", "editor"].includes(method) && typeof event.id === "string") {
         this.pendingExtensionRequest = { ...(event as unknown as ExtensionUiRequest), piChatSessionId: this.activeSessionId };
         this.trackPendingRequest(this.activeSessionId, this.pendingExtensionRequest);
@@ -553,10 +720,11 @@ export class PiChatApp {
       this.broadcastQueue();
       this.broadcast({ type: "pi_chat_sessions_changed", action: "status", sessionId: this.activeSessionId });
     }
-    this.broadcastRpcEvent(event, this.activeSessionId);
+    this.broadcastRpcEvent(broadcastEvent, this.activeSessionId);
     if (type === "agent_start" || type === "message_start") this.broadcast({ type: "pi_chat_sessions_changed", action: "created", sessionId: this.activeSessionId });
     if (type === "agent_settled") {
       this.completeContextUsageRefreshTurn(this.activeSessionId);
+      setTimeout(() => this.warmPrimaryMessageSnapshot(), 0);
       this.running = false;
       this.dispatching = false;
       this.liveMessage = undefined;
@@ -571,6 +739,7 @@ export class PiChatApp {
   private async ensurePrimaryRuntime(): Promise<void> {
     if (!this.primaryFailed && this.options.rpc.isRunning?.() !== false) return;
     if (this.primaryRecovery) return this.primaryRecovery;
+    const desiredGateMode = this.primaryGateMode;
     const recovery = (async () => {
       try {
         await this.options.rpc.restart(this.activeSessionPath, this.currentCwd);
@@ -580,6 +749,10 @@ export class PiChatApp {
         this.running = state.isStreaming;
         this.primaryFailed = false;
         this.toolStatus = "";
+        if (desiredGateMode !== "strict") {
+          await this.options.rpc.send({ type: "prompt", message: `/gate ${desiredGateMode}` }, PROMPT_PREPARE_TIMEOUT_MS);
+        }
+        this.primaryGateMode = desiredGateMode;
         this.broadcast({ type: "pi_chat_process_recovered", piChatSessionId: this.activeSessionId });
       } catch (error) {
         this.primaryFailed = true;
@@ -609,8 +782,95 @@ export class PiChatApp {
     delete pending.thinkingLevel;
   }
 
-  private async sendPrompt(message: string, images: PromptImage[]): Promise<void> {
-    await this.scheduler.sendPrimaryPrompt(message, images);
+  /**
+   * Busy Pi workers deliberately skip get_state so navigation and reconnect do
+   * not queue behind a long turn. Keep that display snapshot aligned with an
+   * accepted setting selection; otherwise a bootstrap/view would overwrite the
+   * browser's optimistic Terra/high selection with the prior Sol/max snapshot.
+   */
+  private rememberPrimaryDisplaySettings(patch: Partial<Pick<PiState, "model" | "thinkingLevel">>): void {
+    this.lastPrimaryState = { ...this.lastPrimaryState, ...patch, isStreaming: this.running || this.lastPrimaryState.isStreaming };
+  }
+
+  private rememberRuntimeDisplaySettings(runtime: SecondaryRuntime, patch: Partial<Pick<PiState, "model" | "thinkingLevel">>): void {
+    runtime.lastState = {
+      ...(runtime.lastState || { model: null, isStreaming: runtime.running }),
+      ...patch,
+      isStreaming: runtime.running || runtime.lastState?.isStreaming || false,
+    };
+  }
+
+  private async syncGateMode(rpc: PiRpcClient, sessionId: string, mode?: GateMode): Promise<void> {
+    if (!mode) return;
+    await rpc.send({ type: "prompt", message: `/gate ${mode}` }, PROMPT_PREPARE_TIMEOUT_MS);
+    this.setGateMode(sessionId, mode);
+  }
+
+  private nextUserPromptAt(): number {
+    this.lastPromptOrderAt = Math.max(this.now(), this.lastPromptOrderAt + 1);
+    return this.lastPromptOrderAt;
+  }
+
+  private setGateMode(sessionId: string, mode: GateMode): void {
+    if (!sessionId) {
+      this.primaryGateMode = mode;
+      return;
+    }
+    if (sessionId === this.activeSessionId) this.primaryGateMode = mode;
+    else {
+      const runtime = this.runtimePool.get(sessionId);
+      if (runtime) runtime.gateMode = mode;
+    }
+    this.gateModesBySession.set(sessionId, mode);
+    this.broadcast({ type: "pi_chat_gate_mode_changed", mode, piChatSessionId: sessionId });
+  }
+
+  private recordUserPrompt(sessionId: string, promptAt = this.now()): void {
+    if (!sessionId) return;
+    // A queued older prompt may dispatch after a newer one was already accepted.
+    // Never let that delayed dispatch move the Session backwards in the sidebar.
+    const current = this.lastUserPromptAtBySession.get(sessionId) || 0;
+    const next = Math.max(current, promptAt);
+    this.lastUserPromptAtBySession.set(sessionId, next);
+    const runtime = this.runtimePool.get(sessionId);
+    if (runtime) runtime.lastUserPromptAt = Math.max(runtime.lastUserPromptAt || 0, next);
+  }
+
+  private noteUserPrompt(sessionId: string, promptAt = this.now()): void {
+    this.recordUserPrompt(sessionId, promptAt);
+    // The sidebar needs to move at admission/queue time, never when assistant
+    // output later touches the JSONL.
+    this.broadcast({ type: "pi_chat_sessions_changed", action: "prompted", sessionId });
+  }
+
+  private async sendPrompt(message: string, images: PromptImage[], promptAt = this.now(), gateMode?: GateMode): Promise<void> {
+    await this.scheduler.sendPrimaryPrompt(message, images, promptAt, gateMode);
+  }
+
+  private warmRuntimeMessageSnapshot(runtime: SecondaryRuntime): void {
+    if (typeof this.options.sessions.messagesForId !== "function") return;
+    void this.options.sessions.messagesForId(runtime.id).then((messages) => {
+      if (messages && this.runtimePool.get(runtime.id) === runtime) {
+        const reconciled = reconcilePersistedHistory(messages, runtime.pendingTerminalMessages);
+        runtime.messageSnapshot = messages;
+        runtime.pendingTerminalMessages = reconciled.pending;
+      }
+    }).catch(() => undefined);
+  }
+
+  private warmPrimaryMessageSnapshot(): void {
+    const path = this.activeSessionPath;
+    const sessionId = this.activeSessionId;
+    if (!path || !sessionId) return;
+    void readSessionMessages(path).then((messages) => {
+      if (this.activeSessionPath === path && this.activeSessionId === sessionId) {
+        const terminalTail = this.primaryPendingTerminalSessionId === sessionId ? this.primaryPendingTerminalMessages : [];
+        const reconciled = reconcilePersistedHistory(messages, terminalTail);
+        this.lastPrimaryMessages = messages;
+        this.primaryPendingTerminalMessages = reconciled.pending;
+        this.lastPrimaryMessagesSessionId = sessionId;
+      }
+    }).catch(() => undefined);
   }
 
   private async dispatchRuntimeNext(runtime: SecondaryRuntime): Promise<void> {
@@ -624,14 +884,22 @@ export class PiChatApp {
   private sessionSummaries(sessions: BootstrapData["sessions"], clientId = ""): BootstrapData["sessions"] {
     // Empty drafts stay out of the sidebar. Prompted drafts that SessionIndex has
     // not yet scanned must still appear as soon as the first send is accepted.
-    const listed = sessions.map((session) => ({
+    const listed = sessions.map((session) => {
+      const runtime = this.runtimePool.get(session.id);
+      const lastUserPromptAt = this.lastUserPromptAtBySession.get(session.id)
+        ?? runtime?.lastUserPromptAt
+        ?? session.lastUserPromptAt;
+      return {
       ...session,
+      ...(lastUserPromptAt !== undefined ? { lastUserPromptAt } : null),
       writable: this.activeSessionIds().includes(session.id),
-      running: (this.running && session.id === this.activeSessionId) || this.runtimePool.get(session.id)?.running === true,
-      queued: session.id === this.activeSessionId ? this.promptQueue.length > 0 : (this.runtimePool.get(session.id)?.promptQueue.length || 0) > 0,
+      releasable: Boolean(runtime && this.runtimePool.canManuallyRelease(runtime)),
+      running: (this.running && session.id === this.activeSessionId) || runtime?.running === true,
+      queued: session.id === this.activeSessionId ? this.promptQueue.length > 0 : (runtime?.promptQueue.length || 0) > 0,
       pendingConfirmation: Boolean(this.pendingRequestForSession(session.id)),
       ...this.controlState(session.id, clientId),
-    }));
+    };
+    });
     const known = new Set(listed.map((session) => session.id));
     for (const runtime of this.runtimePool.runtimes.values()) {
       if (known.has(runtime.id)) continue;
@@ -650,8 +918,10 @@ export class PiChatApp {
         ...base,
         messageCount: Math.max(base.messageCount || 0, 1),
         updatedAt: Math.max(base.updatedAt || 0, runtime.lastUsedAt),
+        lastUserPromptAt: this.lastUserPromptAtBySession.get(runtime.id) ?? runtime.lastUserPromptAt ?? base.lastUserPromptAt ?? base.updatedAt,
         active: true,
         writable: true,
+        releasable: this.runtimePool.canManuallyRelease(runtime),
         running: runtime.running || runtime.dispatching || Boolean(runtime.liveMessage),
         queued: runtime.promptQueue.length > 0,
         pendingConfirmation: Boolean(this.pendingRequestForSession(runtime.id)),
@@ -659,7 +929,7 @@ export class PiChatApp {
       });
       known.add(runtime.id);
     }
-    return listed.sort((left, right) => right.updatedAt - left.updatedAt);
+    return listed.sort(compareSessionsByLastUserPrompt);
   }
 
   private sidebarSessions(sessions: SessionSummary[], clientId: string, all = false): { sessions: SessionSummary[]; total: number } {
@@ -675,12 +945,21 @@ export class PiChatApp {
     return cached ? cached.call(this.options.sessions, activePath, this.currentCwd) : this.options.sessions.list(activePath, this.currentCwd);
   }
 
+  private async restartPrimaryRuntime(sessionFile?: string, cwd = this.currentCwd): Promise<void> {
+    const desiredGateMode = sessionFile ? this.gateModesBySession.get(this.activeSessionId) || this.primaryGateMode : "strict";
+    await this.options.rpc.restart(sessionFile, cwd);
+    if (desiredGateMode !== "strict") {
+      await this.options.rpc.send({ type: "prompt", message: `/gate ${desiredGateMode}` }, PROMPT_PREPARE_TIMEOUT_MS);
+    }
+    this.primaryGateMode = desiredGateMode;
+  }
+
   private async reloadRpc(knownState?: PiState): Promise<void> {
     this.assertApplicationQuiescent("修改资源配置");
     const state = knownState || asState(await this.options.rpc.send({ type: "get_state" }));
     if (state.isStreaming) throw new Error("请先停止所有并行生成，再修改资源配置");
     await this.runtimePool.stopAll();
-    await this.options.rpc.restart(state.sessionFile);
+    await this.restartPrimaryRuntime(state.sessionFile);
     this.broadcast({ type: "pi_chat_reloaded" });
   }
 
@@ -698,7 +977,7 @@ export class PiChatApp {
       const original = error instanceof Error ? error.message : String(error);
       try {
         await restoreSnapshots(snapshots);
-        await this.options.rpc.restart(state.sessionFile);
+        await this.restartPrimaryRuntime(state.sessionFile);
         this.broadcast({ type: "pi_chat_reloaded" });
       } catch (rollbackError) {
         throw new Error(`资源修改失败，自动恢复也失败：${original}；恢复错误：${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
@@ -716,11 +995,11 @@ export class PiChatApp {
     await this.runtimePool.stopAll();
     if (selectedCwd.toLowerCase() !== previousCwd.toLowerCase()) {
       try {
-        await this.options.rpc.restart(undefined, selectedCwd);
+        await this.restartPrimaryRuntime(undefined, selectedCwd);
         await saveWorkspace(selectedCwd);
       } catch (error) {
         const original = error instanceof Error ? error.message : String(error);
-        try { await this.options.rpc.restart(state.sessionFile, previousCwd); }
+        try { await this.restartPrimaryRuntime(state.sessionFile, previousCwd); }
         catch (rollbackError) {
           throw new Error(`工作目录切换失败，恢复旧 Runtime 也失败：${original}；恢复错误：${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
         }
@@ -741,14 +1020,20 @@ export class PiChatApp {
     if (draft) throw new Error("空白新对话会在发送第一条消息后保存，届时才能重命名");
     const path = this.options.sessions.pathForId(id);
     if (!isPrimary && !path) throw new Error("会话不存在");
-    const wasOpen = isPrimary || this.runtimePool.has(id);
-    const runtime = isPrimary ? null : await this.ensureRuntime(id);
-    await (runtime?.rpc || this.options.rpc).send({ type: "set_session_name", name });
-    if (!wasOpen && runtime && !runtime.running) {
-      runtime.unsubscribe();
-      await runtime.rpc.stop();
-      this.runtimePool.detach(id);
-    }
+    const existingRuntime = isPrimary ? null : this.runtimePool.get(id) || null;
+    const wasOpen = isPrimary || Boolean(existingRuntime);
+    const runtime = isPrimary ? null : existingRuntime || await this.ensureRuntime(id);
+    const releaseRuntimeOperation = runtime
+      ? this.runtimePool.acquireOperation(runtime)
+      : this.primaryOperationAdmission.acquire().release;
+    try {
+      await (runtime?.rpc || this.options.rpc).send({ type: "set_session_name", name });
+      if (!wasOpen && runtime && !runtime.running) {
+        runtime.unsubscribe();
+        await runtime.rpc.stop();
+        this.runtimePool.detach(id);
+      }
+    } finally { releaseRuntimeOperation(); }
     await this.options.sessions.list(this.activeSessionPath, this.currentCwd);
     this.broadcast({ type: "pi_chat_sessions_changed", action: "renamed", sessionId: id });
     return this.bootstrap();
@@ -769,15 +1054,18 @@ export class PiChatApp {
       if (this.running || this.promptQueue.length || this.pendingExtensionRequest) throw new Error("请先停止当前生成、处理权限确认并清空队列，再删除此会话");
       const result = rpcData<{ cancelled: boolean }>(await this.options.rpc.send({ type: "new_session" }, 30_000));
       if (result.cancelled) throw new Error("扩展取消了新建会话，无法删除当前会话");
-    } else {
-      if (runtime?.running || runtime?.promptQueue.length || runtime?.extensionUiPending) throw new Error("请先停止该会话的生成、处理权限确认并清空队列，再删除对话");
-      if (runtime) {
+    } else if (runtime) {
+      const releaseRuntimeOperation = this.runtimePool.acquireOperation(runtime);
+      try {
+        if (runtime.running || runtime.promptQueue.length || runtime.extensionUiPending) throw new Error("请先停止该会话的生成、处理权限确认并清空队列，再删除对话");
         runtime.unsubscribe();
         await runtime.rpc.stop();
         this.runtimePool.detach(id);
-      }
+      } finally { releaseRuntimeOperation(); }
     }
     if (path && existsSync(path)) await unlink(path);
+    this.lastUserPromptAtBySession.delete(id);
+    this.gateModesBySession.delete(id);
     this.sessionControl.clearSession(id);
     await this.options.sessions.list(this.activeSessionPath, this.currentCwd);
     this.broadcast({ type: "pi_chat_sessions_changed", action: "deleted", sessionId: id });
@@ -791,7 +1079,7 @@ export class PiChatApp {
     const windowed = messageWindow(messages, turnLimit);
     const settings = snapshot?.settings || {};
     return {
-      session: { ...session, active: false, writable: false, running: false, queued: false },
+      session: { ...session, active: false, writable: false, releasable: false, running: false, queued: false },
       // Never borrow Primary's active settings for history. Pi persists these
       // change events in each JSONL, so reading them keeps cold views truthful.
       state: {
@@ -822,6 +1110,9 @@ export class PiChatApp {
 
   private async sessionView(id: string, turnLimit = RECENT_TURN_WINDOW_SIZE, clientId = ""): Promise<SessionViewData | null> {
     const knownRuntime = this.runtimePool.get(id);
+    const targetRuntimeBusy = id === this.activeSessionId
+      ? this.running || Boolean(this.liveMessage)
+      : Boolean(knownRuntime?.running || knownRuntime?.dispatching || knownRuntime?.liveMessage);
     // Cold history is a pure JSONL read. Avoid waking or querying the Primary RPC
     // and avoid rescanning every Session when the index already knows this ID.
     if (id !== this.activeSessionId && !knownRuntime) {
@@ -835,11 +1126,11 @@ export class PiChatApp {
     const MESSAGES_RPC_MS = 6_000;
     const primaryAvailable = this.applicationLifecycle === "idle" && !this.primaryFailed && this.options.rpc.isRunning?.() !== false;
     let state: PiState = this.lastPrimaryState;
-    if (primaryAvailable) {
+    if (primaryAvailable && !(id !== this.activeSessionId && targetRuntimeBusy)) {
       // Skip get_state only when we already know which Primary Session is live.
       // A view that arrives before bootstrap (or after a restart) still needs one
       // short probe so activeSessionId/path are bound; otherwise we mis-route to cold.
-      const canSkipStateProbe = this.running && Boolean(this.activeSessionId) && Boolean(this.activeSessionPath);
+      const canSkipStateProbe = (this.running || (id === this.activeSessionId && Boolean(this.liveMessage))) && Boolean(this.activeSessionId) && Boolean(this.activeSessionPath);
       if (canSkipStateProbe) {
         state = { ...this.lastPrimaryState, isStreaming: true };
       } else {
@@ -858,8 +1149,17 @@ export class PiChatApp {
     } else {
       state = { model: null, isStreaming: false };
     }
-    const sessions = this.sessionSummaries(await this.options.sessions.list(this.activeSessionPath, this.currentCwd), clientId);
     const secondaryRuntime = knownRuntime;
+    const knownBusy = id === this.activeSessionId
+      ? this.running || Boolean(this.liveMessage)
+      : Boolean(secondaryRuntime?.running || secondaryRuntime?.dispatching || secondaryRuntime?.liveMessage);
+    // A busy Runtime already has a known Session path/index entry. Do not rescan
+    // every JSONL merely to switch back to it: streaming writes continuously
+    // invalidate mtime and made this navigation visibly stall.
+    const indexedSession = knownBusy ? this.options.sessions.summaryForId?.(id) || secondaryRuntime?.draftSession : null;
+    const sessions = indexedSession
+      ? this.sessionSummaries([indexedSession], clientId)
+      : this.sessionSummaries(await this.options.sessions.list(this.activeSessionPath, this.currentCwd), clientId);
     // A fresh New view is valid even though it is deliberately absent from the
     // sidebar until its first user message is persisted.
     const session = sessions.find((item) => item.id === id) || secondaryRuntime?.draftSession;
@@ -870,62 +1170,104 @@ export class PiChatApp {
       : secondaryReadable;
     if (runtime) {
       if (id !== this.activeSessionId) this.runtimePool.touch(runtime as SecondaryRuntime);
-      const busy = runtime.running || Boolean(runtime.liveMessage);
-      // Prefer JSONL first so a busy worker never blocks the whole view path.
-      let messages: PiMessage[] | null = typeof this.options.sessions.messagesForId === "function"
-        ? await this.options.sessions.messagesForId(id)
-        : null;
-      if (!messages) {
+      const busy = runtime.running || Boolean(runtime.liveMessage) || Boolean((runtime as SecondaryRuntime).dispatching);
+      const sessionIndex = this.options.sessions as SessionIndex & {
+        cachedSnapshotForId?: (sessionId: string) => import("./session-index.js").SessionFileSnapshot | null;
+        snapshotForId?: (sessionId: string) => Promise<import("./session-index.js").SessionFileSnapshot | null>;
+      };
+      // For an already-open streaming Session, use the last parsed JSONL branch
+      // immediately. The live assistant snapshot arrives separately over SSE.
+      let snapshot = busy ? sessionIndex.cachedSnapshotForId?.(id) ?? null : null;
+      if (!snapshot && !busy && sessionIndex.snapshotForId) snapshot = await sessionIndex.snapshotForId(id);
+      const persistedRuntimeMessages = id === this.activeSessionId && this.lastPrimaryMessagesSessionId === id
+        ? this.lastPrimaryMessages
+        : secondaryRuntime?.messageSnapshot ?? null;
+      const terminalTail = id === this.activeSessionId
+        ? this.primaryPendingTerminalSessionId === id ? this.primaryPendingTerminalMessages : []
+        : secondaryRuntime?.pendingTerminalMessages || [];
+      let persistedMessages: PiMessage[] | null = snapshot?.messages
+        ?? (busy ? persistedRuntimeMessages : (typeof this.options.sessions.messagesForId === "function"
+          ? await this.options.sessions.messagesForId(id)
+          : null));
+      let messages: PiMessage[] | null = persistedMessages
+        ? reconcilePersistedHistory(persistedMessages, terminalTail).messages
+        : terminalTail.length ? reconcilePersistedHistory([], terminalTail).messages : null;
+      if (!messages && !busy) {
         const path = (typeof this.options.sessions.pathForId === "function" ? this.options.sessions.pathForId(id) : null)
           || (runtime as SecondaryRuntime).sessionPath
           || (runtime as SecondaryRuntime).draftSessionPath;
         if (path) {
-          try { messages = await readSessionMessages(path); } catch { messages = null; }
+          try {
+            persistedMessages = await readSessionMessages(path);
+            messages = reconcilePersistedHistory(persistedMessages, terminalTail).messages;
+          } catch { messages = null; }
         }
       }
       let stateResponse: Record<string, unknown> | null = null;
       let statsResponse: Record<string, unknown> | null = null;
       let commandsResponse: Record<string, unknown> | null = null;
-      try {
-        const probes = await Promise.all([
-          runtime.rpc.send({ type: "get_state" }, SHORT_RPC_MS).catch(() => null),
-          // Stats are nice-to-have while streaming; offline JSONL usage is enough.
-          busy
-            ? Promise.resolve(null)
-            : runtime.rpc.send({ type: "get_session_stats" }, SHORT_RPC_MS).catch(() => null),
-          runtime.rpc.send({ type: "get_commands" }, SHORT_RPC_MS).catch(() => null),
-        ]);
-        stateResponse = probes[0];
-        statsResponse = probes[1];
-        commandsResponse = probes[2];
-      } catch {
-        // Disk history + last known liveMessage still form a usable view.
+      if (!busy) {
+        try {
+          const probes = await Promise.all([
+            runtime.rpc.send({ type: "get_state" }, SHORT_RPC_MS).catch(() => null),
+            runtime.rpc.send({ type: "get_session_stats" }, SHORT_RPC_MS).catch(() => null),
+            runtime.rpc.send({ type: "get_commands" }, SHORT_RPC_MS).catch(() => null),
+          ]);
+          stateResponse = probes[0];
+          statsResponse = probes[1];
+          commandsResponse = probes[2];
+        } catch {
+          // Disk history + last known liveMessage still form a usable view.
+        }
       }
+      const rememberedState = id === this.activeSessionId
+        ? this.lastPrimaryState
+        : secondaryRuntime?.lastState || { model: null };
       const liveState = stateResponse ? asState(stateResponse) : {
-        ...(id === this.activeSessionId ? this.lastPrimaryState : { model: null }),
+        ...rememberedState,
         isStreaming: busy,
       } satisfies PiState;
       if (stateResponse && id === this.activeSessionId) {
         this.lastPrimaryState = liveState;
         this.running = liveState.isStreaming;
       } else if (stateResponse && secondaryRuntime) {
+        secondaryRuntime.lastState = liveState;
         secondaryRuntime.running = liveState.isStreaming;
       }
-      // Only hit get_messages when disk is empty (brand-new draft) or the worker
-      // is idle and might have a slightly newer branch. Never wait long while busy.
-      if (!messages || (!busy && !liveState.isStreaming)) {
+      if (commandsResponse && secondaryRuntime) secondaryRuntime.commands = asCommands(commandsResponse);
+      // Only hit get_messages when disk is empty. Never wait on a busy worker
+      // when terminal SSE rows or a persisted snapshot already form a view.
+      if (!messages && busy) messages = [];
+      if (!messages) {
         try {
-          const rpcMessages = asMessages(await runtime.rpc.send({ type: "get_messages" }, busy ? 3_000 : MESSAGES_RPC_MS));
-          if (!messages || rpcMessages.length >= messages.length) messages = rpcMessages;
+          persistedMessages = asMessages(await runtime.rpc.send({ type: "get_messages" }, busy ? 3_000 : MESSAGES_RPC_MS));
+          messages = reconcilePersistedHistory(persistedMessages, terminalTail).messages;
         } catch (error) {
-          if (!messages) throw error;
+          throw error;
         }
       }
       if (!messages) throw new Error("无法读取会话消息");
+      if (persistedMessages) {
+        const reconciled = reconcilePersistedHistory(persistedMessages, terminalTail);
+        if (id === this.activeSessionId) {
+          this.lastPrimaryMessages = persistedMessages;
+          this.lastPrimaryMessagesSessionId = id;
+          this.primaryPendingTerminalMessages = reconciled.pending;
+        } else if (secondaryRuntime) {
+          secondaryRuntime.messageSnapshot = persistedMessages;
+          secondaryRuntime.pendingTerminalMessages = reconciled.pending;
+        }
+        messages = reconciled.messages;
+      }
       const windowed = messageWindow(messages, turnLimit);
       const stats = statsResponse
         ? await this.statsForSession(id, statsResponse)
-        : await this.offlineStatsForId(id);
+        : busy
+          ? (snapshot ? await this.offlineStatsForId(id, snapshot.usage) : undefined)
+          : await this.offlineStatsForId(id, snapshot?.usage);
+      const rememberedCommands = id === this.activeSessionId
+        ? this.lastPrimaryCommands
+        : secondaryRuntime?.commands;
       return {
         session,
         state: liveState,
@@ -942,7 +1284,12 @@ export class PiChatApp {
         stats,
         queue: id === this.activeSessionId ? this.publicQueue() : this.publicQueue((runtime as SecondaryRuntime).promptQueue),
         queuePaused: id === this.activeSessionId ? this.queuePaused : (runtime as SecondaryRuntime).queuePaused,
-        commands: commandsResponse ? [...BUILTIN_COMMANDS, ...asCommands(commandsResponse)] : undefined,
+        commands: commandsResponse
+          ? [...BUILTIN_COMMANDS, ...asCommands(commandsResponse)]
+          : rememberedCommands?.length
+            ? [...BUILTIN_COMMANDS, ...rememberedCommands]
+            : undefined,
+        gateMode: id === this.activeSessionId ? this.primaryGateMode : (runtime as SecondaryRuntime).gateMode,
         pendingExtensionRequest: this.pendingRequestForSession(id),
         ...this.controlState(id, clientId),
       };
@@ -1054,11 +1401,28 @@ export class PiChatApp {
     const diskMessages = this.activeSessionPath
       ? await readSessionMessages(this.activeSessionPath).catch(() => null)
       : null;
-    let messages = diskMessages;
+    let messages: PiMessage[] | null = null;
+    const primaryTerminalTail = this.primaryPendingTerminalSessionId === this.activeSessionId ? this.primaryPendingTerminalMessages : [];
+    if (diskMessages) {
+      const reconciled = reconcilePersistedHistory(diskMessages, primaryTerminalTail);
+      this.lastPrimaryMessages = diskMessages;
+      this.primaryPendingTerminalMessages = reconciled.pending;
+      this.lastPrimaryMessagesSessionId = this.activeSessionId;
+      messages = reconciled.messages;
+    } else if (this.lastPrimaryMessagesSessionId === this.activeSessionId) {
+      messages = reconcilePersistedHistory(this.lastPrimaryMessages, primaryTerminalTail).messages;
+    }
     // JSONL is authoritative enough for an immediately readable bootstrap.
     // An empty brand-new busy Session can render its live/optimistic message;
     // never hold the whole shell open waiting for get_messages.
-    if (!messages && !busy) messages = asMessages(await this.options.rpc.send({ type: "get_messages" }, 12_000));
+    if (!messages && !busy) {
+      const rpcMessages = asMessages(await this.options.rpc.send({ type: "get_messages" }, 12_000));
+      const reconciled = reconcilePersistedHistory(rpcMessages, primaryTerminalTail);
+      this.lastPrimaryMessages = rpcMessages;
+      this.primaryPendingTerminalMessages = reconciled.pending;
+      this.lastPrimaryMessagesSessionId = this.activeSessionId;
+      messages = reconciled.messages;
+    }
 
     if (!busy) {
       const [modelsResponse, commandsResponse, statsResponse] = await Promise.all([
@@ -1096,6 +1460,7 @@ export class PiChatApp {
       queue: this.publicQueue(),
       queuePaused: this.queuePaused,
       pendingExtensionRequest: this.pendingRequestForSession(this.activeSessionId),
+      gateMode: this.primaryGateMode,
       ...this.controlState(this.activeSessionId, clientId),
       workspaceCwd: this.currentCwd,
       sessions: sidebar.sessions,
@@ -1127,7 +1492,7 @@ export class PiChatApp {
         return json(response, 503, { error: error.message, code: "APPLICATION_LIFECYCLE_BLOCKED", lifecycle: error.lifecycle, retryable: true, ...(isBootstrap ? { requestToken: this.requestToken } : {}) });
       }
       if (error instanceof ApplicationBusyError) return json(response, 409, { error: error.message, code: "APPLICATION_BUSY" });
-      if (error instanceof SessionControlConflictError || error instanceof RuntimeCapacityError) return json(response, 409, { error: error.message });
+      if (error instanceof SessionControlConflictError || error instanceof RuntimeCapacityError || error instanceof OperationAdmissionClosedError) return json(response, 409, { error: error.message });
       if (error instanceof HttpRequestError) return json(response, error.status, { error: error.message });
       if (response.headersSent) {
         response.end();
@@ -1166,7 +1531,7 @@ export class PiChatApp {
       response.write(`event: ready\ndata: ${JSON.stringify({ ok: true, lifecycle: this.applicationLifecycle })}\n\n`);
       this.sseHub.add(response, clientId);
       this.clientConnected(clientId);
-      const timer = setInterval(() => response.write(`event: pi\ndata: ${JSON.stringify({ type: "pi_chat_heartbeat", at: Date.now() })}\n\n`), this.sseHeartbeatMs);
+      const timer = setInterval(() => this.sseHub.heartbeat(response), this.sseHeartbeatMs);
       request.once("close", () => {
         clearInterval(timer);
         this.sseHub.remove(response);
@@ -1253,20 +1618,26 @@ export class PiChatApp {
       const body = await bodyJson(request, 45_000_000);
       const message = typeof body.message === "string" ? body.message.trim() : "";
       const requestedSessionId = typeof body.sessionId === "string" ? body.sessionId : "";
+      const requestedGateMode: GateMode | undefined = body.gateMode === "strict" || body.gateMode === "open" ? body.gateMode : undefined;
       const images = promptImages(body.images);
       if (!message && !images.length) return json(response, 400, { error: "消息或图片不能为空" });
+      const promptAt = this.nextUserPromptAt();
       const admittedSessionId = requestedSessionId || this.activeSessionId || "primary";
       const releasePromptAdmission = await this.beginPromptAdmission(admittedSessionId);
+      let releaseRuntimeAdmission: (() => void) | null = null;
       try {
       this.requireSessionControl(requestedSessionId || this.activeSessionId, clientId);
       // A browser tab can outlive a Pi Chat restart. Restore its requested Session on demand
       // instead of rejecting the prompt because the old in-memory worker map was lost.
-      if (requestedSessionId && !this.activeSessionIds().includes(requestedSessionId)) await this.ensureRuntime(requestedSessionId);
-      const secondaryRuntime = requestedSessionId ? this.runtimePool.get(requestedSessionId) || null : null;
+      const requestedIsPrimary = requestedSessionId && requestedSessionId === this.activeSessionId;
+      if (requestedSessionId && !requestedIsPrimary && !this.activeSessionIds().includes(requestedSessionId)) await this.ensureRuntime(requestedSessionId);
+      const secondaryRuntime = requestedSessionId && !requestedIsPrimary ? this.runtimePool.get(requestedSessionId) || null : null;
       if (secondaryRuntime) {
+        releaseRuntimeAdmission = this.runtimePool.acquireOperation(secondaryRuntime);
         this.runtimePool.touch(secondaryRuntime);
         if (secondaryRuntime.failed || secondaryRuntime.rpc.isRunning?.() === false) await this.recoverRuntime(secondaryRuntime);
       } else {
+        releaseRuntimeAdmission = this.primaryOperationAdmission.acquire().release;
         await this.ensurePrimaryRuntime();
       }
       const targetRpc = secondaryRuntime?.rpc || this.options.rpc;
@@ -1274,6 +1645,9 @@ export class PiChatApp {
       if (extensionCommand) {
         if (images.length) return json(response, 400, { error: "Extension 指令不能同时附加图片" });
         await targetRpc.send({ type: "prompt", message }, PROMPT_PREPARE_TIMEOUT_MS);
+        const requestedGateMode = extensionCommand.name === "gate" ? gateModeFromCommand(message) : null;
+        if (requestedGateMode) this.setGateMode(secondaryRuntime?.id || this.activeSessionId, requestedGateMode);
+        this.noteUserPrompt(secondaryRuntime?.id || this.activeSessionId, promptAt);
         const state = asState(await targetRpc.send({ type: "get_state" }));
         if (secondaryRuntime) {
           secondaryRuntime.running = state.isStreaming;
@@ -1288,14 +1662,18 @@ export class PiChatApp {
         if (this.scheduler.runtimeBusyForQueue(secondaryRuntime)) {
           const enqueueError = this.scheduler.assertCanEnqueue(secondaryRuntime.promptQueue, images);
           if (enqueueError) return json(response, 409, { error: enqueueError });
-          const queued = this.scheduler.enqueueRuntime(secondaryRuntime, message, images);
+          const queued = this.scheduler.enqueueRuntime(secondaryRuntime, message, images, promptAt, requestedGateMode);
+          this.noteUserPrompt(secondaryRuntime.id, promptAt);
           return json(response, 202, { accepted: true, queued: true, id: queued.id, queue: this.publicQueue(secondaryRuntime.promptQueue) });
         }
+        const generation = secondaryRuntime.abortGeneration;
         try {
           await this.applyPendingTurnSettings(secondaryRuntime.rpc, secondaryRuntime.pendingTurnSettings);
+          if (generation !== secondaryRuntime.abortGeneration || this.applicationLifecycle !== "idle") throw new Error("消息发送已取消");
+          await this.syncGateMode(secondaryRuntime.rpc, secondaryRuntime.id, requestedGateMode);
           secondaryRuntime.running = true;
           await secondaryRuntime.rpc.send({ type: "prompt", message: message || "请查看这些图片。", ...(images.length ? { images } : {}) }, PROMPT_PREPARE_TIMEOUT_MS);
-          this.scheduler.notifySecondaryPromptAccepted(secondaryRuntime);
+          this.scheduler.notifySecondaryPromptAccepted(secondaryRuntime, promptAt);
           json(response, 202, { accepted: true, queued: false });
         } catch (error) {
           secondaryRuntime.running = false;
@@ -1306,14 +1684,16 @@ export class PiChatApp {
       if (this.scheduler.primaryBusyForQueue()) {
         const enqueueError = this.scheduler.assertCanEnqueue(this.promptQueue, images);
         if (enqueueError) return json(response, 409, { error: enqueueError });
-        const queued = this.scheduler.enqueuePrimary(message, images);
+        const queued = this.scheduler.enqueuePrimary(message, images, promptAt, requestedGateMode);
+        this.noteUserPrompt(this.activeSessionId, promptAt);
         json(response, 202, { accepted: true, queued: true, id: queued.id, queue: this.publicQueue() });
         return;
       }
-      await this.sendPrompt(message, images);
+      await this.sendPrompt(message, images, promptAt, requestedGateMode);
       json(response, 202, { accepted: true, queued: false });
       return;
       } finally {
+        releaseRuntimeAdmission?.();
         releasePromptAdmission();
       }
     }
@@ -1404,14 +1784,22 @@ export class PiChatApp {
       const sessionId = typeof body.sessionId === "string" ? body.sessionId : this.activeSessionId;
       this.requireSessionControl(sessionId, clientId);
       const secondaryRuntime = this.runtimePool.get(sessionId) || null;
-      if (secondaryRuntime?.failed || secondaryRuntime?.rpc.isRunning?.() === false) await this.recoverRuntime(secondaryRuntime);
-      else if (!secondaryRuntime) await this.ensurePrimaryRuntime();
-      if ((!secondaryRuntime && (this.running || this.promptQueue.length)) || secondaryRuntime?.running) return json(response, 409, { error: "请先停止该会话的生成并清空队列" });
-      if (!secondaryRuntime && sessionId !== this.activeSessionId) return json(response, 409, { error: "该会话尚未启用" });
-      const customInstructions = typeof body.customInstructions === "string" ? body.customInstructions.trim() : "";
-      const result = rpcData<Record<string, unknown>>(await (secondaryRuntime?.rpc || this.options.rpc).send({ type: "compact", ...(customInstructions ? { customInstructions } : {}) }, PROMPT_PREPARE_TIMEOUT_MS));
-      json(response, 200, { result });
-      return;
+      let releaseRuntimeOperation: (() => void) | null = null;
+      try {
+        if (secondaryRuntime) {
+          releaseRuntimeOperation = this.runtimePool.acquireOperation(secondaryRuntime);
+          if (secondaryRuntime.failed || secondaryRuntime.rpc.isRunning?.() === false) await this.recoverRuntime(secondaryRuntime);
+        } else {
+          releaseRuntimeOperation = this.primaryOperationAdmission.acquire().release;
+          await this.ensurePrimaryRuntime();
+        }
+        if ((!secondaryRuntime && (this.running || this.promptQueue.length)) || secondaryRuntime?.running) return json(response, 409, { error: "请先停止该会话的生成并清空队列" });
+        if (!secondaryRuntime && sessionId !== this.activeSessionId) return json(response, 409, { error: "该会话尚未启用" });
+        const customInstructions = typeof body.customInstructions === "string" ? body.customInstructions.trim() : "";
+        const result = rpcData<Record<string, unknown>>(await (secondaryRuntime?.rpc || this.options.rpc).send({ type: "compact", ...(customInstructions ? { customInstructions } : {}) }, PROMPT_PREPARE_TIMEOUT_MS));
+        json(response, 200, { result });
+        return;
+      } finally { releaseRuntimeOperation?.(); }
     }
 
     if (url.pathname === "/api/chat/abort") {
@@ -1421,9 +1809,12 @@ export class PiChatApp {
       this.requireSessionControl(sessionId, clientId);
       const runtime = this.runtimePool.get(sessionId);
       if (runtime) {
+        const releaseRuntimeOperation = this.runtimePool.acquireOperation(runtime);
+        try {
         this.runtimePool.touch(runtime);
+        runtime.abortGeneration += 1;
         if (runtime.failed || runtime.rpc.isRunning?.() === false) return json(response, 200, { ok: true, isStreaming: false, queuePaused: runtime.queuePaused });
-        if (runtime.promptQueue.length) runtime.queuePaused = true;
+        if (runtime.promptQueue.length || runtime.dispatching) runtime.queuePaused = true;
         await runtime.rpc.send({ type: "abort" }, 5_000);
         // Abort itself is enough; a long get_state after abort was a common freeze.
         // Prefer a short probe, then fall back to "stopped" and let agent_settled finish.
@@ -1437,10 +1828,14 @@ export class PiChatApp {
         runtime.running = isStreaming;
         this.broadcastQueue(sessionId);
         return json(response, 200, { ok: true, isStreaming, queuePaused: runtime.queuePaused });
+        } finally { releaseRuntimeOperation(); }
       }
       if (sessionId !== this.activeSessionId) return json(response, 409, { error: "该会话不是活动运行会话" });
+      const releasePrimaryOperation = this.primaryOperationAdmission.acquire().release;
+      try {
       if (this.primaryFailed || this.options.rpc.isRunning?.() === false) return json(response, 200, { ok: true, isStreaming: false, queuePaused: this.queuePaused });
-      if (this.promptQueue.length) this.queuePaused = true;
+      this.scheduler.primaryAbortGeneration += 1;
+      if (this.promptQueue.length || this.dispatching) this.queuePaused = true;
       await this.options.rpc.send({ type: "abort" }, 5_000);
       this.broadcastQueue();
       let isStreaming = false;
@@ -1453,6 +1848,7 @@ export class PiChatApp {
       this.running = isStreaming;
       json(response, 200, { ok: true, isStreaming, queuePaused: this.queuePaused });
       return;
+      } finally { releasePrimaryOperation(); }
     }
 
     if (url.pathname === "/api/sessions") {
@@ -1478,6 +1874,21 @@ export class PiChatApp {
       }
       const sidebar = this.sidebarSessions(await this.cachedSessionList(this.activeSessionPath || state.sessionFile), clientId, all);
       json(response, 200, { sessions: sidebar.sessions, total: sidebar.total, applicationLifecycle: this.applicationLifecycle });
+      return;
+    }
+
+    const releaseSessionMatch = /^\/api\/sessions\/([a-f0-9]{20})\/release$/.exec(url.pathname);
+    if (releaseSessionMatch) {
+      if (request.method !== "POST") return methodNotAllowed(response);
+      const id = releaseSessionMatch[1];
+      if (id === this.activeSessionId) return json(response, 409, { error: "当前主对话不能手动释放" });
+      this.assertNoForeignController(id, clientId);
+      const runtime = this.runtimePool.get(id);
+      if (!runtime) return json(response, 409, { error: "该对话当前不是热对话" });
+      if (!this.runtimePool.canManuallyRelease(runtime)) return json(response, 409, { error: "该对话正在生成、排队、恢复或等待确认，暂时不能释放" });
+      const released = await this.runtimePool.reclaim(id, "manual");
+      if (!released) return json(response, 409, { error: "对话状态已经变化，暂时不能释放" });
+      json(response, 200, { released: true, sessionId: id, activeSessionIds: this.activeSessionIds() });
       return;
     }
 
@@ -1519,10 +1930,14 @@ export class PiChatApp {
       if (request.method !== "POST") return methodNotAllowed(response);
       if (!clientId) return json(response, 400, { error: "浏览器窗口标识无效" });
       const id = viewingMatch[1];
-      const summaries = await this.options.sessions.list(undefined, this.currentCwd);
-      if (!summaries.some((session) => session.id === id) && !this.runtimePool.has(id) && id !== this.activeSessionId) return json(response, 404, { error: "会话不存在" });
-      this.markSessionViewed(clientId, id);
       const runtime = this.runtimePool.get(id);
+      // A running Runtime is authoritative. Avoid a full SessionIndex scan after
+      // every hot navigation just to prove a worker we already own exists.
+      const indexed = !runtime && id !== this.activeSessionId
+        ? this.options.sessions.summaryForId?.(id) || (await this.options.sessions.list(undefined, this.currentCwd)).find((session) => session.id === id)
+        : true;
+      if (!indexed && !runtime && id !== this.activeSessionId) return json(response, 404, { error: "会话不存在" });
+      this.markSessionViewed(clientId, id);
       if (runtime) this.runtimePool.touch(runtime);
       json(response, 200, { viewing: id });
       return;
@@ -1567,7 +1982,8 @@ export class PiChatApp {
         this.activeSessionId = state.sessionFile ? idForPath(state.sessionFile) : state.sessionId || "";
         this.activeSessionPath = state.sessionFile;
       }
-      if (id !== this.activeSessionId) await this.ensureRuntime(id);
+      if (id === this.activeSessionId) await this.ensurePrimaryRuntime();
+      else await this.ensureRuntime(id);
       const view = await this.sessionView(id, RECENT_TURN_WINDOW_SIZE, clientId);
       if (!view) return json(response, 404, { error: "会话不存在" });
       json(response, 200, view);
@@ -1576,9 +1992,16 @@ export class PiChatApp {
 
     if (url.pathname === "/api/sessions/new") {
       if (request.method !== "POST") return methodNotAllowed(response);
-      const runtime = await this.createDraftRuntime(clientId);
-      const view = await this.draftSessionView(runtime, clientId);
-      json(response, 200, view);
+      const draftLease = await this.acquireDraftRuntime(clientId);
+      try {
+        // Mark ownership before the view's get_state await; an empty draft is
+        // then view-pinned when its handoff operation lease is released.
+        this.markSessionViewed(clientId, draftLease.runtime.id);
+        const view = await this.draftSessionView(draftLease.runtime, clientId);
+        json(response, 200, view);
+      } finally {
+        draftLease.release();
+      }
       return;
     }
 
@@ -1648,23 +2071,36 @@ export class PiChatApp {
       if (!provider || !modelId) return json(response, 400, { error: "provider 和 modelId 必填" });
       if (!secondaryRuntime && sessionId !== this.activeSessionId) return json(response, 409, { error: "该会话尚未启用" });
       if (secondaryRuntime) {
-        this.runtimePool.touch(secondaryRuntime);
-        if (secondaryRuntime.failed || secondaryRuntime.rpc.isRunning?.() === false) await this.recoverRuntime(secondaryRuntime);
-      } else {
+        return this.runtimePool.withOperation(secondaryRuntime, async () => {
+          if (secondaryRuntime.failed || secondaryRuntime.rpc.isRunning?.() === false) await this.recoverRuntime(secondaryRuntime);
+          const targetRpc = secondaryRuntime.rpc;
+          if (secondaryRuntime.running) {
+            const model = asModels(await targetRpc.send({ type: "get_available_models" })).find((item) => item.provider === provider && item.id === modelId);
+            if (!model) return json(response, 404, { error: "所选模型不可用" });
+            secondaryRuntime.pendingTurnSettings.model = { provider, modelId };
+            this.rememberRuntimeDisplaySettings(secondaryRuntime, { model });
+            return json(response, 200, { model, pending: true });
+          }
+          const model = rpcData<ModelInfo>(await targetRpc.send({ type: "set_model", provider, modelId }));
+          this.rememberRuntimeDisplaySettings(secondaryRuntime, { model });
+          return json(response, 200, { model, pending: false });
+        });
+      }
+      const releasePrimaryOperation = this.primaryOperationAdmission.acquire().release;
+      try {
         await this.ensurePrimaryRuntime();
-      }
-      const targetRpc = secondaryRuntime?.rpc || this.options.rpc;
-      const targetRunning = secondaryRuntime?.running || (!secondaryRuntime && this.running);
-      if (targetRunning) {
-        const model = asModels(await targetRpc.send({ type: "get_available_models" })).find((item) => item.provider === provider && item.id === modelId);
-        if (!model) return json(response, 404, { error: "所选模型不可用" });
-        (secondaryRuntime?.pendingTurnSettings || this.pendingTurnSettings).model = { provider, modelId };
-        json(response, 200, { model, pending: true });
-        return;
-      }
-      const model = rpcData<ModelInfo>(await targetRpc.send({ type: "set_model", provider, modelId }));
-      json(response, 200, { model, pending: false });
-      return;
+        const targetRunning = this.running;
+        if (targetRunning) {
+          const model = asModels(await this.options.rpc.send({ type: "get_available_models" })).find((item) => item.provider === provider && item.id === modelId);
+          if (!model) return json(response, 404, { error: "所选模型不可用" });
+          this.pendingTurnSettings.model = { provider, modelId };
+          this.rememberPrimaryDisplaySettings({ model });
+          return json(response, 200, { model, pending: true });
+        }
+        const model = rpcData<ModelInfo>(await this.options.rpc.send({ type: "set_model", provider, modelId }));
+        this.rememberPrimaryDisplaySettings({ model });
+        return json(response, 200, { model, pending: false });
+      } finally { releasePrimaryOperation(); }
     }
 
     if (url.pathname === "/api/thinking/set") {
@@ -1680,22 +2116,34 @@ export class PiChatApp {
       if (!level) return json(response, 400, { error: "无效的 Thinking 强度" });
       if (!secondaryRuntime && sessionId !== this.activeSessionId) return json(response, 409, { error: "该会话尚未启用" });
       if (secondaryRuntime) {
-        this.runtimePool.touch(secondaryRuntime);
-        if (secondaryRuntime.failed || secondaryRuntime.rpc.isRunning?.() === false) await this.recoverRuntime(secondaryRuntime);
-      } else {
+        return this.runtimePool.withOperation(secondaryRuntime, async () => {
+          if (secondaryRuntime.failed || secondaryRuntime.rpc.isRunning?.() === false) await this.recoverRuntime(secondaryRuntime);
+          if (secondaryRuntime.running) {
+            secondaryRuntime.pendingTurnSettings.thinkingLevel = level;
+            this.rememberRuntimeDisplaySettings(secondaryRuntime, { thinkingLevel: level });
+            return json(response, 200, { level, pending: true });
+          }
+          await secondaryRuntime.rpc.send({ type: "set_thinking_level", level });
+          const state = asState(await secondaryRuntime.rpc.send({ type: "get_state" }));
+          secondaryRuntime.lastState = state;
+          secondaryRuntime.running = state.isStreaming;
+          return json(response, 200, { level: state.thinkingLevel, pending: false });
+        });
+      }
+      const releasePrimaryOperation = this.primaryOperationAdmission.acquire().release;
+      try {
         await this.ensurePrimaryRuntime();
-      }
-      const targetRpc = secondaryRuntime?.rpc || this.options.rpc;
-      const targetRunning = secondaryRuntime?.running || (!secondaryRuntime && this.running);
-      if (targetRunning) {
-        (secondaryRuntime?.pendingTurnSettings || this.pendingTurnSettings).thinkingLevel = level;
-        json(response, 200, { level, pending: true });
-        return;
-      }
-      await targetRpc.send({ type: "set_thinking_level", level });
-      const state = asState(await targetRpc.send({ type: "get_state" }));
-      json(response, 200, { level: state.thinkingLevel, pending: false });
-      return;
+        if (this.running) {
+          this.pendingTurnSettings.thinkingLevel = level;
+          this.rememberPrimaryDisplaySettings({ thinkingLevel: level });
+          return json(response, 200, { level, pending: true });
+        }
+        await this.options.rpc.send({ type: "set_thinking_level", level });
+        const state = asState(await this.options.rpc.send({ type: "get_state" }));
+        this.lastPrimaryState = state;
+        this.running = state.isStreaming;
+        return json(response, 200, { level: state.thinkingLevel, pending: false });
+      } finally { releasePrimaryOperation(); }
     }
 
     if (url.pathname === "/api/resources/browse") {
@@ -1745,8 +2193,11 @@ export class PiChatApp {
       const pending = this.pendingRequestForSession(sessionId);
       if (!pending || pending.id !== body.id || this.claimingExtensionRequests.has(claimKey)) return json(response, 409, { error: "该确认已在另一窗口处理，或已失效" });
       this.claimingExtensionRequests.add(claimKey);
+      let releaseRuntimeOperation: (() => void) | null = null;
       try {
-        if (runtime) this.runtimePool.touch(runtime);
+        releaseRuntimeOperation = runtime
+          ? this.runtimePool.acquireOperation(runtime)
+          : this.primaryOperationAdmission.acquire().release;
         const command: Record<string, unknown> = { type: "extension_ui_response", id: body.id };
         if (body.cancelled === true) command.cancelled = true;
         else if (typeof body.confirmed === "boolean") command.confirmed = body.confirmed;
@@ -1756,6 +2207,7 @@ export class PiChatApp {
         this.clearPendingRequest(sessionId, body.id);
         json(response, 200, { ok: true });
       } finally {
+        releaseRuntimeOperation?.();
         this.claimingExtensionRequests.delete(claimKey);
       }
       return;

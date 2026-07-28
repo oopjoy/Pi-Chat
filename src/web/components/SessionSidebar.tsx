@@ -2,8 +2,7 @@ import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent as 
 import { createPortal } from "react-dom";
 import type { SessionSummary } from "../../shared/types";
 import { SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN } from "../lib/preferences";
-import { ChipIcon, FolderIcon, PanelLeftIcon, PiMarkIcon, PlusIcon, RefreshIcon, SettingsIcon } from "./Icons";
-import type { ManagementSection } from "./ManagementPanel";
+import { FolderIcon, PanelLeftIcon, PiMarkIcon, PlusIcon, RefreshIcon } from "./Icons";
 
 function relativeTime(timestamp: number): string {
   const elapsed = Date.now() - timestamp;
@@ -13,12 +12,16 @@ function relativeTime(timestamp: number): string {
   return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" }).format(timestamp);
 }
 
-const managementItems: Array<{ section: ManagementSection; label: string }> = [
-  { section: "settings", label: "设置" },
-  { section: "models", label: "Models" },
-];
-
 type SessionStatus = "dormant" | "ready" | "pending" | "running" | "error";
+
+export function sessionCanRelease(session: SessionSummary, warming: boolean, failed: boolean): boolean {
+  return session.releasable === true
+    && !session.running
+    && !session.queued
+    && !session.pendingConfirmation
+    && !warming
+    && !failed;
+}
 
 export function sessionStatus(session: SessionSummary, warming: boolean, failed: boolean): { kind: SessionStatus; label: string } {
   // A confirmation pauses an in-flight turn but needs user attention first.
@@ -63,7 +66,7 @@ function ResizeHandle({ width, onWidthChange }: { width: number; onWidthChange: 
   return <div className="sidebar-resize-handle" role="separator" aria-orientation="vertical" aria-label="拖动调整会话栏宽度" aria-valuemin={SIDEBAR_WIDTH_MIN} aria-valuemax={SIDEBAR_WIDTH_MAX} aria-valuenow={Math.round(width)} tabIndex={0} onPointerDown={onPointerDown} onKeyDown={onKeyDown} />;
 }
 
-export function SessionSidebar({ sessions, sessionsTotal, loadingAllSessions, viewedSessionId, workspaceCwd, open, width, newDisabled, refreshDisabled, restartDisabled, workspaceDisabled, viewBusy, refreshing, warmingSessionIds, failedSessionIds, workspacePicking, onClose, onCollapse, onNew, onRefresh, onLoadAllSessions, onRestart, onView, onRename, onDelete, onPickWorkspace, onManage, onWidthChange }: {
+export function SessionSidebar({ sessions, sessionsTotal, loadingAllSessions, viewedSessionId, workspaceCwd, open, width, newDisabled, refreshDisabled, restartDisabled, workspaceDisabled, viewBusy, refreshing, warmingSessionIds, failedSessionIds, workspacePicking, onClose, onCollapse, onNew, onRefresh, onLoadAllSessions, onRestart, onView, onRelease, onRename, onDelete, onPickWorkspace, onWidthChange }: {
   sessions: SessionSummary[];
   sessionsTotal: number;
   loadingAllSessions: boolean;
@@ -87,10 +90,10 @@ export function SessionSidebar({ sessions, sessionsTotal, loadingAllSessions, vi
   onLoadAllSessions: () => void;
   onRestart: () => void;
   onView: (id: string) => void;
+  onRelease: (session: SessionSummary) => void;
   onRename: (session: SessionSummary) => void;
   onDelete: (session: SessionSummary) => void;
   onPickWorkspace: () => void;
-  onManage: (section: ManagementSection) => void;
   onWidthChange: (width: number) => void;
 }) {
   const [sessionMenuId, setSessionMenuId] = useState("");
@@ -118,6 +121,11 @@ export function SessionSidebar({ sessions, sessionsTotal, loadingAllSessions, vi
     };
   }, [sessionMenuId]);
   const menuSession = sessions.find((session) => session.id === sessionMenuId);
+  const menuSessionCanRelease = Boolean(menuSession && sessionCanRelease(
+    menuSession,
+    warmingSessionIds.includes(menuSession.id),
+    failedSessionIds.includes(menuSession.id),
+  ));
 
   return (
     <>
@@ -140,7 +148,10 @@ export function SessionSidebar({ sessions, sessionsTotal, loadingAllSessions, vi
         <nav className="session-list" aria-label="会话列表">
           {sessions.map((session) => {
             const unavailable = viewBusy || session.id === viewedSessionId;
-            const status = sessionStatus(session, warmingSessionIds.includes(session.id), failedSessionIds.includes(session.id));
+            const warming = warmingSessionIds.includes(session.id);
+            const failed = failedSessionIds.includes(session.id);
+            const status = sessionStatus(session, warming, failed);
+            const canRelease = sessionCanRelease(session, warming, failed);
             return <div className={`session-row ${session.id === viewedSessionId ? "is-active" : ""}`} key={session.id}>
               <button
                 type="button"
@@ -157,7 +168,7 @@ export function SessionSidebar({ sessions, sessionsTotal, loadingAllSessions, vi
                 <button type="button" className="session-menu-trigger" onClick={(event) => {
                   if (sessionMenuId === session.id) return setSessionMenuId("");
                   const rect = event.currentTarget.getBoundingClientRect();
-                  const menuHeight = 72;
+                  const menuHeight = canRelease ? 108 : 72;
                   setSessionMenuPosition({
                     top: rect.bottom + menuHeight + 6 <= window.innerHeight ? rect.bottom + 4 : Math.max(4, rect.top - menuHeight - 4),
                     left: Math.max(4, rect.right - 108),
@@ -173,12 +184,10 @@ export function SessionSidebar({ sessions, sessionsTotal, loadingAllSessions, vi
           {!sessions.length && <p className="empty-list">还没有历史会话</p>}
         </nav>
         <button type="button" className="workspace-picker" disabled={workspaceDisabled} onClick={onPickWorkspace} title="设置工作路径" aria-label="设置工作路径"><FolderIcon className="workspace-picker-icon" /><span title={workspaceCwd || "未设置工作路径"}>{workspacePicking ? "正在打开目录窗口…" : workspaceCwd || "未设置工作路径"}</span></button>
-        <nav className="management-nav" aria-label="管理">
-          {managementItems.map((item) => <button type="button" key={item.section} onClick={() => onManage(item.section)}>{item.section === "models" ? <ChipIcon className="sidebar-line-icon" /> : <SettingsIcon className="sidebar-line-icon" />}{item.label}</button>)}
-        </nav>
         <ResizeHandle width={width} onWidthChange={onWidthChange} />
       </aside>
       {menuSession && createPortal(<div className="session-item-menu" ref={sessionMenuRef} role="menu" style={sessionMenuPosition}>
+        {menuSessionCanRelease && <button type="button" role="menuitem" onClick={() => { setSessionMenuId(""); onRelease(menuSession); }}>释放运行资源</button>}
         <button type="button" role="menuitem" onClick={() => { setSessionMenuId(""); onRename(menuSession); }}>重命名</button>
         <button type="button" role="menuitem" className="is-danger" disabled={menuSession.running || menuSession.queued || menuSession.pendingConfirmation} onClick={() => { setSessionMenuId(""); onDelete(menuSession); }} title={menuSession.running ? "该对话正在生成，停止后才能删除" : menuSession.queued ? "该对话有待发送消息，清空队列后才能删除" : menuSession.pendingConfirmation ? "该对话正在等待确认，处理后才能删除" : undefined}>删除</button>
       </div>, document.body)}

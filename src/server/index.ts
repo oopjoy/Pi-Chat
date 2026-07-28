@@ -61,6 +61,8 @@ if (!loopbackHosts.has(options.host)) {
 }
 options.cwd = await loadWorkspace(options.cwd);
 const projectRoot = findProjectRoot(dirname(fileURLToPath(import.meta.url)));
+const runtimeDist = process.env.PI_CHAT_RUNTIME_DIST ? resolve(process.env.PI_CHAT_RUNTIME_DIST) : resolve(projectRoot, "dist");
+delete process.env.PI_CHAT_RUNTIME_DIST;
 const protectRollbackBackup = process.env.PI_CHAT_SKIP_STALE_DIST_CLEANUP === "1";
 delete process.env.PI_CHAT_SKIP_STALE_DIST_CLEANUP;
 const cleaned = protectRollbackBackup ? 0 : await cleanupStaleDistArtifacts(projectRoot);
@@ -136,7 +138,7 @@ const app = new PiChatApp({
   resources: new ResourceManager(),
   modelManager: new ModelManager(),
   cwd: options.cwd,
-  webRoot: resolve(projectRoot, "dist", "web"),
+  webRoot: resolve(runtimeDist, "web"),
   devMiddleware: vite ? (request, response, next) => vite.middlewares(request, response, next) : undefined,
   allowedHosts: [],
   applicationRestart: prepareApplicationRestart,

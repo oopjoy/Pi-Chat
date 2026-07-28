@@ -95,7 +95,7 @@ export function ManagementPanel({ section, appearance, models, state, busy, onCl
 
   return (
     <div className="panel-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className="management-panel panel-settings" role="dialog" aria-modal="true" aria-labelledby="management-title">
+      <section id="pi-chat-settings-dialog" className="management-panel panel-settings" role="dialog" aria-modal="true" aria-labelledby="management-title">
         <header className="management-head">
           <div>
             <span className="management-kicker">Pi Chat</span>

@@ -12,5 +12,7 @@ src/web/generated/
 new-session.json
 nul
 .pi-subagents/
+test-results/
+playwright-report/
 
 dist-local/

@@ -10,7 +10,7 @@ export interface SessionCacheEntry {
 }
 
 interface SessionCacheFile {
-  version: 1;
+  version: number;
   entries: Record<string, SessionCacheEntry>;
 }
 
@@ -27,6 +27,7 @@ function validEntry(value: unknown): value is SessionCacheEntry {
     && typeof summary.preview === "string"
     && typeof summary.cwd === "string"
     && typeof summary.updatedAt === "number"
+    && (summary.lastUserPromptAt === undefined || typeof summary.lastUserPromptAt === "number")
     && typeof summary.messageCount === "number"
     && typeof summary.turnCount === "number";
 }
@@ -34,7 +35,9 @@ function validEntry(value: unknown): value is SessionCacheEntry {
 export async function loadSessionCache(path: string): Promise<Map<string, SessionCacheEntry>> {
   try {
     const value = JSON.parse(await readFile(path, "utf8")) as Partial<SessionCacheFile>;
-    if (value.version !== 1 || !value.entries || typeof value.entries !== "object") return new Map();
+    // v3 changes summaries to follow the active JSONL parent branch. Rebuild
+    // v2 once so abandoned fork prompts cannot retain stale sidebar recency.
+    if (value.version !== 3 || !value.entries || typeof value.entries !== "object") return new Map();
     return new Map(Object.entries(value.entries).filter((entry): entry is [string, SessionCacheEntry] => validEntry(entry[1])));
   } catch {
     return new Map();
@@ -44,7 +47,7 @@ export async function loadSessionCache(path: string): Promise<Map<string, Sessio
 export async function saveSessionCache(path: string, entries: Map<string, SessionCacheEntry>): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
-  const data: SessionCacheFile = { version: 1, entries: Object.fromEntries(entries) };
+  const data: SessionCacheFile = { version: 3, entries: Object.fromEntries(entries) };
   await writeFile(temporary, `${JSON.stringify(data)}\n`, "utf8");
   await rename(temporary, path);
 }

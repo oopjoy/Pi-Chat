@@ -4,12 +4,17 @@ export interface SessionSummary {
   name: string;
   preview: string;
   cwd: string;
+  /** Last JSONL/file activity; shown as relative time, but never used to reorder active streams. */
   updatedAt: number;
+  /** Persisted/accepted user-instruction time used for stable sidebar recency ordering. */
+  lastUserPromptAt?: number;
   messageCount: number;
   /** Number of user-initiated turns, including turns later aborted or failed. */
   turnCount?: number;
   active: boolean;
   writable?: boolean;
+  /** Current server capability: an idle Secondary Runtime may be manually released. */
+  releasable?: boolean;
   running?: boolean;
   queued?: boolean;
   pendingConfirmation?: boolean;
@@ -59,11 +64,16 @@ export interface PiContentBlock {
 
 export interface PiMessage {
   role: string;
-  content: string | PiContentBlock[];
+  /** Metadata records such as compactionSummary legitimately omit content. */
+  content?: string | PiContentBlock[];
+  summary?: string;
+  tokensBefore?: number;
   timestamp?: number;
   stopReason?: string;
   provider?: string;
   model?: string;
+  /** Thinking level active when this assistant turn was generated, when Pi recorded it. */
+  thinkingLevel?: string;
   toolCallId?: string;
   toolName?: string;
   isError?: boolean;
@@ -123,6 +133,9 @@ export interface QueuedPrompt {
   createdAt: number;
 }
 
+/** Strict confirms write/edit plus best-effort recognized high-risk Bash; open skips Gate prompts. */
+export type GateMode = "strict" | "open";
+
 export interface SessionViewData {
   session: SessionSummary;
   state: PiState;
@@ -142,6 +155,8 @@ export interface SessionViewData {
   commands?: SlashCommand[];
   /** Present on cold view-only sessions where no RPC command list exists; live sessions infer it from commands. */
   gateAvailable?: boolean;
+  /** Authoritative mode for a live Pi Runtime. Cold view-only sessions omit it. */
+  gateMode?: GateMode;
   pendingExtensionRequest?: ExtensionUiRequest;
   controlOwner?: string;
   controlledByThisWindow?: boolean;
@@ -173,6 +188,8 @@ export interface BootstrapData {
   /** Ephemeral same-origin request token, rotated whenever Pi Chat starts. */
   requestToken?: string;
   pendingExtensionRequest?: ExtensionUiRequest;
+  /** Authoritative mode of the active Primary Runtime. */
+  gateMode?: GateMode;
   controlOwner?: string;
   controlledByThisWindow?: boolean;
   applicationLifecycle?: ApplicationLifecycle;

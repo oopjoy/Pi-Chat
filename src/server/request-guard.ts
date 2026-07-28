@@ -18,12 +18,31 @@ function sameToken(left: string, right: string): boolean {
   return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
 }
 
+function normalizeHost(value: string): { authority: string; hostname: string } | null {
+  const raw = value.trim().toLowerCase();
+  if (!raw) return null;
+  try {
+    const parsed = new URL(`http://${raw}`);
+    // Host is an HTTP authority, never a URL. Reject path/query/fragment and
+    // credentials before comparing it to the exact loopback listener; otherwise
+    // the tokenless handoff health exception could accept disguised Hosts.
+    if (parsed.username || parsed.password || parsed.pathname !== "/" || parsed.search || parsed.hash || raw !== parsed.host) return null;
+    return { authority: parsed.host, hostname: parsed.hostname.toLowerCase() };
+  } catch {
+    return null;
+  }
+}
+
 export function requestGuardError(request: IncomingMessage, options: RequestGuardOptions): string | null {
-  const host = header(request, "host").toLowerCase();
-  const allowedHosts = new Set(options.allowedHosts.map((item) => item.toLowerCase()));
-  const hostname = host.startsWith("[") ? host.slice(1, host.indexOf("]")) : host.split(":")[0];
-  const hostAllowed = allowedHosts.has(host) || allowedHosts.has(hostname);
+  const parsedHost = normalizeHost(header(request, "host"));
+  if (!parsedHost) return "请求 Host 未获允许";
+  const allowed = options.allowedHosts.map(normalizeHost).filter((value): value is { authority: string; hostname: string } => Boolean(value));
+  const hostAllowed = allowed.some((item) => item.authority === parsedHost.authority || (item.authority === item.hostname && item.hostname === parsedHost.hostname));
   if (!hostAllowed) return "请求 Host 未获允许";
+  // Bare loopback entries are intentionally a test-only wildcard-port mode.
+  // Production calls set one exact authority after listen(), so they always
+  // require the ephemeral token below.
+  const requiresToken = allowed.some((item) => item.authority === parsedHost.authority && item.authority !== item.hostname);
 
   const origin = header(request, "origin");
   // Navigation GETs commonly omit Origin. API and SSE requests must always identify
@@ -32,23 +51,27 @@ export function requestGuardError(request: IncomingMessage, options: RequestGuar
   if (origin) {
     let parsed: URL;
     try { parsed = new URL(origin); } catch { return "请求 Origin 无效"; }
-    const originHost = parsed.host.toLowerCase();
-    const originName = parsed.hostname.toLowerCase();
-    if (parsed.protocol !== "http:" || (!allowedHosts.has(originHost) && !allowedHosts.has(originName))) return "请求 Origin 未获允许";
+    const originHost = normalizeHost(parsed.host);
+    if (parsed.protocol !== "http:" || !originHost || !allowed.some((item) => item.authority === originHost.authority || (item.authority === item.hostname && item.hostname === originHost.hostname))) return "请求 Origin 未获允许";
   }
 
   const url = new URL(request.url || "/", "http://localhost");
   const pathname = url.pathname;
   const headerToken = header(request, "x-pi-chat-token");
   const fetchSite = header(request, "sec-fetch-site");
-  const browserRequest = Boolean(origin || fetchSite);
-  // This is the one bootstrap handshake that obtains the ephemeral token. It is
-  // still Host/Origin checked above, so another website cannot read or obtain it.
+  // The restart handoff is a separate local process, not a browser: after exact
+  // Host validation it may make this one fixed-shape liveness request without
+  // Origin or the in-memory token. No other API endpoint has this exception.
+  const isTokenlessHealthProbe = pathname === "/api/health" && request.method === "GET" && !origin && !fetchSite && !headerToken;
+  if (isTokenlessHealthProbe) return null;
+  // This is the one bootstrap handshake that obtains the ephemeral token. Every
+  // other API/SSE call, including tokenless local automation, must authenticate.
   const isInitialBootstrap = pathname === "/api/bootstrap" && request.method === "GET" && !headerToken;
-  if ((pathname.startsWith("/api/") || pathname === "/api/events") && browserRequest) {
-    if (!origin && !isInitialBootstrap && fetchSite !== "same-origin") return "请求缺少同源 Origin";
+  if (pathname.startsWith("/api/") || pathname === "/api/events") {
+    const hasRequestIdentity = Boolean(origin || fetchSite || headerToken || (pathname === "/api/events" && url.searchParams.has("token")));
+    if ((requiresToken || hasRequestIdentity) && !origin && !isInitialBootstrap && fetchSite !== "same-origin") return "请求缺少同源 Origin";
     const suppliedToken = pathname === "/api/events" ? url.searchParams.get("token") || "" : headerToken;
-    if (!isInitialBootstrap && !sameToken(suppliedToken, options.token)) return "Pi Chat 请求令牌无效或已过期";
+    if ((requiresToken || hasRequestIdentity) && !isInitialBootstrap && !sameToken(suppliedToken, options.token)) return "Pi Chat 请求令牌无效或已过期";
   }
   return null;
 }

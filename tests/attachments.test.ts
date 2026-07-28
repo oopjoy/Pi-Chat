@@ -4,7 +4,7 @@ import test from "node:test";
 import { PiChatApp, promptImages } from "../src/server/app";
 import { parsePickerOutput } from "../src/server/file-picker";
 import type { PiRpcClient } from "../src/server/rpc-client";
-import type { SessionIndex } from "../src/server/session-index";
+import { idForPath, type SessionIndex } from "../src/server/session-index";
 import type { ResourceManager } from "../src/server/resource-manager";
 import { commandMatches, fileReferences, windowsPathsFromText } from "../src/web/components/ChatInput";
 
@@ -26,9 +26,15 @@ test("production build splits React, Markdown and KaTeX into cacheable chunks", 
 });
 
 test("session sidebar switches sessions without link navigation", async () => {
-  const sidebar = await (await import("node:fs/promises")).readFile(new URL("../src/web/components/SessionSidebar.tsx", import.meta.url), "utf8");
+  const files = await import("node:fs/promises");
+  const sidebar = await files.readFile(new URL("../src/web/components/SessionSidebar.tsx", import.meta.url), "utf8");
+  const app = await files.readFile(new URL("../src/web/App.tsx", import.meta.url), "utf8");
   assert.doesNotMatch(sidebar, /href=\{`\?session=/);
   assert.match(sidebar, /type="button"[\s\S]*onClick=\{\(\) => onView\(session\.id\)\}/);
+  assert.match(app, /matchMedia\?\.\("\(max-width: 760px\)"\)\.matches[\s\S]*setSidebarOpen\(false\)[\s\S]*viewSession\(id\)/);
+  assert.doesNotMatch(app, /onView=\{\(id\) => \{\s*setSidebarOpen\(false\);/);
+  assert.match(sidebar, /menuSessionCanRelease[\s\S]*释放运行资源/);
+  assert.match(app, /api\.releaseSession\(session\.id\)[\s\S]*runtimeStatus: "view-only"/);
 });
 
 test("prompt image validation accepts Pi image content and rejects unsafe payloads", () => {
@@ -107,18 +113,29 @@ test("local prompt queue can cancel, pause on abort and resume", async () => {
   }
 });
 
-test("extension slash commands execute immediately without entering the local queue", async () => {
+test("extension slash commands execute immediately and Gate mode survives browser refresh", async () => {
   const commands: Record<string, unknown>[] = [];
+  const path = "C:\\sessions\\gate.jsonl";
+  const id = idForPath(path);
+  let emit: (event: Record<string, unknown>) => void = () => {};
   const rpc = {
-    onEvent: () => () => {},
+    onEvent: (listener: (event: Record<string, unknown>) => void) => { emit = listener; return () => {}; },
     send: async (command: Record<string, unknown>) => {
       commands.push(command);
-      if (command.type === "get_commands") return { type: "response", success: true, data: { commands: [{ name: "gate", source: "extension", description: "Control file permission gate: /gate status|open|strict|once" }] } };
-      if (command.type === "get_state") return { type: "response", success: true, data: { model: null, isStreaming: false } };
+      if (command.type === "get_commands") return { type: "response", success: true, data: { commands: [{ name: "gate", source: "extension", description: "Control file permission gate: /gate status|open|strict" }] } };
+      if (command.type === "get_state") return { type: "response", success: true, data: { model: null, sessionFile: path, sessionId: "gate", isStreaming: false } };
+      if (command.type === "get_messages") return { type: "response", success: true, data: { messages: [] } };
+      if (command.type === "get_available_models") return { type: "response", success: true, data: { models: [] } };
+      if (command.type === "get_session_stats") return { type: "response", success: true, data: { tokens: {} } };
       return { type: "response", command: command.type, success: true };
     },
   } as unknown as PiRpcClient;
-  const app = new PiChatApp({ rpc, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const sessions = {
+    list: async () => [{ id, sessionId: "gate", name: "Gate", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 0, active: true }],
+    pathForId: () => path,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
   const server = createServer((request, response) => void app.handle(request, response));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
@@ -130,10 +147,79 @@ test("extension slash commands execute immediately without entering the local qu
       body: JSON.stringify({ message: "/gate open" }),
     });
     assert.equal(response.status, 202);
-    assert.deepEqual(await response.json(), { accepted: true, queued: false, extension: true, command: "gate", description: "Control file permission gate: /gate status|open|strict|once", isStreaming: false });
+    assert.deepEqual(await response.json(), { accepted: true, queued: false, extension: true, command: "gate", description: "Control file permission gate: /gate status|open|strict", isStreaming: false });
     assert.deepEqual(commands.filter((command) => command.type === "prompt"), [{ type: "prompt", message: "/gate open" }]);
+
+    const bootstrap = await (await fetch(`http://127.0.0.1:${address.port}/api/bootstrap`)).json() as { gateMode?: string };
+    assert.equal(bootstrap.gateMode, "open", "browser refresh must show the Runtime's actual open mode");
+
+    const unsupported = await fetch(`http://127.0.0.1:${address.port}/api/chat/prompt`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "/gate once" }),
+    });
+    assert.equal(unsupported.status, 202, "Pi still receives the command so its extension can present usage");
+    const view = await (await fetch(`http://127.0.0.1:${address.port}/api/sessions/${id}/view`)).json() as { gateMode?: string };
+    assert.equal(view.gateMode, "open", "an unsupported once command must not alter the authoritative mode");
+    assert.equal(commands.filter((command) => command.type === "prompt").at(-1)?.message, "/gate once");
+    emit({ type: "extension_ui_request", method: "notify", message: "Usage: /gate status|open|strict" });
+    assert.equal((await (await fetch(`http://127.0.0.1:${address.port}/api/sessions/${id}/view`)).json() as { gateMode?: string }).gateMode, "open");
   } finally {
     server.close();
+    await app.close();
+  }
+});
+
+test("Gate mode broadcasts before post-command state probing can fail", async () => {
+  const path = "C:\\sessions\\gate-failure.jsonl";
+  const id = idForPath(path);
+  let failNextState = false;
+  const rpc = {
+    onEvent: () => () => {},
+    send: async (command: Record<string, unknown>) => {
+      if (command.type === "get_commands") return { type: "response", success: true, data: { commands: [{ name: "gate", source: "extension" }] } };
+      if (command.type === "prompt") { failNextState = true; return { type: "response", success: true }; }
+      if (command.type === "get_state") {
+        if (failNextState) { failNextState = false; throw new Error("post-command state failed"); }
+        return { type: "response", success: true, data: { model: null, sessionFile: path, sessionId: "gate-failure", isStreaming: false } };
+      }
+      if (command.type === "get_messages") return { type: "response", success: true, data: { messages: [] } };
+      if (command.type === "get_available_models") return { type: "response", success: true, data: { models: [] } };
+      if (command.type === "get_session_stats") return { type: "response", success: true, data: { tokens: {} } };
+      return { type: "response", success: true };
+    },
+  } as unknown as PiRpcClient;
+  const sessions = {
+    list: async () => [{ id, sessionId: "gate-failure", name: "Gate", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 0, active: true }],
+    pathForId: () => path,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const frames: string[] = [];
+  const clients = (app as unknown as { sseClients: Map<{ write: (frame: string) => void }, string> }).sseClients;
+  clients.set({ write: (frame) => { frames.push(frame); } }, "");
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    assert.equal((await fetch(`http://127.0.0.1:${address.port}/api/bootstrap`)).status, 200);
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/chat/prompt`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "/gate open" }),
+    });
+    assert.equal(response.status, 500);
+    const frame = frames.find((candidate) => candidate.includes("pi_chat_gate_mode_changed"));
+    assert.ok(frame);
+    const event = JSON.parse(frame.split("data: ")[1]) as { mode?: string; piChatSessionId?: string };
+    assert.equal(event.mode, "open");
+    assert.equal(event.piChatSessionId, id);
+    const bootstrap = await (await fetch(`http://127.0.0.1:${address.port}/api/bootstrap`)).json() as { gateMode?: string };
+    assert.equal(bootstrap.gateMode, "open");
+  } finally {
+    server.close();
+    clients.clear();
     await app.close();
   }
 });
@@ -214,6 +300,220 @@ test("viewing a cold session returns history before its runtime finishes restori
   }
 });
 
+test("busy secondary Session view uses persisted snapshot and does not wait on its busy RPC", async () => {
+  const primaryPath = "C:\\sessions\\primary.jsonl";
+  const secondaryPath = "C:\\sessions\\secondary.jsonl";
+  const { idForPath } = await import("../src/server/session-index");
+  const primaryId = idForPath(primaryPath);
+  const secondaryId = idForPath(secondaryPath);
+  const primary = {
+    onEvent: () => () => {},
+    isRunning: () => true,
+    send: async (command: Record<string, unknown>) => {
+      if (command.type === "get_state") return { type: "response", success: true, data: { model: null, sessionFile: primaryPath, sessionId: "primary", isStreaming: false } };
+      throw new Error(`Unexpected primary RPC command: ${String(command.type)}`);
+    },
+  } as unknown as PiRpcClient;
+  const secondaryCommands: string[] = [];
+  const secondary = {
+    onEvent: () => () => {},
+    isRunning: () => true,
+    start: async () => {},
+    stop: async () => {},
+    send: async (command: Record<string, unknown>) => {
+      secondaryCommands.push(String(command.type));
+      if (command.type === "get_state") return { type: "response", success: true, data: { model: null, sessionFile: secondaryPath, sessionId: "secondary", isStreaming: true } };
+      // A busy worker would make these slow in production. The regression is that
+      // navigation must not issue them at all once a persisted snapshot exists.
+      if (["get_commands", "get_messages", "get_session_stats"].includes(String(command.type))) return new Promise<Record<string, unknown>>(() => {});
+      throw new Error(`Unexpected secondary RPC command: ${String(command.type)}`);
+    },
+  } as unknown as PiRpcClient;
+  const primarySummary = { id: primaryId, sessionId: "primary", name: "Primary", preview: "primary", cwd: process.cwd(), updatedAt: 1, lastUserPromptAt: 1, messageCount: 1, active: true };
+  const secondarySummary = { id: secondaryId, sessionId: "secondary", name: "Secondary", preview: "secondary", cwd: process.cwd(), updatedAt: 2, lastUserPromptAt: 2, messageCount: 1, active: false };
+  const snapshot = {
+    messages: [{ role: "user", content: "secondary question" }],
+    usage: { tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, context: null },
+    settings: {},
+  };
+  const sessions = {
+    list: async () => [primarySummary, secondarySummary],
+    pathForId: (id: string) => id === primaryId ? primaryPath : id === secondaryId ? secondaryPath : null,
+    summaryForId: (id: string) => id === secondaryId ? secondarySummary : id === primaryId ? primarySummary : null,
+    cachedSnapshotForId: (id: string) => id === secondaryId ? snapshot : null,
+    snapshotForId: async (id: string) => id === secondaryId ? snapshot : null,
+    messagesForId: async () => null,
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({
+    rpc: primary,
+    createRpc: () => secondary,
+    sessions,
+    resources: {} as ResourceManager,
+    cwd: process.cwd(),
+    webRoot: process.cwd(),
+  });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    // Activate first so PiChatApp owns a known Secondary Runtime, then make its
+    // process appear busy before requesting the view again.
+    const activated = await fetch(`${origin}/api/sessions/${secondaryId}/activate`, { method: "POST" });
+    assert.equal(activated.status, 200);
+    secondaryCommands.length = 0;
+    const started = Date.now();
+    const response = await fetch(`${origin}/api/sessions/${secondaryId}/view`);
+    assert.equal(response.status, 200);
+    assert.ok(Date.now() - started < 250, "busy Session view should not wait for RPC probes");
+    const view = await response.json() as { isStreaming: boolean; messages: Array<{ content: string }> };
+    assert.equal(view.isStreaming, true);
+    assert.deepEqual(view.messages.map((message) => message.content), ["secondary question"]);
+    assert.deepEqual(secondaryCommands, []);
+
+    // Even before the index owns a parsed snapshot, a known busy Runtime must
+    // return promptly rather than synchronously parse its continuously-written
+    // JSONL or wait on a queued read RPC. SSE supplies the live assistant draft.
+    const mutableSessions = sessions as unknown as {
+      cachedSnapshotForId: () => null;
+      snapshotForId: () => Promise<never>;
+      messagesForId: () => Promise<never>;
+    };
+    mutableSessions.cachedSnapshotForId = () => null;
+    mutableSessions.snapshotForId = async () => { throw new Error("busy view must not read a cold snapshot"); };
+    mutableSessions.messagesForId = async () => { throw new Error("busy view must not read messages"); };
+    secondaryCommands.length = 0;
+    const uncachedStarted = Date.now();
+    const uncachedResponse = await fetch(`${origin}/api/sessions/${secondaryId}/view`);
+    assert.equal(uncachedResponse.status, 200);
+    assert.ok(Date.now() - uncachedStarted < 250, "cold busy Session view should still return immediately");
+    const uncachedView = await uncachedResponse.json() as { messages: Array<{ content: string }>; isStreaming: boolean };
+    assert.deepEqual(uncachedView.messages.map((message) => message.content), ["secondary question"]);
+    assert.equal(uncachedView.isStreaming, true);
+    assert.deepEqual(secondaryCommands, []);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("busy secondary views retain terminal assistant and tool-result messages before settlement", async () => {
+  const primaryPath = "C:\\sessions\\terminal-primary.jsonl";
+  const secondaryPath = "C:\\sessions\\terminal-secondary.jsonl";
+  const { idForPath } = await import("../src/server/session-index");
+  const primaryId = idForPath(primaryPath);
+  const secondaryId = idForPath(secondaryPath);
+  const primary = {
+    onEvent: () => () => {},
+    isRunning: () => true,
+    send: async (command: Record<string, unknown>) => {
+      if (command.type === "get_state") return { type: "response", success: true, data: { model: null, sessionFile: primaryPath, sessionId: "primary", isStreaming: false } };
+      throw new Error(`Unexpected primary RPC command: ${String(command.type)}`);
+    },
+  } as unknown as PiRpcClient;
+  let listener: ((event: Record<string, unknown>) => void) | undefined;
+  const secondaryCommands: string[] = [];
+  const secondary = {
+    onEvent: (next: (event: Record<string, unknown>) => void) => { listener = next; return () => {}; },
+    isRunning: () => true,
+    start: async () => {},
+    stop: async () => {},
+    send: async (command: Record<string, unknown>) => {
+      secondaryCommands.push(String(command.type));
+      if (command.type === "get_state") return { type: "response", success: true, data: { model: null, sessionFile: secondaryPath, sessionId: "secondary", isStreaming: false } };
+      if (command.type === "get_session_stats") return { type: "response", success: true, data: { tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
+      if (command.type === "get_commands") return { type: "response", success: true, data: { commands: [] } };
+      if (command.type === "get_messages") return { type: "response", success: true, data: { messages: [{ role: "user", content: "inspect" }] } };
+      throw new Error(`Unexpected secondary RPC command: ${String(command.type)}`);
+    },
+  } as unknown as PiRpcClient;
+  const primarySummary = { id: primaryId, sessionId: "primary", name: "Primary", preview: "primary", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true };
+  const secondarySummary = { id: secondaryId, sessionId: "secondary", name: "Secondary", preview: "inspect", cwd: process.cwd(), updatedAt: 2, messageCount: 1, active: false };
+  const snapshot = { messages: [{ role: "user", content: "inspect", timestamp: 1 }], usage: { tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, context: null }, settings: {} };
+  const sessions = {
+    list: async () => [primarySummary, secondarySummary],
+    pathForId: (id: string) => id === primaryId ? primaryPath : id === secondaryId ? secondaryPath : null,
+    summaryForId: (id: string) => id === secondaryId ? secondarySummary : id === primaryId ? primarySummary : null,
+    cachedSnapshotForId: (id: string) => id === secondaryId ? snapshot : null,
+    snapshotForId: async (id: string) => id === secondaryId ? snapshot : null,
+    messagesForId: async (id: string) => id === secondaryId ? snapshot.messages : null,
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary, createRpc: () => secondary, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    assert.equal((await fetch(`${origin}/api/sessions/${secondaryId}/activate`, { method: "POST" })).status, 200);
+    secondaryCommands.length = 0;
+    listener?.({ type: "agent_start" });
+    listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "thinking", thinking: "read it" }, { type: "toolCall", id: "read-terminal", name: "read", arguments: { path: "file.ts" } }], timestamp: 2 } });
+    listener?.({ type: "message_end", message: { role: "toolResult", toolCallId: "read-terminal", toolName: "read", content: "contents", timestamp: 3 } });
+
+    const response = await fetch(`${origin}/api/sessions/${secondaryId}/view`);
+    assert.equal(response.status, 200);
+    const view = await response.json() as { isStreaming: boolean; messages: Array<{ role: string }> };
+    assert.equal(view.isStreaming, true);
+    assert.deepEqual(view.messages.map((message) => message.role), ["user", "assistant", "toolResult"]);
+    assert.deepEqual(secondaryCommands, []);
+
+    // agent_settled can arrive before JSONL/get_messages exposes the final rows.
+    // The first idle view must retain the terminal SSE tail instead of snapping
+    // back to the old persisted prefix.
+    listener?.({ type: "agent_settled" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    secondaryCommands.length = 0;
+    const settledResponse = await fetch(`${origin}/api/sessions/${secondaryId}/view`);
+    assert.equal(settledResponse.status, 200);
+    const settledView = await settledResponse.json() as { isStreaming: boolean; messages: Array<{ role: string }> };
+    assert.equal(settledView.isStreaming, false);
+    assert.deepEqual(settledView.messages.map((message) => message.role), ["user", "assistant", "toolResult"]);
+    assert.deepEqual(secondaryCommands, ["get_state", "get_session_stats", "get_commands"]);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("a rejected prompt does not reorder sidebar recency", async () => {
+  const { idForPath } = await import("../src/server/session-index");
+  const primaryPath = "C:\\sessions\\rejected-primary.jsonl";
+  const secondaryPath = "C:\\sessions\\rejected-secondary.jsonl";
+  const primaryId = idForPath(primaryPath);
+  const secondaryId = idForPath(secondaryPath);
+  const primary = {
+    onEvent: () => () => {},
+    isRunning: () => true,
+    send: async (command: Record<string, unknown>) => {
+      if (command.type === "get_state") return { type: "response", success: true, data: { model: null, sessionFile: primaryPath, sessionId: "primary", isStreaming: false } };
+      if (command.type === "get_messages") return { type: "response", success: true, data: { messages: [] } };
+      if (command.type === "get_available_models") return { type: "response", success: true, data: { models: [] } };
+      if (command.type === "get_commands") return { type: "response", success: true, data: { commands: [] } };
+      if (command.type === "get_session_stats") return { type: "response", success: true, data: { tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
+      if (command.type === "prompt") throw new Error("provider rejected prompt");
+      throw new Error(`Unexpected RPC command: ${String(command.type)}`);
+    },
+  } as unknown as PiRpcClient;
+  const sessions = {
+    list: async () => [
+      { id: primaryId, sessionId: "primary", name: "Primary", preview: "primary", cwd: process.cwd(), updatedAt: 10, lastUserPromptAt: 10, messageCount: 1, active: true },
+      { id: secondaryId, sessionId: "secondary", name: "Secondary", preview: "secondary", cwd: process.cwd(), updatedAt: 20, lastUserPromptAt: 20, messageCount: 1, active: false },
+    ],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), now: () => 100 });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    assert.equal((await fetch(`${origin}/api/bootstrap`)).status, 200);
+    const rejected = await fetch(`${origin}/api/chat/prompt`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message: "will fail" }) });
+    assert.equal(rejected.status, 500);
+    const sidebar = await (await fetch(`${origin}/api/sessions`)).json() as { sessions: Array<{ id: string }> };
+    assert.deepEqual(sidebar.sessions.map((session) => session.id), [secondaryId, primaryId]);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
 test("active session view restores the cached streaming draft after returning", async () => {
   const activePath = "C:\\sessions\\streaming.jsonl";
   const activeId = (await import("../src/server/session-index")).idForPath(activePath);
@@ -256,7 +556,7 @@ test("active session view restores the cached streaming draft after returning", 
   }
 });
 
-test("chat prompt API forwards validated images to Pi RPC", async () => {
+test("chat prompt API synchronizes Gate before forwarding validated images to Pi RPC", async () => {
   const commands: Record<string, unknown>[] = [];
   const rpc = {
     onEvent: () => () => {},
@@ -280,10 +580,13 @@ test("chat prompt API forwards validated images to Pi RPC", async () => {
     const response = await fetch(`http://127.0.0.1:${address.port}/api/chat/prompt`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ message: "查看图片", images: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }] }),
+      body: JSON.stringify({ message: "查看图片", gateMode: "strict", images: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }] }),
     });
     assert.equal(response.status, 202);
-    assert.deepEqual(commands, [{ type: "prompt", message: "查看图片", images: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }] }]);
+    assert.deepEqual(commands, [
+      { type: "prompt", message: "/gate strict" },
+      { type: "prompt", message: "查看图片", images: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }] },
+    ]);
   } finally {
     server.close();
     await app.close();

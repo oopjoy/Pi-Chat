@@ -1,4 +1,4 @@
-import type { BootstrapData, CustomModelInput, ExtensionResource, PackageResource, PromptImage, QueuedPrompt, ResourceResponse, SessionSummary, SessionViewData, SkillResource, ThinkingLevel } from "../shared/types";
+import type { BootstrapData, CustomModelInput, ExtensionResource, GateMode, PackageResource, PromptImage, QueuedPrompt, ResourceResponse, SessionSummary, SessionViewData, SkillResource, ThinkingLevel } from "../shared/types";
 
 const API_TIMEOUT_MS = 65_000;
 // Pi acknowledges a prompt only after preflight. Auto-compaction runs in that
@@ -100,9 +100,9 @@ export const api = {
   recoverConnection,
   closeWindow: () => request<{ shuttingDown: boolean; closeWindow: true; sessionId?: string; rested?: boolean; remainingWindows: number }>("/api/window/close", { method: "POST" }),
   shutdown: () => request<{ shuttingDown: true }>("/api/shutdown", { method: "POST" }),
-  prompt: (message: string, images: PromptImage[] = [], sessionId = "") => request<{ accepted: boolean; queued: boolean; extension?: boolean; command?: string; description?: string; isStreaming?: boolean; id?: string; queue?: QueuedPrompt[] }>("/api/chat/prompt", {
+  prompt: (message: string, images: PromptImage[] = [], sessionId = "", gateMode?: GateMode) => request<{ accepted: boolean; queued: boolean; extension?: boolean; command?: string; description?: string; isStreaming?: boolean; id?: string; queue?: QueuedPrompt[] }>("/api/chat/prompt", {
     method: "POST",
-    body: JSON.stringify({ message, sessionId, images: images.map(({ type, data, mimeType }) => ({ type, data, mimeType })) }),
+    body: JSON.stringify({ message, sessionId, gateMode, images: images.map(({ type, data, mimeType }) => ({ type, data, mimeType })) }),
   }, PROMPT_PREPARE_TIMEOUT_MS),
   pickLocalFiles: () => request<{ paths: string[] }>("/api/local-files/pick", { method: "POST" }),
   clipboardLocalFiles: () => request<{ paths: string[] }>("/api/local-files/clipboard", { method: "POST" }),
@@ -117,6 +117,7 @@ export const api = {
   clearSessionViewed: (sessionId: string) => request<{ viewing: string }>("/api/sessions/viewing/clear", { method: "POST", body: JSON.stringify({ sessionId }) }),
   activateSession: (id: string) => request<SessionViewData>(`/api/sessions/${id}/activate`, { method: "POST" }),
   sessions: (all = false) => request<{ sessions: SessionSummary[]; total: number }>(`/api/sessions${all ? "?all=1" : ""}`),
+  releaseSession: (id: string) => request<{ released: true; sessionId: string; activeSessionIds: string[] }>(`/api/sessions/${id}/release`, { method: "POST" }),
   renameSession: (id: string, name: string) => request<BootstrapData>(`/api/sessions/${id}`, { method: "PATCH", body: JSON.stringify({ name }) }),
   deleteSession: (id: string) => request<BootstrapData>(`/api/sessions/${id}`, { method: "DELETE" }),
   customModel: (provider: string, modelId: string) => request<{ model: CustomModelInput }>(`/api/models/${encodeURIComponent(provider)}/${encodeURIComponent(modelId)}`),

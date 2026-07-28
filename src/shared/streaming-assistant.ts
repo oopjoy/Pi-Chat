@@ -38,3 +38,159 @@ export function normalizeStreamingAssistantMessage(message: PiMessage, assistant
   blocks[contentIndex] = normalized;
   return { ...message, content: blocks };
 }
+
+function contentIdentity(content: PiMessage["content"]): string {
+  const canonical = typeof content === "string"
+    ? [{ type: "text", text: content }]
+    : content ?? null;
+  try { return JSON.stringify(canonical) ?? String(canonical ?? ""); }
+  catch { return String(canonical ?? ""); }
+}
+
+/** Pi exposes no universal message ID, so prefer stable terminal identifiers. */
+export function messageIdentity(message: PiMessage): string {
+  if (message.role === "toolResult" && message.toolCallId) return `tool:${message.toolCallId}`;
+  if (typeof message.timestamp === "number" && Number.isFinite(message.timestamp)) return `time:${message.role}:${message.timestamp}`;
+  return `content:${message.role}:${message.toolCallId || ""}:${message.toolName || ""}:${contentIdentity(message.content)}`;
+}
+
+export function sameMessage(left: PiMessage, right: PiMessage): boolean {
+  if (left.role !== right.role) return false;
+  if (left.role === "toolResult" && (left.toolCallId || right.toolCallId)) return left.toolCallId === right.toolCallId;
+  const leftTime = typeof left.timestamp === "number" && Number.isFinite(left.timestamp) ? left.timestamp : undefined;
+  const rightTime = typeof right.timestamp === "number" && Number.isFinite(right.timestamp) ? right.timestamp : undefined;
+  if (leftTime !== undefined && rightTime !== undefined && leftTime !== rightTime) return false;
+  return left.toolCallId === right.toolCallId
+    && left.toolName === right.toolName
+    && left.summary === right.summary
+    && left.tokensBefore === right.tokensBefore
+    && contentIdentity(left.content) === contentIdentity(right.content);
+}
+
+export function userTurnCount(messages: PiMessage[]): number {
+  return messages.filter((message) => message.role === "user").length;
+}
+
+/**
+ * Treat persisted JSONL/RPC history as authoritative and retain only terminal
+ * SSE rows that the persisted branch has not exposed yet. This deliberately
+ * rejects arbitrary stale Runtime history, which may contain duplicated or
+ * abandoned branch segments.
+ */
+export function reconcilePersistedHistory(persisted: PiMessage[], terminalTail: PiMessage[]): { messages: PiMessage[]; pending: PiMessage[] } {
+  const uniqueTail = terminalTail.reduce<PiMessage[]>((unique, terminal) => appendTerminalMessage(unique, terminal), []);
+  const persistedTimes = persisted
+    .map((message) => typeof message.timestamp === "number" && Number.isFinite(message.timestamp) ? message.timestamp : undefined)
+    .filter((value): value is number => value !== undefined);
+  const persistedWatermark = persistedTimes.length ? Math.max(...persistedTimes) : undefined;
+  const pending = uniqueTail.filter((terminal) => {
+    if (persisted.some((message) => sameMessage(message, terminal))) return false;
+    const terminalTime = typeof terminal.timestamp === "number" && Number.isFinite(terminal.timestamp) ? terminal.timestamp : undefined;
+    // A stale persisted prefix ends before the terminal and must retain it. If
+    // the authoritative branch has advanced beyond an absent terminal, the row
+    // belonged to a rewound/abandoned branch and must not be resurrected.
+    return terminalTime === undefined || persistedWatermark === undefined || persistedWatermark <= terminalTime;
+  });
+  return {
+    messages: pending.reduce((messages, terminal) => appendTerminalMessage(messages, terminal), [...persisted]),
+    pending,
+  };
+}
+
+/** Add a terminal Pi message exactly once, replacing an earlier form if needed. */
+export function appendTerminalMessage(messages: PiMessage[], message: PiMessage): PiMessage[] {
+  const hasStableIdentity = (message.role === "toolResult" && Boolean(message.toolCallId))
+    || (typeof message.timestamp === "number" && Number.isFinite(message.timestamp));
+  const index = hasStableIdentity
+    ? messages.findIndex((candidate) => sameMessage(candidate, message))
+    : messages.length && sameMessage(messages[messages.length - 1], message) ? messages.length - 1 : -1;
+  if (index < 0) return [...messages, message];
+  if (messages[index] === message) return messages;
+  const next = [...messages];
+  next[index] = message;
+  return next;
+}
+
+export function messageSequenceAt(haystack: PiMessage[], needle: PiMessage[]): number {
+  if (!needle.length) return 0;
+  if (needle.length > haystack.length) return -1;
+  outer: for (let start = 0; start <= haystack.length - needle.length; start += 1) {
+    for (let index = 0; index < needle.length; index += 1) {
+      if (!sameMessage(haystack[start + index], needle[index])) continue outer;
+    }
+    return start;
+  }
+  return -1;
+}
+
+function suffixPrefixOverlap(left: PiMessage[], right: PiMessage[]): number {
+  const maximum = Math.min(left.length, right.length);
+  for (let size = maximum; size > 0; size -= 1) {
+    let matches = true;
+    for (let index = 0; index < size; index += 1) {
+      if (!sameMessage(left[left.length - size + index], right[index])) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches) return size;
+  }
+  return 0;
+}
+
+function timestamp(message: PiMessage): number | undefined {
+  return typeof message.timestamp === "number" && Number.isFinite(message.timestamp) ? message.timestamp : undefined;
+}
+
+type DisjointHistoryOrder = "current-first" | "incoming-first";
+
+function mergeDisjointHistory(left: PiMessage[], right: PiMessage[], order: DisjointHistoryOrder): PiMessage[] {
+  const first = order === "incoming-first" ? right : left;
+  const second = order === "incoming-first" ? left : right;
+  const uniqueConcat = (base: PiMessage[], tail: PiMessage[]): PiMessage[] => tail.reduce(
+    (merged, message) => merged.some((candidate) => sameMessage(candidate, message)) ? merged : [...merged, message],
+    [...base],
+  );
+  const leftTimes = left.map(timestamp);
+  const rightTimes = right.map(timestamp);
+  const allTimestamped = [...leftTimes, ...rightTimes].every((value) => value !== undefined);
+  if (!allTimestamped) return uniqueConcat(first, second);
+
+  const leftMin = Math.min(...leftTimes as number[]);
+  const leftMax = Math.max(...leftTimes as number[]);
+  const rightMin = Math.min(...rightTimes as number[]);
+  const rightMax = Math.max(...rightTimes as number[]);
+  if (leftMax <= rightMin && leftMin < rightMin) return uniqueConcat(left, right);
+  if (rightMax <= leftMin && rightMin < leftMin) return uniqueConcat(right, left);
+
+  const preferredSource = order === "incoming-first" ? 1 : 0;
+  const tagged = [...left.map((message, index) => ({ message, source: 0, index })), ...right.map((message, index) => ({ message, source: 1, index }))];
+  tagged.sort((a, b) => {
+    const leftTime = timestamp(a.message) as number;
+    const rightTime = timestamp(b.message) as number;
+    if (leftTime !== rightTime) return leftTime - rightTime;
+    if (a.source !== b.source) return a.source === preferredSource ? -1 : 1;
+    return a.index - b.index;
+  });
+  return tagged.reduce<PiMessage[]>((merged, entry) => {
+    if (merged.some((candidate) => sameMessage(candidate, entry.message))) return merged;
+    merged.push(entry.message);
+    return merged;
+  }, []);
+}
+
+/** Keep terminal SSE messages when a delayed disk/RPC history is shorter. */
+export function mergeMessageHistory(current: PiMessage[], incoming: PiMessage[], disjointOrder: DisjointHistoryOrder = "current-first"): PiMessage[] {
+  if (!current.length) return incoming;
+  if (!incoming.length) return current;
+  if (messageSequenceAt(incoming, current) >= 0) return incoming;
+  if (messageSequenceAt(current, incoming) >= 0) return current;
+  const forward = suffixPrefixOverlap(current, incoming);
+  if (forward) return [...current, ...incoming.slice(forward)];
+  const backward = suffixPrefixOverlap(incoming, current);
+  if (backward) return [...incoming, ...current.slice(backward)];
+  // A just-accepted terminal event may arrive before an async disk warmer has
+  // loaded the old prefix. With no common anchor, timestamps establish segment
+  // order; exact ties use the caller's explicit base direction.
+  return mergeDisjointHistory(current, incoming, disjointOrder);
+}

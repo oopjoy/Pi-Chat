@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import { spawn, type ChildProcess } from "node:child_process";
-import { closeSync, openSync } from "node:fs";
+import { closeSync, existsSync, openSync } from "node:fs";
 import { appendFile, rm } from "node:fs/promises";
-import { promoteStagedDist, rollbackPromotedDist, type DistPromotionPaths } from "./application-restart.js";
+import { join } from "node:path";
+import { promoteStagedDist, rollbackPromotedDist, terminateProcessTree, type DistPromotionPaths } from "./application-restart.js";
 
 type RestartPayload = {
   parentPid: number;
@@ -40,15 +41,21 @@ async function parentExited(pid: number): Promise<void> {
   throw new Error("等待旧 Pi Chat 服务退出超时");
 }
 
-function spawnServer(protectRollbackBackup: boolean): ChildProcess {
+function spawnServer(protectRollbackBackup: boolean, runtimeDist?: string): ChildProcess {
   const descriptor = openSync(logPath, "a");
+  const args = [...payload.args as string[]];
+  if (runtimeDist) args[0] = join(runtimeDist, "server", "server", "index.js");
   try {
-    return spawn(payload.command as string, payload.args as string[], {
+    return spawn(payload.command as string, args, {
       cwd: payload.cwd as string,
       detached: true,
       stdio: ["ignore", descriptor, descriptor],
       windowsHide: true,
-      env: { ...process.env, ...(protectRollbackBackup ? { PI_CHAT_SKIP_STALE_DIST_CLEANUP: "1" } : {}) },
+      env: {
+        ...process.env,
+        ...(protectRollbackBackup ? { PI_CHAT_SKIP_STALE_DIST_CLEANUP: "1" } : {}),
+        ...(runtimeDist ? { PI_CHAT_RUNTIME_DIST: runtimeDist } : {}),
+      },
     });
   } finally {
     closeSync(descriptor);
@@ -78,11 +85,7 @@ async function waitForHealthy(child: ChildProcess): Promise<void> {
 
 async function stopCandidate(child: ChildProcess | undefined): Promise<void> {
   if (!child || child.exitCode !== null || child.signalCode !== null) return;
-  child.kill();
-  await Promise.race([
-    new Promise<void>((resolve) => child.once("exit", () => resolve())),
-    delay(5_000).then(() => undefined),
-  ]);
+  await terminateProcessTree(child, 2_000);
   await delay(150);
 }
 
@@ -108,14 +111,27 @@ try {
   } catch (candidateError) {
     await log(`候选 Pi Chat 启动失败：${candidateError instanceof Error ? candidateError.message : String(candidateError)}`);
     await stopCandidate(candidate);
-    if (promoted && payload.promoteAfterExit) {
-      await rollbackPromotedDist(payload.promoteAfterExit.liveDist, payload.promoteAfterExit.previousDist);
-      await log("已恢复旧 dist，正在重新启动旧版本。");
+    let fallbackDist: string | undefined;
+    if (payload.promoteAfterExit) {
+      const { liveDist, previousDist } = payload.promoteAfterExit;
+      if (promoted) {
+        try {
+          await rollbackPromotedDist(liveDist, previousDist);
+          await log("已恢复旧 dist，正在重新启动旧版本。");
+        } catch (rollbackError) {
+          await log(`标准回滚失败，将直接从旧版本备份启动：${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
+          if (existsSync(join(previousDist, "server", "server", "index.js"))) fallbackDist = previousDist;
+          else throw rollbackError;
+        }
+      } else if (!existsSync(join(liveDist, "server", "server", "index.js")) && existsSync(join(previousDist, "server", "server", "index.js"))) {
+        fallbackDist = previousDist;
+        await log("Promotion 失败且 live dist 不完整，将直接从旧版本备份启动。");
+      }
     }
-    const fallback = spawnServer(false);
+    const fallback = spawnServer(Boolean(fallbackDist), fallbackDist);
     await waitForHealthy(fallback);
     fallback.unref();
-    await log("旧版本已恢复并通过健康检查。");
+    await log(fallbackDist ? "旧版本已从备份目录直接启动并通过健康检查。" : "旧版本已恢复并通过健康检查。");
   }
 } catch (error) {
   await log(`Pi Chat handoff 失败：${error instanceof Error ? error.message : String(error)}`);

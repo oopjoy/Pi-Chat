@@ -2,14 +2,16 @@
  * Pi Chat File Permission Gate
  * Pi Chat system component: file-permission-gate; version: 1
  *
- * 随 Pi Chat 发布，拦截所有 写/编辑/删除 操作，弹窗请求用户确认后才能执行。
- * 覆盖的工具：write, edit, bash (rm/del)
+ * 随 Pi Chat 发布：严格模式确认 write/edit，并对能明确识别的高风险 Bash
+ * 命令额外确认。Bash 可运行任意 shell、PowerShell 或脚本，无法完整识别全部
+ * 副作用；这是一层辅助防护，不是 sandbox。
+ * 覆盖的工具：write, edit, bash（已识别的高风险命令）
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import * as path from "node:path";
 
-type GateMode = "strict" | "open" | "once";
+type GateMode = "strict" | "open";
 
 export default function (pi: ExtensionAPI) {
 	let gateMode: GateMode = "strict";
@@ -24,13 +26,13 @@ export default function (pi: ExtensionAPI) {
 	];
 
 	pi.registerCommand("gate", {
-		description: "Control file permission gate: /gate status|open|strict|once",
+		description: "Control file permission gate: /gate status|open|strict",
 		handler: async (args, ctx) => {
 			const command = args.trim().toLowerCase();
 
 			if (!command || command === "status") {
 				ctx.ui.notify(
-					`Gate mode: ${gateMode}\nCommands: /gate open, /gate strict, /gate once, /gate status`,
+					`Gate mode: ${gateMode}\nCommands: /gate open, /gate strict, /gate status`,
 					"info",
 				);
 				return;
@@ -40,7 +42,7 @@ export default function (pi: ExtensionAPI) {
 				gateMode = "open";
 				// Always lead with "Gate mode: …" so Pi Chat UI can resync after RPC restart.
 				ctx.ui.notify(
-					"Gate mode: open\nwrite/edit and destructive bash will be allowed without prompts. Use /gate strict to re-enable prompts.",
+					"Gate mode: open\nwrite/edit and recognized high-risk Bash commands will be allowed without prompts. Use /gate strict to re-enable prompts.",
 					"warning",
 				);
 				return;
@@ -48,17 +50,11 @@ export default function (pi: ExtensionAPI) {
 
 			if (["strict", "on", "close", "closed", "enable"].includes(command)) {
 				gateMode = "strict";
-				ctx.ui.notify("Gate mode: strict\nwrite/edit and destructive bash will ask for confirmation.", "info");
+				ctx.ui.notify("Gate mode: strict\nwrite/edit will ask for confirmation; recognized high-risk Bash commands will also ask. Bash side-effect detection is limited.", "info");
 				return;
 			}
 
-			if (["once", "next"].includes(command)) {
-				gateMode = "once";
-				ctx.ui.notify("Gate mode: once\nThe next write/edit/destructive bash call will be allowed, then return to strict mode.", "warning");
-				return;
-			}
-
-			ctx.ui.notify("Usage: /gate status|open|strict|once", "warning");
+			ctx.ui.notify("Usage: /gate status|open|strict", "warning");
 		},
 	});
 
@@ -77,12 +73,6 @@ export default function (pi: ExtensionAPI) {
 			);
 
 			if (gateMode === "open") return undefined;
-			if (gateMode === "once") {
-				gateMode = "strict";
-				ctx.ui?.notify?.(`Gate one-shot allow used for ${tool}: ${displayName}`, "info");
-				return undefined;
-			}
-
 			if (!ctx.hasUI) {
 				ctx.ui?.notify?.(`Blocked ${tool}: ${displayName} (no interactive UI)`, "warning");
 				return { block: true, reason: "File write/edit blocked: no UI for confirmation" };
@@ -109,12 +99,6 @@ export default function (pi: ExtensionAPI) {
 			if (!isDestructive) return undefined;  // 安全命令直接放行
 
 			if (gateMode === "open") return undefined;
-			if (gateMode === "once") {
-				gateMode = "strict";
-				ctx.ui?.notify?.("Gate one-shot allow used for destructive bash.", "info");
-				return undefined;
-			}
-
 			if (!ctx.hasUI) {
 				return { block: true, reason: "Destructive bash command blocked (no UI)" };
 			}

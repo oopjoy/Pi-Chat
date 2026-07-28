@@ -1,136 +1,24 @@
-import { useEffect, useRef, useState, type CSSProperties } from "react";
-import type { ModelInfo, PiState, SessionStats, ThinkingLevel } from "../../shared/types";
-import type { GateMode } from "../lib/gate-mode";
-import { CompactSelect } from "./CompactSelect";
-import { GateControl } from "./GateControl";
-import { CheckIcon, ChipIcon, PanelRightIcon } from "./Icons";
-import { contextUsageTone } from "../lib/context-usage";
+import { PanelRightIcon, SettingsIcon } from "./Icons";
 
-function modelValue(model: Pick<ModelInfo, "provider" | "id">): string {
-  return `${model.provider}\u0000${model.id}`;
-}
-
-function compactTokens(value: number | undefined | null): string {
-  if (typeof value !== "number" || !Number.isFinite(value)) return "—";
-  if (Math.abs(value) >= 1_000_000) return `${(value / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
-  if (Math.abs(value) >= 1_000) return `${(value / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
-  return String(Math.round(value));
-}
-
-const THINKING_LEVELS: Array<{ value: ThinkingLevel; label: string }> = [
-  { value: "off", label: "关闭" },
-  { value: "minimal", label: "Minimal" },
-  { value: "low", label: "Low" },
-  { value: "medium", label: "Medium" },
-  { value: "high", label: "High" },
-  { value: "xhigh", label: "XHigh" },
-  { value: "max", label: "Max" },
-];
-
-function formatPercent(percent: number | null): string {
-  return percent === null ? "—" : `${percent.toFixed(1).replace(/\.0$/, "")}%`;
-}
-
-/**
- * Compact context-occupancy indicator. Cumulative token counters are
- * diagnostic-only, so they live in the hover/focus card instead of the bar.
- */
-function UsageStats({ stats, isCompacting }: { stats?: SessionStats; isCompacting?: boolean }) {
-  const usage = stats?.tokens;
-  const context = stats?.contextUsage;
-  const pendingRefresh = stats?.contextUsagePendingRefresh === true;
-  const percent = pendingRefresh ? null : typeof context?.percent === "number" ? Math.max(0, Math.min(100, context.percent)) : null;
-  const tone = pendingRefresh ? "normal" : contextUsageTone(percent, isCompacting);
-  const percentText = formatPercent(percent);
-  const text = `${pendingRefresh ? "?" : percentText}/${compactTokens(context?.contextWindow)}`;
-  const ringPercent = pendingRefresh ? 33.333 : percent ?? 0;
-  return (
-    <div className={`usage-pill is-${tone}`} tabIndex={0} aria-label={`会话上下文用量 ${pendingRefresh ? "待更新" : text}`}>
-      <i className="context-donut" style={{ "--context-percent": `${ringPercent}%` } as CSSProperties} aria-hidden="true" />
-      <span>{text}</span>
-      <div className="usage-card" role="tooltip">
-        <dl>
-          <div><dt>上下文</dt><dd>{pendingRefresh ? "?" : compactTokens(context?.tokens)} / {compactTokens(context?.contextWindow)}（{pendingRefresh ? "待更新" : percentText}）</dd></div>
-          <div><dt>累计输入</dt><dd>{compactTokens(usage?.input)}</dd></div>
-          <div><dt>累计输出</dt><dd>{compactTokens(usage?.output)}</dd></div>
-          <div><dt>缓存读取</dt><dd>{compactTokens(usage?.cacheRead)}</dd></div>
-        </dl>
-        {pendingRefresh && <p>执行对话以更新上下文占比</p>}
-      </div>
-    </div>
-  );
-}
-
-export function TopBar({ state, models, stats, conversationName, workspacePath, disabled, settingsBusy = false, streaming, gateAvailable, gateMode, onGate, onModel, onThinking, diffSidebarOpen, onToggleDiffSidebar }: {
-  state: PiState;
-  models: ModelInfo[];
-  stats?: SessionStats;
+export function TopBar({ conversationName, workspacePath, settingsOpen, onOpenSettings, diffSidebarOpen, onToggleDiffSidebar }: {
   conversationName: string;
   workspacePath: string;
-  /** Gate / foreign control / lifecycle — may lock all top-bar controls. */
-  disabled: boolean;
-  /** Model / thinking only: cold Runtime activate should not freeze the whole page. */
-  settingsBusy?: boolean;
-  streaming: boolean;
-  gateAvailable: boolean;
-  gateMode: GateMode;
-  onGate: (mode: GateMode) => void;
-  onModel: (provider: string, id: string) => void;
-  onThinking: (level: ThinkingLevel) => void;
+  settingsOpen: boolean;
+  onOpenSettings: () => void;
   diffSidebarOpen: boolean;
   onToggleDiffSidebar: () => void;
 }) {
-  const current = state.model ? modelValue(state.model) : "";
-  const currentModel = models.find((model) => modelValue(model) === current);
-  const modelControlsDisabled = disabled || settingsBusy;
-  const [modelMenuOpen, setModelMenuOpen] = useState(false);
-  const modelMenuRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!modelMenuOpen) return;
-    const closeOnOutsideClick = (event: MouseEvent) => {
-      if (!modelMenuRef.current?.contains(event.target as Node)) setModelMenuOpen(false);
-    };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setModelMenuOpen(false);
-    };
-    window.addEventListener("mousedown", closeOnOutsideClick);
-    window.addEventListener("keydown", closeOnEscape);
-    return () => {
-      window.removeEventListener("mousedown", closeOnOutsideClick);
-      window.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [modelMenuOpen]);
   return (
     <header className="topbar">
       <div className="topbar-context" title={`当前对话：${conversationName}\n工作路径：${workspacePath}`}>
         <strong className="topbar-title">{conversationName}</strong>
       </div>
-      <div className="topbar-indicators">
-        <UsageStats stats={stats} isCompacting={state.isCompacting} />
-      </div>
       <div className="topbar-controls">
-        {gateAvailable && <GateControl mode={gateMode} disabled={disabled} onChange={onGate} />}
-        <div className="model-controls" title={settingsBusy ? "正在切换模型或思考强度…" : streaming ? "当前回复不会中断；新设置将在下一轮对话生效" : undefined}>
-          <div className="model-menu" ref={modelMenuRef}>
-            <button type="button" className={`model-menu-trigger${settingsBusy ? " is-busy" : ""}`} disabled={modelControlsDisabled || !models.length} aria-label="模型" aria-busy={settingsBusy || undefined} aria-haspopup="listbox" aria-expanded={modelMenuOpen} onClick={() => setModelMenuOpen((open) => !open)}>
-              <ChipIcon className="model-icon" />
-              <span>{currentModel?.name || state.model?.id || "未选择"}</span>
-              <i className="model-menu-chevron" aria-hidden="true" />
-            </button>
-            {modelMenuOpen && <div className="model-menu-popover" role="listbox" aria-label="选择模型">
-              {models.map((model) => {
-                const selected = modelValue(model) === current;
-                return <button type="button" key={modelValue(model)} className={selected ? "is-selected" : ""} role="option" aria-selected={selected} disabled={settingsBusy} onClick={() => { setModelMenuOpen(false); onModel(model.provider, model.id); }}>
-                  <span>{model.name || model.id}</span>{selected && <CheckIcon />}
-                </button>;
-              })}
-            </div>}
-          </div>
-          <CompactSelect value={(state.thinkingLevel || "off") as ThinkingLevel} options={THINKING_LEVELS} disabled={modelControlsDisabled || !state.model?.reasoning} ariaLabel="思考强度" title="思考强度" align="right" className="thinking-select" onChange={onThinking} />
-        </div>
         <button type="button" className={`diff-sidebar-toggle${diffSidebarOpen ? " is-open" : ""}`} onClick={onToggleDiffSidebar} aria-label={diffSidebarOpen ? "收起 Diff 侧栏" : "展开 Diff 侧栏"} aria-pressed={diffSidebarOpen} title={diffSidebarOpen ? "收起修改对比侧栏" : "展开修改对比侧栏"}>
           <PanelRightIcon aria-hidden="true" />
+        </button>
+        <button type="button" className={`topbar-settings${settingsOpen ? " is-open" : ""}`} onClick={onOpenSettings} aria-label={settingsOpen ? "关闭设置" : "打开设置"} aria-expanded={settingsOpen} aria-controls="pi-chat-settings-dialog" title={settingsOpen ? "关闭设置" : "设置"}>
+          <SettingsIcon aria-hidden="true" />
         </button>
       </div>
     </header>

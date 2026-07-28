@@ -28,7 +28,7 @@ export function findCompactSelectTypeaheadIndex(labels: string[], currentIndex: 
   return null;
 }
 
-export function CompactSelect<T extends string>({ value, options, disabled, ariaLabel, title, align = "left", icon, className = "", onChange }: {
+export function CompactSelect<T extends string>({ value, options, disabled, ariaLabel, title, align = "left", icon, checkPosition = "end", className = "", onChange }: {
   value: T;
   options: Array<CompactSelectOption<T>>;
   disabled?: boolean;
@@ -36,6 +36,7 @@ export function CompactSelect<T extends string>({ value, options, disabled, aria
   title?: string;
   align?: "left" | "right";
   icon?: ReactNode;
+  checkPosition?: "start" | "end";
   className?: string;
   onChange: (value: T) => void;
 }) {
@@ -143,8 +144,10 @@ export function CompactSelect<T extends string>({ value, options, disabled, aria
       {options.map((option, index) => {
         const isSelected = option.value === value;
         const isActive = index === activeIndex;
-        return <div id={`${id}-option-${index}`} key={option.value} className={`compact-select-option${isSelected ? " is-selected" : ""}${isActive ? " is-active" : ""}`} role="option" aria-selected={isSelected} onMouseMove={() => setActiveIndex(index)} onMouseDown={(event) => event.preventDefault()} onClick={() => chooseOption(index)}>
-          <span>{option.label}</span>{isSelected && <CheckIcon />}
+        return <div id={`${id}-option-${index}`} key={option.value} className={`compact-select-option${isSelected ? " is-selected" : ""}${isActive ? " is-active" : ""}${checkPosition === "start" ? " has-leading-check" : ""}`} role="option" aria-selected={isSelected} onMouseMove={() => setActiveIndex(index)} onMouseDown={(event) => event.preventDefault()} onClick={() => chooseOption(index)}>
+          {checkPosition === "start" && <span className="compact-select-check" aria-hidden="true">{isSelected && <CheckIcon />}</span>}
+          <span>{option.label}</span>
+          {checkPosition === "end" && isSelected && <CheckIcon />}
         </div>;
       })}
     </div>}

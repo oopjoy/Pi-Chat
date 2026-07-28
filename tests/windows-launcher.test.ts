@@ -66,9 +66,13 @@ test("launcher scripts derive paths dynamically and avoid unsafe PowerShell inte
   assert.match(installer, /GetFolderPath\('DesktopDirectory'\)/);
   assert.match(installer, /-Name 'Pi Chat' -Mode 'pwa'/);
   assert.match(installer, /-Name 'Pi Chat Web' -Mode 'web'/);
-  assert.match(readiness, /\/api\/health/);
-  assert.match(readiness, /service -eq 'pi-chat'/);
+  assert.match(readiness, /\/api\/bootstrap/);
+  assert.match(readiness, /bootstrap\.requestToken/);
+  assert.doesNotMatch(readiness, /\/api\/health/);
   assert.doesNotMatch(readiness, /Get-NetTCPConnection/);
+  assert.match(cmd, /if not exist "%~dp0dist\\server\\server\\index\.js"/i);
+  assert.match(cmd, /Pi Chat build is missing; building current source/i);
+  assert.doesNotMatch(cmd, /if exist "%~dp0src\\server\\index\.ts" \(\s*\r?\n\s*echo Building current Pi Chat source/i);
 });
 
 test("PowerShell launcher wrapper preserves exit code and captures output through metacharacter paths", { skip: process.platform !== "win32" }, async () => {

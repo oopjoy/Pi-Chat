@@ -113,7 +113,7 @@ Prefer small hooks and pure libs over growing `App.tsx` further.
 - Viewed idle runtimes may be reclaimed (not permanent pins)
 - Model/Thinking changes do not auto-claim control; foreign owners are rejected
 
-## Session control (0.3)
+## Session control (0.3.6)
 
 - Observing banner only when a **live** foreign SSE owner exists
 - Sole live window auto-claims; never stuck behind a ghost owner
@@ -125,7 +125,7 @@ Prefer small hooks and pure libs over growing `App.tsx` further.
 
 Prefer **RPC capability probe** over a hard Pi version allowlist.
 
-| Field | Value (0.3.0) |
+| Field | Value (0.3.6) |
 |---|---|
 | Required capabilities | `get_state`, `get_messages`, `get_available_models`, `get_commands`, `get_session_stats` |
 | Last verified Pi | 0.81.1 |

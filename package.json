@@ -1,6 +1,6 @@
 {
   "name": "pi-chat",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "private": true,
   "type": "module",
   "description": "A local-first Web/PWA client for Pi RPC",
@@ -32,14 +32,16 @@
     "start": "node dist/server/server/index.js",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit",
     "test": "node --test --import tsx tests/*.test.ts",
+    "test:e2e": "npm run build && playwright test",
+    "test:e2e:ui": "npm run build && playwright test --ui",
     "install:shortcuts": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-shortcuts.ps1"
   },
-  "dependencies": {},
   "devDependencies": {
-    "@vitejs/plugin-react": "^6.0.3",
+    "@playwright/test": "^1.62.0",
     "@types/node": "^24.10.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^6.0.3",
     "jsdom": "^26.1.0",
     "katex": "^0.16.22",
     "react": "^19.2.4",

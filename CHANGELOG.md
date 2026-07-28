@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.3.6
+
+### Reliable local-first sessions
+
+- Reworked Secondary Runtime admission, reclaim, and draft handoff so an empty draft cannot be reclaimed while its browser handoff or async emptiness probe is in flight
+- Queued Secondary prompts now perform the same acceptance bookkeeping as direct prompts: sidebar admission, branch-recency tracking, and snapshot warming occur after Pi accepts the prompt
+- Session view reconciliation now has an explicit SSE invalidation classifier, preventing old snapshots from overwriting newer queue, confirmation, Gate, control, process-status, stream, or transcript state
+- Protected optimistic user turns render exactly once when a background Session refresh races prompt acknowledgement
+- Terminal SSE assistant messages retain repaired cumulative content, and cache/reclaim/SSE heartbeat accounting has additional concurrency coverage
+
+### Composer, history, and Gate UX
+
+- Rebuilt the compact composer controls and responsive conversation shell; Model, Thinking, Gate, usage, queue, attachment, and stop controls stay session-scoped during streaming
+- Assistant footers show the persisted per-reply thinking strength alongside model metadata when available
+- Historical session snapshots restore persisted Model and Thinking settings without activating cold Runtimes
+- Gate now has only **严格** and **放行** modes. Strict always confirms `write` / `edit` and performs best-effort confirmation for recognized high-risk Bash commands; it does not claim to sandbox arbitrary shell side effects
+- Improved process disclosure, read-only edit diffs, queue/local-turn reconciliation, PWA EventSource recovery, navigation epoch isolation, and Windows launcher readiness
+
+### Validation and packaging
+
+- Added focused race, lifecycle, session-cache, SSE, Gate, UI, launcher, and Playwright coverage for the reliability changes
+- Added Playwright E2E test scripts and ignores for generated reports
+
 ## 0.3.5
 
 ### Diff review and session safety

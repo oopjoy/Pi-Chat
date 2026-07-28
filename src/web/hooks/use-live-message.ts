@@ -12,6 +12,20 @@ export function useLiveMessageScheduler(commitMessage: (message: PiMessage) => v
     pendingRef.current = null;
   }, []);
 
+  /**
+   * Terminal events can arrive inside the 50 ms render throttle. Preserve the
+   * newest cumulative snapshot instead of clearing the only thinking/tool-call
+   * payload before it was painted.
+   */
+  const drain = useCallback((): PiMessage | null => {
+    if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+    timerRef.current = null;
+    const latest = pendingRef.current;
+    pendingRef.current = null;
+    if (latest) lastCommitRef.current = performance.now();
+    return latest;
+  }, []);
+
   const schedule = useCallback((message: PiMessage) => {
     pendingRef.current = message;
     if (timerRef.current !== null) return;
@@ -29,5 +43,5 @@ export function useLiveMessageScheduler(commitMessage: (message: PiMessage) => v
   }, [commitMessage, intervalMs]);
 
   useEffect(() => clear, [clear]);
-  return { clearPendingLiveMessage: clear, scheduleLiveMessage: schedule };
+  return { clearPendingLiveMessage: clear, drainPendingLiveMessage: drain, scheduleLiveMessage: schedule };
 }

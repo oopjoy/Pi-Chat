@@ -20,7 +20,7 @@ Pi Chat 是一个连接本机 Pi RPC 的 local-first Web/PWA 客户端。它提�
 - 左侧“浏览工作目录”会弹出前台 Windows Explorer 文件夹窗口，可预览、浏览并选择本地目录；支持目录持久化，并按工作目录筛选 Sessions
 - 历史会话列表、切换和新建；打开或查看历史只读取并缓存 JSONL，不启动 Secondary Runtime。发送、Compact、Model/Thinking 等实际操作才按需恢复 Runtime 并显示绿色就绪灯；最多 5 个热对话（Primary + 4 个 Secondary），达到容量时优先 LRU 回收空闲 Secondary，正在显示的历史也可退回 view-only
 - 同一 Session 可在多个窗口观察，但同一时刻仅一个浏览器窗口可发送、停止、处理 Gate 或改队列；Model/Thinking 修改不会自动取得控制权，无 Owner 时可设置，存在其他窗口 Owner 时必须先显式接管
-- 文件权限 Gate：作为 Pi Chat 内置安全功能呈现；顶栏可切换“严格 / 仅一次 / 放行”，随应用自动安装、校验和修复的极小 Pi 工具执行适配器仍会在真实工具执行前拦截写入、编辑和危险 Bash
+- 文件权限 Gate：作为 Pi Chat 内置安全功能呈现；顶栏可切换“严格 / 放行”。严格模式始终确认 `write` / `edit`，并对可识别的高风险 Bash 做辅助确认；Bash 可运行任意脚本，副作用识别不构成完整 sandbox。随应用自动安装、校验和修复的极小 Pi 工具执行适配器仍在真实工具执行前运行
 - 侧栏提供独立刷新和“完整重启 Pi Chat 并应用更新”：应用级 Lifecycle Barrier 会在构建前同步阻止所有新写操作；新版本先在独立 staging 目录完成并验证，构建失败不会修改当前 `dist`，二次核验全部 Runtime、队列和确认状态通过后才提升产物并执行服务切换。维护期间历史、健康检查和只读 API 保持可用。设置中的“关闭 Pi Chat”同样先执行全局 Busy 检查，再关闭全部窗口、服务和托管 RPC
 - 外观设置：主题、字体、字号、行距和对话宽度
 - 可用模型列表、Models 面板与模型切换；支持基于 `~/.pi/agent/models.json` 的自定义模型 Add/Remove

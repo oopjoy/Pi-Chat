@@ -6,5 +6,9 @@ export function activeSessionIdsFromEvent(value: unknown): string[] {
 
 export function applyActiveSessionIds(sessions: SessionSummary[], ids: string[]): SessionSummary[] {
   const active = new Set(ids);
-  return sessions.map((session) => ({ ...session, writable: active.has(session.id) }));
+  return sessions.map((session) => ({
+    ...session,
+    writable: active.has(session.id),
+    ...(!active.has(session.id) ? { releasable: false } : null),
+  }));
 }
