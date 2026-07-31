@@ -5,7 +5,7 @@
   --reading-font-size: 15.5px;
   --reading-line-height: 1.66;
   --reading-width: 980px;
-  --chat-column-max: 1170px;
+  --chat-column-max: 1200px;
   --chat-column-gutter: 64px;
   --page: #ffffff;
   --surface: #ffffff;
@@ -378,13 +378,14 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .message-footer > button svg { width: 17px; height: 17px; }
 .streaming-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: pulse 1.2s infinite; }
 .message-content { overflow-wrap: anywhere; font-family: var(--reading-font); font-size: var(--reading-font-size); line-height: var(--reading-line-height); }
-.message-user .message-content { display: flex; width: fit-content; max-width: min(86%, calc(var(--reading-width) * .78)); margin-left: auto; padding: 10px 14px; flex-wrap: wrap; gap: 8px; border: 1px solid color-mix(in srgb, var(--accent), transparent 72%); border-radius: 14px 14px 4px 14px; background: var(--user); }
+.message-user .message-content { display: flex; box-sizing: border-box; width: fit-content; max-width: 90%; margin-left: auto; padding: 10px 14px; flex-wrap: wrap; gap: 8px; border: 1px solid color-mix(in srgb, var(--accent), transparent 72%); border-radius: 14px 14px 4px 14px; background: var(--user); }
 .user-plain-text { width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; }
 .message-user > header { justify-content: flex-end; }
 .message-image { display: block; max-width: min(320px, 100%); max-height: 320px; border-radius: 9px; object-fit: contain; }
 .message-assistant .message-content { padding: 2px 0 5px; }
 .message-assistant .markdown-body { font-weight: 400; }
 .message-assistant .markdown-body strong { font-weight: 650; }
+.message-assistant .markdown-body blockquote { border-left-color: var(--text); color: var(--text); font-weight: 650; }
 .message-assistant .code-head { font-family: var(--app-font); }
 .working, .agent-status { color: var(--muted); font-size: 12px; }
 .agent-status { display: flex; align-items: center; gap: 8px; padding: 5px 0 16px; }
@@ -817,7 +818,7 @@ details.conversation-process { display: block; padding: 0; }
   .composer-controls .gate-control { width: 64px; min-width: 64px; flex: 0 1 64px; }
   .composer-usage { min-width: 68px; flex: 0 0 auto; }
   .composer-actions { margin-left: auto; }
-  .message-user .message-content { max-width: 92%; }
+  .message-user .message-content { max-width: 90%; }
   .management-panel { width: 100%; }
   .management-head { min-height: 62px; padding: 10px 14px; }
   .panel-body { padding: 16px; }

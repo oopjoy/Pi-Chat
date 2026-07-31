@@ -33,10 +33,10 @@ test("step snapping corrects off-grid numbers to the nearest step", () => {
   assert.equal(snapToStep(42, 10, 30, 1), 30);
   assert.equal(snapToStep(1.55, 1.0, 3.0, 0.1), 1.6);
   assert.equal(snapToStep(1.54, 1.0, 3.0, 0.1), 1.5);
-  assert.equal(snapToStep(913, 600, 1500, 50), 900);
-  assert.equal(snapToStep(980, 600, 1500, 50), 1000);
+  assert.equal(snapToStep(913, 600, 1200, 50), 900);
+  assert.equal(snapToStep(980, 600, 1200, 50), 1000);
   assert.equal(snapToStep("abc", 10, 30, 1, 16), 16);
-  assert.equal(DEFAULT_APPEARANCE.chatWidth, snapToStep(DEFAULT_APPEARANCE.chatWidth, 600, 1500, 50));
+  assert.equal(DEFAULT_APPEARANCE.chatWidth, snapToStep(DEFAULT_APPEARANCE.chatWidth, 600, 1200, 50));
 });
 
 test("default appearance is an independent reset-safe value", () => {

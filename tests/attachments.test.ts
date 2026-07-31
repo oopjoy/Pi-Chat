@@ -35,6 +35,8 @@ test("session sidebar switches sessions without link navigation", async () => {
   assert.doesNotMatch(app, /onView=\{\(id\) => \{\s*setSidebarOpen\(false\);/);
   assert.match(sidebar, /menuSessionCanRelease[\s\S]*释放运行资源/);
   assert.match(app, /api\.releaseSession\(session\.id\)[\s\S]*runtimeStatus: "view-only"/);
+  const styles = await files.readFile(new URL("../src/web/styles.css", import.meta.url), "utf8");
+  assert.match(styles, /\.message-assistant \.markdown-body blockquote\s*\{[^}]*border-left-color:\s*var\(--text\)[^}]*color:\s*var\(--text\)[^}]*font-weight:\s*650/);
 });
 
 test("prompt image validation accepts Pi image content and rejects unsafe payloads", () => {

@@ -49,7 +49,7 @@ export function loadAppearance(): AppearancePreferences {
       font: ["system", "serif", "mono"].includes(saved.font || "") ? saved.font as FontPreference : DEFAULT_APPEARANCE.font,
       fontSize: snapToStep(saved.fontSize, 10, 30, 1, DEFAULT_APPEARANCE.fontSize),
       lineHeight: snapToStep(saved.lineHeight, 1.0, 3.0, 0.1, DEFAULT_APPEARANCE.lineHeight),
-      chatWidth: snapToStep(saved.chatWidth, 600, 1500, 50, DEFAULT_APPEARANCE.chatWidth),
+      chatWidth: snapToStep(saved.chatWidth, 600, 1200, 50, DEFAULT_APPEARANCE.chatWidth),
       markdownCss: typeof saved.markdownCss === "string" ? saved.markdownCss.replace(/\u0000/g, "").slice(0, 50_000) : DEFAULT_APPEARANCE.markdownCss,
     };
   } catch {
