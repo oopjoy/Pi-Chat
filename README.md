@@ -18,10 +18,10 @@ Pi Chat 是一个连接本机 Pi RPC 的 local-first Web/PWA 客户端。它提�
 - 对话右侧提供首条、上一条、下一条、最新的四格导航
 - 固定铺满动态视口，兼容窗口最大化/还原、Windows DPI、页面缩放和窄窗口
 - 左侧“浏览工作目录”会弹出前台 Windows Explorer 文件夹窗口，可预览、浏览并选择本地目录；支持目录持久化，并按工作目录筛选 Sessions
-- 历史会话列表、切换和新建；打开或查看历史只读取并缓存 JSONL，不启动 Secondary Runtime。发送、Compact、Model/Thinking 等实际操作才按需恢复 Runtime 并显示绿色就绪灯；最多 5 个热对话（Primary + 4 个 Secondary），达到容量时优先 LRU 回收空闲 Secondary，正在显示的历史也可退回 view-only
+- Session-first 历史会话列表、切换和新建：服务与界面优先打开、读取并缓存 JSONL；Primary 会在后台启动并完成兼容性验证，未 ready 或验证失败时历史仍可浏览且不会探测 Primary RPC。打开历史不启动对应 Secondary Runtime。输入框获得焦点或发送、Compact、Model/Thinking、接管等实际操作时才在后台按需准备 Runtime；准备期间仍可立即切换和阅读其他对话。最多 5 个热对话（Primary + 4 个 Secondary），达到容量时优先 LRU 回收空闲 Secondary，正在显示的历史也可退回 view-only
 - 同一 Session 可在多个窗口观察，但同一时刻仅一个浏览器窗口可发送、停止、处理 Gate 或改队列；Model/Thinking 修改不会自动取得控制权，无 Owner 时可设置，存在其他窗口 Owner 时必须先显式接管
 - 文件权限 Gate：作为 Pi Chat 内置安全功能呈现；顶栏可切换“严格 / 放行”。严格模式始终确认 `write` / `edit`，并对可识别的高风险 Bash 做辅助确认；Bash 可运行任意脚本，副作用识别不构成完整 sandbox。随应用自动安装、校验和修复的极小 Pi 工具执行适配器仍在真实工具执行前运行
-- 侧栏提供独立刷新和“完整重启 Pi Chat 并应用更新”：应用级 Lifecycle Barrier 会在构建前同步阻止所有新写操作；新版本先在独立 staging 目录完成并验证，构建失败不会修改当前 `dist`，二次核验全部 Runtime、队列和确认状态通过后才提升产物并执行服务切换。维护期间历史、健康检查和只读 API 保持可用。设置中的“关闭 Pi Chat”同样先执行全局 Busy 检查，再关闭全部窗口、服务和托管 RPC
+- 侧栏提供独立刷新和“完整重启 Pi Chat 并应用更新”：应用级 Lifecycle Barrier 会在构建前同步阻止所有新写操作；新版本先在独立 staging 目录完成并验证，构建失败不会修改当前 `dist`，二次核验全部 Runtime、队列和确认状态通过后才提升产物并执行服务切换。维护期间历史、健康检查和只读 API 保持可用。SSE/EventSource 是可重连传输，断开只会延迟释放窗口控制权，绝不会自动关闭 Pi Chat 服务或托管 RPC；设置中的“关闭 Pi Chat”同样先执行全局 Busy 检查，再关闭全部窗口、服务和托管 RPC
 - 外观设置：主题、字体、字号、行距和对话宽度
 - 可用模型列表、Models 面板与模型切换；支持基于 `~/.pi/agent/models.json` 的自定义模型 Add/Remove
 - 顶栏 Thinking 强度切换
@@ -36,7 +36,7 @@ Pi Chat 是一个连接本机 Pi RPC 的 local-first Web/PWA 客户端。它提�
 
 - **Node.js** 22.19 或更高版本（用来运行 Pi Chat 本地服务）
 - **已全局安装并完成模型认证的 Pi**：`pi --version`  
-  Pi Chat **不会**内置 Pi 内核；服务启动时会拉起本机全局的 `pi --mode rpc`。没有 Pi，服务起不来，聊天界面也不可用。
+  Pi Chat **不会**内置 Pi 内核；服务会在后台拉起本机全局的 `pi --mode rpc`。Pi 尚未就绪时，已保存的 Session JSONL 仍可浏览；发送或其他需要 Pi 的操作会提示 Runtime 不可用。
 - Windows 桌面快捷方式可选；Edge PWA 仅影响独立窗口体验，不是硬性依赖
 
 ### 没有安装 Pi 时会发生什么？
@@ -44,15 +44,14 @@ Pi Chat 是一个连接本机 Pi RPC 的 local-first Web/PWA 客户端。它提�
 双击或运行 `start-pi-chat.cmd`、`pi-chat-launch.cmd`、桌面 **Pi Chat / Pi Chat Web** 时：
 
 1. 启动器先尝试用 **Node** 启动本机 `http://127.0.0.1:30170` 服务；
-2. 服务在监听端口之前会查找全局 Pi 的 `rpc-entry.js` 并启动 RPC；
-3. **找不到 Pi** 时服务进程退出，错误信息为：  
+2. 服务先开放 Session JSONL 浏览，再在后台查找全局 Pi 的 `rpc-entry.js`、启动 RPC 并验证协议能力；
+3. **找不到 Pi 或兼容性验证失败**时，已保存的历史仍可查看，但发送、运行指令和其他 Runtime 操作会稳定返回“Pi Runtime 不可用”，不会通过隐式重启绕过兼容性验证。找不到 Pi 时会显示：
    `找不到全局 Pi。请先安装 Pi，或设置 PI_CHAT_PI_ENTRY 指向 dist/rpc-entry.js。`
 4. 表现：
-   - **带启动浮窗**（桌面快捷方式 / `start-pi-chat-ui.ps1`）：浮窗保留失败状态，可打开 launcher/server 日志；
-   - **直接跑 cmd**：控制台常见 “did not start within 30 seconds”，详细错误在 server 的 stderr 日志；
-   - 浏览器访问 `30170` 会连不上，**不会**出现可用的半残聊天界面。
+   - **带启动浮窗**（桌面快捷方式 / `start-pi-chat-ui.ps1`）：浮窗在服务可浏览时关闭；Pi Runtime 的后续失败记录在 server 日志；
+   - **直接跑 cmd**：浏览器仍可打开本地历史；详细 Runtime 错误在 server 的 stderr 日志。
 
-请先安装并配置好 Pi，再启动 Pi Chat。可选环境变量：`PI_CHAT_PI_ENTRY` 指向 Pi 的 `dist/rpc-entry.js`。
+若要聊天或运行工具，请安装并配置好 Pi。可选环境变量：`PI_CHAT_PI_ENTRY` 指向 Pi 的 `dist/rpc-entry.js`。
 
 ## 开发
 
@@ -133,12 +132,12 @@ Skills 可以向模型注入指令，Plugins/Packages 可以用当前用户的�
 
 **Pi Chat 不负责：** 重写 agent loop、模型和工具执行、自建插件运行时、Electron 桌面壳、远程多用户服务、公网部署，或通用 agent 编排平台。
 
-**当前不在路线图的伪需求：** 远程访问。代码与文档中可预留扩展点，但 0.3.x 不做半成品远程开关。若未来需要，应作为独立设计（认证、HTTPS、审计）而不是放开监听地址。
+**当前不在路线图的伪需求：** 远程访问。代码与文档中可预留扩展点，但 0.4.x 不做半成品远程开关。若未来需要，应作为独立设计（认证、HTTPS、审计）而不是放开监听地址。
 
 ## 兼容的 Pi 版本
 
-- **已验证：** Pi `0.81.1`（全局 `@earendil-works/pi-coding-agent`）
-- **探测方式：** 启动时 RPC 能力探测（`get_state` / `get_messages` / `get_available_models` / `get_commands` / `get_session_stats`），不兼容则拒绝启动
-- 升级 Pi 后若启动失败，请先 `pi --version`，再确认 Pi Chat 是否为最新 0.3.x
+- **已验证：** Pi `0.83.0`（全局 `@earendil-works/pi-coding-agent`）
+- **探测方式：** Primary 在后台执行一次针对当前本机 Pi entrypoint 的 RPC 能力探测（`get_state` / `get_messages` / `get_available_models` / `get_commands` / `get_session_stats`）。不兼容时 Session 浏览继续可用，而新的或需要恢复的 Runtime 写操作返回明确的不可用状态；已经健康的 Secondary 保持可用。任何 Primary 恢复都会重新探测
+- 升级 Pi 后若启动失败，请先 `pi --version`，再确认 Pi Chat 是否为最新 0.4.x
 
 更完整的模块边界与拆分优先级见 `docs/architecture.md`。

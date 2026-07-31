@@ -28,6 +28,12 @@ interface PendingFrames {
   bytes: number;
 }
 
+export type SseDisconnectReason = "request-close" | "write-error" | "pending-buffer-limit" | "shutdown";
+export interface SseDisconnectInfo {
+  reason: SseDisconnectReason;
+  pendingBytes?: number;
+}
+
 /**
  * Owns SSE client sockets and fan-out only.
  *
@@ -40,6 +46,7 @@ export class SseHub {
   private readonly clients = new Map<ServerResponse, string>();
   private readonly backpressured = new Set<ServerResponse>();
   private readonly pendingFrames = new Map<ServerResponse, PendingFrames>();
+  private readonly disconnectListeners = new Set<(response: ServerResponse, clientId: string, info: SseDisconnectInfo) => void>();
 
   get size(): number {
     return this.clients.size;
@@ -55,11 +62,22 @@ export class SseHub {
   }
 
   remove(response: ServerResponse): string {
+    return this.disconnect(response, { reason: "request-close" });
+  }
+
+  /** Report a transport-only departure without conflating it with app lifecycle. */
+  disconnect(response: ServerResponse, info: SseDisconnectInfo): string {
     const clientId = this.clients.get(response) || "";
-    this.clients.delete(response);
+    if (!this.clients.delete(response)) return "";
     this.backpressured.delete(response);
     this.pendingFrames.delete(response);
+    for (const listener of this.disconnectListeners) listener(response, clientId, info);
     return clientId;
+  }
+
+  onDisconnect(listener: (response: ServerResponse, clientId: string, info: SseDisconnectInfo) => void): () => void {
+    this.disconnectListeners.add(listener);
+    return () => this.disconnectListeners.delete(listener);
   }
 
   has(response: ServerResponse): boolean {
@@ -93,13 +111,13 @@ export class SseHub {
 
   closeAll(): void {
     for (const client of this.clients.keys()) {
+      this.disconnect(client, { reason: "shutdown" });
       try {
         client.end();
       } catch {
         // Shutdown path must not throw.
       }
     }
-    this.clients.clear();
     this.backpressured.clear();
     this.pendingFrames.clear();
   }
@@ -114,7 +132,7 @@ export class SseHub {
       this.backpressured.add(client);
       this.waitForDrain(client);
     } catch {
-      this.remove(client);
+      this.disconnect(client, { reason: "write-error" });
     }
   }
 
@@ -131,7 +149,7 @@ export class SseHub {
     if (pending.bytes > MAX_PENDING_SSE_BYTES) {
       // A reconnect makes the browser fetch an authoritative view. Disconnecting
       // is safer than silently dropping ordered lifecycle/tool terminal events.
-      this.remove(client);
+      this.disconnect(client, { reason: "pending-buffer-limit", pendingBytes: pending.bytes });
       try { client.end(); } catch { /* socket is already unusable */ }
       return;
     }
@@ -157,7 +175,7 @@ export class SseHub {
         this.waitForDrain(client);
         return;
       } catch {
-        this.remove(client);
+        this.disconnect(client, { reason: "write-error" });
         return;
       }
     }

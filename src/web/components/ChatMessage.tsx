@@ -4,6 +4,13 @@ import { visibleAssistantBlocks } from "../lib/assistant-text";
 import { CheckIcon, CopyIcon } from "./Icons";
 import { MarkdownBody } from "./MarkdownBody";
 
+/** Fold only explicit source lines; visual wrapping stays device-dependent. */
+export const USER_MESSAGE_FOLD_LINE_LIMIT = 20;
+
+export function shouldFoldUserText(text: string): boolean {
+  return text.split(/\r?\n/).length > USER_MESSAGE_FOLD_LINE_LIMIT;
+}
+
 function blocks(message: PiMessage): PiContentBlock[] {
   if (typeof message.content === "string") return [{ type: "text", text: message.content }];
   return message.content || [];
@@ -31,10 +38,33 @@ export function assistantThinkingLabel(message: PiMessage): string {
 
 export const ChatMessage = memo(function ChatMessage({ message, streaming = false }: { message: PiMessage; streaming?: boolean }) {
   const [copied, setCopied] = useState(false);
+  const [expandedUserText, setExpandedUserText] = useState(false);
+  const [previewImage, setPreviewImage] = useState<{ src: string; alt: string } | null>(null);
   const copyTimerRef = useRef<number | null>(null);
+  const previewCloseRef = useRef<HTMLButtonElement>(null);
+  const previewTriggerRef = useRef<HTMLButtonElement | null>(null);
   useEffect(() => () => {
     if (copyTimerRef.current) window.clearTimeout(copyTimerRef.current);
   }, []);
+  useEffect(() => {
+    if (!previewImage) return;
+    previewCloseRef.current?.focus();
+    const closePreview = () => setPreviewImage(null);
+    const keepFocusInDialog = (event: KeyboardEvent) => {
+      if (event.key === "Escape") return closePreview();
+      if (event.key === "Tab") {
+        event.preventDefault();
+        previewCloseRef.current?.focus();
+      }
+    };
+    document.addEventListener("keydown", keepFocusInDialog);
+    return () => document.removeEventListener("keydown", keepFocusInDialog);
+  }, [previewImage]);
+  useEffect(() => {
+    if (previewImage || !previewTriggerRef.current) return;
+    previewTriggerRef.current.focus();
+    previewTriggerRef.current = null;
+  }, [previewImage]);
 
   if (message.role !== "user" && message.role !== "assistant") return null;
   const content = message.role === "assistant" ? visibleAssistantBlocks(message) : blocks(message);
@@ -44,6 +74,9 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
   );
   if (!streaming && !hasVisibleContent) return null;
   const copyText = message.role === "assistant" ? assistantCopyText(content) : "";
+  const userTextBlocks = message.role === "user" ? content.filter((block): block is PiContentBlock & { text: string } => block.type === "text" && typeof block.text === "string" && Boolean(block.text)) : [];
+  const userImageBlocks = message.role === "user" ? content.filter((block): block is PiContentBlock & { data: string; mimeType: string } => block.type === "image" && typeof block.data === "string" && typeof block.mimeType === "string") : [];
+  const userTextNeedsFolding = userTextBlocks.some((block) => shouldFoldUserText(block.text));
   const modelLabel = message.role === "assistant" ? assistantModelLabel(message) : "";
   const thinkingLabel = message.role === "assistant" ? assistantThinkingLabel(message) : "";
   const copyAnswer = async () => {
@@ -55,28 +88,39 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
   };
 
   return (
-    <article className={`message message-${message.role}`}>
+    <article className={`message message-${message.role}${userTextNeedsFolding ? " is-foldable" : ""}`}>
       {message.role === "assistant" && streaming && <header>
         <span className="streaming-dot" aria-label="正在生成" />
       </header>}
-      <div className="message-content">
-        {content.map((block, index) => {
-          if (block.type === "text" && block.text) {
-            // User input is deliberately literal. Prompts often contain partial
-            // Markdown, shell syntax, paths, or unmatched delimiters; rendering
-            // those as Markdown produces misleading red/error-like formatting.
-            if (message.role === "user") return <div className="user-plain-text" key={index}>{block.text}</div>;
-            return <MarkdownBody key={index} streaming={streaming}>{block.text}</MarkdownBody>;
-          }
-          if (block.type === "image" && block.data && block.mimeType) {
-            return <img className="message-image" key={index} src={`data:${block.mimeType};base64,${block.data}`} alt="用户附加图片" />;
-          }
-          return null;
+      {message.role === "user" && userImageBlocks.length > 0 && <div className="message-user-attachments" aria-label="用户附加图片">
+        {userImageBlocks.map((block, index) => {
+          const src = `data:${block.mimeType};base64,${block.data}`;
+          const alt = "用户附加图片";
+          return <button type="button" className="message-image-thumbnail" key={index} onClick={(event) => { previewTriggerRef.current = event.currentTarget; setPreviewImage({ src, alt }); }} aria-label="查看用户附加图片的大图"><img className="message-image" src={src} alt={alt} /></button>;
         })}
-        {streaming && !content.some((block) => block.type === "text" && block.text) && (
-          <div className="working">Pi 正在工作…</div>
-        )}
-      </div>
+      </div>}
+      {(message.role !== "user" || userTextBlocks.length > 0) && <div className="message-content">
+        {message.role === "user"
+          ? userTextBlocks.map((block, index) => <div className={`user-plain-text${userTextNeedsFolding && !expandedUserText ? " is-collapsed" : ""}`} key={index}>{block.text}</div>)
+          : content.map((block, index) => {
+            if (block.type === "text" && block.text) return <MarkdownBody key={index} streaming={streaming}>{block.text}</MarkdownBody>;
+            if (block.type === "image" && block.data && block.mimeType) return <img className="message-image" key={index} src={`data:${block.mimeType};base64,${block.data}`} alt="用户附加图片" />;
+            return null;
+          })}
+        {streaming && !content.some((block) => block.type === "text" && block.text) && <div className="working">Pi 正在工作…</div>}
+        {message.role === "user" && userTextNeedsFolding && <button
+          type="button"
+          className="user-message-fold-toggle"
+          aria-expanded={expandedUserText}
+          onClick={() => setExpandedUserText((current) => !current)}
+        >{expandedUserText ? "收起" : "展开全部"}</button>}
+      </div>}
+      {previewImage && <div className="image-preview-backdrop" role="presentation" onClick={(event) => { if (event.target === event.currentTarget) setPreviewImage(null); }}>
+        <section className="image-preview-dialog" role="dialog" aria-modal="true" aria-label="用户附加图片预览">
+          <button ref={previewCloseRef} type="button" className="image-preview-close" onClick={() => setPreviewImage(null)} aria-label="关闭图片预览" title="关闭图片预览">关闭</button>
+          <img className="image-preview-full" src={previewImage.src} alt={previewImage.alt} />
+        </section>
+      </div>}
       {message.role === "assistant" && (modelLabel || thinkingLabel || copyText) && <footer className="message-footer">
         <span className="message-metadata">
           {modelLabel && <span className="message-model" title={modelLabel}>{modelLabel}</span>}

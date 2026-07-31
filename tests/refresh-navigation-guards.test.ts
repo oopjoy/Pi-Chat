@@ -9,9 +9,8 @@ test("background view failures preserve an already committed conversation", () =
   assert.equal(refreshFailureKeepsCommittedView(new Error("timeout"), ""), false);
 });
 
-test("an orphaned blank view can escape a stale global busy state through the sidebar", () => {
-  assert.equal(sidebarNavigationBlocked(false, false, true, true), true);
-  assert.equal(sidebarNavigationBlocked(false, false, true, false), false);
-  assert.equal(sidebarNavigationBlocked(true, false, false, false), true);
-  assert.equal(sidebarNavigationBlocked(false, true, false, false), true);
+test("a Session can always escape a Runtime-starting mutation through the sidebar", () => {
+  assert.equal(sidebarNavigationBlocked(false, false), false);
+  assert.equal(sidebarNavigationBlocked(true, false), true);
+  assert.equal(sidebarNavigationBlocked(false, true), true);
 });

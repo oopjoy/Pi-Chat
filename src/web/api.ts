@@ -1,4 +1,4 @@
-import type { BootstrapData, CustomModelInput, ExtensionResource, GateMode, PackageResource, PromptImage, QueuedPrompt, ResourceResponse, SessionSummary, SessionViewData, SkillResource, ThinkingLevel } from "../shared/types";
+import type { BootstrapData, ExtensionResource, GateMode, PackageResource, PromptImage, QueuedPrompt, ResourceResponse, SessionSummary, SessionViewData, SkillResource, ThinkingLevel } from "../shared/types";
 
 const API_TIMEOUT_MS = 65_000;
 // Pi acknowledges a prompt only after preflight. Auto-compaction runs in that
@@ -8,6 +8,14 @@ const PROMPT_PREPARE_TIMEOUT_MS = 210_000;
 const APPLICATION_RESTART_TIMEOUT_MS = 10 * 60_000;
 const APPLICATION_HANDOFF_TIMEOUT_MS = 90_000;
 let requestToken = "";
+
+export class ApiRequestError extends Error {
+  constructor(message: string, readonly status: number, readonly code?: string) {
+    super(message);
+    this.name = "ApiRequestError";
+  }
+}
+
 const clientId = (() => {
   const key = "pi-chat.window-client.v1";
   const existing = window.sessionStorage.getItem(key);
@@ -83,11 +91,11 @@ async function request<T>(path: string, options?: RequestInit, timeoutMs = API_T
     }
     throw cause;
   }
-  const value = await response.json().catch(() => ({})) as T & { error?: string; requestToken?: string };
+  const value = await response.json().catch(() => ({})) as T & { error?: string; requestToken?: string; code?: string };
   // A maintenance-state bootstrap may return 503 while still granting the
   // guarded startup token required to subscribe to lifecycle SSE.
   storeRequestToken(value.requestToken);
-  if (!response.ok) throw new Error(value.error || `请求失败：${response.status}`);
+  if (!response.ok) throw new ApiRequestError(value.error || `请求失败：${response.status}`, response.status, value.code);
   return value;
 }
 
@@ -112,7 +120,13 @@ export const api = {
   resumeQueue: (sessionId = "") => request<{ queue: QueuedPrompt[]; paused: boolean }>("/api/chat/queue/resume", { method: "POST", body: JSON.stringify({ sessionId }) }),
   compact: (customInstructions = "", sessionId = "") => request<{ result: Record<string, unknown> }>("/api/chat/compact", { method: "POST", body: JSON.stringify({ customInstructions, sessionId }) }, PROMPT_PREPARE_TIMEOUT_MS),
   newSession: () => request<SessionViewData>("/api/sessions/new", { method: "POST" }),
-  viewSession: (id: string, turns?: number) => request<SessionViewData>(`/api/sessions/${id}/view${turns ? `?turns=${turns}` : ""}`),
+  viewSession: (id: string, turns?: number, options: { fast?: boolean; signal?: AbortSignal } = {}) => {
+    const query = new URLSearchParams();
+    if (turns) query.set("turns", String(turns));
+    if (options.fast) query.set("fast", "1");
+    const suffix = query.size ? `?${query}` : "";
+    return request<SessionViewData>(`/api/sessions/${id}/view${suffix}`, { signal: options.signal });
+  },
   markSessionViewed: (id: string) => request<{ viewing: string }>(`/api/sessions/${id}/viewing`, { method: "POST" }),
   clearSessionViewed: (sessionId: string) => request<{ viewing: string }>("/api/sessions/viewing/clear", { method: "POST", body: JSON.stringify({ sessionId }) }),
   activateSession: (id: string) => request<SessionViewData>(`/api/sessions/${id}/activate`, { method: "POST" }),
@@ -120,10 +134,6 @@ export const api = {
   releaseSession: (id: string) => request<{ released: true; sessionId: string; activeSessionIds: string[] }>(`/api/sessions/${id}/release`, { method: "POST" }),
   renameSession: (id: string, name: string) => request<BootstrapData>(`/api/sessions/${id}`, { method: "PATCH", body: JSON.stringify({ name }) }),
   deleteSession: (id: string) => request<BootstrapData>(`/api/sessions/${id}`, { method: "DELETE" }),
-  customModel: (provider: string, modelId: string) => request<{ model: CustomModelInput }>(`/api/models/${encodeURIComponent(provider)}/${encodeURIComponent(modelId)}`),
-  addModel: (model: CustomModelInput) => request<BootstrapData>("/api/models", { method: "POST", body: JSON.stringify(model) }),
-  updateModel: (provider: string, modelId: string, model: CustomModelInput) => request<BootstrapData>(`/api/models/${encodeURIComponent(provider)}/${encodeURIComponent(modelId)}`, { method: "PUT", body: JSON.stringify(model) }),
-  removeModel: (provider: string, modelId: string) => request<BootstrapData>("/api/models", { method: "DELETE", body: JSON.stringify({ provider, modelId }) }),
   setModel: (provider: string, modelId: string, sessionId = "") => request<{ model: BootstrapData["state"]["model"]; pending: boolean }>("/api/models/set", {
     method: "POST",
     body: JSON.stringify({ provider, modelId, sessionId }),
@@ -135,7 +145,7 @@ export const api = {
   skills: () => request<ResourceResponse<SkillResource>>("/api/resources/skills"),
   extensions: () => request<ResourceResponse<ExtensionResource>>("/api/resources/extensions"),
   packages: () => request<ResourceResponse<PackageResource>>("/api/resources/packages"),
-  browseResource: (kind: "skills-root" | "extensions-root" | "packages-root") =>
+  browseResource: (kind: "skills-root" | "extensions-root" | "packages-root" | "models-root") =>
     request<{ ok: true; path: string }>("/api/resources/browse", { method: "POST", body: JSON.stringify({ kind }) }),
   respondToExtension: (body: Record<string, unknown>) => request<{ ok: boolean }>("/api/extension-ui/respond", {
     method: "POST",

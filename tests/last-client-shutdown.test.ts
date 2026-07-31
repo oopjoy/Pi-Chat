@@ -17,10 +17,6 @@ class IdleRpc {
     return () => this.listeners.delete(listener);
   }
 
-  emit(event: Record<string, unknown>) {
-    for (const listener of this.listeners) listener(event);
-  }
-
   isRunning() { return !this.stopped; }
   async stop() { this.stopped = true; }
   async send(command: Record<string, unknown>) {
@@ -33,9 +29,10 @@ interface AppInternals {
   clientConnected(clientId: string): void;
   clientDisconnected(clientId: string): void;
   sseClients: Map<ServerResponse, string>;
+  connectedClients: Map<string, number>;
 }
 
-function createApp(shutdown: () => void) {
+function createApp(shutdown: (reason: "api-shutdown" | "last-window-close") => void) {
   const rpc = new IdleRpc();
   const app = new PiChatApp({
     rpc: rpc as unknown as PiRpcClient,
@@ -44,10 +41,9 @@ function createApp(shutdown: () => void) {
     cwd: process.cwd(),
     webRoot: process.cwd(),
     applicationShutdown: shutdown,
-    lastClientShutdownGraceMs: 25,
-    lastClientIdlePollMs: 10,
+    controllerReleaseMs: 25,
   });
-  return { app, rpc, internals: app as unknown as AppInternals };
+  return { app, internals: app as unknown as AppInternals };
 }
 
 function connect(internals: AppInternals, clientId: string): ServerResponse {
@@ -62,49 +58,50 @@ function disconnect(internals: AppInternals, response: ServerResponse, clientId:
   internals.clientDisconnected(clientId);
 }
 
-test("last SSE client leaving gracefully shuts down an idle Pi Chat service", async () => {
+test("last SSE client leaving releases presence but keeps an idle Pi Chat service alive", async () => {
   let shutdowns = 0;
   const { app, internals } = createApp(() => { shutdowns += 1; });
-  const response = connect(internals, "11111111-1111-4111-8111-111111111111");
+  const clientId = "11111111-1111-4111-8111-111111111111";
+  const response = connect(internals, clientId);
   try {
-    disconnect(internals, response, "11111111-1111-4111-8111-111111111111");
+    disconnect(internals, response, clientId);
     await sleep(70);
-    assert.equal(shutdowns, 1);
+    assert.equal(shutdowns, 0);
+    assert.equal(internals.connectedClients.has(clientId), false);
   } finally {
     await app.close();
   }
 });
 
-test("a reconnect during the final-client grace period cancels automatic shutdown", async () => {
+test("an SSE reconnect after a transport drop keeps the same service available", async () => {
   let shutdowns = 0;
   const { app, internals } = createApp(() => { shutdowns += 1; });
-  const first = connect(internals, "11111111-1111-4111-8111-111111111111");
+  const firstId = "11111111-1111-4111-8111-111111111111";
+  const secondId = "22222222-2222-4222-8222-222222222222";
+  const first = connect(internals, firstId);
   try {
-    disconnect(internals, first, "11111111-1111-4111-8111-111111111111");
-    await sleep(10);
-    const returning = connect(internals, "22222222-2222-4222-8222-222222222222");
-    await sleep(55);
+    disconnect(internals, first, firstId);
+    await sleep(40);
+    const returning = connect(internals, secondId);
     assert.equal(shutdowns, 0);
-    disconnect(internals, returning, "22222222-2222-4222-8222-222222222222");
-    await sleep(70);
-    assert.equal(shutdowns, 1);
+    assert.equal(internals.connectedClients.get(secondId), 1);
+    disconnect(internals, returning, secondId);
+    await sleep(40);
+    assert.equal(shutdowns, 0);
   } finally {
     await app.close();
   }
 });
 
-test("automatic shutdown waits for a running Pi task to settle, then gives a fresh grace period", async () => {
+test("an idle Runtime after the final SSE disconnect is not an implicit shutdown request", async () => {
   let shutdowns = 0;
-  const { app, rpc, internals } = createApp(() => { shutdowns += 1; });
-  const response = connect(internals, "11111111-1111-4111-8111-111111111111");
+  const { app, internals } = createApp(() => { shutdowns += 1; });
+  const clientId = "11111111-1111-4111-8111-111111111111";
+  const response = connect(internals, clientId);
   try {
-    rpc.emit({ type: "agent_start" });
-    disconnect(internals, response, "11111111-1111-4111-8111-111111111111");
+    disconnect(internals, response, clientId);
     await sleep(70);
     assert.equal(shutdowns, 0);
-    rpc.emit({ type: "agent_settled" });
-    await sleep(80);
-    assert.equal(shutdowns, 1);
   } finally {
     await app.close();
   }

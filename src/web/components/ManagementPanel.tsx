@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { BootstrapData, CustomModelInput, ExtensionResource, ModelInfo, PackageResource, PiState, SkillResource } from "../../shared/types";
+import type { ExtensionResource, ModelInfo, PackageResource, PiState, SkillResource } from "../../shared/types";
+import { useModalFocus } from "../lib/modal-focus";
 import { api } from "../api";
 import { DEFAULT_APPEARANCE, snapToStep, type AppearancePreferences, type FontPreference, type ThemePreference } from "../lib/preferences";
 import { CompactSelect, type CompactSelectOption } from "./CompactSelect";
-import { CloseIcon, MinusIcon, PlusIcon } from "./Icons";
+import { CloseIcon, FolderIcon, MinusIcon, PlusIcon } from "./Icons";
 
 export type ManagementSection = "settings" | "models";
 type SettingsTab = "appearance" | "models" | "skills" | "extensions" | "packages";
@@ -28,7 +29,7 @@ const FONT_OPTIONS: Array<CompactSelectOption<FontPreference>> = [
   { value: "mono", label: "等宽字体" },
 ];
 
-export function ManagementPanel({ section, appearance, models, state, busy, onClose, onAppearance, onModel, onReloaded, onShutdown }: {
+export function ManagementPanel({ section, appearance, models, state, busy, onClose, onAppearance, onModel, onShutdown }: {
   section: ManagementSection | null;
   appearance: AppearancePreferences;
   models: ModelInfo[];
@@ -37,11 +38,9 @@ export function ManagementPanel({ section, appearance, models, state, busy, onCl
   onClose: () => void;
   onAppearance: (value: AppearancePreferences) => void;
   onModel: (provider: string, id: string) => void;
-  onReloaded: (data?: BootstrapData) => void;
   onShutdown: () => void;
 }) {
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("appearance");
-  const [filter, setFilter] = useState("");
   const [skills, setSkills] = useState<SkillResource[]>([]);
   const [extensions, setExtensions] = useState<ExtensionResource[]>([]);
   const [packages, setPackages] = useState<PackageResource[]>([]);
@@ -49,10 +48,11 @@ export function ManagementPanel({ section, appearance, models, state, busy, onCl
   const [resourceError, setResourceError] = useState("");
   const [resourceNotice, setResourceNotice] = useState("");
   const [loading, setLoading] = useState(false);
+  const dialogRef = useRef<HTMLElement>(null);
+  useModalFocus(Boolean(section), dialogRef);
 
   useEffect(() => {
     setSettingsTab(section === "models" ? "models" : "appearance");
-    setFilter("");
     setResourceError("");
   }, [section]);
 
@@ -79,7 +79,7 @@ export function ManagementPanel({ section, appearance, models, state, busy, onCl
   }, [section, settingsTab]);
   if (!section) return null;
 
-  const browseResource = async (kind: "skills-root" | "extensions-root" | "packages-root") => {
+  const browseResource = async (kind: "skills-root" | "extensions-root" | "packages-root" | "models-root") => {
     setResourceBusy(true);
     setResourceError("");
     setResourceNotice("");
@@ -95,7 +95,7 @@ export function ManagementPanel({ section, appearance, models, state, busy, onCl
 
   return (
     <div className="panel-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section id="pi-chat-settings-dialog" className="management-panel panel-settings" role="dialog" aria-modal="true" aria-labelledby="management-title">
+      <section ref={dialogRef} id="pi-chat-settings-dialog" className="management-panel panel-settings" role="dialog" aria-modal="true" aria-labelledby="management-title">
         <header className="management-head">
           <div>
             <span className="management-kicker">Pi Chat</span>
@@ -118,7 +118,7 @@ export function ManagementPanel({ section, appearance, models, state, busy, onCl
             </nav>
             <div className="settings-content">
               {settingsTab === "appearance" && <AppearancePanel value={appearance} onChange={onAppearance} />}
-              {settingsTab === "models" && <ModelsPanel models={models} state={state} busy={busy} filter={filter} onFilter={setFilter} onModel={onModel} onReloaded={onReloaded} />}
+              {settingsTab === "models" && <ModelsPanel models={models} state={state} busy={busy} onModel={onModel} onBrowseModels={() => void browseResource("models-root")} />}
               {settingsTab === "skills" && <SettingsResourceList
                 title="Skills"
                 description="仅显示当前已启用的 Skill。管理请在本地 agent 目录中进行。"
@@ -164,123 +164,26 @@ export function ManagementPanel({ section, appearance, models, state, busy, onCl
   );
 }
 
-const EMPTY_CUSTOM_MODEL: CustomModelInput = {
-  provider: "",
-  id: "",
-  name: "",
-  baseUrl: "",
-  api: "openai-completions",
-  apiKey: "",
-  reasoning: false,
-  imageInput: false,
-  contextWindow: 128000,
-  maxTokens: 16384,
-};
-
-function ModelsPanel({ models, state, busy, filter, onFilter, onModel, onReloaded }: {
+function ModelsPanel({ models, state, busy, onModel, onBrowseModels }: {
   models: ModelInfo[];
   state: PiState;
   busy: boolean;
-  filter: string;
-  onFilter: (value: string) => void;
   onModel: (provider: string, id: string) => void;
-  onReloaded: (data?: BootstrapData) => void;
+  onBrowseModels: () => void;
 }) {
-  const [adding, setAdding] = useState(false);
-  const [editing, setEditing] = useState<{ provider: string; id: string } | null>(null);
-  const [form, setForm] = useState<CustomModelInput>(EMPTY_CUSTOM_MODEL);
-  const [modelBusy, setModelBusy] = useState(false);
-  const [modelError, setModelError] = useState("");
-  const visible = useMemo(() => filterList(models, filter, (model) => `${model.provider} ${model.id} ${model.name}`), [filter, models]);
-  const update = <K extends keyof CustomModelInput>(key: K, value: CustomModelInput[K]) => setForm((current) => ({ ...current, [key]: value }));
-  const closeForm = () => {
-    setAdding(false);
-    setEditing(null);
-    setForm(EMPTY_CUSTOM_MODEL);
-    setModelError("");
-  };
-  const run = async (operation: () => Promise<BootstrapData>) => {
-    setModelBusy(true);
-    setModelError("");
-    try {
-      const data = await operation();
-      onReloaded(data);
-      return true;
-    } catch (error) {
-      setModelError(error instanceof Error ? error.message : String(error));
-      return false;
-    } finally {
-      setModelBusy(false);
-    }
-  };
-  const save = async () => {
-    if (!form.provider.trim() || !form.id.trim()) return;
-    // Editing renames via the original key; the server reloads Pi and returns
-    // fresh bootstrap data, so the list and TopBar refresh automatically.
-    const operation = editing ? () => api.updateModel(editing.provider, editing.id, form) : () => api.addModel(form);
-    if (await run(operation)) closeForm();
-  };
-  const edit = async (model: ModelInfo) => {
-    if (editing?.provider === model.provider && editing?.id === model.id) {
-      closeForm();
-      return;
-    }
-    setModelBusy(true);
-    setModelError("");
-    setAdding(false);
-    try {
-      const result = await api.customModel(model.provider, model.id);
-      setForm(result.model);
-      setEditing({ provider: model.provider, id: model.id });
-    } catch (error) {
-      setModelError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setModelBusy(false);
-    }
-  };
-  const remove = async (model: ModelInfo) => {
-    if (!window.confirm(`确定从 models.json 删除 “${model.provider}/${model.id}” 吗？`)) return;
-    await run(() => api.removeModel(model.provider, model.id));
-  };
-
-  const renderForm = (isEditing: boolean, inline: boolean) => <div className={`model-form ${inline ? "model-form-inline" : ""}`}>
-    {modelError && <div className="resource-error">{modelError}</div>}
-    <div className="model-form-grid">
-      <label><span>Provider *</span><input value={form.provider} onChange={(event) => update("provider", event.target.value)} placeholder="例如 ollama" /></label>
-      <label><span>Model ID *</span><input value={form.id} onChange={(event) => update("id", event.target.value)} placeholder="例如 qwen2.5-coder:7b" /></label>
-      <label><span>显示名称</span><input value={form.name || ""} onChange={(event) => update("name", event.target.value)} placeholder="可选" /></label>
-      <label><span>API 类型</span><select value={form.api} onChange={(event) => update("api", event.target.value as CustomModelInput["api"])}><option value="openai-completions">OpenAI Completions</option><option value="openai-responses">OpenAI Responses</option><option value="anthropic-messages">Anthropic Messages</option><option value="google-generative-ai">Google Generative AI</option></select></label>
-      <label className="model-form-wide"><span>Base URL（新 Provider 必填）</span><input value={form.baseUrl || ""} onChange={(event) => update("baseUrl", event.target.value)} placeholder="http://localhost:11434/v1" /></label>
-      <label className="model-form-wide"><span>API Key 或引用</span><input type="password" autoComplete="new-password" value={form.apiKey || ""} onChange={(event) => update("apiKey", event.target.value)} placeholder="密钥、$ENV_VAR 或本地服务占位值" /></label>
-      <label><span>Context Window</span><input type="number" min="1" value={form.contextWindow || ""} onChange={(event) => update("contextWindow", event.target.value ? Number(event.target.value) : undefined)} /></label>
-      <label><span>Max Tokens</span><input type="number" min="1" value={form.maxTokens || ""} onChange={(event) => update("maxTokens", event.target.value ? Number(event.target.value) : undefined)} /></label>
+  return <div className="settings-resource-panel models-panel">
+    <div className="settings-resource-heading">
+      <div className="settings-resource-title"><h3>Models<span className="count-badge">{models.length}</span></h3><p>只读显示当前可用模型；在本地 models.json 中管理自定义模型。</p></div>
+      <button type="button" className="resource-browse-root" title="打开 models.json 所在目录" aria-label="打开 models.json 所在目录" disabled={busy} onClick={onBrowseModels}><FolderIcon /></button>
     </div>
-    <div className="model-form-options"><label><input type="checkbox" checked={form.reasoning} onChange={(event) => update("reasoning", event.target.checked)} /> Reasoning</label><label><input type="checkbox" checked={form.imageInput} onChange={(event) => update("imageInput", event.target.checked)} /> 图片输入</label><span>API Key 不会读取或回显；留空会保留已有值。</span></div>
-    {isEditing && <p className="model-form-hint">Provider 和 Model ID 都可以修改，相当于重命名；保存后模型列表和顶栏会自动刷新。</p>}
-    <button type="button" className="model-save-button" disabled={busy || modelBusy || !form.provider.trim() || !form.id.trim()} onClick={() => void save()}>{modelBusy ? "保存中…" : isEditing ? "保存更改" : "保存模型"}</button>
-  </div>;
-
-  return <div className="panel-body models-panel">
-    <div className="models-toolbar"><PanelIntro title="可用模型" description="切换模型，或管理 ~/.pi/agent/models.json 中的自定义模型。" count={models.length} /><button type="button" className="model-add-button" disabled={busy || modelBusy} onClick={() => { if (adding) closeForm(); else { closeForm(); setAdding(true); } }}>{adding ? "取消" : <><PlusIcon />Add</>}</button></div>
-    {modelError && !adding && !editing && <div className="resource-error">{modelError}</div>}
-    {adding && renderForm(false, false)}
-    <Search value={filter} onChange={onFilter} placeholder="搜索 Provider 或模型" />
-    <div className="model-grid">{visible.map((model) => {
+    <div className="settings-resource-list">{models.map((model) => {
       const active = state.model?.provider === model.provider && state.model?.id === model.id;
-      const isEditing = editing?.provider === model.provider && editing?.id === model.id;
-      return <article className={`model-card ${active ? "is-active" : ""} ${isEditing ? "is-editing" : ""}`} key={`${model.provider}/${model.id}`}>
-        <div className="model-card-main">
-          <button type="button" className="model-card-select" disabled={busy || modelBusy || active} onClick={() => onModel(model.provider, model.id)}>
-            <strong>{model.name || model.id}</strong><small><span className="model-id-label">Model ID</span>{model.id}</small>{model.contextWindow && <span className="model-capabilities">{Math.round(model.contextWindow / 1000)}k</span>}
-          </button>
-          {model.custom && <div className="model-card-actions">
-            <button type="button" disabled={busy || modelBusy} title="编辑 models.json 中的模型配置" onClick={() => void edit(model)}>{isEditing ? "收起" : "编辑"}</button>
-            <button type="button" className="is-danger" disabled={busy || modelBusy || active} title={active ? "请先切换到其他模型" : "从 models.json 删除"} onClick={() => void remove(model)}>移除</button>
-          </div>}
-        </div>
-        {isEditing && renderForm(true, true)}
+      return <article className={`settings-resource-row model-resource-row ${active ? "is-active" : ""}`} key={`${model.provider}/${model.id}`}>
+        <button type="button" disabled={busy || active} onClick={() => onModel(model.provider, model.id)} title={`${model.provider}/${model.id}`}>
+          <strong>{model.provider}</strong><code>{model.id}</code>{model.contextWindow && <span>{Math.round(model.contextWindow / 1000)}k</span>}
+        </button>
       </article>;
-    })}</div>
+    })}{!models.length && <p className="resource-loading">当前没有可用模型</p>}</div>
   </div>;
 }
 
@@ -294,7 +197,7 @@ function Search({ value, onChange, placeholder }: { value: string; onChange: (va
 }
 
 function PanelIntro({ title, description, count }: { title: string; description?: string; count?: number }) {
-  return <div className="panel-intro"><div><h3>{title}</h3>{description && <p>{description}</p>}</div>{typeof count === "number" && <span className="count-badge">{count}</span>}</div>;
+  return <div className="panel-intro"><div><h3>{title}{typeof count === "number" && <span className="count-badge">{count}</span>}</h3>{description && <p>{description}</p>}</div></div>;
 }
 
 function packageSummary(item: PackageResource): string {
@@ -318,7 +221,7 @@ function SettingsResourceList<T extends { id: string; name: string }>({ title, d
   return <div className="settings-resource-panel">
     <div className="settings-resource-heading">
       <div className="settings-resource-title"><h3>{title}<span className="count-badge">{resources.length}</span></h3><p>{description}</p></div>
-      <button type="button" className="resource-browse-root" disabled={busy || loading} onClick={onBrowseRoot}>{rootLabel}</button>
+      <button type="button" className="resource-browse-root" title={rootLabel} aria-label={rootLabel} disabled={busy || loading} onClick={onBrowseRoot}><FolderIcon /></button>
     </div>
     {error && <div className="resource-error">{error}</div>}
     {notice && !error && <div className="resource-notice">{notice}</div>}

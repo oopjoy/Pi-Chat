@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { SessionSummary } from "../../shared/types";
+import { useModalFocus } from "../lib/modal-focus";
 
 export type SessionDialogState = { mode: "rename" | "delete"; session: SessionSummary } | null;
 
@@ -12,6 +13,8 @@ export function SessionDialog({ state, busy, onClose, onRename, onDelete }: {
 }) {
   const [name, setName] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useRef<HTMLElement>(null);
+  useModalFocus(Boolean(state), dialogRef, () => inputRef.current);
   useEffect(() => {
     setName(state?.session.name || "");
     if (state?.mode === "rename") requestAnimationFrame(() => inputRef.current?.select());
@@ -30,7 +33,7 @@ export function SessionDialog({ state, busy, onClose, onRename, onDelete }: {
     if (value && !busy) onRename(value);
   };
   return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onClose(); }}>
-    <section className="dialog session-dialog" role="dialog" aria-modal="true" aria-labelledby="session-dialog-title">
+    <section ref={dialogRef} className="dialog session-dialog" role="dialog" aria-modal="true" aria-labelledby="session-dialog-title">
       {state.mode === "rename" ? <>
         <h2 id="session-dialog-title">重命名对话</h2>
         <p>输入新的对话名称。按 Enter 确认，按 Esc 取消。</p>

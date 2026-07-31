@@ -61,7 +61,7 @@ export function commandMatches(value: string, commands: SlashCommand[]): SlashCo
   }).sort((a, b) => a.rank - b.rank || a.score - b.score || a.command.name.localeCompare(b.command.name)).slice(0, 9).map(({ command }) => command);
 }
 
-export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, acceptsImages, commands, controls, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles, onError }: {
+export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, acceptsImages, commands, controls, onFocus, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles, onError }: {
   /** True when a submission will enter the local queue. */
   streaming: boolean;
   /** True only while Pi is actively generating and can be stopped. */
@@ -72,6 +72,8 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   acceptsImages: boolean;
   commands: SlashCommand[];
   controls?: ReactNode;
+  /** First composition intent can warm a cold Runtime without disabling typing. */
+  onFocus?: () => void;
   onSend: (message: string, images: PromptImage[]) => Promise<void>;
   onAbort: () => Promise<void>;
   onPickLocalFiles: () => Promise<string[]>;
@@ -226,7 +228,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
       <div className={`composer ${dragging ? "is-dragging" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }} onDrop={drop}>
         {suggestions.length > 0 && <div className="command-suggestions" role="listbox" aria-label="Pi 指令联想">{suggestions.map((command, index) => <button type="button" role="option" aria-selected={index === suggestionIndex} className={index === suggestionIndex ? "is-active" : ""} key={`${command.source}-${command.name}`} onMouseDown={(event) => event.preventDefault()} onClick={() => completeCommand(command)}><strong>/{command.name}</strong><span>{command.description || "Pi 指令"}</span><small>{command.source}</small></button>)}</div>}
         {images.length > 0 && <div className="image-previews">{images.map((image, index) => <div className="image-preview" key={`${image.fileName}-${index}`}><img src={`data:${image.mimeType};base64,${image.data}`} alt={image.fileName || `图片 ${index + 1}`} /><button type="button" onClick={() => setImages((current) => current.filter((_, itemIndex) => itemIndex !== index))} aria-label={`移除 ${image.fileName || "图片"}`}><CloseIcon /></button><small>{image.fileName || "粘贴的图片"}</small></div>)}</div>}
-        <textarea ref={textareaRef} value={value} onChange={(event) => setValue(event.target.value)} onPaste={paste} onKeyDown={keyDown} disabled={disabled} rows={1} placeholder={disabled ? disabledPlaceholder || "正在切换会话…" : streaming ? "继续输入，发送后加入队列；输入 / 查看指令" : "输入消息，或粘贴、拖入附件"} aria-label="消息输入" />
+        <textarea ref={textareaRef} value={value} onFocus={onFocus} onChange={(event) => setValue(event.target.value)} onPaste={paste} onKeyDown={keyDown} disabled={disabled} rows={1} placeholder={disabled ? disabledPlaceholder || "正在切换会话…" : streaming ? "继续输入，发送后加入队列；输入 / 查看指令" : "输入消息，或粘贴、拖入附件"} aria-label="消息输入" />
         <div className="composer-toolbar">
           <div className="composer-toolbar-controls">{controls}</div>
           <div className="composer-actions">

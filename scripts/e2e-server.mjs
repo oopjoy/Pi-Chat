@@ -55,6 +55,8 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     write({ type: "agent_start" });
     reply(command.id, {});
     setTimeout(() => {
+      write({ type: "message_start", message: { role: "assistant", provider: "test", model: "gpt-e2e", content: "Live response complete" } });
+      write({ type: "message_end", message: { role: "assistant", provider: "test", model: "gpt-e2e", content: "Live response complete" } });
       isStreaming = false;
       write({ type: "agent_settled" });
     }, 80);

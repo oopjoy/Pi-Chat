@@ -363,6 +363,16 @@ test("busy secondary Session view uses persisted snapshot and does not wait on i
     const activated = await fetch(`${origin}/api/sessions/${secondaryId}/activate`, { method: "POST" });
     assert.equal(activated.status, 200);
     secondaryCommands.length = 0;
+    const fastStarted = Date.now();
+    const fastResponse = await fetch(`${origin}/api/sessions/${secondaryId}/view?fast=1`);
+    assert.equal(fastResponse.status, 200);
+    assert.ok(Date.now() - fastStarted < 250, "hot-memory Session view should not wait for RPC probes");
+    const fastView = await fastResponse.json() as { viewSource?: string; reconcilePending?: boolean; messages: Array<{ content: string }> };
+    assert.equal(fastView.viewSource, "hot-memory");
+    assert.equal(fastView.reconcilePending, true, "fast view marks missing stats/commands for later reconciliation");
+    assert.deepEqual(fastView.messages.map((message) => message.content), ["secondary question"]);
+    assert.deepEqual(secondaryCommands, [], "fast view must not issue RPC probes");
+
     const started = Date.now();
     const response = await fetch(`${origin}/api/sessions/${secondaryId}/view`);
     assert.equal(response.status, 200);

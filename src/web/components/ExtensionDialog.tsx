@@ -1,5 +1,6 @@
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import type { ExtensionUiRequest } from "../../shared/types";
+import { useModalFocus } from "../lib/modal-focus";
 import { ExtensionIcon, ShieldIcon } from "./Icons";
 
 export type { ExtensionUiRequest } from "../../shared/types";
@@ -56,9 +57,11 @@ function ExtensionDialogFrame({ gate, title, children, actions }: {
   children: ReactNode;
   actions: ReactNode;
 }) {
+  const dialogRef = useRef<HTMLElement>(null);
+  useModalFocus(true, dialogRef);
   return (
     <div className="dialog-backdrop" role="presentation">
-      <section className="dialog extension-dialog" role="dialog" aria-modal="true" aria-labelledby="extension-dialog-title">
+      <section ref={dialogRef} className="dialog extension-dialog" role="dialog" aria-modal="true" aria-labelledby="extension-dialog-title">
         <header className="extension-dialog-header">
           <span className={`extension-dialog-icon ${gate ? "is-gate" : "is-extension"}`}>
             {gate ? <ShieldIcon /> : <ExtensionIcon />}

@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import type { ExtensionResource, PackageResource, PluginResourceItem, ResourceResponse, SkillResource } from "../shared/types.js";
 
-export type ResourceBrowseKind = "skills-root" | "extensions-root" | "packages-root";
+export type ResourceBrowseKind = "skills-root" | "extensions-root" | "packages-root" | "models-root";
 
 interface PackageFilter {
   source: string;
@@ -261,6 +261,7 @@ export class ResourceManager {
 
   /** Managed local root folder used by the read-only resource inventory. */
   resolveBrowsePath(kind: ResourceBrowseKind): string {
+    if (kind === "models-root") return this.agentDir;
     if (kind === "skills-root") return join(this.agentDir, "skills");
     if (kind === "extensions-root") return join(this.agentDir, "extensions");
     return join(this.agentDir, "npm", "node_modules");

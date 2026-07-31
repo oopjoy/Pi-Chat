@@ -56,7 +56,7 @@ function UsageStats({ stats, isCompacting }: { stats?: SessionStats; isCompactin
   );
 }
 
-export function ComposerControls({ state, models, stats, disabled, settingsBusy = false, streaming, gateAvailable, gateMode, onGate, onModel, onThinking }: {
+export function ComposerControls({ state, models, stats, disabled, settingsBusy = false, streaming, gateAvailable, gateMode, primaryUnavailable = false, onGate, onModel, onThinking }: {
   state: PiState;
   models: ModelInfo[];
   stats?: SessionStats;
@@ -65,15 +65,18 @@ export function ComposerControls({ state, models, stats, disabled, settingsBusy 
   streaming: boolean;
   gateAvailable: boolean;
   gateMode?: GateMode;
+  /** Model, thinking, and Gate mutate the selected Primary Runtime. */
+  primaryUnavailable?: boolean;
   onGate: (mode: GateMode) => void;
   onModel: (provider: string, id: string) => void;
   onThinking: (level: ThinkingLevel) => void;
 }) {
   const current = state.model ? modelValue(state.model) : "";
-  const controlsDisabled = disabled || settingsBusy;
+  const controlsDisabled = disabled || settingsBusy || primaryUnavailable;
   const modelOptions = models.map((model) => ({ value: modelValue(model), label: model.name || model.id }));
+  const unavailableTitle = "Pi Runtime 尚未就绪；历史仍可阅读，Runtime 恢复后可修改此设置";
 
-  return <div className="composer-controls" title={settingsBusy ? "正在切换模型或思考强度…" : streaming ? "当前回复不会中断；新设置将在下一轮对话生效" : undefined}>
+  return <div className="composer-controls" title={primaryUnavailable ? unavailableTitle : settingsBusy ? "正在切换模型或思考强度…" : streaming ? "当前回复不会中断；新设置将在下一轮对话生效" : undefined}>
     <CompactSelect value={current} options={modelOptions} disabled={controlsDisabled || !models.length} ariaLabel="模型" title="模型" align="left" icon={<ChipIcon className="model-icon" />} checkPosition="start" className="composer-model-select" onChange={(value) => {
       const model = models.find((candidate) => modelValue(candidate) === value);
       if (model) onModel(model.provider, model.id);

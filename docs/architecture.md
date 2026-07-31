@@ -25,14 +25,14 @@ Three lifetimes must stay distinct:
 | Pi Chat Node service | HTTP, SSE, Runtime pool, lifecycle barrier | “关闭 Pi Chat” / process exit |
 | Pi RPC Runtime | One session JSONL writer, model stream, tools | Service rest / reclaim / shutdown |
 
-Closing a browser window must not be confused with stopping the Node service. Stopping the service stops hosted RPC workers.
+Closing a browser window must not be confused with stopping the Node service. Likewise, an SSE/EventSource drop is a re-connectable transport event, not evidence that a window or service has closed: it only follows the delayed Session-control release path. Stopping the service is explicit (the close API, restart handoff, or process signal) and stops hosted RPC workers.
 
-## Hard product boundaries (0.3.x)
+## Hard product boundaries (0.4.x)
 
 ### In scope
 
 - Chat UI, streaming, markdown, attachments
-- Session list, cold JSONL history view, on-demand Runtime activation
+- Session-first list and cold JSONL history view; on-demand Runtime activation
 - At most 5 hot conversations total: Primary + at most 4 Secondary Runtimes
 - Multi-window observation with single-writer control
 - Gate confirmation UX
@@ -64,7 +64,8 @@ Current ownership still centers on `src/server/app.ts` (`PiChatApp`), with progr
 | `file-transaction.ts` | Atomic write + snapshot restore |
 | `session-index.ts` | JSONL index, cold snapshots, usage |
 | `application-restart.ts` | Staging build, promote, handoff |
-| `rpc-client.ts` | Global Pi process + capability probe |
+| `rpc-client.ts` | Global Pi process transport + capability probe |
+| `primary-runtime-readiness.ts` | Primary start/recovery, compatibility gate, readiness generations |
 | `runtime-pool.ts` | Secondary Runtime maps, capacity mutex, ensure/draft/recover/reclaim/sweep/stopAll |
 | `session-control.ts` | Multi-window presence, exclusive control owner, delayed release timers |
 | `prompt-scheduler.ts` | Primary queue/dispatch, secondary queue dispatch, enqueue limits |
@@ -104,8 +105,14 @@ Prefer small hooks and pure libs over growing `App.tsx` further.
 
 ## Runtime and session policy
 
-- Cold history view: JSONL only, gray status, no Secondary Runtime
-- Activation on real work: send, compact, model/thinking, explicit activate
+- **Session view is the navigation authority.** A persisted JSONL Session can be opened and read while no corresponding Pi Runtime exists, while Primary is starting, or after Primary compatibility has failed.
+- Primary readiness is explicit (`starting` / `ready` / `failed`), not inferred from a spawned child process. Starting/failed read projections must issue zero Primary RPC requests.
+- Compatibility is a process-wide capability of the configured local Pi entrypoint: Primary is the single probe owner. A new or recovered Secondary therefore requires a ready Primary capability, but an already healthy Secondary remains independently usable if Primary later fails; Secondary startup still verifies its own `get_state` response.
+- Primary writes and crash recovery pass the readiness controller; every restart re-runs compatibility probing, so a failed probe cannot be bypassed by an implicit restart.
+- Cold history view: JSONL only, gray status, no Secondary Runtime.
+- Runtime preparation is a Session-scoped background capability upgrade. Typing/focus may begin warming it, but it must never block reading or navigating to another Session.
+- Activation on real work: send, compact, model/thinking, taking control, or explicit activate.
+- A late warm/activation response may update only its own pane cache; it must not repaint a newer selected Session.
 - Hard cap: at most 5 hot conversations total (Primary + at most 4 Secondary Runtimes)
 - Cold JSONL history views do not count toward the hot limit
 - At capacity, the least-recently-used reclaimable idle Secondary is rested first
@@ -113,7 +120,7 @@ Prefer small hooks and pure libs over growing `App.tsx` further.
 - Viewed idle runtimes may be reclaimed (not permanent pins)
 - Model/Thinking changes do not auto-claim control; foreign owners are rejected
 
-## Session control (0.3.6)
+## Session control (0.4)
 
 - Observing banner only when a **live** foreign SSE owner exists
 - Sole live window auto-claims; never stuck behind a ghost owner
@@ -125,10 +132,10 @@ Prefer small hooks and pure libs over growing `App.tsx` further.
 
 Prefer **RPC capability probe** over a hard Pi version allowlist.
 
-| Field | Value (0.3.6) |
+| Field | Value (0.4.0) |
 |---|---|
 | Required capabilities | `get_state`, `get_messages`, `get_available_models`, `get_commands`, `get_session_stats` |
-| Last verified Pi | 0.81.1 |
+| Last verified Pi | 0.83.0 |
 | Minimum practical | Recent Pi with full RPC surface above |
 
 Missing required capabilities → fail startup clearly.
@@ -161,4 +168,4 @@ Startup best-effort removes orphaned staging/previous/failed trees (unless a han
 - Rotating in-memory request token
 - Strict Host / Origin checks
 - System Gate is installed and self-healed; not a user-removable ordinary extension
-- No public network deployment story in 0.3.x
+- No public network deployment story in 0.4.x

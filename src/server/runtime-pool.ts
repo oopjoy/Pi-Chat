@@ -1,5 +1,5 @@
 import { unlink } from "node:fs/promises";
-import type { ExtensionUiRequest, GateMode, PiMessage, PiState, PromptImage, SessionSummary, SlashCommand, ThinkingLevel } from "../shared/types.js";
+import type { ExtensionUiRequest, GateMode, PiMessage, PiState, PromptImage, SessionStats, SessionSummary, SlashCommand, ThinkingLevel } from "../shared/types.js";
 import { asMessages, asState } from "./pi-data.js";
 import { idForPath, readSessionMessages } from "./session-index.js";
 import { OperationAdmission } from "./operation-admission.js";
@@ -45,6 +45,13 @@ export interface SecondaryRuntime {
   commands?: SlashCommand[];
   /** Last complete persisted message branch, warmed outside the busy navigation path. */
   messageSnapshot?: PiMessage[];
+  /** Metadata required to compose a zero-I/O hot-session view. */
+  summarySnapshot?: SessionSummary;
+  /** Last stats result, usable by hot-memory navigation without another RPC probe. */
+  lastStats?: SessionStats;
+  /** Distinguishes a known empty result from metadata not yet warmed. */
+  commandsKnown?: boolean;
+  statsKnown?: boolean;
   /** Terminal SSE rows not yet confirmed by the persisted JSONL branch. */
   pendingTerminalMessages: PiMessage[];
   /** Awaited per-runtime mutations keep capacity reclamation from stopping this worker. */
@@ -86,9 +93,14 @@ export interface RuntimePoolOptions {
   secondaryRuntimeIdleMs?: number;
   createRpc?: (cwd: string) => PiRpcClient;
   cwd: () => string;
+  /** Secondary workers share the verified Primary Pi implementation. This is a
+   * global compatibility capability, not a per-session probe: start/recovery
+   * still verifies that this individual Session RPC can answer get_state. */
+  assertPrimaryCompatible?: () => void;
   /** Ensure SessionIndex knows current paths (list/refresh) before pathForId. */
   refreshSessions: () => Promise<void>;
   pathForId: (id: string) => string | null;
+  summaryForId?: (id: string) => SessionSummary | null;
   isClosed: () => boolean;
   /** Sweep only while the application admits background maintenance. */
   canSweep: () => boolean;
@@ -320,6 +332,9 @@ export class RuntimePool {
   }
 
   async ensure(id: string): Promise<SecondaryRuntime> {
+    // Primary owns the one compatibility probe for this local Pi entrypoint.
+    // Do not turn cold Session browsing into duplicate capability RPC traffic.
+    this.options.assertPrimaryCompatible?.();
     const stopping = this.runtimeStops.get(id);
     if (stopping) {
       await stopping;
@@ -365,6 +380,7 @@ export class RuntimePool {
         const state = asState(await rpc.send({ type: "get_state" }));
         runtime.lastState = state;
         runtime.running = state.isStreaming;
+        runtime.summarySnapshot = this.options.summaryForId?.(id) || undefined;
         this.runtimes.set(id, runtime);
         this.options.broadcast({
           type: "pi_chat_active_session_changed",
@@ -388,6 +404,10 @@ export class RuntimePool {
 
   async recover(runtime: SecondaryRuntime): Promise<void> {
     if (runtime.recovery) return runtime.recovery;
+    // Existing healthy Secondary workers remain independent from later Primary
+    // loss. A crashed worker is a fresh capability acquisition and therefore
+    // requires the globally verified local Pi implementation again.
+    this.options.assertPrimaryCompatible?.();
     if (!runtime.sessionPath) throw new Error("Pi RPC 已退出，且会话路径不可用");
     const desiredGateMode = runtime.gateMode;
     const recovery = (async () => {

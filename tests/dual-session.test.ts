@@ -172,7 +172,7 @@ test("closing one of multiple windows rests its exclusive idle Session without s
     pathForId: () => path,
     messagesForId: async () => [],
   } as unknown as SessionIndex;
-  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), applicationShutdown: () => { shutdowns += 1; } });
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), applicationShutdown: (_reason) => { shutdowns += 1; } });
   const first = "11111111-1111-4111-8111-111111111111";
   const second = "22222222-2222-4222-8222-222222222222";
   const internals = app as unknown as { connectedClients: Map<string, number>; viewedSessionsByClient: Map<string, string> };
@@ -236,13 +236,13 @@ test("closing the last connected window shuts down the Pi Chat application", asy
   const path = "C:\\sessions\\primary.jsonl";
   const id = idForPath(path);
   const primary = new FakeRpc(path, "primary");
-  let shutdowns = 0;
+  const shutdownReasons: string[] = [];
   const sessions = {
     list: async () => [{ id, sessionId: "primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
     pathForId: () => path,
     messagesForId: async () => [],
   } as unknown as SessionIndex;
-  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), applicationShutdown: () => { shutdowns += 1; } });
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), applicationShutdown: (reason) => { shutdownReasons.push(reason); } });
   const client = "11111111-1111-4111-8111-111111111111";
   (app as unknown as { connectedClients: Map<string, number> }).connectedClients.set(client, 1);
   const server = createServer((request, response) => void app.handle(request, response));
@@ -254,7 +254,7 @@ test("closing the last connected window shuts down the Pi Chat application", asy
     assert.equal(response.status, 202);
     assert.deepEqual(await response.json(), { shuttingDown: true, closeWindow: true, remainingWindows: 0 });
     await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.equal(shutdowns, 1);
+    assert.deepEqual(shutdownReasons, ["last-window-close"]);
   } finally {
     server.close();
     await app.close();
@@ -502,7 +502,7 @@ test("last-window close refuses while a prompt is dispatching", async () => {
   const path = "C:\\sessions\\primary.jsonl";
   const primary = new FakeRpc(path, "primary");
   let shutdowns = 0;
-  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), applicationShutdown: () => { shutdowns += 1; } });
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), applicationShutdown: (_reason) => { shutdowns += 1; } });
   const client = "11111111-1111-4111-8111-111111111111";
   const internals = app as unknown as { connectedClients: Map<string, number>; dispatching: boolean };
   internals.connectedClients.set(client, 1);
@@ -526,7 +526,7 @@ test("global shutdown refuses while any conversation is still busy", async () =>
   const path = "C:\\sessions\\primary.jsonl";
   const primary = new FakeRpc(path, "primary");
   let shutdowns = 0;
-  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), applicationShutdown: () => { shutdowns += 1; } });
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), applicationShutdown: (_reason) => { shutdowns += 1; } });
   (app as unknown as { dispatching: boolean }).dispatching = true;
   const server = createServer((request, response) => void app.handle(request, response));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -546,9 +546,9 @@ test("global shutdown refuses while any conversation is still busy", async () =>
 test("global shutdown broadcasts to every window before stopping the application", async () => {
   const path = "C:\\sessions\\primary.jsonl";
   const primary = new FakeRpc(path, "primary");
-  let shutdowns = 0;
+  const shutdownReasons: string[] = [];
   const frames: string[] = [];
-  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), applicationShutdown: () => { shutdowns += 1; } });
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), applicationShutdown: (reason) => { shutdownReasons.push(reason); } });
   const clients = (app as unknown as { sseClients: Map<{ write: (frame: string) => void }, string> }).sseClients;
   clients.set({ write: (frame) => { frames.push(frame); } }, "11111111-1111-4111-8111-111111111111");
   clients.set({ write: (frame) => { frames.push(frame); } }, "22222222-2222-4222-8222-222222222222");
@@ -560,7 +560,7 @@ test("global shutdown broadcasts to every window before stopping the application
     const response = await fetch(`http://127.0.0.1:${address.port}/api/shutdown`, { method: "POST" });
     assert.equal(response.status, 202);
     assert.deepEqual(await response.json(), { shuttingDown: true });
-    assert.equal(shutdowns, 1);
+    assert.deepEqual(shutdownReasons, ["api-shutdown"]);
     assert.equal(frames.filter((frame) => frame.includes("pi_chat_application_closing")).length, 2);
   } finally {
     server.close();
@@ -875,7 +875,7 @@ test("a pending extension confirmation belongs to one Session and only its first
   }
 });
 
-test("a crashed primary RPC clears stale state and recovers on the next bootstrap", async () => {
+test("a crashed primary RPC leaves persisted history readable until the next write recovers it", async () => {
   const path = "C:\\sessions\\primary.jsonl";
   const id = idForPath(path);
   const primary = new FakeRpc(path, "primary");
@@ -896,16 +896,19 @@ test("a crashed primary RPC clears stale state and recovers on the next bootstra
     primary.emit({ type: "agent_start" });
     primary.crash();
     const recovered = await (await fetch(`${origin}/api/bootstrap`)).json() as { state: { isStreaming: boolean }; sessions: Array<{ id: string; running?: boolean }> };
-    assert.equal(primary.restartCount, 1);
+    assert.equal(primary.restartCount, 0, "reading bootstrap must not wake a failed Primary Runtime");
     assert.equal(recovered.state.isStreaming, false);
     assert.equal(recovered.sessions.find((session) => session.id === id)?.running, false);
+    const prompt = await fetch(`${origin}/api/chat/prompt`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message: "recover on write", sessionId: id }) });
+    assert.equal(prompt.status, 202);
+    assert.equal(primary.restartCount, 1);
   } finally {
     server.close();
     await app.close();
   }
 });
 
-test("Session list recovers a crashed primary while cold history view stays read-only", async () => {
+test("Session list and history view keep a crashed primary dormant until a write", async () => {
   for (const endpoint of ["/api/sessions", "view"] as const) {
     const path = "C:\\sessions\\primary.jsonl";
     const id = idForPath(path);
@@ -926,7 +929,7 @@ test("Session list recovers a crashed primary while cold history view stays read
       primary.crash();
       const url = endpoint === "view" ? `/api/sessions/${id}/view` : endpoint;
       assert.equal((await fetch(`${origin}${url}`)).status, 200);
-      assert.equal(primary.restartCount, endpoint === "view" ? 0 : 1);
+      assert.equal(primary.restartCount, 0, `${endpoint} must remain read-only`);
     } finally {
       server.close();
       await app.close();

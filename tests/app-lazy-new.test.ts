@@ -73,6 +73,7 @@ const bootstrap: BootstrapData = {
   activeSessionId: activeId,
   activeSessionIds: [activeId],
   applicationLifecycle: "idle",
+  primaryRuntime: { status: "ready", generation: 0 },
 };
 
 const draftView: SessionViewData = {
@@ -130,6 +131,36 @@ test("conversation controls live in the composer while settings moves to the top
     assert.ok(dom.window.document.querySelector("#pi-chat-settings-dialog"));
     assert.equal(settings.getAttribute("aria-expanded"), "true");
     assert.equal(settings.getAttribute("aria-label"), "关闭设置");
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("Primary readiness explains capability loss without blocking historical navigation", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  Object.assign(api, {
+    bootstrap: async () => ({ ...bootstrap, primaryRuntime: { status: "failed" as const, generation: 2, error: "protocol mismatch" } }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const status = dom.window.document.querySelector<HTMLElement>(".primary-runtime-status")!;
+    assert.match(status.textContent || "", /仍可阅读历史/);
+    assert.match(status.textContent || "", /protocol mismatch/);
+    const input = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    assert.equal(input.disabled, true);
+    assert.match(input.placeholder, /历史仍可阅读/);
+    // The server's ready SSE triggers a guarded background metadata refresh;
+    // the status transition itself is covered by server contract tests. Keep
+    // this JSDOM test focused on the failed-readiness capability boundary.
+    assert.ok(FakeEventSource.instances.length > 0);
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);
@@ -458,6 +489,37 @@ test("late stop and queue actions from A do not overwrite Session B", async () =
     await visitB();
     await act(async () => resolveResume({ queue: [queuedA], paused: false }));
     assert.match(dom.window.document.querySelector(".prompt-queue")?.textContent || "", /queued B/);
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("EventSource reconnect refreshes an authoritative terminal without duplicating it", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const terminal = { role: "assistant", content: "terminal recovered after reconnect", timestamp: 2 } as const;
+  Object.assign(api, {
+    bootstrap: async () => ({ ...bootstrap, messages: [{ role: "user", content: "question", timestamp: 1 }, terminal], messageTotal: 2, turnTotal: 1 }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    recoverConnection: async () => undefined,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => source.emitPi({ type: "message_end", piChatSessionId: activeId, message: terminal }));
+    assert.equal((dom.window.document.body.textContent || "").match(/terminal recovered after reconnect/g)?.length, 1);
+    await act(async () => {
+      source.onerror?.(new dom.window.Event("error"));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.equal((dom.window.document.body.textContent || "").match(/terminal recovered after reconnect/g)?.length, 1);
+    assert.ok(FakeEventSource.instances.length >= 2);
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);

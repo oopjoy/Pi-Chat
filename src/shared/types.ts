@@ -160,9 +160,25 @@ export interface SessionViewData {
   pendingExtensionRequest?: ExtensionUiRequest;
   controlOwner?: string;
   controlledByThisWindow?: boolean;
+  /** A hot-memory view is immediately usable but its JSONL transcript is still warming. */
+  historyPending?: boolean;
+  /** A follow-up authoritative view should refresh incomplete hot-memory metadata. */
+  reconcilePending?: boolean;
+  /** Diagnostic source for navigation-performance measurement. */
+  viewSource?: "browser-cache" | "hot-memory" | "cold-jsonl";
 }
 
 export type ApplicationLifecycle = "idle" | "restarting" | "shutting-down" | "workspace-changing" | "resources-reloading";
+
+/** Primary Pi process capability is separate from Session/JSONL availability. */
+export type PrimaryRuntimeStatus = "starting" | "ready" | "failed";
+export interface PrimaryRuntimeReadiness {
+  status: PrimaryRuntimeStatus;
+  /** Safe diagnostic for UI; never a stack trace or raw transport payload. */
+  error?: string;
+  /** Monotonic controller generation; guards later retry/recovery transitions. */
+  generation: number;
+}
 
 export interface BootstrapData {
   state: PiState;
@@ -193,6 +209,8 @@ export interface BootstrapData {
   controlOwner?: string;
   controlledByThisWindow?: boolean;
   applicationLifecycle?: ApplicationLifecycle;
+  /** Session browsing remains available while this is starting or failed. */
+  primaryRuntime: PrimaryRuntimeReadiness;
 }
 
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";

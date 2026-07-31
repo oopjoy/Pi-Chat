@@ -35,6 +35,80 @@ test("authoritative Gate updates survive cached session navigation", () => {
   assert.equal(cache.get("gate")?.gateMode, "strict");
 });
 
+test("pinned hot panes survive cold LRU eviction and retain sparse live updates", () => {
+  const cache = new SessionViewCache(1);
+  cache.setPinned(["hot"]);
+  cache.remember(view("hot"));
+  cache.remember(view("cold-one"));
+  cache.remember(view("cold-two"));
+  assert.ok(cache.get("hot"));
+  assert.equal(cache.get("cold-one"), undefined);
+  cache.updateLive("unopened-hot", { role: "assistant", content: "streaming" });
+  cache.setPinned(["hot", "unopened-hot"]);
+  cache.remember(view("unopened-hot"));
+  assert.equal(cache.get("unopened-hot")?.liveMessage?.content, "streaming");
+});
+
+test("unpinning a never-opened hot pane releases sparse SSE state", () => {
+  const cache = new SessionViewCache();
+  cache.updateLive("sparse", { role: "assistant", content: "temporary draft" });
+  cache.setPinned(["sparse"]);
+  cache.setPinned([]);
+
+  // A later authoritative view must not resurrect an unreachable old draft.
+  cache.remember(view("sparse"));
+  assert.equal(cache.get("sparse")?.liveMessage, undefined);
+});
+
+test("an authoritative view confirms an older transient queue and Gate update", () => {
+  const cache = new SessionViewCache();
+  cache.remember({ ...view("confirmed"), queue: [{ id: "old", message: "old", imageCount: 0, createdAt: 1 }], gateMode: "open" });
+  cache.patch("confirmed", { queue: [], gateMode: "strict" });
+  cache.remember({ ...view("confirmed"), queue: [{ id: "new", message: "new", imageCount: 0, createdAt: 2 }], gateMode: "open" });
+  assert.deepEqual(cache.get("confirmed")?.queue?.map((item) => item.id), ["new"]);
+  assert.equal(cache.get("confirmed")?.gateMode, "open");
+});
+
+test("navigation preserves only transient fields received after its request began", () => {
+  const cache = new SessionViewCache();
+  cache.remember({ ...view("navigation"), queue: [{ id: "old", message: "old", imageCount: 0, createdAt: 1 }] });
+  const revision = cache.revisionFor("navigation");
+  cache.patch("navigation", { queue: [{ id: "after", message: "after", imageCount: 0, createdAt: 2 }] });
+  const merged = cache.mergeNavigation({ ...view("navigation"), queue: [{ id: "response", message: "response", imageCount: 0, createdAt: 3 }] }, revision);
+  assert.deepEqual(merged.queue?.map((item) => item.id), ["after"]);
+});
+
+test("a post-request compacting overlay preserves authoritative model metadata", () => {
+  const cache = new SessionViewCache();
+  cache.remember({ ...view("state-race"), state: { model: { provider: "old", id: "old", name: "Old" }, thinkingLevel: "low", isStreaming: false } });
+  const revision = cache.revisionFor("state-race");
+  cache.patch("state-race", { state: { isCompacting: true } });
+  const merged = cache.mergeNavigation({
+    ...view("state-race"),
+    state: { model: { provider: "new", id: "new", name: "New" }, thinkingLevel: "high", isStreaming: false },
+  }, revision);
+
+  assert.equal(merged.state.model?.id, "new");
+  assert.equal(merged.state.thinkingLevel, "high");
+  assert.equal(merged.state.isCompacting, true);
+});
+
+test("a later state event does not revive model metadata from before navigation", () => {
+  const cache = new SessionViewCache();
+  cache.remember({ ...view("state-fields"), state: { model: { provider: "old", id: "old", name: "Old" }, thinkingLevel: "low", isStreaming: false } });
+  cache.patch("state-fields", { state: { model: { provider: "staged", id: "staged", name: "Staged" }, thinkingLevel: "medium" } });
+  const revision = cache.revisionFor("state-fields");
+  cache.patch("state-fields", { state: { isStreaming: true } });
+  const merged = cache.mergeNavigation({
+    ...view("state-fields"),
+    state: { model: { provider: "authoritative", id: "authoritative", name: "Authoritative" }, thinkingLevel: "high", isStreaming: false },
+  }, revision);
+
+  assert.equal(merged.state.model?.id, "authoritative");
+  assert.equal(merged.state.thinkingLevel, "high");
+  assert.equal(merged.state.isStreaming, true);
+});
+
 test("a delayed busy view cannot erase terminal SSE messages or its live draft", () => {
   const cache = new SessionViewCache();
   const base = {

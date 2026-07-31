@@ -31,8 +31,8 @@ export function sessionStatus(session: SessionSummary, warming: boolean, failed:
   if (warming) return { kind: "running", label: "正在启动会话" };
   if (session.queued) return { kind: "pending", label: "消息等待发送" };
   if (failed) return { kind: "error", label: "会话运行异常" };
-  if (session.writable) return { kind: "ready", label: "已就绪" };
-  return { kind: "dormant", label: "按需启动" };
+  if (session.writable) return { kind: "ready", label: "Pi 已驻留" };
+  return { kind: "dormant", label: "历史会话 · 发送时准备 Pi" };
 }
 
 function ResizeHandle({ width, onWidthChange }: { width: number; onWidthChange: (width: number) => void }) {
@@ -120,6 +120,9 @@ export function SessionSidebar({ sessions, sessionsTotal, loadingAllSessions, vi
       document.removeEventListener("scroll", closeOnLayoutChange, true);
     };
   }, [sessionMenuId]);
+  useEffect(() => {
+    if (!open) setSessionMenuId("");
+  }, [open]);
   const menuSession = sessions.find((session) => session.id === sessionMenuId);
   const menuSessionCanRelease = Boolean(menuSession && sessionCanRelease(
     menuSession,
@@ -130,7 +133,7 @@ export function SessionSidebar({ sessions, sessionsTotal, loadingAllSessions, vi
   return (
     <>
       {open && <button type="button" className="sidebar-scrim" aria-label="关闭会话栏" onClick={onClose} />}
-      <aside className={`sidebar ${open ? "is-open" : ""}`} style={{ "--sidebar-width": `${width}px` } as CSSProperties}>
+      <aside className={`sidebar ${open ? "is-open" : ""}`} aria-hidden={!open} inert={!open} style={{ "--sidebar-width": `${width}px` } as CSSProperties}>
         <div className="sidebar-topline">
           <div className="brand-row"><span className="brand-mark"><PiMarkIcon /></span><strong>Pi Chat</strong></div>
           <button type="button" className="sidebar-collapse" onClick={onCollapse} title="收起侧栏" aria-label="收起侧栏">

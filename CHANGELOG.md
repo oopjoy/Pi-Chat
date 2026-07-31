@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.0
+
+### Session-first availability
+
+- Open the HTTP listener and persisted Session index before Primary Pi finishes starting, so saved JSONL conversations remain immediately browsable during Runtime startup, recovery, or compatibility failure
+- Expose explicit Primary readiness (`starting`, `ready`, or `failed`) with generation tracking; unavailable read paths issue zero Primary RPC requests while Primary-only mutations return a stable `PRIMARY_RUNTIME_UNAVAILABLE` response
+- Re-run the full RPC capability probe after every Primary recovery, and require that process-wide compatibility proof before creating or recovering a Secondary Runtime
+- Keep already healthy Secondary workers usable if Primary later fails, while each new or recovered Secondary still verifies its own `get_state` response
+
+### Runtime, transport, and navigation resilience
+
+- Treat SSE/EventSource as a reconnectable transport rather than a service-lifecycle lease: disconnects, write failures, and slow-client backpressure now close only the affected connection
+- Preserve explicit shutdown through the close API, last-window policy, restart handoff, and process signals, with typed shutdown reasons in service logs
+- Add authoritative reconnect reconciliation so terminal assistant messages are refreshed without duplication after a dropped EventSource
+- Cache per-Session history, revisions, terminal leases, overlays, and reading positions while rendering only the selected Timeline; stale HTTP, SSE, warm, model, queue, and extension results cannot repaint a newer destination
+- Prepare a cold Session Runtime on composer focus or first mutation without blocking reading, switching, or JSONL history access
+
+### Interface and compatibility
+
+- Distinguish dormant history (`历史会话 · 发送时准备 Pi`) from resident Runtime state (`Pi 已驻留`) without conflating Runtime residency with browser-window control ownership
+- Keep completed cold and hot conversations visually equivalent through the same Timeline, Markdown, KaTeX, tool, copy, image, and scrolling presentation
+- Verified Pi Chat against Pi `0.83.0`, including real RPC command/model/state/statistics loading with no extension errors
+- Added focused readiness, recovery, navigation, Runtime admission, sole-client reconnect, slow-client backpressure, Sidebar semantics, and Playwright coverage
+
 ## 0.3.6
 
 ### Reliable local-first sessions

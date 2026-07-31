@@ -42,6 +42,7 @@ test("resource manager exposes a read-only inventory with real Pi ownership", as
     assert.ok(packageResource?.enabled);
     assert.equal(packageResource.resources.length, 2);
 
+    assert.equal(manager.resolveBrowsePath("models-root"), root);
     assert.equal(manager.resolveBrowsePath("skills-root"), join(root, "skills"));
     assert.equal(manager.resolveBrowsePath("extensions-root"), join(root, "extensions"));
     assert.equal(manager.resolveBrowsePath("packages-root"), join(root, "npm", "node_modules"));

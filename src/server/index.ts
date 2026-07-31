@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PiChatApp } from "./app.js";
+import { PrimaryRuntimeReadinessController } from "./primary-runtime-readiness.js";
 import { ModelManager } from "./model-manager.js";
 import { ResourceManager } from "./resource-manager.js";
 import { PiRpcClient } from "./rpc-client.js";
@@ -79,13 +80,15 @@ if (gateComponent.status === "conflict" || gateComponent.status === "source-miss
 }
 const rpc = new PiRpcClient({ cwd: options.cwd });
 
-console.log("[Pi Chat] 正在启动 Pi RPC…");
-await rpc.start();
-const compatibility = await rpc.probeCompatibility();
-if (!compatibility.compatible) {
-  await rpc.stop();
-  throw new Error(`当前 Pi RPC 协议不兼容 Pi Chat：\n- ${compatibility.diagnostics.join("\n- ")}\n请更新 Pi，或使用兼容的 Pi Chat 版本。`);
-}
+// Session/JSONL browsing starts independently. This controller is the sole
+// owner of Primary start/restart plus compatibility verification.
+const primaryRuntime = new PrimaryRuntimeReadinessController(rpc);
+console.log("[Pi Chat] 正在准备 Pi Runtime…");
+const primaryStartup = primaryRuntime.start();
+void primaryStartup.then(() => console.log("[Pi Chat] Pi Runtime 已就绪。")).catch((cause) => {
+  const error = cause instanceof Error ? cause : new Error(String(cause));
+  console.error(`[Pi Chat] Pi Runtime 暂不可用：${error.message}`);
+});
 
 let vite: Awaited<ReturnType<typeof import("vite")["createServer"]>> | undefined;
 if (options.dev) {
@@ -125,7 +128,7 @@ async function prepareApplicationRestart() {
             previousDist: build.previousDist,
           },
         });
-        void shutdown().then(() => process.exit(0));
+        void shutdown("restart-handoff").then(() => process.exit(0));
       }, 0);
     },
   };
@@ -142,7 +145,8 @@ const app = new PiChatApp({
   devMiddleware: vite ? (request, response, next) => vite.middlewares(request, response, next) : undefined,
   allowedHosts: [],
   applicationRestart: prepareApplicationRestart,
-  applicationShutdown: () => setTimeout(() => void shutdown().then(() => process.exit(0)), 0),
+  applicationShutdown: (reason) => setTimeout(() => void shutdown(reason).then(() => process.exit(0)), 0),
+  primaryRuntime,
 });
 const server = createHttpServer((request, response) => void app.handle(request, response));
 
@@ -156,19 +160,23 @@ const authority = options.host.includes(":") ? `[${options.host}]:${port}` : `${
 app.setAllowedHosts([authority]);
 console.log(`[Pi Chat] 已启动：http://${options.host}:${port}`);
 
+type ShutdownReason = "sigint" | "sigterm" | "api-shutdown" | "last-window-close" | "restart-handoff";
+
 let shuttingDown = false;
-async function shutdown(): Promise<void> {
+async function shutdown(reason: ShutdownReason): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
-  console.log("\n[Pi Chat] 正在关闭…");
+  console.log(`\n[Pi Chat] 正在关闭（reason=${reason}）…`);
   // End SSE clients and secondary workers before server.close(): Node waits for
   // long-lived SSE connections, so closing the listener first can deadlock a
   // self-restart indefinitely.
   await app.close();
   await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
   await vite?.close();
+  // If shutdown races initial spawn, wait for it before the final bounded stop.
+  await primaryStartup.catch(() => undefined);
   await rpc.stop();
 }
 
-process.once("SIGINT", () => void shutdown().then(() => process.exit(0)));
-process.once("SIGTERM", () => void shutdown().then(() => process.exit(0)));
+process.once("SIGINT", () => void shutdown("sigint").then(() => process.exit(0)));
+process.once("SIGTERM", () => void shutdown("sigterm").then(() => process.exit(0)));
