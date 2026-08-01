@@ -175,10 +175,12 @@ test("closing one of multiple windows rests its exclusive idle Session without s
   const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), applicationShutdown: (_reason) => { shutdowns += 1; } });
   const first = "11111111-1111-4111-8111-111111111111";
   const second = "22222222-2222-4222-8222-222222222222";
-  const internals = app as unknown as { connectedClients: Map<string, number>; viewedSessionsByClient: Map<string, string> };
-  internals.connectedClients.set(first, 1);
-  internals.connectedClients.set(second, 1);
-  internals.viewedSessionsByClient.set(first, id);
+  const internals = app as unknown as { sessionControl: { clientConnected(clientId: string): void; noteClientPresence(clientId: string): boolean; markViewed(clientId: string, sessionId: string): void }; connectedClients: Map<string, number>; viewedSessionsByClient: Map<string, string> };
+  internals.sessionControl.clientConnected(first);
+  internals.sessionControl.clientConnected(second);
+  internals.sessionControl.noteClientPresence(first);
+  internals.sessionControl.noteClientPresence(second);
+  internals.sessionControl.markViewed(first, id);
   const server = createServer((request, response) => void app.handle(request, response));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
@@ -210,10 +212,12 @@ test("closing one window does not rest its Session while an admitted mutation is
   const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
   const first = "11111111-1111-4111-8111-111111111111";
   const second = "22222222-2222-4222-8222-222222222222";
-  const internals = app as unknown as { connectedClients: Map<string, number>; viewedSessionsByClient: Map<string, string>; lifecycleCoordinator: { beginMutation(): () => void } };
-  internals.connectedClients.set(first, 1);
-  internals.connectedClients.set(second, 1);
-  internals.viewedSessionsByClient.set(first, id);
+  const internals = app as unknown as { sessionControl: { clientConnected(clientId: string): void; noteClientPresence(clientId: string): boolean; markViewed(clientId: string, sessionId: string): void }; connectedClients: Map<string, number>; viewedSessionsByClient: Map<string, string>; lifecycleCoordinator: { beginMutation(): () => void } };
+  internals.sessionControl.clientConnected(first);
+  internals.sessionControl.clientConnected(second);
+  internals.sessionControl.noteClientPresence(first);
+  internals.sessionControl.noteClientPresence(second);
+  internals.sessionControl.markViewed(first, id);
   const releaseMutation = internals.lifecycleCoordinator.beginMutation();
   const server = createServer((request, response) => void app.handle(request, response));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -227,6 +231,40 @@ test("closing one window does not rest its Session while an admitted mutation is
     assert.equal(primary.stopCount, 0);
   } finally {
     releaseMutation();
+    server.close();
+    await app.close();
+  }
+});
+
+test("window close ignores a stale transport-only client but fresh second window still keeps the application open", async () => {
+  const path = "C:\\sessions\\presence-close.jsonl";
+  const id = idForPath(path);
+  const primary = new FakeRpc(path, "primary");
+  const shutdownReasons: string[] = [];
+  let now = 0;
+  const sessions = {
+    list: async () => [{ id, sessionId: "primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+    pathForId: () => path,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), presenceTtlMs: 50, now: () => now, applicationShutdown: (reason) => { shutdownReasons.push(reason); } });
+  const stale = "11111111-1111-4111-8111-111111111111";
+  const fresh = "22222222-2222-4222-8222-222222222222";
+  const internals = app as unknown as { sessionControl: { clientConnected(clientId: string): void; noteClientPresence(clientId: string): boolean } };
+  internals.sessionControl.clientConnected(stale);
+  internals.sessionControl.clientConnected(fresh);
+  now = 60;
+  internals.sessionControl.noteClientPresence(fresh);
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    const closingFresh = await fetch(`http://127.0.0.1:${address.port}/api/window/close`, { method: "POST", headers: { "x-pi-chat-client": fresh } });
+    assert.equal(closingFresh.status, 202);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(shutdownReasons, ["last-window-close"]);
+  } finally {
     server.close();
     await app.close();
   }
@@ -590,6 +628,8 @@ test("control-change SSE marks only the owning browser window as writable", asyn
   clients.set({ write: (frame) => { observerFrames.push(frame); } }, observer);
   sessionControl.clientConnected(owner);
   sessionControl.clientConnected(observer);
+  sessionControl.noteClientPresence(owner);
+  sessionControl.noteClientPresence(observer);
   const server = createServer((request, response) => void app.handle(request, response));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();

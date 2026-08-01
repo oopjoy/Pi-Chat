@@ -102,6 +102,7 @@ async function request<T>(path: string, options?: RequestInit, timeoutMs = API_T
 export const api = {
   bootstrap: () => request<BootstrapData>("/api/bootstrap"),
   eventsUrl: () => `/api/events?token=${encodeURIComponent(requestToken)}&client=${encodeURIComponent(clientId)}`,
+  renewPresence: () => request<{ present: true }>("/api/presence", { method: "POST" }, 10_000),
   takeSessionControl: (sessionId: string) => request<{ controlOwner: string; controlledByThisWindow: boolean }>(`/api/sessions/${sessionId}/control`, { method: "POST" }),
   restart: () => request<{ restarting: true }>("/api/restart", { method: "POST" }, APPLICATION_RESTART_TIMEOUT_MS),
   waitForApplicationHandoff,

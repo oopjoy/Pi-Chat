@@ -216,13 +216,12 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .session-name { display: block; font-size: 13px; font-weight: 590; }
 .session-item.is-active .session-name { color: var(--accent); }
 .session-meta { display: flex; align-items: center; gap: 6px; margin-top: 4px; overflow: visible; color: var(--muted); font-size: 10.5px; text-overflow: clip; }
-/* Session state lives beside the timestamp only (not the title color): a hollow gray-blue ring is readable
-   persisted history without a resident Runtime; green means Pi is resident; yellow needs attention; red is a Session error. */
-.session-status { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; }
-.session-status.is-dormant { border: 1.4px solid color-mix(in srgb, var(--muted) 72%, var(--accent)); background: transparent; }
-.session-status.is-ready { background: #24a36a; box-shadow: 0 0 0 3px color-mix(in srgb, #24a36a, transparent 84%); }
-.session-status.is-pending { background: #d89318; box-shadow: 0 0 0 3px color-mix(in srgb, #d89318, transparent 84%); }
-.session-status.is-error { background: var(--danger); box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger), transparent 84%); }
+/* Session state reflects user-visible work and notifications, never Runtime residency.
+   Neutral is an idle conversation; green means a background reply awaits review. */
+.session-status { box-sizing: border-box; width: 9px; height: 9px; flex: 0 0 auto; border: 1.5px solid #91a4bf; border-radius: 50%; background: transparent; }
+.session-status.is-unread { border-color: #24a36a; background: #24a36a; box-shadow: 0 0 0 3px color-mix(in srgb, #24a36a, transparent 84%); }
+.session-status.is-pending { border: 0; background: #d89318; box-shadow: 0 0 0 3px color-mix(in srgb, #d89318, transparent 84%); }
+.session-status.is-error { border: 0; background: var(--danger); box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger), transparent 84%); }
 .session-status.is-running { width: 11px; height: 11px; border: 1.7px solid color-mix(in srgb, var(--accent), transparent 58%); border-top-color: var(--accent); background: transparent; animation: spin .75s linear infinite; }
 
 /* One compact overflow menu preserves nearly the full title width until hover/focus. */
@@ -529,7 +528,11 @@ details.conversation-process { display: block; padding: 0; }
 .prompt-queue article small { margin-left: 7px; color: var(--muted); font-size: 9px; }
 .prompt-queue article button { padding: 3px 6px; border: 0; border-radius: 5px; background: transparent; color: var(--danger); cursor: pointer; font-size: 9px; }
 .prompt-queue.is-paused { border-color: color-mix(in srgb, var(--danger), transparent 65%); }
-.composer-wrap { flex: 0 0 auto; padding: 7px 0 15px; background: linear-gradient(transparent, var(--page) 34%); }
+/* In flow, the notice stack reserves space instead of covering queue controls above it. */
+.composer-wrap { display: flex; flex: 0 0 auto; flex-direction: column; align-items: center; gap: 4px; padding: 7px 0 15px; background: linear-gradient(transparent, var(--page) 34%); }
+.system-notice-stack { display: flex; width: max-content; max-width: 80%; max-height: calc(100dvh - 96px); flex-direction: column; align-items: center; gap: 4px; overflow-y: auto; pointer-events: none; }
+.system-notice-stack:empty { display: none; }
+.system-notice-stack > * { box-sizing: border-box; width: fit-content; max-width: 100%; margin: 0; overflow-wrap: anywhere; word-break: break-word; white-space: pre-wrap; }
 .composer { position: relative; display: flex; box-sizing: border-box; width: min(calc(100% - var(--chat-column-gutter)), var(--reading-width), var(--chat-column-max)); min-height: 85px; margin: 0 auto; flex-direction: column; gap: 5px; padding: 8px 8px 5px; border: 1px solid color-mix(in srgb, var(--line), #c8ced7 20%); border-radius: 11px; background: var(--surface); box-shadow: 0 3px 12px rgba(27, 44, 70, .055); }
 .composer:focus-within, .composer.is-dragging { border-color: color-mix(in srgb, var(--accent), transparent 38%); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent), transparent 89%); }
 .composer-toolbar { position: relative; top: 3px; display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 10px; }
@@ -625,9 +628,10 @@ details.conversation-process { display: block; padding: 0; }
 .stop-button > span { width: 10px; height: 10px; border-radius: 2px; background: var(--danger); }
 .stop-button:hover:not(:disabled) { background: color-mix(in srgb, var(--danger), transparent 88%); }
 .queue-submit-button:disabled, .send-button:disabled, .stop-button:disabled { cursor: default; opacity: .45; }
-.app-toast { position: absolute; z-index: 60; left: 50%; bottom: 92px; transform: translateX(-50%); width: max-content; max-width: min(620px, calc(100% - 30px)); padding: 9px 13px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); box-shadow: var(--shadow); font-size: 12px; }
+.app-toast { padding: 9px 13px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); box-shadow: var(--shadow); color: var(--text); font-size: 12px; line-height: 1.45; text-align: center; }
 .app-toast.error { border-color: color-mix(in srgb, var(--danger), transparent 50%); color: var(--danger); }
-.primary-runtime-status { width: min(calc(100% - var(--chat-column-gutter)), var(--reading-width), var(--chat-column-max)); box-sizing: border-box; margin: 0 auto 8px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; color: var(--muted); font-size: 12px; background: color-mix(in srgb, var(--surface), transparent 20%); }
+.primary-runtime-status { padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; color: var(--muted); font-size: 12px; line-height: 1.45; text-align: center; background: color-mix(in srgb, var(--surface), transparent 20%); }
+.composer-preparing-status { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border: 1px solid color-mix(in srgb, var(--accent), transparent 68%); border-radius: 8px; background: color-mix(in srgb, var(--surface), var(--accent-soft) 18%); color: var(--muted); font-size: 12px; line-height: 1.45; }
 .primary-runtime-status.is-starting { border-color: color-mix(in srgb, var(--accent), transparent 72%); }
 .primary-runtime-status.is-failed { border-color: color-mix(in srgb, var(--danger), transparent 55%); color: var(--danger); }
 .shutdown-screen { display: grid; width: 100%; min-height: 100dvh; place-content: center; justify-items: center; padding: 32px; background: var(--surface); color: var(--text); text-align: center; }
@@ -663,7 +667,7 @@ details.conversation-process { display: block; padding: 0; }
 .panel-close svg { width: 17px; height: 17px; }
 .panel-body { min-height: 0; overflow-y: auto; padding: 18px 22px; }
 .panel-intro { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 15px; }
-.resource-browse-root svg { width: 16px; height: 16px; }
+.resource-browse-root svg { width: 16px; height: 16px; color: var(--accent); }
 .panel-intro h3 { margin: 0 0 3px; font-size: 13px; }
 .panel-intro p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .count-badge, .status-chip { padding: 4px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: 10px; font-weight: 700; }

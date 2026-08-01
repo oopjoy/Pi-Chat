@@ -92,6 +92,21 @@ test("image preview sizing stays within the padded dynamic viewport", async () =
   assert.match(styles, /\.image-preview-full\s*\{[^}]*max-width:\s*min\(calc\(96vw - 26px\), 1414px\)[^}]*max-height:\s*calc\(100dvh - 102px\)/);
 });
 
+test("system notices reserve flow space four pixels above the Composer and wrap within eighty percent of chat", async () => {
+  const styles = await readFile(new URL("../src/web/styles.css", import.meta.url), "utf8");
+  const app = await readFile(new URL("../src/web/App.tsx", import.meta.url), "utf8");
+  const input = await readFile(new URL("../src/web/components/ChatInput.tsx", import.meta.url), "utf8");
+  assert.match(styles, /\.composer-wrap\s*\{[^}]*display:\s*flex[^}]*flex-direction:\s*column[^}]*align-items:\s*center[^}]*gap:\s*4px/);
+  assert.match(styles, /\.system-notice-stack\s*\{[^}]*display:\s*flex[^}]*width:\s*max-content[^}]*max-width:\s*80%[^}]*align-items:\s*center/);
+  assert.doesNotMatch(styles, /\.system-notice-stack\s*\{[^}]*position:\s*absolute/);
+  assert.match(styles, /\.system-notice-stack:empty\s*\{\s*display:\s*none/);
+  assert.match(styles, /\.system-notice-stack > \*\s*\{[^}]*width:\s*fit-content[^}]*max-width:\s*100%[^}]*overflow-wrap:\s*anywhere[^}]*white-space:\s*pre-wrap/);
+  assert.match(input, /notices\?: ReactNode/);
+  assert.match(input, /className="system-notice-stack"[\s\S]*\{notices\}/);
+  assert.match(app, /notices=\{[\s\S]*primary-runtime-status[\s\S]*app-toast/);
+  assert.doesNotMatch(app, /<ChatInput[\s\S]*\/>\s*\{\(error \|\| notice\) && <div className=\{`app-toast/);
+});
+
 test("user folding toggle expands and restores the collapsed text", async () => {
   const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>");
   Object.assign(globalThis, {

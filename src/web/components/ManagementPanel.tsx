@@ -118,7 +118,7 @@ export function ManagementPanel({ section, appearance, models, state, busy, onCl
             </nav>
             <div className="settings-content">
               {settingsTab === "appearance" && <AppearancePanel value={appearance} onChange={onAppearance} />}
-              {settingsTab === "models" && <ModelsPanel models={models} state={state} busy={busy} onModel={onModel} onBrowseModels={() => void browseResource("models-root")} />}
+              {settingsTab === "models" && <ModelsPanel models={models} state={state} busy={busy} browseBusy={resourceBusy} onModel={onModel} onBrowseModels={() => void browseResource("models-root")} />}
               {settingsTab === "skills" && <SettingsResourceList
                 title="Skills"
                 description="仅显示当前已启用的 Skill。管理请在本地 agent 目录中进行。"
@@ -164,17 +164,18 @@ export function ManagementPanel({ section, appearance, models, state, busy, onCl
   );
 }
 
-function ModelsPanel({ models, state, busy, onModel, onBrowseModels }: {
+function ModelsPanel({ models, state, busy, browseBusy, onModel, onBrowseModels }: {
   models: ModelInfo[];
   state: PiState;
   busy: boolean;
+  browseBusy: boolean;
   onModel: (provider: string, id: string) => void;
   onBrowseModels: () => void;
 }) {
   return <div className="settings-resource-panel models-panel">
     <div className="settings-resource-heading">
       <div className="settings-resource-title"><h3>Models<span className="count-badge">{models.length}</span></h3><p>只读显示当前可用模型；在本地 models.json 中管理自定义模型。</p></div>
-      <button type="button" className="resource-browse-root" title="打开 models.json 所在目录" aria-label="打开 models.json 所在目录" disabled={busy} onClick={onBrowseModels}><FolderIcon /></button>
+      <button type="button" className="resource-browse-root" title="打开 models.json 所在目录" aria-label="打开 models.json 所在目录" disabled={browseBusy} onClick={onBrowseModels}><FolderIcon /></button>
     </div>
     <div className="settings-resource-list">{models.map((model) => {
       const active = state.model?.provider === model.provider && state.model?.id === model.id;

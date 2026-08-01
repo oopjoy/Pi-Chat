@@ -78,18 +78,16 @@ test("cold and hot-memory navigation emit bounded first-pane measurements during
   expect(hot?.elapsedMs).toBeLessThan(500);
 });
 
-test("typing into a cold Session warms Pi in the background without blocking another Session", async ({ page }, testInfo) => {
+test("focusing a cold Session keeps it neutral until the first send starts Pi", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "chromium-desktop");
   await page.goto("/");
   const second = page.locator(".session-item", { hasText: "Second session" });
   await second.click();
   await expect(page.getByText("Final answer with")).toBeVisible();
 
-  // Second starts cold. Focus expresses write intent, but it must not make the
-  // sidebar inert while Runtime preparation happens in parallel.
   const composer = page.getByRole("textbox", { name: "消息输入" });
   await composer.focus();
-  await expect(second.locator(".session-status")).toHaveAttribute("aria-label", /正在启动会话|Pi 已驻留/);
+  await expect(second.locator(".session-status")).toHaveAttribute("aria-label", "对话空闲");
   const first = page.locator(".session-item", { hasText: "First session" });
   await expect(first).toBeEnabled();
   await first.click();
@@ -114,14 +112,14 @@ test("an idle hot Secondary can be released without losing the open history", as
   await page.getByRole("button", { name: "发送消息" }).click();
   await expect(page.getByText("warm this session")).toBeVisible();
   const row = page.locator(".session-row", { hasText: "Second session" });
-  await expect(row.locator(".session-status")).toHaveAttribute("aria-label", "Pi 已驻留");
+  await expect(row.locator(".session-status")).toHaveAttribute("aria-label", "对话空闲");
   await row.hover();
   await row.getByRole("button", { name: "Second session 的操作菜单" }).click();
   await page.getByRole("menuitem", { name: "释放运行资源" }).click();
   await expect(page.getByText("已释放对话运行资源")).toBeVisible();
   await expect(page.getByText("Final answer with")).toBeVisible();
   await expect(page.getByRole("textbox", { name: "消息输入" })).toBeEnabled();
-  await expect(row.locator(".session-status")).toHaveAttribute("aria-label", "历史会话 · 发送时准备 Pi");
+  await expect(row.locator(".session-status")).toHaveAttribute("aria-label", "对话空闲");
   await row.hover();
   await row.getByRole("button", { name: "Second session 的操作菜单" }).click();
   await expect(page.getByRole("menuitem", { name: "释放运行资源" })).toHaveCount(0);

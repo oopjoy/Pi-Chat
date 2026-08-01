@@ -12,7 +12,7 @@ function relativeTime(timestamp: number): string {
   return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" }).format(timestamp);
 }
 
-type SessionStatus = "dormant" | "ready" | "pending" | "running" | "error";
+type SessionStatus = "idle" | "unread" | "pending" | "running" | "error";
 
 export function sessionCanRelease(session: SessionSummary, warming: boolean, failed: boolean): boolean {
   return session.releasable === true
@@ -23,16 +23,16 @@ export function sessionCanRelease(session: SessionSummary, warming: boolean, fai
     && !failed;
 }
 
-export function sessionStatus(session: SessionSummary, warming: boolean, failed: boolean): { kind: SessionStatus; label: string } {
+export function sessionStatus(session: SessionSummary, failed: boolean, hasUnseenReply: boolean): { kind: SessionStatus; label: string } {
+  // The dot describes user-visible conversation work, never Runtime residency.
   // A confirmation pauses an in-flight turn but needs user attention first.
   if (session.pendingConfirmation) return { kind: "pending", label: "等待权限确认" };
   // A queued follow-up must not hide the reply currently being generated.
   if (session.running) return { kind: "running", label: "正在生成" };
-  if (warming) return { kind: "running", label: "正在启动会话" };
   if (session.queued) return { kind: "pending", label: "消息等待发送" };
   if (failed) return { kind: "error", label: "会话运行异常" };
-  if (session.writable) return { kind: "ready", label: "Pi 已驻留" };
-  return { kind: "dormant", label: "历史会话 · 发送时准备 Pi" };
+  if (hasUnseenReply) return { kind: "unread", label: "有新回复" };
+  return { kind: "idle", label: "对话空闲" };
 }
 
 function ResizeHandle({ width, onWidthChange }: { width: number; onWidthChange: (width: number) => void }) {
@@ -66,7 +66,7 @@ function ResizeHandle({ width, onWidthChange }: { width: number; onWidthChange: 
   return <div className="sidebar-resize-handle" role="separator" aria-orientation="vertical" aria-label="拖动调整会话栏宽度" aria-valuemin={SIDEBAR_WIDTH_MIN} aria-valuemax={SIDEBAR_WIDTH_MAX} aria-valuenow={Math.round(width)} tabIndex={0} onPointerDown={onPointerDown} onKeyDown={onKeyDown} />;
 }
 
-export function SessionSidebar({ sessions, sessionsTotal, loadingAllSessions, viewedSessionId, workspaceCwd, open, width, newDisabled, refreshDisabled, restartDisabled, workspaceDisabled, viewBusy, refreshing, warmingSessionIds, failedSessionIds, mutatingSessionIds, workspacePicking, onClose, onCollapse, onNew, onRefresh, onLoadAllSessions, onRestart, onView, onRelease, onRename, onDelete, onPickWorkspace, onWidthChange }: {
+export function SessionSidebar({ sessions, sessionsTotal, loadingAllSessions, viewedSessionId, workspaceCwd, open, width, newDisabled, refreshDisabled, restartDisabled, workspaceDisabled, viewBusy, refreshing, warmingSessionIds, failedSessionIds, unseenReplySessionIds, mutatingSessionIds, workspacePicking, onClose, onCollapse, onNew, onRefresh, onLoadAllSessions, onRestart, onView, onRelease, onRename, onDelete, onPickWorkspace, onWidthChange }: {
   sessions: SessionSummary[];
   sessionsTotal: number;
   loadingAllSessions: boolean;
@@ -82,6 +82,8 @@ export function SessionSidebar({ sessions, sessionsTotal, loadingAllSessions, vi
   refreshing: boolean;
   warmingSessionIds: string[];
   failedSessionIds: string[];
+  /** Browser-local completion notice; intentionally separate from Runtime state. */
+  unseenReplySessionIds: string[];
   /** A rename/delete has been accepted locally and must settle before another one starts. */
   mutatingSessionIds: string[];
   workspacePicking: boolean;
@@ -156,7 +158,7 @@ export function SessionSidebar({ sessions, sessionsTotal, loadingAllSessions, vi
             const warming = warmingSessionIds.includes(session.id);
             const failed = failedSessionIds.includes(session.id);
             const mutating = mutatingSessionIds.includes(session.id);
-            const status = sessionStatus(session, warming, failed);
+            const status = sessionStatus(session, failed, unseenReplySessionIds.includes(session.id));
             const canRelease = sessionCanRelease(session, warming, failed);
             return <div className={`session-row ${session.id === viewedSessionId ? "is-active" : ""}`} key={session.id}>
               <button

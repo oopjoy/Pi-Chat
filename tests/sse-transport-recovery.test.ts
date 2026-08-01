@@ -30,7 +30,7 @@ class IdleRpc {
   }
 }
 
-async function startApp() {
+async function startApp(options: { presenceTtlMs?: number } = {}) {
   const rpc = new IdleRpc();
   const app = new PiChatApp({
     rpc: rpc as unknown as PiRpcClient,
@@ -38,6 +38,7 @@ async function startApp() {
     resources: {} as ResourceManager,
     cwd: process.cwd(),
     webRoot: process.cwd(),
+    ...options,
   });
   const server = createServer((request, response) => void app.handle(request, response));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -87,6 +88,120 @@ test("a real sole SSE transport drop leaves health, bootstrap, and a replacement
     const replacement = await openEvents(fixture.origin, secondClient);
     replacement.controller.abort();
     await replacement.reader.cancel().catch(() => undefined);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("foreground presence expiry pushes a control-state SSE frame that clears an observing banner", async () => {
+  const fixture = await startApp({ presenceTtlMs: 40 });
+  const appInternals = fixture.app as unknown as {
+    sseClients: Map<object, string>;
+    sessionControl: { clientConnected(clientId: string): void; noteClientPresence(clientId: string): boolean; setController(sessionId: string, clientId: string): void };
+  };
+  const sessionId = "aaaaaaaaaaaaaaaaaaaa";
+  const owner = "11111111-1111-4111-8111-111111111111";
+  const observer = "22222222-2222-4222-8222-222222222222";
+  const ownerFrames: string[] = [];
+  const observerFrames: string[] = [];
+  const ownerSocket = { write: (frame: string) => { ownerFrames.push(frame); return true; }, end() {} };
+  const observerSocket = { write: (frame: string) => { observerFrames.push(frame); return true; }, end() {} };
+  appInternals.sseClients.set(ownerSocket, owner);
+  appInternals.sseClients.set(observerSocket, observer);
+  appInternals.sessionControl.clientConnected(owner);
+  appInternals.sessionControl.clientConnected(observer);
+  appInternals.sessionControl.noteClientPresence(owner);
+  appInternals.sessionControl.noteClientPresence(observer);
+  appInternals.sessionControl.setController(sessionId, owner);
+  ownerFrames.length = 0;
+  observerFrames.length = 0;
+  try {
+    await sleep(20);
+    appInternals.sessionControl.noteClientPresence(observer);
+    await sleep(30);
+    const observerFrame = observerFrames.at(-1) || "";
+    assert.match(observerFrame, /"type":"pi_chat_session_control_changed"/);
+    assert.match(observerFrame, /"sessionId":"aaaaaaaaaaaaaaaaaaaa"/);
+    assert.doesNotMatch(observerFrame, /"controlOwner"/);
+    assert.match(observerFrame, /"controlledByThisWindow":false/);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("application close leaves no SessionControl release timer after closing SSE clients", async () => {
+  const fixture = await startApp();
+  const appInternals = fixture.app as unknown as {
+    sseClients: Map<object, string>;
+    sessionControl: {
+      clientConnected(clientId: string): void;
+      connectedClients: Map<string, number>;
+      controllerReleaseTimers: Map<string, NodeJS.Timeout>;
+    };
+  };
+  const clientId = "close-cleanup-client";
+  const client = { write: () => true, end() {} };
+  appInternals.sseClients.set(client, clientId);
+  appInternals.sessionControl.clientConnected(clientId);
+  try {
+    await fixture.app.close();
+    assert.equal(appInternals.sseClients.size, 0);
+    assert.equal(appInternals.sessionControl.connectedClients.size, 0);
+    assert.equal(appInternals.sessionControl.controllerReleaseTimers.size, 0);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("server-initiated SSE removal releases its SessionControl presence", async () => {
+  const fixture = await startApp();
+  const appInternals = fixture.app as unknown as {
+    sseClients: Map<object, string>;
+    connectedClients: Map<string, number>;
+    broadcast(event: Record<string, unknown>): void;
+  };
+  const clientId = "33333333-3333-4333-8333-333333333333";
+  const client = new EventEmitter() as EventEmitter & { ended: boolean; write(frame: string): boolean; end(): void };
+  client.ended = false;
+  client.write = () => false;
+  client.end = () => { client.ended = true; };
+  appInternals.sseClients.set(client, clientId);
+  appInternals.connectedClients.set(clientId, 1);
+  try {
+    for (let index = 0; index < 6; index += 1) {
+      appInternals.broadcast({ type: "tool_execution_end", sequence: index, payload: "x".repeat(450_000) });
+    }
+    assert.equal(client.ended, true);
+    assert.equal(appInternals.sseClients.size, 0);
+    assert.equal(appInternals.connectedClients.has(clientId), false);
+    // The later HTTP request-close path sees an already removed socket and must
+    // not decrement below zero or schedule a second ownership cleanup.
+    (fixture.app as unknown as { sseHub: { remove(response: object): string } }).sseHub.remove(client);
+    assert.equal(appInternals.connectedClients.has(clientId), false);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("write-error removal releases SessionControl presence exactly once", async () => {
+  const fixture = await startApp();
+  const appInternals = fixture.app as unknown as {
+    sseClients: Map<object, string>;
+    connectedClients: Map<string, number>;
+    broadcast(event: Record<string, unknown>): void;
+  };
+  const clientId = "44444444-4444-4444-8444-444444444444";
+  const client = new EventEmitter() as EventEmitter & { write(frame: string): boolean; end(): void };
+  client.write = () => { throw new Error("broken socket"); };
+  client.end = () => {};
+  appInternals.sseClients.set(client, clientId);
+  appInternals.connectedClients.set(clientId, 1);
+  try {
+    appInternals.broadcast({ type: "message_update", payload: "trigger write error" });
+    assert.equal(appInternals.sseClients.size, 0);
+    assert.equal(appInternals.connectedClients.has(clientId), false);
+    (fixture.app as unknown as { sseHub: { remove(response: object): string } }).sseHub.remove(client);
+    assert.equal(appInternals.connectedClients.has(clientId), false);
   } finally {
     await fixture.close();
   }

@@ -79,6 +79,8 @@ export interface PiChatAppOptions {
   maxIdleSecondaryRuntimes?: number;
   secondaryRuntimeSweepMs?: number;
   controllerReleaseMs?: number;
+  /** Foreground browser lease duration; separate from the SSE transport socket. */
+  presenceTtlMs?: number;
   gateRequestTimeoutMs?: number;
   sseHeartbeatMs?: number;
   now?: () => number;
@@ -183,6 +185,8 @@ export class PiChatApp {
     this.sseHeartbeatMs = Math.max(10, options.sseHeartbeatMs ?? 20_000);
     this.sessionControl = new SessionControl({
       controllerReleaseMs: options.controllerReleaseMs,
+      presenceTtlMs: options.presenceTtlMs,
+      now: this.now,
       onControlChanged: (sessionId) => this.broadcastControlState(sessionId),
     });
     this.sessionControllers = this.sessionControl.sessionControllers;
@@ -242,7 +246,11 @@ export class PiChatApp {
       broadcast: (event) => this.broadcast(event),
     });
     this.runtimes = this.runtimePool.runtimes;
-    this.sseHub.onDisconnect((_response, _clientId, info) => {
+    this.sseHub.onDisconnect((_response, clientId, info) => {
+      // SseHub is the one canonical transport departure path. It covers both
+      // request-close and server-initiated slow-client/write-error removal, so
+      // SessionControl decrements this connection exactly once.
+      this.clientDisconnected(clientId);
       // Transport diagnostics deliberately exclude client/session identity and
       // payloads. A dropped EventSource remains recoverable and must not alter
       // application lifecycle or Runtime ownership.
@@ -326,7 +334,7 @@ export class PiChatApp {
 
   private isOrdinaryMutation(request: IncomingMessage, url: URL): boolean {
     if (request.method === "GET" || request.method === "HEAD") return false;
-    if (["/api/restart", "/api/shutdown", "/api/window/close", "/api/workspace/pick", "/api/workspace/set", "/api/local-files/pick", "/api/local-files/clipboard"].includes(url.pathname)) return false;
+    if (["/api/restart", "/api/shutdown", "/api/window/close", "/api/presence", "/api/workspace/pick", "/api/workspace/set", "/api/local-files/pick", "/api/local-files/clipboard"].includes(url.pathname)) return false;
     if (url.pathname === "/api/models" || url.pathname.startsWith("/api/resources/")) return false;
     if (/^\/api\/models\/[A-Za-z0-9._-]{1,80}\//.test(url.pathname)) return false;
     if (url.pathname === "/api/sessions/viewing/clear" || /^\/api\/sessions\/[a-f0-9]{20}\/viewing$/.test(url.pathname)) return false;
@@ -340,13 +348,15 @@ export class PiChatApp {
     // Distinct Session workers can stop concurrently. Sequential forced-stop
     // windows made shutdown/restart scale by roughly three seconds per worker.
     await this.runtimePool.stopAll({ cleanupDrafts: true });
+    // Closing the hub emits the canonical disconnect callbacks. Clear control
+    // state afterwards so those callbacks cannot leave fresh release timers.
+    this.sseHub.closeAll();
     this.sessionControl.clear();
     this.scheduler.clearPrimary();
     for (const timer of this.pendingExtensionTimers.values()) clearTimeout(timer);
     this.pendingExtensionTimers.clear();
     this.claimingExtensionRequests.clear();
     this.promptAdmissionTails.clear();
-    this.sseHub.closeAll();
   }
 
   private broadcast(event: Record<string, unknown>): void {
@@ -1571,11 +1581,20 @@ export class PiChatApp {
       const timer = setInterval(() => this.sseHub.heartbeat(response), this.sseHeartbeatMs);
       request.once("close", () => {
         clearInterval(timer);
-        // SseHub emits a transport-only diagnostic before presence is released.
-        // A server-initiated slow-client close already removed its entry.
-        const removedClientId = this.sseHub.remove(response);
-        this.clientDisconnected(removedClientId || clientId);
+        // The hub emits exactly one disconnect notification. If a slow-client
+        // protection already removed this response, remove() is a harmless no-op.
+        this.sseHub.remove(response);
       });
+      return;
+    }
+
+    if (url.pathname === "/api/presence") {
+      if (request.method !== "POST") return methodNotAllowed(response);
+      if (!clientId) return json(response, 400, { error: "浏览器窗口标识无效" });
+      if (!this.sessionControl.noteClientPresence(clientId)) {
+        return json(response, 409, { error: "事件连接已断开，正在重新连接" });
+      }
+      json(response, 200, { present: true });
       return;
     }
 
@@ -1590,7 +1609,9 @@ export class PiChatApp {
       if (request.method !== "POST") return methodNotAllowed(response);
       if (!clientId) return json(response, 400, { error: "缺少窗口标识，无法安全关闭" });
       if (this.applicationLifecycle !== "idle") throw new ApplicationLifecycleConflictError(this.applicationLifecycle, this.lifecycleMessage());
-      const otherWindowCount = this.sessionControl.otherWindowCount(clientId);
+      // A frozen/recovered PWA may retain only its transport socket. It must
+      // not prevent the final foreground window from closing the application.
+      const otherWindowCount = this.sessionControl.otherPresentWindowCount(clientId);
       if (otherWindowCount > 0) {
         const viewedSessionId = this.releaseClient(clientId);
         // A Prompt may already hold an admission lease while its request body is
