@@ -166,3 +166,18 @@ test("cache navigation never mistakes its own local overlay for persisted histor
   assert.deepEqual(returnedPaint.messages, [previous, local]);
   assert.deepEqual(returnedPaint.pendingTurns, [pending]);
 });
+
+test("a late prompt acknowledgement cannot reappend a local turn already confirmed by a view", async () => {
+  const { appendLocalTurnOnce } = await import("../src/web/lib/local-user-turn");
+  const localTurn: LocalUserTurn = { sessionId: "session-a", message: local, expectedTurnTotal: 2 };
+  const firstPaint = appendLocalTurnOnce([previous], localTurn);
+  assert.deepEqual(firstPaint, [previous, local]);
+
+  // The authoritative view confirms and removes the local overlay before the
+  // accepted-prompt HTTP acknowledgement reaches the browser.
+  localTurn.renderedInTranscript = false;
+  const authoritative = [previous, { role: "user" as const, content: "submitted just now" }];
+  const pendingAfterView = protectTranscriptWithLocalTurns([localTurn], authoritative, 2, 2).pendingTurns;
+  assert.deepEqual(pendingAfterView, []);
+  assert.deepEqual(appendLocalTurnOnce(authoritative, pendingAfterView[0]), authoritative);
+});

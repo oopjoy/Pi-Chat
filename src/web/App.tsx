@@ -25,10 +25,11 @@ import { gateModeFromCommand, gateModeFromNotice, type GateMode } from "./lib/ga
 import { assistantMessage, lifecycleFromEvent, parseEventData, userMessage } from "./lib/pi-events";
 import { applyAppearance, loadAppearance, loadSidebarOpen, loadSidebarWidth, saveAppearance, saveSidebarOpen, saveSidebarWidth, type AppearancePreferences } from "./lib/preferences";
 import { rememberedSessionId, rememberSessionId } from "./lib/session-location";
-import { appendPendingUserMessage, bindQueuedAdmission, bindQueuedDispatch, localTurnBelongsInTranscript, markLocalTurnQueued, nextLocalTurnTotal, protectTranscriptWithLocalTurns, removeLocalTurnAndRebase, type LocalUserTurn } from "./lib/local-user-turn";
+import { appendLocalTurnOnce, appendPendingUserMessage, bindQueuedAdmission, bindQueuedDispatch, localTurnBelongsInTranscript, markLocalTurnQueued, nextLocalTurnTotal, protectTranscriptWithLocalTurns, removeLocalTurnAndRebase, type LocalUserTurn } from "./lib/local-user-turn";
 import { refreshFailureKeepsCommittedView, sidebarNavigationBlocked } from "./lib/refresh-navigation-guards";
 import { SessionScrollMemory } from "./lib/session-scroll-memory";
 import { SessionViewCache } from "./lib/session-view-cache";
+import { uniqueSessionSummaries } from "./lib/session-summary";
 
 const EMPTY_STATE: PiState = { model: null, isStreaming: false };
 const LOCAL_DRAFT_BUSY_ID = "__local_draft_busy__";
@@ -95,6 +96,7 @@ export function App() {
   const [stats, setStats] = useState<SessionStats | undefined>();
   const [liveMessage, setLiveMessage] = useState<PiMessage | null>(null);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const sessionsRef = useRef<SessionSummary[]>([]);
   const [sessionsTotal, setSessionsTotal] = useState(0);
   const [loadingAllSessions, setLoadingAllSessions] = useState(false);
   const showAllSessionsRef = useRef(false);
@@ -142,7 +144,13 @@ export function App() {
   const [primaryRuntime, setPrimaryRuntime] = useState<PrimaryRuntimeReadiness>({ status: "starting", generation: 0 });
   /** Session IDs whose Pi Runtime is being prepared outside the reading path. */
   const [warmingSessionIds, setWarmingSessionIds] = useState<string[]>([]);
+  const [mutatingSessionIds, setMutatingSessionIds] = useState<string[]>([]);
   const viewCacheRef = useRef(new SessionViewCache());
+  /** Structural deletion is terminal, including for delayed HTTP/SSE continuations. */
+  const confirmedDeletedSessionIdsRef = useRef(new Set<string>());
+  const optimisticRenamesRef = useRef(new Map<string, { token: number; previousName: string; name: string }>());
+  const optimisticDeletesRef = useRef(new Map<string, { token: number; session: SessionSummary; index: number; sessionsTotal: number; wasViewed: boolean }>());
+  const optimisticSessionMutationTokenRef = useRef(0);
   const [gateModes, setGateModes] = useState<Record<string, GateMode>>({});
   const gateModesRef = useRef<Record<string, GateMode>>({});
   const updateGateMode = useCallback((sessionId: string, mode: GateMode | undefined) => {
@@ -150,10 +158,11 @@ export function App() {
     if (mode) next[sessionId] = mode;
     else delete next[sessionId];
     gateModesRef.current = next;
-    viewCacheRef.current.patch(sessionId, { gateMode: mode });
+    if (!confirmedDeletedSessionIdsRef.current.has(sessionId)) viewCacheRef.current.patch(sessionId, { gateMode: mode });
     setGateModes(next);
   }, []);
   const [failedSessionIds, setFailedSessionIds] = useState<string[]>([]);
+  useEffect(() => { sessionsRef.current = sessions; }, [sessions]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const scrollMemoryRef = useRef(new SessionScrollMemory());
@@ -200,6 +209,16 @@ export function App() {
     if (recoverableRefreshError(message)) return;
     setError(message);
   }, []);
+
+  const syncMutatingSessionIds = () => setMutatingSessionIds([...new Set([...optimisticRenamesRef.current.keys(), ...optimisticDeletesRef.current.keys()])]);
+  const reconcileOptimisticSessions = (incoming: SessionSummary[]) => uniqueSessionSummaries(incoming)
+    .filter((session) => !optimisticDeletesRef.current.has(session.id) && !confirmedDeletedSessionIdsRef.current.has(session.id))
+    .map((session) => {
+      const rename = optimisticRenamesRef.current.get(session.id);
+      return rename ? { ...session, name: rename.name } : session;
+    });
+  const optimisticSessionsTotal = (incoming: SessionSummary[], total: number) => Math.max(0, total - incoming.filter((session) => optimisticDeletesRef.current.has(session.id) || confirmedDeletedSessionIdsRef.current.has(session.id)).length);
+  const rememberSessionView = (view: SessionViewData) => confirmedDeletedSessionIdsRef.current.has(view.session.id) ? undefined : viewCacheRef.current.remember(view);
 
   const setRuntimeWarming = useCallback((sessionId: string, warming: boolean) => {
     if (!sessionId) return;
@@ -284,12 +303,13 @@ export function App() {
     for (const session of data.sessions) {
       if (typeof session.turnCount === "number" && Number.isFinite(session.turnCount)) sourceTurnTotalsRef.current.set(session.id, session.turnCount);
     }
+    const incoming = reconcileOptimisticSessions(data.sessions);
     setSessions((current) => {
-      if (!showAllSessionsRef.current) return data.sessions;
-      const updates = new Map(data.sessions.map((session) => [session.id, session]));
-      return current.map((session) => updates.get(session.id) || session);
+      if (!showAllSessionsRef.current) return incoming;
+      const updates = new Map(incoming.map((session) => [session.id, session]));
+      return uniqueSessionSummaries(current.filter((session) => !optimisticDeletesRef.current.has(session.id) && !confirmedDeletedSessionIdsRef.current.has(session.id)).map((session) => updates.get(session.id) || session));
     });
-    setSessionsTotal(data.sessionsTotal ?? data.sessions.length);
+    setSessionsTotal(optimisticSessionsTotal(data.sessions, data.sessionsTotal ?? data.sessions.length));
     const activeId = data.activeSessionId || data.sessions.find((session) => session.active)?.id || "";
     setActiveSessionId(activeId);
     const hotIds = data.activeSessionIds || (activeId ? [activeId] : []);
@@ -305,7 +325,7 @@ export function App() {
   const applyBootstrap = useCallback((data: BootstrapData) => {
     const activeViewId = data.activeSessionId || data.sessions.find((item) => item.active)?.id || "";
     const activeViewSession = data.sessions.find((session) => session.id === activeViewId);
-    const sourceView = activeViewSession ? viewCacheRef.current.remember({
+    const sourceView = activeViewSession && !confirmedDeletedSessionIdsRef.current.has(activeViewSession.id) ? rememberSessionView({
       session: activeViewSession,
       state: data.state,
       messages: data.messages,
@@ -375,6 +395,8 @@ export function App() {
   }, []);
 
   const applySessionView = useCallback((view: SessionViewData) => {
+    // A structural delete wins over a delayed view/cache response.
+    if (confirmedDeletedSessionIdsRef.current.has(view.session.id)) return;
     // Cache the source view before adding local UI overlays. A cached overlay has
     // a synthetic turnTotal and must never confirm that its own user message was
     // persisted when the user switches away and returns.
@@ -433,7 +455,7 @@ export function App() {
     recordPaneCommit(resolvedView);
     // A blank New draft has no persisted user message and intentionally stays
     // out of sidebar history until its first successful prompt.
-    if (view.session.messageCount > 0) setSessions((current) => current.some((session) => session.id === view.session.id) ? current.map((session) => session.id === view.session.id ? { ...session, ...view.session } : session) : [...current, view.session]);
+    if (view.session.messageCount > 0) setSessions((current) => uniqueSessionSummaries(current.some((session) => session.id === view.session.id) ? current.map((session) => session.id === view.session.id ? { ...session, ...view.session } : session) : [...current, view.session]));
     if (view.isActive) setActiveSessionIds((current) => [...new Set([...current, view.session.id])]);
     setViewedId(view.session.id);
   }, [recordPaneCommit, setRuntimeWarming, setViewedId, tryAutoAllowGate, updateGateMode]);
@@ -513,8 +535,8 @@ export function App() {
       for (const session of result.sessions) {
         if (typeof session.turnCount === "number" && Number.isFinite(session.turnCount)) sourceTurnTotalsRef.current.set(session.id, session.turnCount);
       }
-      setSessions(result.sessions);
-      setSessionsTotal(result.total ?? result.sessions.length);
+      setSessions(reconcileOptimisticSessions(result.sessions));
+      setSessionsTotal(optimisticSessionsTotal(result.sessions, result.total ?? result.sessions.length));
     } finally {
       sessionRefreshInFlightRef.current = false;
       if (sessionRefreshRequestedRef.current) {
@@ -534,8 +556,8 @@ export function App() {
         if (typeof session.turnCount === "number" && Number.isFinite(session.turnCount)) sourceTurnTotalsRef.current.set(session.id, session.turnCount);
       }
       showAllSessionsRef.current = true;
-      setSessions(result.sessions);
-      setSessionsTotal(result.total ?? result.sessions.length);
+      setSessions(reconcileOptimisticSessions(result.sessions));
+      setSessionsTotal(optimisticSessionsTotal(result.sessions, result.total ?? result.sessions.length));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -758,12 +780,12 @@ export function App() {
         // background view request then merges the current live draft. Only a
         // structural mutation makes the cached view semantically invalid.
         if (typeof event.sessionId === "string" && ["deleted", "renamed"].includes(String(event.action || ""))) viewCacheRef.current.forget(event.sessionId);
-        if (event.action === "deleted" && event.sessionId === viewedSessionIdRef.current) {
-          viewedSessionIdRef.current = "";
-          void refresh().catch(reportBackgroundRefreshError);
-        } else {
-          scheduleSidebarRefresh();
-        }
+        if (event.action === "deleted" && typeof event.sessionId === "string") {
+          const wasViewed = finalizeDeletedSession(event.sessionId);
+          const remaining = sessionsRef.current.filter((session) => session.id !== event.sessionId);
+          if (wasViewed) selectDeletionFallback(event.sessionId, remaining, true);
+          void refreshSidebarSessions().catch(reportBackgroundRefreshError);
+        } else scheduleSidebarRefresh();
       } else if (type === "pi_chat_queue_update") {
         const currentQueue = Array.isArray(event.queue) ? event.queue as unknown as QueuedPrompt[] : [];
         const admittedId = typeof event.admittedId === "string" ? event.admittedId : "";
@@ -1218,7 +1240,7 @@ export function App() {
           setPendingUserMessage(null);
           setPromptStarting(true);
           setToolStatus("Pi 内核已就绪，正在准备消息…");
-        } else viewCacheRef.current.remember(view);
+        } else rememberSessionView(view);
         if (preferredModel && (view.state.model?.provider !== preferredModel.provider || view.state.model?.id !== preferredModel.id)) {
           const selected = await api.setModel(preferredModel.provider, preferredModel.id, targetSessionId);
           if (viewedSessionIdRef.current === targetSessionId) setState((current) => ({ ...current, model: selected.model }));
@@ -1241,7 +1263,7 @@ export function App() {
         if (activationIsCurrent) {
           viewCacheRef.current.forget(view.session.id);
           applySessionView(view);
-        } else viewCacheRef.current.remember(view);
+        } else rememberSessionView(view);
         setPendingUserMessage(null);
         setPromptStarting(true);
         setToolStatus("Pi 内核已就绪，正在准备消息…");
@@ -1335,9 +1357,7 @@ export function App() {
           // A very fast turn can settle before the prompt HTTP acknowledgement.
           // Commit the local bubble before waiting for its final JSONL view.
           protectLocalPrompt(localTurn);
-          if (!localTurnEntry()?.renderedInTranscript) {
-            setMessages((current) => [...current, localTurn]);
-          }
+          setMessages((current) => appendLocalTurnOnce(current, localTurnEntry()));
           setPendingUserMessage(null);
           try {
             const requestVersion = sessionEventVersionRef.current.get(targetSessionId) || 0;
@@ -1352,9 +1372,7 @@ export function App() {
           // overlay into `messages` while this HTTP acknowledgement was pending.
           // Do not create a duplicate user bubble in that race.
           protectLocalPrompt(localTurn);
-          if (!localTurnEntry()?.renderedInTranscript) {
-            setMessages((current) => [...current, localTurn]);
-          }
+          setMessages((current) => appendLocalTurnOnce(current, localTurnEntry()));
           setPendingUserMessage(null);
           setState((current) => ({ ...current, isStreaming: true }));
           setToolStatus("Pi 正在思考…");
@@ -1428,6 +1446,7 @@ export function App() {
   };
 
   const viewSession = async (id: string) => {
+    if (confirmedDeletedSessionIdsRef.current.has(id)) return;
     if (id === viewedSessionIdRef.current && desiredSessionIdRef.current === id) return;
     // Snapshot exactly what the user is leaving, including a cumulative SSE
     // assistant draft. Returning to a running Session can then paint this first
@@ -1521,7 +1540,7 @@ export function App() {
         if (!(cause instanceof ApiRequestError) || cause.code !== "HOT_VIEW_UNAVAILABLE") throw cause;
         view = await api.viewSession(id, rememberedTurns, { signal: controller.signal });
       }
-      if (navigationEpochRef.current !== epoch || desiredSessionIdRef.current !== id) return;
+      if (navigationEpochRef.current !== epoch || desiredSessionIdRef.current !== id || confirmedDeletedSessionIdsRef.current.has(id)) return;
       pendingScrollRestoreRef.current = id;
       applySessionView(viewCacheRef.current.mergeNavigation(view, requestStartRevision));
       if ((view.historyPending || view.reconcilePending || view.isStreaming) && viewedSessionIdRef.current === id) schedulePromptReconcile(id);
@@ -1703,11 +1722,62 @@ export function App() {
     }
   };
 
+  const applySessionListSnapshot = (result: { sessions: SessionSummary[]; total: number }) => {
+    setSessions(reconcileOptimisticSessions(result.sessions));
+    setSessionsTotal(optimisticSessionsTotal(result.sessions, result.total));
+  };
+  const finalizeDeletedSession = (sessionId: string) => {
+    const wasViewed = sessionId === viewedSessionIdRef.current || sessionId === desiredSessionIdRef.current;
+    if (sessionId === desiredSessionIdRef.current) cancelPendingNavigation();
+    optimisticRenamesRef.current.delete(sessionId);
+    optimisticDeletesRef.current.delete(sessionId);
+    confirmedDeletedSessionIdsRef.current.add(sessionId);
+    scrollMemoryRef.current.forget(sessionId);
+    viewCacheRef.current.forget(sessionId);
+    localUserTurnsRef.current.delete(sessionId);
+    sourceTurnTotalsRef.current.delete(sessionId);
+    setSessions((current) => current.filter((session) => session.id !== sessionId));
+    if (sessionId === viewedSessionIdRef.current) {
+      viewedSessionIdRef.current = "";
+      desiredSessionIdRef.current = "";
+      setViewedSessionId("");
+      rememberSessionId("");
+      setMessages([]); setPendingUserMessage(null); setLiveMessage(null); setQueue([]); setToolStatus("");
+      setRuntimeStatus("view-only");
+    }
+    syncMutatingSessionIds();
+    return wasViewed;
+  };
+  const selectDeletionFallback = (deletedId: string, remaining: SessionSummary[], wasViewed: boolean) => {
+    if (!wasViewed) return;
+    if (viewedSessionIdRef.current && viewedSessionIdRef.current !== deletedId) return;
+    const replacement = remaining.find((session) => session.id !== deletedId);
+    if (replacement) void viewSession(replacement.id);
+    else createSession();
+  };
+  const reconcileSessionMutation = async (sessionId: string, kind: "rename" | "delete", expectedName?: string) => {
+    const result = await api.sessions(true);
+    const session = result.sessions.find((item) => item.id === sessionId);
+    return { result, outcome: kind === "rename" ? (session?.name === expectedName ? "committed" : session ? "not-committed" : "absent") : (session ? "not-committed" : "committed") } as const;
+  };
+  const reconcilePendingSessionMutations = async () => {
+    const result = await api.sessions(true);
+    for (const [id, pending] of optimisticRenamesRef.current) {
+      const session = result.sessions.find((item) => item.id === id);
+      if (session?.name === pending.name) optimisticRenamesRef.current.delete(id);
+      else if (!session) { const wasViewed = finalizeDeletedSession(id); selectDeletionFallback(id, result.sessions, wasViewed); }
+    }
+    for (const id of optimisticDeletesRef.current.keys()) if (!result.sessions.some((session) => session.id === id)) finalizeDeletedSession(id);
+    syncMutatingSessionIds();
+    applySessionListSnapshot(result);
+  };
+
   const refreshManually = async () => {
     setRefreshing(true);
     setError("");
     try {
       await refresh();
+      await reconcilePendingSessionMutations();
       setNotice("会话已刷新");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -1751,20 +1821,52 @@ export function App() {
     }
   };
 
-  const renameSession = async (name: string) => {
-    if (!sessionDialog) return;
-    setSessionActionBusy(true);
+  const renameSession = (name: string) => {
+    const dialog = sessionDialog;
+    if (!dialog || dialog.mode !== "rename") return;
+    const sessionId = dialog.session.id;
+    if (optimisticRenamesRef.current.has(sessionId) || optimisticDeletesRef.current.has(sessionId)) return;
+    const token = ++optimisticSessionMutationTokenRef.current;
+    optimisticRenamesRef.current.set(sessionId, { token, previousName: dialog.session.name, name });
+    syncMutatingSessionIds();
+    setSessionDialog(null);
     setError("");
-    try {
-      await api.renameSession(sessionDialog.session.id, name);
-      setSessionDialog(null);
-      await refresh();
+    setSessions((current) => current.map((session) => session.id === sessionId ? { ...session, name } : session));
+    const cached = viewCacheRef.current.get(sessionId);
+    if (cached) viewCacheRef.current.refresh(sessionId, { session: { ...cached.session, name } });
+    void api.renameSession(sessionId, name).then((data) => {
+      if (optimisticRenamesRef.current.get(sessionId)?.token !== token) return;
+      optimisticRenamesRef.current.delete(sessionId);
+      syncMutatingSessionIds();
+      applyBootstrapMetadata(data);
       setNotice("对话已重命名");
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setSessionActionBusy(false);
-    }
+    }).catch(async (cause) => {
+      if (optimisticRenamesRef.current.get(sessionId)?.token !== token) return;
+      try {
+        const { outcome, result } = await reconcileSessionMutation(sessionId, "rename", name);
+        if (optimisticRenamesRef.current.get(sessionId)?.token !== token) return;
+        if (outcome === "committed") {
+          optimisticRenamesRef.current.delete(sessionId);
+          syncMutatingSessionIds();
+          applySessionListSnapshot(result);
+          setNotice("对话已重命名");
+          return;
+        }
+        if (outcome === "absent") {
+          const wasViewed = finalizeDeletedSession(sessionId);
+          applySessionListSnapshot(result);
+          selectDeletionFallback(sessionId, result.sessions, wasViewed);
+          setError("重命名未完成：对话已不存在或已被删除");
+          return;
+        }
+        optimisticRenamesRef.current.delete(sessionId);
+        syncMutatingSessionIds();
+        applySessionListSnapshot(result);
+        setError(`重命名失败，已恢复原名称：${cause instanceof Error ? cause.message : String(cause)}`);
+        return;
+      } catch { /* retain indeterminate intent until an authoritative refresh */ }
+      setError(`重命名结果尚未确认，请刷新页面后核对：${cause instanceof Error ? cause.message : String(cause)}`);
+    });
   };
 
   const releaseSession = async (session: SessionSummary) => {
@@ -1777,62 +1879,58 @@ export function App() {
       viewCacheRef.current.setPinned(ids);
       setSessions((current) => applyActiveSessionIds(current, ids));
       const cached = viewCacheRef.current.get(session.id);
-      if (cached) viewCacheRef.current.refresh(session.id, {
-        runtimeStatus: "view-only",
-        isActive: false,
-        isStreaming: false,
-        liveMessage: undefined,
-        toolStatus: "",
-        session: { ...cached.session, writable: false, releasable: false, running: false, queued: false },
-        state: { ...cached.state, isStreaming: false },
-      });
+      if (cached) viewCacheRef.current.refresh(session.id, { runtimeStatus: "view-only", isActive: false, isStreaming: false, liveMessage: undefined, toolStatus: "", session: { ...cached.session, writable: false, releasable: false, running: false, queued: false }, state: { ...cached.state, isStreaming: false } });
       if (viewedSessionIdRef.current === session.id) {
-        setRuntimeStatus("view-only");
-        setState((current) => ({ ...current, isStreaming: false }));
-        setToolStatus("");
+        setRuntimeStatus("view-only"); setState((current) => ({ ...current, isStreaming: false })); setToolStatus("");
       }
       setNotice("已释放对话运行资源");
       void refreshSidebarSessions().catch(reportBackgroundRefreshError);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setSessionActionBusy(false);
-    }
+    } finally { setSessionActionBusy(false); }
   };
 
-  const deleteSession = async () => {
-    if (!sessionDialog) return;
-    const deletingId = sessionDialog.session.id;
-    if (deletingId === desiredSessionIdRef.current || deletingId === viewedSessionIdRef.current) cancelPendingNavigation();
-    setSessionActionBusy(true);
+  const deleteSession = () => {
+    const dialog = sessionDialog;
+    if (!dialog || dialog.mode !== "delete") return;
+    const deleting = dialog.session;
+    const deletingId = deleting.id;
+    if (optimisticRenamesRef.current.has(deletingId) || optimisticDeletesRef.current.has(deletingId)) return;
+    const wasViewed = deletingId === desiredSessionIdRef.current || deletingId === viewedSessionIdRef.current;
+    const replacement = wasViewed ? sessionsRef.current.find((session) => session.id !== deletingId) : undefined;
+    const token = ++optimisticSessionMutationTokenRef.current;
+    optimisticDeletesRef.current.set(deletingId, { token, session: deleting, index: sessionsRef.current.findIndex((session) => session.id === deletingId), sessionsTotal, wasViewed });
+    syncMutatingSessionIds();
+    if (wasViewed) cancelPendingNavigation();
+    setSessionDialog(null);
     setError("");
-    try {
-      const data = await api.deleteSession(deletingId);
-      scrollMemoryRef.current.forget(deletingId);
-      viewCacheRef.current.forget(deletingId);
-      setSessionDialog(null);
-      if (viewedSessionIdRef.current === deletingId) {
-        // The mutation Bootstrap returns a fresh recent snapshot. Reset the
-        // expanded list so the deleted row cannot survive full-list merging.
-        showAllSessionsRef.current = false;
-        applyBootstrap(data);
-      } else if (showAllSessionsRef.current) {
-        setSessions((current) => current.filter((session) => session.id !== deletingId));
-        setSessionsTotal((current) => Math.max(0, current - 1));
-        void refreshSidebarSessions().catch(reportBackgroundRefreshError);
-      } else {
-        // Do not call full refresh() here: it can block for a long time while
-        // another Session is streaming. The delete response already has the
-        // updated sidebar list.
-        setSessions(data.sessions);
-        setSessionsTotal(data.sessionsTotal ?? data.sessions.length);
-      }
+    setSessions((current) => current.filter((session) => session.id !== deletingId));
+    setSessionsTotal((current) => Math.max(0, current - 1));
+    if (wasViewed) { if (replacement) void viewSession(replacement.id); else createSession(); }
+    void api.deleteSession(deletingId).then((data) => {
+      if (optimisticDeletesRef.current.get(deletingId)?.token !== token) return;
+      finalizeDeletedSession(deletingId);
+      applyBootstrapMetadata(data);
       setNotice("对话已删除");
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setSessionActionBusy(false);
-    }
+    }).catch(async (cause) => {
+      if (optimisticDeletesRef.current.get(deletingId)?.token !== token) return;
+      try {
+        const { outcome, result } = await reconcileSessionMutation(deletingId, "delete");
+        if (optimisticDeletesRef.current.get(deletingId)?.token !== token) return;
+        if (outcome === "committed") {
+          finalizeDeletedSession(deletingId);
+          applySessionListSnapshot(result);
+          setNotice("对话已删除");
+          return;
+        }
+        optimisticDeletesRef.current.delete(deletingId);
+        syncMutatingSessionIds();
+        applySessionListSnapshot(result);
+        setError(`删除失败，已恢复对话显示：${cause instanceof Error ? cause.message : String(cause)}`);
+        return;
+      } catch { /* retain indeterminate intent until an authoritative refresh */ }
+      setError(`删除结果尚未确认，请刷新页面后核对：${cause instanceof Error ? cause.message : String(cause)}`);
+    });
   };
 
   const changeGate = async (mode: GateMode) => {
@@ -1948,6 +2046,7 @@ export function App() {
         refreshing={refreshing}
         warmingSessionIds={warmingSessionIds}
         failedSessionIds={failedSessionIds}
+        mutatingSessionIds={mutatingSessionIds}
         workspacePicking={workspacePicking}
         onClose={() => setSidebarOpen(false)}
         onCollapse={() => setSidebarOpen(false)}

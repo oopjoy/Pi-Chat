@@ -68,6 +68,16 @@ export function localTurnBelongsInTranscript(turn: LocalUserTurn): boolean {
   return turn.queueState !== "waiting";
 }
 
+/**
+ * A late prompt acknowledgement may arrive after a view has already confirmed
+ * and removed this local turn. Render only the still-pending object once.
+ */
+export function appendLocalTurnOnce(messages: PiMessage[], turn: LocalUserTurn | undefined): PiMessage[] {
+  if (!turn || turn.renderedInTranscript) return messages;
+  turn.renderedInTranscript = true;
+  return messages.includes(turn.message) ? messages : [...messages, turn.message];
+}
+
 export function markLocalTurnQueued(turn: LocalUserTurn, queueId: string): void {
   turn.queueId = queueId;
   if (turn.queueState !== "dispatched") turn.queueState = "waiting";

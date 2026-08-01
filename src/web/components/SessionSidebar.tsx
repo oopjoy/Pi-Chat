@@ -66,7 +66,7 @@ function ResizeHandle({ width, onWidthChange }: { width: number; onWidthChange: 
   return <div className="sidebar-resize-handle" role="separator" aria-orientation="vertical" aria-label="拖动调整会话栏宽度" aria-valuemin={SIDEBAR_WIDTH_MIN} aria-valuemax={SIDEBAR_WIDTH_MAX} aria-valuenow={Math.round(width)} tabIndex={0} onPointerDown={onPointerDown} onKeyDown={onKeyDown} />;
 }
 
-export function SessionSidebar({ sessions, sessionsTotal, loadingAllSessions, viewedSessionId, workspaceCwd, open, width, newDisabled, refreshDisabled, restartDisabled, workspaceDisabled, viewBusy, refreshing, warmingSessionIds, failedSessionIds, workspacePicking, onClose, onCollapse, onNew, onRefresh, onLoadAllSessions, onRestart, onView, onRelease, onRename, onDelete, onPickWorkspace, onWidthChange }: {
+export function SessionSidebar({ sessions, sessionsTotal, loadingAllSessions, viewedSessionId, workspaceCwd, open, width, newDisabled, refreshDisabled, restartDisabled, workspaceDisabled, viewBusy, refreshing, warmingSessionIds, failedSessionIds, mutatingSessionIds, workspacePicking, onClose, onCollapse, onNew, onRefresh, onLoadAllSessions, onRestart, onView, onRelease, onRename, onDelete, onPickWorkspace, onWidthChange }: {
   sessions: SessionSummary[];
   sessionsTotal: number;
   loadingAllSessions: boolean;
@@ -82,6 +82,8 @@ export function SessionSidebar({ sessions, sessionsTotal, loadingAllSessions, vi
   refreshing: boolean;
   warmingSessionIds: string[];
   failedSessionIds: string[];
+  /** A rename/delete has been accepted locally and must settle before another one starts. */
+  mutatingSessionIds: string[];
   workspacePicking: boolean;
   onClose: () => void;
   onCollapse: () => void;
@@ -153,6 +155,7 @@ export function SessionSidebar({ sessions, sessionsTotal, loadingAllSessions, vi
             const unavailable = viewBusy || session.id === viewedSessionId;
             const warming = warmingSessionIds.includes(session.id);
             const failed = failedSessionIds.includes(session.id);
+            const mutating = mutatingSessionIds.includes(session.id);
             const status = sessionStatus(session, warming, failed);
             const canRelease = sessionCanRelease(session, warming, failed);
             return <div className={`session-row ${session.id === viewedSessionId ? "is-active" : ""}`} key={session.id}>
@@ -168,7 +171,7 @@ export function SessionSidebar({ sessions, sessionsTotal, loadingAllSessions, vi
                 <span className="session-meta"><i className={`session-status is-${status.kind}`} role="img" aria-label={status.label} title={status.label} />{relativeTime(session.updatedAt)} · {session.turnCount ?? session.messageCount} 轮</span>
               </button>
               <div className={`session-item-actions${sessionMenuId === session.id ? " is-open" : ""}`}>
-                <button type="button" className="session-menu-trigger" onClick={(event) => {
+                <button type="button" className="session-menu-trigger" disabled={mutating} onClick={(event) => {
                   if (sessionMenuId === session.id) return setSessionMenuId("");
                   const rect = event.currentTarget.getBoundingClientRect();
                   const menuHeight = canRelease ? 108 : 72;
@@ -191,8 +194,8 @@ export function SessionSidebar({ sessions, sessionsTotal, loadingAllSessions, vi
       </aside>
       {menuSession && createPortal(<div className="session-item-menu" ref={sessionMenuRef} role="menu" style={sessionMenuPosition}>
         {menuSessionCanRelease && <button type="button" role="menuitem" onClick={() => { setSessionMenuId(""); onRelease(menuSession); }}>释放运行资源</button>}
-        <button type="button" role="menuitem" onClick={() => { setSessionMenuId(""); onRename(menuSession); }}>重命名</button>
-        <button type="button" role="menuitem" className="is-danger" disabled={menuSession.running || menuSession.queued || menuSession.pendingConfirmation} onClick={() => { setSessionMenuId(""); onDelete(menuSession); }} title={menuSession.running ? "该对话正在生成，停止后才能删除" : menuSession.queued ? "该对话有待发送消息，清空队列后才能删除" : menuSession.pendingConfirmation ? "该对话正在等待确认，处理后才能删除" : undefined}>删除</button>
+        <button type="button" role="menuitem" disabled={mutatingSessionIds.includes(menuSession.id)} onClick={() => { setSessionMenuId(""); onRename(menuSession); }}>重命名</button>
+        <button type="button" role="menuitem" className="is-danger" disabled={mutatingSessionIds.includes(menuSession.id) || menuSession.running || menuSession.queued || menuSession.pendingConfirmation} onClick={() => { setSessionMenuId(""); onDelete(menuSession); }} title={mutatingSessionIds.includes(menuSession.id) ? "该对话的管理操作尚未确认" : menuSession.running ? "该对话正在生成，停止后才能删除" : menuSession.queued ? "该对话有待发送消息，清空队列后才能删除" : menuSession.pendingConfirmation ? "该对话正在等待确认，处理后才能删除" : undefined}>删除</button>
       </div>, document.body)}
     </>
   );
