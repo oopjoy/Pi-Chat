@@ -29,12 +29,14 @@ const FONT_OPTIONS: Array<CompactSelectOption<FontPreference>> = [
   { value: "mono", label: "等宽字体" },
 ];
 
-export function ManagementPanel({ section, appearance, models, state, busy, onClose, onAppearance, onModel, onShutdown }: {
+export function ManagementPanel({ section, appearance, models, state, busy, shutdownBlocked, onClose, onAppearance, onModel, onShutdown }: {
   section: ManagementSection | null;
   appearance: AppearancePreferences;
   models: ModelInfo[];
   state: PiState;
   busy: boolean;
+  /** Identity mismatch blocks ordinary settings, not the guarded shutdown recovery. */
+  shutdownBlocked: boolean;
   onClose: () => void;
   onAppearance: (value: AppearancePreferences) => void;
   onModel: (provider: string, id: string) => void;
@@ -114,7 +116,7 @@ export function ManagementPanel({ section, appearance, models, state, busy, onCl
                   </button>
                 ))}
               </div>
-              <button type="button" className="settings-shutdown" disabled={busy} onClick={onShutdown} title="检查全部对话后，关闭所有 Pi Chat 窗口、服务和会话进程">关闭 Pi Chat</button>
+              <button type="button" className="settings-shutdown" disabled={shutdownBlocked} onClick={onShutdown} title="检查全部对话后，关闭所有 Pi Chat 窗口、服务和会话进程">关闭 Pi Chat</button>
             </nav>
             <div className="settings-content">
               {settingsTab === "appearance" && <AppearancePanel value={appearance} onChange={onAppearance} />}

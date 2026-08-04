@@ -2,8 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
 import { JSDOM } from "jsdom";
 import { CompactSelect, findCompactSelectTypeaheadIndex, getCompactSelectNavigationIndex } from "../src/web/components/CompactSelect";
 
@@ -53,13 +51,6 @@ async function renderSelect(disabled = false, checkPosition: "start" | "end" = "
 function key(dom: JSDOM, element: Element, value: string) {
   element.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: value, bubbles: true }));
 }
-
-test("CompactSelect forced-colors styles keep focus and active option visible", async () => {
-  const css = await readFile(resolve(import.meta.dirname, "../src/web/styles.css"), "utf8");
-  assert.match(css, /@media \(forced-colors: active\)/);
-  assert.match(css, /\.compact-select-trigger:focus-visible[\s\S]*outline:/);
-  assert.match(css, /\.compact-select-option\.is-active[\s\S]*outline:/);
-});
 
 test("CompactSelect navigation helpers handle boundaries and typeahead wrapping", () => {
   assert.equal(getCompactSelectNavigationIndex("ArrowDown", 1, 4), 2);

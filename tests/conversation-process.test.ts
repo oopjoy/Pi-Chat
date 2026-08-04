@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
+import { renderToStaticMarkup } from "react-dom/server";
 import { JSDOM } from "jsdom";
-import type { PiMessage } from "../src/shared/types";
+import { LOCAL_COORDINATION_ROLE, type PiMessage } from "../src/shared/types";
 import { ConversationProcess, toolLabel } from "../src/web/components/ConversationProcess";
 import { EditDiffSidebar } from "../src/web/components/EditToolDiff";
 import { groupConversation } from "../src/web/lib/conversation-process";
@@ -107,6 +108,39 @@ test("does not create a process for ordinary user and assistant messages", () =>
   ]);
   assert.equal(items.length, 2);
   assert.ok(items.every((item) => item.kind === "message"));
+});
+
+test("a local coordination notice remains in the process layer before following tools", () => {
+  const items = groupConversation([
+    { role: "assistant", content: "Earlier result", timestamp: 1 },
+    { role: LOCAL_COORDINATION_ROLE, localCoordination: { source: "subagent-result" }, content: "Run: 35f640a2\nChildren: 4 completed\nOutputs: 4 present", timestamp: 2 },
+    { role: "assistant", content: [{ type: "toolCall", id: "read-after-notice", name: "read", arguments: {} }], timestamp: 3 },
+  ]);
+  assert.deepEqual(items.map((item) => item.kind), ["message", "process"]);
+  assert.equal(items[1]?.kind, "process");
+  if (items[1]?.kind === "process") {
+    assert.equal(items[1].entries[0]?.kind, "coordination");
+    assert.deepEqual(items[1].entries[0], { kind: "coordination", source: "subagent-result", summary: "4 个子任务完成 · 有 4 份输出", text: "Run: 35f640a2\nChildren: 4 completed\nOutputs: 4 present" });
+  }
+});
+
+test("coordination events are compact and collapsed until their process details open", () => {
+  const html = renderToStaticMarkup(createElement(ConversationProcess, { entries: [{
+    kind: "coordination",
+    source: "subagent-result",
+    summary: "4 个子任务完成 · 有 4 份输出",
+    text: "Output artifact: C:\\Users\\opjoy\\.pi-subagents\\artifacts\\run.md",
+  }] }));
+  assert.match(html, /^<details class="conversation-process"/);
+  assert.doesNotMatch(html, /^<details[^>]*\sopen(?:=|\s|>)/);
+  assert.match(html, /本地协调 · subagent-result/);
+  assert.match(html, /4 个子任务完成 · 有 4 份输出/);
+  assert.match(html, /<details class="process-entry process-coordination"/);
+  assert.match(html, /Output artifact: C:\\Users\\opjoy\\.pi-subagents\\artifacts\\run\.md/);
+});
+
+test("native system messages do not become visible process boundaries", () => {
+  assert.deepEqual(groupConversation([{ role: "system", content: "Runtime-only metadata" }]), []);
 });
 
 test("streaming thinking-only assistant turns fold into a process without a body message", () => {

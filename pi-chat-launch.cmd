@@ -11,11 +11,16 @@ exit /b 2
 
 :mode-ok
 set "URL=http://127.0.0.1:30170"
+rem %%~dp0 ends with a backslash. A trailing backslash immediately before a
+rem quoted PowerShell argument can escape its closing quote in Windows argv
+rem parsing, so normalize it to an explicit child path first.
+set "PI_CHAT_PROJECT_DIRECTORY=%~dp0."
 set "PWA_APP_ID=geogmfmioogonffbmpjonolpkgepgafd"
 set "EDGE_PWA=%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge_proxy.exe"
 
-powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0scripts\pi-chat-port-ready.ps1"
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0scripts\pi-chat-port-ready.ps1" -ProjectDirectory "%PI_CHAT_PROJECT_DIRECTORY%"
 if not errorlevel 1 goto :open
+if errorlevel 2 goto :stale
 
 rem Normal startup must use the existing production build. Rebuilding on every
 rem PWA launch turns a 5–10 second cold start into a 30+ second one and briefly
@@ -44,8 +49,12 @@ if errorlevel 1 exit /b 1
 
 set /a ATTEMPTS=0
 :wait
-powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0scripts\pi-chat-port-ready.ps1"
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0scripts\pi-chat-port-ready.ps1" -ProjectDirectory "%PI_CHAT_PROJECT_DIRECTORY%"
 if not errorlevel 1 goto :open
+if errorlevel 2 (
+  echo A different Pi Chat build is listening on port 30170.
+  exit /b 1
+)
 set /a ATTEMPTS+=1
 if %ATTEMPTS% GEQ 60 (
   echo Pi Chat did not start within 30 seconds.
@@ -53,6 +62,15 @@ if %ATTEMPTS% GEQ 60 (
 )
 powershell.exe -NoProfile -NonInteractive -Command "Start-Sleep -Seconds 1"
 goto :wait
+
+:stale
+rem A verified Pi Chat is listening on this port, but its build identity does
+rem not match this checkout's dist. It may be another checkout or installation.
+rem Never shut it down automatically: that could interrupt work in progress.
+echo A different Pi Chat build is already running on port 30170.
+echo Open that instance in its own window and close it, or use its own
+echo restart/shutdown controls, then start this version again.
+exit /b 1
 
 :open
 rem The WinForms start UI may own browser/PWA open so the splash can hide first.

@@ -4,7 +4,7 @@ import { readdir, stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { homedir } from "node:os";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
-import type { PiMessage, SessionSummary, ThinkingLevel } from "../shared/types.js";
+import { LOCAL_COORDINATION_ROLE, type PiMessage, type SessionSummary, type ThinkingLevel } from "../shared/types.js";
 import { compareSessionsByLastUserPrompt } from "../shared/session-order.js";
 import { loadSessionCache, saveSessionCache, type SessionCacheEntry } from "./session-index-cache.js";
 
@@ -25,6 +25,11 @@ interface SessionEntry {
   provider?: string;
   modelId?: string;
   thinkingLevel?: ThinkingLevel;
+  /** Pi's local custom records are not ordinary Runtime messages. */
+  details?: {
+    bodyText?: unknown;
+    from?: { name?: unknown };
+  };
   message?: PiMessage;
 }
 
@@ -41,6 +46,24 @@ function textFromContent(content: unknown): string {
 function cleanPreview(value: string, limit = 90): string {
   const clean = value.replace(/\s+/g, " ").trim();
   return clean.length > limit ? `${clean.slice(0, limit - 1)}…` : clean;
+}
+
+/**
+ * Intercom deliveries are persisted as Pi `custom_message` records, so
+ * they cannot be sent back to Pi as chat turns. Keeping this strict whitelist
+ * visible in the read-only transcript preserves their ordering boundary: a
+ * following tool process must not look like it displaced the delivery.
+ */
+function localCoordinationMessage(entry: SessionEntry): PiMessage | null {
+  if (entry.type !== "custom_message" || entry.customType !== "intercom_message") return null;
+  const body = typeof entry.details?.bodyText === "string" ? entry.details.bodyText.trim() : "";
+  if (!body) return null;
+  const sender = typeof entry.details?.from?.name === "string" ? entry.details.from.name.trim() : "";
+  return {
+    role: LOCAL_COORDINATION_ROLE,
+    content: body,
+    localCoordination: sender ? { source: sender } : {},
+  };
 }
 
 function timestampFromEntry(entry: SessionEntry): number | undefined {
@@ -182,6 +205,15 @@ export async function readSessionSnapshot(path: string): Promise<SessionFileSnap
   const settings: SessionSettingsSnapshot = {};
   let activeThinkingLevel: ThinkingLevel | undefined;
   for (const entry of branch) {
+    const coordination = localCoordinationMessage(entry);
+    if (coordination) {
+      const timestamp = timestampFromEntry(entry);
+      messages.push({
+        ...coordination,
+        ...(Number.isFinite(timestamp) ? { timestamp } : {}),
+      });
+      continue;
+    }
     if (entry.type === "model_change" && typeof entry.provider === "string" && typeof entry.modelId === "string") {
       settings.provider = entry.provider;
       settings.modelId = entry.modelId;

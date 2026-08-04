@@ -20,7 +20,7 @@ Pi Chat 是一个连接本机 Pi RPC 的 local-first Web/PWA 客户端。它提�
 - Session-first 历史会话列表、切换和新建：服务与界面先打开、读取并缓存 JSONL；Primary 会在后台启动并完成兼容性验证，未 ready 或验证失败时历史仍可浏览且不会探测 Primary RPC。选中、滚动、搜索或切换冷历史只读取 JSONL，不启动 Secondary Runtime；只有发送、Compact、Model/Thinking、接管或显式启动 Pi 等实际操作才会为该 Session 单飞准备专属 Runtime。服务的默认工作目录保持固定；需要不同目录时，在创建该条 New 草稿后使用“新对话工作路径”选择器单独修改，不会影响其他对话。新对话首条消息将 Runtime 创建、Model、Thinking、Gate 与 prompt 合并为一个服务事务。最多 5 个热对话（Primary + 4 个 Secondary），达到容量时优先 LRU 回收空闲 Secondary，正在显示的历史也可退回 view-only
 - 同一 Session 可在多个窗口观察，但同一时刻仅一个浏览器窗口可发送、停止、处理 Gate 或改队列；Model/Thinking 修改不会自动取得控制权，无 Owner 时可设置，存在其他窗口 Owner 时必须先显式接管
 - 文件权限 Gate：作为 Pi Chat 内置安全功能呈现；顶栏可切换“严格 / 放行”。严格模式始终确认 `write` / `edit`，并对可识别的高风险 Bash 做辅助确认；Bash 可运行任意脚本，副作用识别不构成完整 sandbox。随应用自动安装、校验和修复的极小 Pi 工具执行适配器仍在真实工具执行前运行
-- 侧栏提供独立刷新和“完整重启 Pi Chat 并应用更新”：应用级 Lifecycle Barrier 会在构建前同步阻止所有新写操作；新版本先在独立 staging 目录完成并验证，构建失败不会修改当前 `dist`，二次核验全部 Runtime、队列和确认状态通过后才提升产物并执行服务切换。维护期间历史、健康检查和只读 API 保持可用。SSE/EventSource 是可重连传输，断开不会自动关闭 Pi Chat 服务或托管 RPC；但全部浏览器/PWA 页面都通过非 BFCache 关闭明确离开后，服务会等待生成、队列、确认、恢复、Runtime transition 与 mutation 全部结束，并连续空闲 $10$ 秒后自动退出。设置中的“关闭 Pi Chat”仍可显式立即请求关闭，并同样先执行全局 Busy 检查
+- 侧栏提供独立刷新和“完整重启 Pi Chat 并应用更新”：应用级 Lifecycle Barrier 会在构建前同步阻止所有新写操作；新版本先在独立 staging 目录完成并验证，构建失败不会修改当前 `dist`，二次核验全部 Runtime、队列和确认状态通过后才提升产物并执行服务切换。维护期间历史、健康检查和只读 API 保持可用。网页与服务的 build identity 不一致时，普通修改会暂停，但“完整重启”与设置中的“关闭 Pi Chat”仍可请求服务端执行其最终 Busy 检查，避免客户端恢复路径被旧页面状态锁死。SSE/EventSource 是可重连传输，断开不会自动关闭 Pi Chat 服务或托管 RPC；但全部浏览器/PWA 页面都通过非 BFCache 关闭明确离开后，服务会等待生成、队列、确认、恢复、Runtime transition 与 mutation 全部结束，并连续空闲 $10$ 秒后自动退出。设置中的“关闭 Pi Chat”仍可显式立即请求关闭，并同样先执行全局 Busy 检查
 - 外观设置：主题、字体、字号、行距和对话宽度
 - 可用模型列表、Models 面板与模型切换；支持基于 `~/.pi/agent/models.json` 的自定义模型 Add/Remove
 - 顶栏 Thinking 强度切换
@@ -108,6 +108,8 @@ Pi Chat 保留普通浏览器访问，同时提供适合 Edge / Chrome 的独立
 npm run build
 npm start
 ```
+
+如果 `127.0.0.1:30170` 已有 Pi Chat 服务，`npm run build` 以及所有会写 live `dist/` 的组成命令（`clean`、`build:identity`、`build:web`、`build:server`、`copy:resources`）都会拒绝覆盖它正在提供的 `dist/`，防止旧服务混用新网页资源。请使用界面的“完整重启 Pi Chat 并应用更新”，或先关闭 Pi Chat；应用内重启会安全地在 staging 目录构建。桌面启动器也会将监听服务的 build identity 与本地 `dist/build-identity.json` 比较：若端口上是不同构建（可能是另一个 checkout 或安装），启动器只报告冲突并退出，绝不自动关闭或按端口/PID 强杀该实例；请在它自身窗口中显式关闭或切换后，再启动当前版本。构建保护默认检查 `127.0.0.1:30170`；若以非默认端口运行，请设置 `PI_CHAT_PORT` 为实际端口。
 
 可选参数：
 

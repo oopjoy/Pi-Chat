@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { SessionIndex, cleanPreview, idForPath, readSessionMessages, readSessionUsage, textFromContent } from "../src/server/session-index";
+import { LOCAL_COORDINATION_ROLE } from "../src/shared/types";
 
 test("session index extracts header, title, preview, message count and user turn count", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-sessions-"));
@@ -151,6 +152,42 @@ test("session message reader follows only the current JSONL branch", async () =>
     const messages = await readSessionMessages(path);
     assert.deepEqual(messages.map((message) => message.content), ["kept user", "current user", "current answer"]);
     assert.equal(messages[0].timestamp, Date.parse("2026-01-01T00:00:00Z"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an intercom custom message stays visible as a read-only process boundary", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-intercom-history-"));
+  try {
+    const path = join(root, "history.jsonl");
+    await writeFile(path, [
+      { type: "session", id: "session", cwd: "C:\\work" },
+      { type: "message", id: "u1", parentId: null, message: { role: "user", content: "original question" } },
+      { type: "message", id: "a1", parentId: "u1", message: { role: "assistant", content: "completed answer" } },
+      {
+        type: "custom_message",
+        customType: "intercom_message",
+        id: "coordination",
+        parentId: "a1",
+        timestamp: "2026-01-01T00:00:03.000Z",
+        details: {
+          from: { name: "chat2" },
+          bodyText: "请停止运行中的操作，只报告当前状态。",
+        },
+      },
+      { type: "message", id: "tool-run", parentId: "coordination", message: { role: "assistant", content: [{ type: "toolCall", id: "read-1", name: "read", arguments: { path: "status" } }] } },
+    ].map(JSON.stringify).join("\n"));
+
+    const messages = await readSessionMessages(path);
+    assert.deepEqual(messages.map((message) => message.role), ["user", "assistant", LOCAL_COORDINATION_ROLE, "assistant"]);
+    assert.equal(messages[2].content, "请停止运行中的操作，只报告当前状态。");
+    assert.deepEqual(messages[2].localCoordination, { source: "chat2" });
+    assert.equal(messages[2].timestamp, Date.parse("2026-01-01T00:00:03.000Z"));
+
+    const [summary] = await new SessionIndex(root, join(root, "cache.json")).list();
+    assert.equal(summary.turnCount, 1, "local coordination never becomes a user turn");
+    assert.equal(summary.messageCount, 3, "the sidebar still counts only Pi message records");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -77,7 +77,12 @@ export interface PiContentBlock {
   mimeType?: string;
 }
 
+/** Local-only read-only transcript role for intercom deliveries; never sent to Pi. */
+export const LOCAL_COORDINATION_ROLE = "localCoordination";
+
 export interface PiMessage {
+  /** Pi Chat-only metadata for a localCoordination event. */
+  localCoordination?: { source?: string };
   role: string;
   /** Metadata records such as compactionSummary legitimately omit content. */
   content?: string | PiContentBlock[];

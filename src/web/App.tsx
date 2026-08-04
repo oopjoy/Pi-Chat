@@ -220,6 +220,9 @@ export function App() {
   const { liveMessage } = pane;
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const sessionsRef = useRef<SessionSummary[]>([]);
+  /** A remembered pane may load before bootstrap; it must not become a fake one-row sidebar. */
+  const sidebarInventoryReadyRef = useRef(false);
+  const [sidebarInventoryReady, setSidebarInventoryReady] = useState(false);
   const [sessionsTotal, setSessionsTotal] = useState(0);
   const [sessionDirectories, setSessionDirectories] = useState<SessionDirectorySummary[]>([]);
   const [loadingAllSessions, setLoadingAllSessions] = useState(false);
@@ -715,6 +718,10 @@ export function App() {
   // view so a refresh can restore a remembered cold Session without briefly
   // committing the Primary Runtime's blank draft to the timeline.
   const applyBootstrapMetadata = useCallback((data: BootstrapData) => {
+    // A remembered JSONL view can win the startup race. Only a bootstrap
+    // inventory is allowed to establish sidebar rows in that initial gap.
+    sidebarInventoryReadyRef.current = true;
+    setSidebarInventoryReady(true);
     for (const session of data.sessions) {
       if (
         typeof session.turnCount === "number" &&
@@ -984,6 +991,9 @@ export function App() {
           identity: { kind: "session", sessionId: resolvedView.session.id },
           piState: {
             ...resolvedView.state,
+            // A cold JSONL view can commit before the global sidebar inventory.
+            // Keep its own identity metadata in the same atomic pane projection.
+            sessionName: resolvedView.session.name,
             ...(staged?.model !== undefined ? { model: staged.model } : null),
             ...(staged?.thinkingLevel !== undefined
               ? { thinkingLevel: staged.thinkingLevel }
@@ -1032,18 +1042,22 @@ export function App() {
       );
       recordPaneCommit(resolvedView);
       // A blank New draft has no persisted user message and intentionally stays
-      // out of sidebar history until its first successful prompt.
+      // out of sidebar history until its first successful prompt. A remembered
+      // Session may restore before bootstrap; update an existing row, but do not
+      // turn that one restored pane into a fake one-item sidebar.
       if (view.session.messageCount > 0) {
         const summary = applyLocalTurnCount(normalizeSessionRunning(view.session));
-        setSessions((current) =>
-          uniqueSessionSummaries(
-            current.some((session) => session.id === summary.id)
+        setSessions((current) => {
+          const known = current.some((session) => session.id === summary.id);
+          if (!known && !sidebarInventoryReadyRef.current) return current;
+          return uniqueSessionSummaries(
+            known
               ? current.map((session) =>
                   session.id === summary.id ? { ...session, ...summary } : session,
                 )
               : [...current, summary],
-          ),
-        );
+          );
+        });
       }
       if (view.isActive)
         setActiveSessionIds((current) => [
@@ -1066,7 +1080,10 @@ export function App() {
   const ensureHandshake = useCallback(() => {
     if (handshakeInFlightRef.current) return handshakeInFlightRef.current;
     const request = api.handshake()
-      .then((handshake) => { setServerBuildIdentity(handshake.buildIdentity); })
+      .then((handshake) => {
+        setServerBuildIdentity(handshake.buildIdentity);
+        setBuildIdentityMismatch(!buildIdentityMatches(handshake.buildIdentity));
+      })
       .finally(() => {
         if (handshakeInFlightRef.current === request) handshakeInFlightRef.current = null;
       });
@@ -3628,7 +3645,10 @@ export function App() {
   };
 
   const restartPi = async () => {
-    if (buildIdentityMismatch) return;
+    // A mismatched bundle has stale browser state by definition. Let the server
+    // make the final quiescence decision rather than trapping recovery behind a
+    // possibly stale sidebar activity projection.
+    if (busy || lifecycleBlocked || (!buildIdentityMismatch && (anySessionRunning || anySessionQueued || anySessionPendingConfirmation))) return;
     if (
       !window.confirm(
         "完整重启 Pi Chat 并应用本地更新？\n\n将结束 Pi Chat 服务及其所有 Pi RPC 会话进程，重新构建当前工作目录，然后启动全新的 Pi Chat。已保存的前端、服务端、内置组件与本地配置更新都会生效；聊天记录不会删除。\n\n会重新加载当前电脑上已经保存的 Pi Chat、扩展和配置改动。正在生成、排队或等待确认时无法执行。",
@@ -3653,7 +3673,9 @@ export function App() {
   };
 
   const shutdownPiChat = async () => {
-    if (buildIdentityMismatch) return;
+    // See restartPi: only the server's live quiescence check is authoritative
+    // when this Web bundle no longer agrees with that server.
+    if (busy || lifecycleBlocked || (!buildIdentityMismatch && (anySessionRunning || anySessionQueued || anySessionPendingConfirmation))) return;
     if (
       !window.confirm(
         "关闭全部 Pi Chat？\n\n将先检查所有窗口中的对话。只要任一对话仍在执行、排队或等待确认，就不会关闭。\n\n确认空闲后，将关闭所有浏览器/PWA 窗口、本地服务和全部 Pi RPC。聊天记录和设置会保留。",
@@ -3904,8 +3926,12 @@ export function App() {
   const anySessionQueued = sessions.some((session) => session.queued);
   const lifecycleBlocked = applicationLifecycle !== "idle";
   const mutationBlocked = lifecycleBlocked || buildIdentityMismatch;
-  const globalMutationBlocked =
-    mutationBlocked ||
+  // A mismatched Web bundle may never change Session/Runtime state, but its two
+  // lifecycle recovery actions remain available. Their endpoint remains guarded
+  // by the server's live quiescence barrier; stale browser sidebar state must
+  // not deadlock the only recovery route.
+  const recoveryActionBlocked = lifecycleBlocked;
+  const globalMutationBlocked = mutationBlocked ||
     anySessionRunning ||
     anySessionQueued ||
     anySessionPendingConfirmation;
@@ -3924,7 +3950,8 @@ export function App() {
   const conversationName = localDraft
     ? "新对话"
     : viewedSession?.name ||
-      (state.messageCount ? state.sessionName || "已保存对话" : "新对话");
+      state.sessionName ||
+      "已保存对话";
   const loadingSession = paneLoading
     ? sessions.find((session) => session.id === paneLoading.sessionId)
     : undefined;
@@ -4084,7 +4111,7 @@ export function App() {
   const composerNotices = <>
     {buildIdentityMismatch && (
       <div className="primary-runtime-status is-failed" role="status">
-        网页与服务版本不一致。请刷新页面；若仍存在，请重新打开 Pi Chat。
+        网页与服务版本不一致，普通操作已暂停。请刷新页面；若仍存在，可在左侧使用“完整重启”，或在设置中关闭 Pi Chat 后重新打开。
       </div>
     )}
     {primaryRuntimeMessage && (
@@ -4134,6 +4161,7 @@ export function App() {
         sessions={sessions}
         sessionsTotal={sessionsTotal}
         sessionDirectories={sessionDirectories}
+        inventoryReady={sidebarInventoryReady}
         loadingAllSessions={loadingAllSessions}
         loadingDirectoryKeys={loadingDirectoryKeys}
         viewedSessionId={viewedSessionId}
@@ -4141,9 +4169,12 @@ export function App() {
         open={sidebarOpen}
         width={sidebarWidth}
         onWidthChange={setSidebarWidth}
-        newDisabled={false}
+        newDisabled={mutationBlocked}
         refreshDisabled={loading || refreshing}
-        restartDisabled={loading || busy || refreshing || globalMutationBlocked}
+        restartDisabled={
+          loading || busy || refreshing ||
+          (buildIdentityMismatch ? recoveryActionBlocked : globalMutationBlocked)
+        }
         viewBusy={sidebarViewBlocked}
         refreshing={refreshing}
         pinnedSessionIds={sessionNavigation.pinnedSessionIds}
@@ -4305,6 +4336,9 @@ export function App() {
         models={models}
         state={state}
         busy={busy || globalMutationBlocked}
+        shutdownBlocked={
+          busy || (buildIdentityMismatch ? recoveryActionBlocked : globalMutationBlocked)
+        }
         onClose={() => setManagementSection(null)}
         onAppearance={setAppearance}
         onModel={(provider, id) => void changeModel(provider, id)}

@@ -431,9 +431,9 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .message-image-thumbnail:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .message-image { display: block; max-width: min(320px, 100%); max-height: 320px; border-radius: 9px; object-fit: contain; }
 .message-user-attachments .message-image { max-width: min(160px, 100%); max-height: 120px; border-radius: 7px; }
-.image-preview-backdrop { position: fixed; z-index: 100; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(5, 12, 23, .72); }
-.image-preview-dialog { position: relative; display: grid; max-width: min(96vw, 1440px); max-height: calc(100dvh - 48px); place-items: center; padding: 40px 12px 12px; border: 1px solid color-mix(in srgb, var(--line), transparent 45%); border-radius: 12px; background: var(--surface); box-shadow: 0 18px 54px rgba(0, 0, 0, .4); }
-.image-preview-full { display: block; max-width: min(calc(96vw - 26px), 1414px); max-height: calc(100dvh - 102px); object-fit: contain; }
+.image-preview-backdrop { position: fixed; z-index: 100; inset: 0; display: grid; box-sizing: border-box; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); place-items: center; padding: 24px; background: rgba(5, 12, 23, .72); }
+.image-preview-dialog { position: relative; display: grid; box-sizing: border-box; min-width: 0; max-width: min(calc(100vw - 48px), 1440px); max-height: calc(100dvh - 48px); place-items: center; padding: 40px 12px 12px; border: 1px solid color-mix(in srgb, var(--line), transparent 45%); border-radius: 12px; background: var(--surface); box-shadow: 0 18px 54px rgba(0, 0, 0, .4); }
+.image-preview-full { display: block; min-width: 0; max-width: min(calc(100vw - 74px), 1414px); max-height: calc(100dvh - 102px); object-fit: contain; }
 .image-preview-close { position: absolute; top: 8px; right: 8px; min-height: 26px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--text); cursor: pointer; font: inherit; font-size: 12px; font-weight: 650; }
 .image-preview-close:hover { border-color: color-mix(in srgb, var(--accent), transparent 45%); background: var(--accent-soft); color: var(--accent); }
 .image-preview-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -510,6 +510,12 @@ details.conversation-process { display: block; padding: 0; }
 .process-entry:hover, .process-entry[open] { border-color: var(--line); }
 .process-entry.is-error { color: var(--danger); }
 .process-entry > summary .process-status-icon { width: 13px; height: 13px; }
+.process-coordination { color: var(--muted); }
+.process-coordination-icon { border: 1.5px solid currentColor; border-radius: 50%; opacity: .72; }
+.process-coordination .process-summary-label { gap: 6px; }
+.process-coordination em { min-width: 0; overflow: hidden; color: inherit; font-size: inherit; font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
+.process-coordination-detail { padding: 0 7px 7px; }
+.process-coordination-detail pre { max-height: 340px; margin: 0; overflow: auto; padding: 9px 10px; border-radius: 5px; background: var(--code-bg); color: var(--code-text); white-space: pre-wrap; overflow-wrap: anywhere; font: 12.5px/1.62 ui-monospace, Consolas, monospace; }
 .process-tool-detail { display: grid; gap: 7px; padding: 0 7px 7px; }
 .process-tool-detail section { overflow: hidden; border-radius: 5px; background: var(--code-bg); color: var(--code-text); }
 .process-tool-detail strong { display: block; padding: 4px 7px; border-bottom: 1px solid var(--code-border); background: var(--code-head-bg); color: var(--code-head-text); font-size: 9px; font-weight: 700; }

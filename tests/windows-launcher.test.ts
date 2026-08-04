@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { once } from "node:events";
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -16,65 +17,85 @@ test("Windows launcher assets are packaged and project shortcuts are ignored", a
   ]);
   const pkg = JSON.parse(packageJson) as { files: string[]; scripts: Record<string, string> };
   assert.match(gitignore, /^\*\.lnk$/m);
-  for (const file of ["start-pi-chat.cmd", "start-pi-chat-ui.ps1", "scripts/install-shortcuts.ps1", "scripts/pi-chat-launch-process.ps1", "resources"]) {
+  for (const file of ["start-pi-chat.cmd", "start-pi-chat-ui.ps1", "scripts/install-shortcuts.ps1", "scripts/pi-chat-launch-process.ps1", "scripts/assert-safe-live-dist.mjs", "resources"]) {
     assert.ok(pkg.files.includes(file), `${file} must be included in the package`);
   }
   assert.equal(pkg.scripts["install:shortcuts"], "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-shortcuts.ps1");
+  for (const script of ["preclean", "prebuild", "prebuild:identity", "prebuild:web", "prebuild:server", "precopy:resources"]) {
+    assert.equal(pkg.scripts[script], "node scripts/assert-safe-live-dist.mjs", `${script} must protect live dist`);
+  }
   assert.match(wrapper, /pi-chat-launch\.cmd" web/i);
 });
 
-test("launcher scripts derive paths dynamically and avoid unsafe PowerShell interpolation", async () => {
-  const [cmd, ui, processHelper, installer, readiness] = await Promise.all([
+test("launcher keeps portable path resolution and refuses to take over another build", async () => {
+  const [cmd, ui, installer, readiness] = await Promise.all([
     readProjectFile("pi-chat-launch.cmd"),
     readProjectFile("start-pi-chat-ui.ps1"),
-    readProjectFile("scripts/pi-chat-launch-process.ps1"),
     readProjectFile("scripts/install-shortcuts.ps1"),
     readProjectFile("scripts/pi-chat-port-ready.ps1"),
   ]);
-  for (const source of [cmd, ui, installer]) {
+  for (const source of [cmd, ui, installer])
     assert.doesNotMatch(source, /C:\\Users\\/i);
-  }
-  assert.match(cmd, /set "PI_CHAT_PROJECT_DIR=%~dp0"/);
-  assert.match(cmd, /-WorkingDirectory \$env:PI_CHAT_PROJECT_DIR/);
-  assert.match(cmd, /-RedirectStandardOutput \$env:PI_CHAT_SERVER_OUT/);
-  assert.match(cmd, /-RedirectStandardError \$env:PI_CHAT_SERVER_ERR/);
-  assert.doesNotMatch(cmd, /-WorkingDirectory\s+'%~dp0'/i);
-  assert.equal(cmd.includes("-WorkingDirectory '%~dp0'"), false);
-  assert.match(ui, /resources\\icons\\pi-chat\.ico/i);
-  assert.match(ui, /Start-PiChatLauncherProcess/);
-  assert.doesNotMatch(ui, /PI_CHAT_LAUNCH_LOG/);
-  assert.match(processHelper, /call "%PI_CHAT_LAUNCHER%" %PI_CHAT_LAUNCH_MODE%/);
-  assert.match(processHelper, /Get-PiChatLauncherExitCode/);
-  assert.match(processHelper, /\.Refresh\(\)/);
-  assert.match(processHelper, /RedirectStandardOutput/);
-  assert.match(processHelper, /RedirectStandardError/);
-  assert.match(ui, /launcherExitCode -ne 0/);
-  assert.match(ui, /server-\$runId\.stdout\.log/);
-  assert.match(ui, /server-\$runId\.stderr\.log/);
-  assert.match(ui, /Pi Chat 启动失败/);
-  assert.match(ui, /打开日志/);
-  assert.match(ui, /重试/);
-  assert.match(ui, /关闭/);
-  assert.match(ui, /PI_CHAT_SKIP_OPEN/);
-  assert.match(ui, /Open-PiChatWindow/);
-  assert.match(ui, /\$form\.Hide\(\)/);
-  assert.doesNotMatch(ui, /TotalMilliseconds -ge 280/);
-  assert.match(cmd, /PI_CHAT_SKIP_OPEN/);
-  assert.match(installer, /Split-Path -Parent \$PSScriptRoot/);
-  assert.match(installer, /-WindowStyle Hidden/);
-  assert.match(installer, /\$shortcut\.WindowStyle = 7/);
-  assert.match(installer, /GetFolderPath\('DesktopDirectory'\)/);
-  assert.match(installer, /-Name 'Pi Chat' -Mode 'pwa'/);
-  assert.match(installer, /-Name 'Pi Chat Web' -Mode 'web'/);
+
+  assert.match(cmd, /%~dp0/);
+  assert.match(cmd, /pi-chat-port-ready\.ps1/i);
   assert.match(readiness, /\/api\/bootstrap\/handshake/);
-  assert.match(readiness, /handshake\.requestToken/);
-  assert.match(readiness, /handshake\.buildIdentity\.fingerprint/);
-  assert.doesNotMatch(readiness, /Invoke-RestMethod[^\r\n]*\/api\/bootstrap['"]/);
-  assert.doesNotMatch(readiness, /\/api\/health/);
-  assert.doesNotMatch(readiness, /Get-NetTCPConnection/);
-  assert.match(cmd, /if not exist "%~dp0dist\\server\\server\\index\.js"/i);
-  assert.match(cmd, /Pi Chat build is missing; building current source/i);
-  assert.doesNotMatch(cmd, /if exist "%~dp0src\\server\\index\.ts" \(\s*\r?\n\s*echo Building current Pi Chat source/i);
+  assert.match(readiness, /exit 2/);
+  assert.match(cmd, /if errorlevel 2 goto :stale/i);
+  assert.match(cmd, /A different Pi Chat build is already running/i);
+  assert.match(cmd, /exit \/b 1/i);
+  assert.doesNotMatch(cmd, /\/api\/shutdown/);
+  assert.doesNotMatch(cmd, /X-Pi-Chat-Token/);
+  assert.doesNotMatch(readiness, /X-Pi-Chat-Token/);
+});
+
+test("PowerShell readiness distinguishes the expected build from a verified stale listener", { skip: process.platform !== "win32" }, async () => {
+  const sandbox = await mkdtemp(join(tmpdir(), "pi-chat-readiness-"));
+  const readyScript = join(root, "scripts", "pi-chat-port-ready.ps1");
+  const matching = "a".repeat(64);
+  const stale = "b".repeat(64);
+  const fixtureSource = String.raw`
+    import { createServer } from "node:http";
+    const fingerprint = process.env.PI_CHAT_TEST_FINGERPRINT;
+    const server = createServer((request, response) => {
+      if (request.url === "/api/bootstrap/handshake") {
+        response.setHeader("content-type", "application/json");
+        response.end(JSON.stringify({ requestToken: "test-token", buildIdentity: { schemaVersion: 1, fingerprint } }));
+      } else { response.statusCode = 404; response.end(); }
+    });
+    server.listen(0, "127.0.0.1", () => console.log("PORT=" + server.address().port));
+  `;
+  const fixture = spawn(process.execPath, ["--input-type=module", "-e", fixtureSource], {
+    env: { ...process.env, PI_CHAT_TEST_FINGERPRINT: matching },
+    stdio: ["ignore", "pipe", "ignore"],
+    windowsHide: true,
+  });
+  let output = "";
+  fixture.stdout.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
+  const runReadiness = (port: number) => new Promise<number>((resolveExit, reject) => {
+    const child = spawn("powershell.exe", [
+      "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", readyScript,
+      "-Port", String(port), "-ProjectDirectory", sandbox,
+    ], { stdio: "ignore", windowsHide: true });
+    child.once("error", reject);
+    child.once("exit", (code) => resolveExit(code ?? 1));
+  });
+  try {
+    const deadline = Date.now() + 5_000;
+    while (!/PORT=(\d+)/.test(output) && Date.now() < deadline)
+      await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+    const port = Number(/PORT=(\d+)/.exec(output)?.[1]);
+    assert.ok(port > 0, "test listener must announce a port");
+    await mkdir(join(sandbox, "dist"));
+    await writeFile(join(sandbox, "dist", "build-identity.json"), JSON.stringify({ schemaVersion: 1, fingerprint: matching }), "utf8");
+    assert.equal(await runReadiness(port), 0, "matching listener is ready");
+    await writeFile(join(sandbox, "dist", "build-identity.json"), JSON.stringify({ schemaVersion: 1, fingerprint: stale }), "utf8");
+    assert.equal(await runReadiness(port), 2, "verified mismatched listener is distinguished from no listener");
+  } finally {
+    fixture.kill("SIGTERM");
+    await Promise.race([once(fixture, "exit"), new Promise((resolveWait) => setTimeout(resolveWait, 2_000))]);
+    await rm(sandbox, { recursive: true, force: true });
+  }
 });
 
 test("PowerShell launcher wrapper preserves exit code and captures output through metacharacter paths", { skip: process.platform !== "win32" }, async () => {

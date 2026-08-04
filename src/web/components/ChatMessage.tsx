@@ -1,4 +1,5 @@
 import { memo, useEffect, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import type { PiContentBlock, PiMessage } from "../../shared/types";
 import { visibleAssistantBlocks } from "../lib/assistant-text";
 import { CheckIcon, CopyIcon } from "./Icons";
@@ -39,7 +40,7 @@ export function assistantThinkingLabel(message: PiMessage): string {
 export const ChatMessage = memo(function ChatMessage({ message, streaming = false }: { message: PiMessage; streaming?: boolean }) {
   const [copied, setCopied] = useState(false);
   const [expandedUserText, setExpandedUserText] = useState(false);
-  const [previewImage, setPreviewImage] = useState<{ src: string; alt: string } | null>(null);
+  const [previewImage, setPreviewImage] = useState<{ src: string; alt: string; width: number; height: number } | null>(null);
   const copyTimerRef = useRef<number | null>(null);
   const previewCloseRef = useRef<HTMLButtonElement>(null);
   const previewTriggerRef = useRef<HTMLButtonElement | null>(null);
@@ -65,7 +66,6 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
     previewTriggerRef.current.focus();
     previewTriggerRef.current = null;
   }, [previewImage]);
-
   if (message.role !== "user" && message.role !== "assistant") return null;
   const content = message.role === "assistant" ? visibleAssistantBlocks(message) : blocks(message);
   const hasVisibleContent = content.some((block) =>
@@ -96,7 +96,16 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
         {userImageBlocks.map((block, index) => {
           const src = `data:${block.mimeType};base64,${block.data}`;
           const alt = "用户附加图片";
-          return <button type="button" className="message-image-thumbnail" key={index} onClick={(event) => { previewTriggerRef.current = event.currentTarget; setPreviewImage({ src, alt }); }} aria-label="查看用户附加图片的大图"><img className="message-image" src={src} alt={alt} /></button>;
+          return <button type="button" className="message-image-thumbnail" key={index} onClick={(event) => {
+            previewTriggerRef.current = event.currentTarget;
+            const viewport = window.visualViewport;
+            setPreviewImage({
+              src,
+              alt,
+              width: viewport?.width || window.innerWidth,
+              height: viewport?.height || window.innerHeight,
+            });
+          }} aria-label="查看用户附加图片的大图"><img className="message-image" src={src} alt={alt} /></button>;
         })}
       </div>}
       {(message.role !== "user" || userTextBlocks.length > 0) && <div className="message-content">
@@ -115,10 +124,25 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
           onClick={() => setExpandedUserText((current) => !current)}
         >{expandedUserText ? "收起" : "展开全部"}</button>}
       </div>}
-      {previewImage && <div className="image-preview-backdrop" role="presentation" onClick={(event) => { if (event.target === event.currentTarget) setPreviewImage(null); }}>
-        <section className="image-preview-dialog" role="dialog" aria-modal="true" aria-label="用户附加图片预览">
+      {previewImage && <div
+        className="image-preview-backdrop"
+        role="presentation"
+        onClick={(event) => { if (event.target === event.currentTarget) setPreviewImage(null); }}
+      >
+        <section
+          className="image-preview-dialog"
+          style={{ maxWidth: `${Math.max(0, previewImage.width - 48)}px`, maxHeight: `${Math.max(0, previewImage.height - 48)}px` } as CSSProperties}
+          role="dialog"
+          aria-modal="true"
+          aria-label="用户附加图片预览"
+        >
           <button ref={previewCloseRef} type="button" className="image-preview-close" onClick={() => setPreviewImage(null)} aria-label="关闭图片预览" title="关闭图片预览">关闭</button>
-          <img className="image-preview-full" src={previewImage.src} alt={previewImage.alt} />
+          <img
+            className="image-preview-full"
+            style={{ maxWidth: `${Math.max(0, previewImage.width - 74)}px`, maxHeight: `${Math.max(0, previewImage.height - 102)}px` } as CSSProperties}
+            src={previewImage.src}
+            alt={previewImage.alt}
+          />
         </section>
       </div>}
       {message.role === "assistant" && (modelLabel || thinkingLabel || copyText) && <footer className="message-footer">

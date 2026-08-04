@@ -291,6 +291,68 @@ test("foreground presence renews on ready, visible lifecycle events, stays quiet
   }
 });
 
+test("a build mismatch blocks ordinary mutations but preserves server-guarded lifecycle recovery", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const testGlobal = globalThis as typeof globalThis & { __PI_CHAT_TEST_WEB_BUILD_IDENTITY__?: BootstrapData["buildIdentity"] };
+  testGlobal.__PI_CHAT_TEST_WEB_BUILD_IDENTITY__ = { schemaVersion: 1, packageVersion: "test", revision: "test", fingerprint: "0".repeat(64), builtAt: "test" };
+  let restartCalls = 0;
+  let shutdownCalls = 0;
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      buildIdentity: { schemaVersion: 1, packageVersion: "test", revision: "test", fingerprint: "1".repeat(64), builtAt: "test" },
+    }),
+    eventsUrl: () => "/api/events",
+    restart: async () => {
+      restartCalls += 1;
+      return { restarting: true as const };
+    },
+    shutdown: async () => {
+      shutdownCalls += 1;
+      return { shuttingDown: true as const };
+    },
+    waitForApplicationHandoff: async () => { throw new Error("test handoff unavailable"); },
+    markSessionViewed: async () => ({ viewing: activeId }),
+    renewPresence: async () => ({ present: true as const }),
+    signalWindowClose: () => true,
+  });
+  Object.defineProperty(dom.window, "confirm", { value: () => true, configurable: true });
+  Object.defineProperty(dom.window, "close", { value: () => undefined, configurable: true });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => {
+      root.render(createElement(App));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.match(dom.window.document.body.textContent || "", /网页与服务版本不一致/);
+    assert.equal(dom.window.document.querySelector<HTMLTextAreaElement>("textarea")?.disabled, true, "ordinary prompt writes remain blocked");
+    const restart = dom.window.document.querySelector<HTMLButtonElement>(".restart-pi")!;
+    assert.equal(restart.disabled, false, "the guarded restart recovery remains available");
+    await act(async () => {
+      restart.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.equal(restartCalls, 1);
+    const settings = dom.window.document.querySelector<HTMLButtonElement>(".topbar-settings")!;
+    await act(async () => settings.click());
+    const shutdown = dom.window.document.querySelector<HTMLButtonElement>(".settings-shutdown")!;
+    assert.equal(shutdown.disabled, false, "the guarded shutdown recovery remains available");
+    await act(async () => {
+      shutdown.click();
+      await Promise.resolve();
+    });
+    assert.equal(shutdownCalls, 1);
+  } finally {
+    await act(async () => root.unmount());
+    delete testGlobal.__PI_CHAT_TEST_WEB_BUILD_IDENTITY__;
+    Object.assign(api, originals);
+  }
+});
+
 test("a transient empty model inventory never leaks the Composer's internal model key", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");
@@ -548,7 +610,9 @@ test("ChatInput keeps an unsent draft and image attachment across Session naviga
         value: [new dom.window.File(["image"], "keep.png", { type: "image/png" })],
       });
       fileInput.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
-      await new Promise((resolve) => dom.window.setTimeout(resolve, 0));
+      const deadline = Date.now() + 250;
+      while (!dom.window.document.querySelector(".image-preview img[alt='keep.png']") && Date.now() < deadline)
+        await new Promise((resolve) => dom.window.setTimeout(resolve, 5));
     });
     assert.equal(textarea.value, "keep this unsent draft");
     assert.ok(dom.window.document.querySelector(".image-preview img[alt='keep.png']"));
@@ -803,6 +867,21 @@ test("remembered cold history paints before global bootstrap finishes while muta
     assert.match(dom.window.document.body.textContent || "", /remembered answer/);
     assert.equal(coldViews, 1);
     assert.equal(dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")?.disabled, true, "history may paint early but mutations wait for bootstrap identity/readiness");
+    assert.equal(
+      dom.window.document.querySelector(".topbar-title")?.textContent,
+      "Remembered cold",
+      "an early committed JSONL pane owns its title before sidebar inventory arrives",
+    );
+    assert.equal(
+      dom.window.document.querySelectorAll(".session-row").length,
+      0,
+      "a remembered pane cannot become a fake one-row sidebar before bootstrap inventory arrives",
+    );
+    assert.match(
+      dom.window.document.querySelector(".session-list")?.textContent || "",
+      /正在加载对话…/,
+      "an unconfirmed inventory must not claim that history is empty",
+    );
 
     await act(async () => {
       resolveBootstrap({ ...bootstrap, sessions: [...bootstrap.sessions, cold.session], sessionsTotal: 2 });
@@ -810,6 +889,7 @@ test("remembered cold history paints before global bootstrap finishes while muta
       await Promise.resolve();
     });
     assert.match(dom.window.document.body.textContent || "", /remembered answer/);
+    assert.equal(dom.window.document.querySelector(".topbar-title")?.textContent, "Remembered cold");
     assert.equal(coldViews, 1, "bootstrap reuses the in-flight remembered view instead of reading it twice");
   } finally {
     await act(async () => root.unmount());
@@ -2137,6 +2217,11 @@ test("a stale A Runtime warm cannot overwrite a newer A revisit", async () => {
     });
     assert.match(dom.window.document.querySelector(".composer-model-select .compact-select-trigger")?.textContent || "", /Warm Model B/);
     assert.match(dom.window.document.querySelector(".thinking-control .compact-select-trigger")?.textContent || "", /high/);
+    assert.equal(
+      dom.window.document.querySelector(".topbar-title")?.textContent,
+      "Warm A",
+      "the newer A revisit owns the title before an earlier A warm completes",
+    );
     await act(async () => {
       resolveWarm({ sessionId: coldId, state: { ...viewA.state, model: modelA, thinkingLevel: "low" }, gateMode: "strict" });
       await Promise.resolve();
@@ -2144,6 +2229,11 @@ test("a stale A Runtime warm cannot overwrite a newer A revisit", async () => {
     });
     assert.match(dom.window.document.querySelector(".composer-model-select .compact-select-trigger")?.textContent || "", /Warm Model B/);
     assert.match(dom.window.document.querySelector(".thinking-control .compact-select-trigger")?.textContent || "", /high/);
+    assert.equal(
+      dom.window.document.querySelector(".topbar-title")?.textContent,
+      "Warm A",
+      "the stale A warm result cannot replace the current A pane title",
+    );
     assert.equal(
       dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")?.placeholder,
       "输入消息，或粘贴、拖入附件",

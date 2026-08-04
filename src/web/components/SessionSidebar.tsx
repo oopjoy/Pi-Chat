@@ -67,10 +67,12 @@ function ResizeHandle({ width, onWidthChange }: { width: number; onWidthChange: 
   return <div className="sidebar-resize-handle" role="separator" aria-orientation="vertical" aria-label="拖动调整会话栏宽度" aria-valuemin={SIDEBAR_WIDTH_MIN} aria-valuemax={SIDEBAR_WIDTH_MAX} aria-valuenow={Math.round(width)} tabIndex={0} onPointerDown={onPointerDown} onKeyDown={onKeyDown} />;
 }
 
-export function SessionSidebar({ sessions, sessionsTotal, sessionDirectories, loadingAllSessions, loadingDirectoryKeys, viewedSessionId, workspaceCwd, open, width, newDisabled, refreshDisabled, restartDisabled, viewBusy, refreshing, pinnedSessionIds, pinnedDirectoryKeys, collapsedDirectoryKeys, expandedDirectoryKeys, failedSessionIds, unseenReplySessionIds, mutatingSessionIds, onClose, onCollapse, onNew, onRefresh, onLoadAllSessions, onLoadDirectory, onRestart, onView, onTogglePin, onToggleDirectoryPin, onSetDirectoryCollapsed, onRename, onDelete, onWidthChange }: {
+export function SessionSidebar({ sessions, sessionsTotal, sessionDirectories, inventoryReady, loadingAllSessions, loadingDirectoryKeys, viewedSessionId, workspaceCwd, open, width, newDisabled, refreshDisabled, restartDisabled, viewBusy, refreshing, pinnedSessionIds, pinnedDirectoryKeys, collapsedDirectoryKeys, expandedDirectoryKeys, failedSessionIds, unseenReplySessionIds, mutatingSessionIds, onClose, onCollapse, onNew, onRefresh, onLoadAllSessions, onLoadDirectory, onRestart, onView, onTogglePin, onToggleDirectoryPin, onSetDirectoryCollapsed, onRename, onDelete, onWidthChange }: {
   sessions: SessionSummary[];
   sessionsTotal: number;
   sessionDirectories: SessionDirectorySummary[];
+  /** A remembered conversation can render before the sidebar inventory is authoritative. */
+  inventoryReady: boolean;
   loadingAllSessions: boolean;
   loadingDirectoryKeys: string[];
   viewedSessionId: string;
@@ -252,7 +254,7 @@ export function SessionSidebar({ sessions, sessionsTotal, sessionDirectories, lo
           {searching && loadingAllSessions && <p className="empty-list">正在加载全部对话…</p>}
           {searching && !loadingAllSessions && sessions.length < sessionsTotal && <button type="button" className="load-all-sessions" onClick={onLoadAllSessions}>重试加载全部对话</button>}
           {searching && !loadingAllSessions && sessions.length >= sessionsTotal && !visibleSessionCount && <p className="empty-list">没有匹配的对话</p>}
-          {!searching && !sessions.length && <p className="empty-list">还没有历史会话</p>}
+          {!searching && !sessions.length && <p className="empty-list">{inventoryReady ? "还没有历史会话" : "正在加载对话…"}</p>}
         </nav>
         <ResizeHandle width={width} onWidthChange={onWidthChange} />
       </aside>

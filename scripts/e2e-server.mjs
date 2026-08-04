@@ -3,8 +3,10 @@ import { once } from "node:events";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { e2eRuntimeDist } from "./e2e-runtime-dist.mjs";
 
 const projectRoot = resolve(import.meta.dirname, "..");
+const runtimeDist = e2eRuntimeDist(process.env, projectRoot);
 const portIndex = process.argv.indexOf("--port");
 const port = portIndex >= 0 ? Number(process.argv[portIndex + 1]) : 30179;
 if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error("E2E 端口无效");
@@ -32,7 +34,8 @@ await writeFile(join(sessions, "second.jsonl"), [
     { type: "toolCall", id: "edit-e2e", name: "edit", arguments: { path: "src/example.ts", edits: [{ oldText: "const oldValue = 1;", newText: "const newValue = 2;" }] } },
   ] } },
   { type: "message", id: "second-result", parentId: "second-process", timestamp: "2026-01-02T00:00:03Z", message: { role: "toolResult", toolCallId: "edit-e2e", toolName: "edit", content: "Successfully replaced 1 block(s)" } },
-  { type: "message", id: "second-answer", parentId: "second-result", timestamp: "2026-01-02T00:00:04Z", message: { role: "assistant", provider: "test", model: "gpt-e2e", timestamp: Date.parse("2026-01-02T00:00:04Z"), content: "Final **answer** with `$x = 1$`." } },
+  { type: "message", id: "second-image", parentId: "second-result", timestamp: "2026-01-02T00:00:04Z", message: { role: "user", timestamp: Date.parse("2026-01-02T00:00:04Z"), content: [{ type: "image", mimeType: "image/svg+xml", data: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="3200" height="1800"><rect width="100%" height="100%" fill="#78b8f5"/><text x="1600" y="900" text-anchor="middle" dominant-baseline="middle" font-size="160" fill="#182131">Preview fixture</text></svg>').toString("base64") }] } },
+  { type: "message", id: "second-answer", parentId: "second-image", timestamp: "2026-01-02T00:00:05Z", message: { role: "assistant", provider: "test", model: "gpt-e2e", timestamp: Date.parse("2026-01-02T00:00:05Z"), content: "Final **answer** with `$x = 1$`." } },
 ].map(JSON.stringify).join("\n") + "\n", "utf8");
 
 await writeFile(rpcEntry, String.raw`
@@ -47,7 +50,10 @@ const reply = (id, data) => write({ type: "response", id, success: true, data })
 const handlers = {
   get_state: () => ({ model: { provider: "test", id: "gpt-e2e", name: "E2E Model", input: ["text"] }, isStreaming, sessionId, sessionFile }),
   get_messages: () => ({ messages: [] }),
-  get_available_models: () => ({ models: [{ provider: "test", id: "gpt-e2e", name: "E2E Model", input: ["text"] }] }),
+  get_available_models: () => ({ models: [
+    { provider: "test", id: "gpt-e2e", name: "E2E Model", input: ["text"] },
+    { provider: "test", id: "gpt-e2e-alt", name: "Alternate E2E Model", input: ["text"] },
+  ] }),
   get_commands: () => ({ commands: [] }),
   get_session_stats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }),
 };
@@ -69,10 +75,11 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 });
 `, "utf8");
 
-const child = spawn(process.execPath, [join(projectRoot, "dist", "server", "server", "index.js"), "--host", "127.0.0.1", "--port", String(port), "--cwd", root], {
+const child = spawn(process.execPath, [join(runtimeDist, "server", "server", "index.js"), "--host", "127.0.0.1", "--port", String(port), "--cwd", root], {
   cwd: projectRoot,
   env: {
     ...process.env,
+    PI_CHAT_RUNTIME_DIST: runtimeDist,
     PI_CHAT_PI_ENTRY: rpcEntry,
     PI_CODING_AGENT_DIR: agentDir,
     PI_CODING_AGENT_SESSION_DIR: sessions,

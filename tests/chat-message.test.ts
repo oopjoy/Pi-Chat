@@ -1,12 +1,10 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 import React, { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { JSDOM } from "jsdom";
 import { assistantCopyText, assistantModelLabel, assistantThinkingLabel, ChatMessage, shouldFoldUserText, USER_MESSAGE_FOLD_LINE_LIMIT } from "../src/web/components/ChatMessage";
-import { ChatInput } from "../src/web/components/ChatInput";
 
 test("user messages stay literal instead of rendering incomplete Markdown or math", () => {
   const source = "**unfinished $x + [link](\\\\server\\share";
@@ -87,39 +85,6 @@ test("user image thumbnails open a closable accessible preview", async () => {
   }
 });
 
-test("image preview sizing stays within the padded dynamic viewport", async () => {
-  const styles = await readFile(new URL("../src/web/styles.css", import.meta.url), "utf8");
-  assert.match(styles, /\.image-preview-dialog\s*\{[^}]*max-height:\s*calc\(100dvh - 48px\)/);
-  assert.match(styles, /\.image-preview-full\s*\{[^}]*max-width:\s*min\(calc\(96vw - 26px\), 1414px\)[^}]*max-height:\s*calc\(100dvh - 102px\)/);
-});
-
-test("system notices reserve flow space four pixels above the Composer and wrap within eighty percent of chat", async () => {
-  const styles = await readFile(new URL("../src/web/styles.css", import.meta.url), "utf8");
-  assert.match(styles, /\.composer-wrap\s*\{[^}]*display:\s*flex[^}]*flex-direction:\s*column[^}]*align-items:\s*center[^}]*gap:\s*4px/);
-  assert.match(styles, /\.system-notice-stack\s*\{[^}]*display:\s*flex[^}]*width:\s*max-content[^}]*max-width:\s*80%[^}]*align-items:\s*center/);
-  assert.doesNotMatch(styles, /\.system-notice-stack\s*\{[^}]*position:\s*absolute/);
-  assert.match(styles, /\.system-notice-stack:empty\s*\{\s*display:\s*none/);
-  assert.match(styles, /\.system-notice-stack > \*\s*\{[^}]*width:\s*fit-content[^}]*max-width:\s*100%[^}]*overflow-wrap:\s*anywhere[^}]*white-space:\s*pre-wrap/);
-  const html = renderToStaticMarkup(createElement(ChatInput, {
-    streaming: false,
-    stopping: false,
-    disabled: false,
-    acceptsImages: false,
-    commands: [],
-    notices: createElement(
-      React.Fragment,
-      null,
-      createElement("div", { className: "primary-runtime-status" }, "Runtime notice"),
-      createElement("div", { className: "app-toast" }, "Toast notice"),
-    ),
-    onSend: async () => undefined,
-    onAbort: async () => undefined,
-    onPickLocalFiles: async () => [],
-    onReadClipboardFiles: async () => [],
-    onError: () => undefined,
-  }));
-  assert.match(html, /class="system-notice-stack"[\s\S]*primary-runtime-status[\s\S]*app-toast/);
-});
 
 test("user folding toggle expands and restores the collapsed text", async () => {
   const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>");
@@ -157,10 +122,16 @@ test("assistant images retain their full non-previewable rendering", async () =>
   } }));
   assert.match(html, /class="message-image"[^>]*src="data:image\/png;base64,aGVsbG8="/);
   assert.doesNotMatch(html, /message-image-thumbnail|image-preview/);
+});
 
-  const styles = await readFile(new URL("../src/web/styles.css", import.meta.url), "utf8");
-  assert.match(styles, /\.message-image\s*\{[^}]*max-width:\s*min\(320px, 100%\)[^}]*max-height:\s*320px/);
-  assert.match(styles, /\.message-user-attachments \.message-image\s*\{[^}]*max-width:\s*min\(160px, 100%\)[^}]*max-height:\s*120px/);
+test("local coordination and native system messages stay out of the chat body", () => {
+  for (const role of ["localCoordination", "system"]) {
+    const html = renderToStaticMarkup(React.createElement(ChatMessage, { message: {
+      role,
+      content: "Runtime-only metadata",
+    } }));
+    assert.equal(html, "");
+  }
 });
 
 test("assistant messages continue to use Markdown rendering", () => {

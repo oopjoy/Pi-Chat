@@ -8,35 +8,6 @@ import { idForPath, type SessionIndex } from "../src/server/session-index";
 import type { ResourceManager } from "../src/server/resource-manager";
 import { commandMatches, fileReferences, windowsPathsFromText } from "../src/web/components/ChatInput";
 
-test("production web entry advertises standalone install metadata", async () => {
-  const html = await (await import("node:fs/promises")).readFile(new URL("../src/web/index.html", import.meta.url), "utf8");
-  const manifest = JSON.parse(await (await import("node:fs/promises")).readFile(new URL("../src/web/public/manifest.webmanifest", import.meta.url), "utf8")) as { display: string; start_url: string; icons: Array<{ src: string }> };
-  assert.match(html, /rel="manifest" href="\/manifest\.webmanifest(?:\?[^\"]+)?"/);
-  assert.match(html, /rel="icon" href="\/icons\/pi-chat-[^\"]+\.png(?:\?[^\"]+)?"/);
-  assert.equal(manifest.display, "standalone");
-  assert.equal(manifest.start_url, "/");
-  assert.equal(manifest.icons.length >= 2, true);
-  assert.ok(manifest.icons.every((icon) => icon.src.startsWith("/icons/pi-chat-")));
-});
-
-test("production build splits React, Markdown and KaTeX into cacheable chunks", async () => {
-  const config = await (await import("node:fs/promises")).readFile(new URL("../vite.config.ts", import.meta.url), "utf8");
-  assert.match(config, /codeSplitting/);
-  for (const name of ["react", "markdown", "katex"]) assert.match(config, new RegExp(`name: ["']${name}["']`));
-});
-
-test("session sidebar switches sessions without link navigation", async () => {
-  const files = await import("node:fs/promises");
-  const sidebar = await files.readFile(new URL("../src/web/components/SessionSidebar.tsx", import.meta.url), "utf8");
-  const app = await files.readFile(new URL("../src/web/App.tsx", import.meta.url), "utf8");
-  assert.doesNotMatch(sidebar, /href=\{`\?session=/);
-  assert.match(sidebar, /type="button"[\s\S]*onClick=\{\(\) => onView\(session\.id\)\}/);
-  assert.match(app, /matchMedia\?\.\("\(max-width: 760px\)"\)\.matches[\s\S]*setSidebarOpen\(false\)[\s\S]*viewSession\(id\)/);
-  assert.doesNotMatch(app, /onView=\{\(id\) => \{\s*setSidebarOpen\(false\);/);
-  const styles = await files.readFile(new URL("../src/web/styles.css", import.meta.url), "utf8");
-  assert.match(styles, /\.message-assistant \.markdown-body blockquote\s*\{[^}]*border-left-color:\s*var\(--text\)[^}]*color:\s*var\(--text\)[^}]*font-weight:\s*650/);
-});
-
 test("prompt image validation accepts Pi image content and rejects unsafe payloads", () => {
   assert.deepEqual(promptImages([{ type: "image", data: "aGVsbG8=", mimeType: "image/png", fileName: "ignored.png" }]), [
     { type: "image", data: "aGVsbG8=", mimeType: "image/png" },

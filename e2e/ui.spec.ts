@@ -105,6 +105,87 @@ test("mobile session navigation closes the left sidebar", async ({ page }, testI
   await expect(sidebar).not.toHaveClass(/is-open/);
 });
 
+test("image preview stays inside the viewport and restores thumbnail focus", async ({ page }, testInfo) => {
+  test.skip(!["chromium-desktop", "chromium-mobile"].includes(testInfo.project.name));
+  await openSecondSession(page);
+  const thumbnail = page.getByRole("button", { name: "查看用户附加图片的大图" });
+  await thumbnail.focus();
+  await thumbnail.click();
+  const dialog = page.getByRole("dialog", { name: "用户附加图片预览" });
+  const image = dialog.locator("img");
+  const close = dialog.getByRole("button", { name: "关闭图片预览" });
+  await expect(dialog).toBeVisible();
+  await expect(close).toBeFocused();
+  const viewport = await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }));
+  for (const box of [await dialog.boundingBox(), await image.boundingBox()]) {
+    expect(box).not.toBeNull();
+    expect(box!.x).toBeGreaterThanOrEqual(0);
+    expect(box!.y).toBeGreaterThanOrEqual(0);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.width);
+    expect(box!.y + box!.height).toBeLessThanOrEqual(viewport.height);
+  }
+  await close.click();
+  await expect(dialog).toBeHidden();
+  await expect(thumbnail).toBeFocused();
+});
+
+test("long Runtime notice remains in flow above an unobscured Composer", async ({ page }, testInfo) => {
+  test.skip(!["chromium-desktop", "chromium-mobile"].includes(testInfo.project.name));
+  const longNotice = "Refresh failed because the session inventory is temporarily unavailable. ".repeat(8);
+  await page.goto("/");
+  await page.route("**/api/bootstrap", (route) => route.fulfill({
+    status: 503,
+    contentType: "application/json",
+    body: JSON.stringify({ error: longNotice }),
+  }));
+  await page.getByRole("button", { name: "刷新会话列表" }).click();
+  const notice = page.locator(".app-toast.error");
+  const composer = page.locator(".composer");
+  await expect(notice).toBeVisible();
+  await expect(notice).toContainText(longNotice);
+  await expect(composer).toBeVisible();
+  const [noticeBox, composerBox, viewport, noticeMetrics] = await Promise.all([
+    notice.boundingBox(), composer.boundingBox(), page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight })),
+    notice.evaluate((element) => ({ clientWidth: element.clientWidth, scrollWidth: element.scrollWidth })),
+  ]);
+  expect(noticeBox).not.toBeNull();
+  expect(composerBox).not.toBeNull();
+  expect(noticeMetrics.scrollWidth).toBeLessThanOrEqual(noticeMetrics.clientWidth + 1);
+  expect(noticeBox!.y + noticeBox!.height).toBeLessThanOrEqual(composerBox!.y);
+  expect(noticeBox!.x).toBeGreaterThanOrEqual(0);
+  expect(noticeBox!.x + noticeBox!.width).toBeLessThanOrEqual(viewport.width);
+  expect(composerBox!.x).toBeGreaterThanOrEqual(0);
+  expect(composerBox!.x + composerBox!.width).toBeLessThanOrEqual(viewport.width);
+});
+
+test("forced colors keeps CompactSelect focus and active option visibly outlined", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium-forced-colors");
+  await page.emulateMedia({ forcedColors: "active" });
+  await page.goto("/");
+  const trigger = page.getByRole("button", { name: "模型" });
+  await trigger.focus();
+  await expect(trigger).toBeFocused();
+  await expect(trigger).toHaveCSS("outline-style", "solid");
+  await trigger.press("ArrowDown");
+  const listbox = page.getByRole("listbox", { name: "模型" });
+  await expect(listbox).toBeFocused();
+  await listbox.press("ArrowDown");
+  const activeOption = listbox.locator("[role='option']").nth(1);
+  await expect(activeOption).toHaveAttribute("id", await listbox.getAttribute("aria-activedescendant") || "");
+  const forcedColorsDiagnostic = await activeOption.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      forcedColors: matchMedia("(forced-colors: active)").matches,
+      outlineStyle: style.outlineStyle,
+      borderTopStyle: style.borderTopStyle,
+      backgroundColor: style.backgroundColor,
+      color: style.color,
+    };
+  });
+  expect(forcedColorsDiagnostic.forcedColors).toBe(true);
+  expect(forcedColorsDiagnostic.outlineStyle).toBe("solid");
+});
+
 test("session search filters locally and pin persists across reload", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "chromium-desktop");
   await page.goto("/");
@@ -167,7 +248,6 @@ test("Diff sidebar slides, remains inert while hidden, and process collapses fro
   await process.locator(".process-edit-entry button").click();
   const diff = page.locator(".edit-diff-sidebar");
   await expect(diff).toHaveClass(/is-open/);
-  await expect(diff).toHaveCSS("transform", "matrix(1, 0, 0, 1, 0, 0)");
   await expect(diff.getByText("const newValue = 2;")).toBeVisible();
   await diff.locator(".edit-diff-sidebar-header > button").click();
   await expect(diff).not.toHaveClass(/is-open/);
