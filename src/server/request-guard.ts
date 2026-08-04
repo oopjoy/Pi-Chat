@@ -66,11 +66,12 @@ export function requestGuardError(request: IncomingMessage, options: RequestGuar
   if (isTokenlessHealthProbe) return null;
   // This is the one bootstrap handshake that obtains the ephemeral token. Every
   // other API/SSE call, including tokenless local automation, must authenticate.
-  const isInitialBootstrap = pathname === "/api/bootstrap" && request.method === "GET" && !headerToken;
+  const isInitialBootstrap = pathname === "/api/bootstrap/handshake" && request.method === "GET" && !headerToken;
   if (pathname.startsWith("/api/") || pathname === "/api/events") {
-    const hasRequestIdentity = Boolean(origin || fetchSite || headerToken || (pathname === "/api/events" && url.searchParams.has("token")));
+    const queryTokenRoute = pathname === "/api/events" || pathname === "/api/window/close";
+    const hasRequestIdentity = Boolean(origin || fetchSite || headerToken || (queryTokenRoute && url.searchParams.has("token")));
     if ((requiresToken || hasRequestIdentity) && !origin && !isInitialBootstrap && fetchSite !== "same-origin") return "请求缺少同源 Origin";
-    const suppliedToken = pathname === "/api/events" ? url.searchParams.get("token") || "" : headerToken;
+    const suppliedToken = queryTokenRoute ? url.searchParams.get("token") || headerToken : headerToken;
     if ((requiresToken || hasRequestIdentity) && !isInitialBootstrap && !sameToken(suppliedToken, options.token)) return "Pi Chat 请求令牌无效或已过期";
   }
   return null;

@@ -1,5 +1,5 @@
-import { mergeMessageHistory, messageSequenceAt, reconcilePersistedHistory, userTurnCount } from "../../shared/streaming-assistant";
-import type { PiMessage, PiState, SessionViewData } from "../../shared/types";
+import { mergeMessageHistory, reconcilePersistedHistory, userTurnCount } from "../../shared/streaming-assistant";
+import type { PiMessage, PiState, SessionActivityState, SessionViewData } from "../../shared/types";
 
 export type SessionViewSnapshot = SessionViewData & { cachedAt: number };
 
@@ -8,6 +8,8 @@ export type PaneTransientPatch = Partial<Pick<SessionViewData,
   "liveMessage" | "toolStatus" | "queue" | "queuePaused" | "gateMode" |
   "pendingExtensionRequest" | "controlOwner" | "controlledByThisWindow" |
   "isStreaming" | "runtimeStatus">> & {
+  /** A newer SSE activity snapshot must survive an older HTTP Session view. */
+  sessionActivity?: SessionActivityState;
   /** State fields are independently transient; never snapshot the whole PiState. */
   state?: Partial<PiState>;
 };
@@ -109,9 +111,23 @@ export class SessionViewCache {
   private applyOverlay<T extends SessionViewSnapshot | SessionViewData>(id: string, view: T, minRevision = 0): T {
     const patch = this.overlayAfter(id, minRevision);
     if (!Object.keys(patch).length) return view;
+    const { sessionActivity, controlOwner, controlledByThisWindow, ...fields } = patch;
+    // `undefined` is meaningful for controlOwner: an SSE clear must remove a
+    // former owner rather than retaining it through nullish fallback.
+    const hasControlOwner = Object.hasOwn(patch, "controlOwner");
+    const hasControlledByThisWindow = Object.hasOwn(patch, "controlledByThisWindow");
+    const control = hasControlOwner || hasControlledByThisWindow
+      ? {
+          controlOwner: hasControlOwner ? controlOwner : view.controlOwner ?? view.session.controlOwner,
+          controlledByThisWindow: hasControlledByThisWindow ? controlledByThisWindow : view.controlledByThisWindow ?? view.session.controlledByThisWindow,
+        }
+      : null;
     return {
       ...view,
-      ...patch,
+      ...fields,
+      ...control,
+      ...(sessionActivity ? { session: { ...view.session, activity: sessionActivity } } : null),
+      ...(control ? { session: { ...(sessionActivity ? { ...view.session, activity: sessionActivity } : view.session), ...control } } : null),
       ...(patch.state ? { state: { ...view.state, ...patch.state } } : null),
     } as T;
   }
@@ -121,10 +137,10 @@ export class SessionViewCache {
     const id = view.session.id;
     const previous = this.views.get(id);
     const previousPersisted = this.persistedMessages.get(id) || [];
-    const incomingIsStrictOldPrefix = Boolean(previousPersisted.length
-      && view.messages.length < previousPersisted.length
-      && messageSequenceAt(previousPersisted, view.messages) === 0);
-    const preserveStreamingTranscript = Boolean(previous && (view.isStreaming || view.state.isStreaming || incomingIsStrictOldPrefix));
+    // A settled JSONL/runtime view is authoritative even when its active branch
+    // is a strict prefix of a cached branch. Only a genuinely streaming view
+    // may merge history; terminal SSE tails are reconciled independently below.
+    const preserveStreamingTranscript = Boolean(previous && (view.isStreaming || view.state.isStreaming));
     const persisted = preserveStreamingTranscript
       ? mergeMessageHistory(previousPersisted, view.messages)
       : view.messages;
@@ -143,6 +159,10 @@ export class SessionViewCache {
       liveMessage: (view.isStreaming || view.state.isStreaming)
         ? view.liveMessage || previous?.liveMessage
         : view.liveMessage,
+      // A hot partial view intentionally omits commands while its Runtime is
+      // busy. `undefined` means "not refreshed", not "command discovery is
+      // empty"; only an explicit [] may clear the prior inventory.
+      commands: view.commands ?? previous?.commands,
       cachedAt: this.now(),
     };
     this.views.delete(id);
@@ -187,14 +207,25 @@ export class SessionViewCache {
   /** Apply only explicitly transient SSE state; use remember() for HTTP views. */
   patch(id: string, patch: PaneTransientPatch): SessionViewSnapshot | undefined {
     this.recordOverlay(id, patch);
-    const { state: statePatch, ...fields } = patch;
+    const { state: statePatch, sessionActivity, controlOwner, controlledByThisWindow, ...fields } = patch;
+    const hasControlOwner = Object.hasOwn(patch, "controlOwner");
+    const hasControlledByThisWindow = Object.hasOwn(patch, "controlledByThisWindow");
     const previous = this.views.get(id);
     if (!previous) return undefined;
     const persisted = this.persistedMessages.get(id) || [];
     const reconciled = reconcilePersistedHistory(persisted, this.terminalTails.get(id) || []);
+    const control = hasControlOwner || hasControlledByThisWindow
+      ? {
+          controlOwner: hasControlOwner ? controlOwner : previous.controlOwner ?? previous.session.controlOwner,
+          controlledByThisWindow: hasControlledByThisWindow ? controlledByThisWindow : previous.controlledByThisWindow ?? previous.session.controlledByThisWindow,
+        }
+      : null;
     const next: SessionViewSnapshot = {
       ...previous,
       ...fields,
+      ...control,
+      ...(sessionActivity ? { session: { ...previous.session, activity: sessionActivity } } : null),
+      ...(control ? { session: { ...(sessionActivity ? { ...previous.session, activity: sessionActivity } : previous.session), ...control } } : null),
       messages: reconciled.messages,
       messageTotal: previous.messageTotal,
       turnTotal: previous.turnTotal,

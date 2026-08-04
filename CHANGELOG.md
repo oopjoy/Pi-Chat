@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.4.1
+
+### Reliability convergence
+
+- Cold JSONL history is strictly view-only: browsing, search, scrolling, pagination, and composer focus do not create a Secondary Runtime; real write or control intent activates the Session through a single-flight readiness path.
+- New drafts have their own selected working directory, while live Primary and Secondary Runtime cwd bindings remain immutable. Fresh Windows installations default future drafts to the current user's Desktop; existing saved workspace choices are retained.
+- The first New prompt now submits Runtime creation, Model, Thinking, Gate synchronization, and prompt admission as one transaction. A bounded JSONL-visibility retry replaces the provisional `新对话` title with the persisted first-turn title after a very fast completion.
+- Multi-window lifecycle now distinguishes page presence from reconnectable SSE transport. The last explicitly closed browser/PWA page triggers only a quiescent $10$-second auto-shutdown grace; replacement pages and stale close beacons cannot terminate active work.
+- Session navigation adds local search, Session pins, directory grouping, collapse/fixed preferences, and an authoritative Runtime activity projection. Manual Secondary release is removed; automatic safe reclaim remains.
+- Build identity is embedded in both the Web bundle and server health/bootstrap responses, so restart handoff detects mismatched frontend/server artifacts.
+
+### Safety, maintainability, and verification
+
+- Hardened loopback API admission, exact handshake/host handling, Runtime provenance, prompt reconciliation, capacity reservations, queue/settlement barriers, and cold-history cache freshness.
+- Added explicit feature-surface, frontend state-ownership, and timing-contract documentation. The reliability-convergence architecture is frozen: future coordination changes require a reproducible correctness, security, or measured user-facing problem.
+- Playwright now gives each test an isolated local server and dynamic port. Focused tests cover pane authority, draft workspace ownership, Runtime event transitions, route admission, persistence races, and session navigation.
+- Validation: `npm run typecheck`, `npm test` ($413$ passing tests), and `npm run test:e2e` ($9$ desktop/mobile applicable tests passing; $9$ intentionally project-skipped).
+
+### Known boundaries
+
+- Pi Chat remains a loopback-only local Web/PWA client; it does not provide remote access, public deployment, Electron, a replacement Pi agent loop, or a plugin platform.
+- Package version $0.4.1$ is a source release; generated `dist/`, local Session JSONL, test output, and subagent artifacts are intentionally excluded from Git.
+
 ## 0.4.0
 
 ### Session-first availability

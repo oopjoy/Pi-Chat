@@ -22,12 +22,14 @@ Three lifetimes must stay distinct:
 | Layer | Owns | Stopped by |
 |---|---|---|
 | Browser / PWA window | UI, EventSource, local preferences | Window close |
-| Pi Chat Node service | HTTP, SSE, Runtime pool, lifecycle barrier | “关闭 Pi Chat” / process exit |
+| Pi Chat Node service | HTTP, SSE, Runtime pool, lifecycle barrier | “关闭 Pi Chat” / process exit / 最后窗口关闭后的 quiescent auto-shutdown |
 | Pi RPC Runtime | One session JSONL writer, model stream, tools | Service rest / reclaim / shutdown |
 
-Closing a browser window must not be confused with stopping the Node service. Likewise, an SSE/EventSource drop is a re-connectable transport event, not evidence that a window or service has closed: it only follows the delayed Session-control release path. Stopping the service is explicit (the close API, restart handoff, or process signal) and stops hosted RPC workers.
+Closing a browser window is distinct from an SSE/EventSource drop. An SSE/EventSource drop is reconnectable transport state, not evidence that a window or service has closed: it only follows the delayed Session-control release path. A non-BFCache `pagehide` explicitly removes one browser/PWA page instance; when that leaves no page instances, Pi Chat waits for all generation, queue, confirmation, recovery, Runtime transition, and mutation work to finish, then requires a continuous $10$ second quiescent grace before automatically stopping hosted RPC workers and the Node service. A replacement page cancels that grace; stale close beacons cannot remove a replacement page. Explicit close API, restart handoff, and process signals remain independent shutdown paths.
 
 ## Hard product boundaries (0.4.x)
+
+The status of each current capability is tracked in [`feature-surface.md`](feature-surface.md). A capability marked removed there must not retain a hidden route, browser wrapper, shared type, or feature-specific regression test.
 
 ### In scope
 
@@ -50,7 +52,7 @@ Closing a browser window must not be confused with stopping the Node service. Li
 
 ### Reserved local automation surface
 
-`POST /api/workspace/set` remains a **local** path/body API for scripts or a future local CLI. The browser uses `POST /api/workspace/pick` (native folder dialog). Do not document `workspace/set` as a remote client entry.
+`POST /api/workspace/pick` and `POST /api/workspace/set` remain **local automation** APIs for scripts or a future local CLI; the ordinary browser UI exposes only the per-draft `POST /api/workspace/draft-pick` control. The global APIs update only the persisted default/index cwd for future drafts; they never stop, restart, rebind, or change the cwd of a live Runtime. Do not document `workspace/set` as a remote client entry.
 
 ## Server module map
 
@@ -70,6 +72,10 @@ Current ownership still centers on `src/server/app.ts` (`PiChatApp`), with progr
 | `session-control.ts` | Multi-window presence, exclusive control owner, delayed release timers |
 | `prompt-scheduler.ts` | Primary queue/dispatch, secondary queue dispatch, enqueue limits |
 | `sse-hub.ts` | SSE client map, broadcast / broadcastEach |
+| `runtime-event-transition.ts` | Pure shared event-derived Runtime projection; no transport, timer, queue, binding, or provenance ownership |
+| `routes/bootstrap.ts` | Health, handshake, bootstrap HTTP parsing/serialization through explicit App capabilities |
+| `routes/sessions-read.ts` | Read-only Session list/view HTTP parsing/serialization through explicit App capabilities |
+| `api-route-admission.ts` | Pure lifecycle admission classification and prompt body-size policy |
 
 ### Extraction order
 
@@ -79,18 +85,37 @@ Extract **state ownership**, not only functions:
 2. **SessionControl / WindowPresence** — done (`session-control.ts`)
 3. **PromptScheduler** — done (`prompt-scheduler.ts`); primary/secondary queue + dispatch
 4. **SseHub** — done (`sse-hub.ts`); subscribe/broadcast only
-5. **HttpRoutes** — next wave; keep routes in `app.ts` until domain services stabilize further
+5. **HttpRoutes** — completed for this refactor wave: bootstrap and read-only Session route domains are extracted; the remaining mutation, chat/queue, model/settings, resource, transport streaming, and lifecycle routes were ownership-audited and intentionally remain in `app.ts`
 
 Acceptance for a real extraction:
 
 - Maps for runtimes / controllers are private to their owner module
-- Routes never mutate those maps directly
+- Routes receive explicit named capabilities and never mutate runtime/controller/SSE maps directly
+- Runtime event transition remains pure; binding checks, queue drains, timer ownership, snapshot warming, and Primary/Secondary lifecycle differences remain in `PiChatApp`
 - RuntimePool never imports `IncomingMessage` / `ServerResponse`
 - Domain modules are unit-testable without a full HTTP server
 
+Step 5 is complete without moving every URL. Further route movement was rejected where a transport-only adapter would require a wide capability facade, expose private Runtime/control/queue/lifecycle authority, or increase total production code without removing duplicate policy. In particular, SSE/presence/window-close/restart/shutdown and extension-response routes remain beside their owning maps and timers; chat/queue and Session control/warm/activate/new remain beside their admission and Runtime ownership; model/settings and resource routes remain in maintain mode. A future extraction requires a concrete ownership reduction, not line movement.
+
 Do **not** extract Skills/Extensions resource managers as part of this refactor wave unless a concrete bug requires it. Leave resource pages in maintain mode.
 
+## Reliability convergence freeze
+
+The current refactor wave ends at this architecture. File size, route count, test-file length, or superficial similarity between revisions and generations are not by themselves reasons for another coordination refactor. The ownership and timing documents are guardrails for maintenance, not a backlog for further abstraction.
+
+A later change to core coordination structure must be driven by at least one of:
+
+- a reproducible correctness failure such as cross-Session painting, duplicate writes, wrong Runtime reclaim, shutdown during admitted work, or a lost terminal event;
+- a security boundary failure;
+- a measured user-visible latency or reliability problem;
+- deletion of an existing writable authority or duplicate policy, with one explicit remaining owner;
+- a focused regression that fails before the change and passes after it.
+
+Every admitted coordination change must state which existing authority or policy it removes, which module becomes the sole owner, and which concrete behavior is corrected. Adding a facade, revision, generation, cache layer, hook, reducer, route adapter, or test framework without removing existing authority is out of scope. Broad test cleanup and source-shape deletion remain deferred until observed maintenance cost justifies a separate rollback surface.
+
 ## Frontend module map
+
+The step 3 ownership boundary and staged migration are defined in [`frontend-state-ownership.md`](frontend-state-ownership.md). State migration must follow that design gate before component extraction.
 
 | Module | Responsibility |
 |---|---|
@@ -109,10 +134,12 @@ Prefer small hooks and pure libs over growing `App.tsx` further.
 - Primary readiness is explicit (`starting` / `ready` / `failed`), not inferred from a spawned child process. Starting/failed read projections must issue zero Primary RPC requests.
 - Compatibility is a process-wide capability of the configured local Pi entrypoint: Primary is the single probe owner. A new or recovered Secondary therefore requires a ready Primary capability, but an already healthy Secondary remains independently usable if Primary later fails; Secondary startup still verifies its own `get_state` response.
 - Primary writes and crash recovery pass the readiness controller; every restart re-runs compatibility probing, so a failed probe cannot be bypassed by an implicit restart.
-- Cold history view: JSONL only, gray status, no Secondary Runtime.
-- Runtime preparation is a Session-scoped background capability upgrade. Typing/focus may begin warming it, but it must never block reading or navigating to another Session.
-- Activation on real work: send, compact, model/thinking, taking control, or explicit activate.
-- A late warm/activation response may update only its own pane cache; it must not repaint a newer selected Session.
+- Cold history view: JSONL is returned first with gray/view-only status. Browsing, scrolling, search, pagination and cache navigation never start a Secondary Runtime.
+- Runtime preparation is a Session-scoped single-flight capability upgrade for explicit write/control intent. It never creates a blank Runtime or rebinds a process between Sessions.
+- Activation on real work: send, compact, model/thinking, taking control, or explicit activate. A send to an inactive Session awaits its shared readiness promise rather than a full activation view.
+- A new draft's first user turn performs Runtime creation, Model, Thinking, conditional Gate synchronization, and prompt admission under one draft lease and one Session prompt-admission FIFO; it avoids browser-side sequential setup requests.
+- A late warm/activation response may update only its own pane cache; it must not repaint a newer selected Session. Runtime startup's successful `get_state` response is retained as `lastState`, and cached Session identity/path/cwd avoids a global SessionIndex scan; unknown IDs refresh once then fail closed.
+- Gate synchronization is conditional: an authoritative Runtime already in the requested mode receives no redundant `/gate` command.
 - Hard cap: at most 5 hot conversations total (Primary + at most 4 Secondary Runtimes)
 - Cold JSONL history views do not count toward the hot limit
 - At capacity, the least-recently-used reclaimable idle Secondary is rested first
@@ -132,7 +159,7 @@ Prefer small hooks and pure libs over growing `App.tsx` further.
 
 Prefer **RPC capability probe** over a hard Pi version allowlist.
 
-| Field | Value (0.4.0) |
+| Field | Value (0.4.1) |
 |---|---|
 | Required capabilities | `get_state`, `get_messages`, `get_available_models`, `get_commands`, `get_session_stats` |
 | Last verified Pi | 0.83.0 |

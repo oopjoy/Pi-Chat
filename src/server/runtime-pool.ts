@@ -3,7 +3,7 @@ import type { ExtensionUiRequest, GateMode, PiMessage, PiState, PromptImage, Ses
 import { asMessages, asState } from "./pi-data.js";
 import { idForPath, readSessionMessages } from "./session-index.js";
 import { OperationAdmission } from "./operation-admission.js";
-import type { PiRpcClient } from "./rpc-client.js";
+import type { PiRpcClient, RpcEventSource } from "./rpc-client.js";
 
 const DEFAULT_SECONDARY_RUNTIME_IDLE_MS = 40 * 60 * 1_000;
 /** Primary + four Secondary workers = five hot conversations total. */
@@ -27,6 +27,8 @@ export interface RuntimeQueuedPrompt {
 
 export interface DraftRuntimeLease {
   runtime: SecondaryRuntime;
+  /** Only a freshly spawned empty draft is discarded if Primary readiness fails. */
+  created: boolean;
   release(): void;
 }
 
@@ -79,10 +81,16 @@ export interface SecondaryRuntime {
   lastUserPromptAt?: number;
   /** Pi's JSONL path, available even before SessionIndex first observes the Session. */
   sessionPath?: string;
+  /** Actual child-process cwd. A dedicated Runtime never changes identity or cwd. */
+  cwd: string;
+  /** Current dedicated child source; stale pre-recovery events are ignored. */
+  rpcGeneration: number;
   draftSessionPath?: string;
+  /** Coalesces an uncertain empty-draft probe; Pi RPC has no cancellation. */
+  draftProbe?: Promise<boolean | null>;
 }
 
-export type RuntimeReclaimReason = "idle" | "capacity" | "manual";
+export type RuntimeReclaimReason = "idle" | "capacity";
 export class RuntimeCapacityError extends Error {}
 
 export interface RuntimePoolOptions {
@@ -106,14 +114,16 @@ export interface RuntimePoolOptions {
   canSweep: () => boolean;
   /** Live empty drafts have no indexed history fallback and cannot be reclaimed. */
   isViewed?: (sessionId: string) => boolean;
-  onSecondaryEvent: (runtime: SecondaryRuntime, event: Record<string, unknown>) => void;
+  onSecondaryEvent: (runtime: SecondaryRuntime, event: Record<string, unknown>, source?: RpcEventSource) => void;
   /** Host merges primary + secondary IDs for SSE payloads. */
   activeSessionIds: () => string[];
   broadcast: (event: Record<string, unknown>) => void;
 }
 
 /**
- * Owns Secondary Runtime maps, capacity mutex, reclaim, and draft workers.
+ * Owns dedicated Secondary Runtime maps, capacity mutex, reclaim, and drafts.
+ * A Runtime owns exactly one Pi process for its entire lifetime; it is never
+ * rebound to another Session.
  * Does not own HTTP, SSE client maps, primary RPC, or prompt dispatch policy.
  */
 export class RuntimePool {
@@ -121,7 +131,10 @@ export class RuntimePool {
   readonly runtimes = new Map<string, SecondaryRuntime>();
   private readonly runtimeStarts = new Map<string, Promise<SecondaryRuntime>>();
   private readonly runtimeStops = new Map<string, Promise<void>>();
+  private readonly draftStarts = new Map<string, Promise<DraftRuntimeLease>>();
   private runtimeCapacityTail: Promise<void> = Promise.resolve();
+  /** Starts reserve capacity before spawning outside the short capacity lock. */
+  private reservedStarts = 0;
   private readonly maxSecondaryRuntimes: number;
   private readonly maxIdleSecondaryRuntimes: number;
   private readonly secondaryRuntimeIdleMs: number;
@@ -136,6 +149,7 @@ export class RuntimePool {
   get startingCount(): number { return this.runtimeStarts.size; }
   get stoppingCount(): number { return this.runtimeStops.size; }
   get transitioningCount(): number { return this.runtimeStarts.size + this.runtimeStops.size; }
+  get reservedStartCount(): number { return this.reservedStarts; }
 
   get(id: string): SecondaryRuntime | undefined { return this.runtimes.get(id); }
   has(id: string): boolean { return this.runtimes.has(id); }
@@ -167,15 +181,14 @@ export class RuntimePool {
   }
 
   /** Testable primitive shared by reclaim paths: close admission, drain, recheck, then stop. */
-  async stopReclaimable(runtime: SecondaryRuntime, reason: RuntimeReclaimReason = "idle"): Promise<boolean> {
+  async stopReclaimable(runtime: SecondaryRuntime): Promise<boolean> {
     const generation = await runtime.operationAdmission.closeAndDrain();
     if (generation === null) return false;
-    const manuallyReleasable = reason !== "manual" || (!runtime.failed && runtime.rpc.isRunning?.() !== false);
     // Admission is intentionally closed above, so do not call public
     // canReclaim() here: that guard is for competing callers and would reject
     // this stop owner itself. Recheck every other reclaim invariant instead.
     const retainsEmptyDraft = Boolean(runtime.draftSession && this.options.isViewed?.(runtime.id));
-    if (this.runtimes.get(runtime.id) !== runtime || !manuallyReleasable || !this.isIdle(runtime) || retainsEmptyDraft) {
+    if (this.runtimes.get(runtime.id) !== runtime || !this.isIdle(runtime) || retainsEmptyDraft) {
       runtime.operationAdmission.reopen(generation);
       return false;
     }
@@ -202,13 +215,6 @@ export class RuntimePool {
     return !runtime.operationAdmission.isClosed
       && this.isIdle(runtime)
       && !(runtime.draftSession && this.options.isViewed?.(runtime.id));
-  }
-
-  canManuallyRelease(runtime: SecondaryRuntime): boolean {
-    return !runtime.failed
-      && runtime.rpc.isRunning?.() !== false
-      && !runtime.operationAdmission.isClosed
-      && this.canReclaim(runtime);
   }
 
   busyCount(): number {
@@ -264,7 +270,7 @@ export class RuntimePool {
     const runtime = this.runtimes.get(id);
     if (!runtime || !this.canReclaim(runtime)) return false;
     const stopping = (async () => {
-      const stopped = await this.stopReclaimable(runtime, reason);
+      const stopped = await this.stopReclaimable(runtime);
       if (!stopped || this.runtimes.get(id) !== runtime) return false;
       this.runtimes.delete(id);
       runtime.unsubscribe();
@@ -288,6 +294,30 @@ export class RuntimePool {
     }
   }
 
+  private async reserveStart(beforeReserve?: () => void | Promise<void>): Promise<{
+    commit(publish: () => void): Promise<void>;
+    release(): Promise<void>;
+  }> {
+    await this.withCapacity(async () => {
+      await this.makeRoomForSecondary();
+      await beforeReserve?.();
+      this.reservedStarts += 1;
+    });
+    let finished = false;
+    const finish = async (publish?: () => void) => {
+      if (finished) return;
+      await this.withCapacity(async () => {
+        if (finished) return;
+        // Publish and consume the reservation in one short critical section.
+        // Capacity can never count this Runtime as both live and reserved.
+        publish?.();
+        this.reservedStarts = Math.max(0, this.reservedStarts - 1);
+        finished = true;
+      });
+    };
+    return { commit: (publish) => finish(publish), release: () => finish() };
+  }
+
   private capacityError(): RuntimeCapacityError {
     return new RuntimeCapacityError(`已达到 ${this.maxSecondaryRuntimes + 1} 个热对话上限。请等待一个对话结束运行，或关闭受保护的空白新对话后重试`);
   }
@@ -308,9 +338,10 @@ export class RuntimePool {
     const idleExcess = Math.max(0, idleCount - this.maxIdleSecondaryRuntimes + 1);
     for (const runtime of reclaimable.slice(0, idleExcess)) await this.reclaim(runtime.id, "capacity");
 
-    // withCapacity serializes all creation paths, so the map size plus the
-    // worker about to be created is an authoritative hard-cap check.
-    while (this.runtimes.size >= this.maxSecondaryRuntimes) {
+    // Live workers plus starts already promised a slot are the authoritative
+    // cap. The latter start outside this mutex, so independent cold Sessions
+    // can spawn in parallel without exceeding capacity.
+    while (this.runtimes.size + this.reservedStarts >= this.maxSecondaryRuntimes) {
       if (!await this.reclaimOldestAvailable()) throw this.capacityError();
     }
   }
@@ -349,16 +380,28 @@ export class RuntimePool {
     const starting = this.runtimeStarts.get(id);
     if (starting) return starting;
     if (!this.options.createRpc) throw new Error("当前服务未启用多会话运行");
-    const start = this.withCapacity(async () => {
-      await this.options.refreshSessions();
-      const path = this.options.pathForId(id);
+    const start = (async () => {
+      // SessionIndex keeps a complete ID/path cache from the sidebar/view. A
+      // known Session must not pay for a global JSONL scan merely to start its
+      // own dedicated Runtime. Unknown/stale IDs still refresh once and fail
+      // closed when the path cannot be recovered.
+      let path = this.options.pathForId(id);
+      let summary = this.options.summaryForId?.(id) || undefined;
+      if (!path) {
+        await this.options.refreshSessions();
+        path = this.options.pathForId(id);
+        summary = this.options.summaryForId?.(id) || undefined;
+      }
       if (!path) throw new Error("会话不存在");
-      await this.makeRoomForSecondary();
-      const rpc = this.options.createRpc!(this.options.cwd());
+      const runtimeCwd = summary?.cwd || this.options.cwd();
+      const reservation = await this.reserveStart();
+      const rpc = this.options.createRpc!(runtimeCwd);
       const runtime: SecondaryRuntime = {
         id,
         rpc,
         sessionPath: path,
+        cwd: runtimeCwd,
+        rpcGeneration: 0,
         operationLeases: 0,
         operationAdmission: new OperationAdmission(),
         abortGeneration: 0,
@@ -374,14 +417,18 @@ export class RuntimePool {
         pendingTurnSettings: {},
         gateMode: "strict",
       };
-      runtime.unsubscribe = rpc.onEvent((event) => this.options.onSecondaryEvent(runtime, event));
+      runtime.unsubscribe = rpc.onEvent((event, source) => this.options.onSecondaryEvent(runtime, event, source));
       try {
-        await rpc.start(["--session", path]);
-        const state = asState(await rpc.send({ type: "get_state" }));
+        const startResult = await rpc.start(["--session", path]);
+        runtime.rpcGeneration = rpc.currentGeneration?.() || 0;
+        // Lightweight test/embedding RPC implementations predating the
+        // readiness-return contract still return void. Production PiRpcClient
+        // returns the successful probe so no duplicate query is needed.
+        const state = asState(startResult || await rpc.send({ type: "get_state" }));
         runtime.lastState = state;
         runtime.running = state.isStreaming;
-        runtime.summarySnapshot = this.options.summaryForId?.(id) || undefined;
-        this.runtimes.set(id, runtime);
+        runtime.summarySnapshot = summary;
+        await reservation.commit(() => this.runtimes.set(id, runtime));
         this.options.broadcast({
           type: "pi_chat_active_session_changed",
           sessionId: id,
@@ -392,8 +439,10 @@ export class RuntimePool {
         runtime.unsubscribe();
         await rpc.stop();
         throw error;
+      } finally {
+        await reservation.release();
       }
-    });
+    })();
     this.runtimeStarts.set(id, start);
     try {
       return await start;
@@ -412,8 +461,9 @@ export class RuntimePool {
     const desiredGateMode = runtime.gateMode;
     const recovery = (async () => {
       try {
-        await runtime.rpc.restart(runtime.sessionPath, this.options.cwd());
-        const state = asState(await runtime.rpc.send({ type: "get_state" }));
+        const restartResult = await runtime.rpc.restart(runtime.sessionPath, runtime.cwd);
+        runtime.rpcGeneration = runtime.rpc.currentGeneration?.() || 0;
+        const state = asState(restartResult || await runtime.rpc.send({ type: "get_state" }));
         runtime.lastState = state;
         runtime.running = state.isStreaming;
         runtime.failed = false;
@@ -443,14 +493,25 @@ export class RuntimePool {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") return null;
       }
     }
-    try { return asMessages(await runtime.rpc.send({ type: "get_messages" }, 3_000)).length > 0; }
+    try { return asMessages(await runtime.rpc.send({ type: "get_messages" }, 300)).length > 0; }
     catch { return null; }
   }
 
-  private currentReusableDraft(runtime: SecondaryRuntime, clientId: string): boolean {
+  private probeDraftHasMessages(runtime: SecondaryRuntime): Promise<boolean | null> {
+    if (runtime.draftProbe) return runtime.draftProbe;
+    const probe = this.draftHasMessages(runtime);
+    runtime.draftProbe = probe;
+    void probe.finally(() => {
+      if (runtime.draftProbe === probe) runtime.draftProbe = undefined;
+    });
+    return probe;
+  }
+
+  private currentReusableDraft(runtime: SecondaryRuntime, clientId: string, cwd: string): boolean {
     return this.runtimes.get(runtime.id) === runtime
       && Boolean(runtime.draftSession)
       && runtime.draftOwnerClientId === clientId
+      && runtime.cwd === cwd
       && !runtime.failed
       && runtime.rpc.isRunning?.() !== false;
   }
@@ -460,10 +521,11 @@ export class RuntimePool {
    * that lease to the caller, so reclaim cannot stop it before the route marks
    * the browser's draft as viewed.
    */
-  private async findReusableDraft(clientId: string): Promise<DraftRuntimeLease | undefined> {
+  private async findReusableDraft(clientId: string, cwd: string, probes = new Map<SecondaryRuntime, Promise<boolean | null>>()): Promise<DraftRuntimeLease | undefined> {
     const candidates = [...this.runtimes.values()].filter((runtime) =>
       Boolean(runtime.draftSession)
       && runtime.draftOwnerClientId === clientId
+      && runtime.cwd === cwd
       && this.isIdle(runtime)
       && !runtime.failed
       && runtime.rpc.isRunning?.() !== false
@@ -477,14 +539,18 @@ export class RuntimePool {
       }
       // Do not trust the marker alone: an Extension command can persist a turn
       // through a different response path.
-      const hasMessages = await this.draftHasMessages(runtime);
-      if (!this.currentReusableDraft(runtime, clientId)) {
+      const hasMessages = await (probes.get(runtime) || (() => {
+        const probe = this.probeDraftHasMessages(runtime);
+        probes.set(runtime, probe);
+        return probe;
+      })());
+      if (!this.currentReusableDraft(runtime, clientId, cwd)) {
         release();
         continue;
       }
       if (hasMessages === false) {
         this.touch(runtime);
-        return { runtime, release };
+        return { runtime, created: false, release };
       }
       if (hasMessages === true) {
         runtime.draftSession = undefined;
@@ -505,27 +571,36 @@ export class RuntimePool {
     return true;
   }
 
-  async acquireDraft(clientId = ""): Promise<DraftRuntimeLease> {
+  async acquireDraft(clientId = "", cwd = this.options.cwd()): Promise<DraftRuntimeLease> {
     if (!this.options.createRpc) throw new Error("当前服务未启用多会话运行");
-    return this.withCapacity(async () => {
-      const reusable = await this.findReusableDraft(clientId);
+    const key = `${clientId}\u0000${cwd}`;
+    const existingStart = this.draftStarts.get(key);
+    if (existingStart) return existingStart;
+    const acquisition = (async () => {
+      // A pre-existing healthy draft remains usable after a later Primary
+      // compatibility failure. Probe before the new-capability check.
+      const probes = new Map<SecondaryRuntime, Promise<boolean | null>>();
+      const reusable = await this.findReusableDraft(clientId, cwd, probes);
       if (reusable) {
-        this.options.broadcast({
-          type: "pi_chat_active_session_changed",
-          sessionId: reusable.runtime.id,
-          activeSessionIds: this.options.activeSessionIds(),
-        });
+        this.options.broadcast({ type: "pi_chat_active_session_changed", sessionId: reusable.runtime.id, activeSessionIds: this.options.activeSessionIds() });
         return reusable;
       }
-      // Clean only this window's residual empty drafts. Never reclaim a busy draft
-      // or one that already has a user message: the next New used to wipe the
-      // previous conversation while it was still streaming or still unindexed.
-      for (const draft of [...this.runtimes.values()].filter((runtime) => runtime.draftSession && runtime.draftOwnerClientId === clientId)) {
+      // New drafts may spawn while the Primary's compatibility probe is still
+      // running; PiChatApp joins that probe before it sends setup or a prompt.
+      // A Primary that was already known failed is rejected by the route before
+      // reaching here, while existing healthy drafts remain reusable.
+      // Clean residual drafts outside the global capacity lock. A single probe
+      // is shared per Runtime within this acquisition and times out quickly.
+      for (const draft of [...this.runtimes.values()].filter((runtime) => runtime.draftSession && runtime.draftOwnerClientId === clientId && runtime.cwd === cwd)) {
         if (!this.isIdle(draft)) continue;
         let release: (() => void) | undefined;
         try { release = this.acquireOperation(draft); }
         catch { continue; }
-        const hasMessages = await this.draftHasMessages(draft);
+        const hasMessages = await (probes.get(draft) || (() => {
+          const probe = this.probeDraftHasMessages(draft);
+          probes.set(draft, probe);
+          return probe;
+        })());
         const stillAttached = this.runtimes.get(draft.id) === draft;
         release();
         if (!stillAttached) continue;
@@ -535,15 +610,18 @@ export class RuntimePool {
         }
         if (hasMessages === false) await this.reclaim(draft.id, "capacity");
       }
-      await this.makeRoomForSecondary();
-      const idleCount = [...this.runtimes.values()].filter((runtime) => this.isIdle(runtime)).length;
-      if (idleCount >= this.maxIdleSecondaryRuntimes) {
-        throw new RuntimeCapacityError(`已有 ${idleCount} 个窗口保留空白新对话，请先使用或关闭其中一个再新建`);
-      }
-      const rpc = this.options.createRpc!(this.options.cwd());
+      const reservation = await this.reserveStart(() => {
+        const idleCount = [...this.runtimes.values()].filter((runtime) => this.isIdle(runtime)).length;
+        if (idleCount >= this.maxIdleSecondaryRuntimes) {
+          throw new RuntimeCapacityError(`已有 ${idleCount} 个窗口保留空白新对话，请先使用或关闭其中一个再新建`);
+        }
+      });
+      const reservedRpc = this.options.createRpc!(cwd);
       const runtime: SecondaryRuntime = {
         id: "",
-        rpc,
+        rpc: reservedRpc,
+        cwd,
+        rpcGeneration: 0,
         operationLeases: 0,
         operationAdmission: new OperationAdmission(),
         abortGeneration: 0,
@@ -560,10 +638,11 @@ export class RuntimePool {
         gateMode: "strict",
         draftOwnerClientId: clientId,
       };
-      runtime.unsubscribe = rpc.onEvent((event) => this.options.onSecondaryEvent(runtime, event));
+      runtime.unsubscribe = reservedRpc.onEvent((event, source) => this.options.onSecondaryEvent(runtime, event, source));
       try {
-        await rpc.start();
-        const state = asState(await rpc.send({ type: "get_state" }));
+        const startResult = await reservedRpc.start();
+        runtime.rpcGeneration = reservedRpc.currentGeneration?.() || 0;
+        const state = asState(startResult || await reservedRpc.send({ type: "get_state" }));
         runtime.lastState = state;
         if (!state.sessionFile) throw new Error("Pi 未返回新会话文件");
         runtime.id = idForPath(state.sessionFile);
@@ -574,13 +653,13 @@ export class RuntimePool {
           sessionId: state.sessionId || runtime.id,
           name: "新对话",
           preview: "尚未发送消息",
-          cwd: this.options.cwd(),
+          cwd,
           updatedAt: this.options.now(),
           messageCount: 0,
           turnCount: 0,
           active: false,
         };
-        this.runtimes.set(runtime.id, runtime);
+        await reservation.commit(() => this.runtimes.set(runtime.id, runtime));
         // Protect the newly mapped empty draft through the same route handoff
         // window as a reused draft. It becomes view-pinned before release.
         const release = this.acquireOperation(runtime);
@@ -589,13 +668,28 @@ export class RuntimePool {
           sessionId: runtime.id,
           activeSessionIds: this.options.activeSessionIds(),
         });
-        return { runtime, release };
+        return { runtime, created: true, release };
       } catch (error) {
         runtime.unsubscribe();
-        await rpc.stop();
+        await reservedRpc.stop();
         throw error;
+      } finally {
+        await reservation.release();
       }
-    });
+    })();
+    this.draftStarts.set(key, acquisition);
+    try {
+      return await acquisition;
+    } finally {
+      if (this.draftStarts.get(key) === acquisition) this.draftStarts.delete(key);
+    }
+  }
+
+  /** Discard an unprompted newly-created draft after its Primary readiness join fails. */
+  async discardDraft(runtime: SecondaryRuntime): Promise<void> {
+    if (!runtime.draftSession || runtime.prompted) return;
+    const released = await this.releaseForDeletion(runtime.id);
+    if (released) await this.cleanupEmptyDraft(released);
   }
 
   /** Stop every secondary without reclaim broadcasts (reload / workspace / app close). */
@@ -612,7 +706,33 @@ export class RuntimePool {
     }));
   }
 
-  /** Drop map entry after host already stopped the worker (rename / delete paths). */
+  /**
+   * Stop and detach an idle Runtime before deleting its JSONL. This is stricter
+   * than a direct stop: admission is closed first so no prompt/rename/model
+   * mutation can race the file removal. Visible empty drafts are intentionally
+   * allowed here because the caller is explicitly deleting them.
+   */
+  async releaseForDeletion(id: string): Promise<SecondaryRuntime | undefined> {
+    const runtime = this.runtimes.get(id);
+    if (!runtime) return undefined;
+    const generation = await runtime.operationAdmission.closeAndDrain();
+    if (generation === null) return undefined;
+    if (this.runtimes.get(id) !== runtime || !this.isIdle(runtime)) {
+      runtime.operationAdmission.reopen(generation);
+      return undefined;
+    }
+    try {
+      await runtime.rpc.stop();
+      this.runtimes.delete(id);
+      runtime.unsubscribe();
+      return runtime;
+    } catch (error) {
+      runtime.operationAdmission.reopen(generation);
+      throw error;
+    }
+  }
+
+  /** Drop map entry after host already stopped the dedicated Runtime. */
   detach(id: string): SecondaryRuntime | undefined {
     const runtime = this.runtimes.get(id);
     if (runtime) this.runtimes.delete(id);

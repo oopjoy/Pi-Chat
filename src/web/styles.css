@@ -186,6 +186,13 @@ body.sidebar-resizing .sidebar { transition: none; will-change: auto; }
 .new-chat:hover:not(:disabled), .refresh-chat:hover:not(:disabled) { border-color: var(--accent); }
 button:disabled { cursor: not-allowed; opacity: .56; }
 .session-heading { display: flex; justify-content: space-between; padding: 17px 8px 7px; color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .04em; }
+.session-search { position: relative; display: block; margin: 0 4px 7px; }
+.session-search > svg { position: absolute; top: 50%; left: 9px; width: 15px; height: 15px; color: var(--muted); transform: translateY(-50%); pointer-events: none; }
+.session-search input { width: 100%; height: 32px; padding: 5px 28px 5px 31px; border: 1px solid var(--line); border-radius: 7px; outline: 0; background: var(--surface); color: var(--text); font: inherit; font-size: 11.5px; }
+.session-search input::placeholder { color: var(--muted); }
+.session-search input:hover { border-color: var(--line-strong); }
+.session-search input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent), transparent 84%); }
+.session-search input::-webkit-search-cancel-button { cursor: pointer; }
 .session-list { min-height: 0; flex: 1; margin-right: -9px; overflow-y: auto; /* Let rows use the former scrollbar gutter; the native track still reserves its own width. */ padding-right: 0; scrollbar-color: #aab1bb transparent; scrollbar-width: auto; }
 .session-list::-webkit-scrollbar { width: 10px; }
 .session-list::-webkit-scrollbar-track { background: transparent; }
@@ -194,12 +201,32 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .load-all-sessions { width: calc(100% - 8px); margin: 8px 4px 12px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--muted); font-size: 12px; font-weight: 650; }
 .load-all-sessions:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 .load-all-sessions:disabled { opacity: .65; cursor: wait; }
-.session-row { position: relative; margin: 2px 0; border-radius: 9px; }
+.session-directory { margin: 2px 0 7px; }
+.session-directory-header { display: flex; min-width: 0; min-height: 36px; align-items: center; gap: 2px; }
+.session-directory-toggle { display: grid; min-width: 0; min-height: 36px; flex: 1; grid-template-columns: 16px 16px minmax(0, 1fr) auto; align-items: center; gap: 5px; padding: 7px 8px 7px 4px; border: 0; border-radius: 8px; background: transparent; color: var(--text); cursor: pointer; font: inherit; font-size: 13px; font-weight: 590; text-align: left; }
+.session-directory-toggle:hover { background: var(--surface-hover); color: var(--text); }
+.session-directory-toggle > svg { width: 16px; height: 16px; }
+.session-directory-toggle > svg:first-child { transition: transform .12s ease; }
+.session-directory-toggle > svg.is-expanded { transform: rotate(90deg); }
+.session-directory-toggle > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-directory-toggle small { padding: 0 3px; color: var(--text); font: inherit; font-size: 10.5px; font-weight: 600; }
+.session-directory-pin { display: grid; width: 29px; height: 29px; flex: 0 0 29px; place-items: center; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--text); cursor: pointer; }
+.session-directory-pin:hover, .session-directory-pin.is-fixed { background: var(--accent-soft); color: var(--accent); }
+.session-directory-pin svg { width: 14px; height: 14px; }
+.session-directory-items { margin-left: 13px; }
+.session-directory-empty { margin: 0; padding: 9px 8px; color: var(--muted); font-size: 11px; }
+.load-directory-sessions { width: calc(100% - 8px); margin: 5px 4px 8px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--muted); cursor: pointer; font: inherit; font-size: 11px; font-weight: 650; }
+.load-directory-sessions:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.session-directory.is-fixed .session-directory-toggle { color: var(--text); }
+.session-row { position: relative; margin: 2px 0; border-radius: 8px; }
 .session-item {
-  display: block;
+  display: flex;
   width: 100%;
-  /* Full width for the title; action buttons overlay only on hover/focus. */
-  padding: 10px 12px;
+  min-height: 36px;
+  align-items: center;
+  gap: 10px;
+  /* Metadata occupies the base right edge; the status/menu slot overlays it on interaction. */
+  padding: 7px 12px;
   overflow: hidden;
   border: 0;
   border-radius: 9px;
@@ -213,35 +240,39 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .session-item.is-disabled { cursor: default; }
 .session-item.is-active { background: var(--accent-soft); opacity: 1; }
 .session-name, .session-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.session-name { display: block; font-size: 13px; font-weight: 590; }
+.session-name { display: flex; min-width: 0; flex: 1 1 auto; align-items: center; gap: 5px; font-size: 13px; font-weight: 500; }
+.session-name-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-pin-indicator { display: inline-grid; width: 14px; height: 14px; flex: 0 0 14px; place-items: center; color: var(--accent); }
+.session-pin-indicator svg { width: 14px; height: 14px; stroke-width: 1.7; }
 .session-item.is-active .session-name { color: var(--accent); }
-.session-meta { display: flex; align-items: center; gap: 6px; margin-top: 4px; overflow: visible; color: var(--muted); font-size: 10.5px; text-overflow: clip; }
-/* Session state reflects user-visible work and notifications, never Runtime residency.
-   Neutral is an idle conversation; green means a background reply awaits review. */
-.session-status { box-sizing: border-box; width: 9px; height: 9px; flex: 0 0 auto; border: 1.5px solid #91a4bf; border-radius: 50%; background: transparent; }
-.session-status.is-unread { border-color: #24a36a; background: #24a36a; box-shadow: 0 0 0 3px color-mix(in srgb, #24a36a, transparent 84%); }
-.session-status.is-pending { border: 0; background: #d89318; box-shadow: 0 0 0 3px color-mix(in srgb, #d89318, transparent 84%); }
-.session-status.is-error { border: 0; background: var(--danger); box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger), transparent 84%); }
-.session-status.is-running { width: 11px; height: 11px; border: 1.7px solid color-mix(in srgb, var(--accent), transparent 58%); border-top-color: var(--accent); background: transparent; animation: spin .75s linear infinite; }
+.session-meta { flex: 0 0 auto; margin: 0; padding-right: 2px; color: var(--muted); font-size: 10.5px; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+/* A visible status/action owns the right edge; never blend it with the timestamp beneath. */
+.session-row.has-status .session-meta, .session-row:hover .session-meta, .session-row:focus-within .session-meta, .session-row.is-menu-open .session-meta { visibility: hidden; }
+/* The fixed right slot shows status at rest and its keyboard-reachable menu on interaction. */
+.session-status { display: grid; box-sizing: border-box; width: 11px; height: 11px; place-items: center; pointer-events: none; transition: opacity .12s ease; }
+.session-status.is-unread::before, .session-status.is-pending::before, .session-status.is-error::before { width: 9px; height: 9px; border-radius: 50%; content: ""; }
+.session-status.is-unread::before { background: #24a36a; box-shadow: 0 0 0 3px color-mix(in srgb, #24a36a, transparent 84%); }
+.session-status.is-pending::before { background: #d89318; box-shadow: 0 0 0 3px color-mix(in srgb, #d89318, transparent 84%); }
+.session-status.is-error::before { background: var(--danger); box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger), transparent 84%); }
+.session-status.is-running { border: 1.7px solid color-mix(in srgb, var(--accent), transparent 58%); border-top-color: var(--accent); border-radius: 50%; animation: spin .75s linear infinite; }
 
-/* One compact overflow menu preserves nearly the full title width until hover/focus. */
 .session-item-actions {
   position: absolute;
-  z-index: 2;
+  z-index: 3;
   top: 50%;
-  right: 4px;
-  display: flex;
-  gap: 4px;
-  padding: 4px 2px;
-  border-radius: 9px;
-  background: transparent;
+  right: 6px;
+  display: grid;
+  width: 29px;
+  height: 29px;
+  place-items: center;
   transform: translateY(-50%);
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity .12s ease;
 }
 .session-row.is-active .session-item-actions { background: transparent; }
-.session-row:hover .session-item-actions, .session-row:focus-within .session-item-actions, .session-item-actions.is-open { opacity: 1; pointer-events: auto; }
+/* Keep the trigger focusable at rest: opacity hides it visually without removing Tab access. */
+.session-menu-trigger { grid-area: 1 / 1; opacity: 0; pointer-events: none; transition: opacity .12s ease; }
+.session-status { grid-area: 1 / 1; }
+.session-row:hover .session-menu-trigger, .session-row:focus-within .session-menu-trigger, .session-item-actions.is-open .session-menu-trigger { opacity: 1; pointer-events: auto; }
+.session-row:hover .session-status, .session-row:focus-within .session-status, .session-item-actions.is-open .session-status { opacity: 0; }
 .session-item-actions.is-open { z-index: 12; }
 .session-menu-trigger { display: grid; width: 29px; height: 29px; place-items: center; padding: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--muted); box-shadow: 0 2px 7px rgba(23, 34, 54, .07); cursor: pointer; }
 .session-menu-trigger:hover, .session-menu-trigger[aria-expanded="true"] { border-color: var(--line-strong); background: var(--surface-hover); color: var(--text); }
@@ -253,10 +284,13 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .session-item-menu button:disabled { cursor: not-allowed; opacity: .48; }
 @keyframes session-pulse { 50% { opacity: .45; transform: scale(.82); } }
 .empty-list { padding: 28px 8px; color: var(--muted); font-size: 12px; text-align: center; }
-.workspace-picker { display: flex; width: 100%; min-height: 38px; align-items: center; gap: 8px; padding: 7px 9px; border: 0; border-top: 1px solid var(--line); background: transparent; color: var(--muted); cursor: pointer; text-align: left; }
-.workspace-picker:hover:not(:disabled) { background: var(--surface-hover); color: var(--text); }
-.workspace-picker-icon { width: 19px; height: 19px; flex: 0 0 auto; color: var(--accent); fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; }
-.workspace-picker > span { min-width: 0; flex: 1; overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.draft-workspace { display: grid; width: min(100%, 480px); grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px; margin: 18px auto 0; padding: 10px 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-soft); text-align: left; }
+.draft-workspace > span { color: var(--muted); font-size: 11px; font-weight: 650; }
+.draft-workspace code { min-width: 0; overflow: hidden; color: var(--text); font: 11px ui-monospace, Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.draft-workspace button { display: grid; width: 29px; height: 29px; place-items: center; padding: 0; border: 0; border-radius: 7px; background: transparent; color: var(--accent); cursor: pointer; }
+.draft-workspace button svg { width: 17px; height: 17px; }
+.draft-workspace button:hover:not(:disabled) { background: var(--accent-soft); color: var(--accent); }
+.draft-workspace small { grid-column: 1 / -1; color: var(--muted); font-size: 10px; }
 .sidebar-scrim { display: none; }
 
 .chat-shell { position: relative; display: flex; min-width: 0; min-height: 0; height: 100%; flex: 1; flex-direction: column; overflow: hidden; background: var(--surface); }
@@ -733,7 +767,7 @@ details.conversation-process { display: block; padding: 0; }
 .settings-resource-row > div { min-width: 0; }
 .settings-resource-row strong { display: block; overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .settings-resource-row code { display: block; overflow: hidden; margin-top: 4px; color: var(--muted); font: 10px ui-monospace, Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
-.resource-browse-root { display: grid; width: 32px; min-height: 30px; flex: none; place-items: center; padding: 0; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-soft); color: var(--text); cursor: pointer; font: inherit; font-size: 11px; font-weight: 650; }
+.resource-browse-root { display: grid; width: 32px; min-height: 30px; flex: none; place-items: center; padding: 0; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--text); cursor: pointer; font: inherit; font-size: 11px; font-weight: 650; }
 .resource-browse-root:hover { border-color: color-mix(in srgb, var(--accent), transparent 40%); color: var(--accent); }
 .resource-browse-root:disabled { opacity: .45; cursor: default; }
 .resource-notice { margin-bottom: 12px; padding: 9px 11px; border-radius: 8px; background: color-mix(in srgb, var(--accent), transparent 90%); color: var(--text); font-size: 11px; white-space: pre-wrap; }

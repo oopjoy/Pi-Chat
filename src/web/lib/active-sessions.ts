@@ -9,6 +9,5 @@ export function applyActiveSessionIds(sessions: SessionSummary[], ids: string[])
   return sessions.map((session) => ({
     ...session,
     writable: active.has(session.id),
-    ...(!active.has(session.id) ? { releasable: false } : null),
   }));
 }

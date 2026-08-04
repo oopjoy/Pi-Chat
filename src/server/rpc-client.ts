@@ -20,7 +20,12 @@ export interface PiRpcCompatibility {
   diagnostics: string[];
 }
 
-type EventListener = (event: Record<string, unknown>) => void;
+export interface RpcEventSource {
+  /** Monotonic per-child spawn identity; stale children can never impersonate a replacement. */
+  generation: number;
+}
+
+type EventListener = (event: Record<string, unknown>, source?: RpcEventSource) => void;
 
 export function resolvePiEntry(env: NodeJS.ProcessEnv = process.env): string | null {
   const configured = env.PI_CHAT_PI_ENTRY;
@@ -53,6 +58,8 @@ export function resolvePiEntry(env: NodeJS.ProcessEnv = process.env): string | n
 
 export class PiRpcClient {
   private child: ChildProcessWithoutNullStreams | null = null;
+  private source: (RpcEventSource & { child: ChildProcessWithoutNullStreams; stderrTail: string }) | null = null;
+  private sourceGeneration = 0;
   private listeners = new Set<EventListener>();
   private pending = new Map<string, PendingRequest>();
   private readonly readQueries = new Map<string, Promise<Record<string, unknown>>>();
@@ -63,7 +70,10 @@ export class PiRpcClient {
 
   constructor(private readonly options: RpcClientOptions) {}
 
-  async start(extraArgs: string[] = []): Promise<void> {
+  /** The currently live child generation, or zero for legacy in-process test doubles. */
+  currentGeneration(): number { return this.source?.generation || 0; }
+
+  async start(extraArgs: string[] = []): Promise<Record<string, unknown>> {
     if (this.child) throw new Error("Pi RPC is already running");
     const piEntry = this.options.piEntry ?? resolvePiEntry();
     if (!piEntry) {
@@ -72,23 +82,29 @@ export class PiRpcClient {
 
     const child = spawn(process.execPath, [piEntry, ...(this.options.args ?? []), ...extraArgs], {
       cwd: this.options.cwd,
-      env: { ...process.env, FORCE_COLOR: "0" },
+      // RPC mode has no interactive update prompt. Disable the unrelated
+      // version lookup as well so every dedicated child avoids its startup I/O.
+      env: { ...process.env, FORCE_COLOR: "0", PI_SKIP_VERSION_CHECK: "1" },
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });
+    const source = { generation: ++this.sourceGeneration, child, stderrTail: "" };
     this.child = child;
+    this.source = source;
 
     child.stderr.on("data", (chunk: Buffer) => {
-      this.stderrTail = `${this.stderrTail}${chunk.toString("utf8")}`.slice(-8_000);
+      if (this.source !== source) return;
+      source.stderrTail = `${source.stderrTail}${chunk.toString("utf8")}`.slice(-8_000);
+      this.stderrTail = source.stderrTail;
     });
-    child.once("error", (error) => this.handleExit(new Error(`Pi RPC 启动失败：${error.message}`)));
+    child.once("error", (error) => this.handleExit(source, new Error(`Pi RPC 启动失败：${error.message}`)));
     child.once("exit", (code, signal) => {
-      this.handleExit(new Error(`Pi RPC 已退出（code=${code}, signal=${signal}）。${this.stderrTail}`));
+      this.handleExit(source, new Error(`Pi RPC 已退出（code=${code}, signal=${signal}）。${source.stderrTail}`));
     });
-    this.attachJsonlReader(child.stdout);
+    this.attachJsonlReader(child.stdout, source);
 
     try {
-      await this.waitUntilReady();
+      return await this.waitUntilReady();
     } catch (error) {
       // A protocol/startup failure must not leave an untracked Pi child keeping
       // the server process alive or holding a Session JSONL open.
@@ -97,7 +113,7 @@ export class PiRpcClient {
     }
   }
 
-  private async waitUntilReady(): Promise<void> {
+  private async waitUntilReady(): Promise<Record<string, unknown>> {
     const deadline = Date.now() + 20_000;
     let lastError: unknown;
     while (Date.now() < deadline) {
@@ -105,8 +121,7 @@ export class PiRpcClient {
         throw new Error(`Pi RPC 在初始化期间退出。${this.stderrTail}`);
       }
       try {
-        await this.send({ type: "get_state" }, 2_000);
-        return;
+        return await this.send({ type: "get_state" }, 2_000);
       } catch (error) {
         lastError = error;
         await new Promise((resolve) => setTimeout(resolve, 150));
@@ -115,7 +130,7 @@ export class PiRpcClient {
     throw lastError instanceof Error ? lastError : new Error("等待 Pi RPC 就绪超时");
   }
 
-  private attachJsonlReader(stream: NodeJS.ReadableStream): void {
+  private attachJsonlReader(stream: NodeJS.ReadableStream, source?: RpcEventSource): void {
     const decoder = new StringDecoder("utf8");
     let buffer = "";
     stream.on("data", (chunk: Buffer | string) => {
@@ -126,16 +141,19 @@ export class PiRpcClient {
         let line = buffer.slice(0, newline);
         buffer = buffer.slice(newline + 1);
         if (line.endsWith("\r")) line = line.slice(0, -1);
-        if (line) this.handleLine(line);
+        if (line) this.handleLine(line, source);
       }
     });
     stream.on("end", () => {
       buffer += decoder.end();
-      if (buffer) this.handleLine(buffer.endsWith("\r") ? buffer.slice(0, -1) : buffer);
+      if (buffer) this.handleLine(buffer.endsWith("\r") ? buffer.slice(0, -1) : buffer, source);
     });
   }
 
-  private handleLine(line: string): void {
+  private handleLine(line: string, source?: RpcEventSource): void {
+    // Streams remain readable briefly after SIGTERM on Windows. Do not let an
+    // old child resolve current requests or publish unsolicited lifecycle data.
+    if (source && this.source?.generation !== source.generation) return;
     let data: Record<string, unknown>;
     try {
       data = JSON.parse(line) as Record<string, unknown>;
@@ -160,7 +178,7 @@ export class PiRpcClient {
       // response and must never leak into the unsolicited event/SSE channel.
       return;
     }
-    for (const listener of this.listeners) listener(data);
+    for (const listener of this.listeners) listener(data, source);
   }
 
   private rejectPending(error: Error): void {
@@ -173,9 +191,10 @@ export class PiRpcClient {
     this.outstandingReadQueryIds.clear();
   }
 
-  private handleExit(error: Error): void {
-    if (!this.child) return;
+  private handleExit(source: RpcEventSource, error: Error): void {
+    if (!this.source || this.source.generation !== source.generation) return;
     this.child = null;
+    this.source = null;
     this.rejectPending(error);
     for (const listener of this.listeners) listener({ type: "pi_chat_process_error", error: error.message });
   }
@@ -260,16 +279,19 @@ export class PiRpcClient {
     return { compatible: diagnostics.length === 0, diagnostics };
   }
 
-  async restart(sessionPath?: string, cwd?: string): Promise<void> {
+  async restart(sessionPath?: string, cwd?: string): Promise<Record<string, unknown>> {
+    // A Runtime's cwd is an immutable process identity boundary. Callers may
+    // repeat it for assertion, but may never retarget a live client in place.
+    if (cwd && cwd !== this.options.cwd) throw new Error("Pi RPC Runtime 工作目录不可在原进程上重绑定");
     await this.stop();
-    if (cwd) this.options.cwd = cwd;
-    await this.start(sessionPath ? ["--session", sessionPath] : []);
+    return this.start(sessionPath ? ["--session", sessionPath] : []);
   }
 
   async stop(): Promise<void> {
     const child = this.child;
     if (!child) return;
     this.child = null;
+    if (this.source?.child === child) this.source = null;
     this.rejectPending(new Error("Pi RPC 已停止"));
     child.kill("SIGTERM");
     await Promise.race([

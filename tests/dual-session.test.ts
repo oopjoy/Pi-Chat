@@ -15,6 +15,8 @@ import type { SessionSummary } from "../src/shared/types";
 class FakeRpc {
   readonly commands: Record<string, unknown>[] = [];
   private listeners = new Set<(event: Record<string, unknown>) => void>();
+  /** Captures callbacks once registered so a test can model an already-buffered old-child frame after unsubscribe. */
+  private readonly historicalListeners = new Set<(event: Record<string, unknown>) => void>();
   streaming = false;
   stopCount = 0;
   restartCount = 0;
@@ -22,8 +24,14 @@ class FakeRpc {
   alive = true;
 
   constructor(readonly path: string, readonly sessionId: string) {}
-  onEvent(listener: (event: Record<string, unknown>) => void) { this.listeners.add(listener); return () => this.listeners.delete(listener); }
+  onEvent(listener: (event: Record<string, unknown>) => void) {
+    this.listeners.add(listener);
+    this.historicalListeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
   emit(event: Record<string, unknown>) { for (const listener of this.listeners) listener(event); }
+  /** A stopped child can already have a stdout callback queued when unsubscribe runs. */
+  emitLate(event: Record<string, unknown>) { for (const listener of this.historicalListeners) listener(event); }
   async start() { this.alive = true; }
   async stop() { this.stopCount += 1; this.alive = false; }
   isRunning() { return this.alive; }
@@ -52,16 +60,14 @@ class FakeRpc {
   }
 }
 
-class BlockingRenameRpc extends FakeRpc {
-  renameStarted!: () => void;
-  readonly renameStartedPromise = new Promise<void>((resolve) => { this.renameStarted = resolve; });
-  releaseRename!: () => void;
-  private readonly renameReleasePromise = new Promise<void>((resolve) => { this.releaseRename = resolve; });
+class PersistedDraftRpc extends FakeRpc {
+  private hasPrompt = false;
 
   override async send(command: Record<string, unknown>) {
-    if (command.type === "set_session_name") {
-      this.renameStarted();
-      await this.renameReleasePromise;
+    if (command.type === "prompt") this.hasPrompt = true;
+    if (command.type === "get_messages" && this.hasPrompt) {
+      this.commands.push(command);
+      return { type: "response", success: true, data: { messages: [{ role: "user", content: "hello" }] } };
     }
     return super.send(command);
   }
@@ -80,6 +86,195 @@ class GateFakeRpc extends FakeRpc {
     return super.send(command);
   }
 }
+
+test("warm starts a dedicated Runtime without full-view probes and same-mode Gate is a no-op", async () => {
+  const primaryPath = "C:\\sessions\\warm-primary.jsonl";
+  const secondaryPath = "C:\\sessions\\warm-secondary.jsonl";
+  const primaryId = idForPath(primaryPath);
+  const secondaryId = idForPath(secondaryPath);
+  const primary = new FakeRpc(primaryPath, "warm-primary");
+  const secondary = new FakeRpc(secondaryPath, "warm-secondary");
+  const summaries = [
+    { id: primaryId, sessionId: "warm-primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 2, messageCount: 1, active: true },
+    { id: secondaryId, sessionId: "warm-secondary", name: "Secondary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: false },
+  ];
+  const sessions = {
+    list: async () => summaries,
+    pathForId: (id: string) => id === primaryId ? primaryPath : id === secondaryId ? secondaryPath : null,
+    summaryForId: (id: string) => summaries.find((summary) => summary.id === id) || null,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, createRpc: () => secondary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    await fetch(`${origin}/api/bootstrap`);
+    const warm = await fetch(`${origin}/api/sessions/${secondaryId}/warm`, { method: "POST" });
+    assert.equal(warm.status, 200);
+    assert.deepEqual(secondary.commands.map((command) => command.type), ["get_state"], "warm must not request history, commands, or stats");
+
+    const prompted = await fetch(`${origin}/api/chat/prompt`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "hello", sessionId: secondaryId, gateMode: "strict" }),
+    });
+    assert.equal(prompted.status, 202);
+    assert.equal(secondary.commands.filter((command) => command.type === "prompt" && command.message === "/gate strict").length, 0);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("known cold history returns without waiting for global inventory, usage fallback, or Gate discovery", async () => {
+  const primaryPath = "C:\\sessions\\cold-fast-primary.jsonl";
+  const coldPath = "C:\\sessions\\cold-fast-target.jsonl";
+  const primaryId = idForPath(primaryPath);
+  const coldId = idForPath(coldPath);
+  const primary = new FakeRpc(primaryPath, "cold-fast-primary");
+  const coldSummary = { id: coldId, sessionId: "cold-fast", name: "Cold fast", preview: "saved", cwd: process.cwd(), updatedAt: 1, messageCount: 2, active: false };
+  const sessions = {
+    summaryForId: (id: string) => id === coldId ? coldSummary : id === primaryId ? { ...coldSummary, id: primaryId, sessionId: "cold-fast-primary", active: true } : null,
+    snapshotForId: async (id: string) => id === coldId ? {
+      messages: [{ role: "user", content: "saved question" }, { role: "assistant", content: "saved answer" }],
+      usage: { tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 }, context: null },
+      settings: {},
+    } : null,
+    messagesForId: async () => { throw new Error("target snapshot should satisfy history"); },
+    usageForId: async () => new Promise<never>(() => undefined),
+    list: async () => new Promise<SessionSummary[]>(() => undefined),
+  } as unknown as SessionIndex;
+  const resources = {
+    systemGateEnabled: async () => new Promise<boolean>(() => undefined),
+  } as unknown as ResourceManager;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/sessions/${coldId}/view`, { signal: AbortSignal.timeout(500) });
+    assert.equal(response.status, 200);
+    const view = await response.json() as { viewSource: string; runtimeStatus: string; messages: Array<{ content: string }>; gateAvailable: boolean };
+    assert.equal(view.viewSource, "cold-jsonl");
+    assert.equal(view.runtimeStatus, "view-only");
+    assert.deepEqual(view.messages.map((message) => message.content), ["saved question", "saved answer"]);
+    assert.equal(view.gateAvailable, true);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("new-session initial submit accepts a >1 MB image body and performs model, thinking, Gate, and user prompt", async () => {
+  const primaryPath = "C:\\sessions\\initial-primary.jsonl";
+  const draftPath = "C:\\sessions\\initial-draft.jsonl";
+  const primaryId = idForPath(primaryPath);
+  const primary = new FakeRpc(primaryPath, "initial-primary");
+  const draft = new FakeRpc(draftPath, "initial-draft");
+  const sessions = {
+    list: async () => [{ id: primaryId, sessionId: "initial-primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+    pathForId: () => primaryPath,
+    summaryForId: () => null,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, createRpc: () => draft as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const imageData = "A".repeat(1_100_000);
+  try {
+    await fetch(`${origin}/api/bootstrap`);
+    const response = await fetch(`${origin}/api/sessions/new`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ initial: {
+        message: "first",
+        images: [{ type: "image", data: imageData, mimeType: "image/png" }],
+        model: { provider: "test", modelId: "next" },
+        thinkingLevel: "high",
+        gateMode: "open",
+      } }),
+    });
+    assert.equal(response.status, 202);
+    assert.deepEqual(
+      draft.commands.filter((command) => ["set_model", "set_thinking_level", "prompt"].includes(String(command.type))).map((command) => [command.type, command.message]),
+      [["set_model", undefined], ["set_thinking_level", undefined], ["prompt", "/gate open"], ["prompt", "first"]],
+    );
+    const prompt = draft.commands.find((command) => command.type === "prompt" && command.message === "first") as { images?: Array<{ data: string }> } | undefined;
+    assert.equal(prompt?.images?.[0]?.data.length, imageData.length);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("a settled first draft retries JSONL visibility before replacing its provisional title", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-draft-title-"));
+  const primaryPath = join(root, "primary.jsonl");
+  const draftPath = join(root, "draft.jsonl");
+  const primaryId = idForPath(primaryPath);
+  const draftId = idForPath(draftPath);
+  const primary = new FakeRpc(primaryPath, "title-primary");
+  const draft = new FakeRpc(draftPath, "title-draft");
+  let persisted = false;
+  const durableSummary: SessionSummary = {
+    id: draftId,
+    sessionId: "title-draft",
+    name: "durable first prompt",
+    preview: "durable first prompt",
+    cwd: root,
+    updatedAt: 2,
+    lastUserPromptAt: 2,
+    messageCount: 1,
+    turnCount: 1,
+    active: false,
+  };
+  const sessions = {
+    list: async () => [
+      { id: primaryId, sessionId: "title-primary", name: "Primary", preview: "", cwd: root, updatedAt: 1, messageCount: 1, active: true },
+      ...(persisted ? [durableSummary] : []),
+    ],
+    pathForId: (id: string) => id === primaryId ? primaryPath : persisted && id === draftId ? draftPath : null,
+    summaryForId: (id: string) => persisted && id === draftId ? durableSummary : null,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, createRpc: () => draft as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: root, webRoot: root });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    const response = await fetch(`${origin}/api/sessions/new`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ initial: { message: "durable first prompt" } }),
+    });
+    assert.equal(response.status, 202);
+    assert.equal((await response.json() as { session: { name: string } }).session.name, "新对话");
+
+    draft.streaming = false;
+    draft.emit({ type: "agent_settled" });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    persisted = true;
+    await writeFile(draftPath, `${JSON.stringify({ type: "message", message: { role: "user", content: "durable first prompt" } })}\n`, "utf8");
+    await new Promise((resolve) => setTimeout(resolve, 180));
+
+    const sidebar = await (await fetch(`${origin}/api/sessions`)).json() as { sessions: SessionSummary[] };
+    assert.equal(sidebar.sessions.find((session) => session.id === draftId)?.name, "durable first prompt");
+    assert.equal((app as unknown as { runtimes: Map<string, { draftSession?: unknown }> }).runtimes.get(draftId)?.draftSession, undefined);
+  } finally {
+    server.close();
+    await app.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("Gate modes stay isolated per Runtime and survive Secondary recovery", async () => {
   const primaryPath = "C:\\sessions\\gate-primary.jsonl";
@@ -175,9 +370,11 @@ test("closing one of multiple windows rests its exclusive idle Session without s
   const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), applicationShutdown: (_reason) => { shutdowns += 1; } });
   const first = "11111111-1111-4111-8111-111111111111";
   const second = "22222222-2222-4222-8222-222222222222";
-  const internals = app as unknown as { sessionControl: { clientConnected(clientId: string): void; noteClientPresence(clientId: string): boolean; markViewed(clientId: string, sessionId: string): void }; connectedClients: Map<string, number>; viewedSessionsByClient: Map<string, string> };
+  const internals = app as unknown as { sessionControl: { clientConnected(clientId: string): void; noteClientPresence(clientId: string): boolean; markViewed(clientId: string, sessionId: string): void }; connectedClients: Map<string, number>; connectedPageClients: Map<string, string>; viewedSessionsByClient: Map<string, string> };
   internals.sessionControl.clientConnected(first);
   internals.sessionControl.clientConnected(second);
+  internals.connectedPageClients.set(first, first);
+  internals.connectedPageClients.set(second, second);
   internals.sessionControl.noteClientPresence(first);
   internals.sessionControl.noteClientPresence(second);
   internals.sessionControl.markViewed(first, id);
@@ -192,7 +389,8 @@ test("closing one of multiple windows rests its exclusive idle Session without s
     assert.deepEqual(await response.json(), { shuttingDown: false, closeWindow: true, sessionId: id, rested: true, remainingWindows: 1 });
     assert.equal(shutdowns, 0);
     assert.equal(primary.stopCount, 1);
-    assert.equal(internals.connectedClients.has(first), false);
+    assert.equal(internals.connectedClients.has(first), true, "the unload socket remains counted until its actual TCP close");
+    assert.equal(internals.connectedPageClients.has(first), false, "the closing page no longer counts as open");
     assert.equal(internals.connectedClients.has(second), true);
   } finally {
     server.close();
@@ -236,51 +434,39 @@ test("closing one window does not rest its Session while an admitted mutation is
   }
 });
 
-test("window close ignores a stale transport-only client but fresh second window still keeps the application open", async () => {
+test("an open background transport still prevents last-window auto shutdown", async () => {
   const path = "C:\\sessions\\presence-close.jsonl";
-  const id = idForPath(path);
   const primary = new FakeRpc(path, "primary");
   const shutdownReasons: string[] = [];
-  let now = 0;
-  const sessions = {
-    list: async () => [{ id, sessionId: "primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
-    pathForId: () => path,
-    messagesForId: async () => [],
-  } as unknown as SessionIndex;
-  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), presenceTtlMs: 50, now: () => now, applicationShutdown: (reason) => { shutdownReasons.push(reason); } });
-  const stale = "11111111-1111-4111-8111-111111111111";
-  const fresh = "22222222-2222-4222-8222-222222222222";
-  const internals = app as unknown as { sessionControl: { clientConnected(clientId: string): void; noteClientPresence(clientId: string): boolean } };
-  internals.sessionControl.clientConnected(stale);
-  internals.sessionControl.clientConnected(fresh);
-  now = 60;
-  internals.sessionControl.noteClientPresence(fresh);
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), lastWindowShutdownGraceMs: 25, lastWindowShutdownPollMs: 5, applicationShutdown: (reason) => { shutdownReasons.push(reason); } });
+  const background = "11111111-1111-4111-8111-111111111111";
+  const closing = "22222222-2222-4222-8222-222222222222";
+  const internals = app as unknown as { connectedClients: Map<string, number>; connectedPageClients: Map<string, string> };
+  internals.connectedClients.set(background, 1);
+  internals.connectedClients.set(closing, 1);
+  internals.connectedPageClients.set(background, background);
+  internals.connectedPageClients.set(closing, closing);
   const server = createServer((request, response) => void app.handle(request, response));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   assert.ok(address && typeof address === "object");
   try {
-    const closingFresh = await fetch(`http://127.0.0.1:${address.port}/api/window/close`, { method: "POST", headers: { "x-pi-chat-client": fresh } });
-    assert.equal(closingFresh.status, 202);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.deepEqual(shutdownReasons, ["last-window-close"]);
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/window/close`, { method: "POST", headers: { "x-pi-chat-client": closing } });
+    assert.equal(response.status, 200);
+    assert.equal((await response.json() as { remainingWindows: number }).remainingWindows, 1);
+    await new Promise((resolve) => setTimeout(resolve, 45));
+    assert.deepEqual(shutdownReasons, []);
   } finally {
     server.close();
     await app.close();
   }
 });
 
-test("closing the last connected window shuts down the Pi Chat application", async () => {
+test("closing the last window waits for a quiescent grace before shutting down", async () => {
   const path = "C:\\sessions\\primary.jsonl";
-  const id = idForPath(path);
   const primary = new FakeRpc(path, "primary");
   const shutdownReasons: string[] = [];
-  const sessions = {
-    list: async () => [{ id, sessionId: "primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
-    pathForId: () => path,
-    messagesForId: async () => [],
-  } as unknown as SessionIndex;
-  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), applicationShutdown: (reason) => { shutdownReasons.push(reason); } });
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), lastWindowShutdownGraceMs: 30, lastWindowShutdownPollMs: 5, applicationShutdown: (reason) => { shutdownReasons.push(reason); } });
   const client = "11111111-1111-4111-8111-111111111111";
   (app as unknown as { connectedClients: Map<string, number> }).connectedClients.set(client, 1);
   const server = createServer((request, response) => void app.handle(request, response));
@@ -289,10 +475,68 @@ test("closing the last connected window shuts down the Pi Chat application", asy
   assert.ok(address && typeof address === "object");
   try {
     const response = await fetch(`http://127.0.0.1:${address.port}/api/window/close`, { method: "POST", headers: { "x-pi-chat-client": client } });
-    assert.equal(response.status, 202);
-    assert.deepEqual(await response.json(), { shuttingDown: true, closeWindow: true, remainingWindows: 0 });
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { shuttingDown: false, closeWindow: true, rested: false, remainingWindows: 0, autoShutdownPending: true });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(shutdownReasons, []);
+    for (let attempt = 0; attempt < 20 && shutdownReasons.length === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
     assert.deepEqual(shutdownReasons, ["last-window-close"]);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("a same-window refresh during grace cancels last-window auto shutdown", async () => {
+  const primary = new FakeRpc("C:\\sessions\\refresh.jsonl", "primary");
+  const shutdownReasons: string[] = [];
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), lastWindowShutdownGraceMs: 30, lastWindowShutdownPollMs: 5, applicationShutdown: (reason) => { shutdownReasons.push(reason); } });
+  const client = "11111111-1111-4111-8111-111111111111";
+  const internals = app as unknown as { connectedClients: Map<string, number>; clientConnected(clientId: string): void; clientDisconnected(clientId: string): void };
+  internals.connectedClients.set(client, 1);
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    await fetch(`http://127.0.0.1:${address.port}/api/window/close`, { method: "POST", headers: { "x-pi-chat-client": client } });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    internals.clientConnected(client);
+    internals.clientDisconnected(client);
+    await new Promise((resolve) => setTimeout(resolve, 45));
+    assert.deepEqual(shutdownReasons, []);
+    assert.equal(internals.connectedClients.get(client), 1);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("a delayed old-page close beacon cannot close its replacement page", async () => {
+  const primary = new FakeRpc("C:\\sessions\\late-beacon.jsonl", "primary");
+  const shutdownReasons: string[] = [];
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), lastWindowShutdownGraceMs: 25, lastWindowShutdownPollMs: 5, applicationShutdown: (reason) => { shutdownReasons.push(reason); } });
+  const client = "11111111-1111-4111-8111-111111111111";
+  const oldPage = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const newPage = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const internals = app as unknown as { connectedClients: Map<string, number>; connectedPageClients: Map<string, string>; clientConnected(clientId: string, pageId: string): void };
+  internals.connectedClients.set(client, 1);
+  internals.connectedPageClients.set(oldPage, client);
+  // Replacement SSE wins the race and registers before the old unload beacon.
+  internals.clientConnected(client, newPage);
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/window/close?page=${oldPage}`, { method: "POST", headers: { "x-pi-chat-client": client } });
+    assert.equal(response.status, 200);
+    assert.equal((await response.json() as { remainingWindows: number }).remainingWindows, 1);
+    await new Promise((resolve) => setTimeout(resolve, 45));
+    assert.deepEqual(shutdownReasons, []);
+    assert.equal(internals.connectedPageClients.get(newPage), client);
   } finally {
     server.close();
     await app.close();
@@ -344,7 +588,9 @@ test("restart barrier rejects new mutations throughout a long build and commits 
       healthData = await health.json() as typeof healthData;
       if (healthData.lifecycle !== "restarting") await new Promise((resolve) => setTimeout(resolve, 5));
     } while (healthData.lifecycle !== "restarting" && Date.now() < healthDeadline);
-    assert.deepEqual(healthData, { ok: true, service: "pi-chat", lifecycle: "restarting" });
+    assert.equal(healthData.ok, true);
+    assert.equal(healthData.service, "pi-chat");
+    assert.equal(healthData.lifecycle, "restarting");
     const maintenanceBootstrap = await fetch(`${origin}/api/bootstrap`);
     assert.equal(maintenanceBootstrap.status, 503);
     const maintenanceData = await maintenanceBootstrap.json() as { lifecycle?: string; requestToken?: string };
@@ -376,7 +622,7 @@ test("restart barrier rejects new mutations throughout a long build and commits 
   }
 });
 
-test("an in-flight mutation lease prevents restart before the Prompt body is complete", async () => {
+test("an incomplete request with no valid session identity does not block restart admission", async () => {
   const path = "C:\\sessions\\primary.jsonl";
   const primary = new FakeRpc(path, "primary");
   const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), applicationRestart: async () => ({ promote: async () => undefined, handoff: () => undefined, discard: async () => undefined }) });
@@ -391,12 +637,44 @@ test("an in-flight mutation lease prevents restart before the Prompt body is com
   try {
     await new Promise((resolve) => setTimeout(resolve, 5));
     const restart = await fetch(`${origin}/api/restart`, { method: "POST" });
-    assert.equal(restart.status, 409);
-    assert.equal((await restart.json() as { code?: string }).code, "APPLICATION_BUSY");
+    assert.equal(restart.status, 202);
     const health = await fetch(`${origin}/api/health`);
-    assert.equal((await health.json() as { lifecycle: string }).lifecycle, "idle");
+    assert.equal((await health.json() as { lifecycle: string }).lifecycle, "restarting");
   } finally {
     slowPrompt.destroy();
+    server.close();
+    await app.close();
+  }
+});
+
+test("an incomplete new-session body does not block restart admission", async () => {
+  const path = "C:\\sessions\\primary-new.jsonl";
+  const primary = new FakeRpc(path, "primary-new");
+  const app = new PiChatApp({
+    rpc: primary as unknown as PiRpcClient,
+    sessions: {} as SessionIndex,
+    resources: {} as ResourceManager,
+    cwd: process.cwd(),
+    webRoot: process.cwd(),
+    applicationRestart: async () => ({ promote: async () => undefined, handoff: () => undefined, discard: async () => undefined }),
+  });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const slowNew = httpRequest(`${origin}/api/sessions/new`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "transfer-encoding": "chunked" },
+  });
+  slowNew.on("error", () => undefined);
+  slowNew.write('{"cwd":"');
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const restart = await fetch(`${origin}/api/restart`, { method: "POST" });
+    assert.equal(restart.status, 202);
+  } finally {
+    slowNew.destroy();
     server.close();
     await app.close();
   }
@@ -429,7 +707,7 @@ test("restart build failure restores idle admission", async () => {
   }
 });
 
-test("paused Secondary queue blocks workspace changes while resources stay read-only", async () => {
+test("paused Secondary queue does not block future-default workspace changes", async () => {
   const primaryPath = "C:\\sessions\\primary.jsonl";
   const secondaryPath = "C:\\sessions\\secondary.jsonl";
   const primaryId = idForPath(primaryPath);
@@ -459,7 +737,7 @@ test("paused Secondary queue blocks workspace changes while resources stay read-
     runtime.queuePaused = true;
     runtime.promptQueue.push({ id: "queued" });
     const workspace = await fetch(`${origin}/api/workspace/set`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: process.cwd() }) });
-    assert.equal(workspace.status, 409);
+    assert.equal(workspace.status, 200);
     for (const kind of ["skills", "extensions", "packages"]) {
       const resource = await fetch(`${origin}/api/resources/${kind}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "resource", enabled: true }) });
       assert.equal(resource.status, 405);
@@ -505,7 +783,7 @@ test("model file mutation rolls back and restores the primary Runtime when reloa
   }
 });
 
-test("workspace change restores the previous Runtime when the new workspace restart fails", async () => {
+test("workspace default change never restarts or rebinds a live Runtime", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-workspace-rollback-"));
   const previousCwd = join(root, "old");
   const nextCwd = join(root, "new");
@@ -513,7 +791,13 @@ test("workspace change restores the previous Runtime when the new workspace rest
   const path = "C:\\sessions\\primary.jsonl";
   const primary = new FakeRpc(path, "primary");
   primary.restartFailures = 1;
-  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: previousCwd, webRoot: process.cwd() });
+  const app = new PiChatApp({
+    rpc: primary as unknown as PiRpcClient,
+    sessions: { list: async () => [] } as unknown as SessionIndex,
+    resources: {} as ResourceManager,
+    cwd: previousCwd,
+    webRoot: process.cwd(),
+  });
   const server = createServer((request, response) => void app.handle(request, response));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
@@ -524,10 +808,9 @@ test("workspace change restores the previous Runtime when the new workspace rest
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ path: nextCwd }),
     });
-    assert.equal(response.status, 500);
-    assert.match((await response.json() as { error: string }).error, /已恢复原工作目录/);
-    assert.equal((app as unknown as { currentCwd: string }).currentCwd, previousCwd);
-    assert.equal(primary.restartCount, 2);
+    assert.equal(response.status, 200);
+    assert.equal((app as unknown as { currentCwd: string }).currentCwd, nextCwd);
+    assert.equal(primary.restartCount, 0);
     assert.equal(primary.alive, true);
   } finally {
     server.close();
@@ -536,11 +819,58 @@ test("workspace change restores the previous Runtime when the new workspace rest
   }
 });
 
-test("last-window close refuses while a prompt is dispatching", async () => {
+test("a final window close never shuts down an actively streaming Pi worker", async () => {
+  const path = "C:\\sessions\\active-close.jsonl";
+  const primary = new FakeRpc(path, "primary");
+  primary.streaming = true;
+  const shutdownReasons: string[] = [];
+  const app = new PiChatApp({
+    rpc: primary as unknown as PiRpcClient,
+    sessions: {} as SessionIndex,
+    resources: {} as ResourceManager,
+    cwd: process.cwd(),
+    webRoot: process.cwd(),
+    lastWindowShutdownGraceMs: 25,
+    lastWindowShutdownPollMs: 5,
+    applicationShutdown: (reason) => { shutdownReasons.push(reason); },
+  });
+  const client = "11111111-1111-4111-8111-111111111111";
+  const page = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const internals = app as unknown as { connectedClients: Map<string, number>; connectedPageClients: Map<string, string>; activeSessionId: string; primaryBoundSessionId: string; running: boolean };
+  internals.connectedClients.set(client, 1);
+  internals.connectedPageClients.set(page, client);
+  internals.activeSessionId = idForPath(path);
+  internals.primaryBoundSessionId = idForPath(path);
+  internals.running = true;
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/window/close?page=${page}`, { method: "POST", headers: { "x-pi-chat-client": client } });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { shuttingDown: false, closeWindow: true, rested: false, remainingWindows: 0, autoShutdownPending: true });
+    await new Promise((resolve) => setTimeout(resolve, 70));
+    assert.deepEqual(shutdownReasons, []);
+    assert.equal(primary.stopCount, 0, "auto shutdown must not stop a still-streaming worker");
+
+    primary.streaming = false;
+    internals.running = false;
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    assert.deepEqual(shutdownReasons, [], "a full grace begins only after the worker becomes idle");
+    await new Promise((resolve) => setTimeout(resolve, 70));
+    assert.deepEqual(shutdownReasons, ["last-window-close"]);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("last-window auto shutdown waits for dispatch to finish before starting its grace", async () => {
   const path = "C:\\sessions\\primary.jsonl";
   const primary = new FakeRpc(path, "primary");
   let shutdowns = 0;
-  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), applicationShutdown: (_reason) => { shutdowns += 1; } });
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), lastWindowShutdownGraceMs: 25, lastWindowShutdownPollMs: 5, applicationShutdown: (_reason) => { shutdowns += 1; } });
   const client = "11111111-1111-4111-8111-111111111111";
   const internals = app as unknown as { connectedClients: Map<string, number>; dispatching: boolean };
   internals.connectedClients.set(client, 1);
@@ -551,9 +881,14 @@ test("last-window close refuses while a prompt is dispatching", async () => {
   assert.ok(address && typeof address === "object");
   try {
     const response = await fetch(`http://127.0.0.1:${address.port}/api/window/close`, { method: "POST", headers: { "x-pi-chat-client": client } });
-    assert.equal(response.status, 409);
+    assert.equal(response.status, 200);
+    await new Promise((resolve) => setTimeout(resolve, 40));
     assert.equal(shutdowns, 0);
-    assert.equal(internals.connectedClients.has(client), true);
+    internals.dispatching = false;
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    assert.equal(shutdowns, 0, "the grace starts only after dispatch becomes idle");
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(shutdowns, 1);
   } finally {
     server.close();
     await app.close();
@@ -687,7 +1022,7 @@ test("a closed browser window releases Session control after its SSE lease expir
   }
 });
 
-test("sidebar strictly defaults to twenty recent Sessions and can explicitly load the complete snapshot", async () => {
+test("sidebar defaults to at most fifteen rows per directory and can explicitly load the complete snapshot", async () => {
   const path = "C:\\sessions\\old-active.jsonl";
   const activeId = idForPath(path);
   const primary = new FakeRpc(path, "old-active");
@@ -715,7 +1050,7 @@ test("sidebar strictly defaults to twenty recent Sessions and can explicitly loa
   try {
     const recent = await (await fetch(`${origin}/api/sessions`)).json() as { sessions: Array<{ id: string }>; total: number };
     assert.equal(recent.total, 25);
-    assert.equal(recent.sessions.length, 20);
+    assert.equal(recent.sessions.length, 15);
     assert.equal(recent.sessions.some((session) => session.id === activeId), false);
     const all = await (await fetch(`${origin}/api/sessions?all=1`)).json() as { sessions: Array<{ id: string }>; total: number };
     assert.equal(all.total, 25);
@@ -767,11 +1102,19 @@ test("empty terminal assistant SSE events retain the cumulative answer payload",
   const clients = (app as unknown as { sseClients: Map<{ write: (frame: string) => boolean }, string> }).sseClients;
   clients.set({ write: (frame) => { frames.push(frame); return true; } }, "11111111-1111-4111-8111-111111111111");
   try {
+    await (app as unknown as { ensurePrimaryIdentity(): Promise<void> }).ensurePrimaryIdentity();
+    primary.emit({ type: "agent_start" });
     primary.emit({ type: "message_update", message: { role: "assistant", content: "cumulative answer", timestamp: 1 } });
     primary.emit({ type: "message_end", message: { role: "assistant", content: [], timestamp: 2 } });
-    const terminal = frames.find((frame) => frame.includes('"type":"message_end"')) || "";
-    assert.match(terminal, /"content":"cumulative answer"/);
-    assert.match(terminal, /"piChatSessionId"/);
+    primary.emit({ type: "agent_settled" });
+    primary.emit({ type: "agent_start" });
+    primary.emit({ type: "message_end", message: { role: "assistant", content: "second answer", timestamp: 3 } });
+    const terminals = frames.filter((frame) => frame.includes('"type":"message_end"'));
+    assert.match(terminals[0] || "", /"content":"cumulative answer"/);
+    assert.match(terminals[0] || "", /"piChatSessionId"/);
+    assert.match(terminals[0] || "", /"piChatRunEpoch":"[A-Za-z0-9_-]+"/);
+    assert.match(terminals[0] || "", /"piChatRunGeneration":1/);
+    assert.match(terminals[1] || "", /"piChatRunGeneration":2/);
   } finally {
     clients.clear();
     await app.close();
@@ -786,6 +1129,7 @@ test("cumulative tool execution updates never enter the browser SSE fanout", asy
   const clients = (app as unknown as { sseClients: Map<{ write: (frame: string) => boolean }, string> }).sseClients;
   clients.set({ write: (frame) => { frames.push(frame); return true; } }, "11111111-1111-4111-8111-111111111111");
   try {
+    await (app as unknown as { ensurePrimaryIdentity(): Promise<void> }).ensurePrimaryIdentity();
     primary.emit({ type: "tool_execution_start", toolCallId: "call-1", toolName: "bash" });
     primary.emit({ type: "tool_execution_update", toolCallId: "call-1", toolName: "bash", partialResult: { content: "x".repeat(600_000) } });
     primary.emit({ type: "tool_execution_end", toolCallId: "call-1", toolName: "bash", result: { content: "done" }, isError: false });
@@ -1099,118 +1443,6 @@ test("model and thinking changes do not claim or transfer Session control", asyn
   }
 });
 
-test("manual release rejects while a Secondary rename mutation holds admission", async () => {
-  const primaryPath = "C:\\sessions\\rename-primary.jsonl";
-  const secondaryPath = "C:\\sessions\\rename-secondary.jsonl";
-  const primaryId = idForPath(primaryPath);
-  const secondaryId = idForPath(secondaryPath);
-  const primary = new FakeRpc(primaryPath, "primary");
-  const secondary = new BlockingRenameRpc(secondaryPath, "secondary");
-  const summaries = [
-    { id: primaryId, sessionId: "primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 2, messageCount: 1, active: true },
-    { id: secondaryId, sessionId: "secondary", name: "Secondary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: false },
-  ];
-  const sessions = {
-    list: async () => summaries,
-    pathForId: (id: string) => id === primaryId ? primaryPath : id === secondaryId ? secondaryPath : null,
-    messagesForId: async () => [],
-  } as unknown as SessionIndex;
-  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, createRpc: () => secondary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
-  const server = createServer((request, response) => void app.handle(request, response));
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  assert.ok(address && typeof address === "object");
-  const origin = `http://127.0.0.1:${address.port}`;
-  try {
-    assert.equal((await fetch(`${origin}/api/sessions/${secondaryId}/activate`, { method: "POST" })).status, 200);
-    const rename = fetch(`${origin}/api/sessions/${secondaryId}`, {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: "Renamed" }),
-    });
-    await secondary.renameStartedPromise;
-    const blockedRelease = await fetch(`${origin}/api/sessions/${secondaryId}/release`, { method: "POST" });
-    assert.equal(blockedRelease.status, 409);
-    assert.match((await blockedRelease.json() as { error: string }).error, /暂时不能释放/);
-    assert.equal(secondary.stopCount, 0);
-    secondary.releaseRename();
-    assert.equal((await rename).status, 200);
-    assert.equal((await fetch(`${origin}/api/sessions/${secondaryId}/release`, { method: "POST" })).status, 200);
-    assert.equal(secondary.stopCount, 1);
-  } finally {
-    secondary.releaseRename();
-    server.close();
-    await app.close();
-  }
-});
-
-test("manual release is available only for an idle hot Secondary Runtime", async () => {
-  const primaryPath = "C:\\sessions\\primary.jsonl";
-  const secondaryPath = "C:\\sessions\\secondary.jsonl";
-  const primaryId = idForPath(primaryPath);
-  const secondaryId = idForPath(secondaryPath);
-  const primary = new FakeRpc(primaryPath, "primary");
-  const firstWorker = new FakeRpc(secondaryPath, "secondary");
-  const resumedWorker = new FakeRpc(secondaryPath, "secondary");
-  const workers = [firstWorker, resumedWorker];
-  const summaries = [
-    { id: primaryId, sessionId: "primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 2, messageCount: 1, active: true },
-    { id: secondaryId, sessionId: "secondary", name: "Secondary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: false },
-  ];
-  const sessions = {
-    list: async () => summaries,
-    pathForId: (id: string) => id === primaryId ? primaryPath : id === secondaryId ? secondaryPath : null,
-    messagesForId: async () => [],
-  } as unknown as SessionIndex;
-  const app = new PiChatApp({
-    rpc: primary as unknown as PiRpcClient,
-    createRpc: () => workers.shift() as unknown as PiRpcClient,
-    sessions,
-    resources: {} as ResourceManager,
-    cwd: process.cwd(),
-    webRoot: process.cwd(),
-  });
-  const server = createServer((request, response) => void app.handle(request, response));
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  assert.ok(address && typeof address === "object");
-  const origin = `http://127.0.0.1:${address.port}`;
-  try {
-    const coldRelease = await fetch(`${origin}/api/sessions/${secondaryId}/release`, { method: "POST" });
-    assert.equal(coldRelease.status, 409);
-    assert.match((await coldRelease.json() as { error: string }).error, /不是热对话/);
-
-    assert.equal((await fetch(`${origin}/api/sessions/${secondaryId}/activate`, { method: "POST" })).status, 200);
-    const sidebar = await (await fetch(`${origin}/api/sessions`)).json() as { sessions: SessionSummary[] };
-    assert.equal(sidebar.sessions.find((session) => session.id === secondaryId)?.releasable, true);
-    assert.equal(sidebar.sessions.find((session) => session.id === primaryId)?.releasable, false);
-
-    const primaryRelease = await fetch(`${origin}/api/sessions/${primaryId}/release`, { method: "POST" });
-    assert.equal(primaryRelease.status, 409);
-    assert.match((await primaryRelease.json() as { error: string }).error, /主对话/);
-
-    const released = await fetch(`${origin}/api/sessions/${secondaryId}/release`, { method: "POST" });
-    assert.equal(released.status, 200);
-    assert.deepEqual(await released.json(), { released: true, sessionId: secondaryId, activeSessionIds: [primaryId] });
-    assert.equal(firstWorker.stopCount, 1);
-
-    // A later write follows the normal cold-to-hot recovery path.
-    const prompt = await fetch(`${origin}/api/chat/prompt`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ message: "resume after release", sessionId: secondaryId }),
-    });
-    assert.equal(prompt.status, 202);
-    assert.equal(resumedWorker.streaming, true);
-    const busyRelease = await fetch(`${origin}/api/sessions/${secondaryId}/release`, { method: "POST" });
-    assert.equal(busyRelease.status, 409);
-    assert.match((await busyRelease.json() as { error: string }).error, /暂时不能释放/);
-  } finally {
-    server.close();
-    await app.close();
-  }
-});
-
 test("idle secondary workers use LRU capacity reclamation without stopping active work", async () => {
   const pathA = "C:\\sessions\\a.jsonl";
   const pathB = "C:\\sessions\\b.jsonl";
@@ -1265,6 +1497,88 @@ test("idle secondary workers use LRU capacity reclamation without stopping activ
     const bootstrap = await (await fetch(`${origin}/api/bootstrap`)).json() as { activeSessionIds: string[] };
     assert.deepEqual(new Set(bootstrap.activeSessionIds), new Set([idA, idB, idC]));
   } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("a reclaimed Runtime's late terminal, settlement, and error frames cannot contaminate another Session", async () => {
+  const primaryPath = "C:\\sessions\\primary-stale-reclaim.jsonl";
+  const pathA = "C:\\sessions\\stale-a.jsonl";
+  const pathB = "C:\\sessions\\clean-b.jsonl";
+  const primaryId = idForPath(primaryPath);
+  const idA = idForPath(pathA);
+  const idB = idForPath(pathB);
+  const primary = new FakeRpc(primaryPath, "primary-stale-reclaim");
+  const workerA = new FakeRpc(pathA, "stale-a");
+  const workerB = new FakeRpc(pathB, "clean-b");
+  const workers = [workerA, workerB];
+  const summaries = [
+    { id: primaryId, sessionId: "primary-stale-reclaim", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 3, messageCount: 1, active: true },
+    { id: idA, sessionId: "stale-a", name: "A", preview: "A persisted", cwd: process.cwd(), updatedAt: 2, messageCount: 1, active: false },
+    { id: idB, sessionId: "clean-b", name: "B", preview: "B persisted", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: false },
+  ];
+  const sessions = {
+    list: async (activePath?: string) => summaries.map((session) => ({ ...session, active: session.id === idForPath(activePath || primaryPath) })),
+    pathForId: (id: string) => id === primaryId ? primaryPath : id === idA ? pathA : id === idB ? pathB : null,
+    messagesForId: async (id: string) => [{ role: "user", content: id === idB ? "B persisted" : "A persisted" }],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({
+    rpc: primary as unknown as PiRpcClient,
+    createRpc: () => workers.shift() as unknown as PiRpcClient,
+    sessions,
+    resources: {} as ResourceManager,
+    cwd: process.cwd(),
+    webRoot: process.cwd(),
+    secondaryRuntimeSweepMs: 60_000,
+  });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const frames: string[] = [];
+  const clients = (app as unknown as { sseClients: Map<{ write: (frame: string) => boolean }, string> }).sseClients;
+  clients.set({ write: (frame) => { frames.push(frame); return true; } }, "observer");
+  try {
+    assert.equal((await fetch(`${origin}/api/sessions/${idA}/activate`, { method: "POST" })).status, 200);
+    const pool = (app as unknown as {
+      runtimePool: { get(id: string): { running: boolean; dispatching: boolean; failed?: boolean; promptQueue: unknown[]; pendingTerminalMessages: unknown[] } | undefined; reclaim(id: string, reason: "idle"): Promise<boolean> };
+    }).runtimePool;
+    assert.equal(await pool.reclaim(idA, "idle"), true);
+    assert.equal(workerA.stopCount, 1);
+    assert.equal(pool.get(idA), undefined);
+
+    assert.equal((await fetch(`${origin}/api/sessions/${idB}/activate`, { method: "POST" })).status, 200);
+    const runtimeB = pool.get(idB);
+    assert.ok(runtimeB);
+    const before = {
+      frames: frames.length,
+      running: runtimeB.running,
+      dispatching: runtimeB.dispatching,
+      failed: runtimeB.failed,
+      queue: [...runtimeB.promptQueue],
+      terminals: [...runtimeB.pendingTerminalMessages],
+    };
+
+    // Models stdout callbacks already queued by A's stopped child: the Runtime
+    // object has been detached, so none may route through B or reach SSE.
+    workerA.emitLate({ type: "message_end", message: { role: "assistant", content: "A_STALE_MARKER" } });
+    workerA.emitLate({ type: "agent_settled" });
+    workerA.emitLate({ type: "pi_chat_process_error", error: "A_STALE_MARKER" });
+    await new Promise((resolve) => setTimeout(resolve, 15));
+
+    assert.equal(frames.length, before.frames, "stale A events must not publish an SSE frame for B");
+    assert.equal(runtimeB.running, before.running);
+    assert.equal(runtimeB.dispatching, before.dispatching);
+    assert.equal(runtimeB.failed, before.failed);
+    assert.deepEqual(runtimeB.promptQueue, before.queue);
+    assert.deepEqual(runtimeB.pendingTerminalMessages, before.terminals);
+    const view = await (await fetch(`${origin}/api/sessions/${idB}/view`)).json() as { messages: Array<{ content?: unknown }>; liveMessage?: { content?: unknown }; activity?: unknown };
+    assert.doesNotMatch(JSON.stringify(view), /A_STALE_MARKER/);
+    assert.equal(view.liveMessage, undefined);
+  } finally {
+    clients.clear();
     server.close();
     await app.close();
   }
@@ -1516,6 +1830,112 @@ test("New creates an independent draft while the primary Session is running", as
     assert.equal(primary.commands.some((command) => command.type === "new_session"), false);
     assert.equal(draft.commands.some((command) => command.type === "new_session"), false);
     assert.equal((await fetch(`${origin}/api/sessions`)).status, 200);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("a prompted draft stays in its selected cwd group before SessionIndex catches up", async () => {
+  const selectedCwd = await mkdtemp(join(tmpdir(), "pi-chat-draft-cwd-"));
+  const primaryPath = "C:\\sessions\\primary.jsonl";
+  const draftPath = join(selectedCwd, "draft.jsonl");
+  const primaryId = idForPath(primaryPath);
+  const draftId = idForPath(draftPath);
+  const primary = new FakeRpc(primaryPath, "primary");
+  const draft = new PersistedDraftRpc(draftPath, "draft");
+  const sessions = {
+    // Deliberately omit the new draft to reproduce the scan-lag window.
+    list: async (activePath?: string) => [{ id: primaryId, sessionId: "primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: primaryId === idForPath(activePath || primaryPath) }],
+    pathForId: (id: string) => id === primaryId ? primaryPath : null,
+    summaryForId: () => null,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  let createdCwd = "";
+  const app = new PiChatApp({
+    rpc: primary as unknown as PiRpcClient,
+    createRpc: (cwd) => { createdCwd = cwd; return draft as unknown as PiRpcClient; },
+    sessions,
+    resources: {} as ResourceManager,
+    cwd: process.cwd(),
+    webRoot: process.cwd(),
+  });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const client = "11111111-1111-4111-8111-111111111111";
+  const headers = { "content-type": "application/json", "x-pi-chat-client": client };
+  try {
+    const created = await fetch(`${origin}/api/sessions/new`, { method: "POST", headers, body: JSON.stringify({ cwd: selectedCwd }) });
+    assert.equal(created.status, 200);
+    assert.equal((await created.json() as { session: { id: string } }).session.id, draftId);
+    assert.equal(createdCwd, selectedCwd);
+    const prompted = await fetch(`${origin}/api/chat/prompt`, { method: "POST", headers, body: JSON.stringify({ message: "hello", sessionId: draftId }) });
+    assert.equal(prompted.status, 202);
+    draft.streaming = false;
+    draft.emit({ type: "agent_settled" });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const sidebar = await (await fetch(`${origin}/api/sessions`, { headers })).json() as { sessions: SessionSummary[]; directories: Array<{ cwd: string }> };
+    assert.equal(sidebar.sessions.find((session) => session.id === draftId)?.cwd, selectedCwd);
+    assert.equal(sidebar.directories.some((directory) => directory.cwd === selectedCwd), true);
+  } finally {
+    server.close();
+    await app.close();
+    await rm(selectedCwd, { recursive: true, force: true });
+  }
+});
+
+test("Primary and Secondary settlement dispatch every queued follow-up", async () => {
+  const pathA = "C:\\sessions\\queue-primary.jsonl";
+  const pathB = "C:\\sessions\\queue-secondary.jsonl";
+  const idA = idForPath(pathA);
+  const idB = idForPath(pathB);
+  const primary = new FakeRpc(pathA, "queue-primary");
+  const secondary = new FakeRpc(pathB, "queue-secondary");
+  const sessions = {
+    list: async (activePath?: string) => [
+      { id: idA, sessionId: "queue-primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 2, messageCount: 1, active: idForPath(activePath || pathA) === idA },
+      { id: idB, sessionId: "queue-secondary", name: "Secondary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: false },
+    ],
+    pathForId: (id: string) => id === idA ? pathA : id === idB ? pathB : null,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({
+    rpc: primary as unknown as PiRpcClient,
+    createRpc: () => secondary as unknown as PiRpcClient,
+    sessions,
+    resources: {} as ResourceManager,
+    cwd: process.cwd(),
+    webRoot: process.cwd(),
+  });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const prompt = (sessionId: string, message: string) => fetch(`${origin}/api/chat/prompt`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sessionId, message }),
+  });
+  const settle = async (rpc: FakeRpc) => {
+    rpc.streaming = false;
+    rpc.emit({ type: "agent_settled" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  };
+  try {
+    await fetch(`${origin}/api/bootstrap`);
+    await fetch(`${origin}/api/sessions/${idB}/view`);
+    for (const [id, rpc, prefix] of [[idA, primary, "primary"], [idB, secondary, "secondary"]] as const) {
+      await prompt(id, `${prefix}-A`);
+      await prompt(id, `${prefix}-B`);
+      await prompt(id, `${prefix}-C`);
+      await settle(rpc);
+      assert.deepEqual(rpc.commands.filter((command) => command.type === "prompt").map((command) => command.message), [`${prefix}-A`, `${prefix}-B`]);
+      await settle(rpc);
+      assert.deepEqual(rpc.commands.filter((command) => command.type === "prompt").map((command) => command.message), [`${prefix}-A`, `${prefix}-B`, `${prefix}-C`]);
+    }
   } finally {
     server.close();
     await app.close();

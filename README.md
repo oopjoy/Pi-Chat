@@ -17,11 +17,10 @@ Pi Chat 是一个连接本机 Pi RPC 的 local-first Web/PWA 客户端。它提�
 - 长会话初始仅渲染最近 20 个用户发起的完整对话轮次（包含该轮后续回复与工具过程）；滚到顶部可点击“加载更早 10 轮”逐步展开历史；侧栏会话元数据使用持久化索引缓存，变更时增量更新
 - 对话右侧提供首条、上一条、下一条、最新的四格导航
 - 固定铺满动态视口，兼容窗口最大化/还原、Windows DPI、页面缩放和窄窗口
-- 左侧“浏览工作目录”会弹出前台 Windows Explorer 文件夹窗口，可预览、浏览并选择本地目录；支持目录持久化，并按工作目录筛选 Sessions
-- Session-first 历史会话列表、切换和新建：服务与界面优先打开、读取并缓存 JSONL；Primary 会在后台启动并完成兼容性验证，未 ready 或验证失败时历史仍可浏览且不会探测 Primary RPC。打开历史不启动对应 Secondary Runtime。输入框获得焦点或发送、Compact、Model/Thinking、接管等实际操作时才在后台按需准备 Runtime；准备期间仍可立即切换和阅读其他对话。最多 5 个热对话（Primary + 4 个 Secondary），达到容量时优先 LRU 回收空闲 Secondary，正在显示的历史也可退回 view-only
+- Session-first 历史会话列表、切换和新建：服务与界面先打开、读取并缓存 JSONL；Primary 会在后台启动并完成兼容性验证，未 ready 或验证失败时历史仍可浏览且不会探测 Primary RPC。选中、滚动、搜索或切换冷历史只读取 JSONL，不启动 Secondary Runtime；只有发送、Compact、Model/Thinking、接管或显式启动 Pi 等实际操作才会为该 Session 单飞准备专属 Runtime。服务的默认工作目录保持固定；需要不同目录时，在创建该条 New 草稿后使用“新对话工作路径”选择器单独修改，不会影响其他对话。新对话首条消息将 Runtime 创建、Model、Thinking、Gate 与 prompt 合并为一个服务事务。最多 5 个热对话（Primary + 4 个 Secondary），达到容量时优先 LRU 回收空闲 Secondary，正在显示的历史也可退回 view-only
 - 同一 Session 可在多个窗口观察，但同一时刻仅一个浏览器窗口可发送、停止、处理 Gate 或改队列；Model/Thinking 修改不会自动取得控制权，无 Owner 时可设置，存在其他窗口 Owner 时必须先显式接管
 - 文件权限 Gate：作为 Pi Chat 内置安全功能呈现；顶栏可切换“严格 / 放行”。严格模式始终确认 `write` / `edit`，并对可识别的高风险 Bash 做辅助确认；Bash 可运行任意脚本，副作用识别不构成完整 sandbox。随应用自动安装、校验和修复的极小 Pi 工具执行适配器仍在真实工具执行前运行
-- 侧栏提供独立刷新和“完整重启 Pi Chat 并应用更新”：应用级 Lifecycle Barrier 会在构建前同步阻止所有新写操作；新版本先在独立 staging 目录完成并验证，构建失败不会修改当前 `dist`，二次核验全部 Runtime、队列和确认状态通过后才提升产物并执行服务切换。维护期间历史、健康检查和只读 API 保持可用。SSE/EventSource 是可重连传输，断开只会延迟释放窗口控制权，绝不会自动关闭 Pi Chat 服务或托管 RPC；设置中的“关闭 Pi Chat”同样先执行全局 Busy 检查，再关闭全部窗口、服务和托管 RPC
+- 侧栏提供独立刷新和“完整重启 Pi Chat 并应用更新”：应用级 Lifecycle Barrier 会在构建前同步阻止所有新写操作；新版本先在独立 staging 目录完成并验证，构建失败不会修改当前 `dist`，二次核验全部 Runtime、队列和确认状态通过后才提升产物并执行服务切换。维护期间历史、健康检查和只读 API 保持可用。SSE/EventSource 是可重连传输，断开不会自动关闭 Pi Chat 服务或托管 RPC；但全部浏览器/PWA 页面都通过非 BFCache 关闭明确离开后，服务会等待生成、队列、确认、恢复、Runtime transition 与 mutation 全部结束，并连续空闲 $10$ 秒后自动退出。设置中的“关闭 Pi Chat”仍可显式立即请求关闭，并同样先执行全局 Busy 检查
 - 外观设置：主题、字体、字号、行距和对话宽度
 - 可用模型列表、Models 面板与模型切换；支持基于 `~/.pi/agent/models.json` 的自定义模型 Add/Remove
 - 顶栏 Thinking 强度切换
@@ -62,7 +61,7 @@ npm install --include=dev
 npm run dev
 ```
 
-默认地址：`http://127.0.0.1:30170`，新会话默认使用当前用户主目录作为工作目录。
+默认地址：`http://127.0.0.1:30170`。没有已保存工作目录选择的新安装，New 草稿默认使用当前用户的桌面目录（Windows 下为 `C:\\Users\\<用户名>\\Desktop`）；`PI_CHAT_CWD` 或 `--cwd` 可提供启动回退目录，但已有的用户保存选择不会被自动覆盖。每个尚未提交的 New 草稿可单独修改其工作路径。
 
 ## Windows 桌面快捷方式
 
@@ -101,7 +100,7 @@ Pi Chat 不提供 Todo 功能，也不会安装或管理 Todo Extension。历史
 
 Pi Chat 保留普通浏览器访问，同时提供适合 Edge / Chrome 的独立窗口安装配置。启动服务后，用 Edge 或 Chrome 打开 `http://127.0.0.1:30170`，在浏览器菜单中选择“应用 / Apps → 将此站点安装为应用（Install this site as an app）”。
 
-安装后会以独立 Pi Chat 窗口启动，不显示地址栏、标签页、书签栏或浏览器导航；普通浏览器访问仍然可用。该模式不使用 Service Worker，避免本地更新后被旧前端缓存遮挡。关闭浏览器窗口不会停止后台 Pi Chat 服务；请使用设置中的“关闭 Pi Chat”，或通过桌面的 **Pi Chat** / **Pi Chat Web** 重新启动。源码工作目录的启动器会先构建本地改动；Windows Release ZIP 已内置干净的编译产物，不需要 npm、源码或构建工具即可启动。
+安装后会以独立 Pi Chat 窗口启动，不显示地址栏、标签页、书签栏或浏览器导航；普通浏览器访问仍然可用。该模式不使用 Service Worker，避免本地更新后被旧前端缓存遮挡。关闭最后一个浏览器/PWA 窗口会在所有工作完成后开始连续空闲 $10$ 秒的自动退出倒计时；刷新、BFCache、网络/SSE 断线，以及旧页面延迟发送的关闭通知都不会关闭替代页面或误触发服务退出。也可使用设置中的“关闭 Pi Chat”显式关闭，或通过桌面的 **Pi Chat** / **Pi Chat Web** 重新启动。源码工作目录的启动器会先构建本地改动；Windows Release ZIP 已内置干净的编译产物，不需要 npm、源码或构建工具即可启动。
 
 ## 构建与运行
 
@@ -122,11 +121,13 @@ node dist/server/server/index.js --host 127.0.0.1 --port 30170 --cwd C:\\work
 
 基础版只监听本机回环地址（默认 `127.0.0.1`）。每次服务启动会轮换内存请求 token，并校验精确 Host、同源 Origin 与 token，阻止普通跨站网页调用本机 Pi 接口。启动时还会探测 Pi RPC 的必要能力；若 Pi 升级导致协议不兼容，服务会给出明确错误而不是带着部分失效功能启动。文件权限 Gate 的执行钩子虽然技术上运行于 Pi Extension API，但由 Pi Chat 自动管理、不可通过普通扩展列表停用或移除；这确保网页 UI 保持内置体验，同时真实工具调用前仍有可靠拦截。
 
-网页 UI 使用本机文件夹选择器 `POST /api/workspace/pick`。`POST /api/workspace/set` 是本地/自动化工作目录切换入口（例如脚本或后续本机 CLI），不是远程访问能力。当前版本不提供远程多用户、HTTPS 公网暴露或跨机器访问；请勿将服务绑定到非回环地址或暴露到公网。
+普通网页 UI 不提供全局工作目录切换；请在 New 草稿的“新对话工作路径”中为该次对话选择目录。`POST /api/workspace/pick` 和 `POST /api/workspace/set` 仅保留给本地自动化或未来本机 CLI：若使用，它们只更新未来草稿和目录索引上下文，绝不会重启、重绑或改变任何活 Runtime 的真实 cwd，也不是远程访问能力。当前版本不提供远程多用户、HTTPS 公网暴露或跨机器访问；请勿将服务绑定到非回环地址或暴露到公网。
 
 Skills 可以向模型注入指令，Plugins/Packages 可以用当前用户的完整权限执行代码。安装来源必须可信；删除操作会在界面中二次确认。Skills/Plugins 配置变化后，Pi Chat 会重启 RPC 并恢复当前会话。
 
 ## 产品边界
+
+当前功能入口、保留的本地 API 与已删除能力，以 [`docs/feature-surface.md`](docs/feature-surface.md) 的清单为准。标记为已删除的能力不得只保留隐藏路由、浏览器包装、共享类型或专用回归测试。
 
 **Pi Chat 负责：** 会话展示与输入、本地 Session 切换、Runtime 按需启动与回收、多窗口控制权、Gate/确认交互、Pi 原生资源的有限管理，以及本地 Web/PWA 启动体验。
 

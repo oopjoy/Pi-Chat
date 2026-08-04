@@ -1,3 +1,18 @@
+/** Authoritative Runtime work phase for Sidebar presentation and HTTP snapshots. */
+export type SessionExecutionState = "idle" | "queued" | "dispatching" | "running" | "paused" | "failed";
+
+/** Server-owned activity facts. Browser-local unseen completion remains separate. */
+export interface SessionActivityState {
+  execution: SessionExecutionState;
+  awaitingConfirmation: boolean;
+}
+
+export interface SessionDirectorySummary {
+  cwd: string;
+  count: number;
+  lastUserPromptAt: number;
+}
+
 export interface SessionSummary {
   id: string;
   sessionId: string;
@@ -13,11 +28,11 @@ export interface SessionSummary {
   turnCount?: number;
   active: boolean;
   writable?: boolean;
-  /** Current server capability: an idle Secondary Runtime may be manually released. */
-  releasable?: boolean;
   running?: boolean;
   queued?: boolean;
   pendingConfirmation?: boolean;
+  /** Authoritative execution/confirmation snapshot used by Sidebar status. */
+  activity?: SessionActivityState;
   /** One browser window may control a Session; other windows are read-only observers. */
   controlOwner?: string;
   controlledByThisWindow?: boolean;
@@ -136,6 +151,36 @@ export interface QueuedPrompt {
 /** Strict confirms write/edit plus best-effort recognized high-risk Bash; open skips Gate prompts. */
 export type GateMode = "strict" | "open";
 
+/** A dedicated Session Runtime is ready to accept mutations; full history and
+ * command/stat snapshots intentionally remain outside this latency-sensitive
+ * capability check. */
+export interface SessionRuntimeReadyData {
+  sessionId: string;
+  state: PiState;
+  gateMode: GateMode;
+}
+
+export interface InitialPromptRequest {
+  message: string;
+  images?: PromptImage[];
+  model?: { provider: string; modelId: string };
+  thinkingLevel?: ThinkingLevel;
+  gateMode?: GateMode;
+}
+
+export interface InitialPromptData extends SessionRuntimeReadyData {
+  /** The draft identity becomes durable for browser routing before JSONL indexing catches up. */
+  session: SessionSummary;
+  accepted: boolean;
+  queued: false;
+  extension?: boolean;
+  command?: string;
+  description?: string;
+  isStreaming?: boolean;
+  id?: string;
+  queue?: QueuedPrompt[];
+}
+
 export interface SessionViewData {
   session: SessionSummary;
   state: PiState;
@@ -180,10 +225,37 @@ export interface PrimaryRuntimeReadiness {
   generation: number;
 }
 
+export interface BuildIdentity {
+  schemaVersion: 1;
+  packageVersion: string;
+  /** Optional build-pipeline revision label; it is never a local path or secret. */
+  revision: string;
+  /** SHA-256 fingerprint of the project build inputs. This is the equality key. */
+  fingerprint: string;
+  /** Diagnostic-only timestamp, excluded from identity comparison. */
+  builtAt: string;
+}
+
+export interface HealthData {
+  ok: true;
+  service: "pi-chat";
+  lifecycle: ApplicationLifecycle;
+  buildIdentity: BuildIdentity;
+}
+
+export interface BootstrapHandshakeData {
+  buildIdentity: BuildIdentity;
+  /** Ephemeral same-origin request token, rotated whenever Pi Chat starts. */
+  requestToken: string;
+}
+
 export interface BootstrapData {
+  buildIdentity: BuildIdentity;
   state: PiState;
   messages: PiMessage[];
   sessions: SessionSummary[];
+  /** All known cwd groups; rows themselves may be a bounded initial page. */
+  sessionDirectories?: SessionDirectorySummary[];
   /** Total matching Sessions before the default recent-list limit. */
   sessionsTotal?: number;
   models: ModelInfo[];

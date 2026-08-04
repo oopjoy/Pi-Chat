@@ -4,9 +4,10 @@ import { useModalFocus } from "../lib/modal-focus";
 
 export type SessionDialogState = { mode: "rename" | "delete"; session: SessionSummary } | null;
 
-export function SessionDialog({ state, busy, onClose, onRename, onDelete }: {
+export function SessionDialog({ state, busy, disabled = false, onClose, onRename, onDelete }: {
   state: SessionDialogState;
   busy: boolean;
+  disabled?: boolean;
   onClose: () => void;
   onRename: (name: string) => void;
   onDelete: () => void;
@@ -30,7 +31,7 @@ export function SessionDialog({ state, busy, onClose, onRename, onDelete }: {
   if (!state) return null;
   const submitRename = () => {
     const value = name.trim();
-    if (value && !busy) onRename(value);
+    if (value && !busy && !disabled) onRename(value);
   };
   return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onClose(); }}>
     <section ref={dialogRef} className="dialog session-dialog" role="dialog" aria-modal="true" aria-labelledby="session-dialog-title">
@@ -42,7 +43,7 @@ export function SessionDialog({ state, busy, onClose, onRename, onDelete }: {
           autoFocus
           value={name}
           maxLength={120}
-          disabled={busy}
+          disabled={busy || disabled}
           aria-label="对话名称"
           onChange={(event) => setName(event.target.value)}
           onKeyDown={(event) => {
@@ -54,7 +55,7 @@ export function SessionDialog({ state, busy, onClose, onRename, onDelete }: {
         />
         <footer>
           <button type="button" disabled={busy} onClick={onClose}>取消</button>
-          <button type="button" className="primary" disabled={busy || !name.trim()} onClick={submitRename}>{busy ? "保存中…" : "确认"}</button>
+          <button type="button" className="primary" disabled={busy || disabled || !name.trim()} onClick={submitRename}>{busy ? "保存中…" : "确认"}</button>
         </footer>
       </> : <>
         <h2 id="session-dialog-title">删除对话</h2>
@@ -64,7 +65,7 @@ export function SessionDialog({ state, busy, onClose, onRename, onDelete }: {
         {state.session.pendingConfirmation && <p className="dialog-warning">该对话正在等待确认，请先处理该请求。</p>}
         <footer>
           <button type="button" disabled={busy} onClick={onClose}>取消</button>
-          <button type="button" className="danger" disabled={busy || state.session.running || state.session.queued || state.session.pendingConfirmation} onClick={onDelete}>{busy ? "删除中…" : "确认删除"}</button>
+          <button type="button" className="danger" disabled={busy || disabled || state.session.running || state.session.queued || state.session.pendingConfirmation} onClick={onDelete}>{busy ? "删除中…" : "确认删除"}</button>
         </footer>
       </>}
     </section>

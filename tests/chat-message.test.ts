@@ -6,6 +6,7 @@ import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { JSDOM } from "jsdom";
 import { assistantCopyText, assistantModelLabel, assistantThinkingLabel, ChatMessage, shouldFoldUserText, USER_MESSAGE_FOLD_LINE_LIMIT } from "../src/web/components/ChatMessage";
+import { ChatInput } from "../src/web/components/ChatInput";
 
 test("user messages stay literal instead of rendering incomplete Markdown or math", () => {
   const source = "**unfinished $x + [link](\\\\server\\share";
@@ -94,17 +95,30 @@ test("image preview sizing stays within the padded dynamic viewport", async () =
 
 test("system notices reserve flow space four pixels above the Composer and wrap within eighty percent of chat", async () => {
   const styles = await readFile(new URL("../src/web/styles.css", import.meta.url), "utf8");
-  const app = await readFile(new URL("../src/web/App.tsx", import.meta.url), "utf8");
-  const input = await readFile(new URL("../src/web/components/ChatInput.tsx", import.meta.url), "utf8");
   assert.match(styles, /\.composer-wrap\s*\{[^}]*display:\s*flex[^}]*flex-direction:\s*column[^}]*align-items:\s*center[^}]*gap:\s*4px/);
   assert.match(styles, /\.system-notice-stack\s*\{[^}]*display:\s*flex[^}]*width:\s*max-content[^}]*max-width:\s*80%[^}]*align-items:\s*center/);
   assert.doesNotMatch(styles, /\.system-notice-stack\s*\{[^}]*position:\s*absolute/);
   assert.match(styles, /\.system-notice-stack:empty\s*\{\s*display:\s*none/);
   assert.match(styles, /\.system-notice-stack > \*\s*\{[^}]*width:\s*fit-content[^}]*max-width:\s*100%[^}]*overflow-wrap:\s*anywhere[^}]*white-space:\s*pre-wrap/);
-  assert.match(input, /notices\?: ReactNode/);
-  assert.match(input, /className="system-notice-stack"[\s\S]*\{notices\}/);
-  assert.match(app, /notices=\{[\s\S]*primary-runtime-status[\s\S]*app-toast/);
-  assert.doesNotMatch(app, /<ChatInput[\s\S]*\/>\s*\{\(error \|\| notice\) && <div className=\{`app-toast/);
+  const html = renderToStaticMarkup(createElement(ChatInput, {
+    streaming: false,
+    stopping: false,
+    disabled: false,
+    acceptsImages: false,
+    commands: [],
+    notices: createElement(
+      React.Fragment,
+      null,
+      createElement("div", { className: "primary-runtime-status" }, "Runtime notice"),
+      createElement("div", { className: "app-toast" }, "Toast notice"),
+    ),
+    onSend: async () => undefined,
+    onAbort: async () => undefined,
+    onPickLocalFiles: async () => [],
+    onReadClipboardFiles: async () => [],
+    onError: () => undefined,
+  }));
+  assert.match(html, /class="system-notice-stack"[\s\S]*primary-runtime-status[\s\S]*app-toast/);
 });
 
 test("user folding toggle expands and restores the collapsed text", async () => {

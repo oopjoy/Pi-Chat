@@ -89,6 +89,31 @@ test("timed-out read queries reject duplicates until their late response is cons
   await client.stop();
 });
 
+test("a late child generation cannot emit events or clear a replacement transport", () => {
+  const first = fakeChild().child;
+  const second = fakeChild().child;
+  const client = new PiRpcClient({ cwd: process.cwd() });
+  const events: Array<{ event: Record<string, unknown>; generation?: number }> = [];
+  client.onEvent((event, source) => events.push({ event, generation: source?.generation }));
+  const internals = client as unknown as {
+    child: typeof first;
+    source: { generation: number; child: typeof first; stderrTail: string };
+    handleLine(line: string, source: { generation: number }): void;
+    handleExit(source: { generation: number }, error: Error): void;
+  };
+  internals.child = second;
+  internals.source = { generation: 2, child: second, stderrTail: "" };
+
+  internals.handleLine(JSON.stringify({ type: "agent_start" }), { generation: 1 });
+  internals.handleExit({ generation: 1 }, new Error("old child exit"));
+  assert.equal(events.length, 0);
+  assert.equal(internals.child, second, "old exit must not detach replacement child");
+  assert.equal(client.currentGeneration(), 2);
+
+  internals.handleLine(JSON.stringify({ type: "agent_start" }), { generation: 2 });
+  assert.deepEqual(events, [{ event: { type: "agent_start" }, generation: 2 }]);
+});
+
 test("global Pi RPC starts and answers state requests", { skip: !piEntry, timeout: 30_000 }, async () => {
   assert.ok(piEntry);
   const client = new PiRpcClient({

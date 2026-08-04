@@ -3,7 +3,7 @@ import { createReadStream, existsSync, type Stats } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { homedir } from "node:os";
-import { extname, join, resolve } from "node:path";
+import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import type { PiMessage, SessionSummary, ThinkingLevel } from "../shared/types.js";
 import { compareSessionsByLastUserPrompt } from "../shared/session-order.js";
 import { loadSessionCache, saveSessionCache, type SessionCacheEntry } from "./session-index-cache.js";
@@ -380,8 +380,8 @@ export class SessionIndex {
     const normalizedActive = activePath ? resolve(activePath).toLowerCase() : "";
     const normalizedCwd = cwd ? resolve(cwd).toLowerCase() : "";
     const summaries: SessionSummary[] = [];
+    const nextPathsById = new Map<string, string>();
     let cacheChanged = false;
-    this.pathsById.clear();
 
     for (const path of files) {
       const normalized = resolve(path);
@@ -413,7 +413,7 @@ export class SessionIndex {
       }
       // Keep the global ID lookup complete even when this caller requests a
       // workspace-filtered sidebar. Runtime restore may target another cwd.
-      this.pathsById.set(cached.summary.id, normalized);
+      nextPathsById.set(cached.summary.id, normalized);
       if (normalizedCwd && resolve(cached.summary.cwd || "").toLowerCase() !== normalizedCwd) continue;
       summaries.push({ ...cached.summary, active: isActive });
     }
@@ -425,6 +425,10 @@ export class SessionIndex {
       }
     }
     if (cacheChanged) await saveSessionCache(this.cachePath, this.cache);
+    // Publish one complete mapping. Clearing the live map before a recursive
+    // scan made known cold Sessions temporarily look unknown, forcing their
+    // target view behind the serialized global inventory refresh.
+    this.pathsById = nextPathsById;
     return summaries.sort(compareSessionsByLastUserPrompt);
   }
 
@@ -436,6 +440,57 @@ export class SessionIndex {
     const path = this.pathForId(id);
     const cached = path && this.cache?.get(resolve(path));
     return cached ? { ...cached.summary, active: false } : null;
+  }
+
+  /**
+   * Restore one target from the persisted metadata cache without recursively
+   * enumerating every Session directory. This is the cold-start counterpart to
+   * summaryForId(): remembered history may become readable while bootstrap's
+   * full inventory refresh continues independently.
+   */
+  async cachedSummaryForId(id: string): Promise<SessionSummary | null> {
+    const known = this.summaryForId(id);
+    if (known) return known;
+    if (!this.cache) this.cache = await loadSessionCache(this.cachePath);
+    for (const [path, entry] of this.cache) {
+      if (entry.summary.id !== id) continue;
+      const normalized = resolve(path);
+      const withinRoot = relative(resolve(this.root), normalized);
+      const validPath = extname(normalized).toLowerCase() === ".jsonl"
+        && !isAbsolute(withinRoot)
+        && withinRoot !== ".."
+        && !withinRoot.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`)
+        && idForPath(normalized) === id;
+      if (!validPath) {
+        this.cache.delete(path);
+        await saveSessionCache(this.cachePath, this.cache);
+        return null;
+      }
+      let fileStat: Stats;
+      try { fileStat = await this.statFile(normalized); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        this.cache.delete(path);
+        await saveSessionCache(this.cachePath, this.cache);
+        return null;
+      }
+      let summary = entry.summary;
+      if (entry.mtimeMs !== fileStat.mtimeMs || entry.size !== fileStat.size) {
+        const refreshed = await parseSession(normalized, fileStat.mtimeMs);
+        if (!refreshed || refreshed.id !== id) {
+          this.cache.delete(path);
+          await saveSessionCache(this.cachePath, this.cache);
+          return null;
+        }
+        summary = refreshed;
+        this.cache.set(normalized, { mtimeMs: fileStat.mtimeMs, size: fileStat.size, summary: refreshed });
+        if (normalized !== path) this.cache.delete(path);
+        await saveSessionCache(this.cachePath, this.cache);
+      }
+      this.pathsById.set(id, normalized);
+      return { ...summary, active: false };
+    }
+    return null;
   }
 
   /**
@@ -466,7 +521,10 @@ export class SessionIndex {
       const cached = this.snapshotCache.get(id);
       if (cached && cached.mtimeMs === fileStat.mtimeMs && cached.size === fileStat.size) return cached.snapshot;
       const snapshot = await readSessionSnapshot(path);
-      const bytes = snapshot.messages.reduce((total, message) => total + Buffer.byteLength(JSON.stringify(message), "utf8"), 0);
+      // The source file size is a conservative cache weight and is already
+      // available from stat(). Re-serializing every parsed message doubled the
+      // CPU work on the first open of a large cold conversation.
+      const bytes = fileStat.size;
       const previous = this.snapshotCache.get(id);
       if (previous) this.snapshotCacheBytes -= previous.bytes;
       this.snapshotCache.delete(id);

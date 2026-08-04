@@ -78,9 +78,10 @@ function ExtensionDialogFrame({ gate, title, children, actions }: {
   );
 }
 
-export function ExtensionDialog({ request, onRespond }: {
+export function ExtensionDialog({ request, disabled = false, onRespond }: {
   request: ExtensionUiRequest | null;
-  onRespond: (body: Record<string, unknown>) => void;
+  disabled?: boolean;
+  onRespond: (body: { id?: string; cancelled?: boolean; confirmed?: boolean; value?: string }) => void;
 }) {
   const [value, setValue] = useState("");
   const gateDetails = useMemo(() => request ? describeGateRequest(request) : null, [request]);
@@ -90,19 +91,20 @@ export function ExtensionDialog({ request, onRespond }: {
   useEffect(() => {
     if (!request || !supported) return;
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
+      if (event.key !== "Escape" || disabled) return;
       event.preventDefault();
       if (gateDetails) onRespond({ id: request.id, value: gateDetails.blockValue });
       else onRespond({ id: request.id, cancelled: true });
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [gateDetails, onRespond, request, supported]);
+  }, [disabled, gateDetails, onRespond, request, supported]);
 
   if (!request || !supported) return null;
 
-  const cancel = () => onRespond({ id: request.id, cancelled: true });
+  const cancel = () => { if (!disabled) onRespond({ id: request.id, cancelled: true }); };
   const submit = () => {
+    if (disabled) return;
     if (request.method === "confirm") onRespond({ id: request.id, confirmed: true });
     else onRespond({ id: request.id, value });
   };
@@ -114,8 +116,8 @@ export function ExtensionDialog({ request, onRespond }: {
         title="权限确认"
         actions={
           <>
-            <button type="button" className="gate-block" autoFocus onClick={() => onRespond({ id: request.id, value: gateDetails.blockValue })}>Block</button>
-            <button type="button" className="gate-allow" onClick={() => onRespond({ id: request.id, value: gateDetails.allowValue })}>Allow</button>
+            <button type="button" className="gate-block" autoFocus disabled={disabled} onClick={() => onRespond({ id: request.id, value: gateDetails.blockValue })}>Block</button>
+            <button type="button" className="gate-allow" disabled={disabled} onClick={() => onRespond({ id: request.id, value: gateDetails.allowValue })}>Allow</button>
           </>
         }
       >
@@ -132,19 +134,19 @@ export function ExtensionDialog({ request, onRespond }: {
       title={request.title || "Pi 需要你的输入"}
       actions={
         <>
-          <button type="button" onClick={cancel}>取消</button>
-          {request.method !== "select" && <button type="button" className="primary" onClick={submit}>确定</button>}
+          <button type="button" disabled={disabled} onClick={cancel}>取消</button>
+          {request.method !== "select" && <button type="button" className="primary" disabled={disabled} onClick={submit}>确定</button>}
         </>
       }
     >
       {request.message && <p className="extension-dialog-message">{request.message}</p>}
       {request.method === "select" && (
         <div className="dialog-options">
-          {(request.options || []).map((option) => <button type="button" key={option} onClick={() => onRespond({ id: request.id, value: option })}>{option}</button>)}
+          {(request.options || []).map((option) => <button type="button" key={option} disabled={disabled} onClick={() => onRespond({ id: request.id, value: option })}>{option}</button>)}
         </div>
       )}
-      {request.method === "input" && <input autoFocus value={value} placeholder={request.placeholder} onChange={(event) => setValue(event.target.value)} />}
-      {request.method === "editor" && <textarea autoFocus rows={8} value={value} placeholder={request.placeholder} onChange={(event) => setValue(event.target.value)} />}
+      {request.method === "input" && <input autoFocus disabled={disabled} value={value} placeholder={request.placeholder} onChange={(event) => setValue(event.target.value)} />}
+      {request.method === "editor" && <textarea autoFocus disabled={disabled} rows={8} value={value} placeholder={request.placeholder} onChange={(event) => setValue(event.target.value)} />}
     </ExtensionDialogFrame>
   );
 }

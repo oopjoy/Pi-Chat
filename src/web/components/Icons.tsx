@@ -103,3 +103,11 @@ export function ImageIcon(props: IconProps) {
 export function FileSearchIcon(props: IconProps) {
   return <LineIcon {...props}><path d="M6 3.5h8l4 4V20a.5.5 0 0 1-.5.5h-11A.5.5 0 0 1 6 20Z" /><path d="M14 3.5v4h4" /><circle cx="10.3" cy="14.1" r="2.6" /><path d="m12.2 16 2.1 2.1" /></LineIcon>;
 }
+
+export function SearchIcon(props: IconProps) {
+  return <LineIcon {...props}><circle cx="10.5" cy="10.5" r="5.8" /><path d="m15 15 4.2 4.2" /></LineIcon>;
+}
+
+export function PinIcon(props: IconProps) {
+  return <LineIcon {...props}><path d="M8.5 4h7M10 4v5l-2 3v1.5h8V12l-2-3V4M12 13.5V21" /></LineIcon>;
+}

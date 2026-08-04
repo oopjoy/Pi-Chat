@@ -1,4 +1,12 @@
-import type { BootstrapData, ExtensionResource, GateMode, PackageResource, PromptImage, QueuedPrompt, ResourceResponse, SessionSummary, SessionViewData, SkillResource, ThinkingLevel } from "../shared/types";
+import type { BootstrapData, BootstrapHandshakeData, ExtensionResource, GateMode, InitialPromptData, ModelInfo, PackageResource, PromptImage, QueuedPrompt, ResourceResponse, SessionDirectorySummary, SessionRuntimeReadyData, SessionSummary, SessionViewData, SkillResource, ThinkingLevel } from "../shared/types";
+
+export type ExtensionResponseInput = {
+  id: string;
+  sessionId: string;
+  cancelled?: boolean;
+  confirmed?: boolean;
+  value?: string;
+};
 
 const API_TIMEOUT_MS = 65_000;
 // Pi acknowledges a prompt only after preflight. Auto-compaction runs in that
@@ -8,6 +16,7 @@ const PROMPT_PREPARE_TIMEOUT_MS = 210_000;
 const APPLICATION_RESTART_TIMEOUT_MS = 10 * 60_000;
 const APPLICATION_HANDOFF_TIMEOUT_MS = 90_000;
 let requestToken = "";
+let handshakeInFlight: Promise<BootstrapHandshakeData> | null = null;
 
 export class ApiRequestError extends Error {
   constructor(message: string, readonly status: number, readonly code?: string) {
@@ -24,6 +33,7 @@ const clientId = (() => {
   window.sessionStorage.setItem(key, created);
   return created;
 })();
+const pageId = crypto.randomUUID();
 
 function storeRequestToken(value: unknown): void {
   if (typeof value === "string" && value) requestToken = value;
@@ -33,11 +43,11 @@ async function recoverConnection(): Promise<void> {
   const deadline = Date.now() + APPLICATION_HANDOFF_TIMEOUT_MS;
   while (Date.now() < deadline) {
     try {
-      // Omit the possibly stale token. Bootstrap is the guarded same-origin
-      // handshake that returns the current process token after a crash/restart.
-      const response = await fetch("/api/bootstrap", {
+      // The fixed-shape handshake is the only tokenless browser API and returns
+      // no Session or Runtime data while obtaining a replacement process token.
+      const response = await fetch("/api/bootstrap/handshake", {
         cache: "no-store",
-        headers: { "x-pi-chat-client": clientId },
+        headers: { "x-pi-chat-client": clientId, "x-pi-chat-page": pageId },
         signal: AbortSignal.timeout(3_000),
       });
       const value = await response.json().catch(() => ({})) as { requestToken?: string };
@@ -55,9 +65,9 @@ async function waitForApplicationHandoff(previousToken = requestToken): Promise<
   const deadline = Date.now() + APPLICATION_HANDOFF_TIMEOUT_MS;
   while (Date.now() < deadline) {
     try {
-      // Deliberately omit the expired token: bootstrap is the guarded handshake
-      // that obtains the freshly started server's new in-memory token.
-      const response = await fetch("/api/bootstrap", { cache: "no-store", signal: AbortSignal.timeout(3_000) });
+      // Deliberately omit the expired token: the fixed-shape handshake obtains
+      // the freshly started server's new in-memory token without loading state.
+      const response = await fetch("/api/bootstrap/handshake", { cache: "no-store", signal: AbortSignal.timeout(3_000) });
       const value = await response.json() as { requestToken?: string };
       if (response.ok && value.requestToken && value.requestToken !== previousToken) {
         storeRequestToken(value.requestToken);
@@ -81,6 +91,7 @@ async function request<T>(path: string, options?: RequestInit, timeoutMs = API_T
       ...(options?.body ? { "content-type": "application/json" } : {}),
       ...(requestToken ? { "x-pi-chat-token": requestToken } : {}),
       "x-pi-chat-client": clientId,
+      "x-pi-chat-page": pageId,
       ...options?.headers,
       },
     });
@@ -99,28 +110,61 @@ async function request<T>(path: string, options?: RequestInit, timeoutMs = API_T
   return value;
 }
 
+function handshake(): Promise<BootstrapHandshakeData> {
+  if (handshakeInFlight) return handshakeInFlight;
+  const handshakeRequest = request<BootstrapHandshakeData>("/api/bootstrap/handshake").finally(() => {
+    if (handshakeInFlight === handshakeRequest) handshakeInFlight = null;
+  });
+  handshakeInFlight = handshakeRequest;
+  return handshakeRequest;
+}
+
 export const api = {
-  bootstrap: () => request<BootstrapData>("/api/bootstrap"),
-  eventsUrl: () => `/api/events?token=${encodeURIComponent(requestToken)}&client=${encodeURIComponent(clientId)}`,
+  handshake,
+  bootstrap: async () => {
+    if (!requestToken) await handshake();
+    return request<BootstrapData>("/api/bootstrap");
+  },
+  eventsUrl: () => `/api/events?token=${encodeURIComponent(requestToken)}&client=${encodeURIComponent(clientId)}&page=${encodeURIComponent(pageId)}`,
   renewPresence: () => request<{ present: true }>("/api/presence", { method: "POST" }, 10_000),
+  relinquishPresence: () => request<{ present: false }>("/api/presence", { method: "POST", body: JSON.stringify({ foreground: false }) }, 10_000),
   takeSessionControl: (sessionId: string) => request<{ controlOwner: string; controlledByThisWindow: boolean }>(`/api/sessions/${sessionId}/control`, { method: "POST" }),
   restart: () => request<{ restarting: true }>("/api/restart", { method: "POST" }, APPLICATION_RESTART_TIMEOUT_MS),
   waitForApplicationHandoff,
   recoverConnection,
-  closeWindow: () => request<{ shuttingDown: boolean; closeWindow: true; sessionId?: string; rested?: boolean; remainingWindows: number }>("/api/window/close", { method: "POST" }),
+  closeWindow: () => request<{ shuttingDown: boolean; closeWindow: true; sessionId?: string; rested?: boolean; remainingWindows: number; autoShutdownPending?: boolean }>("/api/window/close", { method: "POST" }),
+  signalWindowClose: () => {
+    if (!requestToken || typeof navigator.sendBeacon !== "function") return false;
+    const query = new URLSearchParams({ token: requestToken, client: clientId, page: pageId });
+    return navigator.sendBeacon(`/api/window/close?${query}`);
+  },
   shutdown: () => request<{ shuttingDown: true }>("/api/shutdown", { method: "POST" }),
-  prompt: (message: string, images: PromptImage[] = [], sessionId = "", gateMode?: GateMode) => request<{ accepted: boolean; queued: boolean; extension?: boolean; command?: string; description?: string; isStreaming?: boolean; id?: string; queue?: QueuedPrompt[] }>("/api/chat/prompt", {
+  prompt: (message: string, images: PromptImage[] = [], sessionId: string, gateMode?: GateMode) => request<{ accepted: boolean; queued: boolean; extension?: boolean; command?: string; description?: string; isStreaming?: boolean; id?: string; queue?: QueuedPrompt[] }>("/api/chat/prompt", {
     method: "POST",
     body: JSON.stringify({ message, sessionId, gateMode, images: images.map(({ type, data, mimeType }) => ({ type, data, mimeType })) }),
   }, PROMPT_PREPARE_TIMEOUT_MS),
   pickLocalFiles: () => request<{ paths: string[] }>("/api/local-files/pick", { method: "POST" }),
   clipboardLocalFiles: () => request<{ paths: string[] }>("/api/local-files/clipboard", { method: "POST" }),
-  pickWorkspace: () => request<{ cancelled: boolean; workspaceName?: string; data?: BootstrapData }>("/api/workspace/pick", { method: "POST" }),
-  abort: (sessionId = "") => request<{ ok: boolean; isStreaming: boolean; queuePaused: boolean }>("/api/chat/abort", { method: "POST", body: JSON.stringify({ sessionId }) }),
-  cancelQueued: (id: string, sessionId = "") => request<{ queue: QueuedPrompt[]; paused: boolean }>(`/api/chat/queue/${id}`, { method: "DELETE", body: JSON.stringify({ sessionId }) }),
-  resumeQueue: (sessionId = "") => request<{ queue: QueuedPrompt[]; paused: boolean }>("/api/chat/queue/resume", { method: "POST", body: JSON.stringify({ sessionId }) }),
-  compact: (customInstructions = "", sessionId = "") => request<{ result: Record<string, unknown> }>("/api/chat/compact", { method: "POST", body: JSON.stringify({ customInstructions, sessionId }) }, PROMPT_PREPARE_TIMEOUT_MS),
-  newSession: () => request<SessionViewData>("/api/sessions/new", { method: "POST" }),
+  pickDraftWorkspace: () => request<{ cancelled: boolean; cwd?: string }>("/api/workspace/draft-pick", { method: "POST" }),
+  abort: (sessionId: string) => request<{ ok: boolean; isStreaming: boolean; queuePaused: boolean }>("/api/chat/abort", { method: "POST", body: JSON.stringify({ sessionId }) }),
+  cancelQueued: (id: string, sessionId: string) => request<{ queue: QueuedPrompt[]; paused: boolean }>(`/api/chat/queue/${id}`, { method: "DELETE", body: JSON.stringify({ sessionId }) }),
+  resumeQueue: (sessionId: string) => request<{ queue: QueuedPrompt[]; paused: boolean }>("/api/chat/queue/resume", { method: "POST", body: JSON.stringify({ sessionId }) }),
+  compact: (customInstructions: string, sessionId: string) => request<{ result: Record<string, unknown> }>("/api/chat/compact", { method: "POST", body: JSON.stringify({ customInstructions, sessionId }) }, PROMPT_PREPARE_TIMEOUT_MS),
+  newSession: (cwd?: string) => request<SessionViewData>("/api/sessions/new", { method: "POST", body: JSON.stringify(cwd ? { cwd } : {}) }),
+  submitNewSession: (input: { cwd?: string; message: string; images: PromptImage[]; model?: ModelInfo | null; thinkingLevel?: ThinkingLevel; gateMode?: GateMode }) => request<InitialPromptData>("/api/sessions/new", {
+    method: "POST",
+    body: JSON.stringify({
+      ...(input.cwd ? { cwd: input.cwd } : null),
+      initial: {
+        message: input.message,
+        images: input.images.map(({ type, data, mimeType }) => ({ type, data, mimeType })),
+        ...(input.model ? { model: { provider: input.model.provider, modelId: input.model.id } } : null),
+        ...(input.thinkingLevel ? { thinkingLevel: input.thinkingLevel } : null),
+        ...(input.gateMode ? { gateMode: input.gateMode } : null),
+      },
+    }),
+  }, PROMPT_PREPARE_TIMEOUT_MS),
+  warmSession: (id: string) => request<SessionRuntimeReadyData>(`/api/sessions/${id}/warm`, { method: "POST" }),
   viewSession: (id: string, turns?: number, options: { fast?: boolean; signal?: AbortSignal } = {}) => {
     const query = new URLSearchParams();
     if (turns) query.set("turns", String(turns));
@@ -131,15 +175,15 @@ export const api = {
   markSessionViewed: (id: string) => request<{ viewing: string }>(`/api/sessions/${id}/viewing`, { method: "POST" }),
   clearSessionViewed: (sessionId: string) => request<{ viewing: string }>("/api/sessions/viewing/clear", { method: "POST", body: JSON.stringify({ sessionId }) }),
   activateSession: (id: string) => request<SessionViewData>(`/api/sessions/${id}/activate`, { method: "POST" }),
-  sessions: (all = false) => request<{ sessions: SessionSummary[]; total: number }>(`/api/sessions${all ? "?all=1" : ""}`),
-  releaseSession: (id: string) => request<{ released: true; sessionId: string; activeSessionIds: string[] }>(`/api/sessions/${id}/release`, { method: "POST" }),
+  sessions: (all = false) => request<{ sessions: SessionSummary[]; total: number; directories?: SessionDirectorySummary[] }>(`/api/sessions${all ? "?all=1" : ""}`),
+  directorySessions: (cwd: string, offset = 0) => request<{ sessions: SessionSummary[]; total: number; directories?: SessionDirectorySummary[] }>(`/api/sessions?${new URLSearchParams({ cwd, offset: String(offset), limit: "15" })}`),
   renameSession: (id: string, name: string) => request<BootstrapData>(`/api/sessions/${id}`, { method: "PATCH", body: JSON.stringify({ name }) }),
   deleteSession: (id: string) => request<BootstrapData>(`/api/sessions/${id}`, { method: "DELETE" }),
-  setModel: (provider: string, modelId: string, sessionId = "") => request<{ model: BootstrapData["state"]["model"]; pending: boolean }>("/api/models/set", {
+  setModel: (provider: string, modelId: string, sessionId: string) => request<{ model: BootstrapData["state"]["model"]; pending: boolean }>("/api/models/set", {
     method: "POST",
     body: JSON.stringify({ provider, modelId, sessionId }),
   }),
-  setThinking: (level: ThinkingLevel, sessionId = "") => request<{ level: ThinkingLevel; pending: boolean }>("/api/thinking/set", {
+  setThinking: (level: ThinkingLevel, sessionId: string) => request<{ level: ThinkingLevel; pending: boolean }>("/api/thinking/set", {
     method: "POST",
     body: JSON.stringify({ level, sessionId }),
   }),
@@ -148,7 +192,7 @@ export const api = {
   packages: () => request<ResourceResponse<PackageResource>>("/api/resources/packages"),
   browseResource: (kind: "skills-root" | "extensions-root" | "packages-root" | "models-root") =>
     request<{ ok: true; path: string }>("/api/resources/browse", { method: "POST", body: JSON.stringify({ kind }) }),
-  respondToExtension: (body: Record<string, unknown>) => request<{ ok: boolean }>("/api/extension-ui/respond", {
+  respondToExtension: (body: ExtensionResponseInput) => request<{ ok: boolean }>("/api/extension-ui/respond", {
     method: "POST",
     body: JSON.stringify(body),
   }),

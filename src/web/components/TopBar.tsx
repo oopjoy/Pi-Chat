@@ -1,8 +1,10 @@
 import { PanelRightIcon, SettingsIcon } from "./Icons";
 
-export function TopBar({ conversationName, workspacePath, settingsOpen, onOpenSettings, diffSidebarOpen, onToggleDiffSidebar }: {
+export function TopBar({ conversationName, workspacePath, buildIdentity, settingsOpen, onOpenSettings, diffSidebarOpen, onToggleDiffSidebar }: {
   conversationName: string;
   workspacePath: string;
+  /** Compact, non-secret build diagnostic used to identify stale Web bundles. */
+  buildIdentity: string;
   settingsOpen: boolean;
   onOpenSettings: () => void;
   diffSidebarOpen: boolean;
@@ -10,7 +12,7 @@ export function TopBar({ conversationName, workspacePath, settingsOpen, onOpenSe
 }) {
   return (
     <header className="topbar">
-      <div className="topbar-context" title={`当前对话：${conversationName}\n工作路径：${workspacePath}`}>
+      <div className="topbar-context" title={`当前对话：${conversationName}\n工作路径：${workspacePath}\n${buildIdentity}`}>
         <strong className="topbar-title">{conversationName}</strong>
       </div>
       <div className="topbar-controls">

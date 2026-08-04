@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { OperationAdmission } from "../src/server/operation-admission";
 import { RuntimePool, type SecondaryRuntime } from "../src/server/runtime-pool";
+import { idForPath } from "../src/server/session-index";
 
 function runtime(stop: () => Promise<void>): SecondaryRuntime {
   return {
     id: "runtime",
+    cwd: process.cwd(),
     rpc: { stop, isRunning: () => true } as never,
     running: false,
     queuePaused: false,
@@ -90,6 +92,200 @@ test("draft handoff lease blocks reclaim while an empty draft probe is pending",
   assert.equal(target.operationLeases, 0);
   assert.equal(await targetPool.reclaim(target.id, "capacity"), true);
   assert.equal(stopCount, 1);
+});
+
+test("deletion waits for an admitted operation and stop failure reopens dedicated Runtime admission", async () => {
+  let releaseStop!: () => void;
+  let stopCount = 0;
+  const target = runtime(async () => {
+    stopCount += 1;
+    await new Promise<void>((resolve) => { releaseStop = resolve; });
+  });
+  const targetPool = pool();
+  targetPool.runtimes.set(target.id, target);
+  const operation = targetPool.acquireOperation(target);
+  const deleting = targetPool.releaseForDeletion(target.id);
+  await Promise.resolve();
+  assert.equal(stopCount, 0, "deletion waits for the admitted operation to drain");
+  assert.throws(() => targetPool.acquireOperation(target), /休眠|closed/i, "closed deletion admission rejects a competing mutation");
+  operation();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(stopCount, 1);
+  releaseStop();
+  assert.equal(await deleting, target);
+  assert.equal(targetPool.get(target.id), undefined);
+
+  const failed = runtime(async () => { throw new Error("locked"); });
+  const failedPool = pool();
+  failedPool.runtimes.set(failed.id, failed);
+  await assert.rejects(() => failedPool.releaseForDeletion(failed.id), /locked/);
+  assert.equal(failedPool.get(failed.id), failed, "a failed stop leaves the Session process owned by its Runtime");
+  assert.equal(failed.operationAdmission.isClosed, false, "a failed stop reopens admission");
+});
+
+test("four reserved cold starts run concurrently without exceeding the Secondary cap", async () => {
+  const starts = Array.from({ length: 5 }, () => deferred<void>());
+  let started = 0;
+  const paths = starts.map((_, index) => `C:\\sessions\\parallel-${index}.jsonl`);
+  const targetPool = new RuntimePool({
+    now: () => 1,
+    cwd: () => process.cwd(),
+    maxSecondaryRuntimes: 4,
+    createRpc: () => {
+      const index = started++;
+      return {
+        onEvent: () => () => {},
+        start: async () => starts[index].promise,
+        stop: async () => {},
+        isRunning: () => true,
+        send: async () => ({ type: "response", success: true, data: { model: null, isStreaming: false, sessionFile: paths[index], sessionId: String(index) } }),
+      } as never;
+    },
+    refreshSessions: async () => {},
+    pathForId: (id) => paths.find((path) => id === idForPath(path)) || null,
+    isClosed: () => false,
+    canSweep: () => true,
+    onSecondaryEvent: () => {},
+    activeSessionIds: () => [],
+    broadcast: () => {},
+  });
+  const firstFour = paths.slice(0, 4).map((path) => targetPool.ensure(idForPath(path)));
+  for (let turn = 0; turn < 20 && started < 4; turn += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(started, 4, "every free slot starts before any slow readiness resolves");
+  await assert.rejects(() => targetPool.ensure(idForPath(paths[4])), /热对话上限/);
+  assert.equal(started, 4, "the fifth Session never spawns without a reservation");
+  for (const start of starts.slice(0, 4)) start.resolve();
+  await Promise.all(firstFour);
+  assert.equal(targetPool.size, 4);
+  assert.equal(targetPool.reservedStartCount, 0);
+});
+
+test("failed reserved start releases capacity for a later Session", async () => {
+  const firstPath = "C:\\sessions\\failed-reservation.jsonl";
+  const secondPath = "C:\\sessions\\released-reservation.jsonl";
+  let starts = 0;
+  const targetPool = new RuntimePool({
+    now: () => 1,
+    cwd: () => process.cwd(),
+    maxSecondaryRuntimes: 1,
+    createRpc: () => {
+      const fail = starts++ === 0;
+      return {
+        onEvent: () => () => {},
+        start: async () => { if (fail) throw new Error("start failed"); },
+        stop: async () => {},
+        isRunning: () => true,
+        send: async () => ({ type: "response", success: true, data: { model: null, isStreaming: false, sessionFile: secondPath, sessionId: "second" } }),
+      } as never;
+    },
+    refreshSessions: async () => {},
+    pathForId: (id) => id === idForPath(firstPath) ? firstPath : id === idForPath(secondPath) ? secondPath : null,
+    isClosed: () => false,
+    canSweep: () => true,
+    onSecondaryEvent: () => {},
+    activeSessionIds: () => [],
+    broadcast: () => {},
+  });
+  await assert.rejects(() => targetPool.ensure(idForPath(firstPath)), /start failed/);
+  await targetPool.ensure(idForPath(secondPath));
+  assert.equal(targetPool.size, 1);
+  assert.equal(targetPool.reservedStartCount, 0);
+});
+
+test("known cached Session starts without a global index refresh and reuses Pi readiness state", async () => {
+  const path = "C:\\sessions\\cached.jsonl";
+  const id = idForPath(path);
+  let refreshes = 0;
+  let stateQueries = 0;
+  const readiness = { type: "response", success: true, data: { model: null, isStreaming: false, sessionFile: path, sessionId: "cached" } };
+  const targetPool = new RuntimePool({
+    now: () => 1,
+    cwd: () => process.cwd(),
+    createRpc: () => ({
+      onEvent: () => () => {},
+      start: async () => readiness,
+      stop: async () => {},
+      isRunning: () => true,
+      send: async (command: Record<string, unknown>) => {
+        if (command.type === "get_state") stateQueries += 1;
+        return readiness;
+      },
+    }) as never,
+    refreshSessions: async () => { refreshes += 1; },
+    pathForId: (candidate) => candidate === id ? path : null,
+    summaryForId: (candidate) => candidate === id ? { id, sessionId: "cached", name: "Cached", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: false } : null,
+    isClosed: () => false,
+    canSweep: () => true,
+    onSecondaryEvent: () => {},
+    activeSessionIds: () => [],
+    broadcast: () => {},
+  });
+  const runtime = await targetPool.ensure(id);
+  assert.equal(refreshes, 0, "known Session identity must not force a global JSONL scan");
+  assert.equal(stateQueries, 0, "RuntimePool consumes the state PiRpcClient.start already proved");
+  assert.equal(runtime.lastState?.sessionFile, path);
+});
+
+test("unknown Session refreshes once before failing closed", async () => {
+  let refreshes = 0;
+  const targetPool = new RuntimePool({
+    now: () => 1,
+    cwd: () => process.cwd(),
+    createRpc: () => { throw new Error("must not spawn"); },
+    refreshSessions: async () => { refreshes += 1; },
+    pathForId: () => null,
+    isClosed: () => false,
+    canSweep: () => true,
+    onSecondaryEvent: () => {},
+    activeSessionIds: () => [],
+    broadcast: () => {},
+  });
+  await assert.rejects(() => targetPool.ensure("missing"), /会话不存在/);
+  assert.equal(refreshes, 1);
+});
+
+test("secondary recovery always retains its dedicated Session cwd", async () => {
+  const workspaceA = "C:\\workspace-a";
+  const workspaceB = "D:\\workspace-b";
+  const path = `${workspaceA}\\session.jsonl`;
+  const id = idForPath(path);
+  let applicationCwd = workspaceA;
+  const restarts: Array<{ path?: string; cwd?: string }> = [];
+  const rpc = {
+    onEvent: () => () => {},
+    start: async () => {},
+    stop: async () => {},
+    isRunning: () => true,
+    restart: async (sessionPath?: string, cwd?: string) => { restarts.push({ path: sessionPath, cwd }); },
+    send: async (command: Record<string, unknown>) => ({
+      type: "response",
+      success: true,
+      data: command.type === "get_state"
+        ? { model: null, isStreaming: false, sessionFile: path, sessionId: id }
+        : {},
+    }),
+  } as never;
+  const targetPool = new RuntimePool({
+    now: () => 1,
+    cwd: () => applicationCwd,
+    createRpc: (cwd) => {
+      assert.equal(cwd, workspaceA, "the original Session starts in its summary cwd");
+      return rpc;
+    },
+    refreshSessions: async () => {},
+    pathForId: (candidate) => candidate === id ? path : null,
+    summaryForId: (candidate) => candidate === id ? { id, sessionId: "session", name: "Session", preview: "", cwd: workspaceA, updatedAt: 1, messageCount: 1, active: false } : null,
+    isClosed: () => false,
+    canSweep: () => true,
+    onSecondaryEvent: () => {},
+    activeSessionIds: () => [],
+    broadcast: () => {},
+  });
+  const target = await targetPool.ensure(id);
+  applicationCwd = workspaceB;
+  target.failed = true;
+  await targetPool.ensure(id);
+  assert.deepEqual(restarts, [{ path, cwd: workspaceA }], "recovery never inherits a later application workspace");
 });
 
 test("concurrent reclaim keeps one stop marker until ensure can safely restart", async () => {

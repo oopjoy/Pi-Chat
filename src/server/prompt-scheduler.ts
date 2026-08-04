@@ -27,6 +27,8 @@ export interface PromptSchedulerHost {
   applyPendingTurnSettings(rpc: PiRpcClient, pending: PendingTurnSettings): Promise<void>;
   syncGateMode(rpc: PiRpcClient, sessionId: string, mode?: GateMode): Promise<void>;
   broadcast(event: Record<string, unknown>): void;
+  /** Publish the server-derived activity snapshot after a queue-state mutation. */
+  publishSessionActivity?(sessionId: string): void;
   /** `promptAt` is the original user-admission time, including queued prompts. */
   onPrimaryPromptAccepted(sessionId: string, promptAt: number): void;
   onSecondaryPromptAccepted(runtime: SecondaryRuntime, promptAt: number): void;
@@ -61,6 +63,7 @@ export class PromptScheduler {
       ...(admittedId ? { admittedId } : null),
       piChatSessionId: sessionId,
     });
+    this.host.publishSessionActivity?.(sessionId);
   }
 
   broadcastPrimaryQueue(admittedId = ""): void {
@@ -136,6 +139,7 @@ export class PromptScheduler {
       if (generation !== this.primaryAbortGeneration || this.host.isClosed() || !this.host.isLifecycleIdle()) throw new Error("消息发送已取消");
       await this.host.syncGateMode(this.host.primaryRpc(), this.host.activeSessionId(), gateMode);
       this.primaryRunning = true;
+      this.host.publishSessionActivity?.(this.host.activeSessionId());
       try {
         await this.host.primaryRpc().send(
           { type: "prompt", message: message || "请查看这些图片。", ...(images.length ? { images } : {}) },
@@ -144,6 +148,7 @@ export class PromptScheduler {
         this.host.onPrimaryPromptAccepted(this.host.activeSessionId(), promptAt);
       } catch (error) {
         this.primaryRunning = false;
+        this.host.publishSessionActivity?.(this.host.activeSessionId());
         throw error;
       }
     } finally { releaseOperation(); }
@@ -191,6 +196,7 @@ export class PromptScheduler {
         piChatSessionId: this.host.activeSessionId(),
         error: error instanceof Error ? error.message : String(error),
       });
+      this.host.publishSessionActivity?.(this.host.activeSessionId());
     }
   }
 
@@ -228,6 +234,7 @@ export class PromptScheduler {
           error: error instanceof Error ? error.message : String(error),
           piChatSessionId: runtime.id,
         });
+        this.host.publishSessionActivity?.(runtime.id);
         releaseOperation();
         return;
       }
@@ -251,6 +258,7 @@ export class PromptScheduler {
       if (generation !== runtime.abortGeneration || this.host.isClosed() || !this.host.isLifecycleIdle()) throw new Error("消息发送已取消");
       await this.host.syncGateMode(runtime.rpc, runtime.id, next.gateMode);
       runtime.running = true;
+      this.host.publishSessionActivity?.(runtime.id);
       await runtime.rpc.send(
         { type: "prompt", message: next.message || "请查看这些图片。", ...(next.images.length ? { images: next.images } : {}) },
         PROMPT_PREPARE_TIMEOUT_MS,
@@ -270,6 +278,7 @@ export class PromptScheduler {
         error: error instanceof Error ? error.message : String(error),
         piChatSessionId: runtime.id,
       });
+      this.host.publishSessionActivity?.(runtime.id);
     } finally { releaseOperation(); }
   }
 

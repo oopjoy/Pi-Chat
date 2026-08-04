@@ -29,6 +29,27 @@ test("controlState hides grace and ghost foreign owners from the observing banne
   });
 });
 
+test("an unfocused renderer releases write ownership but retains its transport and view pin", () => {
+  const control = new SessionControl({ onControlChanged: () => {} });
+  const sessionId = "a1a1a1a1a1a1a1a1a1a1";
+  const owner = "11111111-1111-4111-8111-111111111111";
+  const visible = "22222222-2222-4222-8222-222222222222";
+
+  control.clientConnected(owner);
+  control.clientConnected(visible);
+  control.noteClientPresence(owner);
+  control.noteClientPresence(visible);
+  control.markViewed(owner, sessionId);
+  control.setController(sessionId, owner);
+
+  assert.equal(control.noteClientBackground(owner), true);
+  assert.equal(control.isClientConnected(owner), true);
+  assert.equal(control.isViewed(sessionId), true);
+  assert.equal(control.sessionControllers.has(sessionId), false);
+  assert.doesNotThrow(() => control.requireControl(sessionId, visible));
+  control.clear();
+});
+
 test("a frozen foreign EventSource stops blocking a visible window after foreground lease expiry", () => {
   let now = 0;
   const control = new SessionControl({
@@ -131,6 +152,47 @@ test("an expired owner becomes fresh again and broadcasts the changed control pr
     controlledByThisWindow: false,
   });
   assert.ok(changed.filter((id) => id === sessionId).length >= 2);
+  control.clear();
+});
+
+test("presence before the first view marker claims a stale owner for the sole visible PWA", () => {
+  const control = new SessionControl({ onControlChanged: () => {} });
+  const sessionId = "babababababababababa";
+  const ghost = "11111111-1111-4111-8111-111111111111";
+  const restored = "22222222-2222-4222-8222-222222222222";
+
+  // After F5/resume the EventSource can renew foreground presence before React
+  // posts its selected Session. This used to leave the prior renderer as owner.
+  control.sessionControllers.set(sessionId, ghost);
+  control.clientConnected(restored);
+  control.noteClientPresence(restored);
+  assert.equal(control.sessionControllers.get(sessionId), ghost);
+  control.markViewed(restored, sessionId);
+
+  assert.deepEqual(control.controlState(sessionId, restored), {
+    controlOwner: restored,
+    controlledByThisWindow: true,
+  });
+  control.clear();
+});
+
+test("viewing after presence preserves takeover when another foreground window exists", () => {
+  const control = new SessionControl({ onControlChanged: () => {} });
+  const sessionId = "bebebebebebebebebebe";
+  const owner = "11111111-1111-4111-8111-111111111111";
+  const observer = "22222222-2222-4222-8222-222222222222";
+
+  control.clientConnected(owner);
+  control.clientConnected(observer);
+  control.noteClientPresence(owner);
+  control.noteClientPresence(observer);
+  control.setController(sessionId, owner);
+  control.markViewed(observer, sessionId);
+
+  assert.deepEqual(control.controlState(sessionId, observer), {
+    controlOwner: owner,
+    controlledByThisWindow: false,
+  });
   control.clear();
 });
 

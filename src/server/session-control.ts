@@ -154,6 +154,17 @@ export class SessionControl {
     return true;
   }
 
+  /**
+   * A connected EventSource may belong to a hidden or unfocused renderer.
+   * It remains a transport/view pin, but cannot retain foreground write control.
+   */
+  noteClientBackground(clientId: string): boolean {
+    if (!clientId || !this.isClientConnected(clientId)) return false;
+    this.clearClientPresence(clientId);
+    this.clearOwnershipForClient(clientId);
+    return true;
+  }
+
   clientDisconnected(clientId: string): void {
     if (!clientId) return;
     const remaining = Math.max(0, (this.connectedClients.get(clientId) || 1) - 1);
@@ -174,19 +185,26 @@ export class SessionControl {
   }
 
   /**
-   * Immediately drop presence and ownership (window close API).
-   * @returns the session this window was viewing, if any.
+   * Release one window's view and control immediately while its unload-time SSE
+   * socket finishes closing. Transport counts remain authoritative so a refresh
+   * can reconnect with the same client ID without an old socket deleting it.
    */
-  releaseClient(clientId: string): string {
+  closeWindow(clientId: string): string {
     if (!clientId) return "";
     const viewedSessionId = this.viewedSessionsByClient.get(clientId) || "";
     const timer = this.controllerReleaseTimers.get(clientId);
     if (timer) clearTimeout(timer);
     this.controllerReleaseTimers.delete(clientId);
-    this.connectedClients.delete(clientId);
     this.clearClientPresence(clientId);
     this.viewedSessionsByClient.delete(clientId);
     this.clearOwnershipForClient(clientId);
+    return viewedSessionId;
+  }
+
+  /** Immediately drop every lease for a client that will not reconnect. */
+  releaseClient(clientId: string): string {
+    const viewedSessionId = this.closeWindow(clientId);
+    this.connectedClients.delete(clientId);
     return viewedSessionId;
   }
 
@@ -196,6 +214,12 @@ export class SessionControl {
     // explicitly renews foreground presence through /api/presence.
     if (clientId && sessionId && this.connectedClients.has(clientId)) {
       this.viewedSessionsByClient.set(clientId, sessionId);
+      // On a restored PWA, presence commonly arrives before this view marker.
+      // Claim here as well: otherwise that ordering leaves a disconnected or
+      // frozen former renderer as the displayed owner until another renewal.
+      // `claimIfSolePresentWindow` still refuses to displace a second visible
+      // browser window, so true multi-window control remains explicit.
+      this.claimIfSolePresentWindow(sessionId, clientId);
     }
   }
 

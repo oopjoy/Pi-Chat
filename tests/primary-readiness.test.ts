@@ -177,6 +177,44 @@ test("failed Primary does not prevent activating an existing Secondary Runtime",
   } finally { server.close(); await app.close(); }
 });
 
+test("failed Primary rejects a new draft before it can spawn or prompt", async () => {
+  const path = "C:\\sessions\\blocked-new-draft.jsonl";
+  const primary = new ReadinessFakeRpc(path, "primary");
+  const draft = new ReadinessFakeRpc(path, "draft");
+  let draftCreates = 0;
+  const bridge = new ReadinessBridge({ status: "failed", generation: 2, error: "protocol mismatch" });
+  const sessions = {
+    list: async () => [],
+    pathForId: () => null,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({
+    rpc: primary as unknown as PiRpcClient,
+    createRpc: () => { draftCreates += 1; return draft as unknown as PiRpcClient; },
+    sessions,
+    resources: {} as ResourceManager,
+    cwd: process.cwd(),
+    webRoot: process.cwd(),
+    primaryRuntime: bridge,
+  });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/sessions/new`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ initial: { message: "must not send" } }),
+    });
+    const body = await response.json();
+    assert.equal(response.status, 503, JSON.stringify(body));
+    assert.equal((body as { code?: string }).code, "PRIMARY_RUNTIME_UNAVAILABLE");
+    assert.equal(draftCreates, 0);
+    assert.equal(draft.commands.some((command) => command.type === "prompt"), false);
+  } finally { server.close(); await app.close(); }
+});
+
 test("failed Primary mutation returns stable unavailable response without restart or prompt", async () => {
   const f = await fixture({ status: "failed", generation: 2, error: "protocol mismatch" });
   try {

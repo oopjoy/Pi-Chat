@@ -3,7 +3,7 @@ import { createServer } from "node:http";
 import test from "node:test";
 import { PiChatApp } from "../src/server/app";
 import { requestGuardError } from "../src/server/request-guard";
-import { requestClientId } from "../src/server/http-transport";
+import { requestClientId, requestPageId } from "../src/server/http-transport";
 import type { PiRpcClient } from "../src/server/rpc-client";
 import type { SessionIndex } from "../src/server/session-index";
 import type { ResourceManager } from "../src/server/resource-manager";
@@ -47,7 +47,13 @@ async function withServer<T>(token: string, run: (origin: string) => Promise<T>)
 
 test("browser API requests require exact localhost host, origin, and startup token", async () => {
   await withServer("current-token", async (origin) => {
-    const bootstrap = await fetch(`${origin}/api/bootstrap`, { headers: { origin, "sec-fetch-site": "same-origin" } });
+    const handshake = await fetch(`${origin}/api/bootstrap/handshake`, { headers: { origin, "sec-fetch-site": "same-origin" } });
+    assert.equal(handshake.status, 200);
+    assert.equal((await handshake.json() as { requestToken: string }).requestToken, "current-token");
+
+    const tokenlessBootstrap = await fetch(`${origin}/api/bootstrap`, { headers: { origin, "sec-fetch-site": "same-origin" } });
+    assert.equal(tokenlessBootstrap.status, 403);
+    const bootstrap = await fetch(`${origin}/api/bootstrap`, { headers: { origin, "sec-fetch-site": "same-origin", "x-pi-chat-token": "current-token" } });
     assert.equal(bootstrap.status, 200);
     assert.equal((await bootstrap.json() as { requestToken: string }).requestToken, "current-token");
 
@@ -55,7 +61,15 @@ test("browser API requests require exact localhost host, origin, and startup tok
     // its one tokenless, fixed-shape liveness probe.
     const handoffHealth = await fetch(`${origin}/api/health`);
     assert.equal(handoffHealth.status, 200);
-    assert.deepEqual(await handoffHealth.json(), { ok: true, service: "pi-chat", lifecycle: "idle" });
+    assert.deepEqual(await handoffHealth.json(), {
+      ok: true,
+      service: "pi-chat",
+      lifecycle: "idle",
+      buildIdentity: { schemaVersion: 1, packageVersion: "unknown", revision: "unknown", fingerprint: "unknown", builtAt: "unknown" },
+    });
+
+    const tokenlessView = await fetch(`${origin}/api/sessions/00000000000000000000/view`, { headers: { origin, "sec-fetch-site": "same-origin" } });
+    assert.equal(tokenlessView.status, 403, "the lightweight handshake must not make Session reads tokenless");
 
     const allowed = await fetch(`${origin}/api/health`, { headers: { origin, "sec-fetch-site": "same-origin", "x-pi-chat-token": "current-token" } });
     assert.equal(allowed.status, 200);
@@ -70,10 +84,66 @@ test("browser API requests require exact localhost host, origin, and startup tok
   });
 });
 
-test("EventSource query carries the browser window identity without custom headers", () => {
+test("EventSource and close beacons carry browser and page identities without custom headers", () => {
   const client = "11111111-1111-4111-8111-111111111111";
-  assert.equal(requestClientId({ url: `/api/events?client=${client}`, headers: {} } as unknown as import("node:http").IncomingMessage), client);
+  const page = "22222222-2222-4222-8222-222222222222";
+  const eventRequest = { url: `/api/events?client=${client}&page=${page}`, headers: {} } as unknown as import("node:http").IncomingMessage;
+  const closeRequest = { url: `/api/window/close?client=${client}&page=${page}`, headers: {} } as unknown as import("node:http").IncomingMessage;
+  assert.equal(requestClientId(eventRequest), client);
+  assert.equal(requestPageId(eventRequest), page);
+  assert.equal(requestClientId(closeRequest), client);
+  assert.equal(requestPageId(closeRequest), page);
   assert.equal(requestClientId({ url: "/api/events?client=invalid", headers: {} } as unknown as import("node:http").IncomingMessage), "");
+});
+
+test("same-origin close beacons may authenticate with the startup token query", () => {
+  const allowed = requestGuardError({
+    method: "POST",
+    url: "/api/window/close?token=current-token&client=11111111-1111-4111-8111-111111111111",
+    headers: { host: "127.0.0.1:30170", origin: "http://127.0.0.1:30170", "sec-fetch-site": "same-origin" },
+  } as unknown as import("node:http").IncomingMessage, { allowedHosts: ["127.0.0.1:30170"], token: "current-token" });
+  assert.equal(allowed, null);
+
+  const stale = requestGuardError({
+    method: "POST",
+    url: "/api/window/close?token=old-token&client=11111111-1111-4111-8111-111111111111",
+    headers: { host: "127.0.0.1:30170", origin: "http://127.0.0.1:30170", "sec-fetch-site": "same-origin" },
+  } as unknown as import("node:http").IncomingMessage, { allowedHosts: ["127.0.0.1:30170"], token: "current-token" });
+  assert.equal(stale, "Pi Chat 请求令牌无效或已过期");
+});
+
+test("existing-session mutation bodies fail closed before control or RPC work", async () => {
+  await withServer("current-token", async (origin) => {
+    const routes = [
+      ["/api/chat/prompt", "POST", { message: "must not target Primary" }],
+      ["/api/chat/abort", "POST", {}],
+      ["/api/chat/queue/resume", "POST", {}],
+      ["/api/chat/compact", "POST", {}],
+      ["/api/models/set", "POST", { provider: "test", modelId: "model" }],
+      ["/api/thinking/set", "POST", { level: "high" }],
+      ["/api/extension-ui/respond", "POST", { id: "request" }],
+      ["/api/chat/queue/11111111-1111-4111-8111-111111111111", "DELETE", {}],
+    ] as const;
+    for (const [path, method, body] of routes) {
+      for (const sessionId of [undefined, "", "   ", "not-a-session", 1, null, {}]) {
+        const response = await fetch(`${origin}${path}`, {
+          method,
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(sessionId === undefined ? body : { ...body, sessionId }),
+        });
+        assert.equal(response.status, 400, `${method} ${path} must reject ${JSON.stringify(sessionId)}`);
+      }
+    }
+  });
+});
+
+test("health and bootstrap expose the same non-secret build identity", async () => {
+  await withServer("current-token", async (origin) => {
+    const health = await (await fetch(`${origin}/api/health`)).json() as { buildIdentity?: { fingerprint?: string } };
+    const bootstrap = await (await fetch(`${origin}/api/bootstrap`)).json() as { buildIdentity?: { fingerprint?: string } };
+    assert.equal(health.buildIdentity?.fingerprint, "unknown");
+    assert.deepEqual(bootstrap.buildIdentity, health.buildIdentity);
+  });
 });
 
 test("malformed request bodies are client errors and missing assets stay 404", async () => {
@@ -130,7 +200,7 @@ test("tokenless mutations are rejected in exact-authority mode", () => {
 test("IPv6 loopback authority is normalized", () => {
   const result = requestGuardError({
     method: "GET",
-    url: "/api/bootstrap",
+    url: "/api/bootstrap/handshake",
     headers: { host: "[::1]:30170", origin: "http://[::1]:30170" },
   } as unknown as import("node:http").IncomingMessage, { allowedHosts: ["[::1]:30170"], token: "current-token" });
   assert.equal(result, null);

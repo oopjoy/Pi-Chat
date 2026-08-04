@@ -11,6 +11,7 @@ type RestartPayload = {
   args: string[];
   cwd: string;
   healthUrl: string;
+  expectedBuildFingerprint?: string;
   logPath: string;
   promoteAfterExit?: DistPromotionPaths;
 };
@@ -73,8 +74,10 @@ async function waitForHealthy(child: ChildProcess): Promise<void> {
     if (exit) throw new Error(`候选服务启动失败（${exit}）`);
     try {
       const response = await fetch(payload.healthUrl as string, { signal: AbortSignal.timeout(1_500) });
-      const state = await response.json() as { ok?: boolean; service?: string };
-      if (response.ok && state.ok === true && state.service === "pi-chat") return;
+      const state = await response.json() as { ok?: boolean; service?: string; buildIdentity?: { fingerprint?: string } };
+      const expected = payload.expectedBuildFingerprint;
+      if (response.ok && state.ok === true && state.service === "pi-chat"
+        && (!expected || state.buildIdentity?.fingerprint === expected)) return;
     } catch {
       // Candidate is still starting Pi RPC or has not bound the listener yet.
     }

@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures";
 
 async function openSecondSession(page: import("@playwright/test").Page) {
   await page.goto("/");
@@ -81,13 +81,13 @@ test("cold and hot-memory navigation emit bounded first-pane measurements during
 test("focusing a cold Session keeps it neutral until the first send starts Pi", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "chromium-desktop");
   await page.goto("/");
-  const second = page.locator(".session-item", { hasText: "Second session" });
-  await second.click();
+  const secondRow = page.locator(".session-row", { hasText: "Second session" });
+  await secondRow.locator(".session-item").click();
   await expect(page.getByText("Final answer with")).toBeVisible();
 
   const composer = page.getByRole("textbox", { name: "消息输入" });
   await composer.focus();
-  await expect(second.locator(".session-status")).toHaveAttribute("aria-label", "对话空闲");
+  await expect(secondRow.locator(".session-status")).toHaveAttribute("aria-label", "对话空闲");
   const first = page.locator(".session-item", { hasText: "First session" });
   await expect(first).toBeEnabled();
   await first.click();
@@ -105,30 +105,57 @@ test("mobile session navigation closes the left sidebar", async ({ page }, testI
   await expect(sidebar).not.toHaveClass(/is-open/);
 });
 
-test("an idle hot Secondary can be released without losing the open history", async ({ page }, testInfo) => {
+test("session search filters locally and pin persists across reload", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "chromium-desktop");
-  await openSecondSession(page);
-  await page.getByRole("textbox", { name: "消息输入" }).fill("warm this session");
-  await page.getByRole("button", { name: "发送消息" }).click();
-  await expect(page.getByText("warm this session")).toBeVisible();
-  const row = page.locator(".session-row", { hasText: "Second session" });
-  await expect(row.locator(".session-status")).toHaveAttribute("aria-label", "对话空闲");
-  await row.hover();
-  await row.getByRole("button", { name: "Second session 的操作菜单" }).click();
-  await page.getByRole("menuitem", { name: "释放运行资源" }).click();
-  await expect(page.getByText("已释放对话运行资源")).toBeVisible();
-  await expect(page.getByText("Final answer with")).toBeVisible();
-  await expect(page.getByRole("textbox", { name: "消息输入" })).toBeEnabled();
-  await expect(row.locator(".session-status")).toHaveAttribute("aria-label", "对话空闲");
-  await row.hover();
-  await row.getByRole("button", { name: "Second session 的操作菜单" }).click();
-  await expect(page.getByRole("menuitem", { name: "释放运行资源" })).toHaveCount(0);
+  await page.goto("/");
+  const secondRow = page.locator(".session-row", { hasText: "Second session" });
+  await secondRow.hover();
+  await secondRow.getByRole("button", { name: "Second session 的操作菜单" }).click();
+  await page.getByRole("menuitem", { name: "置顶", exact: true }).click();
+  await expect(page.locator(".session-row").first()).toContainText("Second session");
+  await expect(page.locator(".session-row").first().locator(".session-pin-indicator")).toBeVisible();
+
+  await page.reload();
+  await expect(page.locator(".session-row").first()).toContainText("Second session");
+  await page.locator(".session-row").first().hover();
+  await page.locator(".session-row").first().getByRole("button", { name: "Second session 的操作菜单" }).click();
+  await expect(page.getByRole("menuitem", { name: "取消置顶", exact: true })).toBeVisible();
   await page.keyboard.press("Escape");
 
-  const primaryRow = page.locator(".session-row", { hasText: "First session" });
-  await primaryRow.hover();
-  await primaryRow.getByRole("button", { name: "First session 的操作菜单" }).click();
-  await expect(page.getByRole("menuitem", { name: "释放运行资源" })).toHaveCount(0);
+  const search = page.getByRole("searchbox", { name: "搜索对话" });
+  await search.fill("first session");
+  await expect(page.locator(".session-row")).toHaveCount(1);
+  await expect(page.locator(".session-row").first()).toContainText("First session");
+  await search.fill("");
+  await expect(page.locator(".session-row")).toHaveCount(2);
+  await expect(page.locator(".session-row").first()).toContainText("Second session");
+});
+
+test("directory groups collapse, search temporarily expands, and fixed state persists", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium-desktop");
+  await page.goto("/");
+  const directory = page.locator(".session-directory").first();
+  const toggle = directory.locator(".session-directory-toggle");
+  const fixed = directory.locator(".session-directory-pin");
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+  await fixed.click();
+  await expect(fixed).toHaveAttribute("aria-pressed", "true");
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect(directory.locator(".session-row")).toHaveCount(0);
+
+  const search = page.getByRole("searchbox", { name: "搜索对话" });
+  await search.fill("first session");
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+  await expect(directory.locator(".session-row")).toHaveCount(1);
+  await search.fill("");
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect(directory.locator(".session-row")).toHaveCount(0);
+
+  await page.reload();
+  const restored = page.locator(".session-directory").first();
+  await expect(restored.locator(".session-directory-pin")).toHaveAttribute("aria-pressed", "true");
+  await expect(restored.locator(".session-directory-toggle")).toHaveAttribute("aria-expanded", "false");
 });
 
 test("Diff sidebar slides, remains inert while hidden, and process collapses from the footer", async ({ page }, testInfo) => {

@@ -13,6 +13,7 @@ import { SessionIndex } from "./session-index.js";
 import { loadWorkspace } from "./workspace-state.js";
 import { ensurePiChatSystemGate } from "./system-gate-installer.js";
 import { buildPiChat, cleanupStaleDistArtifacts, handOffApplicationRestart } from "./application-restart.js";
+import { loadBuildIdentity } from "./build-identity.js";
 
 interface CliOptions {
   host: string;
@@ -25,7 +26,9 @@ function parseArgs(argv: string[]): CliOptions {
   const options: CliOptions = {
     host: process.env.PI_CHAT_HOST || "127.0.0.1",
     port: Number(process.env.PI_CHAT_PORT || 30170),
-    cwd: process.env.PI_CHAT_CWD || homedir(),
+    // A new installation should create conversations beside ordinary user files,
+    // not inside this app's own checkout. CLI/env and a saved user choice still win.
+    cwd: process.env.PI_CHAT_CWD || join(homedir(), "Desktop"),
     dev: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
@@ -68,6 +71,7 @@ const protectRollbackBackup = process.env.PI_CHAT_SKIP_STALE_DIST_CLEANUP === "1
 delete process.env.PI_CHAT_SKIP_STALE_DIST_CLEANUP;
 const cleaned = protectRollbackBackup ? 0 : await cleanupStaleDistArtifacts(projectRoot);
 if (cleaned > 0) console.log(`[Pi Chat] 已清理 ${cleaned} 个残留的 dist 暂存/备份目录。`);
+const buildIdentity = await loadBuildIdentity(runtimeDist);
 const agentDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 const gateComponent = await ensurePiChatSystemGate({
   agentDir,
@@ -122,6 +126,7 @@ async function prepareApplicationRestart() {
           port: options.port,
           cwd: options.cwd,
           dev: options.dev,
+          expectedBuildFingerprint: build.buildFingerprint,
           promoteAfterExit: {
             liveDist: build.liveDist,
             stagedDist: build.distPath,
@@ -136,6 +141,11 @@ async function prepareApplicationRestart() {
 
 const app = new PiChatApp({
   rpc,
+  // A Secondary Runtime owns its Pi process for its full lifetime. The pool
+  // retains at most four idle/active Session runtimes and never rebinds one
+  // Session's process to another Session.
+  maxSecondaryRuntimes: 4,
+  maxIdleSecondaryRuntimes: 4,
   createRpc: (cwd) => new PiRpcClient({ cwd }),
   sessions: new SessionIndex(),
   resources: new ResourceManager(),
@@ -147,6 +157,7 @@ const app = new PiChatApp({
   applicationRestart: prepareApplicationRestart,
   applicationShutdown: (reason) => setTimeout(() => void shutdown(reason).then(() => process.exit(0)), 0),
   primaryRuntime,
+  buildIdentity,
 });
 const server = createHttpServer((request, response) => void app.handle(request, response));
 
@@ -159,7 +170,6 @@ const port = typeof address === "object" && address ? address.port : options.por
 const authority = options.host.includes(":") ? `[${options.host}]:${port}` : `${options.host}:${port}`;
 app.setAllowedHosts([authority]);
 console.log(`[Pi Chat] 已启动：http://${options.host}:${port}`);
-
 type ShutdownReason = "sigint" | "sigterm" | "api-shutdown" | "last-window-close" | "restart-handoff";
 
 let shuttingDown = false;

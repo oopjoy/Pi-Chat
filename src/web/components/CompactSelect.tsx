@@ -28,7 +28,7 @@ export function findCompactSelectTypeaheadIndex(labels: string[], currentIndex: 
   return null;
 }
 
-export function CompactSelect<T extends string>({ value, options, disabled, ariaLabel, title, align = "left", icon, checkPosition = "end", className = "", onChange }: {
+export function CompactSelect<T extends string>({ value, options, disabled, ariaLabel, title, align = "left", icon, checkPosition = "end", className = "", fallbackLabel, onChange }: {
   value: T;
   options: Array<CompactSelectOption<T>>;
   disabled?: boolean;
@@ -38,6 +38,8 @@ export function CompactSelect<T extends string>({ value, options, disabled, aria
   icon?: ReactNode;
   checkPosition?: "start" | "end";
   className?: string;
+  /** Readable current text while an async option inventory has not caught up. */
+  fallbackLabel?: string;
   onChange: (value: T) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -48,8 +50,12 @@ export function CompactSelect<T extends string>({ value, options, disabled, aria
   const typeaheadRef = useRef({ value: "", time: 0 });
   const id = useId();
   const listboxId = `${id}-listbox`;
-  const selectedIndex = Math.max(0, options.findIndex((option) => option.value === value));
-  const selected = options[selectedIndex];
+  const matchedSelectedIndex = options.findIndex(
+    (option) => option.value === value,
+  );
+  const selectedIndex = Math.max(0, matchedSelectedIndex);
+  const selected =
+    matchedSelectedIndex >= 0 ? options[matchedSelectedIndex] : undefined;
   const activeOptionId = open && options[activeIndex] ? `${id}-option-${activeIndex}` : undefined;
 
   const focusTrigger = () => requestAnimationFrame(() => triggerRef.current?.focus());
@@ -137,7 +143,7 @@ export function CompactSelect<T extends string>({ value, options, disabled, aria
   return <div className={`compact-select ${className}`} ref={rootRef} title={title}>
     <button ref={triggerRef} type="button" className="compact-select-trigger" disabled={disabled} aria-label={ariaLabel} aria-haspopup="listbox" aria-expanded={open} aria-controls={open ? listboxId : undefined} onClick={() => open ? setOpen(false) : openListbox()} onKeyDown={handleTriggerKeyDown}>
       {icon}
-      <span>{selected?.label || value}</span>
+      <span>{selected?.label || fallbackLabel || value}</span>
       <i className="compact-select-chevron" aria-hidden="true" />
     </button>
     {open && <div ref={listboxRef} id={listboxId} className={`compact-select-popover is-${align}`} role="listbox" tabIndex={0} aria-label={ariaLabel} aria-activedescendant={activeOptionId} onKeyDown={handleListboxKeyDown}>

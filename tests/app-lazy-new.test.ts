@@ -42,6 +42,10 @@ function installDom() {
     }),
     configurable: true,
   });
+  Object.defineProperty(dom.window.document, "hasFocus", {
+    value: () => true,
+    configurable: true,
+  });
   Object.defineProperty(dom.window.HTMLElement.prototype, "scrollTo", {
     value() {},
     configurable: true,
@@ -169,6 +173,8 @@ test("foreground presence renews on ready, visible lifecycle events, stays quiet
   const { App } = await import("../src/web/App");
   const originals = { ...api };
   let renewals = 0;
+  let relinquishments = 0;
+  let closeSignals = 0;
   Object.assign(api, {
     bootstrap: async () => bootstrap,
     eventsUrl: () => "/api/events",
@@ -176,6 +182,14 @@ test("foreground presence renews on ready, visible lifecycle events, stays quiet
     renewPresence: async () => {
       renewals += 1;
       return { present: true as const };
+    },
+    relinquishPresence: async () => {
+      relinquishments += 1;
+      return { present: false as const };
+    },
+    signalWindowClose: () => {
+      closeSignals += 1;
+      return true;
     },
   });
   const root = createRoot(dom.window.document.querySelector("#root")!);
@@ -196,6 +210,28 @@ test("foreground presence renews on ready, visible lifecycle events, stays quiet
       dom.window.dispatchEvent(new dom.window.Event("focus")),
     );
     assert.ok(renewals > beforeFocus, "focus renews presence");
+    Object.defineProperty(dom.window.document, "hasFocus", {
+      value: () => false,
+      configurable: true,
+    });
+    const beforeBlur = renewals;
+    await act(async () =>
+      dom.window.dispatchEvent(new dom.window.Event("blur")),
+    );
+    assert.equal(relinquishments, 0, "ordinary blur pauses renewal without immediately releasing foreground control");
+    assert.equal(closeSignals, 0, "blur must not declare the browser window closed");
+    await act(async () =>
+      dom.window.dispatchEvent(new dom.window.Event("focus")),
+    );
+    assert.equal(renewals, beforeBlur, "focus without document focus cannot renew foreground presence");
+    Object.defineProperty(dom.window.document, "hasFocus", {
+      value: () => true,
+      configurable: true,
+    });
+    await act(async () =>
+      dom.window.dispatchEvent(new dom.window.Event("focus")),
+    );
+    assert.ok(renewals > beforeBlur, "a genuinely focused renderer renews presence");
     const sourcesBeforeFailedRenewal = FakeEventSource.instances.length;
     Object.assign(api, {
       renewPresence: async () => {
@@ -241,6 +277,105 @@ test("foreground presence renews on ready, visible lifecycle events, stays quiet
       dom.window.dispatchEvent(new dom.window.Event("pageshow")),
     );
     assert.ok(renewals > beforeHidden, "pageshow renews presence");
+    await act(async () =>
+      dom.window.dispatchEvent(new dom.window.PageTransitionEvent("pagehide", { persisted: false })),
+    );
+    assert.equal(closeSignals, 0, "pagehide can mean PWA backgrounding and must not declare a window closed");
+    await act(async () =>
+      dom.window.dispatchEvent(new dom.window.Event("unload")),
+    );
+    assert.equal(closeSignals, 1, "a real renderer unload declares the window closed");
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a transient empty model inventory never leaks the Composer's internal model key", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const selected = {
+    provider: "xwill",
+    id: "gpt-5.6-sol",
+    name: "gpt-5.6-sol",
+    input: ["text"],
+    reasoning: true,
+  };
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, model: selected },
+      models: [],
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const trigger = dom.window.document.querySelector<HTMLButtonElement>(
+      ".composer-model-select .compact-select-trigger",
+    )!;
+    assert.equal(trigger.textContent?.trim(), "gpt-5.6-sol");
+    assert.doesNotMatch(trigger.textContent || "", /xwill|\u0000/);
+    assert.equal(trigger.disabled, true, "selection stays disabled until its inventory has arrived");
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("Primary startup disables cached model choices until Runtime readiness", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const cached = { provider: "cached", id: "ready-later", name: "Ready later", reasoning: true };
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      models: [cached],
+      primaryRuntime: { status: "starting" as const, generation: 1 },
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const model = dom.window.document.querySelector<HTMLButtonElement>(
+      ".composer-model-select .compact-select-trigger",
+    )!;
+    assert.equal(model.disabled, true, "Primary settings wait for readiness even with a cached catalogue");
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("system Gate selector remains visible when startup command inventory is empty", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  Object.assign(api, {
+    bootstrap: async () => ({ ...bootstrap, commands: [], gateMode: "strict" as const }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const gate = dom.window.document.querySelector<HTMLButtonElement>(
+      ".composer .gate-control .compact-select-trigger",
+    );
+    assert.ok(gate, "the verified system Gate must not depend on get_commands()");
+    assert.equal(gate.textContent?.trim(), "严格");
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);
@@ -351,7 +486,338 @@ test("conversation controls live in the composer while settings moves to the top
   }
 });
 
-test("focusing a cold conversation does not start Pi before the first send", async () => {
+test("ChatInput keeps an unsent draft and image attachment across Session navigation", async () => {
+  const { dom } = installDom();
+  Object.assign(globalThis, {
+    FileReader: dom.window.FileReader,
+    File: dom.window.File,
+  });
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const secondId = "draft-preservation-123";
+  const imageModel = {
+    ...bootstrap.state.model!,
+    input: ["text", "image"],
+  };
+  const secondView: SessionViewData = {
+    ...draftView,
+    session: {
+      ...draftView.session,
+      id: secondId,
+      sessionId: "draft-preservation",
+      name: "Draft preservation",
+      active: false,
+      writable: false,
+    },
+    state: { ...draftView.state, model: imageModel, sessionId: "draft-preservation" },
+    runtimeStatus: "view-only",
+    isActive: false,
+  };
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, model: imageModel },
+      models: [imageModel],
+      sessions: [...bootstrap.sessions, secondView.session],
+      sessionsTotal: 2,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async (id: string) => ({ viewing: id }),
+    viewSession: async (id: string) => id === secondId ? secondView : draftView,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "keep this unsent draft");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "keep this unsent draft" }));
+      dom.window.document.querySelector<HTMLButtonElement>(".attachment-button")!.click();
+    });
+    await act(async () => {
+      [...dom.window.document.querySelectorAll<HTMLButtonElement>(".attachment-menu [role='menuitem']")]
+        .find((button) => button.textContent?.includes("图片"))!
+        .click();
+      const fileInput = dom.window.document.querySelector<HTMLInputElement>("input[type='file']")!;
+      Object.defineProperty(fileInput, "files", {
+        configurable: true,
+        value: [new dom.window.File(["image"], "keep.png", { type: "image/png" })],
+      });
+      fileInput.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+      await new Promise((resolve) => dom.window.setTimeout(resolve, 0));
+    });
+    assert.equal(textarea.value, "keep this unsent draft");
+    assert.ok(dom.window.document.querySelector(".image-preview img[alt='keep.png']"));
+    const sessionButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
+      .find((button) => button.textContent?.includes("Draft preservation"))!;
+    await act(async () => sessionButton.click());
+    await act(async () =>
+      [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
+        .find((button) => button.textContent?.includes("Active"))!
+        .click(),
+    );
+    const afterNavigation = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    assert.equal(afterNavigation, textarea, "the unkeyed ChatInput must not remount");
+    assert.equal(afterNavigation.value, "keep this unsent draft");
+    assert.ok(dom.window.document.querySelector(".image-preview img[alt='keep.png']"));
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("loading earlier history is isolated per Session across a pane switch", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const secondId = "11111111111111111111";
+  const summaryB = {
+    ...bootstrap.sessions[0],
+    id: secondId,
+    sessionId: "second",
+    name: "History B",
+    active: false,
+  };
+  const recent = (label: string): SessionViewData => ({
+    ...draftView,
+    session: label === "A" ? bootstrap.sessions[0] : summaryB,
+    state: { ...bootstrap.state, sessionId: label.toLowerCase() },
+    messages: [{ role: "user", content: `${label} recent` }],
+    messageTotal: 40,
+    turnTotal: 20,
+    visibleTurnCount: 10,
+    messagesTruncated: true,
+    isActive: label === "A",
+    runtimeStatus: label === "A" ? "active" : "view-only",
+  });
+  const expanded = (label: string): SessionViewData => ({
+    ...recent(label),
+    messages: [
+      { role: "user", content: `${label} older` },
+      { role: "user", content: `${label} recent` },
+    ],
+    visibleTurnCount: 20,
+    messagesTruncated: false,
+  });
+  let resolveA!: (view: SessionViewData) => void;
+  let resolveB!: (view: SessionViewData) => void;
+  const earlierA = new Promise<SessionViewData>((resolve) => { resolveA = resolve; });
+  const earlierB = new Promise<SessionViewData>((resolve) => { resolveB = resolve; });
+  const earlierCalls: string[] = [];
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      messages: recent("A").messages,
+      messageTotal: 40,
+      turnTotal: 20,
+      visibleTurnCount: 10,
+      messagesTruncated: true,
+      sessions: [bootstrap.sessions[0], summaryB],
+      sessionsTotal: 2,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async (id: string) => ({ viewing: id }),
+    viewSession: async (id: string, turns?: number) => {
+      if (!turns) return id === secondId ? recent("B") : recent("A");
+      earlierCalls.push(id);
+      return id === secondId ? earlierB : earlierA;
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const loadButton = () => [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => /加载更早|正在加载/.test(button.textContent || ""))!;
+    await act(async () => {
+      loadButton().click();
+      await Promise.resolve();
+    });
+    assert.deepEqual(earlierCalls, [activeId]);
+
+    const secondButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
+      .find((button) => button.textContent?.includes("History B"))!;
+    await act(async () => secondButton.click());
+    assert.match(dom.window.document.body.textContent || "", /B recent/);
+    await act(async () => {
+      loadButton().click();
+      await Promise.resolve();
+    });
+    assert.deepEqual(earlierCalls, [activeId, secondId], "B starts its own history request while A is still pending");
+
+    await act(async () => {
+      resolveA(expanded("A"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(loadButton().textContent, "正在加载…", "A completion cannot clear B's loading lease");
+    assert.doesNotMatch(dom.window.document.body.textContent || "", /A older/, "A's late page cannot replace B");
+
+    await act(async () => {
+      resolveB(expanded("B"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.match(dom.window.document.body.textContent || "", /B older/);
+    assert.doesNotMatch(dom.window.document.body.textContent || "", /正在加载…/);
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("an old history request cannot affect a later visit to the same Session", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const secondId = "22222222222222222222";
+  const summaryB = { ...bootstrap.sessions[0], id: secondId, sessionId: "second", name: "History B", active: false };
+  const view = (id: string, content: string, truncated = true): SessionViewData => ({
+    ...draftView,
+    session: id === activeId ? bootstrap.sessions[0] : summaryB,
+    state: { ...bootstrap.state, sessionId: id },
+    messages: [{ role: "user", content }],
+    messageTotal: 40,
+    turnTotal: 20,
+    visibleTurnCount: truncated ? 10 : 20,
+    messagesTruncated: truncated,
+    isActive: id === activeId,
+    runtimeStatus: id === activeId ? "active" : "view-only",
+  });
+  let resolveOldA!: (value: SessionViewData) => void;
+  let resolveNewA!: (value: SessionViewData) => void;
+  const oldA = new Promise<SessionViewData>((resolve) => { resolveOldA = resolve; });
+  const newA = new Promise<SessionViewData>((resolve) => { resolveNewA = resolve; });
+  let aEarlierCalls = 0;
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      messages: view(activeId, "A recent").messages,
+      messageTotal: 40,
+      turnTotal: 20,
+      visibleTurnCount: 10,
+      messagesTruncated: true,
+      sessions: [bootstrap.sessions[0], summaryB],
+      sessionsTotal: 2,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async (id: string) => ({ viewing: id }),
+    viewSession: async (id: string, turns?: number) => {
+      if (id === activeId && turns === 20) {
+        aEarlierCalls += 1;
+        return aEarlierCalls === 1 ? oldA : newA;
+      }
+      return id === activeId ? view(activeId, "A recent") : view(secondId, "B recent");
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const loadButton = () => [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => /加载更早|正在加载/.test(button.textContent || ""))!;
+    const sessionButton = (name: string) => [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
+      .find((button) => button.textContent?.includes(name))!;
+    await act(async () => {
+      loadButton().click();
+      await Promise.resolve();
+    });
+    await act(async () => sessionButton("History B").click());
+    await act(async () => sessionButton("Active").click());
+    await act(async () => {
+      loadButton().click();
+      await Promise.resolve();
+    });
+    assert.equal(aEarlierCalls, 2, "the later visit starts a fresh A history request");
+
+    await act(async () => {
+      resolveOldA(view(activeId, "A stale older", false));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(loadButton().textContent, "正在加载…", "the old visit cannot clear the new visit's lease");
+    assert.doesNotMatch(dom.window.document.body.textContent || "", /A stale older/);
+
+    await act(async () => {
+      resolveNewA(view(activeId, "A current older", false));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.match(dom.window.document.body.textContent || "", /A current older/);
+    assert.doesNotMatch(dom.window.document.body.textContent || "", /正在加载…/);
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("remembered cold history paints before global bootstrap finishes while mutations stay disabled", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const coldId = "abcdef0123456789abcd";
+  dom.window.history.replaceState(null, "", `/?session=${coldId}`);
+  const cold: SessionViewData = {
+    ...draftView,
+    session: { ...draftView.session, id: coldId, sessionId: "remembered-cold", name: "Remembered cold", messageCount: 2, active: false, writable: false },
+    messages: [{ role: "user", content: "remembered question" }, { role: "assistant", content: "remembered answer" }],
+    messageTotal: 2,
+    runtimeStatus: "view-only",
+    isActive: false,
+    viewSource: "cold-jsonl",
+  };
+  let resolveBootstrap!: (value: BootstrapData) => void;
+  const pendingBootstrap = new Promise<BootstrapData>((resolve) => { resolveBootstrap = resolve; });
+  let coldViews = 0;
+  Object.assign(api, {
+    handshake: async () => ({
+      requestToken: "test-token",
+      buildIdentity: { schemaVersion: 1, packageVersion: "test", revision: "test", fingerprint: "0".repeat(64), builtAt: "test" },
+    }),
+    bootstrap: async () => pendingBootstrap,
+    eventsUrl: () => "/api/events",
+    viewSession: async (id: string) => {
+      assert.equal(id, coldId);
+      coldViews += 1;
+      return cold;
+    },
+    markSessionViewed: async () => ({ viewing: coldId }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => {
+      root.render(createElement(App));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.match(dom.window.document.body.textContent || "", /remembered answer/);
+    assert.equal(coldViews, 1);
+    assert.equal(dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")?.disabled, true, "history may paint early but mutations wait for bootstrap identity/readiness");
+
+    await act(async () => {
+      resolveBootstrap({ ...bootstrap, sessions: [...bootstrap.sessions, cold.session], sessionsTotal: 2 });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.match(dom.window.document.body.textContent || "", /remembered answer/);
+    assert.equal(coldViews, 1, "bootstrap reuses the in-flight remembered view instead of reading it twice");
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("opening a cold conversation paints JSONL without starting a dedicated Runtime", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
@@ -373,6 +839,7 @@ test("focusing a cold conversation does not start Pi before the first send", asy
     isActive: false,
   };
   let activations = 0;
+  let coldViews = 0;
   let resolveActivation!: (view: SessionViewData) => void;
   const activation = new Promise<SessionViewData>((resolve) => {
     resolveActivation = resolve;
@@ -385,10 +852,23 @@ test("focusing a cold conversation does not start Pi before the first send", asy
     }),
     eventsUrl: () => "/api/events",
     markSessionViewed: async () => ({ viewing: activeId }),
-    viewSession: async (id: string) => (id === coldId ? cold : draftView),
-    activateSession: async () => {
+    viewSession: async (id: string) => {
+      if (id === coldId) {
+        coldViews += 1;
+        return cold;
+      }
+      return {
+        ...draftView,
+        session: bootstrap.sessions[0],
+        state: bootstrap.state,
+        isActive: true,
+        runtimeStatus: "active" as const,
+      };
+    },
+    warmSession: async () => {
       activations += 1;
-      return activation;
+      await activation;
+      return { sessionId: coldId, state: cold.state, gateMode: "strict" as const };
     },
     prompt: async () => ({ accepted: true, queued: false }),
   });
@@ -402,6 +882,18 @@ test("focusing a cold conversation does not start Pi before the first send", asy
     await act(async () =>
       coldRow.querySelector<HTMLButtonElement>(".session-item")?.click(),
     );
+    assert.equal(coldViews, 1);
+    const activeRow = [
+      ...dom.window.document.querySelectorAll<HTMLElement>(".session-row"),
+    ].find((row) => row.textContent?.includes("Active"));
+    assert.ok(activeRow);
+    await act(async () =>
+      activeRow.querySelector<HTMLButtonElement>(".session-item")?.click(),
+    );
+    await act(async () =>
+      coldRow.querySelector<HTMLButtonElement>(".session-item")?.click(),
+    );
+    assert.equal(coldViews, 1, "a fresh stable cold pane reopens from data cache without another JSONL request");
     const input = dom.window.document.querySelector<HTMLTextAreaElement>(
       "textarea[aria-label='消息输入']",
     )!;
@@ -409,7 +901,7 @@ test("focusing a cold conversation does not start Pi before the first send", asy
     assert.equal(
       activations,
       0,
-      "typing intent must not prewarm a cold Runtime",
+      "passive JSONL browsing and focus must not warm a dedicated Runtime",
     );
 
     await act(async () => {
@@ -480,6 +972,8 @@ test("a background completed reply becomes green until this browser opens the co
     messageTotal: 2,
     turnTotal: 1,
   };
+  let resolveBackgroundView!: (view: SessionViewData) => void;
+  const pendingBackgroundView = new Promise<SessionViewData>((resolve) => { resolveBackgroundView = resolve; });
   Object.assign(api, {
     bootstrap: async () => ({
       ...bootstrap,
@@ -493,7 +987,7 @@ test("a background completed reply becomes green until this browser opens the co
     eventsUrl: () => "/api/events",
     markSessionViewed: async () => ({ viewing: activeId }),
     viewSession: async (id: string) =>
-      id === backgroundId ? background : draftView,
+      id === backgroundId ? pendingBackgroundView : draftView,
   });
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {
@@ -524,10 +1018,91 @@ test("a background completed reply becomes green until this browser opens the co
       backgroundRow.querySelector<HTMLButtonElement>(".session-item")?.click(),
     );
     assert.equal(
-      backgroundRow
-        .querySelector(".session-status")
-        ?.classList.contains("is-unread"),
+      backgroundRow.querySelector(".session-status")?.classList.contains("is-unread"),
       false,
+      "selection consumes the green marker immediately",
+    );
+    assert.equal(
+      backgroundRow.querySelector(".session-status")?.classList.contains("is-running"),
+      false,
+      "a delayed stale view must not replace green with a blue running ring",
+    );
+    await act(async () => resolveBackgroundView({
+      ...background,
+      session: { ...background.session, running: true },
+      state: { ...background.state, isStreaming: true },
+      isStreaming: true,
+    }));
+    const openedRow = [...dom.window.document.querySelectorAll<HTMLElement>(".session-row")]
+      .find((row) => row.textContent?.includes("Background"));
+    assert.ok(openedRow);
+    assert.equal(openedRow.querySelector(".session-status")?.classList.contains("is-running"), false);
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("opening an unread conversation preserves a newer running state", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const backgroundId = "unread-running-123456";
+  const background: SessionViewData = {
+    ...draftView,
+    session: {
+      ...draftView.session,
+      id: backgroundId,
+      sessionId: "unread-running",
+      name: "Unread then running",
+      messageCount: 2,
+      active: true,
+      writable: true,
+    },
+    messages: [
+      { role: "user", content: "question" },
+      { role: "assistant", content: "completed reply" },
+    ],
+    messageTotal: 2,
+    turnTotal: 1,
+  };
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      sessions: [...bootstrap.sessions, background.session],
+      sessionsTotal: 2,
+      activeSessionIds: [activeId, backgroundId],
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    viewSession: async (id: string) => id === backgroundId ? background : draftView,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.emitPi({
+        type: "message_end",
+        piChatSessionId: backgroundId,
+        message: { role: "assistant", content: "completed reply" },
+      });
+      source.emitPi({ type: "agent_settled", piChatSessionId: backgroundId });
+      source.emitPi({ type: "agent_start", piChatSessionId: backgroundId });
+    });
+    const row = [...dom.window.document.querySelectorAll<HTMLElement>(".session-row")]
+      .find((candidate) => candidate.textContent?.includes("Unread then running"));
+    assert.ok(row);
+    assert.equal(row.querySelector(".session-status")?.classList.contains("is-running"), true);
+
+    await act(async () => row.querySelector<HTMLButtonElement>(".session-item")?.click());
+    assert.equal(row.querySelector(".session-status")?.classList.contains("is-unread"), false);
+    assert.equal(
+      row.querySelector(".session-status")?.classList.contains("is-running"),
+      true,
+      "selection must not overwrite a newer agent_start with settled=false",
     );
   } finally {
     await act(async () => root.unmount());
@@ -821,6 +1396,182 @@ test("the next turn carries the Gate mode shown after refresh", async () => {
         .click(),
     );
     assert.deepEqual(promptCalls, [["next turn", [], activeId, "strict"]]);
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("an accepted prompt advances the sidebar turn count before stale metadata catches up", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const existingMessages = [
+    { role: "user" as const, content: "first" },
+    { role: "assistant" as const, content: "reply" },
+    { role: "user" as const, content: "second" },
+  ];
+  const staleSession = { ...bootstrap.sessions[0], turnCount: 2 };
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      sessions: [staleSession],
+      messages: existingMessages,
+      messageTotal: existingMessages.length,
+      turnTotal: 2,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    prompt: async () => ({ accepted: true, queued: false }),
+    sessions: async () => ({ sessions: [staleSession], total: 1 }),
+    viewSession: async () => ({
+      ...draftView,
+      session: staleSession,
+      state: { ...bootstrap.state, isStreaming: false },
+      messages: existingMessages,
+      messageTotal: existingMessages.length,
+      turnTotal: 2,
+      isActive: true,
+      runtimeStatus: "active",
+      isStreaming: false,
+    }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "third");
+      textarea.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: "third",
+        }),
+      );
+    });
+    await act(async () =>
+      dom.window.document
+        .querySelector<HTMLButtonElement>(".send-button")!
+        .click(),
+    );
+    assert.match(
+      dom.window.document.querySelector<HTMLButtonElement>(".session-item")?.title || "",
+      /3 turns/,
+      "the accepted local turn is already known before SessionIndex rescans JSONL",
+    );
+
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.emitPi({
+        type: "pi_chat_sessions_changed",
+        action: "prompted",
+        sessionId: activeId,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 220));
+    });
+    assert.match(
+      dom.window.document.querySelector<HTMLButtonElement>(".session-item")?.title || "",
+      /3 turns/,
+      "an older sidebar snapshot must not roll the local turn count back",
+    );
+
+    await act(async () => {
+      source.emitPi({ type: "agent_settled", piChatSessionId: activeId });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.match(
+      dom.window.document.querySelector<HTMLButtonElement>(".session-item")?.title || "",
+      /3 turns/,
+      "an older Session view must not bypass the local turn-count watermark",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("cancelling an admitted queued prompt rolls the sidebar turn count back", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const queuedItem = {
+    id: "00000000-0000-4000-8000-000000000002",
+    message: "cancel this turn",
+    imageCount: 0,
+    createdAt: 3,
+  };
+  const existingMessages = [
+    { role: "user" as const, content: "first" },
+    { role: "assistant" as const, content: "reply" },
+    { role: "user" as const, content: "second" },
+  ];
+  const session = { ...bootstrap.sessions[0], turnCount: 2 };
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      sessions: [session],
+      messages: existingMessages,
+      messageTotal: existingMessages.length,
+      turnTotal: 2,
+      queuePaused: true,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    prompt: async () => ({
+      accepted: true,
+      queued: true,
+      id: queuedItem.id,
+      queue: [queuedItem],
+    }),
+    cancelQueued: async () => ({ queue: [], paused: false }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, queuedItem.message);
+      textarea.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: queuedItem.message,
+        }),
+      );
+    });
+    await act(async () =>
+      dom.window.document
+        .querySelector<HTMLButtonElement>(".queue-submit-button")!
+        .click(),
+    );
+    assert.match(dom.window.document.querySelector<HTMLButtonElement>(".session-item")?.title || "", /3 turns/);
+
+    await act(async () =>
+      dom.window.document
+        .querySelector<HTMLButtonElement>(".prompt-queue article button")!
+        .click(),
+    );
+    assert.match(
+      dom.window.document.querySelector<HTMLButtonElement>(".session-item")?.title || "",
+      /2 turns/,
+      "a cancelled queue item is no longer an accepted user turn",
+    );
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);
@@ -1127,6 +1878,7 @@ test("agent settlement clears a completed tool status left after compaction", as
       source.emitPi({
         type: "tool_execution_end",
         piChatSessionId: activeId,
+        piChatRunGeneration: 1,
         toolName: "bash",
         isError: false,
       }),
@@ -1134,7 +1886,7 @@ test("agent settlement clears a completed tool status left after compaction", as
     assert.match(
       dom.window.document.querySelector(".agent-status.is-compacting")
         ?.textContent || "",
-      /bash 已完成/,
+      /bash 已完成，Pi 正在继续…/,
     );
     assert.ok(
       dom.window.document.querySelector(
@@ -1143,7 +1895,7 @@ test("agent settlement clears a completed tool status left after compaction", as
     );
 
     await act(async () =>
-      source.emitPi({ type: "agent_settled", piChatSessionId: activeId }),
+      source.emitPi({ type: "agent_settled", piChatSessionId: activeId, piChatRunGeneration: 1 }),
     );
     assert.equal(
       dom.window.document.querySelector(".agent-status"),
@@ -1161,6 +1913,20 @@ test("agent settlement clears a completed tool status left after compaction", as
         "textarea[aria-label='消息输入']",
       )?.disabled,
       false,
+    );
+    await act(async () => {
+      source.emitPi({ type: "tool_execution_end", piChatSessionId: activeId, piChatRunGeneration: 1, toolName: "bash", isError: false });
+      source.emitPi({ type: "pi_chat_session_status", piChatSessionId: activeId, piChatRunGeneration: 1, activity: { execution: "running", awaitingConfirmation: false } });
+    });
+    assert.equal(
+      dom.window.document.querySelector(".agent-status"),
+      null,
+      "late tool/status events from a settled generation must not restore a spinner",
+    );
+    assert.equal(
+      dom.window.document.querySelector(".session-status.is-running"),
+      null,
+      "late running activity must not restore the sidebar spinner",
     );
   } finally {
     await act(async () => root.unmount());
@@ -1230,6 +1996,713 @@ test("extension resolution invalidates an older Session view before it can reope
       dom.window.document.querySelector(".extension-dialog"),
       null,
       "the older view must not restore a resolved confirmation",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a late cold activation from A cannot overwrite the Session B composer", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const coldId = "aaaaaaaaaaaaaaaaaaaa";
+  const secondId = "bbbbbbbbbbbbbbbbbbbb";
+  const modelA = { id: "model-a", name: "Model A", provider: "test", input: ["text"], reasoning: true };
+  const modelB = { id: "model-b", name: "Model B", provider: "test", input: ["text"], reasoning: true };
+  const summaryA = { ...bootstrap.sessions[0], id: coldId, sessionId: "cold-a", name: "Cold A", active: false, writable: false };
+  const summaryB = { ...bootstrap.sessions[0], id: secondId, sessionId: "session-b", name: "Session B", active: false };
+  const viewA: SessionViewData = {
+    ...draftView,
+    session: summaryA,
+    state: { ...bootstrap.state, model: modelA, thinkingLevel: "high", sessionId: "cold-a" },
+    runtimeStatus: "view-only",
+    isActive: false,
+  };
+  const activatedA: SessionViewData = { ...viewA, session: { ...summaryA, active: true, writable: true }, runtimeStatus: "active", isActive: true };
+  const viewB: SessionViewData = {
+    ...draftView,
+    session: summaryB,
+    state: { ...bootstrap.state, model: modelB, thinkingLevel: "low", sessionId: "session-b" },
+    runtimeStatus: "view-only",
+    isActive: false,
+  };
+  let resolveActivation!: (view: SessionViewData) => void;
+  const pendingActivation = new Promise<SessionViewData>((resolve) => { resolveActivation = resolve; });
+  const promptTargets: string[] = [];
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      models: [modelA, modelB],
+      sessions: [bootstrap.sessions[0], summaryA, summaryB],
+      sessionsTotal: 3,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async (id: string) => ({ viewing: id }),
+    viewSession: async (id: string) => id === coldId ? viewA : id === secondId ? viewB : draftView,
+    warmSession: async (id: string) => {
+      if (id === secondId) return { sessionId: id, state: viewB.state, gateMode: "strict" as const };
+      const view = await pendingActivation;
+      return { sessionId: view.session.id, state: view.state, gateMode: "strict" as const };
+    },
+    prompt: async (_message: string, _images: unknown[], sessionId: string) => {
+      promptTargets.push(sessionId);
+      return { accepted: true, queued: false };
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const sessionButton = (name: string) => [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
+      .find((button) => button.textContent?.includes(name))!;
+    await act(async () => sessionButton("Cold A").click());
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "send to cold A");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "send to cold A" }));
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+    });
+    await act(async () => sessionButton("Session B").click());
+    assert.match(dom.window.document.querySelector(".composer-model-select .compact-select-trigger")?.textContent || "", /Model B/);
+    assert.match(dom.window.document.querySelector(".thinking-control .compact-select-trigger")?.textContent || "", /low/);
+
+    await act(async () => {
+      resolveActivation(activatedA);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.deepEqual(promptTargets, [coldId], "the background send still targets A");
+    assert.match(dom.window.document.querySelector(".composer-model-select .compact-select-trigger")?.textContent || "", /Model B/);
+    assert.match(dom.window.document.querySelector(".thinking-control .compact-select-trigger")?.textContent || "", /low/);
+    assert.doesNotMatch(dom.window.document.body.textContent || "", /Pi 已就绪，正在发送消息/);
+    assert.equal(textarea.disabled, false, "A activation cannot lock B's composer");
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a stale A Runtime warm cannot overwrite a newer A revisit", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const coldId = "warm-a-12345678901234";
+  const secondId = "warm-b-12345678901234";
+  const modelA = { id: "warm-model-a", name: "Warm Model A", provider: "test", input: ["text"], reasoning: true };
+  const modelB = { id: "warm-model-b", name: "Warm Model B", provider: "test", input: ["text"], reasoning: true };
+  const summaryA = { ...bootstrap.sessions[0], id: coldId, sessionId: "warm-a", name: "Warm A", active: false, writable: false };
+  const summaryB = { ...bootstrap.sessions[0], id: secondId, sessionId: "warm-b", name: "Warm B", active: false, writable: false };
+  const viewA = { ...draftView, session: summaryA, state: { ...bootstrap.state, model: modelA, thinkingLevel: "low", sessionId: "warm-a" }, runtimeStatus: "view-only" as const, isActive: false, historyPending: true };
+  const revisitA = { ...viewA, historyPending: false, state: { ...viewA.state, model: modelB, thinkingLevel: "high" } };
+  const viewB = { ...draftView, session: summaryB, state: { ...bootstrap.state, model: modelB, thinkingLevel: "medium", sessionId: "warm-b" }, runtimeStatus: "view-only" as const, isActive: false };
+  let resolveWarm!: (ready: { sessionId: string; state: typeof viewA.state; gateMode: "strict" }) => void;
+  const pendingWarm = new Promise<{ sessionId: string; state: typeof viewA.state; gateMode: "strict" }>((resolve) => { resolveWarm = resolve; });
+  let viewsOfA = 0;
+  Object.assign(api, {
+    bootstrap: async () => ({ ...bootstrap, models: [modelA, modelB], sessions: [bootstrap.sessions[0], summaryA, summaryB], sessionsTotal: 3 }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async (id: string) => ({ viewing: id }),
+    viewSession: async (id: string) => {
+      if (id === coldId) return ++viewsOfA === 1 ? viewA : revisitA;
+      if (id === secondId) return viewB;
+      return draftView;
+    },
+    warmSession: async () => pendingWarm,
+    prompt: async () => ({ accepted: true, queued: false }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const sessionButton = (name: string) => [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
+      .find((button) => button.textContent?.includes(name))!;
+    await act(async () => sessionButton("Warm A").click());
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "start stale warm");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "start stale warm" }));
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+    });
+    await act(async () => sessionButton("Warm B").click());
+    await act(async () => sessionButton("Warm A").click());
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.match(dom.window.document.querySelector(".composer-model-select .compact-select-trigger")?.textContent || "", /Warm Model B/);
+    assert.match(dom.window.document.querySelector(".thinking-control .compact-select-trigger")?.textContent || "", /high/);
+    await act(async () => {
+      resolveWarm({ sessionId: coldId, state: { ...viewA.state, model: modelA, thinkingLevel: "low" }, gateMode: "strict" });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.match(dom.window.document.querySelector(".composer-model-select .compact-select-trigger")?.textContent || "", /Warm Model B/);
+    assert.match(dom.window.document.querySelector(".thinking-control .compact-select-trigger")?.textContent || "", /high/);
+    assert.equal(
+      dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")?.placeholder,
+      "输入消息，或粘贴、拖入附件",
+      "the returned A pane joins the existing warm and becomes active",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a stale A prompt acknowledgement cannot modify a newer A revisit", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const secondId = "prompt-b-123456789012";
+  const summaryB = {
+    ...bootstrap.sessions[0],
+    id: secondId,
+    sessionId: "prompt-b",
+    name: "Prompt B",
+    active: false,
+    writable: false,
+  };
+  const viewA: SessionViewData = {
+    ...draftView,
+    session: { ...bootstrap.sessions[0], active: true, writable: true },
+    state: { ...bootstrap.state, isStreaming: false },
+    runtimeStatus: "active",
+    isActive: true,
+    queue: [],
+    queuePaused: false,
+  };
+  const viewB: SessionViewData = {
+    ...draftView,
+    session: summaryB,
+    state: { ...bootstrap.state, sessionId: "prompt-b" },
+    runtimeStatus: "view-only",
+    isActive: false,
+  };
+  let resolvePrompt!: (result: { accepted: true; queued: true; id: string; queue: Array<{ id: string; message: string; imageCount: number; createdAt: number }> }) => void;
+  const pendingPrompt = new Promise<{ accepted: true; queued: true; id: string; queue: Array<{ id: string; message: string; imageCount: number; createdAt: number }> }>((resolve) => {
+    resolvePrompt = resolve;
+  });
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      sessions: [bootstrap.sessions[0], summaryB],
+      sessionsTotal: 2,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async (id: string) => ({ viewing: id }),
+    viewSession: async (id: string) => id === secondId ? viewB : viewA,
+    prompt: async () => pendingPrompt,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "old prompt");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "old prompt" }));
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+    });
+    const sessionButton = (name: string) =>
+      [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
+        .find((button) => button.textContent?.includes(name))!;
+    await act(async () => sessionButton("Prompt B").click());
+    await act(async () => sessionButton("Active").click());
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(dom.window.document.querySelector(".prompt-queue"), null);
+    await act(async () => {
+      resolvePrompt({
+        accepted: true,
+        queued: true,
+        id: "old-queue",
+        queue: [{ id: "old-queue", message: "old prompt", imageCount: 0, createdAt: 1 }],
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(
+      dom.window.document.querySelector(".prompt-queue"),
+      null,
+      "a pre-navigation A acknowledgement cannot install its queue in later A",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a stale A prompt failure cannot modify a newer A revisit", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const secondId = "prompt-failure-b-12345";
+  const summaryB = {
+    ...bootstrap.sessions[0],
+    id: secondId,
+    sessionId: "prompt-failure-b",
+    name: "Prompt failure B",
+    active: false,
+    writable: false,
+  };
+  const viewA: SessionViewData = {
+    ...draftView,
+    session: { ...bootstrap.sessions[0], active: true, writable: true },
+    state: { ...bootstrap.state, isStreaming: false },
+    runtimeStatus: "active",
+    isActive: true,
+  };
+  const viewB: SessionViewData = {
+    ...draftView,
+    session: summaryB,
+    state: { ...bootstrap.state, sessionId: "prompt-failure-b" },
+    runtimeStatus: "view-only",
+    isActive: false,
+  };
+  let rejectPrompt!: (cause: Error) => void;
+  const pendingPrompt = new Promise<never>((_resolve, reject) => {
+    rejectPrompt = reject;
+  });
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      sessions: [bootstrap.sessions[0], summaryB],
+      sessionsTotal: 2,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async (id: string) => ({ viewing: id }),
+    viewSession: async (id: string) => id === secondId ? viewB : viewA,
+    prompt: async () => pendingPrompt,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "old failed prompt");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "old failed prompt" }));
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+    });
+    const sessionButton = (name: string) =>
+      [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
+        .find((button) => button.textContent?.includes(name))!;
+    await act(async () => sessionButton("Prompt failure B").click());
+    await act(async () => sessionButton("Active").click());
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      rejectPrompt(new Error("old prompt failed"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.doesNotMatch(
+      dom.window.document.querySelector(".app-toast")?.textContent || "",
+      /old prompt failed/,
+      "an old A failure cannot show an error on a newer A pane",
+    );
+    assert.equal(dom.window.document.querySelector(".prompt-queue"), null);
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a stale A extension failure cannot reopen a newer A pane", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const coldAId = "extension-a-123456789";
+  const secondId = "extension-b-123456789";
+  const summaryA = {
+    ...bootstrap.sessions[0],
+    id: coldAId,
+    sessionId: "extension-a",
+    name: "Extension A",
+    active: false,
+    writable: false,
+  };
+  const summaryB = {
+    ...bootstrap.sessions[0],
+    id: secondId,
+    sessionId: "extension-b",
+    name: "Extension B",
+    active: false,
+    writable: false,
+  };
+  const request = {
+    type: "extension_ui_request",
+    id: "stale-extension",
+    method: "confirm",
+    title: "Old confirmation",
+    piChatSessionId: coldAId,
+  } as const;
+  const viewA: SessionViewData = {
+    ...draftView,
+    session: summaryA,
+    state: { ...bootstrap.state, sessionId: "extension-a" },
+    runtimeStatus: "view-only",
+    isActive: false,
+    pendingExtensionRequest: request,
+  };
+  const viewB: SessionViewData = {
+    ...draftView,
+    session: summaryB,
+    state: { ...bootstrap.state, sessionId: "extension-b" },
+    runtimeStatus: "view-only",
+    isActive: false,
+  };
+  let rejectResponse!: (cause: Error) => void;
+  const pendingResponse = new Promise<never>((_resolve, reject) => {
+    rejectResponse = reject;
+  });
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      sessions: [bootstrap.sessions[0], summaryA, summaryB],
+      sessionsTotal: 3,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async (id: string) => ({ viewing: id }),
+    viewSession: async (id: string) =>
+      id === coldAId ? viewA : id === secondId ? viewB : draftView,
+    respondToExtension: async () => pendingResponse,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const sessionButton = (name: string) =>
+      [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
+        .find((button) => button.textContent?.includes(name))!;
+    await act(async () => sessionButton("Extension A").click());
+    assert.ok(dom.window.document.querySelector(".extension-dialog"));
+    await act(async () =>
+      [...dom.window.document.querySelectorAll<HTMLButtonElement>(".extension-dialog button")]
+        .find((button) => button.textContent === "确定")!.click(),
+    );
+    await act(async () => sessionButton("Extension B").click());
+    await act(async () => sessionButton("Extension A").click());
+    assert.equal(
+      dom.window.document.querySelector(".extension-dialog"),
+      null,
+      "the newer A cache projection has no pending confirmation",
+    );
+    await act(async () => {
+      rejectResponse(new Error("response lost"));
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(
+      dom.window.document.querySelector(".extension-dialog"),
+      null,
+      "the old A response cannot restore its confirmation after A → B → A",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a stale A reconcile rejection cannot retry or show an error on a newer A pane", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const secondId = "reconcile-b-123456789";
+  const summaryB = { ...bootstrap.sessions[0], id: secondId, sessionId: "reconcile-b", name: "Reconcile B", active: false, writable: false };
+  const streamingA: SessionViewData = {
+    ...draftView,
+    session: { ...bootstrap.sessions[0], active: true, writable: true },
+    state: { ...bootstrap.state, isStreaming: true },
+    runtimeStatus: "active",
+    isActive: true,
+    isStreaming: true,
+    reconcilePending: true,
+  };
+  const viewB: SessionViewData = { ...draftView, session: summaryB, state: { ...bootstrap.state, sessionId: "reconcile-b" }, runtimeStatus: "view-only", isActive: false };
+  let rejectOldReconcile!: (cause: Error) => void;
+  const pendingOldReconcile = new Promise<SessionViewData>((_resolve, reject) => { rejectOldReconcile = reject; });
+  let activeReads = 0;
+  Object.assign(api, {
+    bootstrap: async () => ({ ...bootstrap, sessions: [bootstrap.sessions[0], summaryB], sessionsTotal: 2 }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async (id: string) => ({ viewing: id }),
+    viewSession: async (id: string) => {
+      if (id === secondId) return viewB;
+      activeReads += 1;
+      return activeReads === 2 ? pendingOldReconcile : streamingA;
+    },
+    prompt: async () => ({ accepted: true, queued: false, isStreaming: true }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "start reconcile");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "start reconcile" }));
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+    });
+    const sessionButton = (name: string) =>
+      [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
+        .find((button) => button.textContent?.includes(name))!;
+    await act(async () => sessionButton("Reconcile B").click());
+    await act(async () => sessionButton("Active").click());
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 4_100)));
+    assert.equal(activeReads, 2, "the acknowledged A prompt starts one reconcile request after the initial read");
+    await act(async () => sessionButton("Reconcile B").click());
+    await act(async () => sessionButton("Active").click());
+    await act(async () => {
+      rejectOldReconcile(new Error("stale reconcile failed"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.doesNotMatch(
+      dom.window.document.querySelector(".app-toast")?.textContent || "",
+      /stale reconcile failed/,
+    );
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 80)));
+    assert.equal(activeReads, 3, "the stale rejection must not schedule another reconcile retry");
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a stale Gate auto-allow result cannot show feedback after A → B → A", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const secondId = "gate-feedback-b-12345";
+  const summaryB = {
+    ...bootstrap.sessions[0],
+    id: secondId,
+    sessionId: "gate-feedback-b",
+    name: "Gate feedback B",
+    active: false,
+    writable: false,
+  };
+  const viewB: SessionViewData = {
+    ...draftView,
+    session: summaryB,
+    state: { ...bootstrap.state, sessionId: "gate-feedback-b" },
+    runtimeStatus: "view-only",
+    isActive: false,
+  };
+  let resolveResponse!: () => void;
+  const pendingResponse = new Promise<void>((resolve) => { resolveResponse = resolve; });
+  Object.assign(api, {
+    bootstrap: async () => ({ ...bootstrap, sessions: [bootstrap.sessions[0], summaryB], sessionsTotal: 2 }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async (id: string) => ({ viewing: id }),
+    viewSession: async (id: string) => id === secondId ? viewB : draftView,
+    respondToExtension: async () => pendingResponse,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => source.emitPi({ type: "pi_chat_gate_mode_changed", piChatSessionId: activeId, mode: "open" }));
+    await act(async () => source.emitPi({
+      type: "extension_ui_request",
+      piChatSessionId: activeId,
+      id: "auto-allow-stale",
+      method: "select",
+      title: "Pi Chat Gate: bash\necho stale",
+      options: ["allow", "block"],
+    }));
+    const sessionButton = (name: string) =>
+      [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
+        .find((button) => button.textContent?.includes(name))!;
+    await act(async () => sessionButton("Gate feedback B").click());
+    await act(async () => sessionButton("Active").click());
+    await act(async () => {
+      resolveResponse();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.doesNotMatch(
+      dom.window.document.querySelector(".app-toast")?.textContent || "",
+      /已按放行模式自动允许/,
+      "the old A success toast cannot appear on a newer A pane",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a stale Gate auto-allow failure cannot show an error after A → B", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const secondId = "gate-feedback-failure-b";
+  const summaryB = { ...bootstrap.sessions[0], id: secondId, sessionId: "gate-feedback-failure-b", name: "Gate failure B", active: false, writable: false };
+  const viewB: SessionViewData = { ...draftView, session: summaryB, state: { ...bootstrap.state, sessionId: "gate-feedback-failure-b" }, runtimeStatus: "view-only", isActive: false };
+  let rejectResponse!: (cause: Error) => void;
+  const pendingResponse = new Promise<never>((_resolve, reject) => { rejectResponse = reject; });
+  Object.assign(api, {
+    bootstrap: async () => ({ ...bootstrap, sessions: [bootstrap.sessions[0], summaryB], sessionsTotal: 2 }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async (id: string) => ({ viewing: id }),
+    viewSession: async (id: string) => id === secondId ? viewB : draftView,
+    respondToExtension: async () => pendingResponse,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => source.emitPi({ type: "pi_chat_gate_mode_changed", piChatSessionId: activeId, mode: "open" }));
+    await act(async () => source.emitPi({
+      type: "extension_ui_request", piChatSessionId: activeId, id: "auto-allow-stale-failure", method: "select",
+      title: "Pi Chat Gate: bash\necho stale", options: ["allow", "block"],
+    }));
+    await act(async () =>
+      [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
+        .find((button) => button.textContent?.includes("Gate failure B"))!.click(),
+    );
+    await act(async () => {
+      rejectResponse(new Error("stale auto-allow failed"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.doesNotMatch(
+      dom.window.document.querySelector(".app-toast")?.textContent || "",
+      /stale auto-allow failed/,
+      "the old A failure toast cannot appear on B",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a stale A takeover cannot overwrite a newer A revisit or control SSE", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const secondId = "takeover-b-1234567890";
+  const summaryA = {
+    ...bootstrap.sessions[0],
+    controlOwner: "old-owner",
+    controlledByThisWindow: false,
+  };
+  const summaryB = {
+    ...bootstrap.sessions[0],
+    id: secondId,
+    sessionId: "takeover-b",
+    name: "Takeover B",
+    active: false,
+    writable: false,
+  };
+  const revisitedA: SessionViewData = {
+    ...draftView,
+    session: {
+      ...summaryA,
+      controlOwner: "new-owner",
+      controlledByThisWindow: false,
+    },
+    state: { ...bootstrap.state, isStreaming: false },
+    isActive: true,
+    runtimeStatus: "active",
+    controlOwner: "new-owner",
+    controlledByThisWindow: false,
+  };
+  const viewB: SessionViewData = {
+    ...draftView,
+    session: summaryB,
+    state: { ...bootstrap.state, sessionId: "takeover-b" },
+    isActive: false,
+    runtimeStatus: "view-only",
+  };
+  let resolveTakeover!: (value: { controlOwner: string; controlledByThisWindow: true }) => void;
+  const pendingTakeover = new Promise<{ controlOwner: string; controlledByThisWindow: true }>((resolve) => {
+    resolveTakeover = resolve;
+  });
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      sessions: [summaryA, summaryB],
+      sessionsTotal: 2,
+      controlOwner: "old-owner",
+      controlledByThisWindow: false,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async (id: string) => ({ viewing: id }),
+    viewSession: async (id: string) => id === secondId ? viewB : revisitedA,
+    takeSessionControl: async () => pendingTakeover,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    await act(async () => new Promise((resolve) => dom.window.setTimeout(resolve, 450)));
+    const takeover = [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-control-banner button")]
+      .find((button) => button.textContent?.includes("接管控制"));
+    assert.ok(takeover, "the initially foreign A pane exposes takeover");
+    await act(async () => {
+      takeover.click();
+      await Promise.resolve();
+    });
+    const sessionButton = (name: string) =>
+      [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
+        .find((button) => button.textContent?.includes(name))!;
+    await act(async () => sessionButton("Takeover B").click());
+    await act(async () => sessionButton("Active").click());
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.emitPi({
+        type: "pi_chat_session_control_changed",
+        sessionId: activeId,
+        controlOwner: "newer-sse-owner",
+        controlledByThisWindow: false,
+      });
+      await Promise.resolve();
+    });
+    await act(async () => {
+      resolveTakeover({ controlOwner: "stale-takeover", controlledByThisWindow: true });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => new Promise((resolve) => dom.window.setTimeout(resolve, 450)));
+    assert.ok(
+      dom.window.document.querySelector(".session-control-banner"),
+      "a stale pre-navigation takeover cannot claim the revisited A pane",
+    );
+    assert.match(
+      dom.window.document.body.textContent || "",
+      /另一窗口中控制/,
+      "the newer same-Session control SSE remains authoritative",
     );
   } finally {
     await act(async () => root.unmount());
@@ -1398,6 +2871,37 @@ test("late model and thinking responses from A do not overwrite the Session B co
       )?.textContent || "",
       /low/,
     );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("abort clears a stale sidebar running activity before a later refresh", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true },
+      sessions: [{ ...bootstrap.sessions[0], running: true, activity: { execution: "running" as const, awaitingConfirmation: false } }],
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    abort: async () => ({ ok: true, isStreaming: false, queuePaused: false }),
+    viewSession: async () => ({ ...draftView, session: bootstrap.sessions[0] }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    assert.ok(dom.window.document.querySelector(".session-status.is-running"));
+    await act(async () =>
+      dom.window.document.querySelector<HTMLButtonElement>(".stop-button")!.click(),
+    );
+    assert.equal(dom.window.document.querySelector(".session-status.is-running"), null);
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);
@@ -1660,13 +3164,11 @@ test("New is instant and the first send shows Pi startup before materializing a 
       await pendingClear;
       return { viewing: "" };
     },
-    newSession: async () => {
+    submitNewSession: async () => {
       newSessionCalls += 1;
-      return pendingNew;
-    },
-    prompt: async () => {
+      const view = await pendingNew;
       promptCalls += 1;
-      return { accepted: true, queued: false };
+      return { sessionId: view.session.id, session: view.session, state: view.state, gateMode: "strict" as const, accepted: true as const, queued: false as const };
     },
     viewSession: async () => {
       viewSessionCalls += 1;
@@ -1757,6 +3259,175 @@ test("New is instant and the first send shows Pi startup before materializing a 
       /completed while SSE was stale/,
     );
     assert.equal(dom.window.document.querySelector(".stop-button"), null);
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("draft startup races keep the composer usable, preserve newer control, and show one user turn", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  let resolveNew!: (view: SessionViewData) => void;
+  let resolvePrompt!: (value: { accepted: boolean; queued: boolean }) => void;
+  let resolveSecondPrompt!: (value: { accepted: boolean; queued: boolean }) => void;
+  let resolveThirdPrompt!: (value: { accepted: boolean; queued: boolean }) => void;
+  const pendingNew = new Promise<SessionViewData>((resolve) => { resolveNew = resolve; });
+  const pendingPrompt = new Promise<{ accepted: boolean; queued: boolean }>((resolve) => { resolvePrompt = resolve; });
+  const pendingSecondPrompt = new Promise<{ accepted: boolean; queued: boolean }>((resolve) => { resolveSecondPrompt = resolve; });
+  const pendingThirdPrompt = new Promise<{ accepted: boolean; queued: boolean }>((resolve) => { resolveThirdPrompt = resolve; });
+  let promptCalls = 0;
+  const foreignDraft: SessionViewData = {
+    ...draftView,
+    controlOwner: "another-window",
+    controlledByThisWindow: false,
+    session: { ...draftView.session, controlOwner: "another-window", controlledByThisWindow: false },
+  };
+  const authoritative: SessionViewData = {
+    ...draftView,
+    state: { ...draftView.state, isStreaming: false, messageCount: 1 },
+    session: { ...draftView.session, messageCount: 1, controlOwner: "this-window", controlledByThisWindow: true },
+    messages: [{ role: "user", content: "draft race", timestamp: 200 }],
+    messageTotal: 1,
+    turnTotal: 1,
+    controlOwner: "this-window",
+    controlledByThisWindow: true,
+  };
+  Object.assign(api, {
+    bootstrap: async () => bootstrap,
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async (id: string) => ({ viewing: id }),
+    clearSessionViewed: async () => ({ viewing: "" }),
+    submitNewSession: async () => {
+      const view = await pendingNew;
+      return { sessionId: view.session.id, session: view.session, state: view.state, gateMode: "strict" as const, accepted: true as const, queued: false as const };
+    },
+    prompt: async () => {
+      promptCalls += 1;
+      return promptCalls === 1 ? pendingPrompt : promptCalls === 2 ? pendingSecondPrompt : pendingThirdPrompt;
+    },
+    viewSession: async () => authoritative,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.dispatchEvent(new dom.window.MessageEvent("ready", { data: JSON.stringify({ lifecycle: "idle", piChatRunEpoch: "epoch-a" }) }));
+      await Promise.resolve();
+    });
+    const newButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "New")!;
+    await act(async () => newButton.click());
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "draft race");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "draft race" }));
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      source.emitPi({ type: "pi_chat_session_control_changed", sessionId: draftView.session.id, controlOwner: "this-window", controlledByThisWindow: true });
+      resolveNew(foreignDraft);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(textarea.disabled, false, "the combined first-prompt request owns the startup transaction without requiring a full draft view");
+    assert.notEqual(textarea.placeholder, "正在切换会话…", "prompt preparation must not masquerade as navigation");
+
+    await act(async () => {
+      source.emitPi({ type: "agent_start", piChatSessionId: draftView.session.id, piChatRunEpoch: "epoch-a", piChatRunGeneration: 1 });
+      await Promise.resolve();
+    });
+    assert.notEqual(textarea.placeholder, "正在切换会话…", `unexpected navigation lock: ${textarea.placeholder}`);
+    assert.equal(textarea.disabled, false, `agent_start releases the late prompt acknowledgement lock (${textarea.placeholder})`);
+    assert.equal(dom.window.document.querySelectorAll(".message-user").length, 1);
+
+    await act(async () => {
+      source.emitPi({ type: "message_end", piChatSessionId: draftView.session.id, piChatRunEpoch: "epoch-a", piChatRunGeneration: 1, message: { role: "user", content: "draft race", timestamp: 220 } });
+      source.emitPi({ type: "message_end", piChatSessionId: draftView.session.id, piChatRunEpoch: "epoch-a", piChatRunGeneration: 1, message: { role: "assistant", content: "answer finished before prompt ack", timestamp: 230 } });
+      source.emitPi({ type: "agent_settled", piChatSessionId: draftView.session.id, piChatRunEpoch: "epoch-a", piChatRunGeneration: 1 });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(dom.window.document.querySelector(".composer-preparing-status"), null, "a completed answer clears preparation even while prompt HTTP is pending");
+    assert.equal(textarea.disabled, false, "settlement must not re-lock the composer behind the pending HTTP request");
+    assert.match(dom.window.document.body.textContent || "", /answer finished before prompt ack/);
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "second turn");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "second turn" }));
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+    });
+    assert.equal(promptCalls, 1, "the first combined submission already owns its prompt acknowledgement; no second mocked prompt dispatch is needed before it resolves");
+    assert.equal(textarea.disabled, true, "the combined first-submit acknowledgement retains its own prompt lease until Pi confirms the next generation");
+    await act(async () => {
+      source.emitPi({ type: "agent_settled", piChatSessionId: draftView.session.id, piChatRunEpoch: "epoch-a", piChatRunGeneration: 1 });
+      await Promise.resolve();
+    });
+    assert.equal(textarea.disabled, true, "a delayed first-turn event cannot release the active combined-submit lease");
+    await act(async () => {
+      resolvePrompt({ accepted: true, queued: false });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(textarea.disabled, false, "the first combined acknowledgement settles its only pending submission lease");
+    await act(async () => {
+      source.emitPi({ type: "agent_start", piChatSessionId: draftView.session.id, piChatRunEpoch: "epoch-a", piChatRunGeneration: 2 });
+      await Promise.resolve();
+    });
+    assert.equal(textarea.disabled, false, "the matching later run generation releases the active prompt lease");
+    assert.equal(dom.window.document.querySelector(".composer-preparing-status"), null, "the late first acknowledgement cannot restore the stale preparation bubble");
+    await act(async () => {
+      resolveSecondPrompt({ accepted: true, queued: false });
+      await Promise.resolve();
+      source.emitPi({ type: "agent_settled", piChatSessionId: draftView.session.id, piChatRunEpoch: "epoch-a", piChatRunGeneration: 2 });
+      await Promise.resolve();
+    });
+    assert.equal(dom.window.document.querySelectorAll(".message-user").length, 2, "each of the two submitted turns appears exactly once");
+
+    const restartedBootstrap: BootstrapData = {
+      ...bootstrap,
+      state: { ...authoritative.state, isStreaming: false },
+      messages: authoritative.messages,
+      sessions: [authoritative.session],
+      activeSessionId: draftView.session.id,
+      activeSessionIds: [draftView.session.id],
+      controlOwner: "this-window",
+      controlledByThisWindow: true,
+    };
+    Object.assign(api, { bootstrap: async () => restartedBootstrap });
+    await act(async () => {
+      source.dispatchEvent(new dom.window.MessageEvent("ready", { data: JSON.stringify({ lifecycle: "idle", piChatRunEpoch: "epoch-b" }) }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "third turn after restart");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "third turn after restart" }));
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+    });
+    assert.equal(promptCalls, 2, "the combined first submit replaces the old separate first prompt dispatch");
+    assert.equal(textarea.disabled, false, "the combined first submission leaves the restarted prompt path free once prior work has settled");
+    await act(async () => {
+      source.emitPi({ type: "agent_start", piChatSessionId: draftView.session.id, piChatRunEpoch: "epoch-a", piChatRunGeneration: 3 });
+      await Promise.resolve();
+    });
+    assert.equal(textarea.disabled, false, "a stale event from the previous service epoch is ignored");
+    await act(async () => {
+      source.emitPi({ type: "agent_start", piChatSessionId: draftView.session.id, piChatRunEpoch: "epoch-b", piChatRunGeneration: 1 });
+      await Promise.resolve();
+    });
+    assert.equal(textarea.disabled, false, "generation one from the replacement service releases the new lease");
+    await act(async () => {
+      resolveThirdPrompt({ accepted: true, queued: false });
+      await Promise.resolve();
+    });
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 450)));
+    assert.equal(dom.window.document.querySelector(".session-control-banner"), null, "a stale draft view must not overwrite newer control SSE");
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);
@@ -2064,6 +3735,11 @@ test("viewed delete immediately selects an existing replacement and success keep
       session: id === replacement.id ? replacement : bootstrap.sessions[0],
       isActive: false,
       runtimeStatus: "view-only",
+    }),
+    warmSession: async (id: string) => ({
+      sessionId: id,
+      state: draftView.state,
+      gateMode: "strict" as const,
     }),
   });
   const root = createRoot(dom.window.document.querySelector("#root")!);
@@ -2564,6 +4240,105 @@ test("a full inventory absent rename installs a tombstone against an older sideb
   }
 });
 
+test("session search loads the full inventory and pinning persists across remounts", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const secondId = "pin-search-123456789";
+  const second = {
+    ...bootstrap.sessions[0],
+    id: secondId,
+    sessionId: "pin-search",
+    name: "Archived research",
+    preview: "Needle preview",
+    cwd: "D:/Research/Needle",
+    updatedAt: 0,
+    active: false,
+    writable: false,
+  };
+  let fullInventoryCalls = 0;
+  Object.assign(api, {
+    bootstrap: async () => ({ ...bootstrap, sessionsTotal: 2 }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    sessions: async (all = false) => {
+      if (all) fullInventoryCalls += 1;
+      return all
+        ? { sessions: [bootstrap.sessions[0], second], total: 2 }
+        : { sessions: bootstrap.sessions, total: 2 };
+    },
+  });
+  const render = async () => {
+    const root = createRoot(dom.window.document.querySelector("#root")!);
+    await act(async () => root.render(createElement(App)));
+    return root;
+  };
+  let root = await render();
+  try {
+    const search = dom.window.document.querySelector<HTMLInputElement>("input[aria-label='搜索对话']")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLInputElement.prototype,
+        "value",
+      )?.set?.call(search, "needle");
+      search.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "needle" }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(fullInventoryCalls, 1);
+    const resultRow = [...dom.window.document.querySelectorAll<HTMLElement>(".session-row")]
+      .find((row) => row.textContent?.includes("Archived research"));
+    assert.ok(resultRow);
+    await act(async () => resultRow.querySelector<HTMLButtonElement>(".session-menu-trigger")!.click());
+    const pin = [...dom.window.document.querySelectorAll<HTMLButtonElement>("[role='menuitem']")]
+      .find((button) => button.textContent === "置顶");
+    assert.ok(pin);
+    await act(async () => pin.click());
+    assert.ok(resultRow.querySelector(".session-pin-indicator"));
+
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLInputElement.prototype,
+        "value",
+      )?.set?.call(search, "");
+      search.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "deleteContentBackward" }));
+    });
+    assert.equal(
+      [...dom.window.document.querySelectorAll<HTMLElement>(".session-row")]
+        .some((row) => row.textContent?.includes("Archived research")),
+      false,
+      "clearing search restores the collapsed, lazily loaded non-current directory",
+    );
+
+    await act(async () => root.unmount());
+    dom.window.document.querySelector("#root")!.replaceChildren();
+    root = await render();
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const remountedSearch = dom.window.document.querySelector<HTMLInputElement>("input[aria-label='搜索对话']")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value")?.set?.call(remountedSearch, "needle");
+      remountedSearch.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "needle" }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(fullInventoryCalls, 2, "search is the explicit global-inventory path after remount");
+    const pinnedRow = [...dom.window.document.querySelectorAll<HTMLElement>(".session-row")]
+      .find((row) => row.textContent?.includes("Archived research"));
+    assert.ok(pinnedRow?.querySelector(".session-pin-indicator"));
+    await act(async () => pinnedRow!.querySelector<HTMLButtonElement>(".session-menu-trigger")!.click());
+    assert.ok([...dom.window.document.querySelectorAll<HTMLButtonElement>("[role='menuitem']")]
+      .some((button) => button.textContent === "取消置顶"));
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
 test("App collapses duplicate Session IDs from bootstrap to one latest sidebar row", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");
@@ -2606,6 +4381,88 @@ test("App collapses duplicate Session IDs from bootstrap to one latest sidebar r
       dom.window.document.querySelectorAll(".session-item").length,
       1,
     );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a lost prompt acknowledgement cannot remove a user turn after SSE proves acceptance", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  let rejectPrompt!: (cause: Error) => void;
+  const pendingPrompt = new Promise<never>((_resolve, reject) => {
+    rejectPrompt = reject;
+  });
+  Object.assign(api, {
+    bootstrap: async () => bootstrap,
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    prompt: async () => pendingPrompt,
+    viewSession: async () => ({
+      ...draftView,
+      session: { ...bootstrap.sessions[0], running: true },
+      state: { ...bootstrap.state, isStreaming: true },
+      isStreaming: true,
+    }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "must remain visible");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "must remain visible" }));
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+    });
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.emitPi({ type: "agent_start", piChatSessionId: activeId });
+      await Promise.resolve();
+      rejectPrompt(new Error("network response lost"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(dom.window.document.querySelectorAll(".message-user").length, 1, "the accepted prompt keeps exactly one protected user row");
+    assert.equal(dom.window.document.querySelector(".message-user")?.textContent, "must remain visible");
+    assert.equal(textarea.value, "", "an uncertain acknowledgement must not restore text that Pi is already processing");
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("an explicit prompt rejection rolls back the local user turn", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { ApiRequestError, api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  Object.assign(api, {
+    bootstrap: async () => bootstrap,
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    prompt: async () => {
+      throw new ApiRequestError("rejected", 409, "APPLICATION_BUSY");
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "restore rejected text");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "restore rejected text" }));
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(dom.window.document.querySelectorAll(".message-user").length, 0);
+    assert.equal(textarea.value, "restore rejected text", "a definite rejection restores the composer for correction or retry");
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);

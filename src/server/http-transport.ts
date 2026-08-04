@@ -30,20 +30,26 @@ export function methodNotAllowed(response: ServerResponse): void {
 
 const CLIENT_ID_PATTERN = /^[a-f0-9-]{20,64}$/i;
 
-export function requestClientId(request: IncomingMessage): string {
-  const value = request.headers["x-pi-chat-client"];
-  const headerClientId = Array.isArray(value) ? value[0] : value;
-  if (typeof headerClientId === "string" && CLIENT_ID_PATTERN.test(headerClientId)) return headerClientId;
-  // Native EventSource cannot set X-Pi-Chat-Client, so SSE carries the same
-  // non-secret window identity in its guarded same-origin query string.
+function requestIdentity(request: IncomingMessage, headerName: string, queryName: string): string {
+  const value = request.headers[headerName];
+  const headerValue = Array.isArray(value) ? value[0] : value;
+  if (typeof headerValue === "string" && CLIENT_ID_PATTERN.test(headerValue)) return headerValue;
   try {
     const url = new URL(request.url || "/", "http://127.0.0.1");
-    if (url.pathname !== "/api/events") return "";
-    const queryClientId = url.searchParams.get("client") || "";
-    return CLIENT_ID_PATTERN.test(queryClientId) ? queryClientId : "";
+    if (url.pathname !== "/api/events" && url.pathname !== "/api/window/close") return "";
+    const queryValue = url.searchParams.get(queryName) || "";
+    return CLIENT_ID_PATTERN.test(queryValue) ? queryValue : "";
   } catch {
     return "";
   }
+}
+
+export function requestClientId(request: IncomingMessage): string {
+  return requestIdentity(request, "x-pi-chat-client", "client");
+}
+
+export function requestPageId(request: IncomingMessage): string {
+  return requestIdentity(request, "x-pi-chat-page", "page");
 }
 
 export class HttpRequestError extends Error {

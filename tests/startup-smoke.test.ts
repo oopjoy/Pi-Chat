@@ -69,10 +69,16 @@ test("compiled server starts against fake RPC, probes capabilities, serves guard
   });
   try {
     const origin = `http://127.0.0.1:${port}`;
-    const bootstrap = await waitFor(`${origin}/api/bootstrap`, child);
+    // Only the fixed-shape handshake is tokenless. The full bootstrap must
+    // retain the request-token guard even during cold service startup.
+    const handshake = await waitFor(`${origin}/api/bootstrap/handshake`, child);
+    const handshakeData = await handshake.json() as { requestToken?: string };
+    assert.equal(handshake.status, 200);
+    assert.ok(handshakeData.requestToken);
+    const bootstrap = await fetch(`${origin}/api/bootstrap`, { headers: { origin, "x-pi-chat-token": handshakeData.requestToken } });
     const data = await bootstrap.json() as { requestToken?: string };
     assert.equal(bootstrap.status, 200);
-    assert.ok(data.requestToken);
+    assert.equal(data.requestToken, handshakeData.requestToken);
     const guarded = await fetch(`${origin}/api/health`, { headers: { origin, "x-pi-chat-token": data.requestToken } });
     assert.equal(guarded.status, 200);
     assert.equal((await guarded.json() as { service?: string }).service, "pi-chat");

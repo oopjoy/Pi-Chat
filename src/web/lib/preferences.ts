@@ -1,3 +1,5 @@
+import { orderedPinnedDirectoryKeys, orderedPinnedSessionIds } from "./session-navigation";
+
 export type ThemePreference = "system" | "light" | "dark";
 export type FontPreference = "system" | "serif" | "mono";
 
@@ -8,6 +10,14 @@ export interface AppearancePreferences {
   lineHeight: number;
   chatWidth: number;
   markdownCss: string;
+}
+
+export interface SessionNavigationPreferences {
+  version: 2;
+  pinnedSessionIds: string[];
+  pinnedDirectoryKeys: string[];
+  collapsedDirectoryKeys: string[];
+  expandedDirectoryKeys: string[];
 }
 
 export const DEFAULT_APPEARANCE: AppearancePreferences = {
@@ -31,6 +41,8 @@ export function snapToStep(value: unknown, minimum: number, maximum: number, ste
 const STORAGE_KEY = "pi-chat.appearance.v1";
 const SIDEBAR_KEY = "pi-chat.sidebar-open.v1";
 const SIDEBAR_WIDTH_KEY = "pi-chat.sidebar-width.v1";
+const SESSION_NAVIGATION_V1_KEY = "pi-chat.session-navigation.v1";
+const SESSION_NAVIGATION_KEY = "pi-chat.session-navigation.v2";
 export const SIDEBAR_WIDTH_MIN = 220;
 export const SIDEBAR_WIDTH_MAX = 480;
 export const SIDEBAR_WIDTH_DEFAULT = 286;
@@ -77,6 +89,45 @@ export function loadSidebarWidth(): number {
 
 export function saveSidebarWidth(width: number): void {
   localStorage.setItem(SIDEBAR_WIDTH_KEY, String(Math.round(clamp(width, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_DEFAULT))));
+}
+
+const EMPTY_SESSION_NAVIGATION: SessionNavigationPreferences = {
+  version: 2,
+  pinnedSessionIds: [],
+  pinnedDirectoryKeys: [],
+  collapsedDirectoryKeys: [],
+  expandedDirectoryKeys: [],
+};
+
+export function loadSessionNavigationPreferences(): SessionNavigationPreferences {
+  try {
+    const saved = JSON.parse(localStorage.getItem(SESSION_NAVIGATION_KEY) || "null") as Partial<SessionNavigationPreferences> | null;
+    if (saved && saved.version === 2) return {
+      version: 2,
+      pinnedSessionIds: orderedPinnedSessionIds(saved.pinnedSessionIds),
+      pinnedDirectoryKeys: orderedPinnedDirectoryKeys(saved.pinnedDirectoryKeys),
+      collapsedDirectoryKeys: orderedPinnedDirectoryKeys(saved.collapsedDirectoryKeys),
+      expandedDirectoryKeys: orderedPinnedDirectoryKeys(saved.expandedDirectoryKeys),
+    };
+  } catch {
+    // A damaged v2 record must not discard a still-readable v1 Session pin list.
+  }
+  try {
+    const legacy = JSON.parse(localStorage.getItem(SESSION_NAVIGATION_V1_KEY) || "{}") as { pinnedSessionIds?: unknown };
+    return { ...EMPTY_SESSION_NAVIGATION, pinnedSessionIds: orderedPinnedSessionIds(legacy.pinnedSessionIds) };
+  } catch {
+    return EMPTY_SESSION_NAVIGATION;
+  }
+}
+
+export function saveSessionNavigationPreferences(preferences: SessionNavigationPreferences): void {
+  localStorage.setItem(SESSION_NAVIGATION_KEY, JSON.stringify({
+    version: 2,
+    pinnedSessionIds: orderedPinnedSessionIds(preferences.pinnedSessionIds),
+    pinnedDirectoryKeys: orderedPinnedDirectoryKeys(preferences.pinnedDirectoryKeys),
+    collapsedDirectoryKeys: orderedPinnedDirectoryKeys(preferences.collapsedDirectoryKeys),
+    expandedDirectoryKeys: orderedPinnedDirectoryKeys(preferences.expandedDirectoryKeys),
+  }));
 }
 
 export function applyAppearance(preferences: AppearancePreferences): void {

@@ -105,6 +105,12 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   }, [suggestions.length, value]);
 
   useEffect(() => {
+    // Pi may emit agent_start before the prompt HTTP response returns. At that
+    // point the first turn is accepted and follow-ups can safely enter Queue.
+    if (activelyStreaming) setSending(false);
+  }, [activelyStreaming]);
+
+  useEffect(() => {
     if (!attachmentOpen) return;
     const close = (event: PointerEvent) => {
       if (!attachmentRef.current?.contains(event.target as Node)) setAttachmentOpen(false);
@@ -243,7 +249,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
               <input ref={imageInputRef} className="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple onChange={(event) => { void addImages([...event.target.files || []]); event.target.value = ""; }} />
             </div>
             {(activelyStreaming || stopping)
-              ? <button type="button" className="stop-button" disabled={stopping} onClick={() => void onAbort()} aria-label={stopping ? "正在停止" : "停止生成"} title={stopping ? "正在停止" : "停止生成"}><span aria-hidden="true" /></button>
+              ? <button type="button" className="stop-button" disabled={disabled || stopping} onClick={() => void onAbort()} aria-label={stopping ? "正在停止" : "停止生成"} title={stopping ? "正在停止" : "停止生成"}><span aria-hidden="true" /></button>
               : !streaming && <button type="button" className="send-button" disabled={(!value.trim() && !images.length) || disabled || sending || stopping} onClick={() => void submit()} aria-label={sending ? "正在发送" : isExtensionCommand ? "执行指令" : "发送消息"} title={sending ? "正在发送" : isExtensionCommand ? "执行指令" : "发送消息"}><SendIcon /></button>}
           </div>
         </div>

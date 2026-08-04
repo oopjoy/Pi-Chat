@@ -66,8 +66,10 @@ test("launcher scripts derive paths dynamically and avoid unsafe PowerShell inte
   assert.match(installer, /GetFolderPath\('DesktopDirectory'\)/);
   assert.match(installer, /-Name 'Pi Chat' -Mode 'pwa'/);
   assert.match(installer, /-Name 'Pi Chat Web' -Mode 'web'/);
-  assert.match(readiness, /\/api\/bootstrap/);
-  assert.match(readiness, /bootstrap\.requestToken/);
+  assert.match(readiness, /\/api\/bootstrap\/handshake/);
+  assert.match(readiness, /handshake\.requestToken/);
+  assert.match(readiness, /handshake\.buildIdentity\.fingerprint/);
+  assert.doesNotMatch(readiness, /Invoke-RestMethod[^\r\n]*\/api\/bootstrap['"]/);
   assert.doesNotMatch(readiness, /\/api\/health/);
   assert.doesNotMatch(readiness, /Get-NetTCPConnection/);
   assert.match(cmd, /if not exist "%~dp0dist\\server\\server\\index\.js"/i);

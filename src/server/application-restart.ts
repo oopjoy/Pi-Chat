@@ -1,12 +1,14 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
-import { access, readdir, rename, rm } from "node:fs/promises";
+import { access, readdir, readFile, rename, rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
 export interface ApplicationRestartOptions {
   projectRoot: string;
+  /** Expected staged artifact fingerprint; handoff rejects a stale candidate. */
+  expectedBuildFingerprint?: string;
   serverEntry: string;
   host: string;
   port: number;
@@ -28,6 +30,7 @@ export interface DistPromotionPaths {
 
 export interface StagedApplicationBuild {
   readonly distPath: string;
+  readonly buildFingerprint: string;
   readonly liveDist: string;
   readonly previousDist: string;
   promote(): Promise<void>;
@@ -248,8 +251,15 @@ export async function buildPiChat(projectRoot: string): Promise<StagedApplicatio
     throw error;
   }
 
+  const identity = JSON.parse(await readFile(join(stagedDist, "build-identity.json"), "utf8")) as { fingerprint?: unknown };
+  if (typeof identity.fingerprint !== "string" || !/^[a-f0-9]{64}$/i.test(identity.fingerprint)) {
+    await rm(stagedDist, { recursive: true, force: true });
+    throw new Error("Pi Chat 暂存构建缺少有效 build identity");
+  }
+
   return {
     distPath: stagedDist,
+    buildFingerprint: identity.fingerprint,
     liveDist,
     previousDist,
     async promote(): Promise<void> {
@@ -287,6 +297,7 @@ export function handOffApplicationRestart(options: ApplicationRestartOptions): v
     args: restartServerArgs(options),
     cwd: options.projectRoot,
     healthUrl: `http://${authority}/api/health`,
+    ...(options.expectedBuildFingerprint ? { expectedBuildFingerprint: options.expectedBuildFingerprint } : {}),
     logPath: join(tmpdir(), "pi-chat-restart-handoff.log"),
     ...(options.promoteAfterExit ? { promoteAfterExit: options.promoteAfterExit } : {}),
   });

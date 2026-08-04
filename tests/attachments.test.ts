@@ -33,8 +33,6 @@ test("session sidebar switches sessions without link navigation", async () => {
   assert.match(sidebar, /type="button"[\s\S]*onClick=\{\(\) => onView\(session\.id\)\}/);
   assert.match(app, /matchMedia\?\.\("\(max-width: 760px\)"\)\.matches[\s\S]*setSidebarOpen\(false\)[\s\S]*viewSession\(id\)/);
   assert.doesNotMatch(app, /onView=\{\(id\) => \{\s*setSidebarOpen\(false\);/);
-  assert.match(sidebar, /menuSessionCanRelease[\s\S]*释放运行资源/);
-  assert.match(app, /api\.releaseSession\(session\.id\)[\s\S]*runtimeStatus: "view-only"/);
   const styles = await files.readFile(new URL("../src/web/styles.css", import.meta.url), "utf8");
   assert.match(styles, /\.message-assistant \.markdown-body blockquote\s*\{[^}]*border-left-color:\s*var\(--text\)[^}]*color:\s*var\(--text\)[^}]*font-weight:\s*650/);
 });
@@ -79,11 +77,13 @@ test("slash command matching prioritizes prefixes and closes after arguments beg
 
 test("local prompt queue can cancel, pause on abort and resume", async () => {
   const commands: Record<string, unknown>[] = [];
+  const activePath = "C:\\sessions\\local-queue.jsonl";
+  const activeId = idForPath(activePath);
   const rpc = {
     onEvent: () => () => {},
     send: async (command: Record<string, unknown>) => {
       commands.push(command);
-      if (command.type === "get_state") return { type: "response", success: true, data: { model: null, isStreaming: false } };
+      if (command.type === "get_state") return { type: "response", success: true, data: { model: null, isStreaming: false, sessionFile: activePath, sessionId: "local-queue" } };
       return { type: "response", command: command.type, success: true };
     },
   } as unknown as PiRpcClient;
@@ -95,16 +95,16 @@ test("local prompt queue can cancel, pause on abort and resume", async () => {
   const origin = `http://127.0.0.1:${address.port}`;
   try {
     const post = (path: string, body: object = {}) => fetch(`${origin}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-    assert.equal((await post("/api/chat/prompt", { message: "first" })).status, 202);
-    const queuedResponse = await post("/api/chat/prompt", { message: "second" });
+    assert.equal((await post("/api/chat/prompt", { message: "first", sessionId: activeId })).status, 202);
+    const queuedResponse = await post("/api/chat/prompt", { message: "second", sessionId: activeId });
     const queued = await queuedResponse.json() as { id: string };
     assert.ok(queued.id);
-    assert.equal((await fetch(`${origin}/api/chat/queue/${queued.id}`, { method: "DELETE" })).status, 200);
-    const third = await (await post("/api/chat/prompt", { message: "third" })).json() as { queued: boolean };
+    assert.equal((await fetch(`${origin}/api/chat/queue/${queued.id}`, { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ sessionId: activeId }) })).status, 200);
+    const third = await (await post("/api/chat/prompt", { message: "third", sessionId: activeId })).json() as { queued: boolean };
     assert.equal(third.queued, true);
-    const aborted = await (await post("/api/chat/abort")).json() as { queuePaused: boolean };
+    const aborted = await (await post("/api/chat/abort", { sessionId: activeId })).json() as { queuePaused: boolean };
     assert.equal(aborted.queuePaused, true);
-    const resumed = await (await post("/api/chat/queue/resume")).json() as { paused: boolean };
+    const resumed = await (await post("/api/chat/queue/resume", { sessionId: activeId })).json() as { paused: boolean };
     assert.equal(resumed.paused, false);
     await new Promise((resolve) => setTimeout(resolve, 10));
     assert.equal(commands.filter((command) => command.type === "prompt").length, 2);
@@ -146,7 +146,7 @@ test("extension slash commands execute immediately and Gate mode survives browse
     const response = await fetch(`http://127.0.0.1:${address.port}/api/chat/prompt`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ message: "/gate open" }),
+      body: JSON.stringify({ message: "/gate open", sessionId: id }),
     });
     assert.equal(response.status, 202);
     assert.deepEqual(await response.json(), { accepted: true, queued: false, extension: true, command: "gate", description: "Control file permission gate: /gate status|open|strict", isStreaming: false });
@@ -158,7 +158,7 @@ test("extension slash commands execute immediately and Gate mode survives browse
     const unsupported = await fetch(`http://127.0.0.1:${address.port}/api/chat/prompt`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ message: "/gate once" }),
+      body: JSON.stringify({ message: "/gate once", sessionId: id }),
     });
     assert.equal(unsupported.status, 202, "Pi still receives the command so its extension can present usage");
     const view = await (await fetch(`http://127.0.0.1:${address.port}/api/sessions/${id}/view`)).json() as { gateMode?: string };
@@ -209,7 +209,7 @@ test("Gate mode broadcasts before post-command state probing can fail", async ()
     const response = await fetch(`http://127.0.0.1:${address.port}/api/chat/prompt`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ message: "/gate open" }),
+      body: JSON.stringify({ message: "/gate open", sessionId: id }),
     });
     assert.equal(response.status, 500);
     const frame = frames.find((candidate) => candidate.includes("pi_chat_gate_mode_changed"));
@@ -516,7 +516,7 @@ test("a rejected prompt does not reorder sidebar recency", async () => {
   try {
     const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
     assert.equal((await fetch(`${origin}/api/bootstrap`)).status, 200);
-    const rejected = await fetch(`${origin}/api/chat/prompt`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message: "will fail" }) });
+    const rejected = await fetch(`${origin}/api/chat/prompt`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message: "will fail", sessionId: primaryId }) });
     assert.equal(rejected.status, 500);
     const sidebar = await (await fetch(`${origin}/api/sessions`)).json() as { sessions: Array<{ id: string }> };
     assert.deepEqual(sidebar.sessions.map((session) => session.id), [secondaryId, primaryId]);
@@ -531,11 +531,11 @@ test("active session view restores the cached streaming draft after returning", 
   const activeId = (await import("../src/server/session-index")).idForPath(activePath);
   const rpc = {
     onEvent: (listener: (event: Record<string, unknown>) => void) => {
-      queueMicrotask(() => {
+      setTimeout(() => {
         listener({ type: "agent_start" });
         listener({ type: "message_update", message: { role: "assistant", content: "partial answer" } });
         listener({ type: "tool_execution_start", toolName: "read" });
-      });
+      }, 0);
       return () => {};
     },
     send: async (command: Record<string, unknown>) => {
@@ -551,7 +551,8 @@ test("active session view restores the cached streaming draft after returning", 
   const app = new PiChatApp({ rpc, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
   const server = createServer((request, response) => void app.handle(request, response));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await (app as unknown as { ensurePrimaryIdentity(): Promise<void> }).ensurePrimaryIdentity();
+  await new Promise((resolve) => setTimeout(resolve, 5));
   try {
     const address = server.address();
     assert.ok(address && typeof address === "object");
@@ -568,11 +569,14 @@ test("active session view restores the cached streaming draft after returning", 
   }
 });
 
-test("chat prompt API synchronizes Gate before forwarding validated images to Pi RPC", async () => {
+test("chat prompt API skips redundant strict Gate synchronization before forwarding validated images", async () => {
   const commands: Record<string, unknown>[] = [];
+  const activePath = "C:\\sessions\\validated-image-primary.jsonl";
+  const activeId = (await import("../src/server/session-index")).idForPath(activePath);
   const rpc = {
     onEvent: () => () => {},
     send: async (command: Record<string, unknown>) => {
+      if (command.type === "get_state") return { type: "response", command: command.type, success: true, data: { model: null, isStreaming: false, sessionFile: activePath, sessionId: "primary" } };
       commands.push(command);
       return { type: "response", command: command.type, success: true };
     },
@@ -592,11 +596,10 @@ test("chat prompt API synchronizes Gate before forwarding validated images to Pi
     const response = await fetch(`http://127.0.0.1:${address.port}/api/chat/prompt`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ message: "查看图片", gateMode: "strict", images: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }] }),
+      body: JSON.stringify({ message: "查看图片", sessionId: activeId, gateMode: "strict", images: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }] }),
     });
     assert.equal(response.status, 202);
     assert.deepEqual(commands, [
-      { type: "prompt", message: "/gate strict" },
       { type: "prompt", message: "查看图片", images: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }] },
     ]);
   } finally {

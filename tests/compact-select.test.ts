@@ -110,6 +110,34 @@ test("CompactSelect can align a leading selected check without shifting labels",
   await act(async () => root.unmount());
 });
 
+test("CompactSelect renders a readable fallback instead of an unmatched internal value", async () => {
+  const dom = installDom();
+  const root = createRoot(dom.window.document.querySelector<HTMLElement>("#root")!);
+  const unmatched = "xwill\u0000gpt-5.6-sol";
+  try {
+    await act(async () => {
+      root.render(createElement(CompactSelect, {
+        value: unmatched,
+        options: [...options],
+        ariaLabel: "模型",
+        fallbackLabel: "gpt-5.6-sol",
+        onChange: () => undefined,
+      }));
+    });
+    const trigger = dom.window.document.querySelector<HTMLButtonElement>(".compact-select-trigger")!;
+    assert.equal(trigger.textContent?.trim(), "gpt-5.6-sol");
+    assert.doesNotMatch(trigger.textContent || "", /xwill|\u0000/);
+    await act(async () => trigger.click());
+    assert.equal(
+      dom.window.document.querySelector(".compact-select-option.is-selected"),
+      null,
+      "an unmatched controlled value must not mark the first option selected",
+    );
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
 test("CompactSelect typeahead, Escape, outside click, and disabled state close coherently", async () => {
   const { dom, root } = await renderSelect();
   const trigger = dom.window.document.querySelector<HTMLButtonElement>(".compact-select-trigger")!;

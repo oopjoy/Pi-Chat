@@ -5,6 +5,9 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const projectRoot = resolve(import.meta.dirname, "..");
+const portIndex = process.argv.indexOf("--port");
+const port = portIndex >= 0 ? Number(process.argv[portIndex + 1]) : 30179;
+if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error("E2E 端口无效");
 const root = await mkdtemp(join(tmpdir(), "pi-chat-e2e-"));
 const sessions = join(root, "sessions");
 const agentDir = join(root, "agent");
@@ -66,7 +69,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 });
 `, "utf8");
 
-const child = spawn(process.execPath, [join(projectRoot, "dist", "server", "server", "index.js"), "--host", "127.0.0.1", "--port", "30179", "--cwd", root], {
+const child = spawn(process.execPath, [join(projectRoot, "dist", "server", "server", "index.js"), "--host", "127.0.0.1", "--port", String(port), "--cwd", root], {
   cwd: projectRoot,
   env: {
     ...process.env,

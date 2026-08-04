@@ -433,6 +433,95 @@ test("session refresh tolerates a JSONL deleted after enumeration", async () => 
   }
 });
 
+test("a persisted metadata cache restores one cold target before any global inventory scan", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-session-index-target-"));
+  try {
+    const directory = join(root, "--project--");
+    await mkdir(directory);
+    const path = join(directory, "session.jsonl");
+    await writeFile(path, [
+      { type: "session", version: 3, id: "target", timestamp: "2026-01-01T00:00:00Z", cwd: root },
+      { type: "message", id: "1", message: { role: "user", content: "question" } },
+    ].map(JSON.stringify).join("\n") + "\n");
+    const first = new SessionIndex(root);
+    const [session] = await first.list();
+    const statPaths: string[] = [];
+    const second = new SessionIndex(root, first.cachePath, async (candidate) => {
+      statPaths.push(candidate);
+      assert.equal(candidate, path, "target restore may stat only the requested JSONL");
+      return stat(candidate);
+    });
+    const summary = await second.cachedSummaryForId(session.id);
+    assert.equal(summary?.id, session.id);
+    assert.equal(second.pathForId(session.id), path);
+    assert.deepEqual(statPaths, [path]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("target-only cache restore refreshes stale metadata without scanning other Sessions", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-session-index-target-stale-"));
+  try {
+    const path = join(root, "session.jsonl");
+    const writeSession = async (name: string) => writeFile(path, [
+      { type: "session", version: 3, id: "target-stale", timestamp: "2026-01-01T00:00:00Z", cwd: root },
+      { type: "message", id: "1", message: { role: "user", content: name } },
+      { type: "session_info", id: "2", name },
+    ].map(JSON.stringify).join("\n") + "\n");
+    await writeSession("Old title");
+    const first = new SessionIndex(root);
+    const [session] = await first.list();
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    await writeSession("New title with more bytes");
+
+    const statPaths: string[] = [];
+    const second = new SessionIndex(root, first.cachePath, async (candidate) => {
+      statPaths.push(candidate);
+      return stat(candidate);
+    });
+    const summary = await second.cachedSummaryForId(session.id);
+    assert.equal(summary?.name, "New title with more bytes");
+    assert.deepEqual(statPaths, [path]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an in-progress inventory refresh keeps the previous ID-to-path mapping readable", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-session-index-atomic-"));
+  try {
+    const directory = join(root, "--project--");
+    await mkdir(directory);
+    const path = join(directory, "session.jsonl");
+    await writeFile(path, [
+      { type: "session", version: 3, id: "atomic", timestamp: "2026-01-01T00:00:00Z", cwd: root },
+      { type: "message", id: "1", message: { role: "user", content: "question" } },
+    ].map(JSON.stringify).join("\n") + "\n");
+    let releaseStat!: () => void;
+    let blockNextStat = false;
+    const index = new SessionIndex(root, undefined, async (candidate) => {
+      if (blockNextStat && candidate === path) {
+        blockNextStat = false;
+        await new Promise<void>((resolve) => { releaseStat = resolve; });
+      }
+      return stat(candidate);
+    });
+    const [session] = await index.list();
+    assert.equal(index.pathForId(session.id), path);
+
+    blockNextStat = true;
+    const refresh = index.list(undefined, root);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(index.pathForId(session.id), path, "known target remains addressable while the global scan is pending");
+    assert.equal(index.summaryForId(session.id)?.id, session.id);
+    releaseStat();
+    await refresh;
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("session helper output is stable and compact", () => {
   assert.equal(cleanPreview(" a\n  b "), "a b");
   assert.equal(textFromContent([{ type: "thinking", thinking: "hidden" }, { type: "text", text: "shown" }]), "shown");

@@ -28,6 +28,19 @@ test("SessionViewCache refreshes recency and evicts the oldest view", () => {
   assert.equal(cache.get("one"), undefined);
 });
 
+test("partial view omission preserves the cached command inventory", () => {
+  const cache = new SessionViewCache();
+  cache.remember({
+    ...view("commands"),
+    commands: [{ name: "extension", description: "Extension", source: "extension" }],
+  });
+  cache.remember({ ...view("commands"), commands: undefined });
+  assert.deepEqual(cache.get("commands")?.commands?.map((command) => command.name), ["extension"]);
+
+  cache.remember({ ...view("commands"), commands: [] });
+  assert.deepEqual(cache.get("commands")?.commands, [], "only an explicit empty inventory clears commands");
+});
+
 test("authoritative Gate updates survive cached session navigation", () => {
   const cache = new SessionViewCache();
   cache.remember({ ...view("gate"), gateMode: "open" });
@@ -76,6 +89,29 @@ test("navigation preserves only transient fields received after its request bega
   cache.patch("navigation", { queue: [{ id: "after", message: "after", imageCount: 0, createdAt: 2 }] });
   const merged = cache.mergeNavigation({ ...view("navigation"), queue: [{ id: "response", message: "response", imageCount: 0, createdAt: 3 }] }, revision);
   assert.deepEqual(merged.queue?.map((item) => item.id), ["after"]);
+});
+
+test("a newer control SSE snapshot survives a stale navigation response", () => {
+  const cache = new SessionViewCache();
+  cache.remember({ ...view("control"), controlOwner: "former-window", controlledByThisWindow: false, session: { ...view("control").session, controlOwner: "former-window", controlledByThisWindow: false } });
+  const revision = cache.revisionFor("control");
+  cache.patch("control", { controlOwner: "this-window", controlledByThisWindow: true });
+  const merged = cache.mergeNavigation({ ...view("control"), controlOwner: "former-window", controlledByThisWindow: false, session: { ...view("control").session, controlOwner: "former-window", controlledByThisWindow: false } }, revision);
+  assert.equal(merged.controlOwner, "this-window");
+  assert.equal(merged.controlledByThisWindow, true);
+  assert.equal(merged.session.controlOwner, "this-window");
+  assert.equal(merged.session.controlledByThisWindow, true);
+});
+
+test("a newer control-clear SSE snapshot removes a stale HTTP owner", () => {
+  const cache = new SessionViewCache();
+  cache.remember({ ...view("control-clear"), controlOwner: "former-window", controlledByThisWindow: false, session: { ...view("control-clear").session, controlOwner: "former-window", controlledByThisWindow: false } });
+  const revision = cache.revisionFor("control-clear");
+  cache.patch("control-clear", { controlOwner: undefined, controlledByThisWindow: false });
+  const merged = cache.mergeNavigation({ ...view("control-clear"), controlOwner: "former-window", controlledByThisWindow: false, session: { ...view("control-clear").session, controlOwner: "former-window", controlledByThisWindow: false } }, revision);
+  assert.equal(merged.controlOwner, undefined);
+  assert.equal(merged.session.controlOwner, undefined);
+  assert.equal(merged.controlledByThisWindow, false);
 });
 
 test("a post-request compacting overlay preserves authoritative model metadata", () => {
@@ -128,6 +164,30 @@ test("a delayed busy view cannot erase terminal SSE messages or its live draft",
   const stale = cache.remember({ ...base, liveMessage: undefined });
   assert.deepEqual(stale.messages.map((message) => message.role), ["user", "assistant", "toolResult"]);
   assert.equal(stale.liveMessage, undefined);
+});
+
+test("a settled authoritative strict prefix replaces an abandoned cached branch", () => {
+  const cache = new SessionViewCache();
+  const root = { role: "user" as const, content: "root", timestamp: 1 };
+  const abandonedUser = { role: "user" as const, content: "abandoned", timestamp: 2 };
+  const abandonedReply = { role: "assistant" as const, content: "old answer", timestamp: 3 };
+  cache.remember({
+    ...view("rewound"),
+    messages: [root, abandonedUser, abandonedReply],
+    messageTotal: 3,
+    turnTotal: 2,
+  });
+  cache.remember({
+    ...view("rewound"),
+    messages: [root],
+    messageTotal: 1,
+    turnTotal: 1,
+    viewSource: "cold-jsonl",
+  });
+  const settled = cache.get("rewound");
+  assert.deepEqual(settled?.messages, [root]);
+  assert.equal(settled?.messageTotal, 1);
+  assert.equal(settled?.turnTotal, 1);
 });
 
 test("an idle view that is only a stale prefix cannot erase an SSE terminal tail", () => {
