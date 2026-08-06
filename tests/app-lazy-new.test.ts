@@ -344,6 +344,8 @@ test("a build mismatch blocks ordinary mutations but preserves server-guarded li
     assert.equal(restartCalls, 1);
     const settings = dom.window.document.querySelector<HTMLButtonElement>(".topbar-settings")!;
     await act(async () => settings.click());
+    const workspacePicker = dom.window.document.querySelector<HTMLButtonElement>("button[aria-label='选择默认工作路径']")!;
+    assert.equal(workspacePicker.disabled, true, "ordinary workspace changes remain blocked");
     const shutdown = dom.window.document.querySelector<HTMLButtonElement>(".settings-shutdown")!;
     assert.equal(shutdown.disabled, false, "the guarded shutdown recovery remains available");
     await act(async () => {

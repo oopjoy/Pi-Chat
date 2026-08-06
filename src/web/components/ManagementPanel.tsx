@@ -29,9 +29,13 @@ const FONT_OPTIONS: Array<CompactSelectOption<FontPreference>> = [
   { value: "mono", label: "等宽字体" },
 ];
 
-export function ManagementPanel({ section, appearance, models, state, busy, shutdownBlocked, onClose, onAppearance, onModel, onShutdown }: {
+export function ManagementPanel({ section, appearance, workspaceCwd, workspacePicking, workspaceDisabled, models, state, busy, shutdownBlocked, onClose, onAppearance, onPickWorkspace, onModel, onShutdown }: {
   section: ManagementSection | null;
   appearance: AppearancePreferences;
+  /** Persisted default for future drafts; existing Session cwd values stay immutable. */
+  workspaceCwd: string;
+  workspacePicking: boolean;
+  workspaceDisabled: boolean;
   models: ModelInfo[];
   state: PiState;
   busy: boolean;
@@ -39,6 +43,7 @@ export function ManagementPanel({ section, appearance, models, state, busy, shut
   shutdownBlocked: boolean;
   onClose: () => void;
   onAppearance: (value: AppearancePreferences) => void;
+  onPickWorkspace: () => void;
   onModel: (provider: string, id: string) => void;
   onShutdown: () => void;
 }) {
@@ -119,7 +124,7 @@ export function ManagementPanel({ section, appearance, models, state, busy, shut
               <button type="button" className="settings-shutdown" disabled={shutdownBlocked} onClick={onShutdown} title="检查全部对话后，关闭所有 Pi Chat 窗口、服务和会话进程">关闭 Pi Chat</button>
             </nav>
             <div className="settings-content">
-              {settingsTab === "appearance" && <AppearancePanel value={appearance} onChange={onAppearance} />}
+              {settingsTab === "appearance" && <AppearancePanel value={appearance} workspaceCwd={workspaceCwd} workspacePicking={workspacePicking} workspaceDisabled={workspaceDisabled} onChange={onAppearance} onPickWorkspace={onPickWorkspace} />}
               {settingsTab === "models" && <ModelsPanel models={models} state={state} busy={busy} browseBusy={resourceBusy} onModel={onModel} onBrowseModels={() => void browseResource("models-root")} />}
               {settingsTab === "skills" && <SettingsResourceList
                 title="Skills"
@@ -237,7 +242,14 @@ function SettingsResourceList<T extends { id: string; name: string }>({ title, d
   </div>;
 }
 
-function AppearancePanel({ value, onChange }: { value: AppearancePreferences; onChange: (value: AppearancePreferences) => void }) {
+function AppearancePanel({ value, workspaceCwd, workspacePicking, workspaceDisabled, onChange, onPickWorkspace }: {
+  value: AppearancePreferences;
+  workspaceCwd: string;
+  workspacePicking: boolean;
+  workspaceDisabled: boolean;
+  onChange: (value: AppearancePreferences) => void;
+  onPickWorkspace: () => void;
+}) {
   const update = <K extends keyof AppearancePreferences>(key: K, next: AppearancePreferences[K]) => onChange({ ...value, [key]: next });
   const isDefault = Object.keys(DEFAULT_APPEARANCE).every((key) => value[key as keyof AppearancePreferences] === DEFAULT_APPEARANCE[key as keyof AppearancePreferences]);
   return <div className="panel-body appearance-panel">
@@ -245,6 +257,12 @@ function AppearancePanel({ value, onChange }: { value: AppearancePreferences; on
       <PanelIntro title="外观与阅读" />
       <button type="button" className="appearance-reset" disabled={isDefault} onClick={() => onChange({ ...DEFAULT_APPEARANCE })}>重置外观</button>
     </div>
+    <SettingRow title="默认工作路径" description="仅用于以后新建的对话；已有对话不会改变">
+      <div className="workspace-setting-control">
+        <code title={workspaceCwd}>{workspaceCwd || "未设置工作路径"}</code>
+        <button type="button" className="workspace-picker" disabled={workspaceDisabled || workspacePicking} onClick={onPickWorkspace} title="选择默认工作路径" aria-label="选择默认工作路径"><FolderIcon /></button>
+      </div>
+    </SettingRow>
     <SettingRow title="主题"><CompactSelect value={value.theme} options={THEME_OPTIONS} ariaLabel="主题" title="主题" align="right" className="appearance-select" onChange={(next) => update("theme", next)} /></SettingRow>
     <SettingRow title="聊天字体"><CompactSelect value={value.font} options={FONT_OPTIONS} ariaLabel="聊天字体" title="聊天字体" align="right" className="appearance-select" onChange={(next) => update("font", next)} /></SettingRow>
     <StepperSetting title="字号" hint="10 ~ 30 px" value={value.fontSize} minimum={10} maximum={30} step={1} onChange={(next) => update("fontSize", next)} />

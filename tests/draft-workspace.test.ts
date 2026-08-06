@@ -105,6 +105,83 @@ test("a stale draft workspace picker cannot overwrite a later New draft", async 
   }
 });
 
+test("a stale default workspace picker cannot change the default after New", async () => {
+  const dom = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  let resolvePicker!: (value: { cancelled: false; workspaceName: string; data: BootstrapData }) => void;
+  const pendingPicker = new Promise<{ cancelled: false; workspaceName: string; data: BootstrapData }>((resolve) => {
+    resolvePicker = resolve;
+  });
+  const updatedBootstrap = { ...bootstrap, workspaceCwd: "D:/stale-default" };
+  Object.assign(api, {
+    bootstrap: async () => bootstrap,
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    clearSessionViewed: async () => ({ viewing: "" }),
+    pickWorkspace: async () => pendingPicker,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    await act(async () => dom.window.document.querySelector<HTMLButtonElement>(".topbar-settings")!.click());
+    await act(async () => dom.window.document.querySelector<HTMLButtonElement>("button[aria-label='选择默认工作路径']")!.click());
+    const newButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.trim() === "New")!;
+    await act(async () => newButton.click());
+    await act(async () => {
+      resolvePicker({ cancelled: false, workspaceName: "stale-default", data: updatedBootstrap });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(dom.window.document.querySelector(".draft-workspace code")?.textContent, "C:/work");
+    assert.equal(dom.window.document.querySelector(".workspace-setting-control code")?.textContent, "C:/work");
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("settings changes the default workspace only for later New drafts", async () => {
+  const dom = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const updatedBootstrap = { ...bootstrap, workspaceCwd: "D:/default-workspace" };
+  Object.assign(api, {
+    bootstrap: async () => bootstrap,
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    clearSessionViewed: async () => ({ viewing: "" }),
+    pickWorkspace: async () => ({ cancelled: false, workspaceName: "default-workspace", data: updatedBootstrap }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    await act(async () => dom.window.document.querySelector<HTMLButtonElement>(".topbar-settings")!.click());
+    const picker = dom.window.document.querySelector<HTMLButtonElement>("button[aria-label='选择默认工作路径']")!;
+    assert.equal(picker.disabled, false);
+    await act(async () => {
+      picker.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(dom.window.document.querySelector(".workspace-setting-control code")?.textContent, "D:/default-workspace");
+    assert.equal(dom.window.document.querySelector(".topbar-title")?.textContent, "Busy", "changing the future default must not replace the active pane");
+
+    const newButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.trim() === "New")!;
+    await act(async () => newButton.click());
+    assert.equal(dom.window.document.querySelector(".draft-workspace code")?.textContent, "D:/default-workspace");
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
 test("a running Session never disables New or the independent draft workspace picker", async () => {
   const dom = installDom();
   const { createRoot } = await import("react-dom/client");

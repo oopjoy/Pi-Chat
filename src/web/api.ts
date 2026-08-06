@@ -146,6 +146,7 @@ export const api = {
   pickLocalFiles: () => request<{ paths: string[] }>("/api/local-files/pick", { method: "POST" }),
   clipboardLocalFiles: () => request<{ paths: string[] }>("/api/local-files/clipboard", { method: "POST" }),
   pickDraftWorkspace: () => request<{ cancelled: boolean; cwd?: string }>("/api/workspace/draft-pick", { method: "POST" }),
+  pickWorkspace: () => request<{ cancelled: boolean; workspaceName?: string; data?: BootstrapData }>("/api/workspace/pick", { method: "POST" }),
   abort: (sessionId: string) => request<{ ok: boolean; isStreaming: boolean; queuePaused: boolean }>("/api/chat/abort", { method: "POST", body: JSON.stringify({ sessionId }) }),
   cancelQueued: (id: string, sessionId: string) => request<{ queue: QueuedPrompt[]; paused: boolean }>(`/api/chat/queue/${id}`, { method: "DELETE", body: JSON.stringify({ sessionId }) }),
   resumeQueue: (sessionId: string) => request<{ queue: QueuedPrompt[]; paused: boolean }>("/api/chat/queue/resume", { method: "POST", body: JSON.stringify({ sessionId }) }),

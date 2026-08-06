@@ -258,6 +258,8 @@ export function App() {
   const [workspacePicking, setWorkspacePicking] = useState(false);
   /** Invalidates a native picker when its New draft is superseded. */
   const draftWorkspacePickerTokenRef = useRef<symbol | null>(null);
+  /** One global default picker at a time; it never owns the visible conversation pane. */
+  const workspaceDefaultPickerTokenRef = useRef<symbol | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(loadSidebarOpen);
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
   const [managementSection, setManagementSection] =
@@ -3275,7 +3277,10 @@ export function App() {
     navigationEpochRef.current += 1;
     refreshEpochRef.current += 1;
     setViewSwitching(false);
+    // A New draft supersedes both kinds of native picker. A late response must
+    // not alter either this draft or the default it inherited.
     draftWorkspacePickerTokenRef.current = null;
+    workspaceDefaultPickerTokenRef.current = null;
     setWorkspacePicking(false);
     if (promptReconcileTimerRef.current !== null)
       window.clearTimeout(promptReconcileTimerRef.current);
@@ -3535,6 +3540,31 @@ export function App() {
     } finally {
       if (draftWorkspacePickerTokenRef.current === token) {
         draftWorkspacePickerTokenRef.current = null;
+        setWorkspacePicking(false);
+      }
+    }
+  };
+
+  const pickDefaultWorkspace = async () => {
+    if (workspacePicking || mutationBlocked) return;
+    const token = Symbol("default-workspace-picker");
+    workspaceDefaultPickerTokenRef.current = token;
+    setWorkspacePicking(true);
+    setError("");
+    setNotice("请在弹出的 Windows 窗口中选择默认工作路径");
+    try {
+      const result = await api.pickWorkspace();
+      if (workspaceDefaultPickerTokenRef.current !== token || result.cancelled || !result.data) return;
+      // This is global metadata only. A pending draft can have its own selected
+      // cwd, and an existing Runtime always keeps its immutable Session cwd.
+      applyBootstrapMetadata(result.data);
+      setNotice(`以后新建的对话将使用工作目录：${result.data.workspaceCwd}`);
+    } catch (cause) {
+      if (workspaceDefaultPickerTokenRef.current === token)
+        setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      if (workspaceDefaultPickerTokenRef.current === token) {
+        workspaceDefaultPickerTokenRef.current = null;
         setWorkspacePicking(false);
       }
     }
@@ -4373,6 +4403,9 @@ export function App() {
       <ManagementPanel
         section={managementSection}
         appearance={appearance}
+        workspaceCwd={workspaceCwd}
+        workspacePicking={workspacePicking}
+        workspaceDisabled={mutationBlocked}
         models={models}
         state={state}
         busy={busy || globalMutationBlocked}
@@ -4381,6 +4414,7 @@ export function App() {
         }
         onClose={() => setManagementSection(null)}
         onAppearance={setAppearance}
+        onPickWorkspace={() => void pickDefaultWorkspace()}
         onModel={(provider, id) => void changeModel(provider, id)}
         onShutdown={() => void shutdownPiChat()}
       />

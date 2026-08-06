@@ -720,6 +720,13 @@ details.conversation-process { display: block; padding: 0; }
 .setting-row strong, .setting-row small { display: block; }
 .setting-row strong, .stepper-setting-label strong { font-size: 13px; }
 .setting-row small { margin-top: 3px; color: var(--muted); font-size: 10.5px; }
+.workspace-setting-control { display: flex; min-width: 0; max-width: min(330px, 52%); align-items: center; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.workspace-setting-control code { min-width: 0; flex: 1; overflow: hidden; padding: 0 9px; color: var(--text); font: 11px ui-monospace, Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-picker { display: grid; width: 32px; height: 30px; flex: 0 0 32px; place-items: center; padding: 0; border: 0; border-left: 1px solid var(--line); border-radius: 0 7px 7px 0; background: transparent; color: var(--accent); cursor: pointer; }
+.workspace-picker:hover:not(:disabled) { background: var(--accent-soft); }
+.workspace-picker:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.workspace-picker:disabled { cursor: default; opacity: .45; }
+.workspace-picker svg { width: 16px; height: 16px; }
 /* Theme and font use the shared CompactSelect. Keep the outer white board neutral:
    only a pointer directly over its trigger may show the hover fill. */
 .appearance-select,
@@ -851,6 +858,7 @@ details.conversation-process { display: block; padding: 0; }
   body.sidebar-resizing .sidebar { transition: none; will-change: auto; }
   .topbar { min-height: 46px; gap: 8px; padding: 5px 10px; }
   .stepper-setting { align-items: flex-start; flex-direction: column; gap: 8px; }
+  .workspace-setting-control { width: 100%; max-width: none; }
   :root { --chat-column-gutter: 24px; }
   .timeline-inner { padding: 20px 0 26px; }
   .composer-wrap { padding: 8px 0 10px; }

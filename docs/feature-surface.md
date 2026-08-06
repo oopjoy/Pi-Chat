@@ -16,7 +16,7 @@ Internal implementation endpoints used by a product entry are listed with that p
 | Chat and streaming | Main composer, send button, Stop, Follow-up queue | `POST /api/chat/prompt`, `POST /api/chat/abort`, `DELETE /api/chat/queue/:id`, `POST /api/chat/queue/resume` | Queue cancellation and resume are visible composer operations. |
 | Attachments | Composer attachment menu, paste, drag and drop | `POST /api/local-files/pick`, `POST /api/local-files/clipboard` | Local paths and image payloads only; no upload service. |
 | Session navigation | Sidebar, search, directory groups, history pagination | `GET /api/sessions`, `GET /api/sessions/:id/view`, viewing markers | Cold JSONL navigation does not start a Runtime. |
-| New draft and per-draft cwd | New button and new-draft workspace picker | `POST /api/sessions/new`, `POST /api/workspace/draft-pick` | A draft cwd affects only that new conversation. |
+| Default and per-draft workspace | Settings default-workspace picker; New button and new-draft workspace picker | `POST /api/workspace/pick`, `POST /api/sessions/new`, `POST /api/workspace/draft-pick` | The default applies only to later drafts; a per-draft cwd affects only that new conversation. Neither changes a live Runtime cwd. |
 | Runtime preparation | Send, Compact, model/thinking change, takeover, explicit internal warm path | `POST /api/sessions/:id/warm`, `POST /api/sessions/:id/activate` | Capability upgrade for real work, not a sidebar resource-management feature. |
 | Session control | Observer banner and explicit takeover | `POST /api/sessions/:id/control`, presence and viewing leases | One live browser window writes; other windows observe. |
 | Session rename and delete | Session action menu and confirmation dialog | `PATCH /api/sessions/:id`, `DELETE /api/sessions/:id` | Delete may stop an idle dedicated Runtime before removing JSONL. |
@@ -32,7 +32,6 @@ Internal implementation endpoints used by a product entry are listed with that p
 
 | Capability | Local API | Why retained | Browser rule |
 |---|---|---|---|
-| Future-draft default workspace picker | `POST /api/workspace/pick` | Native folder selection for local automation or a future local CLI. | No `api.ts` wrapper and no ordinary browser UI entry. |
 | Future-draft default workspace setter | `POST /api/workspace/set` | Deterministic path input for local scripts or a future local CLI. | No `api.ts` wrapper and no ordinary browser UI entry. |
 | Health probe | `GET /api/health` | Launchers, restart handoff, and local readiness checks. | Product startup may observe it, but it is not a settings feature. |
 

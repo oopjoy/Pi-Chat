@@ -50,9 +50,9 @@ The status of each current capability is tracked in [`feature-surface.md`](featu
 - Rewriting agent orchestration inside Pi Chat
 - Public internet exposure
 
-### Reserved local automation surface
+### Workspace defaults and local automation surface
 
-`POST /api/workspace/pick` and `POST /api/workspace/set` remain **local automation** APIs for scripts or a future local CLI; the ordinary browser UI exposes only the per-draft `POST /api/workspace/draft-pick` control. The global APIs update only the persisted default/index cwd for future drafts; they never stop, restart, rebind, or change the cwd of a live Runtime. Do not document `workspace/set` as a remote client entry.
+The Settings panel exposes `POST /api/workspace/pick` as the sole browser control for choosing the persisted default cwd for future drafts. New-draft UI also exposes `POST /api/workspace/draft-pick` for one draft only. `POST /api/workspace/set` remains a **local automation** API for scripts or a future local CLI, with no browser wrapper. All global/default paths affect only future drafts and directory indexing; they never stop, restart, rebind, or change the cwd of a live Runtime. Do not document `workspace/set` as a remote client entry.
 
 ## Server module map
 
