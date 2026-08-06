@@ -1,6 +1,9 @@
 import { spawn } from "node:child_process";
 
-const child = spawn(process.execPath, ["--test", "--import", "tsx", "tests/*.test.ts"], {
+// Keep the official test harness responsible for NODE_ENV=test: a few source
+// tests deliberately expose test-only hooks that must be impossible in Web
+// artifacts. Forward Node test flags so focused runs retain that contract.
+const child = spawn(process.execPath, ["--test", "--import", "tsx", ...process.argv.slice(2), "tests/*.test.ts"], {
   env: { ...process.env, NODE_ENV: "test" },
   stdio: "inherit",
   windowsHide: true,

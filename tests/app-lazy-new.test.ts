@@ -292,6 +292,11 @@ test("foreground presence renews on ready, visible lifecycle events, stays quiet
 });
 
 test("a build mismatch blocks ordinary mutations but preserves server-guarded lifecycle recovery", async () => {
+  assert.equal(
+    process.env.NODE_ENV,
+    "test",
+    "此测试依赖受限的 Web identity override；请使用 `npm test` 或 `node scripts/run-tests.mjs` 运行。",
+  );
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");

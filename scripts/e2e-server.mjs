@@ -7,6 +7,7 @@ import { e2eRuntimeDist } from "./e2e-runtime-dist.mjs";
 
 const projectRoot = resolve(import.meta.dirname, "..");
 const runtimeDist = e2eRuntimeDist(process.env, projectRoot);
+const serverDist = resolve(process.env.PI_CHAT_E2E_SERVER_DIST || runtimeDist);
 const portIndex = process.argv.indexOf("--port");
 const port = portIndex >= 0 ? Number(process.argv[portIndex + 1]) : 30179;
 if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error("E2E 端口无效");
@@ -75,7 +76,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 });
 `, "utf8");
 
-const child = spawn(process.execPath, [join(runtimeDist, "server", "server", "index.js"), "--host", "127.0.0.1", "--port", String(port), "--cwd", root], {
+const child = spawn(process.execPath, [join(serverDist, "server", "server", "index.js"), "--host", "127.0.0.1", "--port", String(port), "--cwd", root], {
   cwd: projectRoot,
   env: {
     ...process.env,

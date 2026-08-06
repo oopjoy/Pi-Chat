@@ -63,6 +63,18 @@ npm run dev
 
 默认地址：`http://127.0.0.1:30170`。没有已保存工作目录选择的新安装，New 草稿默认使用当前用户的桌面目录（Windows 下为 `C:\\Users\\<用户名>\\Desktop`）；`PI_CHAT_CWD` 或 `--cwd` 可提供启动回退目录，但已有的用户保存选择不会被自动覆盖。每个尚未提交的 New 草稿可单独修改其工作路径。
 
+### 测试
+
+请通过官方 harness 运行单测：
+
+```bash
+npm test
+# 只运行匹配的测试名称；NODE_ENV=test 会由 harness 负责设置
+npm test -- --test-name-pattern="build mismatch"
+```
+
+不要直接绕过 `scripts/run-tests.mjs` 调用 `node --test`。少数安全边界测试需要 `NODE_ENV=test` 才能使用仅限 JSDOM 的 identity override；生产 Web artifact 不存在该 override。
+
 ## Windows 桌面快捷方式
 
 仓库**不会**提交桌面上的 `.lnk` 文件（会写死本机路径，别人 clone 后失效）。请在**本机项目目录**生成：

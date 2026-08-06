@@ -1,0 +1,33 @@
+name: Windows CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install chromium
+      - run: npm run typecheck
+      - run: npm test
+        env:
+          PI_CHAT_DIST_DIR: .pi-chat-ci-unit-stage
+      - run: npm run test:e2e
+        env:
+          PI_CHAT_DIST_DIR: .pi-chat-ci-e2e-stage
+      - name: Upload Playwright diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-diagnostics
+          path: |
+            playwright-report
+            test-results
+          if-no-files-found: ignore

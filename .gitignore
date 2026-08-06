@@ -16,3 +16,4 @@ test-results/
 playwright-report/
 
 dist-local/
+.pi-chat-*/

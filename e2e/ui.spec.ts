@@ -17,6 +17,18 @@ test("desktop session navigation keeps the left sidebar open", async ({ page }, 
   await expect(sidebar).toHaveClass(/is-open/);
 });
 
+test("a mismatched Web artifact blocks mutations but keeps guarded recovery actions", async ({ page, mismatchedBaseURL }, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium-desktop");
+  await page.goto(mismatchedBaseURL);
+  await expect(page.getByText("网页与服务版本不一致")).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "消息输入" })).toBeDisabled();
+  await expect(page.locator(".new-chat")).toBeDisabled();
+  await expect(page.getByRole("button", { name: "完整重启 Pi Chat 并应用更新" })).toBeEnabled();
+
+  await page.getByRole("button", { name: "设置" }).click();
+  await expect(page.getByRole("button", { name: "关闭 Pi Chat" })).toBeEnabled();
+});
+
 test("cold navigation uses a target-labelled loading pane before replacing the source transcript", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "chromium-desktop");
   await page.goto("/");
