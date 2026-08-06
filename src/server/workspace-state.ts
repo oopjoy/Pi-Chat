@@ -4,14 +4,39 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
-/** Serialize each persisted state target, including callers outside PiChatApp. */
+/** Serialize each persisted state target, including callers inside this process. */
 const saveTails = new Map<string, Promise<void>>();
+const RENAME_RETRY_MS = 25;
+const MAX_RENAME_ATTEMPTS = 8;
 
 export interface SaveWorkspaceOptions {
   /** Test seam to hold one persisted write immediately before its replacement. */
   beforeReplace?: () => Promise<void>;
   /** Test seam for a partially written temporary file that then fails. */
   writeTemporary?: (temporary: string, contents: string) => Promise<void>;
+  /** Test seam for transient Windows target-replacement failures. */
+  renameTemporary?: (temporary: string, path: string) => Promise<void>;
+}
+
+function isTransientRenameError(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && "code" in error
+    && (error.code === "EPERM" || error.code === "EACCES" || error.code === "EBUSY"));
+}
+
+async function replaceWorkspaceState(
+  temporary: string,
+  path: string,
+  replace: (temporary: string, path: string) => Promise<void> = (source, target) => rename(source, target),
+): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await replace(temporary, path);
+      return;
+    } catch (error) {
+      if (!isTransientRenameError(error) || attempt >= MAX_RENAME_ATTEMPTS - 1) throw error;
+      await new Promise<void>((resolveWait) => setTimeout(resolveWait, RENAME_RETRY_MS * (attempt + 1)));
+    }
+  }
 }
 
 function statePath(): string {
@@ -48,7 +73,7 @@ export async function saveWorkspace(cwd: string, options: SaveWorkspaceOptions =
     if (options.writeTemporary) await options.writeTemporary(temporary, contents);
     else await writeFile(temporary, contents, "utf8");
     await options.beforeReplace?.();
-    await rename(temporary, path);
+    await replaceWorkspaceState(temporary, path, options.renameTemporary);
   } catch (error) {
     await rm(temporary, { force: true }).catch(() => undefined);
     throw error;
