@@ -2229,11 +2229,19 @@ export class PiChatApp {
       // lifecycle immediately before persistence.
       const selected = await (this.options.pickWorkspaceFolder || pickWorkspaceFolder)(this.currentCwd);
       if (!selected) return json(response, 200, { cancelled: true });
-      const result = await this.changeWorkspace(selected);
-      // Keep the former browser response contract while newer clients consume
-      // the scoped top-level version fields. This runs after the short commit
-      // lease has released, so a slow bootstrap never blocks lifecycle work.
-      json(response, 200, { cancelled: false, ...result, data: await this.bootstrap() });
+      await this.changeWorkspace(selected);
+      // Bootstrap outside the short commit lease, then use its one authoritative
+      // snapshot for both legacy and revision-aware browser response fields.
+      // A later picker commit therefore cannot split old and new clients.
+      const data = await this.bootstrap();
+      json(response, 200, {
+        cancelled: false,
+        workspaceName: basename(data.workspaceCwd),
+        cwd: data.workspaceCwd,
+        workspaceEpoch: data.workspaceEpoch,
+        workspaceRevision: data.workspaceRevision,
+        data,
+      });
       return;
     }
 

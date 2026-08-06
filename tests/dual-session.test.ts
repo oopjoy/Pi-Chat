@@ -947,6 +947,65 @@ test("workspace picker retains the former bootstrap response for older browser b
   }
 });
 
+test("a delayed workspace picker responds with one latest snapshot for legacy and revision-aware clients", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-workspace-picker-snapshot-"));
+  const first = join(root, "first");
+  const second = join(root, "second");
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = join(root, "agent");
+  await Promise.all([mkdir(first), mkdir(second)]);
+  const app = new PiChatApp({
+    rpc: new FakeRpc("C:\\sessions\\picker-snapshot.jsonl", "picker-snapshot") as unknown as PiRpcClient,
+    sessions: { list: async () => [] } as unknown as SessionIndex,
+    resources: {} as ResourceManager,
+    cwd: root,
+    webRoot: process.cwd(),
+    pickWorkspaceFolder: async () => first,
+  });
+  const internals = app as unknown as { bootstrap: (clientId?: string) => Promise<unknown> };
+  const originalBootstrap = internals.bootstrap.bind(app);
+  let releaseBootstrap!: () => void;
+  const heldBootstrap = new Promise<void>((resolve) => { releaseBootstrap = resolve; });
+  let bootstrapStarted!: () => void;
+  const startedBootstrap = new Promise<void>((resolve) => { bootstrapStarted = resolve; });
+  internals.bootstrap = async (clientId = "") => {
+    bootstrapStarted();
+    await heldBootstrap;
+    return originalBootstrap(clientId);
+  };
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    const pickerResponse = fetch(`${origin}/api/workspace/pick`, { method: "POST" });
+    await startedBootstrap;
+    const newerCommit = await fetch(`${origin}/api/workspace/set`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path: second }),
+    });
+    assert.equal(newerCommit.status, 200);
+    releaseBootstrap();
+    const response = await pickerResponse;
+    assert.equal(response.status, 200);
+    const data = await response.json() as { cwd: string; workspaceEpoch: string; workspaceRevision: number; data: { workspaceCwd: string; workspaceEpoch?: string; workspaceRevision?: number } };
+    assert.equal(data.cwd, second, "a picker response cannot restore its earlier committed cwd");
+    assert.equal(data.workspaceRevision, 2);
+    assert.equal(data.data.workspaceCwd, data.cwd, "legacy and new clients receive the same workspace snapshot");
+    assert.equal(data.data.workspaceEpoch, data.workspaceEpoch);
+    assert.equal(data.data.workspaceRevision, data.workspaceRevision);
+  } finally {
+    releaseBootstrap?.();
+    server.close();
+    await app.close();
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("workspace resource inventory remains rooted at the Primary cwd", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-workspace-resources-"));
   const primaryCwd = join(root, "primary");
