@@ -394,6 +394,14 @@ export function App() {
       { model?: ModelInfo | null; thinkingLevel?: ThinkingLevel }
     >(),
   );
+  /** A cold Session's Gate preference is staged until its next real prompt. */
+  const pendingGateModesRef = useRef(new Map<string, GateMode>());
+  const [pendingGateModes, setPendingGateModes] = useState<Record<string, GateMode>>({});
+  const stageGateMode = useCallback((sessionId: string, mode: GateMode | undefined) => {
+    if (mode) pendingGateModesRef.current.set(sessionId, mode);
+    else pendingGateModesRef.current.delete(sessionId);
+    setPendingGateModes(Object.fromEntries(pendingGateModesRef.current));
+  }, []);
   const DRAFT_PREFS_KEY = "__local_draft__";
   const warmingSessionIdsRef = useRef(new Set<string>());
   const warmingRuntimeStartsRef = useRef(new Map<string, Promise<SessionRuntimeReadyData>>());
@@ -961,6 +969,8 @@ export function App() {
             turnTotal: protectedTranscript.turnTotal,
           }
         : sourceView;
+      // A view reports the Runtime-confirmed value only. A staged cold choice
+      // remains a display/send preference and must never gain Gate authority.
       updateGateMode(sourceView.session.id, view.gateMode);
       const nextRuntimeStatus =
         resolvedView.runtimeStatus ||
@@ -1944,13 +1954,20 @@ export function App() {
           }
         } else if (request.method === "notify") {
           const mode = gateModeFromNotice(request.message);
-          if (mode && eventSessionId) updateGateMode(eventSessionId, mode);
+          if (mode && eventSessionId) {
+            updateGateMode(eventSessionId, mode);
+            if (pendingGateModesRef.current.get(eventSessionId) === mode)
+              stageGateMode(eventSessionId, undefined);
+          }
           if (viewingEventSession) setNotice(request.message || "Pi 通知");
         }
       } else if (type === "pi_chat_gate_mode_changed") {
         const mode = event.mode;
-        if (eventSessionId && (mode === "strict" || mode === "open"))
+        if (eventSessionId && (mode === "strict" || mode === "open")) {
           updateGateMode(eventSessionId, mode);
+          if (pendingGateModesRef.current.get(eventSessionId) === mode)
+            stageGateMode(eventSessionId, undefined);
+        }
       } else if (type === "pi_chat_session_control_changed") {
         const id = typeof event.sessionId === "string" ? event.sessionId : "";
         const owner =
@@ -2781,12 +2798,18 @@ export function App() {
       // which have no Runtime-start view to pass through above.
       protectLocalPrompt();
       promptSubmitted = true;
+      const requestedGateMode =
+        pendingGateModesRef.current.get(targetSessionId) ??
+        gateModesRef.current[targetSessionId];
       const result = initialPromptResult || await api.prompt(
         message,
         images,
         targetSessionId,
-        gateModesRef.current[targetSessionId],
+        requestedGateMode,
       );
+      // HTTP acceptance can mean the prompt was queued, before Gate reaches its
+      // dispatch boundary. Retain the staged display/send intent until the
+      // matching Runtime-confirmed Gate SSE arrives.
       // A late acknowledgement is useful for backend reconciliation, but it
       // cannot write into a later A pane after A → B → A.
       if (!promptPaneIsCurrent()) {
@@ -3355,6 +3378,8 @@ export function App() {
               ? { thinkingLevel: staged.thinkingLevel }
               : null),
           };
+          // Warming does not apply a staged Gate choice. Keep the runtime's
+          // confirmed mode separate so an unconfirmed "open" cannot auto-allow.
           updateGateMode(sessionId, ready.gateMode);
           refreshSessionCache(sessionId, {
             state: cacheState,
@@ -3860,9 +3885,22 @@ export function App() {
   };
 
   const changeGate = async (mode: GateMode) => {
-    if (buildIdentityMismatch || !viewedSessionIdRef.current) return;
-    // Gate changes are security-sensitive: never auto-allow from an optimistic
-    // browser value before the Runtime confirms that the command succeeded.
+    const sessionId = viewedSessionIdRef.current;
+    if (buildIdentityMismatch || !sessionId) return;
+    // A cold history pane has no Runtime to mutate. Keep its intended Gate mode
+    // locally and let the next real prompt synchronize it immediately before Pi
+    // executes; selecting the control must not activate a conversation by itself.
+    if (runtimeStatus !== "active") {
+      stageGateMode(sessionId, mode);
+      setNotice(`已选择 ${mode === "open" ? "放行" : "严格"}，发送时生效`);
+      return;
+    }
+    // An explicit active-Runtime choice supersedes any cold staged intent. Do
+    // this before issuing /gate so an older staged value cannot later override
+    // a confirmed opposite command in UI, prompt payload, or auto-allow logic.
+    stageGateMode(sessionId, undefined);
+    // An active Runtime still requires its own confirmation before browser UI
+    // may change a security-sensitive Gate setting.
     await send(`/gate ${mode}`, []);
   };
 
@@ -3976,7 +4014,9 @@ export function App() {
   const primarySessionFailed =
     primaryRuntime.status === "failed" && viewedSessionId === activeSessionId;
   const gateAvailable = gateAvailableOverride ?? true;
-  const gateMode = gateModes[viewedSessionId];
+  // A staged value can describe the next prompt in a cold history pane, but
+  // never alters gateModesRef, which is the only authority for auto-allow.
+  const gateMode = pendingGateModes[viewedSessionId] ?? gateModes[viewedSessionId];
   const effectiveControl = { ...viewedSession, ...viewControl };
   const observing = Boolean(
     effectiveControl.controlOwner && !effectiveControl.controlledByThisWindow,

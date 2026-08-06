@@ -1178,7 +1178,11 @@ export class PiChatApp {
     for (const runtime of this.runtimePool.runtimes.values()) {
       if (known.has(runtime.id)) continue;
       if (!runtime.prompted && !runtime.running && !runtime.dispatching && !runtime.liveMessage) continue;
-      const base = runtime.draftSession || {
+      // A persisted Session may be momentarily absent from a refresh while its
+      // JSONL is being written. Its Runtime captured the indexed summary at
+      // activation; use that before the one-message draft fallback so a real
+      // title/count cannot regress to "新会话" in the sidebar.
+      const base = runtime.summarySnapshot || runtime.draftSession || {
         id: runtime.id,
         sessionId: runtime.id,
         name: "新会话",

@@ -1353,6 +1353,300 @@ test("Primary readiness explains capability loss without blocking historical nav
   }
 });
 
+test("changing Gate on cold history stages the next prompt without activating its Runtime", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const coldId = "gate-cold-1234567890";
+  const coldSummary = {
+    ...bootstrap.sessions[0],
+    id: coldId,
+    sessionId: "gate-cold",
+    name: "Cold Gate",
+    active: false,
+    writable: false,
+  };
+  const coldView: SessionViewData = {
+    ...draftView,
+    session: coldSummary,
+    state: { ...bootstrap.state, sessionId: "gate-cold" },
+    runtimeStatus: "view-only",
+    isActive: false,
+    gateMode: "strict",
+  };
+  const promptCalls: unknown[][] = [];
+  let warmCalls = 0;
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      sessions: [bootstrap.sessions[0], coldSummary],
+      sessionsTotal: 2,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async (id: string) => ({ viewing: id }),
+    viewSession: async (id: string) => id === coldId ? coldView : draftView,
+    warmSession: async (id: string) => {
+      warmCalls += 1;
+      return { sessionId: id, state: coldView.state, gateMode: "strict" as const };
+    },
+    prompt: async (...args: unknown[]) => {
+      promptCalls.push(args);
+      return { accepted: true, queued: false };
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const sessionButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
+      .find((button) => button.textContent?.includes("Cold Gate"))!;
+    await act(async () => sessionButton.click());
+    const trigger = dom.window.document.querySelector<HTMLButtonElement>(
+      ".gate-control .compact-select-trigger",
+    )!;
+    assert.equal(trigger.textContent?.trim(), "严格");
+    await act(async () => trigger.click());
+    const openOption = [...dom.window.document.querySelectorAll<HTMLElement>(
+      ".gate-control .compact-select-option",
+    )].find((option) => option.textContent?.trim() === "放行");
+    assert.ok(openOption);
+    await act(async () => openOption.click());
+    assert.equal(trigger.textContent?.trim(), "放行");
+    assert.equal(warmCalls, 0, "changing Gate alone must not activate cold history");
+    assert.deepEqual(promptCalls, [], "changing Gate alone must not send an extension command");
+
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "first message");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "first message" }));
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(warmCalls, 1, "the first actual prompt may activate the Session");
+    assert.deepEqual(promptCalls, [["first message", [], coldId, "open"]]);
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("an explicit active Gate choice supersedes an older cold staged mode", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const coldId = "gate-active-choice-123";
+  const coldSummary = {
+    ...bootstrap.sessions[0],
+    id: coldId,
+    sessionId: "gate-active-choice",
+    name: "Gate active choice",
+    active: false,
+    writable: true,
+  };
+  const coldView: SessionViewData = {
+    ...draftView,
+    session: coldSummary,
+    state: { ...bootstrap.state, sessionId: "gate-active-choice" },
+    runtimeStatus: "view-only",
+    isActive: false,
+    gateMode: "strict",
+  };
+  const promptCalls: unknown[][] = [];
+  const autoAllowResponses: unknown[] = [];
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      sessions: [bootstrap.sessions[0], coldSummary],
+      sessionsTotal: 2,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async (id: string) => ({ viewing: id }),
+    viewSession: async (id: string) => id === coldId ? coldView : draftView,
+    warmSession: async (id: string) => ({
+      sessionId: id,
+      state: coldView.state,
+      gateMode: "strict" as const,
+    }),
+    takeSessionControl: async () => ({ controlOwner: "this-window", controlledByThisWindow: true as const }),
+    respondToExtension: async (body: unknown) => { autoAllowResponses.push(body); },
+    prompt: async (...args: unknown[]) => {
+      promptCalls.push(args);
+      const message = args[0];
+      return typeof message === "string" && message.startsWith("/gate ")
+        ? { accepted: true, queued: false, extension: true, command: "gate", isStreaming: false }
+        : { accepted: true, queued: false };
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    await act(async () =>
+      [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
+        .find((button) => button.textContent?.includes("Gate active choice"))!
+        .click(),
+    );
+    const trigger = () => dom.window.document.querySelector<HTMLButtonElement>(
+      ".gate-control .compact-select-trigger",
+    )!;
+    const chooseGate = async (label: string) => {
+      await act(async () => trigger().click());
+      const option = [...dom.window.document.querySelectorAll<HTMLElement>(
+        ".gate-control .compact-select-option",
+      )].find((candidate) => candidate.textContent?.trim() === label);
+      assert.ok(option);
+      await act(async () => option.click());
+    };
+    await chooseGate("放行");
+    assert.equal(trigger().textContent?.trim(), "放行");
+
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => source.emitPi({
+      type: "pi_chat_session_control_changed",
+      sessionId: coldId,
+      controlOwner: "other-window",
+      controlledByThisWindow: false,
+    }));
+    await act(async () => new Promise((resolve) => dom.window.setTimeout(resolve, 450)));
+    const takeover = dom.window.document.querySelector<HTMLButtonElement>(
+      ".session-control-banner button",
+    );
+    assert.ok(takeover);
+    await act(async () => {
+      takeover.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(trigger().textContent?.trim(), "放行", "cold staging survives a pure activation");
+    await chooseGate("严格");
+    assert.equal(trigger().textContent?.trim(), "严格", "the explicit active choice drops the stale cold preference");
+    assert.deepEqual(promptCalls, [["/gate strict", [], coldId, "strict"]]);
+    await act(async () => source.emitPi({
+      type: "extension_ui_request",
+      piChatSessionId: coldId,
+      id: "strict-must-not-auto-allow",
+      method: "select",
+      title: "Pi Chat Gate: bash\necho strict",
+      options: ["allow", "block"],
+    }));
+    assert.deepEqual(autoAllowResponses, [], "the discarded cold open cannot revive auto-allow");
+
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "continue strictly");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "continue strictly" }));
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.deepEqual(promptCalls.at(-1), ["continue strictly", [], coldId, "strict"]);
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a staged cold Gate mode cannot auto-allow before Runtime confirmation", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const coldId = "gate-confirmation-123";
+  const coldSummary = {
+    ...bootstrap.sessions[0],
+    id: coldId,
+    sessionId: "gate-confirmation",
+    name: "Gate confirmation",
+    active: false,
+    writable: false,
+  };
+  const coldView: SessionViewData = {
+    ...draftView,
+    session: coldSummary,
+    state: { ...bootstrap.state, sessionId: "gate-confirmation" },
+    runtimeStatus: "view-only",
+    isActive: false,
+    gateMode: "strict",
+  };
+  const responses: unknown[] = [];
+  Object.assign(api, {
+    bootstrap: async () => ({ ...bootstrap, sessions: [bootstrap.sessions[0], coldSummary], sessionsTotal: 2 }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async (id: string) => ({ viewing: id }),
+    viewSession: async (id: string) => id === coldId ? coldView : draftView,
+    respondToExtension: async (body: unknown) => { responses.push(body); },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    await act(async () =>
+      [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
+        .find((button) => button.textContent?.includes("Gate confirmation"))!
+        .click(),
+    );
+    const trigger = dom.window.document.querySelector<HTMLButtonElement>(
+      ".gate-control .compact-select-trigger",
+    )!;
+    await act(async () => trigger.click());
+    const openOption = [...dom.window.document.querySelectorAll<HTMLElement>(
+      ".gate-control .compact-select-option",
+    )].find((option) => option.textContent?.trim() === "放行");
+    assert.ok(openOption);
+    await act(async () => openOption.click());
+    assert.equal(trigger.textContent?.trim(), "放行", "the staged preference remains visible");
+
+    const source = FakeEventSource.instances.at(-1)!;
+    // Another browser action may warm this Runtime, but its ready state remains
+    // strict until the staged value is synchronized by a real prompt.
+    await act(async () => source.emitPi({
+      type: "pi_chat_gate_mode_changed",
+      piChatSessionId: coldId,
+      mode: "strict",
+    }));
+    await act(async () => source.emitPi({
+      type: "extension_ui_request",
+      piChatSessionId: coldId,
+      id: "must-not-auto-allow",
+      method: "select",
+      title: "Pi Chat Gate: bash\necho strict",
+      options: ["allow", "block"],
+    }));
+    assert.deepEqual(responses, [], "an unconfirmed staged open value cannot auto-allow");
+    assert.ok(dom.window.document.querySelector(".extension-dialog"));
+
+    await act(async () => source.emitPi({
+      type: "pi_chat_gate_mode_changed",
+      piChatSessionId: coldId,
+      mode: "open",
+    }));
+    await act(async () => source.emitPi({
+      type: "extension_ui_request",
+      piChatSessionId: coldId,
+      id: "confirmed-auto-allow",
+      method: "select",
+      title: "Pi Chat Gate: bash\necho open",
+      options: ["allow", "block"],
+    }));
+    await act(async () => { await Promise.resolve(); });
+    assert.deepEqual(responses, [{
+      id: "confirmed-auto-allow",
+      value: "allow",
+      sessionId: coldId,
+    }]);
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
 test("Gate mode changes only after the Runtime confirms the command", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");

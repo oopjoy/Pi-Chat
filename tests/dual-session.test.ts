@@ -129,6 +129,51 @@ test("warm starts a dedicated Runtime without full-view probes and same-mode Gat
   }
 });
 
+test("a running persisted Session retains its indexed sidebar summary while a refresh omits it", async () => {
+  const primaryPath = "C:\\sessions\\summary-primary.jsonl";
+  const secondaryPath = "C:\\sessions\\summary-secondary.jsonl";
+  const primaryId = idForPath(primaryPath);
+  const secondaryId = idForPath(secondaryPath);
+  const primary = new FakeRpc(primaryPath, "summary-primary");
+  const secondary = new FakeRpc(secondaryPath, "summary-secondary");
+  const primarySummary = { id: primaryId, sessionId: "summary-primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 2, messageCount: 1, active: true };
+  const secondarySummary = { id: secondaryId, sessionId: "summary-secondary", name: "Persisted title", preview: "persisted preview", cwd: process.cwd(), updatedAt: 8, messageCount: 24, turnCount: 8, active: false };
+  const sessions = {
+    // Model the short SessionIndex refresh gap: Runtime activation knows the
+    // secondary summary, but the following sidebar list has not republished it.
+    list: async () => [primarySummary],
+    pathForId: (id: string) => id === primaryId ? primaryPath : id === secondaryId ? secondaryPath : null,
+    summaryForId: (id: string) => id === secondaryId ? secondarySummary : id === primaryId ? primarySummary : null,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, createRpc: () => secondary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    await fetch(`${origin}/api/bootstrap`);
+    assert.equal((await fetch(`${origin}/api/sessions/${secondaryId}/warm`, { method: "POST" })).status, 200);
+    assert.equal((await fetch(`${origin}/api/chat/prompt`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "continue", sessionId: secondaryId }),
+    })).status, 202);
+
+    const sidebar = await (await fetch(`${origin}/api/sessions`)).json() as { sessions: SessionSummary[] };
+    const row = sidebar.sessions.find((session) => session.id === secondaryId);
+    assert.ok(row);
+    assert.equal(row.name, "Persisted title");
+    assert.equal(row.preview, "persisted preview");
+    assert.equal(row.messageCount, 24);
+    assert.equal(row.turnCount, 8);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
 test("known cold history returns without waiting for global inventory, usage fallback, or Gate discovery", async () => {
   const primaryPath = "C:\\sessions\\cold-fast-primary.jsonl";
   const coldPath = "C:\\sessions\\cold-fast-target.jsonl";
