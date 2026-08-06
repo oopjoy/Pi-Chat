@@ -105,17 +105,16 @@ test("a stale draft workspace picker cannot overwrite a later New draft", async 
   }
 });
 
-test("a stale default workspace picker cannot change the default after New", async () => {
+test("an independent default workspace picker completes after New without changing that draft", async () => {
   const dom = installDom();
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
   const originals = { ...api };
-  let resolvePicker!: (value: { cancelled: false; workspaceName: string; data: BootstrapData }) => void;
-  const pendingPicker = new Promise<{ cancelled: false; workspaceName: string; data: BootstrapData }>((resolve) => {
+  let resolvePicker!: (value: { cancelled: false; workspaceName: string; cwd: string }) => void;
+  const pendingPicker = new Promise<{ cancelled: false; workspaceName: string; cwd: string }>((resolve) => {
     resolvePicker = resolve;
   });
-  const updatedBootstrap = { ...bootstrap, workspaceCwd: "D:/stale-default" };
   Object.assign(api, {
     bootstrap: async () => bootstrap,
     eventsUrl: () => "/api/events",
@@ -132,12 +131,14 @@ test("a stale default workspace picker cannot change the default after New", asy
       .find((button) => button.textContent?.trim() === "New")!;
     await act(async () => newButton.click());
     await act(async () => {
-      resolvePicker({ cancelled: false, workspaceName: "stale-default", data: updatedBootstrap });
+      resolvePicker({ cancelled: false, workspaceName: "later-default", cwd: "D:/later-default" });
       await Promise.resolve();
       await Promise.resolve();
     });
-    assert.equal(dom.window.document.querySelector(".draft-workspace code")?.textContent, "C:/work");
-    assert.equal(dom.window.document.querySelector(".workspace-setting-control code")?.textContent, "C:/work");
+    assert.equal(dom.window.document.querySelector(".draft-workspace code")?.textContent, "C:/work", "the already-created draft retains the default it captured");
+    assert.equal(dom.window.document.querySelector(".workspace-setting-control code")?.textContent, "D:/later-default");
+    await act(async () => newButton.click());
+    assert.equal(dom.window.document.querySelector(".draft-workspace code")?.textContent, "D:/later-default", "a later New inherits the committed global default");
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);
@@ -150,13 +151,12 @@ test("settings changes the default workspace only for later New drafts", async (
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
   const originals = { ...api };
-  const updatedBootstrap = { ...bootstrap, workspaceCwd: "D:/default-workspace" };
   Object.assign(api, {
     bootstrap: async () => bootstrap,
     eventsUrl: () => "/api/events",
     markSessionViewed: async () => ({ viewing: activeId }),
     clearSessionViewed: async () => ({ viewing: "" }),
-    pickWorkspace: async () => ({ cancelled: false, workspaceName: "default-workspace", data: updatedBootstrap }),
+    pickWorkspace: async () => ({ cancelled: false, workspaceName: "default-workspace", cwd: "D:/default-workspace" }),
   });
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {

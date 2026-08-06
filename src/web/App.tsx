@@ -136,6 +136,7 @@ const GLOBAL_SSE_EVENT_TYPES = new Set([
   "pi_chat_active_session_changed",
   "pi_chat_sessions_changed",
   "pi_chat_primary_runtime_status",
+  "pi_chat_workspace_changed",
 ]);
 
 const SESSION_VIEW_INVALIDATING_EVENT_TYPES = new Set([
@@ -236,6 +237,9 @@ export function App() {
   const viewedSessionId = pane.identity.kind === "session" ? pane.identity.sessionId : "";
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [workspaceCwd, setWorkspaceCwd] = useState("");
+  /** Server epoch + revision prevent stale bootstrap metadata from undoing workspace SSE. */
+  const workspaceEpochRef = useRef("");
+  const workspaceRevisionRef = useRef(0);
   const { draftWorkspaceCwd } = pane;
   const { commands, gateAvailableOverride, queue, queuePaused } = pane;
   const [stopping, setStopping] = useState(false);
@@ -773,7 +777,17 @@ export function App() {
     // choices through that transient snapshot; ComposerControls also renders a
     // readable current-model fallback until the inventory catches up.
     if (data.models.length || !data.state.model) setModels(data.models);
-    setWorkspaceCwd(data.workspaceCwd);
+    const workspaceEpoch = typeof data.workspaceEpoch === "string" ? data.workspaceEpoch : "";
+    const workspaceRevision = typeof data.workspaceRevision === "number" && Number.isFinite(data.workspaceRevision)
+      ? data.workspaceRevision
+      : 0;
+    if (!workspaceEpochRef.current || workspaceEpoch === workspaceEpochRef.current) {
+      if (workspaceRevision >= workspaceRevisionRef.current) {
+        workspaceEpochRef.current = workspaceEpoch || workspaceEpochRef.current;
+        workspaceRevisionRef.current = workspaceRevision;
+        setWorkspaceCwd(data.workspaceCwd);
+      }
+    }
     const identity = data.buildIdentity || webBuildIdentity;
     setServerBuildIdentity(identity);
     setBuildIdentityMismatch(!buildIdentityMatches(identity));
@@ -1351,6 +1365,8 @@ export function App() {
       const readyRunEpoch =
         typeof ready.piChatRunEpoch === "string" ? ready.piChatRunEpoch : "";
       if (readyRunEpoch && readyRunEpoch !== runEpochRef.current) {
+        workspaceEpochRef.current = typeof ready.workspaceEpoch === "string" ? ready.workspaceEpoch : readyRunEpoch;
+        workspaceRevisionRef.current = 0;
         for (const lease of promptBusyReleasesRef.current.values()) {
           lease.markTerminal();
           lease.release();
@@ -1723,6 +1739,17 @@ export function App() {
           // selected cold pane (refresh keeps desired/viewed guards).
           if (next.status === "ready")
             void refresh().catch(reportBackgroundRefreshError);
+        }
+      } else if (type === "pi_chat_workspace_changed") {
+        const cwd = typeof event.cwd === "string" ? event.cwd : "";
+        const workspaceEpoch = typeof event.workspaceEpoch === "string" ? event.workspaceEpoch : runEpochRef.current;
+        const workspaceRevision = typeof event.workspaceRevision === "number" && Number.isFinite(event.workspaceRevision)
+          ? event.workspaceRevision
+          : workspaceRevisionRef.current + 1;
+        if (cwd && (!workspaceEpochRef.current || workspaceEpoch === workspaceEpochRef.current) && workspaceRevision >= workspaceRevisionRef.current) {
+          workspaceEpochRef.current = workspaceEpoch || workspaceEpochRef.current;
+          workspaceRevisionRef.current = workspaceRevision;
+          setWorkspaceCwd(cwd);
         }
       } else if (type === "pi_chat_application_lifecycle") {
         const lifecycle = String(
@@ -3277,11 +3304,11 @@ export function App() {
     navigationEpochRef.current += 1;
     refreshEpochRef.current += 1;
     setViewSwitching(false);
-    // A New draft supersedes both kinds of native picker. A late response must
-    // not alter either this draft or the default it inherited.
+    // A New draft supersedes its per-draft picker, but not the independent
+    // global default picker. This draft keeps the default captured below;
+    // a completed global choice applies only to later drafts.
     draftWorkspacePickerTokenRef.current = null;
-    workspaceDefaultPickerTokenRef.current = null;
-    setWorkspacePicking(false);
+    if (!workspaceDefaultPickerTokenRef.current) setWorkspacePicking(false);
     if (promptReconcileTimerRef.current !== null)
       window.clearTimeout(promptReconcileTimerRef.current);
     promptReconcileTimerRef.current = null;
@@ -3554,11 +3581,19 @@ export function App() {
     setNotice("请在弹出的 Windows 窗口中选择默认工作路径");
     try {
       const result = await api.pickWorkspace();
-      if (workspaceDefaultPickerTokenRef.current !== token || result.cancelled || !result.data) return;
+      if (workspaceDefaultPickerTokenRef.current !== token || result.cancelled || !result.cwd) return;
       // This is global metadata only. A pending draft can have its own selected
       // cwd, and an existing Runtime always keeps its immutable Session cwd.
-      applyBootstrapMetadata(result.data);
-      setNotice(`以后新建的对话将使用工作目录：${result.data.workspaceCwd}`);
+      const workspaceEpoch = typeof result.workspaceEpoch === "string" ? result.workspaceEpoch : runEpochRef.current;
+      const workspaceRevision = typeof result.workspaceRevision === "number" && Number.isFinite(result.workspaceRevision)
+        ? result.workspaceRevision
+        : workspaceRevisionRef.current + 1;
+      if ((!workspaceEpochRef.current || workspaceEpoch === workspaceEpochRef.current) && workspaceRevision >= workspaceRevisionRef.current) {
+        workspaceEpochRef.current = workspaceEpoch || workspaceEpochRef.current;
+        workspaceRevisionRef.current = workspaceRevision;
+        setWorkspaceCwd(result.cwd);
+      }
+      setNotice(`以后新建的对话将使用工作目录：${result.cwd}`);
     } catch (cause) {
       if (workspaceDefaultPickerTokenRef.current === token)
         setError(cause instanceof Error ? cause.message : String(cause));

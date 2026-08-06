@@ -864,6 +864,128 @@ test("workspace default change never restarts or rebinds a live Runtime", async 
   }
 });
 
+test("workspace commits serialize concurrent defaults and respect an active lifecycle barrier", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-workspace-commit-"));
+  const first = join(root, "first");
+  const second = join(root, "second");
+  const agentDir = join(root, "agent");
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  await Promise.all([mkdir(first), mkdir(second)]);
+  const app = new PiChatApp({
+    rpc: new FakeRpc("C:\\sessions\\workspace.jsonl", "workspace") as unknown as PiRpcClient,
+    sessions: { list: async () => [] } as unknown as SessionIndex,
+    resources: {} as ResourceManager,
+    cwd: root,
+    webRoot: process.cwd(),
+  });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    const setWorkspace = (path: string) => fetch(`${origin}/api/workspace/set`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path }),
+    });
+    const [firstResult, secondResult] = await Promise.all([setWorkspace(first), setWorkspace(second)]);
+    assert.equal(firstResult.status, 200);
+    assert.equal(secondResult.status, 200);
+    assert.equal((app as unknown as { currentCwd: string }).currentCwd, second);
+    assert.equal(JSON.parse(await readFile(join(agentDir, "pi-chat-workspace.json"), "utf8")).cwd, second);
+
+    const lifecycle = app as unknown as { lifecycleCoordinator: { begin: (kind: "restarting") => void; end: (kind: "restarting") => void } };
+    lifecycle.lifecycleCoordinator.begin("restarting");
+    const blocked = await setWorkspace(first);
+    assert.equal(blocked.status, 503);
+    assert.equal((await blocked.json() as { code: string }).code, "APPLICATION_LIFECYCLE_BLOCKED");
+    lifecycle.lifecycleCoordinator.end("restarting");
+  } finally {
+    server.close();
+    await app.close();
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("workspace picker retains the former bootstrap response for older browser bundles", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-workspace-picker-contract-"));
+  const selected = join(root, "selected");
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = join(root, "agent");
+  await mkdir(selected);
+  const app = new PiChatApp({
+    rpc: new FakeRpc("C:\\sessions\\picker.jsonl", "picker") as unknown as PiRpcClient,
+    sessions: { list: async () => [] } as unknown as SessionIndex,
+    resources: {} as ResourceManager,
+    cwd: root,
+    webRoot: process.cwd(),
+    pickWorkspaceFolder: async () => selected,
+  });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/workspace/pick`, { method: "POST" });
+    assert.equal(response.status, 200);
+    const data = await response.json() as { cancelled: boolean; cwd: string; workspaceEpoch: string; workspaceRevision: number; data?: { workspaceCwd?: string; workspaceEpoch?: string; workspaceRevision?: number } };
+    assert.equal(data.cancelled, false);
+    assert.equal(data.cwd, selected);
+    assert.equal(data.data?.workspaceCwd, selected, "older clients still read the nested bootstrap workspace path");
+    assert.equal(data.data?.workspaceEpoch, data.workspaceEpoch);
+    assert.equal(data.data?.workspaceRevision, data.workspaceRevision);
+  } finally {
+    server.close();
+    await app.close();
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("workspace resource inventory remains rooted at the Primary cwd", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-workspace-resources-"));
+  const primaryCwd = join(root, "primary");
+  const laterDefault = join(root, "later-default");
+  await Promise.all([mkdir(primaryCwd), mkdir(laterDefault)]);
+  const calls: string[] = [];
+  const resources = {
+    listSkills: async (cwd: string) => { calls.push(`skills:${cwd}`); return { resources: [], diagnostics: [] }; },
+    listExtensions: async (cwd: string) => { calls.push(`extensions:${cwd}`); return { resources: [], diagnostics: [] }; },
+    listPackages: async (cwd: string) => { calls.push(`packages:${cwd}`); return { resources: [], diagnostics: [] }; },
+  } as unknown as ResourceManager;
+  const app = new PiChatApp({
+    rpc: new FakeRpc("C:\\sessions\\resources.jsonl", "resources") as unknown as PiRpcClient,
+    sessions: { list: async () => [] } as unknown as SessionIndex,
+    resources,
+    cwd: primaryCwd,
+    webRoot: process.cwd(),
+  });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    const changed = await fetch(`${origin}/api/workspace/set`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path: laterDefault }),
+    });
+    assert.equal(changed.status, 200);
+    for (const kind of ["skills", "extensions", "packages"]) assert.equal((await fetch(`${origin}/api/resources/${kind}`)).status, 200);
+    assert.deepEqual(calls, [`skills:${primaryCwd}`, `extensions:${primaryCwd}`, `packages:${primaryCwd}`]);
+  } finally {
+    server.close();
+    await app.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("a final window close never shuts down an actively streaming Pi worker", async () => {
   const path = "C:\\sessions\\active-close.jsonl";
   const primary = new FakeRpc(path, "primary");

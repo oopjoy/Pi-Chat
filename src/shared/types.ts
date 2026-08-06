@@ -268,6 +268,10 @@ export interface BootstrapData {
   queue: QueuedPrompt[];
   queuePaused: boolean;
   workspaceCwd: string;
+  /** Scoped to workspaceEpoch; prevents stale bootstrap metadata from undoing workspace SSE. */
+  workspaceRevision?: number;
+  /** Pi Chat process epoch that scopes workspaceRevision across a handoff. */
+  workspaceEpoch?: string;
   messageTotal?: number;
   turnTotal?: number;
   visibleTurnCount?: number;

@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -21,7 +22,7 @@ export async function loadWorkspace(fallback: string): Promise<string> {
 export async function saveWorkspace(cwd: string): Promise<void> {
   const path = statePath();
   await mkdir(dirname(path), { recursive: true });
-  const temporary = `${path}.${process.pid}.tmp`;
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   await writeFile(temporary, `${JSON.stringify({ cwd: resolve(cwd) }, null, 2)}\n`, "utf8");
   await rename(temporary, path);
 }

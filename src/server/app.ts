@@ -119,6 +119,8 @@ export interface PiChatAppOptions {
   applicationShutdown?: (reason: ApplicationShutdownReason) => void;
   /** Index owns spawn/probe/retry; App only projects and gates capability use. */
   primaryRuntime?: PrimaryRuntimeReadinessBridge;
+  /** Test seam for the native directory picker; production uses pickWorkspaceFolder. */
+  pickWorkspaceFolder?: (initialPath?: string) => Promise<string | null>;
 }
 
 export class PiChatApp {
@@ -130,6 +132,8 @@ export class PiChatApp {
   private lastPrimaryState: PiState = { model: null, isStreaming: false };
   private closed = false;
   private currentCwd: string;
+  /** Monotonic workspace default version, scoped by this.runEpoch across a handoff. */
+  private workspaceRevision = 0;
   /** Primary's true process cwd never follows mutable future-draft defaults. */
   private readonly primaryRuntimeCwd: string;
   private activeSessionId = "";
@@ -150,6 +154,8 @@ export class PiChatApp {
   private readonly claimingExtensionRequests = new Set<string>();
   /** FIFO admission per Session prevents simultaneous prompt requests bypassing the queue. */
   private readonly promptAdmissionTails = new Map<string, Promise<void>>();
+  /** Serializes default-workspace commits after native pickers return. */
+  private workspaceCommitTail: Promise<void> = Promise.resolve();
   private primaryFailed = false;
   private primaryRecovery: Promise<void> | null = null;
   private readonly primaryOperationAdmission = new OperationAdmission();
@@ -1282,16 +1288,33 @@ export class PiChatApp {
   }
 
   /** Changes only the persisted default/index context for future drafts. Existing
-   * Session paths and dedicated Runtime cwd values are immutable. */
-  private async changeWorkspace(selected: string): Promise<{ workspaceName: string; data: BootstrapData }> {
-    const selectedCwd = resolve(selected);
-    if (!(await stat(selectedCwd)).isDirectory()) throw new Error("所选工作目录不存在或不是文件夹");
-    await saveWorkspace(selectedCwd);
-    if (selectedCwd.toLowerCase() !== this.currentCwd.toLowerCase()) {
-      this.currentCwd = selectedCwd;
-      this.broadcast({ type: "pi_chat_workspace_changed", cwd: selectedCwd });
+   * Session paths and dedicated Runtime cwd values are immutable. Native folder
+   * pickers wait outside this queue; each returned selection gets a short,
+   * lifecycle-guarded commit in FIFO order. */
+  private async changeWorkspace(selected: string): Promise<{ workspaceName: string; cwd: string; workspaceEpoch: string; workspaceRevision: number }> {
+    let releaseTurn!: () => void;
+    const previous = this.workspaceCommitTail;
+    const turn = new Promise<void>((resolveTurn) => { releaseTurn = resolveTurn; });
+    this.workspaceCommitTail = previous.catch(() => undefined).then(() => turn);
+    await previous.catch(() => undefined);
+    try {
+      const releaseMutation = this.beginMutation();
+      try {
+        const selectedCwd = resolve(selected);
+        if (!(await stat(selectedCwd)).isDirectory()) throw new Error("所选工作目录不存在或不是文件夹");
+        await saveWorkspace(selectedCwd);
+        if (selectedCwd.toLowerCase() !== this.currentCwd.toLowerCase()) {
+          this.currentCwd = selectedCwd;
+          this.workspaceRevision += 1;
+          this.broadcast({ type: "pi_chat_workspace_changed", cwd: selectedCwd, workspaceEpoch: this.runEpoch, workspaceRevision: this.workspaceRevision });
+        }
+        return { workspaceName: basename(selectedCwd), cwd: selectedCwd, workspaceEpoch: this.runEpoch, workspaceRevision: this.workspaceRevision };
+      } finally {
+        releaseMutation();
+      }
+    } finally {
+      releaseTurn();
     }
-    return { workspaceName: basename(selectedCwd), data: await this.bootstrap() };
   }
 
   private async renameSession(id: string, name: string): Promise<BootstrapData> {
@@ -1800,6 +1823,8 @@ export class PiChatApp {
       gateMode: this.primaryGateMode,
       ...this.controlState(this.activeSessionId, clientId),
       workspaceCwd: this.currentCwd,
+      workspaceEpoch: this.runEpoch,
+      workspaceRevision: this.workspaceRevision,
       sessions: sidebar.sessions,
       sessionDirectories: sidebar.directories,
       sessionsTotal: sidebar.total,
@@ -1943,7 +1968,7 @@ export class PiChatApp {
         connection: "keep-alive",
         "x-accel-buffering": "no",
       });
-      response.write(`event: ready\ndata: ${JSON.stringify({ ok: true, lifecycle: this.applicationLifecycle, piChatRunEpoch: this.runEpoch })}\n\n`);
+      response.write(`event: ready\ndata: ${JSON.stringify({ ok: true, lifecycle: this.applicationLifecycle, piChatRunEpoch: this.runEpoch, workspaceEpoch: this.runEpoch })}\n\n`);
       const pageId = requestPageId(request) || clientId;
       this.sseHub.add(response, clientId);
       this.clientConnected(clientId, pageId);
@@ -2190,7 +2215,7 @@ export class PiChatApp {
       // This selects the cwd for a local, not-yet-materialized draft only. It
       // does not touch Primary or any existing Runtime, so concurrent Sessions
       // remain safe and uninterrupted.
-      const selected = await pickWorkspaceFolder(this.currentCwd);
+      const selected = await (this.options.pickWorkspaceFolder || pickWorkspaceFolder)(this.currentCwd);
       if (!selected) return json(response, 200, { cancelled: true });
       if (!(await stat(resolve(selected))).isDirectory()) return json(response, 400, { error: "所选工作目录不存在或不是文件夹" });
       json(response, 200, { cancelled: false, cwd: resolve(selected) });
@@ -2199,18 +2224,22 @@ export class PiChatApp {
 
     if (url.pathname === "/api/workspace/pick") {
       if (request.method !== "POST") return methodNotAllowed(response);
-      // Default-directory selection is not a Runtime operation: existing
-      // Sessions continue on their immutable process cwd even while busy.
-      const selected = await pickWorkspaceFolder(this.currentCwd);
+      // The native picker waits without an admission lease. Its returned path
+      // commits through changeWorkspace(), which serializes and rechecks the
+      // lifecycle immediately before persistence.
+      const selected = await (this.options.pickWorkspaceFolder || pickWorkspaceFolder)(this.currentCwd);
       if (!selected) return json(response, 200, { cancelled: true });
       const result = await this.changeWorkspace(selected);
-      json(response, 200, { cancelled: false, ...result });
+      // Keep the former browser response contract while newer clients consume
+      // the scoped top-level version fields. This runs after the short commit
+      // lease has released, so a slow bootstrap never blocks lifecycle work.
+      json(response, 200, { cancelled: false, ...result, data: await this.bootstrap() });
       return;
     }
 
     // Local/automation path only (scripts, future local CLI). The browser UI
-    // uses the per-draft picker and never changes this global default directly.
-    // Not a remote-access surface; the service itself is loopback-only.
+    // chooses defaults through /api/workspace/pick. Not a remote-access surface;
+    // the service itself is loopback-only.
     if (url.pathname === "/api/workspace/set") {
       if (request.method !== "POST") return methodNotAllowed(response);
       const body = await bodyJson(request);
@@ -2656,19 +2685,19 @@ export class PiChatApp {
 
     if (url.pathname === "/api/resources/skills") {
       if (request.method !== "GET") return methodNotAllowed(response);
-      const result = await this.options.resources.listSkills(this.currentCwd);
+      const result = await this.options.resources.listSkills(this.primaryRuntimeCwd);
       return json(response, 200, { ...result, resources: result.resources.filter((item) => item.enabled) });
     }
 
     if (url.pathname === "/api/resources/extensions") {
       if (request.method !== "GET") return methodNotAllowed(response);
-      const result = await this.options.resources.listExtensions(this.currentCwd);
+      const result = await this.options.resources.listExtensions(this.primaryRuntimeCwd);
       return json(response, 200, { ...result, resources: result.resources.filter((item) => item.enabled) });
     }
 
     if (url.pathname === "/api/resources/packages") {
       if (request.method !== "GET") return methodNotAllowed(response);
-      const result = await this.options.resources.listPackages(this.currentCwd);
+      const result = await this.options.resources.listPackages(this.primaryRuntimeCwd);
       return json(response, 200, { ...result, resources: result.resources.filter((item) => item.enabled) });
     }
 

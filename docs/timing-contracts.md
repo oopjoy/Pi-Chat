@@ -79,6 +79,7 @@
 | takeover | selected Session 前 | `commitPaneIfCurrent` | Session summary | pane authority + event version | stale takeover / newer SSE |
 | abort / queue cancel / resume | selected Session 前 | `commitPaneIfCurrent` / `applySessionView` | cache queue/turn overlay | view operation | late stop/queue B isolation |
 | draft workspace picker | current draft 前 | `commitDraftIfCurrent` | none | draft picker Symbol + draft authority | Draft 1 to Draft 2 |
+| default workspace picker | Settings request | global `workspaceCwd` only | none | default picker Symbol; independent from New | picker then New; later New inherits the committed default |
 | scheduled live message | SSE admission point | scheduler through `paneAuthorityDispatchRef` | live cache | authority | session navigation / streaming |
 | late view after deletion | request before delete | rejected before pane commit | deletion guard rejects cache writes | terminal deletion guard | deleted Session cannot return |
 
@@ -107,6 +108,7 @@ The remaining combinations of `paneAuthorityCanCommit()` with `sessionEventVersi
 | `AbortController`（pagination） | 每个 pagination request | fast/JSONL request | 用户离开后的历史读取继续进行 | Request-local cancellation | isolated history |
 | `refreshEpochRef` | refresh 开始、New 时递增 | bootstrap continuation | 较早 global refresh 安装 metadata | Global refresh request authority | bootstrap/reconnect tests |
 | `draftWorkspacePickerTokenRef` Symbol | native picker 发起时 | picker result | 旧系统 picker 回调影响更新的 picker request | Request-local | stale draft workspace picker |
+| `workspaceDefaultPickerTokenRef` Symbol | Settings native picker 发起时 | picker result | 设置 picker 的旧回调影响更新的全局默认值 | Global request-local | picker then New; later New inherits the committed default |
 
 `SessionViewCache` 已集中 authoritative view、navigation merge、terminal tail、control overlay、queue overlay 与 commands omission 的数据优先级。4C 才能进一步收敛其调用形态；4A/4B.1 不改变这些 merge 规则。
 

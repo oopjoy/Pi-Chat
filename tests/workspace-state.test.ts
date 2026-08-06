@@ -39,3 +39,21 @@ test("workspace state persists an existing selected directory", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("concurrent workspace saves use independent temporary files and leave valid state", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-workspace-concurrent-"));
+  const first = join(root, "first");
+  const second = join(root, "second");
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = join(root, "agent");
+  try {
+    await Promise.all([mkdir(first), mkdir(second)]);
+    await Promise.all([saveWorkspace(first), saveWorkspace(second)]);
+    const persisted = await loadWorkspace(root);
+    assert.ok([resolve(first), resolve(second)].includes(persisted));
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});

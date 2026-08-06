@@ -360,6 +360,112 @@ test("a build mismatch blocks ordinary mutations but preserves server-guarded li
   }
 });
 
+test("a workspace SSE updates the default only for a later New draft", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  Object.assign(api, {
+    bootstrap: async () => bootstrap,
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    clearSessionViewed: async () => ({ viewing: "" }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const newButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.trim() === "New")!;
+    await act(async () => newButton.click());
+    assert.equal(dom.window.document.querySelector(".draft-workspace code")?.textContent, "C:/work");
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => source.emitPi({ type: "pi_chat_workspace_changed", cwd: "D:/shared-default", workspaceEpoch: "workspace-a", workspaceRevision: 1 }));
+    assert.equal(dom.window.document.querySelector(".draft-workspace code")?.textContent, "C:/work", "an existing draft retains its captured cwd");
+    await act(async () => newButton.click());
+    assert.equal(dom.window.document.querySelector(".draft-workspace code")?.textContent, "D:/shared-default");
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a stale bootstrap cannot undo a newer workspace SSE default", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  let bootstrapCalls = 0;
+  let resolveStaleBootstrap!: (value: BootstrapData) => void;
+  const staleBootstrap = new Promise<BootstrapData>((resolve) => { resolveStaleBootstrap = resolve; });
+  Object.assign(api, {
+    bootstrap: async () => {
+      bootstrapCalls += 1;
+      return bootstrapCalls === 1 ? { ...bootstrap, workspaceEpoch: "workspace-a", workspaceRevision: 10 } : staleBootstrap;
+    },
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    clearSessionViewed: async () => ({ viewing: "" }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => source.emitPi({ type: "pi_chat_sse_resync" }));
+    assert.equal(bootstrapCalls, 2, "resync starts a refresh with stale global metadata");
+    await act(async () => source.emitPi({ type: "pi_chat_workspace_changed", cwd: "D:/newer-default", workspaceEpoch: "workspace-a", workspaceRevision: 11 }));
+    await act(async () => {
+      resolveStaleBootstrap({ ...bootstrap, workspaceCwd: "C:/work", workspaceEpoch: "workspace-a", workspaceRevision: 10 });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const newButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.trim() === "New")!;
+    await act(async () => newButton.click());
+    assert.equal(dom.window.document.querySelector(".draft-workspace code")?.textContent, "D:/newer-default");
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a replacement process workspace epoch accepts its fresh default after an older high revision", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  let bootstrapCalls = 0;
+  Object.assign(api, {
+    bootstrap: async () => {
+      bootstrapCalls += 1;
+      return bootstrapCalls === 1
+        ? { ...bootstrap, workspaceCwd: "C:/old-default", workspaceEpoch: "workspace-old", workspaceRevision: 900 }
+        : { ...bootstrap, workspaceCwd: "D:/replacement-default", workspaceEpoch: "workspace-new", workspaceRevision: 0 };
+    },
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    clearSessionViewed: async () => ({ viewing: "" }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => source.dispatchEvent(new dom.window.MessageEvent("ready", {
+      data: JSON.stringify({ lifecycle: "idle", piChatRunEpoch: "workspace-new", workspaceEpoch: "workspace-new" }),
+    })));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+    const newButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.trim() === "New")!;
+    await act(async () => newButton.click());
+    assert.equal(dom.window.document.querySelector(".draft-workspace code")?.textContent, "D:/replacement-default");
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
 test("a transient empty model inventory never leaks the Composer's internal model key", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");
