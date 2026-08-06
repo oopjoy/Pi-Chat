@@ -116,7 +116,7 @@ test("separate Node processes share one workspace state without replacement fail
   const start = join(root, "start");
   const releaseReplace = join(root, "release-replace");
   const moduleUrl = pathToFileURL(resolve(process.cwd(), "src/server/workspace-state.ts")).href;
-  const source = `import { access } from "node:fs/promises"; import { saveWorkspace } from ${JSON.stringify(moduleUrl)}; const wait = async (path) => { for (;;) { try { await access(path); return; } catch { await new Promise((resolve) => setTimeout(resolve, 5)); } } }; console.log("ready"); await wait(process.env.START_FILE); await saveWorkspace(process.env.WORKSPACE, { beforeReplace: async () => { console.log("replace-ready"); await wait(process.env.RELEASE_REPLACE_FILE); } });`;
+  const source = `import { access, rename } from "node:fs/promises"; import { saveWorkspace } from ${JSON.stringify(moduleUrl)}; const wait = async (path) => { for (;;) { try { await access(path); return; } catch { await new Promise((resolve) => setTimeout(resolve, 5)); } } }; let replacements = 0; console.log("ready"); await wait(process.env.START_FILE); await saveWorkspace(process.env.WORKSPACE, { beforeReplace: async () => { console.log("replace-ready"); await wait(process.env.RELEASE_REPLACE_FILE); }, renameTemporary: async (temporary, path) => { replacements += 1; if (process.env.INJECT_TRANSIENT_EPERM === "1" && replacements === 1) { const error = new Error("simulated cross-process Windows contention"); error.code = "EPERM"; throw error; } await rename(temporary, path); } }); console.log("replace-attempts:" + replacements);`;
   const waitWithin = async <T>(pending: Promise<T>, label: string): Promise<T> => {
     let timer: NodeJS.Timeout | undefined;
     try {
@@ -129,7 +129,7 @@ test("separate Node processes share one workspace state without replacement fail
     }
   };
   const children: ReturnType<typeof spawn>[] = [];
-  const run = (workspace: string) => {
+  const run = (workspace: string, injectTransientEperm = false) => {
     let resolveReady!: () => void;
     let rejectReady!: (cause: Error) => void;
     let resolveReplaceReady!: () => void;
@@ -146,9 +146,9 @@ test("separate Node processes share one workspace state without replacement fail
     // a handler so a failing child reports through the bounded phase wait.
     void ready.catch(() => undefined);
     void replaceReady.catch(() => undefined);
-    let resolveDone!: () => void;
+    let resolveDone!: (attempts: number) => void;
     let rejectDone!: (cause: Error) => void;
-    const done = new Promise<void>((resolveChild, rejectChild) => {
+    const done = new Promise<number>((resolveChild, rejectChild) => {
       resolveDone = resolveChild;
       rejectDone = rejectChild;
     });
@@ -161,6 +161,7 @@ test("separate Node processes share one workspace state without replacement fail
         START_FILE: start,
         RELEASE_REPLACE_FILE: releaseReplace,
         WORKSPACE: workspace,
+        INJECT_TRANSIENT_EPERM: injectTransientEperm ? "1" : "",
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -180,20 +181,25 @@ test("separate Node processes share one workspace state without replacement fail
     child.stderr.on("data", (chunk) => { errors += String(chunk); });
     child.once("error", (cause) => fail(cause));
     child.once("exit", (code) => {
-      if (code === 0) resolveDone();
-      else fail(new Error(`workspace child failed (${code}): ${errors || output}`));
+      if (code === 0) {
+        const match = output.match(/replace-attempts:(\d+)/);
+        if (!match) fail(new Error(`workspace child did not report replacement attempts: ${output}`));
+        else resolveDone(Number(match[1]));
+      } else fail(new Error(`workspace child failed (${code}): ${errors || output}`));
     });
     return { ready, replaceReady, done };
   };
   try {
     await Promise.all([mkdir(first), mkdir(second)]);
-    const firstChild = run(first);
+    const firstChild = run(first, true);
     const secondChild = run(second);
     await waitWithin(Promise.all([firstChild.ready, secondChild.ready]), "workspace child startup");
     await writeFile(start, "go", "utf8");
     await waitWithin(Promise.all([firstChild.replaceReady, secondChild.replaceReady]), "workspace child replace barrier");
     await writeFile(releaseReplace, "go", "utf8");
-    await waitWithin(Promise.all([firstChild.done, secondChild.done]), "workspace child completion");
+    const [firstAttempts, secondAttempts] = await waitWithin(Promise.all([firstChild.done, secondChild.done]), "workspace child completion");
+    assert.equal(firstAttempts, 2, "the contending process must retry its injected EPERM once");
+    assert.equal(secondAttempts, 1);
     process.env.PI_CODING_AGENT_DIR = agentDir;
     const persisted = await loadWorkspace(root);
     assert.ok([resolve(first), resolve(second)].includes(persisted));
