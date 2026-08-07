@@ -38,11 +38,13 @@ class ControllerRpc {
   restarts = 0;
   stops = 0;
   probes = 0;
+  stateProbes = 0;
   compatible = true;
-  async start() { this.starts += 1; }
-  async restart() { this.restarts += 1; }
+  async start() { this.starts += 1; return { type: "response", success: true, data: { isStreaming: false } }; }
+  async restart() { this.restarts += 1; return { type: "response", success: true, data: { isStreaming: false } }; }
   async stop() { this.stops += 1; }
-  async probeCompatibility() {
+  async probeCompatibility(initialState?: Record<string, unknown>) {
+    if (initialState) this.stateProbes += 1;
     this.probes += 1;
     return this.compatible
       ? { compatible: true, diagnostics: [] }
@@ -62,6 +64,10 @@ class ReadinessBridge implements PrimaryRuntimeReadinessBridge {
     if (this.recoverFailure) {
       this.set(this.recoverFailure);
       throw new PrimaryRuntimeUnavailableError(this.recoverFailure);
+    }
+    if (this.value.status === "failed") {
+      this.set({ status: "ready", generation: this.value.generation + 1 });
+      return;
     }
     await this.waitUntilReady();
   }
@@ -93,6 +99,7 @@ test("Primary recovery repeats compatibility probing before reporting ready", as
   await controller.start();
   assert.deepEqual(controller.snapshot(), { status: "ready", generation: 1 });
   assert.equal(rpc.probes, 1);
+  assert.equal(rpc.stateProbes, 1);
 
   rpc.compatible = false;
   await assert.rejects(() => controller.recover(), PrimaryRuntimeUnavailableError);
@@ -177,7 +184,7 @@ test("failed Primary does not prevent activating an existing Secondary Runtime",
   } finally { server.close(); await app.close(); }
 });
 
-test("failed Primary rejects a new draft before it can spawn or prompt", async () => {
+test("failed Primary retries recovery before spawning a new draft", async () => {
   const path = "C:\\sessions\\blocked-new-draft.jsonl";
   const primary = new ReadinessFakeRpc(path, "primary");
   const draft = new ReadinessFakeRpc(path, "draft");
@@ -208,15 +215,15 @@ test("failed Primary rejects a new draft before it can spawn or prompt", async (
       body: JSON.stringify({ initial: { message: "must not send" } }),
     });
     const body = await response.json();
-    assert.equal(response.status, 503, JSON.stringify(body));
-    assert.equal((body as { code?: string }).code, "PRIMARY_RUNTIME_UNAVAILABLE");
-    assert.equal(draftCreates, 0);
-    assert.equal(draft.commands.some((command) => command.type === "prompt"), false);
+    assert.equal(response.status, 202, JSON.stringify(body));
+    assert.equal(draftCreates, 1);
+    assert.equal(draft.commands.some((command) => command.type === "prompt"), true);
   } finally { server.close(); await app.close(); }
 });
 
 test("failed Primary mutation returns stable unavailable response without restart or prompt", async () => {
   const f = await fixture({ status: "failed", generation: 2, error: "protocol mismatch" });
+  f.bridge.recoverFailure = { status: "failed", generation: 3, error: "recovery still unavailable" };
   try {
     const response = await fetch(`${f.origin}/api/chat/prompt`, {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sessionId: f.id, message: "must not send" }),
@@ -224,9 +231,9 @@ test("failed Primary mutation returns stable unavailable response without restar
     const body = await response.json();
     assert.equal(response.status, 503, JSON.stringify(body));
     assert.deepEqual(body, {
-      error: "Pi Runtime 不可用：protocol mismatch",
+      error: "Pi Runtime 不可用：recovery still unavailable",
       code: "PRIMARY_RUNTIME_UNAVAILABLE",
-      primaryRuntime: { status: "failed", generation: 2, error: "protocol mismatch" },
+      primaryRuntime: { status: "failed", generation: 3, error: "recovery still unavailable" },
     });
     assert.equal(f.rpc.restartCount, 0);
     assert.equal(f.rpc.commands.some((command) => command.type === "prompt"), false);

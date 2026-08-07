@@ -3,11 +3,12 @@ import { spawn } from "node:child_process";
 import test from "node:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { buildPiChat, cleanupStaleDistArtifacts, promoteStagedDist, rollbackPromotedDist, restartServerArgs, terminateProcessTree } from "../src/server/application-restart";
 
 test("local application build stages a complete replacement without touching live dist", { skip: process.platform !== "win32", timeout: 120_000 }, async () => {
-  const liveIndex = join(process.cwd(), "dist", "web", "index.html");
+  const compiledDist = resolve(process.cwd(), process.env.PI_CHAT_DIST_DIR || "dist");
+  const liveIndex = join(compiledDist, "web", "index.html");
   const before = await readFile(liveIndex, "utf8");
   const build = await buildPiChat(process.cwd());
   try {

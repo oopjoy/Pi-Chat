@@ -56,9 +56,14 @@ export class PrimaryRuntimeReadinessController implements PrimaryRuntimeReadines
     this.publish({ status: "starting", generation });
     const operation = (async () => {
       try {
-        if (restart) await this.rpc.restart(sessionFile, cwd);
-        else await this.rpc.start();
-        const compatibility = await this.rpc.probeCompatibility();
+        const initialState = restart
+          ? await this.rpc.restart(sessionFile, cwd)
+          : await this.rpc.start();
+        // PiRpcClient.start()/restart() already perform and return the
+        // readiness get_state probe. Reuse it so Primary does not immediately
+        // enqueue a second identical query. Legacy test/embedding doubles may
+        // return void, in which case probeCompatibility performs the fallback.
+        const compatibility = await this.rpc.probeCompatibility(initialState || undefined);
         if (!compatibility.compatible) {
           await this.rpc.stop().catch(() => undefined);
           throw new Error(`当前 Pi RPC 协议不兼容 Pi Chat：${compatibility.diagnostics.join("；")}`);

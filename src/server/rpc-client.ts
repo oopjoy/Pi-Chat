@@ -114,20 +114,16 @@ export class PiRpcClient {
   }
 
   private async waitUntilReady(): Promise<Record<string, unknown>> {
-    const deadline = Date.now() + 20_000;
-    let lastError: unknown;
-    while (Date.now() < deadline) {
-      if (!this.child || this.child.exitCode !== null) {
-        throw new Error(`Pi RPC 在初始化期间退出。${this.stderrTail}`);
-      }
-      try {
-        return await this.send({ type: "get_state" }, 2_000);
-      } catch (error) {
-        lastError = error;
-        await new Promise((resolve) => setTimeout(resolve, 150));
-      }
+    // RPC has no cancellation protocol. A short per-attempt timeout therefore
+    // leaves an in-flight get_state behind and makes the nominal retry loop
+    // reject every following attempt with "still processing". Use one request
+    // for the whole startup budget instead; a late response is then the result
+    // of this startup attempt rather than an orphan competing with a retry.
+    const startupTimeoutMs = 30_000;
+    if (!this.child || this.child.exitCode !== null) {
+      throw new Error(`Pi RPC 在初始化期间退出。${this.stderrTail}`);
     }
-    throw lastError instanceof Error ? lastError : new Error("等待 Pi RPC 就绪超时");
+    return this.send({ type: "get_state" }, startupTimeoutMs);
   }
 
   private attachJsonlReader(stream: NodeJS.ReadableStream, source?: RpcEventSource): void {
@@ -261,9 +257,13 @@ export class PiRpcClient {
     return request;
   }
 
-  async probeCompatibility(): Promise<PiRpcCompatibility> {
+  async probeCompatibility(initialState?: Record<string, unknown>): Promise<PiRpcCompatibility> {
     const diagnostics: string[] = [];
-    const check = async (type: string, validate: (data: unknown) => boolean, label: string) => {
+    const check = async (type: string, validate: (data: unknown) => boolean, label: string, initialResponse?: Record<string, unknown>) => {
+      if (initialResponse) {
+        if (!validate(initialResponse.data)) diagnostics.push(`RPC ${type} 返回格式不兼容（需要 ${label}）`);
+        return;
+      }
       try {
         const response = await this.send({ type }, 10_000);
         if (!validate(response.data)) diagnostics.push(`RPC ${type} 返回格式不兼容（需要 ${label}）`);
@@ -271,7 +271,7 @@ export class PiRpcClient {
         diagnostics.push(`RPC 不支持 ${type}：${error instanceof Error ? error.message : String(error)}`);
       }
     };
-    await check("get_state", (data) => Boolean(data && typeof data === "object" && typeof (data as Record<string, unknown>).isStreaming === "boolean"), "isStreaming");
+    await check("get_state", (data) => Boolean(data && typeof data === "object" && typeof (data as Record<string, unknown>).isStreaming === "boolean"), "isStreaming", initialState);
     await check("get_messages", (data) => Boolean(data && typeof data === "object" && Array.isArray((data as Record<string, unknown>).messages)), "messages[]");
     await check("get_available_models", (data) => Boolean(data && typeof data === "object" && Array.isArray((data as Record<string, unknown>).models)), "models[]");
     await check("get_commands", (data) => Boolean(data && typeof data === "object" && Array.isArray((data as Record<string, unknown>).commands)), "commands[]");

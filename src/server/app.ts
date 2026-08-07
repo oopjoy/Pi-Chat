@@ -861,9 +861,23 @@ export class PiChatApp {
   }
 
   /** A new draft may warm beside Primary startup, but no mutation is permitted
-   * until the globally-owned compatibility probe succeeds. */
+   * until the globally-owned compatibility probe succeeds. A failed initial
+   * Primary is recoverable here just like an ordinary prompt mutation. */
   private async waitForNewDraftPrimaryCompatibility(): Promise<void> {
-    if (this.options.primaryRuntime) await this.options.primaryRuntime.waitUntilReady();
+    const primaryRuntime = this.options.primaryRuntime;
+    if (!primaryRuntime) return;
+    if (primaryRuntime.snapshot().status === "failed") {
+      await primaryRuntime.recover(this.activeSessionPath || undefined, this.primaryRuntimeCwd);
+      return;
+    }
+    try {
+      await primaryRuntime.waitUntilReady();
+    } catch (error) {
+      // If the asynchronous initial start failed while the draft was warming,
+      // give this mutation the same one-shot recovery opportunity as prompts.
+      if (primaryRuntime.snapshot().status !== "failed") throw error;
+      await primaryRuntime.recover(this.activeSessionPath || undefined, this.primaryRuntimeCwd);
+    }
   }
 
   private async finalizePersistedDraft(runtime: SecondaryRuntime): Promise<boolean> {
@@ -974,8 +988,26 @@ export class PiChatApp {
   }
 
   private async ensurePrimaryRuntime(): Promise<void> {
-    if (this.options.primaryRuntime) await this.options.primaryRuntime.waitUntilReady();
-    if (!this.primaryFailed && this.options.rpc.isRunning?.() !== false) return;
+    const primaryRuntime = this.options.primaryRuntime;
+    let readiness = primaryRuntime?.snapshot();
+    // waitUntilReady() intentionally preserves a failed readiness snapshot for
+    // read-only callers. Mutating callers, however, are the recovery boundary:
+    // an initial spawn/probe failure must be allowed to retry without requiring
+    // a whole server restart.
+    if (primaryRuntime && readiness?.status !== "failed") {
+      try {
+        await primaryRuntime.waitUntilReady();
+      } catch (error) {
+        readiness = primaryRuntime.snapshot();
+        if (readiness.status !== "failed") throw error;
+      }
+    }
+    readiness = primaryRuntime?.snapshot();
+    // Reaching this point after waitUntilReady() means the normal startup path
+    // is ready. A failed snapshot deliberately skips that wait and falls into
+    // the single-flight recovery below.
+    if (!this.primaryFailed && this.options.rpc.isRunning?.() !== false
+      && (!primaryRuntime || readiness?.status !== "failed")) return;
     if (this.primaryRecovery) return this.primaryRecovery;
     const desiredGateMode = this.primaryGateMode;
     const recovery = (async () => {
@@ -983,11 +1015,12 @@ export class PiChatApp {
         // A cold service may still be completing its initial asynchronous
         // Primary spawn. If it won the race, consume that worker rather than
         // stopping/restarting it a second time.
-        if (this.primaryFailed || this.options.rpc.isRunning?.() === false) {
-          // A post-ready crash recovers only through the controller, which
-          // restarts and repeats compatibility probing before PiChatApp sends.
-          if (this.options.primaryRuntime) await this.options.primaryRuntime.recover(this.activeSessionPath, this.primaryRuntimeCwd);
-          else await this.options.rpc.restart(this.activeSessionPath, this.primaryRuntimeCwd);
+        if (readiness?.status === "failed" || this.primaryFailed || this.options.rpc.isRunning?.() === false) {
+          // An initial failure and a post-ready crash both recover only through
+          // the controller, which restarts and repeats compatibility probing
+          // before PiChatApp sends.
+          if (primaryRuntime) await primaryRuntime.recover(this.activeSessionPath || undefined, this.primaryRuntimeCwd);
+          else await this.options.rpc.restart(this.activeSessionPath || undefined, this.primaryRuntimeCwd);
         }
         const state = asState(await this.options.rpc.send({ type: "get_state" }));
         this.lastPrimaryState = state;
@@ -2454,14 +2487,18 @@ export class PiChatApp {
       if (initial?.thinkingLevel !== undefined && !["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(initial.thinkingLevel)) return json(response, 400, { error: "无效的 Thinking 强度" });
       if (initial?.model !== undefined && (!initial.model || typeof initial.model.provider !== "string" || !initial.model.provider || typeof initial.model.modelId !== "string" || !initial.model.modelId)) return json(response, 400, { error: "新对话模型配置无效" });
       if (initial && !initialMessage && !initialImages.length) return json(response, 400, { error: "消息或图片不能为空" });
-      if (this.options.primaryRuntime?.snapshot().status === "failed") {
-        throw new PrimaryRuntimeUnavailableError(this.options.primaryRuntime.snapshot());
-      }
+      // A failed initial Primary must be recovered before allocating a draft;
+      // otherwise a failed compatibility proof can leave an unnecessary
+      // Secondary worker behind. Healthy/starting Primary still overlaps its
+      // startup with draft creation as before.
+      const primaryWasFailed = this.options.primaryRuntime?.snapshot().status === "failed";
+      if (primaryWasFailed) await this.waitForNewDraftPrimaryCompatibility();
       const draftLease = await this.acquireDraftRuntime(clientId, requestedCwd);
       try {
-        // Spawn and Primary compatibility are intentionally overlapped. The
-        // draft remains unprompted until the common compatibility proof joins.
-        await this.waitForNewDraftPrimaryCompatibility();
+        // Spawn and Primary compatibility are intentionally overlapped while
+        // Primary is starting. The draft remains unprompted until the common
+        // compatibility proof joins.
+        if (!primaryWasFailed) await this.waitForNewDraftPrimaryCompatibility();
         // The lease spans creation, preferences, Gate and prompt admission: an
         // empty draft cannot be reclaimed between these parts of one first turn.
         this.markSessionViewed(clientId, draftLease.runtime.id);

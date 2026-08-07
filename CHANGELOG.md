@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.4.2
+
+### Startup and recovery reliability
+
+- Primary startup now gives its initial `get_state` RPC a single 30-second readiness budget, avoiding the former 2-second timeout/retry path that could leave an uncancellable read outstanding and report a misleading in-progress error.
+- A failed initial Primary readiness probe now recovers through the existing single-flight controller when a real Primary mutation or first New draft needs it; read-only JSONL history remains available without warming or mutating a Runtime.
+- Primary compatibility validation reuses the successful startup state instead of immediately issuing a duplicate `get_state` request, while preserving the legacy fallback for compatible embedded test doubles.
+
+### Workspace, Gate, and verification follow-ups
+
+- Default-workspace updates now serialize in-process persistence, retry transient Windows replacement failures, and converge across windows/processes without rebinding a live Runtime cwd or changing an existing draft's captured workspace.
+- Cold-history Gate choices remain Session-scoped next-prompt intent only; Runtime-confirmed Gate state is kept separate so a staged cold preference cannot auto-authorize a prompt before synchronization.
+- Added regression coverage for slow startup readiness, duplicate-read protection, Primary failed-state recovery, Gate confirmation boundaries, and concurrent workspace-state replacement retry.
+
+### Windows CI reliability
+
+- Windows CI tests now resolve compiled inputs through `PI_CHAT_DIST_DIR`, matching the workflow's isolated build rather than assuming a live `dist/` directory exists.
+- Shortcut WorkingDirectory verification canonicalizes equivalent Windows 8.3 short-path and long-path spellings.
+- Startup smoke now waits independently for the asynchronous Primary RPC capability probe to complete after HTTP handshake readiness, eliminating a nondeterministic missing probe-log race on GitHub-hosted runners.
+- The workflow uses `checkout@v5`, `setup-node@v5`, and `upload-artifact@v6`; project commands continue to run on Node 22.
+
+### Package scope
+
+- This is a Windows local-first package release. The GitHub source archive is for development; `pi-chat-windows-0.4.2.zip` is the runnable package and still requires a supported Node runtime plus a globally installed, authenticated Pi.
+
 ## 0.4.1
 
 ### Reliability convergence

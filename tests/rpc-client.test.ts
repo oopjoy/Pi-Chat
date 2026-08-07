@@ -89,6 +89,30 @@ test("timed-out read queries reject duplicates until their late response is cons
   await client.stop();
 });
 
+test("startup get_state uses one long budget instead of retrying an orphan query", async () => {
+  const { child, writes } = fakeChild();
+  const client = new PiRpcClient({ cwd: process.cwd() });
+  Object.assign(client, { child });
+  const internals = client as unknown as {
+    waitUntilReady: () => Promise<Record<string, unknown>>;
+    handleLine(line: string): void;
+  };
+  let writeCount = 0;
+  child.stdin.write = (value, callback) => {
+    writes.push(value);
+    callback?.(null);
+    const id = (JSON.parse(value) as { id: string }).id;
+    writeCount += 1;
+    setTimeout(() => {
+      internals.handleLine(JSON.stringify({ type: "response", id, success: true, data: { isStreaming: false } }));
+    }, writeCount === 1 ? 2_050 : 0);
+    return true;
+  };
+  await internals.waitUntilReady();
+  assert.equal(writes.length, 1);
+  await client.stop();
+});
+
 test("a late child generation cannot emit events or clear a replacement transport", () => {
   const first = fakeChild().child;
   const second = fakeChild().child;
@@ -114,7 +138,7 @@ test("a late child generation cannot emit events or clear a replacement transpor
   assert.deepEqual(events, [{ event: { type: "agent_start" }, generation: 2 }]);
 });
 
-test("global Pi RPC starts and answers state requests", { skip: !piEntry, timeout: 30_000 }, async () => {
+test("global Pi RPC starts and answers state requests", { skip: !piEntry, timeout: 45_000 }, async () => {
   assert.ok(piEntry);
   const client = new PiRpcClient({
     cwd: process.cwd(),

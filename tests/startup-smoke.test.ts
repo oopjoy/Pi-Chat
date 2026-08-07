@@ -8,6 +8,7 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 
 const projectRoot = resolve(import.meta.dirname, "..");
+const compiledDist = resolve(projectRoot, process.env.PI_CHAT_DIST_DIR || "dist");
 
 async function freePort(): Promise<number> {
   const server = createServer();
@@ -33,6 +34,24 @@ async function waitFor(url: string, child: ReturnType<typeof spawn>): Promise<Re
     await new Promise((resolve) => setTimeout(resolve, 80));
   }
   throw new Error("Pi Chat 启动冒烟测试超时");
+}
+
+async function waitForCapabilityProbe(rpcLog: string, child: ReturnType<typeof spawn>): Promise<string> {
+  const expected = ["get_state", "get_messages", "get_available_models", "get_commands", "get_session_stats"];
+  const deadline = Date.now() + 12_000;
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null) throw new Error("Pi Chat 在 capability probe 完成前退出");
+    try {
+      const commands = await readFile(rpcLog, "utf8");
+      if (expected.every((command) => new RegExp(`^${command}$`, "m").test(commands))) return commands;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      // Primary starts asynchronously after the HTTP listener. The log does not
+      // exist until its fake RPC receives the first capability command.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 80));
+  }
+  throw new Error("Pi RPC capability probe did not complete during startup smoke test");
 }
 
 const fakeRpcEntry = String.raw`
@@ -61,7 +80,7 @@ test("compiled server starts against fake RPC, probes capabilities, serves guard
   const agentDir = join(root, "agent");
   const port = await freePort();
   await writeFile(rpcEntry, fakeRpcEntry, "utf8");
-  const child = spawn(process.execPath, [join(projectRoot, "dist", "server", "server", "index.js"), "--host", "127.0.0.1", "--port", String(port), "--cwd", root], {
+  const child = spawn(process.execPath, [join(compiledDist, "server", "server", "index.js"), "--host", "127.0.0.1", "--port", String(port), "--cwd", root], {
     cwd: projectRoot,
     env: { ...process.env, PI_CHAT_PI_ENTRY: rpcEntry, PI_CODING_AGENT_DIR: agentDir, PI_CHAT_SMOKE_LOG: rpcLog },
     stdio: "ignore",
@@ -82,8 +101,7 @@ test("compiled server starts against fake RPC, probes capabilities, serves guard
     const guarded = await fetch(`${origin}/api/health`, { headers: { origin, "x-pi-chat-token": data.requestToken } });
     assert.equal(guarded.status, 200);
     assert.equal((await guarded.json() as { service?: string }).service, "pi-chat");
-    const rpcCommands = await readFile(rpcLog, "utf8");
-    for (const command of ["get_state", "get_messages", "get_available_models", "get_commands", "get_session_stats"]) assert.match(rpcCommands, new RegExp(`^${command}$`, "m"));
+    await waitForCapabilityProbe(rpcLog, child);
   } finally {
     // Register before killing: on fast Windows exits, registering afterwards can
     // miss the event and make a successful graceful shutdown look like a timeout.

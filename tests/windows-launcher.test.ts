@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -175,8 +175,11 @@ test("shortcut installer supports checkout paths with shell metacharacters", { s
     assert.match(shortcuts[0].TargetPath, /powershell\.exe$/i);
     assert.match(shortcuts[0].Arguments, /start-pi-chat-ui\.ps1" pwa$/i);
     assert.match(shortcuts[1].Arguments, /start-pi-chat-ui\.ps1" web$/i);
+    const canonicalPortableRoot = await realpath(portableRoot);
     for (const shortcut of shortcuts) {
-      assert.equal(shortcut.WorkingDirectory, portableRoot);
+      // Windows may expose the Node-created temporary directory through an 8.3
+      // short path while the Shortcut COM API returns its long-path spelling.
+      assert.equal(await realpath(shortcut.WorkingDirectory), canonicalPortableRoot);
       assert.ok(shortcut.Arguments.includes("Pi Chat's & (portable)"));
       assert.match(shortcut.IconLocation, /resources\\icons\\pi-chat\.ico,0$/i);
     }
