@@ -1534,6 +1534,11 @@ export class PiChatApp {
     );
   }
 
+  /** Secondary recovery is intentionally separate from abort's no-op policy. */
+  private secondaryNeedsRecovery(runtime: SecondaryRuntime): boolean {
+    return runtime.failed || runtime.rpc.isRunning?.() === false;
+  }
+
   private async ensurePrimaryRuntime(): Promise<void> {
     const primaryRuntime = this.options.primaryRuntime;
     let readiness = primaryRuntime?.snapshot();
@@ -3288,10 +3293,7 @@ export class PiChatApp {
           releaseRuntimeAdmission =
             this.runtimePool.acquireOperation(secondaryRuntime);
           this.runtimePool.touch(secondaryRuntime);
-          if (
-            secondaryRuntime.failed ||
-            secondaryRuntime.rpc.isRunning?.() === false
-          )
+          if (this.secondaryNeedsRecovery(secondaryRuntime))
             await this.recoverRuntime(secondaryRuntime);
         } else {
           releaseRuntimeAdmission =
@@ -3478,7 +3480,7 @@ export class PiChatApp {
         });
       if (runtime) {
         this.runtimePool.touch(runtime);
-        if (runtime.failed || runtime.rpc.isRunning?.() === false)
+        if (this.secondaryNeedsRecovery(runtime))
           await this.recoverRuntime(runtime);
         runtime.queuePaused = false;
         this.broadcastQueue(sessionId);
@@ -3571,10 +3573,7 @@ export class PiChatApp {
         if (secondaryRuntime) {
           releaseRuntimeOperation =
             this.runtimePool.acquireOperation(secondaryRuntime);
-          if (
-            secondaryRuntime.failed ||
-            secondaryRuntime.rpc.isRunning?.() === false
-          )
+          if (this.secondaryNeedsRecovery(secondaryRuntime))
             await this.recoverRuntime(secondaryRuntime);
         } else {
           releaseRuntimeOperation =
@@ -4195,10 +4194,7 @@ export class PiChatApp {
         return json(response, 409, { error: "该会话尚未启用" });
       if (secondaryRuntime) {
         return this.runtimePool.withOperation(secondaryRuntime, async () => {
-          if (
-            secondaryRuntime.failed ||
-            secondaryRuntime.rpc.isRunning?.() === false
-          )
+          if (this.secondaryNeedsRecovery(secondaryRuntime))
             await this.recoverRuntime(secondaryRuntime);
           const targetRpc = secondaryRuntime.rpc;
           if (secondaryRuntime.running) {
@@ -4268,10 +4264,7 @@ export class PiChatApp {
         return json(response, 409, { error: "该会话尚未启用" });
       if (secondaryRuntime) {
         return this.runtimePool.withOperation(secondaryRuntime, async () => {
-          if (
-            secondaryRuntime.failed ||
-            secondaryRuntime.rpc.isRunning?.() === false
-          )
+          if (this.secondaryNeedsRecovery(secondaryRuntime))
             await this.recoverRuntime(secondaryRuntime);
           if (secondaryRuntime.running) {
             secondaryRuntime.pendingTurnSettings.thinkingLevel = level;
