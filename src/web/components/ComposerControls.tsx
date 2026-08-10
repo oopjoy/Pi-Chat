@@ -73,7 +73,11 @@ export function ComposerControls({ state, models, stats, disabled, settingsBusy 
 }) {
   const current = state.model ? modelValue(state.model) : "";
   const controlsDisabled = disabled || settingsBusy || primaryUnavailable;
-  const modelOptions = models.map((model) => ({ value: modelValue(model), label: model.name || model.id }));
+  const modelOptions = models.map((model) => ({
+    value: modelValue(model),
+    label: model.name || model.id,
+    title: model.provider,
+  }));
   const unavailableTitle = "Pi Runtime 尚未就绪；历史仍可阅读，Runtime 恢复后可修改此设置";
 
   return <div className="composer-controls" title={primaryUnavailable ? unavailableTitle : settingsBusy ? "正在切换模型或思考强度…" : streaming ? "当前回复不会中断；新设置将在下一轮对话生效" : undefined}>

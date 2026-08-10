@@ -4,6 +4,8 @@ import { CheckIcon } from "./Icons";
 export interface CompactSelectOption<T extends string> {
   value: T;
   label: string;
+  /** Optional per-option hover text; unlike the trigger title it follows the row under the pointer. */
+  title?: string;
 }
 
 export function getCompactSelectNavigationIndex(key: string, currentIndex: number, optionCount: number): number | null {
@@ -150,7 +152,7 @@ export function CompactSelect<T extends string>({ value, options, disabled, aria
       {options.map((option, index) => {
         const isSelected = option.value === value;
         const isActive = index === activeIndex;
-        return <div id={`${id}-option-${index}`} key={option.value} className={`compact-select-option${isSelected ? " is-selected" : ""}${isActive ? " is-active" : ""}${checkPosition === "start" ? " has-leading-check" : ""}`} role="option" aria-selected={isSelected} onMouseMove={() => setActiveIndex(index)} onMouseDown={(event) => event.preventDefault()} onClick={() => chooseOption(index)}>
+        return <div id={`${id}-option-${index}`} key={option.value} className={`compact-select-option${isSelected ? " is-selected" : ""}${isActive ? " is-active" : ""}${checkPosition === "start" ? " has-leading-check" : ""}`} role="option" aria-selected={isSelected} title={option.title} onMouseMove={() => setActiveIndex(index)} onMouseDown={(event) => event.preventDefault()} onClick={() => chooseOption(index)}>
           {checkPosition === "start" && <span className="compact-select-check" aria-hidden="true">{isSelected && <CheckIcon />}</span>}
           <span>{option.label}</span>
           {checkPosition === "end" && isSelected && <CheckIcon />}

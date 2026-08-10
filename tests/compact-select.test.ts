@@ -101,6 +101,29 @@ test("CompactSelect can align a leading selected check without shifting labels",
   await act(async () => root.unmount());
 });
 
+test("CompactSelect renders per-option hover text on the matching row", async () => {
+  const dom = installDom();
+  const root = createRoot(dom.window.document.querySelector<HTMLElement>("#root")!);
+  try {
+    await act(async () => {
+      root.render(createElement(CompactSelect, {
+        value: "beta",
+        options: [
+          { value: "alpha", label: "Alpha", title: "Provider A" },
+          { value: "beta", label: "Beta", title: "Provider B" },
+        ],
+        ariaLabel: "模型",
+        onChange: () => undefined,
+      }));
+    });
+    await act(async () => dom.window.document.querySelector<HTMLButtonElement>(".compact-select-trigger")!.click());
+    const rows = [...dom.window.document.querySelectorAll<HTMLElement>(".compact-select-option")];
+    assert.deepEqual(rows.map((row) => row.title), ["Provider A", "Provider B"]);
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
 test("CompactSelect renders a readable fallback instead of an unmatched internal value", async () => {
   const dom = installDom();
   const root = createRoot(dom.window.document.querySelector<HTMLElement>("#root")!);
