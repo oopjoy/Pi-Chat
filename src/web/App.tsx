@@ -134,6 +134,13 @@ type PaneAuthoritySnapshot = PaneAuthority & {
   committedIdentity: ConversationPaneIdentity;
 };
 type DraftPaneAuthority = Omit<PaneAuthority, "sessionId" | "desiredSessionId">;
+/** Refresh metadata is valid only in this page, process, and navigation epoch. */
+type RefreshAuthority = Pick<
+  PaneAuthority,
+  "runEpochGeneration" | "navigationEpoch"
+> & {
+  refreshEpoch: number;
+};
 type ScheduledLiveMessage = {
   message: PiMessage;
   authority: PaneAuthoritySnapshot;
@@ -798,6 +805,13 @@ export function App() {
       draftGenerationRef.current === authority.draftGeneration,
     [],
   );
+  const refreshAuthorityIsCurrent = useCallback(
+    (authority: RefreshAuthority) =>
+      refreshEpochRef.current === authority.refreshEpoch &&
+      runEpochGenerationRef.current === authority.runEpochGeneration &&
+      navigationEpochRef.current === authority.navigationEpoch,
+    [],
+  );
   const captureDraftPaneAuthority = useCallback(
     (): DraftPaneAuthority => ({
       runEpochGeneration: runEpochGenerationRef.current,
@@ -1370,9 +1384,13 @@ export function App() {
   }, []);
 
   const refresh = useCallback(async () => {
-    const refreshEpoch = ++refreshEpochRef.current;
-    const navigationEpoch = navigationEpochRef.current;
-    const runEpochGeneration = runEpochGenerationRef.current;
+    const refreshAuthority: RefreshAuthority = {
+      refreshEpoch: ++refreshEpochRef.current,
+      runEpochGeneration: runEpochGenerationRef.current,
+      navigationEpoch: navigationEpochRef.current,
+    };
+    const { refreshEpoch, runEpochGeneration, navigationEpoch } =
+      refreshAuthority;
     const wantedId =
       desiredSessionIdRef.current ||
       viewedSessionIdRef.current ||
@@ -1398,8 +1416,7 @@ export function App() {
     const startEarlyHistoryView = () => {
       const currentInitialHistory = initialHistoryRef.current;
       if (
-        refreshEpochRef.current !== refreshEpoch ||
-        runEpochGenerationRef.current !== runEpochGeneration ||
+        !refreshAuthorityIsCurrent(refreshAuthority) ||
         bootstrapSucceeded ||
         !wantedId ||
         viewedSessionIdRef.current ||
@@ -1430,9 +1447,7 @@ export function App() {
       void request
         .then((view) => {
           if (
-            refreshEpochRef.current !== refreshEpoch ||
-            runEpochGenerationRef.current !== runEpochGeneration ||
-            navigationEpochRef.current !== navigationEpoch ||
+            !refreshAuthorityIsCurrent(refreshAuthority) ||
             desiredSessionIdRef.current !== wantedId ||
             localDraftRef.current ||
             confirmedDeletedSessionIdsRef.current.has(wantedId) ||
@@ -1481,23 +1496,13 @@ export function App() {
     } catch (cause) {
       // Browser requests remain uncancelled across handoff. A rejected A
       // bootstrap must not reach its old caller's error UI after B takes over.
-      if (
-        refreshEpochRef.current !== refreshEpoch ||
-        runEpochGenerationRef.current !== runEpochGeneration ||
-        navigationEpochRef.current !== navigationEpoch
-      )
-        return;
+      if (!refreshAuthorityIsCurrent(refreshAuthority)) return;
       throw cause;
     }
     // An old process request can resolve after a replacement ready has started
     // a newer refresh. It must not mark that new epoch bootstrapped or cancel
     // its independent history/sidebar fallback timers.
-    if (
-      refreshEpochRef.current !== refreshEpoch ||
-      runEpochGenerationRef.current !== runEpochGeneration ||
-      navigationEpochRef.current !== navigationEpoch
-    )
-      return;
+    if (!refreshAuthorityIsCurrent(refreshAuthority)) return;
     bootstrapSucceeded = true;
     bootstrapCompletedRef.current = true;
     if (earlyViewTimer !== null) window.clearTimeout(earlyViewTimer);
@@ -1530,9 +1535,7 @@ export function App() {
           earlyViewAuthority || capturePaneAuthority(wantedId);
         const view = await (earlyViewRequest || api.viewSession(wantedId));
         if (
-          refreshEpochRef.current !== refreshEpoch ||
-          runEpochGenerationRef.current !== runEpochGeneration ||
-          navigationEpochRef.current !== navigationEpoch ||
+          !refreshAuthorityIsCurrent(refreshAuthority) ||
           desiredSessionIdRef.current !== wantedId ||
           !paneAuthorityCanCommit(viewAuthority)
         )
@@ -1557,12 +1560,7 @@ export function App() {
         );
         return;
       } catch (cause) {
-        if (
-          refreshEpochRef.current !== refreshEpoch ||
-          runEpochGenerationRef.current !== runEpochGeneration ||
-          navigationEpochRef.current !== navigationEpoch
-        )
-          return;
+        if (!refreshAuthorityIsCurrent(refreshAuthority)) return;
         // A busy Runtime can make this best-effort view refresh time out. Keep the
         // already committed conversation painted; Bootstrap owns only global
         // metadata unless the server explicitly confirms the Session is gone.
@@ -1593,6 +1591,7 @@ export function App() {
     ensureHandshake,
     loadBootstrap,
     paneAuthorityCanCommit,
+    refreshAuthorityIsCurrent,
   ]);
 
   const startIdleRecovery = useCallback(
