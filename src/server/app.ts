@@ -1329,11 +1329,7 @@ export class PiChatApp {
   private async waitForNewDraftPrimaryCompatibility(): Promise<void> {
     const primaryRuntime = this.options.primaryRuntime;
     if (!primaryRuntime) return;
-    if (
-      primaryRuntime.snapshot().status === "failed" ||
-      this.primaryFailed ||
-      this.options.rpc.isRunning?.() === false
-    ) {
+    if (this.primaryNeedsRecovery(primaryRuntime.snapshot())) {
       await this.ensurePrimaryRuntime();
       return;
     }
@@ -1527,6 +1523,17 @@ export class PiChatApp {
     );
   }
 
+  /** Mutation-time recovery policy; read-only paths keep primaryReadReady(). */
+  private primaryNeedsRecovery(
+    readiness = this.options.primaryRuntime?.snapshot(),
+  ): boolean {
+    return (
+      readiness?.status === "failed" ||
+      this.primaryFailed ||
+      this.options.rpc.isRunning?.() === false
+    );
+  }
+
   private async ensurePrimaryRuntime(): Promise<void> {
     const primaryRuntime = this.options.primaryRuntime;
     let readiness = primaryRuntime?.snapshot();
@@ -1546,12 +1553,7 @@ export class PiChatApp {
     // Reaching this point after waitUntilReady() means the normal startup path
     // is ready. A failed snapshot deliberately skips that wait and falls into
     // the single-flight recovery below.
-    if (
-      !this.primaryFailed &&
-      this.options.rpc.isRunning?.() !== false &&
-      (!primaryRuntime || readiness?.status !== "failed")
-    )
-      return;
+    if (!this.primaryNeedsRecovery(readiness)) return;
     if (this.primaryRecovery) return this.primaryRecovery;
     const desiredGateMode = this.primaryGateMode;
     const recovery = (async () => {
@@ -1559,11 +1561,7 @@ export class PiChatApp {
         // A cold service may still be completing its initial asynchronous
         // Primary spawn. If it won the race, consume that worker rather than
         // stopping/restarting it a second time.
-        if (
-          readiness?.status === "failed" ||
-          this.primaryFailed ||
-          this.options.rpc.isRunning?.() === false
-        ) {
+        if (this.primaryNeedsRecovery(readiness)) {
           // An initial failure and a post-ready crash both recover only through
           // the controller, which restarts and repeats compatibility probing
           // before PiChatApp sends.
@@ -3928,10 +3926,7 @@ export class PiChatApp {
       // otherwise a failed compatibility proof can leave an unnecessary
       // Secondary worker behind. Healthy/starting Primary still overlaps its
       // startup with draft creation as before.
-      const primaryWasFailed =
-        this.options.primaryRuntime?.snapshot().status === "failed" ||
-        this.primaryFailed ||
-        this.options.rpc.isRunning?.() === false;
+      const primaryWasFailed = this.primaryNeedsRecovery();
       if (primaryWasFailed) await this.waitForNewDraftPrimaryCompatibility();
       const draftLease = await this.acquireDraftRuntime(clientId, requestedCwd);
       try {
