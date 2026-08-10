@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
-import { PiRpcClient, resolvePiEntry, rpcData } from "../src/server/rpc-client";
+import { PiRpcClient, RpcRequestTimeoutError, resolvePiEntry, rpcData } from "../src/server/rpc-client";
 
 const piEntry = resolvePiEntry();
 
@@ -31,6 +31,18 @@ function fakeChild() {
   child.kill = () => { child.killed = true; child.exitCode = 0; queueMicrotask(() => child.emit("exit", 0, null)); return true; };
   return { child, writes };
 }
+
+test("RPC request timeouts retain their command identity", async () => {
+  const { child } = fakeChild();
+  const client = new PiRpcClient({ cwd: process.cwd() });
+  Object.assign(client, { child });
+  await assert.rejects(
+    client.send({ type: "abort" }, 5),
+    (error) =>
+      error instanceof RpcRequestTimeoutError && error.requestType === "abort",
+  );
+  await client.stop();
+});
 
 test("stopping RPC rejects pending requests immediately instead of leaking timers", async () => {
   const { child } = fakeChild();
@@ -138,7 +150,7 @@ test("a late child generation cannot emit events or clear a replacement transpor
   assert.deepEqual(events, [{ event: { type: "agent_start" }, generation: 2 }]);
 });
 
-test("global Pi RPC starts and answers state requests", { skip: !piEntry, timeout: 45_000 }, async () => {
+test("global Pi RPC starts and answers state requests", { skip: !piEntry, timeout: 75_000 }, async () => {
   assert.ok(piEntry);
   const client = new PiRpcClient({
     cwd: process.cwd(),

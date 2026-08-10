@@ -9,6 +9,13 @@ interface PendingRequest {
   timer: NodeJS.Timeout;
 }
 
+export class RpcRequestTimeoutError extends Error {
+  constructor(readonly requestType: string) {
+    super(`Pi RPC 请求超时：${requestType}`);
+    this.name = "RpcRequestTimeoutError";
+  }
+}
+
 export interface RpcClientOptions {
   cwd: string;
   piEntry?: string;
@@ -119,7 +126,7 @@ export class PiRpcClient {
     // reject every following attempt with "still processing". Use one request
     // for the whole startup budget instead; a late response is then the result
     // of this startup attempt rather than an orphan competing with a retry.
-    const startupTimeoutMs = 30_000;
+    const startupTimeoutMs = 60_000;
     if (!this.child || this.child.exitCode !== null) {
       throw new Error(`Pi RPC 在初始化期间退出。${this.stderrTail}`);
     }
@@ -212,7 +219,7 @@ export class PiRpcClient {
 
   private waitForReadQuery(query: Promise<Record<string, unknown>>, type: string, timeoutMs: number): Promise<Record<string, unknown>> {
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`Pi RPC 请求超时：${type}`)), timeoutMs);
+      const timer = setTimeout(() => reject(new RpcRequestTimeoutError(type)), timeoutMs);
       query.then(
         (value) => { clearTimeout(timer); resolve(value); },
         (error) => { clearTimeout(timer); reject(error); },
@@ -238,7 +245,7 @@ export class PiRpcClient {
     const request = new Promise<Record<string, unknown>>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`Pi RPC 请求超时：${String(command.type)}`));
+        reject(new RpcRequestTimeoutError(String(command.type)));
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       child.stdin.write(`${JSON.stringify(payload)}\n`, (error) => {
