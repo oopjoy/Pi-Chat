@@ -7,10 +7,13 @@ import type { PiRpcClient } from "../src/server/rpc-client";
 import type { ResourceManager } from "../src/server/resource-manager";
 import type { SessionIndex } from "../src/server/session-index";
 
-const sleep = (milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+const sleep = (milliseconds: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 
 class IdleRpc {
-  private readonly listeners = new Set<(event: Record<string, unknown>) => void>();
+  private readonly listeners = new Set<
+    (event: Record<string, unknown>) => void
+  >();
   stopped = false;
 
   onEvent(listener: (event: Record<string, unknown>) => void) {
@@ -18,14 +21,27 @@ class IdleRpc {
     return () => this.listeners.delete(listener);
   }
 
-  isRunning() { return !this.stopped; }
-  async stop() { this.stopped = true; }
+  isRunning() {
+    return !this.stopped;
+  }
+  async stop() {
+    this.stopped = true;
+  }
   async send(command: Record<string, unknown>) {
-    if (command.type === "get_state") return { type: "response", success: true, data: { model: null, isStreaming: false } };
-    if (command.type === "get_messages") return { type: "response", success: true, data: { messages: [] } };
-    if (command.type === "get_available_models") return { type: "response", success: true, data: { models: [] } };
-    if (command.type === "get_commands") return { type: "response", success: true, data: { commands: [] } };
-    if (command.type === "get_session_stats") return { type: "response", success: true, data: {} };
+    if (command.type === "get_state")
+      return {
+        type: "response",
+        success: true,
+        data: { model: null, isStreaming: false },
+      };
+    if (command.type === "get_messages")
+      return { type: "response", success: true, data: { messages: [] } };
+    if (command.type === "get_available_models")
+      return { type: "response", success: true, data: { models: [] } };
+    if (command.type === "get_commands")
+      return { type: "response", success: true, data: { commands: [] } };
+    if (command.type === "get_session_stats")
+      return { type: "response", success: true, data: {} };
     return { type: "response", success: true, data: {} };
   }
 }
@@ -40,7 +56,9 @@ async function startApp(options: { presenceTtlMs?: number } = {}) {
     webRoot: process.cwd(),
     ...options,
   });
-  const server = createServer((request, response) => void app.handle(request, response));
+  const server = createServer(
+    (request, response) => void app.handle(request, response),
+  );
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   assert.ok(address && typeof address === "object");
@@ -58,17 +76,28 @@ async function startApp(options: { presenceTtlMs?: number } = {}) {
 async function openEvents(origin: string, client: string) {
   const bootstrap = await fetch(`${origin}/api/bootstrap`);
   assert.equal(bootstrap.status, 200);
-  const token = (await bootstrap.json() as { requestToken: string }).requestToken;
+  const token = ((await bootstrap.json()) as { requestToken: string })
+    .requestToken;
   const controller = new AbortController();
-  const response = await fetch(`${origin}/api/events?token=${encodeURIComponent(token)}&client=${encodeURIComponent(client)}`, {
-    headers: { origin, "x-pi-chat-client": client },
-    signal: controller.signal,
-  });
+  const response = await fetch(
+    `${origin}/api/events?token=${encodeURIComponent(token)}&client=${encodeURIComponent(client)}`,
+    {
+      headers: { origin, "x-pi-chat-client": client },
+      signal: controller.signal,
+    },
+  );
   assert.equal(response.status, 200);
   const reader = response.body?.getReader();
   assert.ok(reader);
   const first = await reader.read();
-  assert.match(new TextDecoder().decode(first.value), /event: ready/);
+  const readyFrame = new TextDecoder().decode(first.value);
+  assert.match(readyFrame, /event: ready/);
+  // The frame is the initial capability snapshot for browsers whose bootstrap
+  // finished before EventSource connected.
+  assert.match(
+    readyFrame,
+    /"primaryRuntime":\{"status":"ready","generation":0\}/,
+  );
   return { controller, reader };
 }
 
@@ -97,15 +126,31 @@ test("foreground presence expiry pushes a control-state SSE frame that clears an
   const fixture = await startApp({ presenceTtlMs: 40 });
   const appInternals = fixture.app as unknown as {
     sseClients: Map<object, string>;
-    sessionControl: { clientConnected(clientId: string): void; noteClientPresence(clientId: string): boolean; setController(sessionId: string, clientId: string): void };
+    sessionControl: {
+      clientConnected(clientId: string): void;
+      noteClientPresence(clientId: string): boolean;
+      setController(sessionId: string, clientId: string): void;
+    };
   };
   const sessionId = "aaaaaaaaaaaaaaaaaaaa";
   const owner = "11111111-1111-4111-8111-111111111111";
   const observer = "22222222-2222-4222-8222-222222222222";
   const ownerFrames: string[] = [];
   const observerFrames: string[] = [];
-  const ownerSocket = { write: (frame: string) => { ownerFrames.push(frame); return true; }, end() {} };
-  const observerSocket = { write: (frame: string) => { observerFrames.push(frame); return true; }, end() {} };
+  const ownerSocket = {
+    write: (frame: string) => {
+      ownerFrames.push(frame);
+      return true;
+    },
+    end() {},
+  };
+  const observerSocket = {
+    write: (frame: string) => {
+      observerFrames.push(frame);
+      return true;
+    },
+    end() {},
+  };
   appInternals.sseClients.set(ownerSocket, owner);
   appInternals.sseClients.set(observerSocket, observer);
   appInternals.sessionControl.clientConnected(owner);
@@ -161,22 +206,34 @@ test("server-initiated SSE removal releases its SessionControl presence", async 
     broadcast(event: Record<string, unknown>): void;
   };
   const clientId = "33333333-3333-4333-8333-333333333333";
-  const client = new EventEmitter() as EventEmitter & { ended: boolean; write(frame: string): boolean; end(): void };
+  const client = new EventEmitter() as EventEmitter & {
+    ended: boolean;
+    write(frame: string): boolean;
+    end(): void;
+  };
   client.ended = false;
   client.write = () => false;
-  client.end = () => { client.ended = true; };
+  client.end = () => {
+    client.ended = true;
+  };
   appInternals.sseClients.set(client, clientId);
   appInternals.connectedClients.set(clientId, 1);
   try {
     for (let index = 0; index < 6; index += 1) {
-      appInternals.broadcast({ type: "tool_execution_end", sequence: index, payload: "x".repeat(450_000) });
+      appInternals.broadcast({
+        type: "tool_execution_end",
+        sequence: index,
+        payload: "x".repeat(450_000),
+      });
     }
     assert.equal(client.ended, true);
     assert.equal(appInternals.sseClients.size, 0);
     assert.equal(appInternals.connectedClients.has(clientId), false);
     // The later HTTP request-close path sees an already removed socket and must
     // not decrement below zero or schedule a second ownership cleanup.
-    (fixture.app as unknown as { sseHub: { remove(response: object): string } }).sseHub.remove(client);
+    (
+      fixture.app as unknown as { sseHub: { remove(response: object): string } }
+    ).sseHub.remove(client);
     assert.equal(appInternals.connectedClients.has(clientId), false);
   } finally {
     await fixture.close();
@@ -191,16 +248,26 @@ test("write-error removal releases SessionControl presence exactly once", async 
     broadcast(event: Record<string, unknown>): void;
   };
   const clientId = "44444444-4444-4444-8444-444444444444";
-  const client = new EventEmitter() as EventEmitter & { write(frame: string): boolean; end(): void };
-  client.write = () => { throw new Error("broken socket"); };
+  const client = new EventEmitter() as EventEmitter & {
+    write(frame: string): boolean;
+    end(): void;
+  };
+  client.write = () => {
+    throw new Error("broken socket");
+  };
   client.end = () => {};
   appInternals.sseClients.set(client, clientId);
   appInternals.connectedClients.set(clientId, 1);
   try {
-    appInternals.broadcast({ type: "message_update", payload: "trigger write error" });
+    appInternals.broadcast({
+      type: "message_update",
+      payload: "trigger write error",
+    });
     assert.equal(appInternals.sseClients.size, 0);
     assert.equal(appInternals.connectedClients.has(clientId), false);
-    (fixture.app as unknown as { sseHub: { remove(response: object): string } }).sseHub.remove(client);
+    (
+      fixture.app as unknown as { sseHub: { remove(response: object): string } }
+    ).sseHub.remove(client);
     assert.equal(appInternals.connectedClients.has(clientId), false);
   } finally {
     await fixture.close();
@@ -213,16 +280,26 @@ test("a sole backpressured SSE client is dropped without taking down the applica
     sseClients: Map<object, string>;
     broadcast(event: Record<string, unknown>): void;
   };
-  const client = new EventEmitter() as EventEmitter & { ended: boolean; write(frame: string): boolean; end(): void };
+  const client = new EventEmitter() as EventEmitter & {
+    ended: boolean;
+    write(frame: string): boolean;
+    end(): void;
+  };
   client.ended = false;
   client.write = () => false;
-  client.end = () => { client.ended = true; };
+  client.end = () => {
+    client.ended = true;
+  };
   appInternals.sseClients.set(client, "backpressured-client");
   try {
     // The first false write enters backpressure; later non-coalescible frames
     // deliberately exceed the 2 MiB retention cap and force this client away.
     for (let index = 0; index < 6; index += 1) {
-      appInternals.broadcast({ type: "tool_execution_end", sequence: index, payload: "x".repeat(450_000) });
+      appInternals.broadcast({
+        type: "tool_execution_end",
+        sequence: index,
+        payload: "x".repeat(450_000),
+      });
     }
     assert.equal(client.ended, true);
     assert.equal(appInternals.sseClients.size, 0);

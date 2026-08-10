@@ -17,6 +17,9 @@ const APPLICATION_RESTART_TIMEOUT_MS = 10 * 60_000;
 const APPLICATION_HANDOFF_TIMEOUT_MS = 90_000;
 let requestToken = "";
 let handshakeInFlight: Promise<BootstrapHandshakeData> | null = null;
+// A replacement Pi Chat process rotates its in-memory request token. Responses
+// from the old process remain uncancelled, so token writes are generation-scoped.
+let connectionGeneration = 0;
 
 export class ApiRequestError extends Error {
   constructor(message: string, readonly status: number, readonly code?: string) {
@@ -39,6 +42,17 @@ function storeRequestToken(value: unknown): void {
   if (typeof value === "string" && value) requestToken = value;
 }
 
+function acceptConnectionToken(value: unknown): boolean {
+  if (typeof value !== "string" || !value) return false;
+  // A successful reconnect is an authority boundary even when a transient
+  // transport drop happens to return the same token. Old responses must never
+  // regain token ownership after this point.
+  connectionGeneration += 1;
+  handshakeInFlight = null;
+  requestToken = value;
+  return true;
+}
+
 async function recoverConnection(): Promise<void> {
   const deadline = Date.now() + APPLICATION_HANDOFF_TIMEOUT_MS;
   while (Date.now() < deadline) {
@@ -51,8 +65,7 @@ async function recoverConnection(): Promise<void> {
         signal: AbortSignal.timeout(3_000),
       });
       const value = await response.json().catch(() => ({})) as { requestToken?: string };
-      storeRequestToken(value.requestToken);
-      if (response.ok && value.requestToken) return;
+      if (response.ok && acceptConnectionToken(value.requestToken)) return;
     } catch {
       // Listener is unavailable or still starting.
     }
@@ -70,7 +83,7 @@ async function waitForApplicationHandoff(previousToken = requestToken): Promise<
       const response = await fetch("/api/bootstrap/handshake", { cache: "no-store", signal: AbortSignal.timeout(3_000) });
       const value = await response.json() as { requestToken?: string };
       if (response.ok && value.requestToken && value.requestToken !== previousToken) {
-        storeRequestToken(value.requestToken);
+        acceptConnectionToken(value.requestToken);
         return;
       }
     } catch {
@@ -81,7 +94,13 @@ async function waitForApplicationHandoff(previousToken = requestToken): Promise<
   throw new Error("Pi Chat 新服务启动超时，请通过桌面快捷方式重新打开");
 }
 
-async function request<T>(path: string, options?: RequestInit, timeoutMs = API_TIMEOUT_MS): Promise<T> {
+async function request<T>(
+  path: string,
+  options?: RequestInit,
+  timeoutMs = API_TIMEOUT_MS,
+  acceptResponseToken = true,
+): Promise<T> {
+  const requestGeneration = connectionGeneration;
   let response: Response;
   try {
     response = await fetch(path, {
@@ -105,26 +124,64 @@ async function request<T>(path: string, options?: RequestInit, timeoutMs = API_T
   const value = await response.json().catch(() => ({})) as T & { error?: string; requestToken?: string; code?: string };
   // A maintenance-state bootstrap may return 503 while still granting the
   // guarded startup token required to subscribe to lifecycle SSE.
-  storeRequestToken(value.requestToken);
+  if (acceptResponseToken && requestGeneration === connectionGeneration)
+    storeRequestToken(value.requestToken);
   if (!response.ok) throw new ApiRequestError(value.error || `请求失败：${response.status}`, response.status, value.code);
   return value;
 }
 
 function handshake(): Promise<BootstrapHandshakeData> {
   if (handshakeInFlight) return handshakeInFlight;
-  const handshakeRequest = request<BootstrapHandshakeData>("/api/bootstrap/handshake").finally(() => {
+  // The App applies handshake data only after its refresh/epoch authority check.
+  // Do not let an old handshake response mutate the shared token by itself.
+  const handshakeRequest = request<BootstrapHandshakeData>(
+    "/api/bootstrap/handshake",
+    undefined,
+    API_TIMEOUT_MS,
+    false,
+  ).finally(() => {
     if (handshakeInFlight === handshakeRequest) handshakeInFlight = null;
   });
   handshakeInFlight = handshakeRequest;
   return handshakeRequest;
 }
 
+function acceptHandshake(handshake: BootstrapHandshakeData): void {
+  storeRequestToken(handshake.requestToken);
+}
+
+function detachHandshake(): void {
+  // A newer same-process UI refresh must not inherit the older refresh's
+  // authority closure. This intentionally retains the current token/generation.
+  handshakeInFlight = null;
+}
+
+function invalidateHandshake(): void {
+  connectionGeneration += 1;
+  requestToken = "";
+  // Do not cancel the browser request. Forgetting its promise lets the new
+  // process issue its own handshake, while generation guards reject its token.
+  detachHandshake();
+}
+
+async function bootstrap(): Promise<BootstrapData> {
+  const bootstrapGeneration = connectionGeneration;
+  if (!requestToken) {
+    const handshakeData = await handshake();
+    if (bootstrapGeneration !== connectionGeneration) return bootstrap();
+    acceptHandshake(handshakeData);
+  }
+  if (bootstrapGeneration !== connectionGeneration) return bootstrap();
+  return request<BootstrapData>("/api/bootstrap");
+}
+
 export const api = {
   handshake,
-  bootstrap: async () => {
-    if (!requestToken) await handshake();
-    return request<BootstrapData>("/api/bootstrap");
-  },
+  acceptHandshake,
+  acceptConnectionToken,
+  detachHandshake,
+  invalidateHandshake,
+  bootstrap,
   eventsUrl: () => `/api/events?token=${encodeURIComponent(requestToken)}&client=${encodeURIComponent(clientId)}&page=${encodeURIComponent(pageId)}`,
   renewPresence: () => request<{ present: true }>("/api/presence", { method: "POST" }, 10_000),
   relinquishPresence: () => request<{ present: false }>("/api/presence", { method: "POST", body: JSON.stringify({ foreground: false }) }, 10_000),
@@ -147,7 +204,7 @@ export const api = {
   clipboardLocalFiles: () => request<{ paths: string[] }>("/api/local-files/clipboard", { method: "POST" }),
   pickDraftWorkspace: () => request<{ cancelled: boolean; cwd?: string }>("/api/workspace/draft-pick", { method: "POST" }),
   pickWorkspace: () => request<{ cancelled: boolean; workspaceName?: string; cwd?: string; workspaceEpoch?: string; workspaceRevision?: number; data?: BootstrapData }>("/api/workspace/pick", { method: "POST" }),
-  abort: (sessionId: string) => request<{ ok: boolean; isStreaming: boolean; queuePaused: boolean }>("/api/chat/abort", { method: "POST", body: JSON.stringify({ sessionId }) }),
+  abort: (sessionId: string) => request<{ ok: boolean; abortPending?: boolean; isStreaming: boolean; queuePaused: boolean }>("/api/chat/abort", { method: "POST", body: JSON.stringify({ sessionId }) }),
   cancelQueued: (id: string, sessionId: string) => request<{ queue: QueuedPrompt[]; paused: boolean }>(`/api/chat/queue/${id}`, { method: "DELETE", body: JSON.stringify({ sessionId }) }),
   resumeQueue: (sessionId: string) => request<{ queue: QueuedPrompt[]; paused: boolean }>("/api/chat/queue/resume", { method: "POST", body: JSON.stringify({ sessionId }) }),
   compact: (customInstructions: string, sessionId: string) => request<{ result: Record<string, unknown> }>("/api/chat/compact", { method: "POST", body: JSON.stringify({ customInstructions, sessionId }) }, PROMPT_PREPARE_TIMEOUT_MS),

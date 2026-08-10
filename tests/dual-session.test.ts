@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { PiChatApp } from "../src/server/app";
-import type { PiRpcClient } from "../src/server/rpc-client";
+import { RpcRequestTimeoutError, type PiRpcClient } from "../src/server/rpc-client";
 import { idForPath } from "../src/server/session-index";
 import type { SessionIndex } from "../src/server/session-index";
 import type { ResourceManager } from "../src/server/resource-manager";
@@ -2161,6 +2161,60 @@ test("Primary and Secondary settlement dispatch every queued follow-up", async (
       assert.deepEqual(rpc.commands.filter((command) => command.type === "prompt").map((command) => command.message), [`${prefix}-A`, `${prefix}-B`]);
       await settle(rpc);
       assert.deepEqual(rpc.commands.filter((command) => command.type === "prompt").map((command) => command.message), [`${prefix}-A`, `${prefix}-B`, `${prefix}-C`]);
+    }
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("abort timeouts remain accepted while Primary and Secondary wait to settle", async () => {
+  const primaryPath = "C:\\sessions\\abort-primary.jsonl";
+  const secondaryPath = "C:\\sessions\\abort-secondary.jsonl";
+  const primaryId = idForPath(primaryPath);
+  const secondaryId = idForPath(secondaryPath);
+  class SlowAbortRpc extends FakeRpc {
+    override async send(command: Record<string, unknown>) {
+      if (command.type === "abort") {
+        this.commands.push(command);
+        throw new RpcRequestTimeoutError("abort");
+      }
+      return super.send(command);
+    }
+  }
+  const primary = new SlowAbortRpc(primaryPath, "abort-primary");
+  const secondary = new SlowAbortRpc(secondaryPath, "abort-secondary");
+  primary.streaming = true;
+  secondary.streaming = true;
+  const summaries = [
+    { id: primaryId, sessionId: "abort-primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 2, messageCount: 1, active: true },
+    { id: secondaryId, sessionId: "abort-secondary", name: "Secondary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: false },
+  ];
+  const sessions = {
+    list: async () => summaries,
+    pathForId: (id: string) => id === primaryId ? primaryPath : id === secondaryId ? secondaryPath : null,
+    summaryForId: (id: string) => summaries.find((session) => session.id === id) || null,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, createRpc: () => secondary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const postAbort = (sessionId: string) => fetch(`${origin}/api/chat/abort`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sessionId }) });
+  try {
+    await fetch(`${origin}/api/bootstrap`);
+    await fetch(`${origin}/api/sessions/${secondaryId}/warm`, { method: "POST" });
+    for (const sessionId of [primaryId, secondaryId]) {
+      const response = await postAbort(sessionId);
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), {
+        ok: true,
+        abortPending: true,
+        isStreaming: true,
+        queuePaused: false,
+      });
     }
   } finally {
     server.close();

@@ -132,6 +132,8 @@ const bootstrap: BootstrapData = {
   queue: [],
   queuePaused: false,
   workspaceCwd: "C:/work",
+  // The server scopes workspace revisions with its per-process run epoch.
+  workspaceEpoch: "epoch-a",
   activeSessionId: activeId,
   activeSessionIds: [activeId],
   applicationLifecycle: "idle",
@@ -218,12 +220,24 @@ test("foreground presence renews on ready, visible lifecycle events, stays quiet
     await act(async () =>
       dom.window.dispatchEvent(new dom.window.Event("blur")),
     );
-    assert.equal(relinquishments, 0, "ordinary blur pauses renewal without immediately releasing foreground control");
-    assert.equal(closeSignals, 0, "blur must not declare the browser window closed");
+    assert.equal(
+      relinquishments,
+      0,
+      "ordinary blur pauses renewal without immediately releasing foreground control",
+    );
+    assert.equal(
+      closeSignals,
+      0,
+      "blur must not declare the browser window closed",
+    );
     await act(async () =>
       dom.window.dispatchEvent(new dom.window.Event("focus")),
     );
-    assert.equal(renewals, beforeBlur, "focus without document focus cannot renew foreground presence");
+    assert.equal(
+      renewals,
+      beforeBlur,
+      "focus without document focus cannot renew foreground presence",
+    );
     Object.defineProperty(dom.window.document, "hasFocus", {
       value: () => true,
       configurable: true,
@@ -231,7 +245,10 @@ test("foreground presence renews on ready, visible lifecycle events, stays quiet
     await act(async () =>
       dom.window.dispatchEvent(new dom.window.Event("focus")),
     );
-    assert.ok(renewals > beforeBlur, "a genuinely focused renderer renews presence");
+    assert.ok(
+      renewals > beforeBlur,
+      "a genuinely focused renderer renews presence",
+    );
     const sourcesBeforeFailedRenewal = FakeEventSource.instances.length;
     Object.assign(api, {
       renewPresence: async () => {
@@ -278,13 +295,23 @@ test("foreground presence renews on ready, visible lifecycle events, stays quiet
     );
     assert.ok(renewals > beforeHidden, "pageshow renews presence");
     await act(async () =>
-      dom.window.dispatchEvent(new dom.window.PageTransitionEvent("pagehide", { persisted: false })),
+      dom.window.dispatchEvent(
+        new dom.window.PageTransitionEvent("pagehide", { persisted: false }),
+      ),
     );
-    assert.equal(closeSignals, 0, "pagehide can mean PWA backgrounding and must not declare a window closed");
+    assert.equal(
+      closeSignals,
+      0,
+      "pagehide can mean PWA backgrounding and must not declare a window closed",
+    );
     await act(async () =>
       dom.window.dispatchEvent(new dom.window.Event("unload")),
     );
-    assert.equal(closeSignals, 1, "a real renderer unload declares the window closed");
+    assert.equal(
+      closeSignals,
+      1,
+      "a real renderer unload declares the window closed",
+    );
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);
@@ -302,14 +329,28 @@ test("a build mismatch blocks ordinary mutations but preserves server-guarded li
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
   const originals = { ...api };
-  const testGlobal = globalThis as typeof globalThis & { __PI_CHAT_TEST_WEB_BUILD_IDENTITY__?: BootstrapData["buildIdentity"] };
-  testGlobal.__PI_CHAT_TEST_WEB_BUILD_IDENTITY__ = { schemaVersion: 1, packageVersion: "test", revision: "test", fingerprint: "0".repeat(64), builtAt: "test" };
+  const testGlobal = globalThis as typeof globalThis & {
+    __PI_CHAT_TEST_WEB_BUILD_IDENTITY__?: BootstrapData["buildIdentity"];
+  };
+  testGlobal.__PI_CHAT_TEST_WEB_BUILD_IDENTITY__ = {
+    schemaVersion: 1,
+    packageVersion: "test",
+    revision: "test",
+    fingerprint: "0".repeat(64),
+    builtAt: "test",
+  };
   let restartCalls = 0;
   let shutdownCalls = 0;
   Object.assign(api, {
     bootstrap: async () => ({
       ...bootstrap,
-      buildIdentity: { schemaVersion: 1, packageVersion: "test", revision: "test", fingerprint: "1".repeat(64), builtAt: "test" },
+      buildIdentity: {
+        schemaVersion: 1,
+        packageVersion: "test",
+        revision: "test",
+        fingerprint: "1".repeat(64),
+        builtAt: "test",
+      },
     }),
     eventsUrl: () => "/api/events",
     restart: async () => {
@@ -320,34 +361,70 @@ test("a build mismatch blocks ordinary mutations but preserves server-guarded li
       shutdownCalls += 1;
       return { shuttingDown: true as const };
     },
-    waitForApplicationHandoff: async () => { throw new Error("test handoff unavailable"); },
+    waitForApplicationHandoff: async () => {
+      throw new Error("test handoff unavailable");
+    },
     markSessionViewed: async () => ({ viewing: activeId }),
     renewPresence: async () => ({ present: true as const }),
     signalWindowClose: () => true,
   });
-  Object.defineProperty(dom.window, "confirm", { value: () => true, configurable: true });
-  Object.defineProperty(dom.window, "close", { value: () => undefined, configurable: true });
+  Object.defineProperty(dom.window, "confirm", {
+    value: () => true,
+    configurable: true,
+  });
+  Object.defineProperty(dom.window, "close", {
+    value: () => undefined,
+    configurable: true,
+  });
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {
     await act(async () => {
       root.render(createElement(App));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
-    assert.match(dom.window.document.body.textContent || "", /网页与服务版本不一致/);
-    assert.equal(dom.window.document.querySelector<HTMLTextAreaElement>("textarea")?.disabled, true, "ordinary prompt writes remain blocked");
-    const restart = dom.window.document.querySelector<HTMLButtonElement>(".restart-pi")!;
-    assert.equal(restart.disabled, false, "the guarded restart recovery remains available");
+    assert.match(
+      dom.window.document.body.textContent || "",
+      /网页与服务版本不一致/,
+    );
+    assert.equal(
+      dom.window.document.querySelector<HTMLTextAreaElement>("textarea")
+        ?.disabled,
+      true,
+      "ordinary prompt writes remain blocked",
+    );
+    const restart =
+      dom.window.document.querySelector<HTMLButtonElement>(".restart-pi")!;
+    assert.equal(
+      restart.disabled,
+      false,
+      "the guarded restart recovery remains available",
+    );
     await act(async () => {
       restart.click();
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     assert.equal(restartCalls, 1);
-    const settings = dom.window.document.querySelector<HTMLButtonElement>(".topbar-settings")!;
+    const settings =
+      dom.window.document.querySelector<HTMLButtonElement>(".topbar-settings")!;
     await act(async () => settings.click());
-    const workspacePicker = dom.window.document.querySelector<HTMLButtonElement>("button[aria-label='选择默认工作路径']")!;
-    assert.equal(workspacePicker.disabled, true, "ordinary workspace changes remain blocked");
-    const shutdown = dom.window.document.querySelector<HTMLButtonElement>(".settings-shutdown")!;
-    assert.equal(shutdown.disabled, false, "the guarded shutdown recovery remains available");
+    const workspacePicker =
+      dom.window.document.querySelector<HTMLButtonElement>(
+        "button[aria-label='选择默认工作路径']",
+      )!;
+    assert.equal(
+      workspacePicker.disabled,
+      true,
+      "ordinary workspace changes remain blocked",
+    );
+    const shutdown =
+      dom.window.document.querySelector<HTMLButtonElement>(
+        ".settings-shutdown",
+      )!;
+    assert.equal(
+      shutdown.disabled,
+      false,
+      "the guarded shutdown recovery remains available",
+    );
     await act(async () => {
       shutdown.click();
       await Promise.resolve();
@@ -356,6 +433,51 @@ test("a build mismatch blocks ordinary mutations but preserves server-guarded li
   } finally {
     await act(async () => root.unmount());
     delete testGlobal.__PI_CHAT_TEST_WEB_BUILD_IDENTITY__;
+    Object.assign(api, originals);
+  }
+});
+
+test("a bootstrap without a restored Session opens a local New draft with the default workspace", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  let createdSessions = 0;
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      activeSessionId: "",
+      activeSessionIds: [],
+      sessions: bootstrap.sessions.map((session) => ({
+        ...session,
+        active: false,
+      })),
+    }),
+    eventsUrl: () => "/api/events",
+    newSession: async () => {
+      createdSessions += 1;
+      return draftView;
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    assert.equal(
+      dom.window.document.querySelector(".topbar-title")?.textContent,
+      "新对话",
+    );
+    assert.equal(
+      dom.window.document.querySelector(".draft-workspace code")?.textContent,
+      "C:/work",
+    );
+    assert.equal(
+      createdSessions,
+      0,
+      "startup must not create an empty persisted Session",
+    );
+  } finally {
+    await act(async () => root.unmount());
     Object.assign(api, originals);
   }
 });
@@ -375,15 +497,33 @@ test("a workspace SSE updates the default only for a later New draft", async () 
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {
     await act(async () => root.render(createElement(App)));
-    const newButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => button.textContent?.trim() === "New")!;
+    const newButton = [
+      ...dom.window.document.querySelectorAll<HTMLButtonElement>("button"),
+    ].find((button) => button.textContent?.trim() === "New")!;
     await act(async () => newButton.click());
-    assert.equal(dom.window.document.querySelector(".draft-workspace code")?.textContent, "C:/work");
+    assert.equal(
+      dom.window.document.querySelector(".draft-workspace code")?.textContent,
+      "C:/work",
+    );
     const source = FakeEventSource.instances.at(-1)!;
-    await act(async () => source.emitPi({ type: "pi_chat_workspace_changed", cwd: "D:/shared-default", workspaceEpoch: "workspace-a", workspaceRevision: 1 }));
-    assert.equal(dom.window.document.querySelector(".draft-workspace code")?.textContent, "C:/work", "an existing draft retains its captured cwd");
+    await act(async () =>
+      source.emitPi({
+        type: "pi_chat_workspace_changed",
+        cwd: "D:/shared-default",
+        workspaceEpoch: "epoch-a",
+        workspaceRevision: 1,
+      }),
+    );
+    assert.equal(
+      dom.window.document.querySelector(".draft-workspace code")?.textContent,
+      "C:/work",
+      "an existing draft retains its captured cwd",
+    );
     await act(async () => newButton.click());
-    assert.equal(dom.window.document.querySelector(".draft-workspace code")?.textContent, "D:/shared-default");
+    assert.equal(
+      dom.window.document.querySelector(".draft-workspace code")?.textContent,
+      "D:/shared-default",
+    );
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);
@@ -398,11 +538,15 @@ test("a stale bootstrap cannot undo a newer workspace SSE default", async () => 
   const originals = { ...api };
   let bootstrapCalls = 0;
   let resolveStaleBootstrap!: (value: BootstrapData) => void;
-  const staleBootstrap = new Promise<BootstrapData>((resolve) => { resolveStaleBootstrap = resolve; });
+  const staleBootstrap = new Promise<BootstrapData>((resolve) => {
+    resolveStaleBootstrap = resolve;
+  });
   Object.assign(api, {
     bootstrap: async () => {
       bootstrapCalls += 1;
-      return bootstrapCalls === 1 ? { ...bootstrap, workspaceEpoch: "workspace-a", workspaceRevision: 10 } : staleBootstrap;
+      return bootstrapCalls === 1
+        ? { ...bootstrap, workspaceEpoch: "workspace-a", workspaceRevision: 10 }
+        : staleBootstrap;
     },
     eventsUrl: () => "/api/events",
     markSessionViewed: async () => ({ viewing: activeId }),
@@ -413,17 +557,209 @@ test("a stale bootstrap cannot undo a newer workspace SSE default", async () => 
     await act(async () => root.render(createElement(App)));
     const source = FakeEventSource.instances.at(-1)!;
     await act(async () => source.emitPi({ type: "pi_chat_sse_resync" }));
-    assert.equal(bootstrapCalls, 2, "resync starts a refresh with stale global metadata");
-    await act(async () => source.emitPi({ type: "pi_chat_workspace_changed", cwd: "D:/newer-default", workspaceEpoch: "workspace-a", workspaceRevision: 11 }));
+    assert.equal(
+      bootstrapCalls,
+      2,
+      "resync starts a refresh with stale global metadata",
+    );
+    await act(async () =>
+      source.emitPi({
+        type: "pi_chat_workspace_changed",
+        cwd: "D:/newer-default",
+        workspaceEpoch: "workspace-a",
+        workspaceRevision: 11,
+      }),
+    );
     await act(async () => {
-      resolveStaleBootstrap({ ...bootstrap, workspaceCwd: "C:/work", workspaceEpoch: "workspace-a", workspaceRevision: 10 });
+      resolveStaleBootstrap({
+        ...bootstrap,
+        workspaceCwd: "C:/work",
+        workspaceEpoch: "workspace-a",
+        workspaceRevision: 10,
+      });
       await Promise.resolve();
       await Promise.resolve();
     });
-    const newButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => button.textContent?.trim() === "New")!;
+    const newButton = [
+      ...dom.window.document.querySelectorAll<HTMLButtonElement>("button"),
+    ].find((button) => button.textContent?.trim() === "New")!;
     await act(async () => newButton.click());
-    assert.equal(dom.window.document.querySelector(".draft-workspace code")?.textContent, "D:/newer-default");
+    assert.equal(
+      dom.window.document.querySelector(".draft-workspace code")?.textContent,
+      "D:/newer-default",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+for (const terminal of ["ready", "failed"] as const) {
+  test(`a same-generation stale bootstrap cannot overwrite Primary ${terminal} SSE`, async () => {
+    const { dom, FakeEventSource } = installDom();
+    const { createRoot } = await import("react-dom/client");
+    const { api } = await import("../src/web/api");
+    const { App } = await import("../src/web/App");
+    const originals = { ...api };
+    let bootstrapCalls = 0;
+    let resolveStaleBootstrap!: (value: BootstrapData) => void;
+    const staleBootstrap = new Promise<BootstrapData>((resolve) => {
+      resolveStaleBootstrap = resolve;
+    });
+    Object.assign(api, {
+      bootstrap: async () => {
+        bootstrapCalls += 1;
+        return bootstrapCalls === 1
+          ? {
+              ...bootstrap,
+              primaryRuntime: { status: "starting" as const, generation: 7 },
+            }
+          : staleBootstrap;
+      },
+      eventsUrl: () => "/api/events",
+      markSessionViewed: async () => ({ viewing: activeId }),
+    });
+    const root = createRoot(dom.window.document.querySelector("#root")!);
+    try {
+      await act(async () => root.render(createElement(App)));
+      const source = FakeEventSource.instances.at(-1)!;
+      await act(async () => {
+        source.emitPi({ type: "pi_chat_sse_resync" });
+        await Promise.resolve();
+      });
+      assert.equal(
+        bootstrapCalls,
+        2,
+        "resync leaves an older bootstrap request in flight",
+      );
+      await act(async () => {
+        source.emitPi({
+          type: "pi_chat_primary_runtime_status",
+          primaryRuntime:
+            terminal === "ready"
+              ? { status: "ready", generation: 7 }
+              : { status: "failed", generation: 7, error: "worker exited" },
+        });
+        resolveStaleBootstrap({
+          ...bootstrap,
+          primaryRuntime: { status: "starting" as const, generation: 7 },
+        });
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      if (terminal === "ready") {
+        const model = dom.window.document.querySelector<HTMLButtonElement>(
+          ".composer-model-select .compact-select-trigger",
+        )!;
+        assert.equal(
+          model.disabled,
+          false,
+          "same-generation starting must not relock ready controls",
+        );
+      } else {
+        const status = dom.window.document.querySelector<HTMLElement>(
+          ".primary-runtime-status",
+        )!;
+        assert.equal(
+          status.classList.contains("is-failed"),
+          true,
+          "same-generation starting must not hide failure",
+        );
+        assert.match(status.textContent || "", /worker exited/);
+      }
+    } finally {
+      await act(async () => root.unmount());
+      Object.assign(api, originals);
+    }
+  });
+}
+
+test("a replacement clears the old Primary readiness generation before accepting its lower generation", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  let bootstrapCalls = 0;
+  let resolveReplacementBootstrap!: (value: BootstrapData) => void;
+  const pendingReplacementBootstrap = new Promise<BootstrapData>((resolve) => {
+    resolveReplacementBootstrap = resolve;
+  });
+  Object.assign(api, {
+    bootstrap: async () => {
+      bootstrapCalls += 1;
+      return bootstrapCalls === 1
+        ? {
+            ...bootstrap,
+            workspaceEpoch: "epoch-a",
+            primaryRuntime: { status: "ready" as const, generation: 7 },
+          }
+        : pendingReplacementBootstrap;
+    },
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    invalidateHandshake: () => undefined,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const model = () =>
+      dom.window.document.querySelector<HTMLButtonElement>(
+        ".composer-model-select .compact-select-trigger",
+      )!;
+    assert.equal(
+      model().disabled,
+      false,
+      "A's confirmed ready generation enables model settings",
+    );
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () =>
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "idle",
+            piChatRunEpoch: "epoch-b",
+            workspaceEpoch: "epoch-b",
+          }),
+        }),
+      ),
+    );
+    assert.equal(bootstrapCalls, 2);
+    assert.equal(
+      model().disabled,
+      true,
+      "B starts with no inherited ready capability",
+    );
+    assert.equal(
+      dom.window.document
+        .querySelector(".primary-runtime-status")
+        ?.classList.contains("is-starting"),
+      true,
+    );
+    await act(async () => {
+      resolveReplacementBootstrap({
+        ...bootstrap,
+        workspaceEpoch: "epoch-b",
+        primaryRuntime: { status: "starting", generation: 1 },
+      });
+      await Promise.resolve();
+    });
+    assert.equal(
+      model().disabled,
+      true,
+      "B starting generation 1 remains blocked",
+    );
+    await act(async () =>
+      source.emitPi({
+        type: "pi_chat_primary_runtime_status",
+        primaryRuntime: { status: "ready", generation: 1 },
+      }),
+    );
+    assert.equal(
+      model().disabled,
+      false,
+      "B ready generation 1 is accepted after the replacement reset",
+    );
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);
@@ -441,8 +777,18 @@ test("a replacement process workspace epoch accepts its fresh default after an o
     bootstrap: async () => {
       bootstrapCalls += 1;
       return bootstrapCalls === 1
-        ? { ...bootstrap, workspaceCwd: "C:/old-default", workspaceEpoch: "workspace-old", workspaceRevision: 900 }
-        : { ...bootstrap, workspaceCwd: "D:/replacement-default", workspaceEpoch: "workspace-new", workspaceRevision: 0 };
+        ? {
+            ...bootstrap,
+            workspaceCwd: "C:/old-default",
+            workspaceEpoch: "workspace-old",
+            workspaceRevision: 900,
+          }
+        : {
+            ...bootstrap,
+            workspaceCwd: "D:/replacement-default",
+            workspaceEpoch: "workspace-new",
+            workspaceRevision: 0,
+          };
     },
     eventsUrl: () => "/api/events",
     markSessionViewed: async () => ({ viewing: activeId }),
@@ -452,14 +798,1731 @@ test("a replacement process workspace epoch accepts its fresh default after an o
   try {
     await act(async () => root.render(createElement(App)));
     const source = FakeEventSource.instances.at(-1)!;
-    await act(async () => source.dispatchEvent(new dom.window.MessageEvent("ready", {
-      data: JSON.stringify({ lifecycle: "idle", piChatRunEpoch: "workspace-new", workspaceEpoch: "workspace-new" }),
-    })));
+    await act(async () =>
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "idle",
+            piChatRunEpoch: "workspace-new",
+            workspaceEpoch: "workspace-new",
+          }),
+        }),
+      ),
+    );
     await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
-    const newButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => button.textContent?.trim() === "New")!;
+    const newButton = [
+      ...dom.window.document.querySelectorAll<HTMLButtonElement>("button"),
+    ].find((button) => button.textContent?.trim() === "New")!;
     await act(async () => newButton.click());
-    assert.equal(dom.window.document.querySelector(".draft-workspace code")?.textContent, "D:/replacement-default");
+    assert.equal(
+      dom.window.document.querySelector(".draft-workspace code")?.textContent,
+      "D:/replacement-default",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("lifecycle idle consumes replacement bootstrap accounting before a later ready", async () => {
+  for (const outcome of ["success", "failure"] as const) {
+    const { dom, FakeEventSource } = installDom();
+    const { createRoot } = await import("react-dom/client");
+    const { api } = await import("../src/web/api");
+    const { App } = await import("../src/web/App");
+    const originals = { ...api };
+    let bootstrapCalls = 0;
+    let rejectReplacementBootstrap!: (cause: Error) => void;
+    const rejectedReplacementBootstrap = new Promise<BootstrapData>(
+      (_resolve, reject) => {
+        rejectReplacementBootstrap = reject;
+      },
+    );
+    Object.assign(api, {
+      bootstrap: async () => {
+        bootstrapCalls += 1;
+        if (bootstrapCalls === 1) return bootstrap;
+        if (bootstrapCalls === 2 && outcome === "failure")
+          return rejectedReplacementBootstrap;
+        return { ...bootstrap, workspaceEpoch: `epoch-lifecycle-${outcome}` };
+      },
+      eventsUrl: () => "/api/events",
+      markSessionViewed: async () => ({ viewing: activeId }),
+      invalidateHandshake: () => undefined,
+    });
+    const root = createRoot(dom.window.document.querySelector("#root")!);
+    try {
+      await act(async () => root.render(createElement(App)));
+      const source = FakeEventSource.instances.at(-1)!;
+      await act(async () =>
+        source.dispatchEvent(
+          new dom.window.MessageEvent("ready", {
+            data: JSON.stringify({
+              lifecycle: "workspace-changing",
+              piChatRunEpoch: `epoch-lifecycle-${outcome}`,
+              workspaceEpoch: `epoch-lifecycle-${outcome}`,
+            }),
+          }),
+        ),
+      );
+      await act(async () =>
+        source.emitPi({
+          type: "pi_chat_application_lifecycle",
+          lifecycle: "idle",
+        }),
+      );
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+      assert.equal(
+        bootstrapCalls,
+        2,
+        "lifecycle idle starts B's first bootstrap exactly once",
+      );
+      const newButton = [
+        ...dom.window.document.querySelectorAll<HTMLButtonElement>("button"),
+      ].find((button) => button.textContent?.trim() === "New")!;
+      assert.equal(
+        newButton.disabled,
+        false,
+        "lifecycle idle immediately releases maintenance locks",
+      );
+      if (outcome === "failure") {
+        await act(async () => {
+          rejectReplacementBootstrap(
+            new Error("B lifecycle bootstrap unavailable"),
+          );
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+      }
+      await act(async () => {
+        source.dispatchEvent(
+          new dom.window.MessageEvent("ready", {
+            data: JSON.stringify({
+              lifecycle: "idle",
+              piChatRunEpoch: `epoch-lifecycle-${outcome}`,
+              workspaceEpoch: `epoch-lifecycle-${outcome}`,
+            }),
+          }),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      assert.equal(
+        bootstrapCalls,
+        outcome === "failure" ? 3 : 2,
+        "ready does not duplicate a successful lifecycle bootstrap and retries one failed B bootstrap",
+      );
+      await act(async () =>
+        source.dispatchEvent(
+          new dom.window.MessageEvent("ready", {
+            data: JSON.stringify({
+              lifecycle: "idle",
+              piChatRunEpoch: `epoch-lifecycle-${outcome}`,
+              workspaceEpoch: `epoch-lifecycle-${outcome}`,
+            }),
+          }),
+        ),
+      );
+      assert.equal(
+        bootstrapCalls,
+        outcome === "failure" ? 3 : 2,
+        "repeated ready remains bounded",
+      );
+    } finally {
+      await act(async () => root.unmount());
+      Object.assign(api, originals);
+    }
+  }
+});
+
+test("a stale bootstrap rejection during replacement maintenance cannot surface an A error", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  let bootstrapCalls = 0;
+  let rejectOldBootstrap!: (cause: Error) => void;
+  const oldBootstrap = new Promise<BootstrapData>((_resolve, reject) => {
+    rejectOldBootstrap = reject;
+  });
+  Object.assign(api, {
+    bootstrap: async () => {
+      bootstrapCalls += 1;
+      if (bootstrapCalls === 1) return bootstrap;
+      if (bootstrapCalls === 2) return oldBootstrap;
+      return { ...bootstrap, workspaceEpoch: "epoch-b" };
+    },
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    invalidateHandshake: () => undefined,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => source.emitPi({ type: "pi_chat_sse_resync" }));
+    assert.equal(bootstrapCalls, 2, "A resync starts a pending bootstrap");
+    await act(async () =>
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "workspace-changing",
+            piChatRunEpoch: "epoch-b",
+            workspaceEpoch: "epoch-b",
+          }),
+        }),
+      ),
+    );
+    await act(async () => {
+      rejectOldBootstrap(new Error("A stale bootstrap failure"));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.doesNotMatch(
+      dom.window.document.querySelector(".app-toast")?.textContent || "",
+      /A stale bootstrap failure/,
+    );
+    await act(async () => {
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "idle",
+            piChatRunEpoch: "epoch-b",
+            workspaceEpoch: "epoch-b",
+          }),
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.equal(
+      bootstrapCalls,
+      3,
+      "B idle still begins its independent bootstrap after the stale A rejection",
+    );
+    assert.doesNotMatch(
+      dom.window.document.querySelector(".app-toast")?.textContent || "",
+      /A stale bootstrap failure/,
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a replacement maintenance ready detaches an old bootstrap before its later idle refresh", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  let bootstrapCalls = 0;
+  let resolveOldBootstrap!: (value: BootstrapData) => void;
+  const oldBootstrap = new Promise<BootstrapData>((resolve) => {
+    resolveOldBootstrap = resolve;
+  });
+  Object.assign(api, {
+    bootstrap: async () => {
+      bootstrapCalls += 1;
+      if (bootstrapCalls === 1)
+        return {
+          ...bootstrap,
+          workspaceEpoch: "epoch-old",
+          workspaceCwd: "C:/old-default",
+        };
+      if (bootstrapCalls === 2) return oldBootstrap;
+      return {
+        ...bootstrap,
+        workspaceEpoch: "epoch-new",
+        workspaceCwd: "D:/replacement-default",
+      };
+    },
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    invalidateHandshake: () => undefined,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    assert.equal(bootstrapCalls, 1);
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.emitPi({ type: "pi_chat_sse_resync" });
+      await Promise.resolve();
+    });
+    assert.equal(
+      bootstrapCalls,
+      2,
+      "resync leaves an old-process bootstrap pending",
+    );
+    await act(async () =>
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "workspace-changing",
+            piChatRunEpoch: "epoch-new",
+            workspaceEpoch: "epoch-new",
+          }),
+        }),
+      ),
+    );
+    assert.equal(
+      bootstrapCalls,
+      2,
+      "maintenance ready defers bootstrap until idle",
+    );
+    await act(async () => {
+      resolveOldBootstrap({
+        ...bootstrap,
+        workspaceEpoch: "epoch-old",
+        workspaceCwd: "E:/stale-before-idle",
+      });
+      await Promise.resolve();
+    });
+    const newBeforeIdle = [
+      ...dom.window.document.querySelectorAll<HTMLButtonElement>("button"),
+    ].find((button) => button.textContent?.trim() === "New")!;
+    await act(async () => newBeforeIdle.click());
+    assert.notEqual(
+      dom.window.document.querySelector(".draft-workspace code")?.textContent,
+      "E:/stale-before-idle",
+      "an old bootstrap resolving during maintenance cannot commit its metadata",
+    );
+    await act(async () => {
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "idle",
+            piChatRunEpoch: "epoch-new",
+            workspaceEpoch: "epoch-new",
+          }),
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.equal(
+      bootstrapCalls,
+      3,
+      "same-epoch idle must issue B bootstrap after the stale A response",
+    );
+    const newButton = [
+      ...dom.window.document.querySelectorAll<HTMLButtonElement>("button"),
+    ].find((button) => button.textContent?.trim() === "New")!;
+    await act(async () => newButton.click());
+    assert.equal(
+      dom.window.document.querySelector(".draft-workspace code")?.textContent,
+      "D:/replacement-default",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("replacement detaches a pending scheduled Session Index refresh before applying B inventory", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const oldSession = {
+    ...bootstrap.sessions[0],
+    id: "cccccccccccccccccccc",
+    sessionId: "old-index",
+    name: "A scheduled inventory",
+    active: false,
+    writable: false,
+  };
+  const replacementSession = {
+    ...bootstrap.sessions[0],
+    id: "dddddddddddddddddddd",
+    sessionId: "replacement-index",
+    name: "B scheduled inventory",
+    active: false,
+    writable: false,
+  };
+  let resolveOldInventory!: (value: {
+    sessions: typeof bootstrap.sessions;
+    total: number;
+    directories: [];
+  }) => void;
+  let resolveReplacementInventory!: (value: {
+    sessions: typeof bootstrap.sessions;
+    total: number;
+    directories: [];
+  }) => void;
+  const oldInventory = new Promise<{
+    sessions: typeof bootstrap.sessions;
+    total: number;
+    directories: [];
+  }>((resolve) => {
+    resolveOldInventory = resolve;
+  });
+  const replacementInventory = new Promise<{
+    sessions: typeof bootstrap.sessions;
+    total: number;
+    directories: [];
+  }>((resolve) => {
+    resolveReplacementInventory = resolve;
+  });
+  let bootstrapCalls = 0;
+  let sessionReads = 0;
+  Object.assign(api, {
+    bootstrap: async () => {
+      bootstrapCalls += 1;
+      return bootstrapCalls === 1
+        ? bootstrap
+        : new Promise<BootstrapData>(() => undefined);
+    },
+    eventsUrl: () => "/api/events",
+    sessions: async () => {
+      sessionReads += 1;
+      return sessionReads === 1 ? oldInventory : replacementInventory;
+    },
+    invalidateHandshake: () => undefined,
+  });
+  const browserSetTimeout = dom.window.setTimeout.bind(dom.window);
+  const refreshTimers: Array<() => void> = [];
+  Object.defineProperty(dom.window, "setTimeout", {
+    configurable: true,
+    value(callback: TimerHandler, delay?: number) {
+      if (delay === 180 && typeof callback === "function") {
+        refreshTimers.push(callback);
+        return refreshTimers.length;
+      }
+      return browserSetTimeout(callback, delay);
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () =>
+      source.emitPi({
+        type: "pi_chat_active_session_changed",
+        sessionId: activeId,
+        activeSessionIds: [activeId],
+      }),
+    );
+    await act(async () => refreshTimers[0]!());
+    assert.equal(sessionReads, 1, "A starts its scheduled Session Index read");
+
+    await act(async () =>
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "workspace-changing",
+            piChatRunEpoch: "epoch-index-b",
+            workspaceEpoch: "epoch-index-b",
+          }),
+        }),
+      ),
+    );
+    await act(async () =>
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "idle",
+            piChatRunEpoch: "epoch-index-b",
+            workspaceEpoch: "epoch-index-b",
+          }),
+        }),
+      ),
+    );
+    await act(async () =>
+      source.emitPi({
+        type: "pi_chat_active_session_changed",
+        sessionId: activeId,
+        activeSessionIds: [activeId],
+      }),
+    );
+    await act(async () => refreshTimers.at(-1)!());
+    assert.equal(
+      sessionReads,
+      2,
+      "B starts its own refresh instead of joining A",
+    );
+
+    await act(async () => {
+      resolveReplacementInventory({
+        sessions: [replacementSession],
+        total: 1,
+        directories: [],
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.match(
+      dom.window.document.querySelector(".session-list")?.textContent || "",
+      /B scheduled inventory/,
+    );
+    await act(async () => {
+      resolveOldInventory({
+        sessions: [oldSession],
+        total: 1,
+        directories: [],
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.match(
+      dom.window.document.querySelector(".session-list")?.textContent || "",
+      /B scheduled inventory/,
+    );
+    assert.doesNotMatch(
+      dom.window.document.querySelector(".session-list")?.textContent || "",
+      /A scheduled inventory/,
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("replacement pane authority rejects late A navigation success and failure while B history remains usable", async () => {
+  for (const outcome of ["success", "failure"] as const) {
+    const { dom, FakeEventSource } = installDom();
+    const { createRoot } = await import("react-dom/client");
+    const { api } = await import("../src/web/api");
+    const { App } = await import("../src/web/App");
+    const originals = { ...api };
+    const oldId = `aaaaaaaaaaaaaaaaaaa${outcome === "success" ? "1" : "2"}`;
+    const replacementId = `bbbbbbbbbbbbbbbbbbb${outcome === "success" ? "1" : "2"}`;
+    const oldSession = {
+      ...bootstrap.sessions[0],
+      id: oldId,
+      sessionId: `old-${outcome}`,
+      name: `A pending ${outcome}`,
+      active: false,
+      writable: false,
+    };
+    const replacementSession = {
+      ...bootstrap.sessions[0],
+      id: replacementId,
+      sessionId: `replacement-${outcome}`,
+      name: `B JSONL ${outcome}`,
+      active: false,
+      writable: false,
+    };
+    const replacementView: SessionViewData = {
+      ...draftView,
+      session: replacementSession,
+      state: { ...bootstrap.state, sessionId: replacementSession.sessionId },
+      messages: [{ role: "user", content: `B JSONL ${outcome} history` }],
+      isActive: false,
+      runtimeStatus: "view-only",
+    };
+    let resolveOldView!: (value: SessionViewData) => void;
+    let rejectOldView!: (cause: Error) => void;
+    const oldView = new Promise<SessionViewData>((resolve, reject) => {
+      resolveOldView = resolve;
+      rejectOldView = reject;
+    });
+    const pendingReplacementBootstrap = new Promise<BootstrapData>(
+      () => undefined,
+    );
+    let bootstrapCalls = 0;
+    const sidebarTimers: Array<() => void> = [];
+    const browserSetTimeout = dom.window.setTimeout.bind(dom.window);
+    Object.defineProperty(dom.window, "setTimeout", {
+      configurable: true,
+      value(callback: TimerHandler, delay?: number) {
+        if (delay === 250 && typeof callback === "function") {
+          sidebarTimers.push(callback);
+          return 1;
+        }
+        return browserSetTimeout(callback, delay);
+      },
+    });
+    Object.assign(api, {
+      bootstrap: async () => {
+        bootstrapCalls += 1;
+        return bootstrapCalls === 1
+          ? {
+              ...bootstrap,
+              sessions: [...bootstrap.sessions, oldSession],
+              sessionsTotal: 2,
+            }
+          : pendingReplacementBootstrap;
+      },
+      eventsUrl: () => "/api/events",
+      sessions: async () => ({
+        sessions: [replacementSession],
+        total: 1,
+        directories: [],
+      }),
+      viewSession: async (id: string) =>
+        id === oldId ? oldView : replacementView,
+      markSessionViewed: async () => ({ viewing: replacementId }),
+      invalidateHandshake: () => undefined,
+    });
+    const root = createRoot(dom.window.document.querySelector("#root")!);
+    try {
+      await act(async () => root.render(createElement(App)));
+      const oldButton = [
+        ...dom.window.document.querySelectorAll<HTMLButtonElement>(
+          ".session-item",
+        ),
+      ].find((button) => button.textContent?.includes(oldSession.name))!;
+      await act(async () => oldButton.click());
+      const source = FakeEventSource.instances.at(-1)!;
+      await act(async () =>
+        source.dispatchEvent(
+          new dom.window.MessageEvent("ready", {
+            data: JSON.stringify({
+              lifecycle: "workspace-changing",
+              piChatRunEpoch: `epoch-b-${outcome}`,
+              workspaceEpoch: `epoch-b-${outcome}`,
+            }),
+          }),
+        ),
+      );
+      await act(async () =>
+        source.dispatchEvent(
+          new dom.window.MessageEvent("ready", {
+            data: JSON.stringify({
+              lifecycle: "idle",
+              piChatRunEpoch: `epoch-b-${outcome}`,
+              workspaceEpoch: `epoch-b-${outcome}`,
+            }),
+          }),
+        ),
+      );
+      assert.equal(
+        bootstrapCalls,
+        2,
+        "B starts an independent bootstrap after the handoff",
+      );
+      await act(async () => {
+        sidebarTimers.at(-1)!();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      if (outcome === "success") {
+        await act(async () => {
+          resolveOldView({
+            ...replacementView,
+            session: oldSession,
+            messages: [{ role: "assistant", content: "A stale success" }],
+          });
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+        assert.doesNotMatch(
+          dom.window.document.body.textContent || "",
+          /A stale success/,
+        );
+      } else {
+        await act(async () => {
+          rejectOldView(new Error("A stale navigation failure"));
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+        assert.doesNotMatch(
+          dom.window.document.body.textContent || "",
+          /A stale navigation failure/,
+        );
+      }
+      const replacementButton = [
+        ...dom.window.document.querySelectorAll<HTMLButtonElement>(
+          ".session-item",
+        ),
+      ].find((button) =>
+        button.textContent?.includes(replacementSession.name),
+      )!;
+      assert.equal(replacementButton.disabled, false);
+      await act(async () => replacementButton.click());
+      assert.match(
+        dom.window.document.body.textContent || "",
+        new RegExp(`B JSONL ${outcome} history`),
+      );
+      assert.doesNotMatch(
+        dom.window.document.body.textContent || "",
+        /A stale success|A stale navigation failure/,
+      );
+    } finally {
+      await act(async () => root.unmount());
+      Object.assign(api, originals);
+    }
+  }
+});
+
+test("replacement idle releases maintenance locks before a rejected bootstrap and bounds retry", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const historyId = "33333333333333333333";
+  const replacementSession = {
+    ...bootstrap.sessions[0],
+    id: historyId,
+    sessionId: "replacement-history",
+    name: "Replacement history",
+    cwd: "C:/work",
+    active: false,
+    writable: false,
+  };
+  const replacementView: SessionViewData = {
+    ...draftView,
+    session: replacementSession,
+    state: { ...bootstrap.state, sessionId: "replacement-history" },
+    messages: [{ role: "user", content: "replacement JSONL history" }],
+    isActive: false,
+    runtimeStatus: "view-only",
+  };
+  let bootstrapCalls = 0;
+  let rejectReplacementBootstrap!: (cause: Error) => void;
+  const rejectedReplacementBootstrap = new Promise<BootstrapData>(
+    (_resolve, reject) => {
+      rejectReplacementBootstrap = reject;
+    },
+  );
+  const recoveryBootstrap = new Promise<BootstrapData>(() => undefined);
+  let sessionReads = 0;
+  Object.assign(api, {
+    bootstrap: async () => {
+      bootstrapCalls += 1;
+      if (bootstrapCalls === 1) return bootstrap;
+      if (bootstrapCalls === 2) return rejectedReplacementBootstrap;
+      return recoveryBootstrap;
+    },
+    eventsUrl: () => "/api/events",
+    sessions: async () => {
+      sessionReads += 1;
+      return { sessions: [replacementSession], total: 1, directories: [] };
+    },
+    viewSession: async (id: string) => {
+      assert.equal(id, historyId);
+      return replacementView;
+    },
+    markSessionViewed: async () => ({ viewing: historyId }),
+    invalidateHandshake: () => undefined,
+  });
+  const browserSetTimeout = dom.window.setTimeout.bind(dom.window);
+  const sidebarTimers: Array<() => void> = [];
+  Object.defineProperty(dom.window, "setTimeout", {
+    configurable: true,
+    value(callback: TimerHandler, delay?: number) {
+      if (delay === 250 && typeof callback === "function") {
+        sidebarTimers.push(callback);
+        return 1;
+      }
+      return browserSetTimeout(callback, delay);
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () =>
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "workspace-changing",
+            piChatRunEpoch: "epoch-replacement",
+            workspaceEpoch: "epoch-replacement",
+          }),
+        }),
+      ),
+    );
+    const newDuringMaintenance = [
+      ...dom.window.document.querySelectorAll<HTMLButtonElement>("button"),
+    ].find((button) => button.textContent?.trim() === "New")!;
+    assert.equal(newDuringMaintenance.disabled, true);
+
+    await act(async () => {
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "idle",
+            piChatRunEpoch: "epoch-replacement",
+            workspaceEpoch: "epoch-replacement",
+          }),
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.equal(
+      bootstrapCalls,
+      2,
+      "replacement idle starts exactly one B bootstrap",
+    );
+    const newAfterIdle = [
+      ...dom.window.document.querySelectorAll<HTMLButtonElement>("button"),
+    ].find((button) => button.textContent?.trim() === "New")!;
+    assert.equal(
+      newAfterIdle.disabled,
+      false,
+      "authoritative idle releases New before bootstrap recovers",
+    );
+    assert.doesNotMatch(
+      dom.window.document.body.textContent || "",
+      /正在切换工作目录/,
+    );
+
+    await act(async () => {
+      sidebarTimers.at(-1)!();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.ok(
+      sessionReads >= 1,
+      "replacement idle starts an independent Session Index fallback",
+    );
+    const replacementButton = [
+      ...dom.window.document.querySelectorAll<HTMLButtonElement>(
+        ".session-item",
+      ),
+    ].find((button) => button.textContent?.includes("Replacement history"))!;
+    assert.equal(
+      replacementButton.disabled,
+      false,
+      "idle releases sidebar history navigation before bootstrap recovers",
+    );
+    await act(async () => replacementButton.click());
+    assert.match(
+      dom.window.document.body.textContent || "",
+      /replacement JSONL history/,
+    );
+    await act(async () => newAfterIdle.click());
+    assert.equal(
+      dom.window.document.querySelector(".topbar-title")?.textContent,
+      "新对话",
+    );
+    await act(async () => {
+      rejectReplacementBootstrap(
+        new Error("replacement bootstrap unavailable"),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+
+    await act(async () => {
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "idle",
+            piChatRunEpoch: "epoch-replacement",
+            workspaceEpoch: "epoch-replacement",
+          }),
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.equal(
+      bootstrapCalls,
+      3,
+      "one healthy idle retries the rejected bootstrap once",
+    );
+    await act(async () =>
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "idle",
+            piChatRunEpoch: "epoch-replacement",
+            workspaceEpoch: "epoch-replacement",
+          }),
+        }),
+      ),
+    );
+    assert.equal(
+      bootstrapCalls,
+      3,
+      "repeated idle frames cannot create a refresh loop",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a same-epoch ready joining a failed replacement bootstrap preserves its one retry", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  let bootstrapCalls = 0;
+  let rejectReplacementBootstrap!: (cause: Error) => void;
+  const pendingReplacementBootstrap = new Promise<BootstrapData>(
+    (_resolve, reject) => {
+      rejectReplacementBootstrap = reject;
+    },
+  );
+  const pendingRetryBootstrap = new Promise<BootstrapData>(() => undefined);
+  Object.assign(api, {
+    bootstrap: async () => {
+      bootstrapCalls += 1;
+      if (bootstrapCalls === 1)
+        return { ...bootstrap, workspaceEpoch: "epoch-a" };
+      if (bootstrapCalls === 2) return pendingReplacementBootstrap;
+      return pendingRetryBootstrap;
+    },
+    eventsUrl: () => "/api/events",
+    invalidateHandshake: () => undefined,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    assert.equal(bootstrapCalls, 1);
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () =>
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "workspace-changing",
+            piChatRunEpoch: "epoch-b",
+            workspaceEpoch: "epoch-b",
+          }),
+        }),
+      ),
+    );
+    await act(async () =>
+      source.emitPi({
+        type: "pi_chat_application_lifecycle",
+        lifecycle: "idle",
+      }),
+    );
+    assert.equal(
+      bootstrapCalls,
+      2,
+      "lifecycle idle starts B's first bootstrap",
+    );
+    await act(async () =>
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "idle",
+            piChatRunEpoch: "epoch-b",
+            workspaceEpoch: "epoch-b",
+          }),
+        }),
+      ),
+    );
+    assert.equal(
+      bootstrapCalls,
+      2,
+      "same-epoch ready joins B without consuming retry",
+    );
+    await act(async () => {
+      rejectReplacementBootstrap(
+        new Error("replacement bootstrap unavailable"),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await act(async () =>
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "idle",
+            piChatRunEpoch: "epoch-b",
+            workspaceEpoch: "epoch-b",
+          }),
+        }),
+      ),
+    );
+    assert.equal(
+      bootstrapCalls,
+      3,
+      "the next idle starts the one preserved retry",
+    );
+    await act(async () =>
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "idle",
+            piChatRunEpoch: "epoch-b",
+            workspaceEpoch: "epoch-b",
+          }),
+        }),
+      ),
+    );
+    assert.equal(
+      bootstrapCalls,
+      3,
+      "later idle frames cannot create a retry loop",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("maintenance replacement rejects an old Session Index response and still runs B's fallback", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  let bootstrapCalls = 0;
+  let rejectInitialBootstrap!: (cause: Error) => void;
+  const initialBootstrap = new Promise<BootstrapData>((_resolve, reject) => {
+    rejectInitialBootstrap = reject;
+  });
+  const pendingBootstrap = new Promise<BootstrapData>(() => undefined);
+  let resolveOldInventory!: (value: {
+    sessions: typeof bootstrap.sessions;
+    total: number;
+    directories: [];
+  }) => void;
+  const oldInventory = new Promise<{
+    sessions: typeof bootstrap.sessions;
+    total: number;
+    directories: [];
+  }>((resolve) => {
+    resolveOldInventory = resolve;
+  });
+  const oldSession = {
+    ...bootstrap.sessions[0],
+    id: "11111111111111111111",
+    name: "Old inventory",
+    cwd: "E:/old",
+  };
+  const replacementSession = {
+    ...bootstrap.sessions[0],
+    id: "22222222222222222222",
+    name: "Replacement inventory",
+    cwd: "D:/replacement",
+  };
+  let sessionReads = 0;
+  let pendingAReads = 0;
+  let replacementStarted = false;
+  Object.assign(api, {
+    bootstrap: async () => {
+      bootstrapCalls += 1;
+      return bootstrapCalls === 1 ? initialBootstrap : pendingBootstrap;
+    },
+    eventsUrl: () => "/api/events",
+    sessions: async () => {
+      sessionReads += 1;
+      if (!replacementStarted) {
+        pendingAReads += 1;
+        return oldInventory;
+      }
+      return { sessions: [replacementSession], total: 1, directories: [] };
+    },
+    invalidateHandshake: () => undefined,
+  });
+  const browserSetTimeout = dom.window.setTimeout.bind(dom.window);
+  const sidebarTimers: Array<() => void> = [];
+  Object.defineProperty(dom.window, "setTimeout", {
+    configurable: true,
+    value(callback: TimerHandler, delay?: number) {
+      if (delay === 250 && typeof callback === "function") {
+        sidebarTimers.push(callback);
+        return 1;
+      }
+      return browserSetTimeout(callback, delay);
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => {
+      root.render(createElement(App));
+      rejectInitialBootstrap(new Error("initial bootstrap unavailable"));
+      await Promise.resolve();
+    });
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () =>
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "idle",
+            piChatRunEpoch: "epoch-old",
+            workspaceEpoch: "epoch-old",
+          }),
+        }),
+      ),
+    );
+    assert.equal(bootstrapCalls, 2);
+    await act(async () => {
+      sidebarTimers.at(-1)!();
+      await Promise.resolve();
+    });
+    assert.ok(
+      pendingAReads >= 1,
+      "A starts at least one pending Session Index read",
+    );
+    const sessionReadsBeforeReplacement = sessionReads;
+    replacementStarted = true;
+    await act(async () =>
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "workspace-changing",
+            piChatRunEpoch: "epoch-new",
+            workspaceEpoch: "epoch-new",
+          }),
+        }),
+      ),
+    );
+    await act(async () => {
+      resolveOldInventory({
+        sessions: [oldSession],
+        total: 1,
+        directories: [],
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.doesNotMatch(
+      dom.window.document.querySelector(".session-list")?.textContent || "",
+      /Old inventory/,
+    );
+    await act(async () =>
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "idle",
+            piChatRunEpoch: "epoch-new",
+            workspaceEpoch: "epoch-new",
+          }),
+        }),
+      ),
+    );
+    assert.equal(bootstrapCalls, 3);
+    await act(async () => {
+      sidebarTimers.at(-1)!();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.ok(
+      sessionReads > sessionReadsBeforeReplacement,
+      "B starts an independent fallback after the old A inventory is detached",
+    );
+    assert.match(
+      dom.window.document.querySelector(".session-list")?.textContent || "",
+      /d:\/replacement1/,
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a replacement ready starts a new bootstrap instead of joining an old pending request", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  let bootstrapCalls = 0;
+  let resolveOldBootstrap!: (value: BootstrapData) => void;
+  const oldBootstrap = new Promise<BootstrapData>((resolve) => {
+    resolveOldBootstrap = resolve;
+  });
+  Object.assign(api, {
+    bootstrap: async () => {
+      bootstrapCalls += 1;
+      if (bootstrapCalls === 1)
+        return {
+          ...bootstrap,
+          workspaceCwd: "C:/old-default",
+          workspaceEpoch: "epoch-old",
+          workspaceRevision: 900,
+        };
+      if (bootstrapCalls === 2) return oldBootstrap;
+      return {
+        ...bootstrap,
+        workspaceCwd: "D:/replacement-default",
+        workspaceEpoch: "epoch-new",
+        workspaceRevision: 0,
+      };
+    },
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    assert.equal(bootstrapCalls, 1);
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.emitPi({ type: "pi_chat_sse_resync" });
+      await Promise.resolve();
+    });
+    assert.equal(
+      bootstrapCalls,
+      2,
+      "resync leaves an old-process bootstrap in flight",
+    );
+    await act(async () => {
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "idle",
+            piChatRunEpoch: "epoch-new",
+            workspaceEpoch: "epoch-new",
+          }),
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.equal(
+      bootstrapCalls,
+      3,
+      "replacement ready must issue a bootstrap to the new service",
+    );
+    assert.equal(
+      dom.window.document.querySelector(".draft-workspace code"),
+      null,
+    );
+    const newButton = [
+      ...dom.window.document.querySelectorAll<HTMLButtonElement>("button"),
+    ].find((button) => button.textContent?.trim() === "New")!;
+    await act(async () => newButton.click());
+    assert.equal(
+      dom.window.document.querySelector(".draft-workspace code")?.textContent,
+      "D:/replacement-default",
+    );
+    await act(async () => {
+      resolveOldBootstrap({
+        ...bootstrap,
+        workspaceCwd: "C:/old-default",
+        workspaceEpoch: "epoch-old",
+        workspaceRevision: 900,
+      });
+      await Promise.resolve();
+    });
+    assert.equal(
+      dom.window.document.querySelector(".draft-workspace code")?.textContent,
+      "D:/replacement-default",
+      "the old bootstrap cannot overwrite the replacement epoch",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a stale old bootstrap cannot suppress replacement-ready recovery after its bootstrap fails", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  let bootstrapCalls = 0;
+  let resolveOldBootstrap!: (value: BootstrapData) => void;
+  let rejectReplacementBootstrap!: (cause: Error) => void;
+  const oldBootstrap = new Promise<BootstrapData>((resolve) => {
+    resolveOldBootstrap = resolve;
+  });
+  const rejectedReplacementBootstrap = new Promise<BootstrapData>(
+    (_resolve, reject) => {
+      rejectReplacementBootstrap = reject;
+    },
+  );
+  Object.assign(api, {
+    bootstrap: async () => {
+      bootstrapCalls += 1;
+      if (bootstrapCalls === 1)
+        return {
+          ...bootstrap,
+          workspaceCwd: "C:/old-default",
+          workspaceEpoch: "epoch-old",
+          workspaceRevision: 900,
+        };
+      if (bootstrapCalls === 2) return oldBootstrap;
+      if (bootstrapCalls === 3) return rejectedReplacementBootstrap;
+      return {
+        ...bootstrap,
+        workspaceCwd: "D:/replacement-default",
+        workspaceEpoch: "epoch-new",
+        workspaceRevision: 0,
+      };
+    },
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.emitPi({ type: "pi_chat_sse_resync" });
+      await Promise.resolve();
+    });
+    assert.equal(bootstrapCalls, 2);
+    await act(async () => {
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "idle",
+            piChatRunEpoch: "epoch-new",
+            workspaceEpoch: "epoch-new",
+          }),
+        }),
+      );
+      await Promise.resolve();
+    });
+    assert.equal(
+      bootstrapCalls,
+      3,
+      "replacement ready starts its own bootstrap",
+    );
+    await act(async () => {
+      rejectReplacementBootstrap(
+        new Error("replacement bootstrap unavailable"),
+      );
+      await Promise.resolve();
+    });
+    await act(async () => {
+      resolveOldBootstrap({
+        ...bootstrap,
+        workspaceCwd: "C:/old-default",
+        workspaceEpoch: "epoch-old",
+        workspaceRevision: 900,
+      });
+      await Promise.resolve();
+    });
+    await act(async () => {
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "idle",
+            piChatRunEpoch: "epoch-new",
+            workspaceEpoch: "epoch-new",
+          }),
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.equal(
+      bootstrapCalls,
+      4,
+      "one same-epoch ready retries the failed replacement bootstrap",
+    );
+    const newButton = [
+      ...dom.window.document.querySelectorAll<HTMLButtonElement>("button"),
+    ].find((button) => button.textContent?.trim() === "New")!;
+    await act(async () => newButton.click());
+    assert.equal(
+      dom.window.document.querySelector(".draft-workspace code")?.textContent,
+      "D:/replacement-default",
+    );
+    await act(async () =>
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "idle",
+            piChatRunEpoch: "epoch-new",
+            workspaceEpoch: "epoch-new",
+          }),
+        }),
+      ),
+    );
+    assert.equal(
+      bootstrapCalls,
+      4,
+      "the replacement epoch performs only one retry after its failed bootstrap",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a replacement invalidates an old early handshake and starts a fresh history request", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const coldId = "abcdef0123456789abcd";
+  dom.window.history.replaceState(null, "", `/?session=${coldId}`);
+  let bootstrapCalls = 0;
+  let resolveOldHandshake!: (
+    value: Awaited<ReturnType<typeof api.handshake>>,
+  ) => void;
+  let resolveNewHandshake!: (
+    value: Awaited<ReturnType<typeof api.handshake>>,
+  ) => void;
+  const oldHandshake = new Promise<Awaited<ReturnType<typeof api.handshake>>>(
+    (resolve) => {
+      resolveOldHandshake = resolve;
+    },
+  );
+  const newHandshake = new Promise<Awaited<ReturnType<typeof api.handshake>>>(
+    (resolve) => {
+      resolveNewHandshake = resolve;
+    },
+  );
+  let rejectInitialBootstrap!: (cause: Error) => void;
+  const rejectedInitialBootstrap = new Promise<BootstrapData>(
+    (_resolve, reject) => {
+      rejectInitialBootstrap = reject;
+    },
+  );
+  const pendingBootstrap = new Promise<BootstrapData>(() => undefined);
+  const acceptedTokens: string[] = [];
+  let handshakeCalls = 0;
+  let viewCalls = 0;
+  const view = (content: string): SessionViewData => ({
+    ...draftView,
+    session: {
+      ...draftView.session,
+      id: coldId,
+      sessionId: "remembered",
+      name: "Replacement history",
+      messageCount: 2,
+      active: false,
+      writable: false,
+    },
+    state: { ...draftView.state, sessionId: coldId },
+    messages: [{ role: "assistant", content }],
+    messageTotal: 2,
+    runtimeStatus: "view-only",
+    isActive: false,
+  });
+  Object.assign(api, {
+    bootstrap: async () => {
+      bootstrapCalls += 1;
+      return bootstrapCalls === 1 ? rejectedInitialBootstrap : pendingBootstrap;
+    },
+    handshake: async () => {
+      handshakeCalls += 1;
+      return handshakeCalls === 1 ? oldHandshake : newHandshake;
+    },
+    acceptHandshake: (handshake: Awaited<ReturnType<typeof api.handshake>>) => {
+      acceptedTokens.push(handshake.requestToken);
+    },
+    invalidateHandshake: () => undefined,
+    eventsUrl: () => "/api/events",
+    viewSession: async () => {
+      viewCalls += 1;
+      return view("replacement history");
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => {
+      root.render(createElement(App));
+      rejectInitialBootstrap(new Error("initial bootstrap unavailable"));
+      await Promise.resolve();
+    });
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "idle",
+            piChatRunEpoch: "epoch-old",
+            workspaceEpoch: "epoch-old",
+          }),
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 120));
+    });
+    assert.equal(
+      bootstrapCalls,
+      2,
+      "A ready begins its pending recovery bootstrap",
+    );
+    assert.equal(
+      handshakeCalls,
+      1,
+      "the old refresh begins its delayed handshake",
+    );
+    await act(async () => {
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "idle",
+            piChatRunEpoch: "epoch-new",
+            workspaceEpoch: "epoch-new",
+          }),
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 120));
+    });
+    assert.equal(bootstrapCalls, 3, "replacement starts a distinct bootstrap");
+    assert.equal(
+      handshakeCalls,
+      2,
+      "replacement starts a fresh handshake instead of joining A",
+    );
+    await act(async () => {
+      resolveNewHandshake({
+        requestToken: "token-new",
+        buildIdentity: {
+          schemaVersion: 1,
+          packageVersion: "test",
+          revision: "new",
+          fingerprint: "0".repeat(64),
+          builtAt: "new",
+        },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.equal(
+      viewCalls,
+      1,
+      "the replacement performs its own early history view",
+    );
+    assert.match(
+      dom.window.document.body.textContent || "",
+      /replacement history/,
+    );
+    assert.deepEqual(acceptedTokens, ["token-new"]);
+    await act(async () => {
+      resolveOldHandshake({
+        requestToken: "token-old",
+        buildIdentity: {
+          schemaVersion: 1,
+          packageVersion: "test",
+          revision: "old",
+          fingerprint: "1".repeat(64),
+          builtAt: "old",
+        },
+      });
+      await Promise.resolve();
+    });
+    assert.equal(
+      viewCalls,
+      1,
+      "an old handshake cannot send an old-token history request",
+    );
+    assert.deepEqual(
+      acceptedTokens,
+      ["token-new"],
+      "an old handshake cannot restore its token",
+    );
+    assert.match(
+      dom.window.document.body.textContent || "",
+      /replacement history/,
+    );
+    assert.doesNotMatch(
+      dom.window.document.body.textContent || "",
+      /网页与服务版本不一致/,
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a replacement clears old sidebar inventory so its slow bootstrap still uses Session Index", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  let bootstrapCalls = 0;
+  let sessionReads = 0;
+  const pendingReplacementBootstrap = new Promise<BootstrapData>(
+    () => undefined,
+  );
+  const replacementSession = {
+    ...bootstrap.sessions[0],
+    id: "22222222222222222222",
+    sessionId: "replacement",
+    name: "Replacement row",
+    cwd: "D:/replacement",
+    active: false,
+  };
+  Object.assign(api, {
+    bootstrap: async () => {
+      bootstrapCalls += 1;
+      return bootstrapCalls === 1 ? bootstrap : pendingReplacementBootstrap;
+    },
+    eventsUrl: () => "/api/events",
+    sessions: async () => {
+      sessionReads += 1;
+      return { sessions: [replacementSession], total: 1, directories: [] };
+    },
+    markSessionViewed: async () => ({ viewing: activeId }),
+  });
+  const browserSetTimeout = dom.window.setTimeout.bind(dom.window);
+  const sidebarTimers: Array<() => void> = [];
+  Object.defineProperty(dom.window, "setTimeout", {
+    configurable: true,
+    value(callback: TimerHandler, delay?: number) {
+      if (delay === 250 && typeof callback === "function") {
+        sidebarTimers.push(callback);
+        return 1;
+      }
+      return browserSetTimeout(callback, delay);
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    assert.match(
+      dom.window.document.querySelector(".session-list")?.textContent || "",
+      /Active/,
+    );
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () =>
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "idle",
+            piChatRunEpoch: "epoch-new",
+            workspaceEpoch: "epoch-new",
+          }),
+        }),
+      ),
+    );
+    assert.equal(bootstrapCalls, 2);
+    assert.ok(
+      sidebarTimers.length >= 2,
+      "the replacement schedules a fresh Session Index fallback after the cleared A timer",
+    );
+    const readsBeforeReplacementFallback = sessionReads;
+    await act(async () => {
+      sidebarTimers.at(-1)!();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.ok(
+      sessionReads > readsBeforeReplacementFallback,
+      "A's completed inventory cannot suppress B's fallback",
+    );
+    assert.match(
+      dom.window.document.querySelector(".session-list")?.textContent || "",
+      /d:\/replacement1/,
+    );
+    assert.doesNotMatch(
+      dom.window.document.querySelector(".session-list")?.textContent || "",
+      /c:\/work1/,
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a same-epoch recovery refresh detaches an older early handshake and paints cold history", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const coldId = "abcdef0123456789abcd";
+  dom.window.history.replaceState(null, "", `/?session=${coldId}`);
+  let bootstrapCalls = 0;
+  let rejectInitialBootstrap!: (cause: Error) => void;
+  const initialBootstrap = new Promise<BootstrapData>((_resolve, reject) => {
+    rejectInitialBootstrap = reject;
+  });
+  const pendingRecoveryBootstrap = new Promise<BootstrapData>(() => undefined);
+  let resolveFirstHandshake!: (
+    value: Awaited<ReturnType<typeof api.handshake>>,
+  ) => void;
+  let resolveSecondHandshake!: (
+    value: Awaited<ReturnType<typeof api.handshake>>,
+  ) => void;
+  const firstHandshake = new Promise<Awaited<ReturnType<typeof api.handshake>>>(
+    (resolve) => {
+      resolveFirstHandshake = resolve;
+    },
+  );
+  const secondHandshake = new Promise<
+    Awaited<ReturnType<typeof api.handshake>>
+  >((resolve) => {
+    resolveSecondHandshake = resolve;
+  });
+  let handshakeCalls = 0;
+  let viewCalls = 0;
+  const coldView: SessionViewData = {
+    ...draftView,
+    session: {
+      ...draftView.session,
+      id: coldId,
+      sessionId: "remembered",
+      name: "Recovered cold",
+      messageCount: 2,
+      active: false,
+      writable: false,
+    },
+    state: { ...draftView.state, sessionId: coldId },
+    messages: [{ role: "assistant", content: "recovered cold history" }],
+    messageTotal: 2,
+    runtimeStatus: "view-only",
+    isActive: false,
+  };
+  Object.assign(api, {
+    bootstrap: async () => {
+      bootstrapCalls += 1;
+      return bootstrapCalls === 1 ? initialBootstrap : pendingRecoveryBootstrap;
+    },
+    handshake: async () => {
+      handshakeCalls += 1;
+      return handshakeCalls === 1 ? firstHandshake : secondHandshake;
+    },
+    acceptHandshake: () => undefined,
+    eventsUrl: () => "/api/events",
+    viewSession: async () => {
+      viewCalls += 1;
+      return coldView;
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 120));
+    });
+    assert.equal(
+      handshakeCalls,
+      1,
+      "R1 starts its early handshake before bootstrap fails",
+    );
+    await act(async () => {
+      rejectInitialBootstrap(new Error("initial bootstrap unavailable"));
+      await Promise.resolve();
+    });
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "idle",
+            piChatRunEpoch: "epoch-a",
+            workspaceEpoch: "epoch-a",
+          }),
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 120));
+    });
+    assert.equal(
+      bootstrapCalls,
+      2,
+      "ready starts the slow same-epoch recovery bootstrap",
+    );
+    assert.equal(
+      handshakeCalls,
+      2,
+      "R2 must detach from R1 and begin its own handshake",
+    );
+    await act(async () => {
+      resolveFirstHandshake({
+        requestToken: "token-r1",
+        buildIdentity: {
+          schemaVersion: 1,
+          packageVersion: "test",
+          revision: "r1",
+          fingerprint: "1".repeat(64),
+          builtAt: "r1",
+        },
+      });
+      await Promise.resolve();
+    });
+    assert.equal(
+      viewCalls,
+      0,
+      "the old handshake cannot produce an old early view",
+    );
+    await act(async () => {
+      resolveSecondHandshake({
+        requestToken: "token-r2",
+        buildIdentity: {
+          schemaVersion: 1,
+          packageVersion: "test",
+          revision: "r2",
+          fingerprint: "0".repeat(64),
+          builtAt: "r2",
+        },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.equal(
+      viewCalls,
+      1,
+      "R2's fresh handshake reads the remembered JSONL history",
+    );
+    assert.match(
+      dom.window.document.body.textContent || "",
+      /recovered cold history/,
+    );
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);
@@ -495,8 +2558,66 @@ test("a transient empty model inventory never leaks the Composer's internal mode
       ".composer-model-select .compact-select-trigger",
     )!;
     assert.equal(trigger.textContent?.trim(), "gpt-5.6-sol");
+    assert.equal(trigger.parentElement?.title, "模型");
     assert.doesNotMatch(trigger.textContent || "", /xwill|\u0000/);
-    assert.equal(trigger.disabled, true, "selection stays disabled until its inventory has arrived");
+    assert.equal(
+      trigger.disabled,
+      true,
+      "selection stays disabled until its inventory has arrived",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("the initial ready frame releases controls when Primary became ready after bootstrap", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const cached = {
+    provider: "cached",
+    id: "ready-between-bootstrap-and-sse",
+    name: "Ready between bootstrap and SSE",
+    reasoning: true,
+  };
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      models: [cached],
+      primaryRuntime: { status: "starting" as const, generation: 1 },
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const model = () =>
+      dom.window.document.querySelector<HTMLButtonElement>(
+        ".composer-model-select .compact-select-trigger",
+      )!;
+    assert.equal(model().disabled, true, "bootstrap starting blocks settings");
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () =>
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "idle",
+            piChatRunEpoch: "epoch-ready-snapshot",
+            workspaceEpoch: "epoch-ready-snapshot",
+            primaryRuntime: { status: "ready", generation: 1 },
+          }),
+        }),
+      ),
+    );
+    assert.equal(
+      model().disabled,
+      false,
+      "ready carries the missed Primary capability transition without requiring another bootstrap",
+    );
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);
@@ -509,7 +2630,12 @@ test("Primary startup disables cached model choices until Runtime readiness", as
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
   const originals = { ...api };
-  const cached = { provider: "cached", id: "ready-later", name: "Ready later", reasoning: true };
+  const cached = {
+    provider: "cached",
+    id: "ready-later",
+    name: "Ready later",
+    reasoning: true,
+  };
   Object.assign(api, {
     bootstrap: async () => ({
       ...bootstrap,
@@ -525,7 +2651,11 @@ test("Primary startup disables cached model choices until Runtime readiness", as
     const model = dom.window.document.querySelector<HTMLButtonElement>(
       ".composer-model-select .compact-select-trigger",
     )!;
-    assert.equal(model.disabled, true, "Primary settings wait for readiness even with a cached catalogue");
+    assert.equal(
+      model.disabled,
+      true,
+      "Primary settings wait for readiness even with a cached catalogue",
+    );
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);
@@ -539,7 +2669,11 @@ test("system Gate selector remains visible when startup command inventory is emp
   const { App } = await import("../src/web/App");
   const originals = { ...api };
   Object.assign(api, {
-    bootstrap: async () => ({ ...bootstrap, commands: [], gateMode: "strict" as const }),
+    bootstrap: async () => ({
+      ...bootstrap,
+      commands: [],
+      gateMode: "strict" as const,
+    }),
     eventsUrl: () => "/api/events",
     markSessionViewed: async () => ({ viewing: activeId }),
   });
@@ -549,7 +2683,10 @@ test("system Gate selector remains visible when startup command inventory is emp
     const gate = dom.window.document.querySelector<HTMLButtonElement>(
       ".composer .gate-control .compact-select-trigger",
     );
-    assert.ok(gate, "the verified system Gate must not depend on get_commands()");
+    assert.ok(
+      gate,
+      "the verified system Gate must not depend on get_commands()",
+    );
     assert.equal(gate.textContent?.trim(), "严格");
   } finally {
     await act(async () => root.unmount());
@@ -686,7 +2823,11 @@ test("ChatInput keeps an unsent draft and image attachment across Session naviga
       active: false,
       writable: false,
     },
-    state: { ...draftView.state, model: imageModel, sessionId: "draft-preservation" },
+    state: {
+      ...draftView.state,
+      model: imageModel,
+      sessionId: "draft-preservation",
+    },
     runtimeStatus: "view-only",
     isActive: false,
   };
@@ -700,7 +2841,8 @@ test("ChatInput keeps an unsent draft and image attachment across Session naviga
     }),
     eventsUrl: () => "/api/events",
     markSessionViewed: async (id: string) => ({ viewing: id }),
-    viewSession: async (id: string) => id === secondId ? secondView : draftView,
+    viewSession: async (id: string) =>
+      id === secondId ? secondView : draftView,
   });
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {
@@ -709,40 +2851,83 @@ test("ChatInput keeps an unsent draft and image attachment across Session naviga
       "textarea[aria-label='消息输入']",
     )!;
     await act(async () => {
-      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "keep this unsent draft");
-      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "keep this unsent draft" }));
-      dom.window.document.querySelector<HTMLButtonElement>(".attachment-button")!.click();
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "keep this unsent draft");
+      textarea.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: "keep this unsent draft",
+        }),
+      );
+      dom.window.document
+        .querySelector<HTMLButtonElement>(".attachment-button")!
+        .click();
     });
     await act(async () => {
-      [...dom.window.document.querySelectorAll<HTMLButtonElement>(".attachment-menu [role='menuitem']")]
+      [
+        ...dom.window.document.querySelectorAll<HTMLButtonElement>(
+          ".attachment-menu [role='menuitem']",
+        ),
+      ]
         .find((button) => button.textContent?.includes("图片"))!
         .click();
-      const fileInput = dom.window.document.querySelector<HTMLInputElement>("input[type='file']")!;
+      const fileInput =
+        dom.window.document.querySelector<HTMLInputElement>(
+          "input[type='file']",
+        )!;
       Object.defineProperty(fileInput, "files", {
         configurable: true,
-        value: [new dom.window.File(["image"], "keep.png", { type: "image/png" })],
+        value: [
+          new dom.window.File(["image"], "keep.png", { type: "image/png" }),
+        ],
       });
-      fileInput.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+      fileInput.dispatchEvent(
+        new dom.window.Event("change", { bubbles: true }),
+      );
       const deadline = Date.now() + 250;
-      while (!dom.window.document.querySelector(".image-preview img[alt='keep.png']") && Date.now() < deadline)
+      while (
+        !dom.window.document.querySelector(
+          ".image-preview img[alt='keep.png']",
+        ) &&
+        Date.now() < deadline
+      )
         await new Promise((resolve) => dom.window.setTimeout(resolve, 5));
     });
     assert.equal(textarea.value, "keep this unsent draft");
-    assert.ok(dom.window.document.querySelector(".image-preview img[alt='keep.png']"));
-    const sessionButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
-      .find((button) => button.textContent?.includes("Draft preservation"))!;
+    assert.ok(
+      dom.window.document.querySelector(".image-preview img[alt='keep.png']"),
+    );
+    const sessionButton = [
+      ...dom.window.document.querySelectorAll<HTMLButtonElement>(
+        ".session-item",
+      ),
+    ].find((button) => button.textContent?.includes("Draft preservation"))!;
     await act(async () => sessionButton.click());
     await act(async () =>
-      [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
+      [
+        ...dom.window.document.querySelectorAll<HTMLButtonElement>(
+          ".session-item",
+        ),
+      ]
         .find((button) => button.textContent?.includes("Active"))!
         .click(),
     );
-    const afterNavigation = dom.window.document.querySelector<HTMLTextAreaElement>(
-      "textarea[aria-label='消息输入']",
-    )!;
-    assert.equal(afterNavigation, textarea, "the unkeyed ChatInput must not remount");
+    const afterNavigation =
+      dom.window.document.querySelector<HTMLTextAreaElement>(
+        "textarea[aria-label='消息输入']",
+      )!;
+    assert.equal(
+      afterNavigation,
+      textarea,
+      "the unkeyed ChatInput must not remount",
+    );
     assert.equal(afterNavigation.value, "keep this unsent draft");
-    assert.ok(dom.window.document.querySelector(".image-preview img[alt='keep.png']"));
+    assert.ok(
+      dom.window.document.querySelector(".image-preview img[alt='keep.png']"),
+    );
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);
@@ -786,8 +2971,12 @@ test("loading earlier history is isolated per Session across a pane switch", asy
   });
   let resolveA!: (view: SessionViewData) => void;
   let resolveB!: (view: SessionViewData) => void;
-  const earlierA = new Promise<SessionViewData>((resolve) => { resolveA = resolve; });
-  const earlierB = new Promise<SessionViewData>((resolve) => { resolveB = resolve; });
+  const earlierA = new Promise<SessionViewData>((resolve) => {
+    resolveA = resolve;
+  });
+  const earlierB = new Promise<SessionViewData>((resolve) => {
+    resolveB = resolve;
+  });
   const earlierCalls: string[] = [];
   Object.assign(api, {
     bootstrap: async () => ({
@@ -811,31 +3000,48 @@ test("loading earlier history is isolated per Session across a pane switch", asy
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {
     await act(async () => root.render(createElement(App)));
-    const loadButton = () => [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => /加载更早|正在加载/.test(button.textContent || ""))!;
+    const loadButton = () =>
+      [
+        ...dom.window.document.querySelectorAll<HTMLButtonElement>("button"),
+      ].find((button) => /加载更早|正在加载/.test(button.textContent || ""))!;
     await act(async () => {
       loadButton().click();
       await Promise.resolve();
     });
     assert.deepEqual(earlierCalls, [activeId]);
 
-    const secondButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
-      .find((button) => button.textContent?.includes("History B"))!;
+    const secondButton = [
+      ...dom.window.document.querySelectorAll<HTMLButtonElement>(
+        ".session-item",
+      ),
+    ].find((button) => button.textContent?.includes("History B"))!;
     await act(async () => secondButton.click());
     assert.match(dom.window.document.body.textContent || "", /B recent/);
     await act(async () => {
       loadButton().click();
       await Promise.resolve();
     });
-    assert.deepEqual(earlierCalls, [activeId, secondId], "B starts its own history request while A is still pending");
+    assert.deepEqual(
+      earlierCalls,
+      [activeId, secondId],
+      "B starts its own history request while A is still pending",
+    );
 
     await act(async () => {
       resolveA(expanded("A"));
       await Promise.resolve();
       await Promise.resolve();
     });
-    assert.equal(loadButton().textContent, "正在加载…", "A completion cannot clear B's loading lease");
-    assert.doesNotMatch(dom.window.document.body.textContent || "", /A older/, "A's late page cannot replace B");
+    assert.equal(
+      loadButton().textContent,
+      "正在加载…",
+      "A completion cannot clear B's loading lease",
+    );
+    assert.doesNotMatch(
+      dom.window.document.body.textContent || "",
+      /A older/,
+      "A's late page cannot replace B",
+    );
 
     await act(async () => {
       resolveB(expanded("B"));
@@ -843,7 +3049,10 @@ test("loading earlier history is isolated per Session across a pane switch", asy
       await Promise.resolve();
     });
     assert.match(dom.window.document.body.textContent || "", /B older/);
-    assert.doesNotMatch(dom.window.document.body.textContent || "", /正在加载…/);
+    assert.doesNotMatch(
+      dom.window.document.body.textContent || "",
+      /正在加载…/,
+    );
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);
@@ -857,8 +3066,18 @@ test("an old history request cannot affect a later visit to the same Session", a
   const { App } = await import("../src/web/App");
   const originals = { ...api };
   const secondId = "22222222222222222222";
-  const summaryB = { ...bootstrap.sessions[0], id: secondId, sessionId: "second", name: "History B", active: false };
-  const view = (id: string, content: string, truncated = true): SessionViewData => ({
+  const summaryB = {
+    ...bootstrap.sessions[0],
+    id: secondId,
+    sessionId: "second",
+    name: "History B",
+    active: false,
+  };
+  const view = (
+    id: string,
+    content: string,
+    truncated = true,
+  ): SessionViewData => ({
     ...draftView,
     session: id === activeId ? bootstrap.sessions[0] : summaryB,
     state: { ...bootstrap.state, sessionId: id },
@@ -872,8 +3091,12 @@ test("an old history request cannot affect a later visit to the same Session", a
   });
   let resolveOldA!: (value: SessionViewData) => void;
   let resolveNewA!: (value: SessionViewData) => void;
-  const oldA = new Promise<SessionViewData>((resolve) => { resolveOldA = resolve; });
-  const newA = new Promise<SessionViewData>((resolve) => { resolveNewA = resolve; });
+  const oldA = new Promise<SessionViewData>((resolve) => {
+    resolveOldA = resolve;
+  });
+  const newA = new Promise<SessionViewData>((resolve) => {
+    resolveNewA = resolve;
+  });
   let aEarlierCalls = 0;
   Object.assign(api, {
     bootstrap: async () => ({
@@ -893,16 +3116,24 @@ test("an old history request cannot affect a later visit to the same Session", a
         aEarlierCalls += 1;
         return aEarlierCalls === 1 ? oldA : newA;
       }
-      return id === activeId ? view(activeId, "A recent") : view(secondId, "B recent");
+      return id === activeId
+        ? view(activeId, "A recent")
+        : view(secondId, "B recent");
     },
   });
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {
     await act(async () => root.render(createElement(App)));
-    const loadButton = () => [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => /加载更早|正在加载/.test(button.textContent || ""))!;
-    const sessionButton = (name: string) => [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
-      .find((button) => button.textContent?.includes(name))!;
+    const loadButton = () =>
+      [
+        ...dom.window.document.querySelectorAll<HTMLButtonElement>("button"),
+      ].find((button) => /加载更早|正在加载/.test(button.textContent || ""))!;
+    const sessionButton = (name: string) =>
+      [
+        ...dom.window.document.querySelectorAll<HTMLButtonElement>(
+          ".session-item",
+        ),
+      ].find((button) => button.textContent?.includes(name))!;
     await act(async () => {
       loadButton().click();
       await Promise.resolve();
@@ -913,15 +3144,26 @@ test("an old history request cannot affect a later visit to the same Session", a
       loadButton().click();
       await Promise.resolve();
     });
-    assert.equal(aEarlierCalls, 2, "the later visit starts a fresh A history request");
+    assert.equal(
+      aEarlierCalls,
+      2,
+      "the later visit starts a fresh A history request",
+    );
 
     await act(async () => {
       resolveOldA(view(activeId, "A stale older", false));
       await Promise.resolve();
       await Promise.resolve();
     });
-    assert.equal(loadButton().textContent, "正在加载…", "the old visit cannot clear the new visit's lease");
-    assert.doesNotMatch(dom.window.document.body.textContent || "", /A stale older/);
+    assert.equal(
+      loadButton().textContent,
+      "正在加载…",
+      "the old visit cannot clear the new visit's lease",
+    );
+    assert.doesNotMatch(
+      dom.window.document.body.textContent || "",
+      /A stale older/,
+    );
 
     await act(async () => {
       resolveNewA(view(activeId, "A current older", false));
@@ -929,7 +3171,68 @@ test("an old history request cannot affect a later visit to the same Session", a
       await Promise.resolve();
     });
     assert.match(dom.window.document.body.textContent || "", /A current older/);
-    assert.doesNotMatch(dom.window.document.body.textContent || "", /正在加载…/);
+    assert.doesNotMatch(
+      dom.window.document.body.textContent || "",
+      /正在加载…/,
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a fast bootstrap restores its remembered active Session without a competing view request", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  dom.window.history.replaceState(null, "", `/?session=${activeId}`);
+  let viewCalls = 0;
+  let bootstrapCalls = 0;
+  Object.assign(api, {
+    bootstrap: async () => {
+      bootstrapCalls += 1;
+      return bootstrap;
+    },
+    eventsUrl: () => "/api/events",
+    viewSession: async () => {
+      viewCalls += 1;
+      return draftView;
+    },
+    markSessionViewed: async () => ({ viewing: activeId }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => {
+      root.render(createElement(App));
+      await new Promise((resolve) => setTimeout(resolve, 140));
+    });
+    assert.equal(
+      viewCalls,
+      0,
+      "the bootstrap-selected Primary must not race a redundant /view request",
+    );
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () =>
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "idle",
+            piChatRunEpoch: "epoch-a",
+          }),
+        }),
+      ),
+    );
+    assert.equal(
+      bootstrapCalls,
+      1,
+      "initial ready after a successful bootstrap must not repeat it",
+    );
+    assert.equal(
+      dom.window.document.querySelector(".topbar-title")?.textContent,
+      "Active",
+    );
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);
@@ -946,20 +3249,39 @@ test("remembered cold history paints before global bootstrap finishes while muta
   dom.window.history.replaceState(null, "", `/?session=${coldId}`);
   const cold: SessionViewData = {
     ...draftView,
-    session: { ...draftView.session, id: coldId, sessionId: "remembered-cold", name: "Remembered cold", messageCount: 2, active: false, writable: false },
-    messages: [{ role: "user", content: "remembered question" }, { role: "assistant", content: "remembered answer" }],
+    session: {
+      ...draftView.session,
+      id: coldId,
+      sessionId: "remembered-cold",
+      name: "Remembered cold",
+      messageCount: 2,
+      active: false,
+      writable: false,
+    },
+    messages: [
+      { role: "user", content: "remembered question" },
+      { role: "assistant", content: "remembered answer" },
+    ],
     messageTotal: 2,
     runtimeStatus: "view-only",
     isActive: false,
     viewSource: "cold-jsonl",
   };
   let resolveBootstrap!: (value: BootstrapData) => void;
-  const pendingBootstrap = new Promise<BootstrapData>((resolve) => { resolveBootstrap = resolve; });
+  const pendingBootstrap = new Promise<BootstrapData>((resolve) => {
+    resolveBootstrap = resolve;
+  });
   let coldViews = 0;
   Object.assign(api, {
     handshake: async () => ({
       requestToken: "test-token",
-      buildIdentity: { schemaVersion: 1, packageVersion: "test", revision: "test", fingerprint: "0".repeat(64), builtAt: "test" },
+      buildIdentity: {
+        schemaVersion: 1,
+        packageVersion: "test",
+        revision: "test",
+        fingerprint: "0".repeat(64),
+        builtAt: "test",
+      },
     }),
     bootstrap: async () => pendingBootstrap,
     eventsUrl: () => "/api/events",
@@ -972,14 +3294,22 @@ test("remembered cold history paints before global bootstrap finishes while muta
   });
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {
+    await act(async () => root.render(createElement(App)));
     await act(async () => {
-      root.render(createElement(App));
-      await Promise.resolve();
-      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 140));
     });
-    assert.match(dom.window.document.body.textContent || "", /remembered answer/);
+    assert.match(
+      dom.window.document.body.textContent || "",
+      /remembered answer/,
+    );
     assert.equal(coldViews, 1);
-    assert.equal(dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")?.disabled, true, "history may paint early but mutations wait for bootstrap identity/readiness");
+    assert.equal(
+      dom.window.document.querySelector<HTMLTextAreaElement>(
+        "textarea[aria-label='消息输入']",
+      )?.disabled,
+      true,
+      "history may paint early but mutations wait for bootstrap identity/readiness",
+    );
     assert.equal(
       dom.window.document.querySelector(".topbar-title")?.textContent,
       "Remembered cold",
@@ -997,13 +3327,363 @@ test("remembered cold history paints before global bootstrap finishes while muta
     );
 
     await act(async () => {
-      resolveBootstrap({ ...bootstrap, sessions: [...bootstrap.sessions, cold.session], sessionsTotal: 2 });
+      resolveBootstrap({
+        ...bootstrap,
+        sessions: [...bootstrap.sessions, cold.session],
+        sessionsTotal: 2,
+      });
       await Promise.resolve();
       await Promise.resolve();
     });
-    assert.match(dom.window.document.body.textContent || "", /remembered answer/);
-    assert.equal(dom.window.document.querySelector(".topbar-title")?.textContent, "Remembered cold");
-    assert.equal(coldViews, 1, "bootstrap reuses the in-flight remembered view instead of reading it twice");
+    assert.match(
+      dom.window.document.body.textContent || "",
+      /remembered answer/,
+    );
+    assert.equal(
+      dom.window.document.querySelector(".topbar-title")?.textContent,
+      "Remembered cold",
+    );
+    assert.equal(
+      coldViews,
+      1,
+      "bootstrap reuses the in-flight remembered view instead of reading it twice",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("initial idle ready retries one rejected bootstrap and restores the page projection", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  let bootstrapCalls = 0;
+  Object.assign(api, {
+    bootstrap: async () => {
+      bootstrapCalls += 1;
+      if (bootstrapCalls === 1) throw new Error("bootstrap unavailable");
+      return bootstrap;
+    },
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    assert.equal(bootstrapCalls, 1);
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "idle",
+            piChatRunEpoch: "epoch-a",
+          }),
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.equal(
+      bootstrapCalls,
+      2,
+      "the first healthy ready retries a failed initial bootstrap once",
+    );
+    assert.equal(
+      dom.window.document.querySelector(".topbar-title")?.textContent,
+      "Active",
+    );
+    const model = dom.window.document.querySelector<HTMLButtonElement>(
+      ".composer-model-select .compact-select-trigger",
+    )!;
+    assert.equal(
+      model.disabled,
+      false,
+      "the successful retry restores Primary capability metadata",
+    );
+    await act(async () =>
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "idle",
+            piChatRunEpoch: "epoch-a",
+          }),
+        }),
+      ),
+    );
+    assert.equal(
+      bootstrapCalls,
+      2,
+      "repeated initial ready frames cannot create a retry loop",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("an initial ready consumes its only retry even when that retry fails", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  let bootstrapCalls = 0;
+  Object.assign(api, {
+    bootstrap: async () => {
+      bootstrapCalls += 1;
+      throw new Error("bootstrap unavailable");
+    },
+    eventsUrl: () => "/api/events",
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    assert.equal(bootstrapCalls, 1);
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "idle",
+            piChatRunEpoch: "epoch-a",
+          }),
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.equal(bootstrapCalls, 2, "first ready uses the one initial retry");
+    await act(async () => {
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "idle",
+            piChatRunEpoch: "epoch-a",
+          }),
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.equal(
+      bootstrapCalls,
+      2,
+      "a failed initial retry cannot loop on later ready frames",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a slow bootstrap still completes the sidebar inventory through its independent Session Index read", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const pendingBootstrap = new Promise<BootstrapData>(() => undefined);
+  let sessionReads = 0;
+  Object.assign(api, {
+    bootstrap: async () => pendingBootstrap,
+    eventsUrl: () => "/api/events",
+    sessions: async () => {
+      sessionReads += 1;
+      return {
+        sessions: bootstrap.sessions,
+        total: 1,
+        directories: [],
+      };
+    },
+  });
+  const browserSetTimeout = dom.window.setTimeout.bind(dom.window);
+  const sidebarTimers: Array<() => void> = [];
+  Object.defineProperty(dom.window, "setTimeout", {
+    configurable: true,
+    value(callback: TimerHandler, delay?: number) {
+      if (delay === 250 && typeof callback === "function") {
+        sidebarTimers.push(callback);
+        return 1;
+      }
+      return browserSetTimeout(callback, delay);
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    assert.equal(
+      sidebarTimers.length,
+      1,
+      "slow bootstrap schedules its independent sidebar read",
+    );
+    await act(async () => {
+      sidebarTimers[0]!();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.equal(
+      sessionReads,
+      1,
+      "the fallback performs one JSONL-only inventory read",
+    );
+    assert.equal(
+      dom.window.document.querySelectorAll(".session-row").length,
+      1,
+    );
+    assert.doesNotMatch(
+      dom.window.document.querySelector(".session-list")?.textContent || "",
+      /正在加载对话…/,
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a rejected bootstrap does not discard an already-started sidebar inventory fallback", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  let rejectBootstrap!: (cause: Error) => void;
+  let resolveSessions!: (value: {
+    sessions: typeof bootstrap.sessions;
+    total: number;
+    directories: [];
+  }) => void;
+  const pendingBootstrap = new Promise<BootstrapData>((_resolve, reject) => {
+    rejectBootstrap = reject;
+  });
+  const pendingSessions = new Promise<{
+    sessions: typeof bootstrap.sessions;
+    total: number;
+    directories: [];
+  }>((resolve) => {
+    resolveSessions = resolve;
+  });
+  Object.assign(api, {
+    bootstrap: async () => pendingBootstrap,
+    eventsUrl: () => "/api/events",
+    sessions: async () => pendingSessions,
+  });
+  const browserSetTimeout = dom.window.setTimeout.bind(dom.window);
+  const sidebarTimers: Array<() => void> = [];
+  Object.defineProperty(dom.window, "setTimeout", {
+    configurable: true,
+    value(callback: TimerHandler, delay?: number) {
+      if (delay === 250 && typeof callback === "function") {
+        sidebarTimers.push(callback);
+        return 1;
+      }
+      return browserSetTimeout(callback, delay);
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    assert.equal(sidebarTimers.length, 1);
+    await act(async () => {
+      sidebarTimers[0]!();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      rejectBootstrap(new Error("bootstrap unavailable"));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      resolveSessions({
+        sessions: bootstrap.sessions,
+        total: 1,
+        directories: [],
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.equal(
+      dom.window.document.querySelectorAll(".session-row").length,
+      1,
+    );
+    assert.doesNotMatch(
+      dom.window.document.querySelector(".session-list")?.textContent || "",
+      /正在加载对话…/,
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a bootstrap rejected before the sidebar delay leaves its independent inventory timer active", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  let rejectBootstrap!: (cause: Error) => void;
+  const pendingBootstrap = new Promise<BootstrapData>((_resolve, reject) => {
+    rejectBootstrap = reject;
+  });
+  let sessionReads = 0;
+  Object.assign(api, {
+    bootstrap: async () => pendingBootstrap,
+    eventsUrl: () => "/api/events",
+    sessions: async () => {
+      sessionReads += 1;
+      return { sessions: bootstrap.sessions, total: 1, directories: [] };
+    },
+  });
+  const browserSetTimeout = dom.window.setTimeout.bind(dom.window);
+  const browserClearTimeout = dom.window.clearTimeout.bind(dom.window);
+  const sidebarTimers: Array<() => void> = [];
+  const clearedSidebarTimers: number[] = [];
+  Object.defineProperty(dom.window, "setTimeout", {
+    configurable: true,
+    value(callback: TimerHandler, delay?: number) {
+      if (delay === 250 && typeof callback === "function") {
+        sidebarTimers.push(callback);
+        return 91;
+      }
+      return browserSetTimeout(callback, delay);
+    },
+  });
+  Object.defineProperty(dom.window, "clearTimeout", {
+    configurable: true,
+    value(id?: number) {
+      if (id === 91) clearedSidebarTimers.push(id);
+      else browserClearTimeout(id);
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    assert.equal(sidebarTimers.length, 1);
+    await act(async () => {
+      rejectBootstrap(
+        new Error("bootstrap unavailable before sidebar fallback"),
+      );
+      await Promise.resolve();
+    });
+    assert.deepEqual(
+      clearedSidebarTimers,
+      [],
+      "a bootstrap failure must not cancel the pending Session Index fallback",
+    );
+    await act(async () => {
+      sidebarTimers[0]!();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.ok(
+      sessionReads >= 1,
+      "the original independent fallback still reads Session Index after rejection",
+    );
+    assert.equal(
+      dom.window.document.querySelectorAll(".session-row").length,
+      1,
+    );
+    assert.doesNotMatch(
+      dom.window.document.querySelector(".session-list")?.textContent || "",
+      /正在加载对话…/,
+    );
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);
@@ -1061,7 +3741,11 @@ test("opening a cold conversation paints JSONL without starting a dedicated Runt
     warmSession: async () => {
       activations += 1;
       await activation;
-      return { sessionId: coldId, state: cold.state, gateMode: "strict" as const };
+      return {
+        sessionId: coldId,
+        state: cold.state,
+        gateMode: "strict" as const,
+      };
     },
     prompt: async () => ({ accepted: true, queued: false }),
   });
@@ -1086,7 +3770,11 @@ test("opening a cold conversation paints JSONL without starting a dedicated Runt
     await act(async () =>
       coldRow.querySelector<HTMLButtonElement>(".session-item")?.click(),
     );
-    assert.equal(coldViews, 1, "a fresh stable cold pane reopens from data cache without another JSONL request");
+    assert.equal(
+      coldViews,
+      1,
+      "a fresh stable cold pane reopens from data cache without another JSONL request",
+    );
     const input = dom.window.document.querySelector<HTMLTextAreaElement>(
       "textarea[aria-label='消息输入']",
     )!;
@@ -1166,7 +3854,9 @@ test("a background completed reply becomes green until this browser opens the co
     turnTotal: 1,
   };
   let resolveBackgroundView!: (view: SessionViewData) => void;
-  const pendingBackgroundView = new Promise<SessionViewData>((resolve) => { resolveBackgroundView = resolve; });
+  const pendingBackgroundView = new Promise<SessionViewData>((resolve) => {
+    resolveBackgroundView = resolve;
+  });
   Object.assign(api, {
     bootstrap: async () => ({
       ...bootstrap,
@@ -1211,25 +3901,37 @@ test("a background completed reply becomes green until this browser opens the co
       backgroundRow.querySelector<HTMLButtonElement>(".session-item")?.click(),
     );
     assert.equal(
-      backgroundRow.querySelector(".session-status")?.classList.contains("is-unread"),
+      backgroundRow
+        .querySelector(".session-status")
+        ?.classList.contains("is-unread"),
       false,
       "selection consumes the green marker immediately",
     );
     assert.equal(
-      backgroundRow.querySelector(".session-status")?.classList.contains("is-running"),
+      backgroundRow
+        .querySelector(".session-status")
+        ?.classList.contains("is-running"),
       false,
       "a delayed stale view must not replace green with a blue running ring",
     );
-    await act(async () => resolveBackgroundView({
-      ...background,
-      session: { ...background.session, running: true },
-      state: { ...background.state, isStreaming: true },
-      isStreaming: true,
-    }));
-    const openedRow = [...dom.window.document.querySelectorAll<HTMLElement>(".session-row")]
-      .find((row) => row.textContent?.includes("Background"));
+    await act(async () =>
+      resolveBackgroundView({
+        ...background,
+        session: { ...background.session, running: true },
+        state: { ...background.state, isStreaming: true },
+        isStreaming: true,
+      }),
+    );
+    const openedRow = [
+      ...dom.window.document.querySelectorAll<HTMLElement>(".session-row"),
+    ].find((row) => row.textContent?.includes("Background"));
     assert.ok(openedRow);
-    assert.equal(openedRow.querySelector(".session-status")?.classList.contains("is-running"), false);
+    assert.equal(
+      openedRow
+        .querySelector(".session-status")
+        ?.classList.contains("is-running"),
+      false,
+    );
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);
@@ -1270,7 +3972,8 @@ test("opening an unread conversation preserves a newer running state", async () 
     }),
     eventsUrl: () => "/api/events",
     markSessionViewed: async () => ({ viewing: activeId }),
-    viewSession: async (id: string) => id === backgroundId ? background : draftView,
+    viewSession: async (id: string) =>
+      id === backgroundId ? background : draftView,
   });
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {
@@ -1285,13 +3988,24 @@ test("opening an unread conversation preserves a newer running state", async () 
       source.emitPi({ type: "agent_settled", piChatSessionId: backgroundId });
       source.emitPi({ type: "agent_start", piChatSessionId: backgroundId });
     });
-    const row = [...dom.window.document.querySelectorAll<HTMLElement>(".session-row")]
-      .find((candidate) => candidate.textContent?.includes("Unread then running"));
+    const row = [
+      ...dom.window.document.querySelectorAll<HTMLElement>(".session-row"),
+    ].find((candidate) =>
+      candidate.textContent?.includes("Unread then running"),
+    );
     assert.ok(row);
-    assert.equal(row.querySelector(".session-status")?.classList.contains("is-running"), true);
+    assert.equal(
+      row.querySelector(".session-status")?.classList.contains("is-running"),
+      true,
+    );
 
-    await act(async () => row.querySelector<HTMLButtonElement>(".session-item")?.click());
-    assert.equal(row.querySelector(".session-status")?.classList.contains("is-unread"), false);
+    await act(async () =>
+      row.querySelector<HTMLButtonElement>(".session-item")?.click(),
+    );
+    assert.equal(
+      row.querySelector(".session-status")?.classList.contains("is-unread"),
+      false,
+    );
     assert.equal(
       row.querySelector(".session-status")?.classList.contains("is-running"),
       true,
@@ -1337,7 +4051,8 @@ test("a reply viewed before settlement does not become unread after leaving", as
     }),
     eventsUrl: () => "/api/events",
     markSessionViewed: async () => ({ viewing: activeId }),
-    viewSession: async (id: string) => id === backgroundId ? background : draftView,
+    viewSession: async (id: string) =>
+      id === backgroundId ? background : draftView,
   });
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {
@@ -1351,19 +4066,25 @@ test("a reply viewed before settlement does not become unread after leaving", as
       }),
     );
     const sessionButton = (name: string) =>
-      [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
-        .find((button) => button.textContent?.includes(name));
+      [
+        ...dom.window.document.querySelectorAll<HTMLButtonElement>(
+          ".session-item",
+        ),
+      ].find((button) => button.textContent?.includes(name));
     await act(async () => sessionButton("Viewed before settle")?.click());
     await act(async () => sessionButton("Active")?.click());
     await act(async () =>
       source.emitPi({ type: "agent_settled", piChatSessionId: backgroundId }),
     );
 
-    const backgroundRow = [...dom.window.document.querySelectorAll<HTMLElement>(".session-row")]
-      .find((row) => row.textContent?.includes("Viewed before settle"));
+    const backgroundRow = [
+      ...dom.window.document.querySelectorAll<HTMLElement>(".session-row"),
+    ].find((row) => row.textContent?.includes("Viewed before settle"));
     assert.ok(backgroundRow);
     assert.equal(
-      backgroundRow.querySelector(".session-status")?.classList.contains("is-unread"),
+      backgroundRow
+        .querySelector(".session-status")
+        ?.classList.contains("is-unread"),
       false,
     );
   } finally {
@@ -1392,7 +4113,10 @@ test("a stale sidebar snapshot cannot restore the running spinner after settleme
   Object.assign(api, {
     bootstrap: async () => ({
       ...bootstrap,
-      sessions: [...bootstrap.sessions, { ...background, running: sidebarRunning }],
+      sessions: [
+        ...bootstrap.sessions,
+        { ...background, running: sidebarRunning },
+      ],
       sessionsTotal: 2,
       activeSessionIds: [activeId, backgroundId],
     }),
@@ -1403,24 +4127,32 @@ test("a stale sidebar snapshot cannot restore the running spinner after settleme
   try {
     await act(async () => root.render(createElement(App)));
     const source = FakeEventSource.instances.at(-1)!;
-    await act(async () => source.emitPi({ type: "agent_settled", piChatSessionId: backgroundId }));
+    await act(async () =>
+      source.emitPi({ type: "agent_settled", piChatSessionId: backgroundId }),
+    );
     sidebarRunning = true; // An older Bootstrap request still says it was running.
     await act(async () => {
       source.emitPi({ type: "pi_chat_sse_resync" });
       await Promise.resolve();
       await Promise.resolve();
     });
-    const row = [...dom.window.document.querySelectorAll<HTMLElement>(".session-row")]
-      .find((candidate) => candidate.textContent?.includes("Previously running"));
+    const row = [
+      ...dom.window.document.querySelectorAll<HTMLElement>(".session-row"),
+    ].find((candidate) =>
+      candidate.textContent?.includes("Previously running"),
+    );
     assert.ok(row);
-    assert.equal(row.querySelector(".session-status")?.classList.contains("is-running"), false);
+    assert.equal(
+      row.querySelector(".session-status")?.classList.contains("is-running"),
+      false,
+    );
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);
   }
 });
 
-test("Primary readiness explains capability loss without blocking historical navigation", async () => {
+test("failed Primary keeps historical navigation and a recovery-triggering composer available", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
@@ -1454,8 +4186,8 @@ test("Primary readiness explains capability loss without blocking historical nav
     const input = dom.window.document.querySelector<HTMLTextAreaElement>(
       "textarea[aria-label='消息输入']",
     )!;
-    assert.equal(input.disabled, true);
-    assert.match(input.placeholder, /历史仍可阅读/);
+    assert.equal(input.disabled, false);
+    assert.match(input.placeholder, /输入消息/);
     // The server's ready SSE triggers a guarded background metadata refresh;
     // the status transition itself is covered by server contract tests. Keep
     // this JSDOM test focused on the failed-readiness capability boundary.
@@ -1499,10 +4231,14 @@ test("changing Gate on cold history stages the next prompt without activating it
     }),
     eventsUrl: () => "/api/events",
     markSessionViewed: async (id: string) => ({ viewing: id }),
-    viewSession: async (id: string) => id === coldId ? coldView : draftView,
+    viewSession: async (id: string) => (id === coldId ? coldView : draftView),
     warmSession: async (id: string) => {
       warmCalls += 1;
-      return { sessionId: id, state: coldView.state, gateMode: "strict" as const };
+      return {
+        sessionId: id,
+        state: coldView.state,
+        gateMode: "strict" as const,
+      };
     },
     prompt: async (...args: unknown[]) => {
       promptCalls.push(args);
@@ -1512,34 +4248,62 @@ test("changing Gate on cold history stages the next prompt without activating it
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {
     await act(async () => root.render(createElement(App)));
-    const sessionButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
-      .find((button) => button.textContent?.includes("Cold Gate"))!;
+    const sessionButton = [
+      ...dom.window.document.querySelectorAll<HTMLButtonElement>(
+        ".session-item",
+      ),
+    ].find((button) => button.textContent?.includes("Cold Gate"))!;
     await act(async () => sessionButton.click());
     const trigger = dom.window.document.querySelector<HTMLButtonElement>(
       ".gate-control .compact-select-trigger",
     )!;
     assert.equal(trigger.textContent?.trim(), "严格");
     await act(async () => trigger.click());
-    const openOption = [...dom.window.document.querySelectorAll<HTMLElement>(
-      ".gate-control .compact-select-option",
-    )].find((option) => option.textContent?.trim() === "放行");
+    const openOption = [
+      ...dom.window.document.querySelectorAll<HTMLElement>(
+        ".gate-control .compact-select-option",
+      ),
+    ].find((option) => option.textContent?.trim() === "放行");
     assert.ok(openOption);
     await act(async () => openOption.click());
     assert.equal(trigger.textContent?.trim(), "放行");
-    assert.equal(warmCalls, 0, "changing Gate alone must not activate cold history");
-    assert.deepEqual(promptCalls, [], "changing Gate alone must not send an extension command");
+    assert.equal(
+      warmCalls,
+      0,
+      "changing Gate alone must not activate cold history",
+    );
+    assert.deepEqual(
+      promptCalls,
+      [],
+      "changing Gate alone must not send an extension command",
+    );
 
     const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
       "textarea[aria-label='消息输入']",
     )!;
     await act(async () => {
-      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "first message");
-      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "first message" }));
-      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "first message");
+      textarea.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: "first message",
+        }),
+      );
+      dom.window.document
+        .querySelector<HTMLButtonElement>(".send-button")!
+        .click();
       await Promise.resolve();
       await Promise.resolve();
     });
-    assert.equal(warmCalls, 1, "the first actual prompt may activate the Session");
+    assert.equal(
+      warmCalls,
+      1,
+      "the first actual prompt may activate the Session",
+    );
     assert.deepEqual(promptCalls, [["first message", [], coldId, "open"]]);
   } finally {
     await act(async () => root.unmount());
@@ -1580,19 +4344,30 @@ test("an explicit active Gate choice supersedes an older cold staged mode", asyn
     }),
     eventsUrl: () => "/api/events",
     markSessionViewed: async (id: string) => ({ viewing: id }),
-    viewSession: async (id: string) => id === coldId ? coldView : draftView,
+    viewSession: async (id: string) => (id === coldId ? coldView : draftView),
     warmSession: async (id: string) => ({
       sessionId: id,
       state: coldView.state,
       gateMode: "strict" as const,
     }),
-    takeSessionControl: async () => ({ controlOwner: "this-window", controlledByThisWindow: true as const }),
-    respondToExtension: async (body: unknown) => { autoAllowResponses.push(body); },
+    takeSessionControl: async () => ({
+      controlOwner: "this-window",
+      controlledByThisWindow: true as const,
+    }),
+    respondToExtension: async (body: unknown) => {
+      autoAllowResponses.push(body);
+    },
     prompt: async (...args: unknown[]) => {
       promptCalls.push(args);
       const message = args[0];
       return typeof message === "string" && message.startsWith("/gate ")
-        ? { accepted: true, queued: false, extension: true, command: "gate", isStreaming: false }
+        ? {
+            accepted: true,
+            queued: false,
+            extension: true,
+            command: "gate",
+            isStreaming: false,
+          }
         : { accepted: true, queued: false };
     },
   });
@@ -1600,18 +4375,25 @@ test("an explicit active Gate choice supersedes an older cold staged mode", asyn
   try {
     await act(async () => root.render(createElement(App)));
     await act(async () =>
-      [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
+      [
+        ...dom.window.document.querySelectorAll<HTMLButtonElement>(
+          ".session-item",
+        ),
+      ]
         .find((button) => button.textContent?.includes("Gate active choice"))!
         .click(),
     );
-    const trigger = () => dom.window.document.querySelector<HTMLButtonElement>(
-      ".gate-control .compact-select-trigger",
-    )!;
+    const trigger = () =>
+      dom.window.document.querySelector<HTMLButtonElement>(
+        ".gate-control .compact-select-trigger",
+      )!;
     const chooseGate = async (label: string) => {
       await act(async () => trigger().click());
-      const option = [...dom.window.document.querySelectorAll<HTMLElement>(
-        ".gate-control .compact-select-option",
-      )].find((candidate) => candidate.textContent?.trim() === label);
+      const option = [
+        ...dom.window.document.querySelectorAll<HTMLElement>(
+          ".gate-control .compact-select-option",
+        ),
+      ].find((candidate) => candidate.textContent?.trim() === label);
       assert.ok(option);
       await act(async () => option.click());
     };
@@ -1619,13 +4401,17 @@ test("an explicit active Gate choice supersedes an older cold staged mode", asyn
     assert.equal(trigger().textContent?.trim(), "放行");
 
     const source = FakeEventSource.instances.at(-1)!;
-    await act(async () => source.emitPi({
-      type: "pi_chat_session_control_changed",
-      sessionId: coldId,
-      controlOwner: "other-window",
-      controlledByThisWindow: false,
-    }));
-    await act(async () => new Promise((resolve) => dom.window.setTimeout(resolve, 450)));
+    await act(async () =>
+      source.emitPi({
+        type: "pi_chat_session_control_changed",
+        sessionId: coldId,
+        controlOwner: "other-window",
+        controlledByThisWindow: false,
+      }),
+    );
+    await act(
+      async () => new Promise((resolve) => dom.window.setTimeout(resolve, 450)),
+    );
     const takeover = dom.window.document.querySelector<HTMLButtonElement>(
       ".session-control-banner button",
     );
@@ -1635,31 +4421,61 @@ test("an explicit active Gate choice supersedes an older cold staged mode", asyn
       await Promise.resolve();
       await Promise.resolve();
     });
-    assert.equal(trigger().textContent?.trim(), "放行", "cold staging survives a pure activation");
+    assert.equal(
+      trigger().textContent?.trim(),
+      "放行",
+      "cold staging survives a pure activation",
+    );
     await chooseGate("严格");
-    assert.equal(trigger().textContent?.trim(), "严格", "the explicit active choice drops the stale cold preference");
+    assert.equal(
+      trigger().textContent?.trim(),
+      "严格",
+      "the explicit active choice drops the stale cold preference",
+    );
     assert.deepEqual(promptCalls, [["/gate strict", [], coldId, "strict"]]);
-    await act(async () => source.emitPi({
-      type: "extension_ui_request",
-      piChatSessionId: coldId,
-      id: "strict-must-not-auto-allow",
-      method: "select",
-      title: "Pi Chat Gate: bash\necho strict",
-      options: ["allow", "block"],
-    }));
-    assert.deepEqual(autoAllowResponses, [], "the discarded cold open cannot revive auto-allow");
+    await act(async () =>
+      source.emitPi({
+        type: "extension_ui_request",
+        piChatSessionId: coldId,
+        id: "strict-must-not-auto-allow",
+        method: "select",
+        title: "Pi Chat Gate: bash\necho strict",
+        options: ["allow", "block"],
+      }),
+    );
+    assert.deepEqual(
+      autoAllowResponses,
+      [],
+      "the discarded cold open cannot revive auto-allow",
+    );
 
     const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
       "textarea[aria-label='消息输入']",
     )!;
     await act(async () => {
-      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "continue strictly");
-      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "continue strictly" }));
-      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "continue strictly");
+      textarea.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: "continue strictly",
+        }),
+      );
+      dom.window.document
+        .querySelector<HTMLButtonElement>(".send-button")!
+        .click();
       await Promise.resolve();
       await Promise.resolve();
     });
-    assert.deepEqual(promptCalls.at(-1), ["continue strictly", [], coldId, "strict"]);
+    assert.deepEqual(promptCalls.at(-1), [
+      "continue strictly",
+      [],
+      coldId,
+      "strict",
+    ]);
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);
@@ -1691,17 +4507,27 @@ test("a staged cold Gate mode cannot auto-allow before Runtime confirmation", as
   };
   const responses: unknown[] = [];
   Object.assign(api, {
-    bootstrap: async () => ({ ...bootstrap, sessions: [bootstrap.sessions[0], coldSummary], sessionsTotal: 2 }),
+    bootstrap: async () => ({
+      ...bootstrap,
+      sessions: [bootstrap.sessions[0], coldSummary],
+      sessionsTotal: 2,
+    }),
     eventsUrl: () => "/api/events",
     markSessionViewed: async (id: string) => ({ viewing: id }),
-    viewSession: async (id: string) => id === coldId ? coldView : draftView,
-    respondToExtension: async (body: unknown) => { responses.push(body); },
+    viewSession: async (id: string) => (id === coldId ? coldView : draftView),
+    respondToExtension: async (body: unknown) => {
+      responses.push(body);
+    },
   });
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {
     await act(async () => root.render(createElement(App)));
     await act(async () =>
-      [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
+      [
+        ...dom.window.document.querySelectorAll<HTMLButtonElement>(
+          ".session-item",
+        ),
+      ]
         .find((button) => button.textContent?.includes("Gate confirmation"))!
         .click(),
     );
@@ -1709,51 +4535,73 @@ test("a staged cold Gate mode cannot auto-allow before Runtime confirmation", as
       ".gate-control .compact-select-trigger",
     )!;
     await act(async () => trigger.click());
-    const openOption = [...dom.window.document.querySelectorAll<HTMLElement>(
-      ".gate-control .compact-select-option",
-    )].find((option) => option.textContent?.trim() === "放行");
+    const openOption = [
+      ...dom.window.document.querySelectorAll<HTMLElement>(
+        ".gate-control .compact-select-option",
+      ),
+    ].find((option) => option.textContent?.trim() === "放行");
     assert.ok(openOption);
     await act(async () => openOption.click());
-    assert.equal(trigger.textContent?.trim(), "放行", "the staged preference remains visible");
+    assert.equal(
+      trigger.textContent?.trim(),
+      "放行",
+      "the staged preference remains visible",
+    );
 
     const source = FakeEventSource.instances.at(-1)!;
     // Another browser action may warm this Runtime, but its ready state remains
     // strict until the staged value is synchronized by a real prompt.
-    await act(async () => source.emitPi({
-      type: "pi_chat_gate_mode_changed",
-      piChatSessionId: coldId,
-      mode: "strict",
-    }));
-    await act(async () => source.emitPi({
-      type: "extension_ui_request",
-      piChatSessionId: coldId,
-      id: "must-not-auto-allow",
-      method: "select",
-      title: "Pi Chat Gate: bash\necho strict",
-      options: ["allow", "block"],
-    }));
-    assert.deepEqual(responses, [], "an unconfirmed staged open value cannot auto-allow");
+    await act(async () =>
+      source.emitPi({
+        type: "pi_chat_gate_mode_changed",
+        piChatSessionId: coldId,
+        mode: "strict",
+      }),
+    );
+    await act(async () =>
+      source.emitPi({
+        type: "extension_ui_request",
+        piChatSessionId: coldId,
+        id: "must-not-auto-allow",
+        method: "select",
+        title: "Pi Chat Gate: bash\necho strict",
+        options: ["allow", "block"],
+      }),
+    );
+    assert.deepEqual(
+      responses,
+      [],
+      "an unconfirmed staged open value cannot auto-allow",
+    );
     assert.ok(dom.window.document.querySelector(".extension-dialog"));
 
-    await act(async () => source.emitPi({
-      type: "pi_chat_gate_mode_changed",
-      piChatSessionId: coldId,
-      mode: "open",
-    }));
-    await act(async () => source.emitPi({
-      type: "extension_ui_request",
-      piChatSessionId: coldId,
-      id: "confirmed-auto-allow",
-      method: "select",
-      title: "Pi Chat Gate: bash\necho open",
-      options: ["allow", "block"],
-    }));
-    await act(async () => { await Promise.resolve(); });
-    assert.deepEqual(responses, [{
-      id: "confirmed-auto-allow",
-      value: "allow",
-      sessionId: coldId,
-    }]);
+    await act(async () =>
+      source.emitPi({
+        type: "pi_chat_gate_mode_changed",
+        piChatSessionId: coldId,
+        mode: "open",
+      }),
+    );
+    await act(async () =>
+      source.emitPi({
+        type: "extension_ui_request",
+        piChatSessionId: coldId,
+        id: "confirmed-auto-allow",
+        method: "select",
+        title: "Pi Chat Gate: bash\necho open",
+        options: ["allow", "block"],
+      }),
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    assert.deepEqual(responses, [
+      {
+        id: "confirmed-auto-allow",
+        value: "allow",
+        sessionId: coldId,
+      },
+    ]);
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);
@@ -1950,7 +4798,8 @@ test("an accepted prompt advances the sidebar turn count before stale metadata c
         .click(),
     );
     assert.match(
-      dom.window.document.querySelector<HTMLButtonElement>(".session-item")?.title || "",
+      dom.window.document.querySelector<HTMLButtonElement>(".session-item")
+        ?.title || "",
       /3 turns/,
       "the accepted local turn is already known before SessionIndex rescans JSONL",
     );
@@ -1965,7 +4814,8 @@ test("an accepted prompt advances the sidebar turn count before stale metadata c
       await new Promise((resolve) => setTimeout(resolve, 220));
     });
     assert.match(
-      dom.window.document.querySelector<HTMLButtonElement>(".session-item")?.title || "",
+      dom.window.document.querySelector<HTMLButtonElement>(".session-item")
+        ?.title || "",
       /3 turns/,
       "an older sidebar snapshot must not roll the local turn count back",
     );
@@ -1976,7 +4826,8 @@ test("an accepted prompt advances the sidebar turn count before stale metadata c
       await Promise.resolve();
     });
     assert.match(
-      dom.window.document.querySelector<HTMLButtonElement>(".session-item")?.title || "",
+      dom.window.document.querySelector<HTMLButtonElement>(".session-item")
+        ?.title || "",
       /3 turns/,
       "an older Session view must not bypass the local turn-count watermark",
     );
@@ -2047,7 +4898,11 @@ test("cancelling an admitted queued prompt rolls the sidebar turn count back", a
         .querySelector<HTMLButtonElement>(".queue-submit-button")!
         .click(),
     );
-    assert.match(dom.window.document.querySelector<HTMLButtonElement>(".session-item")?.title || "", /3 turns/);
+    assert.match(
+      dom.window.document.querySelector<HTMLButtonElement>(".session-item")
+        ?.title || "",
+      /3 turns/,
+    );
 
     await act(async () =>
       dom.window.document
@@ -2055,7 +4910,8 @@ test("cancelling an admitted queued prompt rolls the sidebar turn count back", a
         .click(),
     );
     assert.match(
-      dom.window.document.querySelector<HTMLButtonElement>(".session-item")?.title || "",
+      dom.window.document.querySelector<HTMLButtonElement>(".session-item")
+        ?.title || "",
       /2 turns/,
       "a cancelled queue item is no longer an accepted user turn",
     );
@@ -2382,7 +5238,11 @@ test("agent settlement clears a completed tool status left after compaction", as
     );
 
     await act(async () =>
-      source.emitPi({ type: "agent_settled", piChatSessionId: activeId, piChatRunGeneration: 1 }),
+      source.emitPi({
+        type: "agent_settled",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+      }),
     );
     assert.equal(
       dom.window.document.querySelector(".agent-status"),
@@ -2402,8 +5262,19 @@ test("agent settlement clears a completed tool status left after compaction", as
       false,
     );
     await act(async () => {
-      source.emitPi({ type: "tool_execution_end", piChatSessionId: activeId, piChatRunGeneration: 1, toolName: "bash", isError: false });
-      source.emitPi({ type: "pi_chat_session_status", piChatSessionId: activeId, piChatRunGeneration: 1, activity: { execution: "running", awaitingConfirmation: false } });
+      source.emitPi({
+        type: "tool_execution_end",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        toolName: "bash",
+        isError: false,
+      });
+      source.emitPi({
+        type: "pi_chat_session_status",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        activity: { execution: "running", awaitingConfirmation: false },
+      });
     });
     assert.equal(
       dom.window.document.querySelector(".agent-status"),
@@ -2498,27 +5369,69 @@ test("a late cold activation from A cannot overwrite the Session B composer", as
   const originals = { ...api };
   const coldId = "aaaaaaaaaaaaaaaaaaaa";
   const secondId = "bbbbbbbbbbbbbbbbbbbb";
-  const modelA = { id: "model-a", name: "Model A", provider: "test", input: ["text"], reasoning: true };
-  const modelB = { id: "model-b", name: "Model B", provider: "test", input: ["text"], reasoning: true };
-  const summaryA = { ...bootstrap.sessions[0], id: coldId, sessionId: "cold-a", name: "Cold A", active: false, writable: false };
-  const summaryB = { ...bootstrap.sessions[0], id: secondId, sessionId: "session-b", name: "Session B", active: false };
+  const modelA = {
+    id: "model-a",
+    name: "Model A",
+    provider: "test",
+    input: ["text"],
+    reasoning: true,
+  };
+  const modelB = {
+    id: "model-b",
+    name: "Model B",
+    provider: "test",
+    input: ["text"],
+    reasoning: true,
+  };
+  const summaryA = {
+    ...bootstrap.sessions[0],
+    id: coldId,
+    sessionId: "cold-a",
+    name: "Cold A",
+    active: false,
+    writable: false,
+  };
+  const summaryB = {
+    ...bootstrap.sessions[0],
+    id: secondId,
+    sessionId: "session-b",
+    name: "Session B",
+    active: false,
+  };
   const viewA: SessionViewData = {
     ...draftView,
     session: summaryA,
-    state: { ...bootstrap.state, model: modelA, thinkingLevel: "high", sessionId: "cold-a" },
+    state: {
+      ...bootstrap.state,
+      model: modelA,
+      thinkingLevel: "high",
+      sessionId: "cold-a",
+    },
     runtimeStatus: "view-only",
     isActive: false,
   };
-  const activatedA: SessionViewData = { ...viewA, session: { ...summaryA, active: true, writable: true }, runtimeStatus: "active", isActive: true };
+  const activatedA: SessionViewData = {
+    ...viewA,
+    session: { ...summaryA, active: true, writable: true },
+    runtimeStatus: "active",
+    isActive: true,
+  };
   const viewB: SessionViewData = {
     ...draftView,
     session: summaryB,
-    state: { ...bootstrap.state, model: modelB, thinkingLevel: "low", sessionId: "session-b" },
+    state: {
+      ...bootstrap.state,
+      model: modelB,
+      thinkingLevel: "low",
+      sessionId: "session-b",
+    },
     runtimeStatus: "view-only",
     isActive: false,
   };
   let resolveActivation!: (view: SessionViewData) => void;
-  const pendingActivation = new Promise<SessionViewData>((resolve) => { resolveActivation = resolve; });
+  const pendingActivation = new Promise<SessionViewData>((resolve) => {
+    resolveActivation = resolve;
+  });
   const promptTargets: string[] = [];
   Object.assign(api, {
     bootstrap: async () => ({
@@ -2529,11 +5442,21 @@ test("a late cold activation from A cannot overwrite the Session B composer", as
     }),
     eventsUrl: () => "/api/events",
     markSessionViewed: async (id: string) => ({ viewing: id }),
-    viewSession: async (id: string) => id === coldId ? viewA : id === secondId ? viewB : draftView,
+    viewSession: async (id: string) =>
+      id === coldId ? viewA : id === secondId ? viewB : draftView,
     warmSession: async (id: string) => {
-      if (id === secondId) return { sessionId: id, state: viewB.state, gateMode: "strict" as const };
+      if (id === secondId)
+        return {
+          sessionId: id,
+          state: viewB.state,
+          gateMode: "strict" as const,
+        };
       const view = await pendingActivation;
-      return { sessionId: view.session.id, state: view.state, gateMode: "strict" as const };
+      return {
+        sessionId: view.session.id,
+        state: view.state,
+        gateMode: "strict" as const,
+      };
     },
     prompt: async (_message: string, _images: unknown[], sessionId: string) => {
       promptTargets.push(sessionId);
@@ -2543,30 +5466,78 @@ test("a late cold activation from A cannot overwrite the Session B composer", as
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {
     await act(async () => root.render(createElement(App)));
-    const sessionButton = (name: string) => [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
-      .find((button) => button.textContent?.includes(name))!;
+    const sessionButton = (name: string) =>
+      [
+        ...dom.window.document.querySelectorAll<HTMLButtonElement>(
+          ".session-item",
+        ),
+      ].find((button) => button.textContent?.includes(name))!;
     await act(async () => sessionButton("Cold A").click());
-    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
     await act(async () => {
-      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "send to cold A");
-      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "send to cold A" }));
-      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "send to cold A");
+      textarea.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: "send to cold A",
+        }),
+      );
+      dom.window.document
+        .querySelector<HTMLButtonElement>(".send-button")!
+        .click();
       await Promise.resolve();
     });
     await act(async () => sessionButton("Session B").click());
-    assert.match(dom.window.document.querySelector(".composer-model-select .compact-select-trigger")?.textContent || "", /Model B/);
-    assert.match(dom.window.document.querySelector(".thinking-control .compact-select-trigger")?.textContent || "", /low/);
+    assert.match(
+      dom.window.document.querySelector(
+        ".composer-model-select .compact-select-trigger",
+      )?.textContent || "",
+      /Model B/,
+    );
+    assert.match(
+      dom.window.document.querySelector(
+        ".thinking-control .compact-select-trigger",
+      )?.textContent || "",
+      /low/,
+    );
 
     await act(async () => {
       resolveActivation(activatedA);
       await Promise.resolve();
       await Promise.resolve();
     });
-    assert.deepEqual(promptTargets, [coldId], "the background send still targets A");
-    assert.match(dom.window.document.querySelector(".composer-model-select .compact-select-trigger")?.textContent || "", /Model B/);
-    assert.match(dom.window.document.querySelector(".thinking-control .compact-select-trigger")?.textContent || "", /low/);
-    assert.doesNotMatch(dom.window.document.body.textContent || "", /Pi 已就绪，正在发送消息/);
-    assert.equal(textarea.disabled, false, "A activation cannot lock B's composer");
+    assert.deepEqual(
+      promptTargets,
+      [coldId],
+      "the background send still targets A",
+    );
+    assert.match(
+      dom.window.document.querySelector(
+        ".composer-model-select .compact-select-trigger",
+      )?.textContent || "",
+      /Model B/,
+    );
+    assert.match(
+      dom.window.document.querySelector(
+        ".thinking-control .compact-select-trigger",
+      )?.textContent || "",
+      /low/,
+    );
+    assert.doesNotMatch(
+      dom.window.document.body.textContent || "",
+      /Pi 已就绪，正在发送消息/,
+    );
+    assert.equal(
+      textarea.disabled,
+      false,
+      "A activation cannot lock B's composer",
+    );
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);
@@ -2581,18 +5552,86 @@ test("a stale A Runtime warm cannot overwrite a newer A revisit", async () => {
   const originals = { ...api };
   const coldId = "warm-a-12345678901234";
   const secondId = "warm-b-12345678901234";
-  const modelA = { id: "warm-model-a", name: "Warm Model A", provider: "test", input: ["text"], reasoning: true };
-  const modelB = { id: "warm-model-b", name: "Warm Model B", provider: "test", input: ["text"], reasoning: true };
-  const summaryA = { ...bootstrap.sessions[0], id: coldId, sessionId: "warm-a", name: "Warm A", active: false, writable: false };
-  const summaryB = { ...bootstrap.sessions[0], id: secondId, sessionId: "warm-b", name: "Warm B", active: false, writable: false };
-  const viewA = { ...draftView, session: summaryA, state: { ...bootstrap.state, model: modelA, thinkingLevel: "low", sessionId: "warm-a" }, runtimeStatus: "view-only" as const, isActive: false, historyPending: true };
-  const revisitA = { ...viewA, historyPending: false, state: { ...viewA.state, model: modelB, thinkingLevel: "high" } };
-  const viewB = { ...draftView, session: summaryB, state: { ...bootstrap.state, model: modelB, thinkingLevel: "medium", sessionId: "warm-b" }, runtimeStatus: "view-only" as const, isActive: false };
-  let resolveWarm!: (ready: { sessionId: string; state: typeof viewA.state; gateMode: "strict" }) => void;
-  const pendingWarm = new Promise<{ sessionId: string; state: typeof viewA.state; gateMode: "strict" }>((resolve) => { resolveWarm = resolve; });
+  const modelA = {
+    id: "warm-model-a",
+    name: "Warm Model A",
+    provider: "test",
+    input: ["text"],
+    reasoning: true,
+  };
+  const modelB = {
+    id: "warm-model-b",
+    name: "Warm Model B",
+    provider: "test",
+    input: ["text"],
+    reasoning: true,
+  };
+  const summaryA = {
+    ...bootstrap.sessions[0],
+    id: coldId,
+    sessionId: "warm-a",
+    name: "Warm A",
+    active: false,
+    writable: false,
+  };
+  const summaryB = {
+    ...bootstrap.sessions[0],
+    id: secondId,
+    sessionId: "warm-b",
+    name: "Warm B",
+    active: false,
+    writable: false,
+  };
+  const viewA = {
+    ...draftView,
+    session: summaryA,
+    state: {
+      ...bootstrap.state,
+      model: modelA,
+      thinkingLevel: "low",
+      sessionId: "warm-a",
+    },
+    runtimeStatus: "view-only" as const,
+    isActive: false,
+    historyPending: true,
+  };
+  const revisitA = {
+    ...viewA,
+    historyPending: false,
+    state: { ...viewA.state, model: modelB, thinkingLevel: "high" },
+  };
+  const viewB = {
+    ...draftView,
+    session: summaryB,
+    state: {
+      ...bootstrap.state,
+      model: modelB,
+      thinkingLevel: "medium",
+      sessionId: "warm-b",
+    },
+    runtimeStatus: "view-only" as const,
+    isActive: false,
+  };
+  let resolveWarm!: (ready: {
+    sessionId: string;
+    state: typeof viewA.state;
+    gateMode: "strict";
+  }) => void;
+  const pendingWarm = new Promise<{
+    sessionId: string;
+    state: typeof viewA.state;
+    gateMode: "strict";
+  }>((resolve) => {
+    resolveWarm = resolve;
+  });
   let viewsOfA = 0;
   Object.assign(api, {
-    bootstrap: async () => ({ ...bootstrap, models: [modelA, modelB], sessions: [bootstrap.sessions[0], summaryA, summaryB], sessionsTotal: 3 }),
+    bootstrap: async () => ({
+      ...bootstrap,
+      models: [modelA, modelB],
+      sessions: [bootstrap.sessions[0], summaryA, summaryB],
+      sessionsTotal: 3,
+    }),
     eventsUrl: () => "/api/events",
     markSessionViewed: async (id: string) => ({ viewing: id }),
     viewSession: async (id: string) => {
@@ -2606,14 +5645,31 @@ test("a stale A Runtime warm cannot overwrite a newer A revisit", async () => {
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {
     await act(async () => root.render(createElement(App)));
-    const sessionButton = (name: string) => [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
-      .find((button) => button.textContent?.includes(name))!;
+    const sessionButton = (name: string) =>
+      [
+        ...dom.window.document.querySelectorAll<HTMLButtonElement>(
+          ".session-item",
+        ),
+      ].find((button) => button.textContent?.includes(name))!;
     await act(async () => sessionButton("Warm A").click());
-    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
     await act(async () => {
-      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "start stale warm");
-      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "start stale warm" }));
-      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "start stale warm");
+      textarea.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: "start stale warm",
+        }),
+      );
+      dom.window.document
+        .querySelector<HTMLButtonElement>(".send-button")!
+        .click();
       await Promise.resolve();
     });
     await act(async () => sessionButton("Warm B").click());
@@ -2622,29 +5678,170 @@ test("a stale A Runtime warm cannot overwrite a newer A revisit", async () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    assert.match(dom.window.document.querySelector(".composer-model-select .compact-select-trigger")?.textContent || "", /Warm Model B/);
-    assert.match(dom.window.document.querySelector(".thinking-control .compact-select-trigger")?.textContent || "", /high/);
+    assert.match(
+      dom.window.document.querySelector(
+        ".composer-model-select .compact-select-trigger",
+      )?.textContent || "",
+      /Warm Model B/,
+    );
+    assert.match(
+      dom.window.document.querySelector(
+        ".thinking-control .compact-select-trigger",
+      )?.textContent || "",
+      /high/,
+    );
     assert.equal(
       dom.window.document.querySelector(".topbar-title")?.textContent,
       "Warm A",
       "the newer A revisit owns the title before an earlier A warm completes",
     );
     await act(async () => {
-      resolveWarm({ sessionId: coldId, state: { ...viewA.state, model: modelA, thinkingLevel: "low" }, gateMode: "strict" });
+      resolveWarm({
+        sessionId: coldId,
+        state: { ...viewA.state, model: modelA, thinkingLevel: "low" },
+        gateMode: "strict",
+      });
       await Promise.resolve();
       await Promise.resolve();
     });
-    assert.match(dom.window.document.querySelector(".composer-model-select .compact-select-trigger")?.textContent || "", /Warm Model B/);
-    assert.match(dom.window.document.querySelector(".thinking-control .compact-select-trigger")?.textContent || "", /high/);
+    assert.match(
+      dom.window.document.querySelector(
+        ".composer-model-select .compact-select-trigger",
+      )?.textContent || "",
+      /Warm Model B/,
+    );
+    assert.match(
+      dom.window.document.querySelector(
+        ".thinking-control .compact-select-trigger",
+      )?.textContent || "",
+      /high/,
+    );
     assert.equal(
       dom.window.document.querySelector(".topbar-title")?.textContent,
       "Warm A",
       "the stale A warm result cannot replace the current A pane title",
     );
     assert.equal(
-      dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")?.placeholder,
+      dom.window.document.querySelector<HTMLTextAreaElement>(
+        "textarea[aria-label='消息输入']",
+      )?.placeholder,
       "输入消息，或粘贴、拖入附件",
       "the returned A pane joins the existing warm and becomes active",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a replacement ignores stale A warm cache writes", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const coldId = "replacement-warm-12345";
+  let promptCalls = 0;
+  const coldSession = {
+    ...bootstrap.sessions[0],
+    id: coldId,
+    sessionId: "replacement-warm",
+    name: "Replacement warm",
+    active: false,
+    writable: false,
+  };
+  const coldView: SessionViewData = {
+    ...draftView,
+    session: coldSession,
+    state: { ...draftView.state, sessionId: "replacement-warm" },
+    isActive: false,
+    runtimeStatus: "view-only",
+  };
+  let resolveWarm!: (value: {
+    sessionId: string;
+    state: typeof coldView.state;
+    gateMode: "strict";
+  }) => void;
+  const pendingWarm = new Promise<{
+    sessionId: string;
+    state: typeof coldView.state;
+    gateMode: "strict";
+  }>((resolve) => {
+    resolveWarm = resolve;
+  });
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      sessions: [bootstrap.sessions[0], coldSession],
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    viewSession: async (id: string) => (id === coldId ? coldView : draftView),
+    warmSession: async () => pendingWarm,
+    prompt: async () => {
+      promptCalls += 1;
+      return { accepted: true, queued: false };
+    },
+    invalidateHandshake: () => undefined,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const coldButton = [
+      ...dom.window.document.querySelectorAll<HTMLButtonElement>(
+        ".session-item",
+      ),
+    ].find((button) => button.textContent?.includes("Replacement warm"))!;
+    await act(async () => coldButton.click());
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "warm");
+      textarea.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: "warm",
+        }),
+      );
+      dom.window.document
+        .querySelector<HTMLButtonElement>(".send-button")!
+        .click();
+      await Promise.resolve();
+    });
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () =>
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "workspace-changing",
+            piChatRunEpoch: "epoch-warm-b",
+            workspaceEpoch: "epoch-warm-b",
+          }),
+        }),
+      ),
+    );
+    await act(async () => {
+      resolveWarm({
+        sessionId: coldId,
+        state: coldView.state,
+        gateMode: "strict",
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.equal(
+      dom.window.document.querySelector(".topbar-title")?.textContent,
+      "Replacement warm",
+      "the old warm completion cannot replace process-B UI state",
+    );
+    assert.equal(
+      promptCalls,
+      0,
+      "the old send chain cannot use process B's transport after its warm settles",
     );
   } finally {
     await act(async () => root.unmount());
@@ -2683,8 +5880,28 @@ test("a stale A prompt acknowledgement cannot modify a newer A revisit", async (
     runtimeStatus: "view-only",
     isActive: false,
   };
-  let resolvePrompt!: (result: { accepted: true; queued: true; id: string; queue: Array<{ id: string; message: string; imageCount: number; createdAt: number }> }) => void;
-  const pendingPrompt = new Promise<{ accepted: true; queued: true; id: string; queue: Array<{ id: string; message: string; imageCount: number; createdAt: number }> }>((resolve) => {
+  let resolvePrompt!: (result: {
+    accepted: true;
+    queued: true;
+    id: string;
+    queue: Array<{
+      id: string;
+      message: string;
+      imageCount: number;
+      createdAt: number;
+    }>;
+  }) => void;
+  const pendingPrompt = new Promise<{
+    accepted: true;
+    queued: true;
+    id: string;
+    queue: Array<{
+      id: string;
+      message: string;
+      imageCount: number;
+      createdAt: number;
+    }>;
+  }>((resolve) => {
     resolvePrompt = resolve;
   });
   Object.assign(api, {
@@ -2695,7 +5912,7 @@ test("a stale A prompt acknowledgement cannot modify a newer A revisit", async (
     }),
     eventsUrl: () => "/api/events",
     markSessionViewed: async (id: string) => ({ viewing: id }),
-    viewSession: async (id: string) => id === secondId ? viewB : viewA,
+    viewSession: async (id: string) => (id === secondId ? viewB : viewA),
     prompt: async () => pendingPrompt,
   });
   const root = createRoot(dom.window.document.querySelector("#root")!);
@@ -2705,14 +5922,28 @@ test("a stale A prompt acknowledgement cannot modify a newer A revisit", async (
       "textarea[aria-label='消息输入']",
     )!;
     await act(async () => {
-      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "old prompt");
-      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "old prompt" }));
-      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "old prompt");
+      textarea.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: "old prompt",
+        }),
+      );
+      dom.window.document
+        .querySelector<HTMLButtonElement>(".send-button")!
+        .click();
       await Promise.resolve();
     });
     const sessionButton = (name: string) =>
-      [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
-        .find((button) => button.textContent?.includes(name))!;
+      [
+        ...dom.window.document.querySelectorAll<HTMLButtonElement>(
+          ".session-item",
+        ),
+      ].find((button) => button.textContent?.includes(name))!;
     await act(async () => sessionButton("Prompt B").click());
     await act(async () => sessionButton("Active").click());
     await act(async () => {
@@ -2725,7 +5956,14 @@ test("a stale A prompt acknowledgement cannot modify a newer A revisit", async (
         accepted: true,
         queued: true,
         id: "old-queue",
-        queue: [{ id: "old-queue", message: "old prompt", imageCount: 0, createdAt: 1 }],
+        queue: [
+          {
+            id: "old-queue",
+            message: "old prompt",
+            imageCount: 0,
+            createdAt: 1,
+          },
+        ],
       });
       await Promise.resolve();
       await Promise.resolve();
@@ -2782,7 +6020,7 @@ test("a stale A prompt failure cannot modify a newer A revisit", async () => {
     }),
     eventsUrl: () => "/api/events",
     markSessionViewed: async (id: string) => ({ viewing: id }),
-    viewSession: async (id: string) => id === secondId ? viewB : viewA,
+    viewSession: async (id: string) => (id === secondId ? viewB : viewA),
     prompt: async () => pendingPrompt,
   });
   const root = createRoot(dom.window.document.querySelector("#root")!);
@@ -2792,14 +6030,28 @@ test("a stale A prompt failure cannot modify a newer A revisit", async () => {
       "textarea[aria-label='消息输入']",
     )!;
     await act(async () => {
-      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "old failed prompt");
-      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "old failed prompt" }));
-      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "old failed prompt");
+      textarea.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: "old failed prompt",
+        }),
+      );
+      dom.window.document
+        .querySelector<HTMLButtonElement>(".send-button")!
+        .click();
       await Promise.resolve();
     });
     const sessionButton = (name: string) =>
-      [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
-        .find((button) => button.textContent?.includes(name))!;
+      [
+        ...dom.window.document.querySelectorAll<HTMLButtonElement>(
+          ".session-item",
+        ),
+      ].find((button) => button.textContent?.includes(name))!;
     await act(async () => sessionButton("Prompt failure B").click());
     await act(async () => sessionButton("Active").click());
     await act(async () => {
@@ -2889,13 +6141,21 @@ test("a stale A extension failure cannot reopen a newer A pane", async () => {
   try {
     await act(async () => root.render(createElement(App)));
     const sessionButton = (name: string) =>
-      [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
-        .find((button) => button.textContent?.includes(name))!;
+      [
+        ...dom.window.document.querySelectorAll<HTMLButtonElement>(
+          ".session-item",
+        ),
+      ].find((button) => button.textContent?.includes(name))!;
     await act(async () => sessionButton("Extension A").click());
     assert.ok(dom.window.document.querySelector(".extension-dialog"));
     await act(async () =>
-      [...dom.window.document.querySelectorAll<HTMLButtonElement>(".extension-dialog button")]
-        .find((button) => button.textContent === "确定")!.click(),
+      [
+        ...dom.window.document.querySelectorAll<HTMLButtonElement>(
+          ".extension-dialog button",
+        ),
+      ]
+        .find((button) => button.textContent === "确定")!
+        .click(),
     );
     await act(async () => sessionButton("Extension B").click());
     await act(async () => sessionButton("Extension A").click());
@@ -2928,7 +6188,14 @@ test("a stale A reconcile rejection cannot retry or show an error on a newer A p
   const { App } = await import("../src/web/App");
   const originals = { ...api };
   const secondId = "reconcile-b-123456789";
-  const summaryB = { ...bootstrap.sessions[0], id: secondId, sessionId: "reconcile-b", name: "Reconcile B", active: false, writable: false };
+  const summaryB = {
+    ...bootstrap.sessions[0],
+    id: secondId,
+    sessionId: "reconcile-b",
+    name: "Reconcile B",
+    active: false,
+    writable: false,
+  };
   const streamingA: SessionViewData = {
     ...draftView,
     session: { ...bootstrap.sessions[0], active: true, writable: true },
@@ -2938,12 +6205,26 @@ test("a stale A reconcile rejection cannot retry or show an error on a newer A p
     isStreaming: true,
     reconcilePending: true,
   };
-  const viewB: SessionViewData = { ...draftView, session: summaryB, state: { ...bootstrap.state, sessionId: "reconcile-b" }, runtimeStatus: "view-only", isActive: false };
+  const viewB: SessionViewData = {
+    ...draftView,
+    session: summaryB,
+    state: { ...bootstrap.state, sessionId: "reconcile-b" },
+    runtimeStatus: "view-only",
+    isActive: false,
+  };
   let rejectOldReconcile!: (cause: Error) => void;
-  const pendingOldReconcile = new Promise<SessionViewData>((_resolve, reject) => { rejectOldReconcile = reject; });
+  const pendingOldReconcile = new Promise<SessionViewData>(
+    (_resolve, reject) => {
+      rejectOldReconcile = reject;
+    },
+  );
   let activeReads = 0;
   Object.assign(api, {
-    bootstrap: async () => ({ ...bootstrap, sessions: [bootstrap.sessions[0], summaryB], sessionsTotal: 2 }),
+    bootstrap: async () => ({
+      ...bootstrap,
+      sessions: [bootstrap.sessions[0], summaryB],
+      sessionsTotal: 2,
+    }),
     eventsUrl: () => "/api/events",
     markSessionViewed: async (id: string) => ({ viewing: id }),
     viewSession: async (id: string) => {
@@ -2960,18 +6241,36 @@ test("a stale A reconcile rejection cannot retry or show an error on a newer A p
       "textarea[aria-label='消息输入']",
     )!;
     await act(async () => {
-      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "start reconcile");
-      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "start reconcile" }));
-      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "start reconcile");
+      textarea.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: "start reconcile",
+        }),
+      );
+      dom.window.document
+        .querySelector<HTMLButtonElement>(".send-button")!
+        .click();
       await Promise.resolve();
     });
     const sessionButton = (name: string) =>
-      [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
-        .find((button) => button.textContent?.includes(name))!;
+      [
+        ...dom.window.document.querySelectorAll<HTMLButtonElement>(
+          ".session-item",
+        ),
+      ].find((button) => button.textContent?.includes(name))!;
     await act(async () => sessionButton("Reconcile B").click());
     await act(async () => sessionButton("Active").click());
     await act(async () => new Promise((resolve) => setTimeout(resolve, 4_100)));
-    assert.equal(activeReads, 2, "the acknowledged A prompt starts one reconcile request after the initial read");
+    assert.equal(
+      activeReads,
+      2,
+      "the acknowledged A prompt starts one reconcile request after the initial read",
+    );
     await act(async () => sessionButton("Reconcile B").click());
     await act(async () => sessionButton("Active").click());
     await act(async () => {
@@ -2984,7 +6283,11 @@ test("a stale A reconcile rejection cannot retry or show an error on a newer A p
       /stale reconcile failed/,
     );
     await act(async () => new Promise((resolve) => setTimeout(resolve, 80)));
-    assert.equal(activeReads, 3, "the stale rejection must not schedule another reconcile retry");
+    assert.equal(
+      activeReads,
+      3,
+      "the stale rejection must not schedule another reconcile retry",
+    );
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);
@@ -3014,30 +6317,47 @@ test("a stale Gate auto-allow result cannot show feedback after A → B → A", 
     isActive: false,
   };
   let resolveResponse!: () => void;
-  const pendingResponse = new Promise<void>((resolve) => { resolveResponse = resolve; });
+  const pendingResponse = new Promise<void>((resolve) => {
+    resolveResponse = resolve;
+  });
   Object.assign(api, {
-    bootstrap: async () => ({ ...bootstrap, sessions: [bootstrap.sessions[0], summaryB], sessionsTotal: 2 }),
+    bootstrap: async () => ({
+      ...bootstrap,
+      sessions: [bootstrap.sessions[0], summaryB],
+      sessionsTotal: 2,
+    }),
     eventsUrl: () => "/api/events",
     markSessionViewed: async (id: string) => ({ viewing: id }),
-    viewSession: async (id: string) => id === secondId ? viewB : draftView,
+    viewSession: async (id: string) => (id === secondId ? viewB : draftView),
     respondToExtension: async () => pendingResponse,
   });
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {
     await act(async () => root.render(createElement(App)));
     const source = FakeEventSource.instances.at(-1)!;
-    await act(async () => source.emitPi({ type: "pi_chat_gate_mode_changed", piChatSessionId: activeId, mode: "open" }));
-    await act(async () => source.emitPi({
-      type: "extension_ui_request",
-      piChatSessionId: activeId,
-      id: "auto-allow-stale",
-      method: "select",
-      title: "Pi Chat Gate: bash\necho stale",
-      options: ["allow", "block"],
-    }));
+    await act(async () =>
+      source.emitPi({
+        type: "pi_chat_gate_mode_changed",
+        piChatSessionId: activeId,
+        mode: "open",
+      }),
+    );
+    await act(async () =>
+      source.emitPi({
+        type: "extension_ui_request",
+        piChatSessionId: activeId,
+        id: "auto-allow-stale",
+        method: "select",
+        title: "Pi Chat Gate: bash\necho stale",
+        options: ["allow", "block"],
+      }),
+    );
     const sessionButton = (name: string) =>
-      [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
-        .find((button) => button.textContent?.includes(name))!;
+      [
+        ...dom.window.document.querySelectorAll<HTMLButtonElement>(
+          ".session-item",
+        ),
+      ].find((button) => button.textContent?.includes(name))!;
     await act(async () => sessionButton("Gate feedback B").click());
     await act(async () => sessionButton("Active").click());
     await act(async () => {
@@ -3063,29 +6383,65 @@ test("a stale Gate auto-allow failure cannot show an error after A → B", async
   const { App } = await import("../src/web/App");
   const originals = { ...api };
   const secondId = "gate-feedback-failure-b";
-  const summaryB = { ...bootstrap.sessions[0], id: secondId, sessionId: "gate-feedback-failure-b", name: "Gate failure B", active: false, writable: false };
-  const viewB: SessionViewData = { ...draftView, session: summaryB, state: { ...bootstrap.state, sessionId: "gate-feedback-failure-b" }, runtimeStatus: "view-only", isActive: false };
+  const summaryB = {
+    ...bootstrap.sessions[0],
+    id: secondId,
+    sessionId: "gate-feedback-failure-b",
+    name: "Gate failure B",
+    active: false,
+    writable: false,
+  };
+  const viewB: SessionViewData = {
+    ...draftView,
+    session: summaryB,
+    state: { ...bootstrap.state, sessionId: "gate-feedback-failure-b" },
+    runtimeStatus: "view-only",
+    isActive: false,
+  };
   let rejectResponse!: (cause: Error) => void;
-  const pendingResponse = new Promise<never>((_resolve, reject) => { rejectResponse = reject; });
+  const pendingResponse = new Promise<never>((_resolve, reject) => {
+    rejectResponse = reject;
+  });
   Object.assign(api, {
-    bootstrap: async () => ({ ...bootstrap, sessions: [bootstrap.sessions[0], summaryB], sessionsTotal: 2 }),
+    bootstrap: async () => ({
+      ...bootstrap,
+      sessions: [bootstrap.sessions[0], summaryB],
+      sessionsTotal: 2,
+    }),
     eventsUrl: () => "/api/events",
     markSessionViewed: async (id: string) => ({ viewing: id }),
-    viewSession: async (id: string) => id === secondId ? viewB : draftView,
+    viewSession: async (id: string) => (id === secondId ? viewB : draftView),
     respondToExtension: async () => pendingResponse,
   });
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {
     await act(async () => root.render(createElement(App)));
     const source = FakeEventSource.instances.at(-1)!;
-    await act(async () => source.emitPi({ type: "pi_chat_gate_mode_changed", piChatSessionId: activeId, mode: "open" }));
-    await act(async () => source.emitPi({
-      type: "extension_ui_request", piChatSessionId: activeId, id: "auto-allow-stale-failure", method: "select",
-      title: "Pi Chat Gate: bash\necho stale", options: ["allow", "block"],
-    }));
     await act(async () =>
-      [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
-        .find((button) => button.textContent?.includes("Gate failure B"))!.click(),
+      source.emitPi({
+        type: "pi_chat_gate_mode_changed",
+        piChatSessionId: activeId,
+        mode: "open",
+      }),
+    );
+    await act(async () =>
+      source.emitPi({
+        type: "extension_ui_request",
+        piChatSessionId: activeId,
+        id: "auto-allow-stale-failure",
+        method: "select",
+        title: "Pi Chat Gate: bash\necho stale",
+        options: ["allow", "block"],
+      }),
+    );
+    await act(async () =>
+      [
+        ...dom.window.document.querySelectorAll<HTMLButtonElement>(
+          ".session-item",
+        ),
+      ]
+        .find((button) => button.textContent?.includes("Gate failure B"))!
+        .click(),
     );
     await act(async () => {
       rejectResponse(new Error("stale auto-allow failed"));
@@ -3143,8 +6499,14 @@ test("a stale A takeover cannot overwrite a newer A revisit or control SSE", asy
     isActive: false,
     runtimeStatus: "view-only",
   };
-  let resolveTakeover!: (value: { controlOwner: string; controlledByThisWindow: true }) => void;
-  const pendingTakeover = new Promise<{ controlOwner: string; controlledByThisWindow: true }>((resolve) => {
+  let resolveTakeover!: (value: {
+    controlOwner: string;
+    controlledByThisWindow: true;
+  }) => void;
+  const pendingTakeover = new Promise<{
+    controlOwner: string;
+    controlledByThisWindow: true;
+  }>((resolve) => {
     resolveTakeover = resolve;
   });
   Object.assign(api, {
@@ -3157,23 +6519,31 @@ test("a stale A takeover cannot overwrite a newer A revisit or control SSE", asy
     }),
     eventsUrl: () => "/api/events",
     markSessionViewed: async (id: string) => ({ viewing: id }),
-    viewSession: async (id: string) => id === secondId ? viewB : revisitedA,
+    viewSession: async (id: string) => (id === secondId ? viewB : revisitedA),
     takeSessionControl: async () => pendingTakeover,
   });
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {
     await act(async () => root.render(createElement(App)));
-    await act(async () => new Promise((resolve) => dom.window.setTimeout(resolve, 450)));
-    const takeover = [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-control-banner button")]
-      .find((button) => button.textContent?.includes("接管控制"));
+    await act(
+      async () => new Promise((resolve) => dom.window.setTimeout(resolve, 450)),
+    );
+    const takeover = [
+      ...dom.window.document.querySelectorAll<HTMLButtonElement>(
+        ".session-control-banner button",
+      ),
+    ].find((button) => button.textContent?.includes("接管控制"));
     assert.ok(takeover, "the initially foreign A pane exposes takeover");
     await act(async () => {
       takeover.click();
       await Promise.resolve();
     });
     const sessionButton = (name: string) =>
-      [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
-        .find((button) => button.textContent?.includes(name))!;
+      [
+        ...dom.window.document.querySelectorAll<HTMLButtonElement>(
+          ".session-item",
+        ),
+      ].find((button) => button.textContent?.includes(name))!;
     await act(async () => sessionButton("Takeover B").click());
     await act(async () => sessionButton("Active").click());
     const source = FakeEventSource.instances.at(-1)!;
@@ -3187,11 +6557,16 @@ test("a stale A takeover cannot overwrite a newer A revisit or control SSE", asy
       await Promise.resolve();
     });
     await act(async () => {
-      resolveTakeover({ controlOwner: "stale-takeover", controlledByThisWindow: true });
+      resolveTakeover({
+        controlOwner: "stale-takeover",
+        controlledByThisWindow: true,
+      });
       await Promise.resolve();
       await Promise.resolve();
     });
-    await act(async () => new Promise((resolve) => dom.window.setTimeout(resolve, 450)));
+    await act(
+      async () => new Promise((resolve) => dom.window.setTimeout(resolve, 450)),
+    );
     assert.ok(
       dom.window.document.querySelector(".session-control-banner"),
       "a stale pre-navigation takeover cannot claim the revisited A pane",
@@ -3374,8 +6749,8 @@ test("late model and thinking responses from A do not overwrite the Session B co
   }
 });
 
-test("abort clears a stale sidebar running activity before a later refresh", async () => {
-  const { dom } = installDom();
+test("a pending abort stays in stopping state until agent settlement", async () => {
+  const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
@@ -3384,11 +6759,25 @@ test("abort clears a stale sidebar running activity before a later refresh", asy
     bootstrap: async () => ({
       ...bootstrap,
       state: { ...bootstrap.state, isStreaming: true },
-      sessions: [{ ...bootstrap.sessions[0], running: true, activity: { execution: "running" as const, awaitingConfirmation: false } }],
+      sessions: [
+        {
+          ...bootstrap.sessions[0],
+          running: true,
+          activity: {
+            execution: "running" as const,
+            awaitingConfirmation: false,
+          },
+        },
+      ],
     }),
     eventsUrl: () => "/api/events",
     markSessionViewed: async () => ({ viewing: activeId }),
-    abort: async () => ({ ok: true, isStreaming: false, queuePaused: false }),
+    abort: async () => ({
+      ok: true,
+      abortPending: true,
+      isStreaming: true,
+      queuePaused: false,
+    }),
     viewSession: async () => ({ ...draftView, session: bootstrap.sessions[0] }),
   });
   const root = createRoot(dom.window.document.querySelector("#root")!);
@@ -3396,9 +6785,31 @@ test("abort clears a stale sidebar running activity before a later refresh", asy
     await act(async () => root.render(createElement(App)));
     assert.ok(dom.window.document.querySelector(".session-status.is-running"));
     await act(async () =>
-      dom.window.document.querySelector<HTMLButtonElement>(".stop-button")!.click(),
+      dom.window.document
+        .querySelector<HTMLButtonElement>(".stop-button")!
+        .click(),
     );
-    assert.equal(dom.window.document.querySelector(".session-status.is-running"), null);
+    assert.match(
+      dom.window.document.querySelector(".app-toast")?.textContent || "",
+      /正在结束当前操作/,
+    );
+    assert.equal(
+      dom.window.document.querySelector<HTMLButtonElement>(".stop-button")
+        ?.disabled,
+      true,
+    );
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () =>
+      source.emitPi({ type: "agent_settled", piChatSessionId: activeId }),
+    );
+    assert.equal(
+      dom.window.document.querySelector(".session-status.is-running"),
+      null,
+    );
+    assert.doesNotMatch(
+      dom.window.document.querySelector(".app-toast")?.textContent || "",
+      /正在结束当前操作/,
+    );
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);
@@ -3665,7 +7076,14 @@ test("New is instant and the first send shows Pi startup before materializing a 
       newSessionCalls += 1;
       const view = await pendingNew;
       promptCalls += 1;
-      return { sessionId: view.session.id, session: view.session, state: view.state, gateMode: "strict" as const, accepted: true as const, queued: false as const };
+      return {
+        sessionId: view.session.id,
+        session: view.session,
+        state: view.state,
+        gateMode: "strict" as const,
+        accepted: true as const,
+        queued: false as const,
+      };
     },
     viewSession: async () => {
       viewSessionCalls += 1;
@@ -3770,23 +7188,54 @@ test("draft startup races keep the composer usable, preserve newer control, and 
   const originals = { ...api };
   let resolveNew!: (view: SessionViewData) => void;
   let resolvePrompt!: (value: { accepted: boolean; queued: boolean }) => void;
-  let resolveSecondPrompt!: (value: { accepted: boolean; queued: boolean }) => void;
-  let resolveThirdPrompt!: (value: { accepted: boolean; queued: boolean }) => void;
-  const pendingNew = new Promise<SessionViewData>((resolve) => { resolveNew = resolve; });
-  const pendingPrompt = new Promise<{ accepted: boolean; queued: boolean }>((resolve) => { resolvePrompt = resolve; });
-  const pendingSecondPrompt = new Promise<{ accepted: boolean; queued: boolean }>((resolve) => { resolveSecondPrompt = resolve; });
-  const pendingThirdPrompt = new Promise<{ accepted: boolean; queued: boolean }>((resolve) => { resolveThirdPrompt = resolve; });
+  let resolveSecondPrompt!: (value: {
+    accepted: boolean;
+    queued: boolean;
+  }) => void;
+  let resolveThirdPrompt!: (value: {
+    accepted: boolean;
+    queued: boolean;
+  }) => void;
+  const pendingNew = new Promise<SessionViewData>((resolve) => {
+    resolveNew = resolve;
+  });
+  const pendingPrompt = new Promise<{ accepted: boolean; queued: boolean }>(
+    (resolve) => {
+      resolvePrompt = resolve;
+    },
+  );
+  const pendingSecondPrompt = new Promise<{
+    accepted: boolean;
+    queued: boolean;
+  }>((resolve) => {
+    resolveSecondPrompt = resolve;
+  });
+  const pendingThirdPrompt = new Promise<{
+    accepted: boolean;
+    queued: boolean;
+  }>((resolve) => {
+    resolveThirdPrompt = resolve;
+  });
   let promptCalls = 0;
   const foreignDraft: SessionViewData = {
     ...draftView,
     controlOwner: "another-window",
     controlledByThisWindow: false,
-    session: { ...draftView.session, controlOwner: "another-window", controlledByThisWindow: false },
+    session: {
+      ...draftView.session,
+      controlOwner: "another-window",
+      controlledByThisWindow: false,
+    },
   };
   const authoritative: SessionViewData = {
     ...draftView,
     state: { ...draftView.state, isStreaming: false, messageCount: 1 },
-    session: { ...draftView.session, messageCount: 1, controlOwner: "this-window", controlledByThisWindow: true },
+    session: {
+      ...draftView.session,
+      messageCount: 1,
+      controlOwner: "this-window",
+      controlledByThisWindow: true,
+    },
     messages: [{ role: "user", content: "draft race", timestamp: 200 }],
     messageTotal: 1,
     turnTotal: 1,
@@ -3800,11 +7249,22 @@ test("draft startup races keep the composer usable, preserve newer control, and 
     clearSessionViewed: async () => ({ viewing: "" }),
     submitNewSession: async () => {
       const view = await pendingNew;
-      return { sessionId: view.session.id, session: view.session, state: view.state, gateMode: "strict" as const, accepted: true as const, queued: false as const };
+      return {
+        sessionId: view.session.id,
+        session: view.session,
+        state: view.state,
+        gateMode: "strict" as const,
+        accepted: true as const,
+        queued: false as const,
+      };
     },
     prompt: async () => {
       promptCalls += 1;
-      return promptCalls === 1 ? pendingPrompt : promptCalls === 2 ? pendingSecondPrompt : pendingThirdPrompt;
+      return promptCalls === 1
+        ? pendingPrompt
+        : promptCalls === 2
+          ? pendingSecondPrompt
+          : pendingThirdPrompt;
     },
     viewSession: async () => authoritative,
   });
@@ -3813,78 +7273,215 @@ test("draft startup races keep the composer usable, preserve newer control, and 
     await act(async () => root.render(createElement(App)));
     const source = FakeEventSource.instances.at(-1)!;
     await act(async () => {
-      source.dispatchEvent(new dom.window.MessageEvent("ready", { data: JSON.stringify({ lifecycle: "idle", piChatRunEpoch: "epoch-a" }) }));
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "idle",
+            piChatRunEpoch: "epoch-a",
+          }),
+        }),
+      );
       await Promise.resolve();
     });
-    const newButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "New")!;
+    const newButton = [
+      ...dom.window.document.querySelectorAll<HTMLButtonElement>("button"),
+    ].find((button) => button.textContent?.trim() === "New")!;
     await act(async () => newButton.click());
-    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
     await act(async () => {
-      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "draft race");
-      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "draft race" }));
-      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "draft race");
+      textarea.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: "draft race",
+        }),
+      );
+      dom.window.document
+        .querySelector<HTMLButtonElement>(".send-button")!
+        .click();
       await Promise.resolve();
     });
 
     await act(async () => {
-      source.emitPi({ type: "pi_chat_session_control_changed", sessionId: draftView.session.id, controlOwner: "this-window", controlledByThisWindow: true });
+      source.emitPi({
+        type: "pi_chat_session_control_changed",
+        sessionId: draftView.session.id,
+        controlOwner: "this-window",
+        controlledByThisWindow: true,
+      });
       resolveNew(foreignDraft);
       await Promise.resolve();
       await Promise.resolve();
     });
-    assert.equal(textarea.disabled, false, "the combined first-prompt request owns the startup transaction without requiring a full draft view");
-    assert.notEqual(textarea.placeholder, "正在切换会话…", "prompt preparation must not masquerade as navigation");
+    assert.equal(
+      textarea.disabled,
+      false,
+      "the combined first-prompt request owns the startup transaction without requiring a full draft view",
+    );
+    assert.notEqual(
+      textarea.placeholder,
+      "正在切换会话…",
+      "prompt preparation must not masquerade as navigation",
+    );
 
     await act(async () => {
-      source.emitPi({ type: "agent_start", piChatSessionId: draftView.session.id, piChatRunEpoch: "epoch-a", piChatRunGeneration: 1 });
+      source.emitPi({
+        type: "agent_start",
+        piChatSessionId: draftView.session.id,
+        piChatRunEpoch: "epoch-a",
+        piChatRunGeneration: 1,
+      });
       await Promise.resolve();
     });
-    assert.notEqual(textarea.placeholder, "正在切换会话…", `unexpected navigation lock: ${textarea.placeholder}`);
-    assert.equal(textarea.disabled, false, `agent_start releases the late prompt acknowledgement lock (${textarea.placeholder})`);
-    assert.equal(dom.window.document.querySelectorAll(".message-user").length, 1);
+    assert.notEqual(
+      textarea.placeholder,
+      "正在切换会话…",
+      `unexpected navigation lock: ${textarea.placeholder}`,
+    );
+    assert.equal(
+      textarea.disabled,
+      false,
+      `agent_start releases the late prompt acknowledgement lock (${textarea.placeholder})`,
+    );
+    assert.equal(
+      dom.window.document.querySelectorAll(".message-user").length,
+      1,
+    );
 
     await act(async () => {
-      source.emitPi({ type: "message_end", piChatSessionId: draftView.session.id, piChatRunEpoch: "epoch-a", piChatRunGeneration: 1, message: { role: "user", content: "draft race", timestamp: 220 } });
-      source.emitPi({ type: "message_end", piChatSessionId: draftView.session.id, piChatRunEpoch: "epoch-a", piChatRunGeneration: 1, message: { role: "assistant", content: "answer finished before prompt ack", timestamp: 230 } });
-      source.emitPi({ type: "agent_settled", piChatSessionId: draftView.session.id, piChatRunEpoch: "epoch-a", piChatRunGeneration: 1 });
+      source.emitPi({
+        type: "message_end",
+        piChatSessionId: draftView.session.id,
+        piChatRunEpoch: "epoch-a",
+        piChatRunGeneration: 1,
+        message: { role: "user", content: "draft race", timestamp: 220 },
+      });
+      source.emitPi({
+        type: "message_end",
+        piChatSessionId: draftView.session.id,
+        piChatRunEpoch: "epoch-a",
+        piChatRunGeneration: 1,
+        message: {
+          role: "assistant",
+          content: "answer finished before prompt ack",
+          timestamp: 230,
+        },
+      });
+      source.emitPi({
+        type: "agent_settled",
+        piChatSessionId: draftView.session.id,
+        piChatRunEpoch: "epoch-a",
+        piChatRunGeneration: 1,
+      });
       await Promise.resolve();
       await Promise.resolve();
     });
-    assert.equal(dom.window.document.querySelector(".composer-preparing-status"), null, "a completed answer clears preparation even while prompt HTTP is pending");
-    assert.equal(textarea.disabled, false, "settlement must not re-lock the composer behind the pending HTTP request");
-    assert.match(dom.window.document.body.textContent || "", /answer finished before prompt ack/);
+    assert.equal(
+      dom.window.document.querySelector(".composer-preparing-status"),
+      null,
+      "a completed answer clears preparation even while prompt HTTP is pending",
+    );
+    assert.equal(
+      textarea.disabled,
+      false,
+      "settlement must not re-lock the composer behind the pending HTTP request",
+    );
+    assert.match(
+      dom.window.document.body.textContent || "",
+      /answer finished before prompt ack/,
+    );
     await act(async () => {
-      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "second turn");
-      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "second turn" }));
-      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "second turn");
+      textarea.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: "second turn",
+        }),
+      );
+      dom.window.document
+        .querySelector<HTMLButtonElement>(".send-button")!
+        .click();
       await Promise.resolve();
     });
-    assert.equal(promptCalls, 1, "the first combined submission already owns its prompt acknowledgement; no second mocked prompt dispatch is needed before it resolves");
-    assert.equal(textarea.disabled, true, "the combined first-submit acknowledgement retains its own prompt lease until Pi confirms the next generation");
+    assert.equal(
+      promptCalls,
+      1,
+      "the first combined submission already owns its prompt acknowledgement; no second mocked prompt dispatch is needed before it resolves",
+    );
+    assert.equal(
+      textarea.disabled,
+      true,
+      "the combined first-submit acknowledgement retains its own prompt lease until Pi confirms the next generation",
+    );
     await act(async () => {
-      source.emitPi({ type: "agent_settled", piChatSessionId: draftView.session.id, piChatRunEpoch: "epoch-a", piChatRunGeneration: 1 });
+      source.emitPi({
+        type: "agent_settled",
+        piChatSessionId: draftView.session.id,
+        piChatRunEpoch: "epoch-a",
+        piChatRunGeneration: 1,
+      });
       await Promise.resolve();
     });
-    assert.equal(textarea.disabled, true, "a delayed first-turn event cannot release the active combined-submit lease");
+    assert.equal(
+      textarea.disabled,
+      true,
+      "a delayed first-turn event cannot release the active combined-submit lease",
+    );
     await act(async () => {
       resolvePrompt({ accepted: true, queued: false });
       await Promise.resolve();
       await Promise.resolve();
     });
-    assert.equal(textarea.disabled, false, "the first combined acknowledgement settles its only pending submission lease");
+    assert.equal(
+      textarea.disabled,
+      false,
+      "the first combined acknowledgement settles its only pending submission lease",
+    );
     await act(async () => {
-      source.emitPi({ type: "agent_start", piChatSessionId: draftView.session.id, piChatRunEpoch: "epoch-a", piChatRunGeneration: 2 });
+      source.emitPi({
+        type: "agent_start",
+        piChatSessionId: draftView.session.id,
+        piChatRunEpoch: "epoch-a",
+        piChatRunGeneration: 2,
+      });
       await Promise.resolve();
     });
-    assert.equal(textarea.disabled, false, "the matching later run generation releases the active prompt lease");
-    assert.equal(dom.window.document.querySelector(".composer-preparing-status"), null, "the late first acknowledgement cannot restore the stale preparation bubble");
+    assert.equal(
+      textarea.disabled,
+      false,
+      "the matching later run generation releases the active prompt lease",
+    );
+    assert.equal(
+      dom.window.document.querySelector(".composer-preparing-status"),
+      null,
+      "the late first acknowledgement cannot restore the stale preparation bubble",
+    );
     await act(async () => {
       resolveSecondPrompt({ accepted: true, queued: false });
       await Promise.resolve();
-      source.emitPi({ type: "agent_settled", piChatSessionId: draftView.session.id, piChatRunEpoch: "epoch-a", piChatRunGeneration: 2 });
+      source.emitPi({
+        type: "agent_settled",
+        piChatSessionId: draftView.session.id,
+        piChatRunEpoch: "epoch-a",
+        piChatRunGeneration: 2,
+      });
       await Promise.resolve();
     });
-    assert.equal(dom.window.document.querySelectorAll(".message-user").length, 2, "each of the two submitted turns appears exactly once");
+    assert.equal(
+      dom.window.document.querySelectorAll(".message-user").length,
+      2,
+      "each of the two submitted turns appears exactly once",
+    );
 
     const restartedBootstrap: BootstrapData = {
       ...bootstrap,
@@ -3898,33 +7495,81 @@ test("draft startup races keep the composer usable, preserve newer control, and 
     };
     Object.assign(api, { bootstrap: async () => restartedBootstrap });
     await act(async () => {
-      source.dispatchEvent(new dom.window.MessageEvent("ready", { data: JSON.stringify({ lifecycle: "idle", piChatRunEpoch: "epoch-b" }) }));
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "idle",
+            piChatRunEpoch: "epoch-b",
+          }),
+        }),
+      );
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     await act(async () => {
-      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "third turn after restart");
-      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "third turn after restart" }));
-      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "third turn after restart");
+      textarea.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: "third turn after restart",
+        }),
+      );
+      dom.window.document
+        .querySelector<HTMLButtonElement>(".send-button")!
+        .click();
       await Promise.resolve();
     });
-    assert.equal(promptCalls, 2, "the combined first submit replaces the old separate first prompt dispatch");
-    assert.equal(textarea.disabled, false, "the combined first submission leaves the restarted prompt path free once prior work has settled");
+    assert.equal(
+      promptCalls,
+      2,
+      "the combined first submit replaces the old separate first prompt dispatch",
+    );
+    assert.equal(
+      textarea.disabled,
+      false,
+      "the combined first submission leaves the restarted prompt path free once prior work has settled",
+    );
     await act(async () => {
-      source.emitPi({ type: "agent_start", piChatSessionId: draftView.session.id, piChatRunEpoch: "epoch-a", piChatRunGeneration: 3 });
+      source.emitPi({
+        type: "agent_start",
+        piChatSessionId: draftView.session.id,
+        piChatRunEpoch: "epoch-a",
+        piChatRunGeneration: 3,
+      });
       await Promise.resolve();
     });
-    assert.equal(textarea.disabled, false, "a stale event from the previous service epoch is ignored");
+    assert.equal(
+      textarea.disabled,
+      false,
+      "a stale event from the previous service epoch is ignored",
+    );
     await act(async () => {
-      source.emitPi({ type: "agent_start", piChatSessionId: draftView.session.id, piChatRunEpoch: "epoch-b", piChatRunGeneration: 1 });
+      source.emitPi({
+        type: "agent_start",
+        piChatSessionId: draftView.session.id,
+        piChatRunEpoch: "epoch-b",
+        piChatRunGeneration: 1,
+      });
       await Promise.resolve();
     });
-    assert.equal(textarea.disabled, false, "generation one from the replacement service releases the new lease");
+    assert.equal(
+      textarea.disabled,
+      false,
+      "generation one from the replacement service releases the new lease",
+    );
     await act(async () => {
       resolveThirdPrompt({ accepted: true, queued: false });
       await Promise.resolve();
     });
     await act(async () => new Promise((resolve) => setTimeout(resolve, 450)));
-    assert.equal(dom.window.document.querySelector(".session-control-banner"), null, "a stale draft view must not overwrite newer control SSE");
+    assert.equal(
+      dom.window.document.querySelector(".session-control-banner"),
+      null,
+      "a stale draft view must not overwrite newer control SSE",
+    );
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);
@@ -4019,6 +7664,111 @@ test("rename updates the sidebar and current title before confirmation, then rol
     assert.match(
       dom.window.document.querySelector(".app-toast.error")?.textContent || "",
       /重命名失败，已恢复原名称：后端拒绝/,
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a replacement clears stale rename intent and ignores its old finalization", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  let resolveRename!: (value: BootstrapData) => void;
+  const pendingRename = new Promise<BootstrapData>((resolve) => {
+    resolveRename = resolve;
+  });
+  Object.assign(api, {
+    bootstrap: async () => bootstrap,
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    renameSession: async () => pendingRename,
+    invalidateHandshake: () => undefined,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    await act(async () =>
+      dom.window.document
+        .querySelector<HTMLButtonElement>(".session-menu-trigger")!
+        .click(),
+    );
+    await act(async () =>
+      [
+        ...dom.window.document.querySelectorAll<HTMLButtonElement>(
+          "[role='menuitem']",
+        ),
+      ]
+        .find((button) => button.textContent === "重命名")!
+        .click(),
+    );
+    const input = dom.window.document.querySelector<HTMLInputElement>(
+      "input[aria-label='对话名称']",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLInputElement.prototype,
+        "value",
+      )?.set?.call(input, "A stale rename");
+      input.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: "A stale rename",
+        }),
+      );
+    });
+    await act(async () =>
+      [
+        ...dom.window.document.querySelectorAll<HTMLButtonElement>(
+          ".session-dialog button",
+        ),
+      ]
+        .find((button) => button.textContent === "确认")!
+        .click(),
+    );
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () =>
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "workspace-changing",
+            piChatRunEpoch: "epoch-rename-b",
+            workspaceEpoch: "epoch-rename-b",
+          }),
+        }),
+      ),
+    );
+    await act(async () =>
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "idle",
+            piChatRunEpoch: "epoch-rename-b",
+            workspaceEpoch: "epoch-rename-b",
+          }),
+        }),
+      ),
+    );
+    assert.equal(
+      dom.window.document.querySelector(".session-name")?.textContent,
+      "Active",
+      "B inventory replaces the stale optimistic rename before A settles",
+    );
+    await act(async () => {
+      resolveRename({
+        ...bootstrap,
+        sessions: [{ ...bootstrap.sessions[0], name: "A stale server rename" }],
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.equal(
+      dom.window.document.querySelector(".session-name")?.textContent,
+      "Active",
+      "A cannot apply its stale bootstrap projection after B inventory replaces the optimistic row",
     );
   } finally {
     await act(async () => root.unmount());
@@ -4341,17 +8091,28 @@ test("local delete keeps its deferred replacement navigation after success settl
         .click(),
     );
     await act(async () =>
-      [...dom.window.document.querySelectorAll<HTMLButtonElement>("[role='menuitem']")]
+      [
+        ...dom.window.document.querySelectorAll<HTMLButtonElement>(
+          "[role='menuitem']",
+        ),
+      ]
         .find((button) => button.textContent === "删除")!
         .click(),
     );
     await act(async () =>
-      [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-dialog button")]
+      [
+        ...dom.window.document.querySelectorAll<HTMLButtonElement>(
+          ".session-dialog button",
+        ),
+      ]
         .find((button) => button.textContent === "确认删除")!
         .click(),
     );
     await act(async () => Promise.resolve());
-    assert.match(dom.window.document.querySelector(".pane-loading")?.textContent || "", /Deferred replacement/);
+    assert.match(
+      dom.window.document.querySelector(".pane-loading")?.textContent || "",
+      /Deferred replacement/,
+    );
 
     await act(async () =>
       resolveDelete({
@@ -4361,7 +8122,10 @@ test("local delete keeps its deferred replacement navigation after success settl
         activeSessionId: replacement.id,
       }),
     );
-    assert.match(dom.window.document.querySelector(".pane-loading")?.textContent || "", /Deferred replacement/);
+    assert.match(
+      dom.window.document.querySelector(".pane-loading")?.textContent || "",
+      /Deferred replacement/,
+    );
 
     await act(async () =>
       resolveReplacement({
@@ -4371,8 +8135,14 @@ test("local delete keeps its deferred replacement navigation after success settl
         runtimeStatus: "view-only",
       }),
     );
-    assert.equal(dom.window.document.querySelector(".topbar-title")?.textContent, "Deferred replacement");
-    assert.equal(dom.window.document.querySelector(".session-name")?.textContent, "Deferred replacement");
+    assert.equal(
+      dom.window.document.querySelector(".topbar-title")?.textContent,
+      "Deferred replacement",
+    );
+    assert.equal(
+      dom.window.document.querySelector(".session-name")?.textContent,
+      "Deferred replacement",
+    );
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);
@@ -4405,34 +8175,81 @@ test("a deleted session cannot return from a deferred activation response", asyn
     resolveActivation = resolve;
   });
   Object.assign(api, {
-    bootstrap: async () => ({ ...bootstrap, sessions: [bootstrap.sessions[0], target], sessionsTotal: 2 }),
+    bootstrap: async () => ({
+      ...bootstrap,
+      sessions: [bootstrap.sessions[0], target],
+      sessionsTotal: 2,
+    }),
     eventsUrl: () => "/api/events",
     markSessionViewed: async () => ({ viewing: activeId }),
     sessions: async () => ({ sessions: [bootstrap.sessions[0]], total: 1 }),
-    viewSession: async (id: string) => id === target.id ? targetView : { ...draftView, session: bootstrap.sessions[0] },
+    viewSession: async (id: string) =>
+      id === target.id
+        ? targetView
+        : { ...draftView, session: bootstrap.sessions[0] },
     activateSession: async () => deferredActivation,
     prompt: async () => ({ accepted: true, queued: false }),
   });
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {
     await act(async () => root.render(createElement(App)));
-    const targetButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
-      .find((button) => button.textContent?.includes("Activation target"))!;
+    const targetButton = [
+      ...dom.window.document.querySelectorAll<HTMLButtonElement>(
+        ".session-item",
+      ),
+    ].find((button) => button.textContent?.includes("Activation target"))!;
     await act(async () => targetButton.click());
-    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
     await act(async () => {
-      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "activate then delete");
-      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "activate then delete" }));
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "activate then delete");
+      textarea.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: "activate then delete",
+        }),
+      );
     });
-    await act(async () => dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click());
-    const source = FakeEventSource.instances.at(-1)!;
-    await act(async () => source.emitPi({ type: "pi_chat_sessions_changed", action: "deleted", sessionId: target.id }));
     await act(async () =>
-      resolveActivation({ ...targetView, isActive: true, runtimeStatus: "active", messages: [{ role: "user", content: "deleted activation transcript" }], messageTotal: 1, turnTotal: 1 }),
+      dom.window.document
+        .querySelector<HTMLButtonElement>(".send-button")!
+        .click(),
     );
-    assert.equal(dom.window.document.querySelectorAll(".session-row").length, 1);
-    assert.match(dom.window.document.querySelector(".topbar-title")?.textContent || "", /Active/);
-    assert.doesNotMatch(dom.window.document.body.textContent || "", /Activation target|deleted activation transcript/);
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () =>
+      source.emitPi({
+        type: "pi_chat_sessions_changed",
+        action: "deleted",
+        sessionId: target.id,
+      }),
+    );
+    await act(async () =>
+      resolveActivation({
+        ...targetView,
+        isActive: true,
+        runtimeStatus: "active",
+        messages: [{ role: "user", content: "deleted activation transcript" }],
+        messageTotal: 1,
+        turnTotal: 1,
+      }),
+    );
+    assert.equal(
+      dom.window.document.querySelectorAll(".session-row").length,
+      1,
+    );
+    assert.match(
+      dom.window.document.querySelector(".topbar-title")?.textContent || "",
+      /Active/,
+    );
+    assert.doesNotMatch(
+      dom.window.document.body.textContent || "",
+      /Activation target|deleted activation transcript/,
+    );
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);
@@ -4774,23 +8591,39 @@ test("session search loads the full inventory and pinning persists across remoun
   };
   let root = await render();
   try {
-    const search = dom.window.document.querySelector<HTMLInputElement>("input[aria-label='搜索对话']")!;
+    const search = dom.window.document.querySelector<HTMLInputElement>(
+      "input[aria-label='搜索对话']",
+    )!;
     await act(async () => {
       Object.getOwnPropertyDescriptor(
         dom.window.HTMLInputElement.prototype,
         "value",
       )?.set?.call(search, "needle");
-      search.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "needle" }));
+      search.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: "needle",
+        }),
+      );
       await Promise.resolve();
       await Promise.resolve();
     });
     assert.equal(fullInventoryCalls, 1);
-    const resultRow = [...dom.window.document.querySelectorAll<HTMLElement>(".session-row")]
-      .find((row) => row.textContent?.includes("Archived research"));
+    const resultRow = [
+      ...dom.window.document.querySelectorAll<HTMLElement>(".session-row"),
+    ].find((row) => row.textContent?.includes("Archived research"));
     assert.ok(resultRow);
-    await act(async () => resultRow.querySelector<HTMLButtonElement>(".session-menu-trigger")!.click());
-    const pin = [...dom.window.document.querySelectorAll<HTMLButtonElement>("[role='menuitem']")]
-      .find((button) => button.textContent === "置顶");
+    await act(async () =>
+      resultRow
+        .querySelector<HTMLButtonElement>(".session-menu-trigger")!
+        .click(),
+    );
+    const pin = [
+      ...dom.window.document.querySelectorAll<HTMLButtonElement>(
+        "[role='menuitem']",
+      ),
+    ].find((button) => button.textContent === "置顶");
     assert.ok(pin);
     await act(async () => pin.click());
     assert.ok(resultRow.querySelector(".session-pin-indicator"));
@@ -4800,11 +8633,17 @@ test("session search loads the full inventory and pinning persists across remoun
         dom.window.HTMLInputElement.prototype,
         "value",
       )?.set?.call(search, "");
-      search.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "deleteContentBackward" }));
+      search.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "deleteContentBackward",
+        }),
+      );
     });
     assert.equal(
-      [...dom.window.document.querySelectorAll<HTMLElement>(".session-row")]
-        .some((row) => row.textContent?.includes("Archived research")),
+      [
+        ...dom.window.document.querySelectorAll<HTMLElement>(".session-row"),
+      ].some((row) => row.textContent?.includes("Archived research")),
       false,
       "clearing search restores the collapsed, lazily loaded non-current directory",
     );
@@ -4816,20 +8655,45 @@ test("session search loads the full inventory and pinning persists across remoun
       await Promise.resolve();
       await Promise.resolve();
     });
-    const remountedSearch = dom.window.document.querySelector<HTMLInputElement>("input[aria-label='搜索对话']")!;
+    const remountedSearch = dom.window.document.querySelector<HTMLInputElement>(
+      "input[aria-label='搜索对话']",
+    )!;
     await act(async () => {
-      Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value")?.set?.call(remountedSearch, "needle");
-      remountedSearch.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "needle" }));
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLInputElement.prototype,
+        "value",
+      )?.set?.call(remountedSearch, "needle");
+      remountedSearch.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: "needle",
+        }),
+      );
       await Promise.resolve();
       await Promise.resolve();
     });
-    assert.equal(fullInventoryCalls, 2, "search is the explicit global-inventory path after remount");
-    const pinnedRow = [...dom.window.document.querySelectorAll<HTMLElement>(".session-row")]
-      .find((row) => row.textContent?.includes("Archived research"));
+    assert.equal(
+      fullInventoryCalls,
+      2,
+      "search is the explicit global-inventory path after remount",
+    );
+    const pinnedRow = [
+      ...dom.window.document.querySelectorAll<HTMLElement>(".session-row"),
+    ].find((row) => row.textContent?.includes("Archived research"));
     assert.ok(pinnedRow?.querySelector(".session-pin-indicator"));
-    await act(async () => pinnedRow!.querySelector<HTMLButtonElement>(".session-menu-trigger")!.click());
-    assert.ok([...dom.window.document.querySelectorAll<HTMLButtonElement>("[role='menuitem']")]
-      .some((button) => button.textContent === "取消置顶"));
+    await act(async () =>
+      pinnedRow!
+        .querySelector<HTMLButtonElement>(".session-menu-trigger")!
+        .click(),
+    );
+    assert.ok(
+      [
+        ...dom.window.document.querySelectorAll<HTMLButtonElement>(
+          "[role='menuitem']",
+        ),
+      ].some((button) => button.textContent === "取消置顶"),
+    );
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);
@@ -4909,11 +8773,24 @@ test("a lost prompt acknowledgement cannot remove a user turn after SSE proves a
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {
     await act(async () => root.render(createElement(App)));
-    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
     await act(async () => {
-      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "must remain visible");
-      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "must remain visible" }));
-      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "must remain visible");
+      textarea.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: "must remain visible",
+        }),
+      );
+      dom.window.document
+        .querySelector<HTMLButtonElement>(".send-button")!
+        .click();
       await Promise.resolve();
     });
     const source = FakeEventSource.instances.at(-1)!;
@@ -4924,9 +8801,20 @@ test("a lost prompt acknowledgement cannot remove a user turn after SSE proves a
       await Promise.resolve();
       await Promise.resolve();
     });
-    assert.equal(dom.window.document.querySelectorAll(".message-user").length, 1, "the accepted prompt keeps exactly one protected user row");
-    assert.equal(dom.window.document.querySelector(".message-user")?.textContent, "must remain visible");
-    assert.equal(textarea.value, "", "an uncertain acknowledgement must not restore text that Pi is already processing");
+    assert.equal(
+      dom.window.document.querySelectorAll(".message-user").length,
+      1,
+      "the accepted prompt keeps exactly one protected user row",
+    );
+    assert.equal(
+      dom.window.document.querySelector(".message-user")?.textContent,
+      "must remain visible",
+    );
+    assert.equal(
+      textarea.value,
+      "",
+      "an uncertain acknowledgement must not restore text that Pi is already processing",
+    );
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);
@@ -4950,16 +8838,36 @@ test("an explicit prompt rejection rolls back the local user turn", async () => 
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {
     await act(async () => root.render(createElement(App)));
-    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
     await act(async () => {
-      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "restore rejected text");
-      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "restore rejected text" }));
-      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "restore rejected text");
+      textarea.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: "restore rejected text",
+        }),
+      );
+      dom.window.document
+        .querySelector<HTMLButtonElement>(".send-button")!
+        .click();
       await Promise.resolve();
       await Promise.resolve();
     });
-    assert.equal(dom.window.document.querySelectorAll(".message-user").length, 0);
-    assert.equal(textarea.value, "restore rejected text", "a definite rejection restores the composer for correction or retry");
+    assert.equal(
+      dom.window.document.querySelectorAll(".message-user").length,
+      0,
+    );
+    assert.equal(
+      textarea.value,
+      "restore rejected text",
+      "a definite rejection restores the composer for correction or retry",
+    );
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);

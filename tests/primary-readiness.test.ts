@@ -55,21 +55,28 @@ class ControllerRpc {
 class ReadinessBridge implements PrimaryRuntimeReadinessBridge {
   private listeners = new Set<(value: PrimaryRuntimeReadiness) => void>();
   recoverFailure: PrimaryRuntimeReadiness | null = null;
+  recoverCalls = 0;
+  onRecover: (() => void) | undefined;
   constructor(private value: PrimaryRuntimeReadiness) {}
   snapshot() { return this.value; }
   async waitUntilReady() {
     if (this.value.status !== "ready") throw new PrimaryRuntimeUnavailableError(this.value);
   }
   async recover(_sessionFile?: string, _cwd?: string) {
+    this.recoverCalls += 1;
     if (this.recoverFailure) {
       this.set(this.recoverFailure);
       throw new PrimaryRuntimeUnavailableError(this.recoverFailure);
     }
     if (this.value.status === "failed") {
+      this.onRecover?.();
       this.set({ status: "ready", generation: this.value.generation + 1 });
       return;
     }
     await this.waitUntilReady();
+  }
+  markFailed(error: unknown) {
+    this.set({ status: "failed", generation: this.value.generation + 1, error: error instanceof Error ? error.message : String(error) });
   }
   subscribe(listener: (value: PrimaryRuntimeReadiness) => void) { this.listeners.add(listener); listener(this.value); return () => this.listeners.delete(listener); }
   set(value: PrimaryRuntimeReadiness) { this.value = value; for (const listener of this.listeners) listener(value); }
@@ -109,6 +116,17 @@ test("Primary recovery repeats compatibility probing before reporting ready", as
   assert.equal(rpc.stops, 1);
 });
 
+test("a live Primary child failure advances readiness before recovery", async () => {
+  const rpc = new ControllerRpc();
+  const controller = new PrimaryRuntimeReadinessController(rpc as unknown as PiRpcClient);
+  await controller.start();
+  controller.markFailed(new Error("worker exited"));
+  assert.deepEqual(controller.snapshot(), { status: "failed", generation: 2, error: "worker exited" });
+  await controller.recover();
+  assert.deepEqual(controller.snapshot(), { status: "ready", generation: 3 });
+  assert.equal(rpc.restarts, 1);
+});
+
 for (const readiness of [
   { status: "starting" as const, generation: 1 },
   { status: "failed" as const, generation: 1, error: "protocol mismatch" },
@@ -127,6 +145,25 @@ for (const readiness of [
     } finally { await f.close(); }
   });
 }
+
+test("an unbound Primary exit is visible as failed readiness to bootstrap", async () => {
+  const f = await fixture({ status: "ready", generation: 1 });
+  try {
+    // No bootstrap has bound get_state to a Session yet. The process event must
+    // still update readiness even though it cannot be broadcast as Session SSE.
+    f.rpc.alive = false;
+    f.rpc.emit({ type: "pi_chat_process_error", error: "worker exited before binding" });
+    const response = await fetch(`${f.origin}/api/bootstrap`);
+    assert.equal(response.status, 200);
+    const body = await response.json() as { primaryRuntime: PrimaryRuntimeReadiness };
+    assert.deepEqual(body.primaryRuntime, {
+      status: "failed",
+      generation: 2,
+      error: "worker exited before binding",
+    });
+    assert.deepEqual(f.rpc.commands, [], "bootstrap must not probe a failed unbound Primary");
+  } finally { await f.close(); }
+});
 
 test("failed recovery preserves the 503 readiness contract", async () => {
   const f = await fixture({ status: "ready", generation: 1 });
@@ -218,6 +255,52 @@ test("failed Primary retries recovery before spawning a new draft", async () => 
     assert.equal(response.status, 202, JSON.stringify(body));
     assert.equal(draftCreates, 1);
     assert.equal(draft.commands.some((command) => command.type === "prompt"), true);
+  } finally { server.close(); await app.close(); }
+});
+
+test("New uses the complete Primary recovery finalizer after a bound crash", async () => {
+  const primaryPath = "C:\\sessions\\primary-new-recovery.jsonl";
+  const draftPath = "C:\\sessions\\draft-new-recovery.jsonl";
+  const primaryId = idForPath(primaryPath);
+  const primary = new ReadinessFakeRpc(primaryPath, "primary-new-recovery");
+  const draft = new ReadinessFakeRpc(draftPath, "draft-new-recovery");
+  const bridge = new ReadinessBridge({ status: "ready", generation: 1 });
+  bridge.onRecover = () => { primary.alive = true; };
+  const sessions = {
+    list: async () => [{ id: primaryId, sessionId: "primary-new-recovery", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+    pathForId: (id: string) => id === primaryId ? primaryPath : null,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({
+    rpc: primary as unknown as PiRpcClient,
+    createRpc: () => draft as unknown as PiRpcClient,
+    sessions,
+    resources: {} as ResourceManager,
+    cwd: process.cwd(),
+    webRoot: process.cwd(),
+    primaryRuntime: bridge,
+  });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    // Bootstrap binds the healthy Primary. Its crash then sets both the App
+    // failure state and controller failure projection.
+    assert.equal((await fetch(`${origin}/api/bootstrap`)).status, 200);
+    primary.alive = false;
+    primary.emit({ type: "pi_chat_process_error", error: "worker crashed" });
+
+    const created = await fetch(`${origin}/api/sessions/new`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({}) });
+    assert.equal(created.status, 200);
+    assert.equal(bridge.recoverCalls, 1);
+    assert.equal(primary.commands.filter((command) => command.type === "get_state").length >= 2, true, "recovery refreshes Primary state before allocating the draft");
+
+    const afterNew = await (await fetch(`${origin}/api/bootstrap`)).json() as { primaryRuntime: PrimaryRuntimeReadiness };
+    assert.deepEqual(afterNew.primaryRuntime, { status: "ready", generation: 3 });
+    assert.equal((await fetch(`${origin}/api/sessions/${primaryId}/warm`, { method: "POST" })).status, 200);
+    assert.equal(bridge.recoverCalls, 1, "returning to Primary must reuse the recovery finalized for New");
   } finally { server.close(); await app.close(); }
 });
 

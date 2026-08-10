@@ -14,6 +14,8 @@ export interface PrimaryRuntimeReadinessBridge {
   snapshot(): PrimaryRuntimeReadiness;
   waitUntilReady(): Promise<void>;
   recover(sessionFile?: string, cwd?: string): Promise<void>;
+  /** Propagate an unexpected live child failure into the readiness projection. */
+  markFailed(error: unknown): void;
   subscribe(listener: (readiness: PrimaryRuntimeReadiness) => void): () => void;
 }
 
@@ -38,6 +40,17 @@ export class PrimaryRuntimeReadinessController implements PrimaryRuntimeReadines
 
   start(): Promise<void> { return this.begin(false); }
   recover(sessionFile?: string, cwd?: string): Promise<void> { return this.begin(true, sessionFile, cwd); }
+
+  markFailed(cause: unknown): void {
+    const error = cause instanceof Error ? cause.message : String(cause);
+    // A replacement/recovery owns the newer state. Do not let an exit event
+    // from the child it is replacing overwrite its starting projection.
+    if (this.readiness.status === "starting") return;
+    // A live-child failure is a later state transition than the successful
+    // probe. Give it a new generation so a delayed ready bootstrap cannot
+    // repaint the browser with the old generation's capability.
+    this.publish({ status: "failed", error, generation: this.readiness.generation + 1 });
+  }
 
   async waitUntilReady(): Promise<void> {
     if (this.readiness.status === "ready") return;

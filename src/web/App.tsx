@@ -96,8 +96,16 @@ import {
 } from "./lib/refresh-navigation-guards";
 import { SessionScrollMemory } from "./lib/session-scroll-memory";
 import { SessionViewCache } from "./lib/session-view-cache";
-import { normalizeCwdKey, togglePinnedDirectory, togglePinnedSession } from "./lib/session-navigation";
-import { buildIdentityLabel, buildIdentityMatches, webBuildIdentity } from "./lib/build-identity";
+import {
+  normalizeCwdKey,
+  togglePinnedDirectory,
+  togglePinnedSession,
+} from "./lib/session-navigation";
+import {
+  buildIdentityLabel,
+  buildIdentityMatches,
+  webBuildIdentity,
+} from "./lib/build-identity";
 import { uniqueSessionSummaries } from "./lib/session-summary";
 import {
   conversationPaneReducer,
@@ -108,10 +116,15 @@ import {
 } from "./state/conversation-pane";
 
 const LOCAL_DRAFT_BUSY_ID = "__local_draft_busy__";
+/** Let the lightweight bootstrap establish the active Session before racing a cold JSONL view. */
+const EARLY_HISTORY_VIEW_DELAY_MS = 100;
+/** Bootstrap includes Primary capability probes; sidebar JSONL inventory has its own faster read path. */
+const EARLY_SIDEBAR_INVENTORY_DELAY_MS = 250;
 
 type PaneAuthority = {
   sessionId: string;
   desiredSessionId: string;
+  runEpochGeneration: number;
   navigationEpoch: number;
   committedRevision: number;
   draftGeneration: number;
@@ -171,7 +184,10 @@ function isSessionScopedEvent(type: string): boolean {
 /** Optimistic terminal state for the narrow abort/settlement-to-SSE gap. */
 function settleSidebarActivity(session: SessionSummary): SessionSummary {
   const activity = session.activity;
-  if (!activity || (activity.execution !== "running" && activity.execution !== "dispatching"))
+  if (
+    !activity ||
+    (activity.execution !== "running" && activity.execution !== "dispatching")
+  )
     return { ...session, running: false };
   const queued = session.queued === true;
   return {
@@ -183,6 +199,18 @@ function settleSidebarActivity(session: SessionSummary): SessionSummary {
 
 function recoverableRefreshError(message: string): boolean {
   return /请求超时|RPC 请求超时|RPC 查询仍在处理中/.test(message);
+}
+
+/** Ignore older generations and same-generation startup snapshots that arrive after a terminal SSE state. */
+function newerPrimaryReadiness(
+  current: PrimaryRuntimeReadiness,
+  incoming: PrimaryRuntimeReadiness,
+): PrimaryRuntimeReadiness {
+  if (incoming.generation > current.generation) return incoming;
+  if (incoming.generation < current.generation) return current;
+  if (incoming.status === "starting" && current.status !== "starting")
+    return current;
+  return incoming;
 }
 
 function hasAssistantPayload(message: PiMessage | null): message is PiMessage {
@@ -198,14 +226,26 @@ export function App() {
     undefined,
     emptyConversationPane,
   );
-  const paneAuthorityDispatchRef = useRef<(
-    authority: PaneAuthoritySnapshot,
-    action: Exclude<ConversationPaneAction, {
-      type: "COMMIT_BOOTSTRAP" | "COMMIT_VIEW" | "RESET_DRAFT" | "CLEAR_PANE" | "DRAFT_WORKSPACE_SELECTED";
-    }>,
-  ) => boolean>(() => false);
+  const paneAuthorityDispatchRef = useRef<
+    (
+      authority: PaneAuthoritySnapshot,
+      action: Exclude<
+        ConversationPaneAction,
+        {
+          type:
+            | "COMMIT_BOOTSTRAP"
+            | "COMMIT_VIEW"
+            | "RESET_DRAFT"
+            | "CLEAR_PANE"
+            | "DRAFT_WORKSPACE_SELECTED";
+        }
+      >,
+    ) => boolean
+  >(() => false);
   /** The synchronous authority mirror changes only with an atomic pane commit. */
-  const committedPaneIdentityRef = useRef<ConversationPaneIdentity>(pane.identity);
+  const committedPaneIdentityRef = useRef<ConversationPaneIdentity>(
+    pane.identity,
+  );
   /** Commands are part of the committed projection, not a render-closure fallback. */
   const committedPaneCommandsRef = useRef<SlashCommand[]>(pane.commands);
   const paneCommitRevisionRef = useRef(0);
@@ -225,16 +265,21 @@ export function App() {
   const sidebarInventoryReadyRef = useRef(false);
   const [sidebarInventoryReady, setSidebarInventoryReady] = useState(false);
   const [sessionsTotal, setSessionsTotal] = useState(0);
-  const [sessionDirectories, setSessionDirectories] = useState<SessionDirectorySummary[]>([]);
+  const [sessionDirectories, setSessionDirectories] = useState<
+    SessionDirectorySummary[]
+  >([]);
   const [loadingAllSessions, setLoadingAllSessions] = useState(false);
-  const [loadingDirectoryKeys, setLoadingDirectoryKeys] = useState<string[]>([]);
-  const [sessionNavigation, setSessionNavigation] = useState(
-    () => loadSessionNavigationPreferences(),
+  const [loadingDirectoryKeys, setLoadingDirectoryKeys] = useState<string[]>(
+    [],
+  );
+  const [sessionNavigation, setSessionNavigation] = useState(() =>
+    loadSessionNavigationPreferences(),
   );
   const showAllSessionsRef = useRef(false);
   const [activeSessionId, setActiveSessionId] = useState("");
   const [activeSessionIds, setActiveSessionIds] = useState<string[]>([]);
-  const viewedSessionId = pane.identity.kind === "session" ? pane.identity.sessionId : "";
+  const viewedSessionId =
+    pane.identity.kind === "session" ? pane.identity.sessionId : "";
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [workspaceCwd, setWorkspaceCwd] = useState("");
   /** Server epoch + revision prevent stale bootstrap metadata from undoing workspace SSE. */
@@ -258,7 +303,9 @@ export function App() {
   const [diffSidebarWidth, setDiffSidebarWidth] = useState(460);
   /** Model / thinking only — must not freeze composer, sidebar, or the whole shell. */
   const [settingsBusy, setSettingsBusy] = useState(false);
+  const settingsOperationTokenRef = useRef<symbol | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const refreshOperationTokenRef = useRef<symbol | null>(null);
   const [workspacePicking, setWorkspacePicking] = useState(false);
   /** Invalidates a native picker when its New draft is superseded. */
   const draftWorkspacePickerTokenRef = useRef<symbol | null>(null);
@@ -289,7 +336,8 @@ export function App() {
     useState<ApplicationLifecycle>("idle");
   /** A stale Web bundle may read, but must not mutate a different Server build. */
   const [buildIdentityMismatch, setBuildIdentityMismatch] = useState(false);
-  const [serverBuildIdentity, setServerBuildIdentity] = useState(webBuildIdentity);
+  const [serverBuildIdentity, setServerBuildIdentity] =
+    useState(webBuildIdentity);
   /** Global Primary capability; separate from the Session/JSONL first-paint state. */
   const [primaryRuntime, setPrimaryRuntime] = useState<PrimaryRuntimeReadiness>(
     { status: "starting", generation: 0 },
@@ -347,23 +395,39 @@ export function App() {
   );
   const [failedSessionIds, setFailedSessionIds] = useState<string[]>([]);
   /** Apply only server-authored Sidebar activity; cache overlay protects it from late HTTP views. */
-  const applySessionActivity = useCallback((sessionId: string, activity: SessionActivityState) => {
-    sessionRunningOverridesRef.current.set(
-      sessionId,
-      activity.execution === "running" || activity.execution === "dispatching",
-    );
-    setFailedSessionIds((current) =>
-      activity.execution === "failed"
-        ? [...new Set([...current, sessionId])]
-        : current.filter((id) => id !== sessionId),
-    );
-    setSessions((current) => current.map((session) =>
-      session.id === sessionId
-        ? { ...session, activity, running: activity.execution === "running" || activity.execution === "dispatching", queued: activity.execution === "queued" || activity.execution === "paused", pendingConfirmation: activity.awaitingConfirmation }
-        : session,
-    ));
-    patchSessionCache(sessionId, { sessionActivity: activity });
-  }, []);
+  const applySessionActivity = useCallback(
+    (sessionId: string, activity: SessionActivityState) => {
+      sessionRunningOverridesRef.current.set(
+        sessionId,
+        activity.execution === "running" ||
+          activity.execution === "dispatching",
+      );
+      setFailedSessionIds((current) =>
+        activity.execution === "failed"
+          ? [...new Set([...current, sessionId])]
+          : current.filter((id) => id !== sessionId),
+      );
+      setSessions((current) =>
+        current.map((session) =>
+          session.id === sessionId
+            ? {
+                ...session,
+                activity,
+                running:
+                  activity.execution === "running" ||
+                  activity.execution === "dispatching",
+                queued:
+                  activity.execution === "queued" ||
+                  activity.execution === "paused",
+                pendingConfirmation: activity.awaitingConfirmation,
+              }
+            : session,
+        ),
+      );
+      patchSessionCache(sessionId, { sessionActivity: activity });
+    },
+    [],
+  );
   useEffect(() => {
     sessionsRef.current = sessions;
   }, [sessions]);
@@ -373,6 +437,7 @@ export function App() {
   const pendingScrollRestoreRef = useRef("");
   const conversationNavigationTargetRef = useRef<number | null>(null);
   const stoppingRef = useRef(false);
+  const stoppingOperationTokenRef = useRef<symbol | null>(null);
   const lastEventFrameAtRef = useRef(Date.now());
   const sessionEventVersionRef = useRef(new Map<string, number>());
   const lastSessionEventTypeRef = useRef(new Map<string, string>());
@@ -384,7 +449,10 @@ export function App() {
   const handoffWaitRef = useRef<Promise<void> | null>(null);
   const sessionRefreshTimerRef = useRef<number | null>(null);
   const sessionRefreshInFlightRef = useRef(false);
+  const sessionRefreshGenerationRef = useRef<number | null>(null);
   const sessionRefreshRequestedRef = useRef(false);
+  const loadAllSessionsGenerationRef = useRef<number | null>(null);
+  const directoryLoadGenerationsRef = useRef(new Map<string, number>());
   const desiredSessionIdRef = useRef("");
   const navigationEpochRef = useRef(0);
   const navigationAbortRef = useRef<AbortController | null>(null);
@@ -402,15 +470,22 @@ export function App() {
   );
   /** A cold Session's Gate preference is staged until its next real prompt. */
   const pendingGateModesRef = useRef(new Map<string, GateMode>());
-  const [pendingGateModes, setPendingGateModes] = useState<Record<string, GateMode>>({});
-  const stageGateMode = useCallback((sessionId: string, mode: GateMode | undefined) => {
-    if (mode) pendingGateModesRef.current.set(sessionId, mode);
-    else pendingGateModesRef.current.delete(sessionId);
-    setPendingGateModes(Object.fromEntries(pendingGateModesRef.current));
-  }, []);
+  const [pendingGateModes, setPendingGateModes] = useState<
+    Record<string, GateMode>
+  >({});
+  const stageGateMode = useCallback(
+    (sessionId: string, mode: GateMode | undefined) => {
+      if (mode) pendingGateModesRef.current.set(sessionId, mode);
+      else pendingGateModesRef.current.delete(sessionId);
+      setPendingGateModes(Object.fromEntries(pendingGateModesRef.current));
+    },
+    [],
+  );
   const DRAFT_PREFS_KEY = "__local_draft__";
   const warmingSessionIdsRef = useRef(new Set<string>());
-  const warmingRuntimeStartsRef = useRef(new Map<string, Promise<SessionRuntimeReadyData>>());
+  const warmingRuntimeStartsRef = useRef(
+    new Map<string, Promise<SessionRuntimeReadyData>>(),
+  );
   /** message_end may precede agent_settled; only their pair creates an unread completion notice. */
   const terminalAssistantSessionIdsRef = useRef(new Set<string>());
   /** SSE lifecycle is newer than a delayed sidebar/bootstrap summary. */
@@ -434,14 +509,31 @@ export function App() {
     >(),
   );
   const runEpochRef = useRef("");
+  /** Increments only on a real replacement, invalidating pre-handoff early reads. */
+  const runEpochGenerationRef = useRef(0);
   const sessionRunGenerationsRef = useRef(new Map<string, number>());
   /** Terminal generations are final: late tool/status frames from them are stale. */
   const settledRunGenerationsRef = useRef(new Map<string, number>());
   const refreshEpochRef = useRef(0);
+  /** Initial SSE ready is redundant only after this page has committed a bootstrap. */
+  const bootstrapCompletedRef = useRef(false);
+  /** A failed initial bootstrap gets one ready-driven retry, never a ready loop. */
+  const initialReadyRecoveryRequestedRef = useRef(false);
+  /** A replacement can announce maintenance before its first idle bootstrap. */
+  const replacementBootstrapPendingRef = useRef(false);
   const bootstrapInFlightRef = useRef<Promise<BootstrapData> | null>(null);
-  const handshakeInFlightRef = useRef<Promise<void> | null>(null);
+  const handshakeInFlightRef = useRef<{
+    refreshEpoch: number;
+    runEpochGeneration: number;
+    request: Promise<boolean>;
+  } | null>(null);
   /** First remembered pane may paint while the slower global bootstrap continues. */
-  const initialHistoryRef = useRef<{ id: string; request: Promise<SessionViewData> } | null>(null);
+  const initialHistoryRef = useRef<{
+    id: string;
+    refreshEpoch: number;
+    runEpochGeneration: number;
+    request: Promise<SessionViewData>;
+  } | null>(null);
   const recoveringConnectionRef = useRef<Promise<void> | null>(null);
   /** Keep sidebar refreshes from reverting a still-unconfirmed local rename/delete. */
   const optimisticRenamesRef = useRef(
@@ -482,7 +574,8 @@ export function App() {
       ),
     );
     const summaryTurnTotal =
-      typeof session.turnCount === "number" && Number.isFinite(session.turnCount)
+      typeof session.turnCount === "number" &&
+      Number.isFinite(session.turnCount)
         ? session.turnCount
         : 0;
     const resolvedTurnTotal = Math.max(
@@ -553,12 +646,14 @@ export function App() {
   /** A per-pane mutation lease allows A to start while B remains interactive. */
   const beginSessionBusy = useCallback((sessionId: string) => {
     const id = sessionId || LOCAL_DRAFT_BUSY_ID;
+    const runEpochGeneration = runEpochGenerationRef.current;
     const counts = busySessionCountsRef.current;
     counts.set(id, (counts.get(id) || 0) + 1);
     setBusySessionIds([...counts.keys()]);
     let released = false;
     return () => {
-      if (released) return;
+      if (released || runEpochGenerationRef.current !== runEpochGeneration)
+        return;
       released = true;
       const count = (counts.get(id) || 1) - 1;
       if (count > 0) counts.set(id, count);
@@ -634,14 +729,21 @@ export function App() {
   }, []);
 
   const commitPane = useCallback(
-    (action: Extract<ConversationPaneAction, {
-      type: "COMMIT_BOOTSTRAP" | "COMMIT_VIEW" | "RESET_DRAFT" | "CLEAR_PANE";
-    }>) => {
-      const identity = action.type === "COMMIT_BOOTSTRAP" || action.type === "COMMIT_VIEW"
-        ? action.pane.identity
-        : action.type === "RESET_DRAFT"
-          ? ({ kind: "draft", sessionId: "" } as const)
-          : ({ kind: "none", sessionId: "" } as const);
+    (
+      action: Extract<
+        ConversationPaneAction,
+        {
+          type:
+            "COMMIT_BOOTSTRAP" | "COMMIT_VIEW" | "RESET_DRAFT" | "CLEAR_PANE";
+        }
+      >,
+    ) => {
+      const identity =
+        action.type === "COMMIT_BOOTSTRAP" || action.type === "COMMIT_VIEW"
+          ? action.pane.identity
+          : action.type === "RESET_DRAFT"
+            ? ({ kind: "draft", sessionId: "" } as const)
+            : ({ kind: "none", sessionId: "" } as const);
       const id = identity.kind === "session" ? identity.sessionId : "";
       // This is the only path that changes the pane currently painted by React.
       // Navigation updates desiredSessionIdRef separately and cannot repaint it.
@@ -669,48 +771,83 @@ export function App() {
    * the visible pane. A matching Session ID alone is insufficient: after
    * A → B → A, an old A request must not replace the newer A pane.
    */
-  const capturePaneAuthority = useCallback((sessionId = viewedSessionIdRef.current): PaneAuthoritySnapshot => ({
-    sessionId,
-    desiredSessionId: desiredSessionIdRef.current,
-    navigationEpoch: navigationEpochRef.current,
-    committedRevision: paneCommitRevisionRef.current,
-    committedIdentity: committedPaneIdentityRef.current,
-    draftGeneration: draftGenerationRef.current,
-  }), []);
-  const paneAuthorityCanCommit = useCallback((authority: PaneAuthoritySnapshot) =>
-    Boolean(authority.sessionId) &&
-    authority.desiredSessionId === authority.sessionId &&
-    desiredSessionIdRef.current === authority.sessionId &&
-    navigationEpochRef.current === authority.navigationEpoch &&
-    paneCommitRevisionRef.current === authority.committedRevision &&
-    committedPaneIdentityRef.current.kind === authority.committedIdentity.kind &&
-    committedPaneIdentityRef.current.sessionId === authority.committedIdentity.sessionId &&
-    draftGenerationRef.current === authority.draftGeneration, []);
-  const captureDraftPaneAuthority = useCallback((): DraftPaneAuthority => ({
-    navigationEpoch: navigationEpochRef.current,
-    committedRevision: paneCommitRevisionRef.current,
-    draftGeneration: draftGenerationRef.current,
-  }), []);
-  const draftAuthorityCanCommit = useCallback((authority: DraftPaneAuthority) =>
-    navigationEpochRef.current === authority.navigationEpoch &&
-    draftGenerationRef.current === authority.draftGeneration &&
-    committedPaneIdentityRef.current.kind === "draft" &&
-    paneCommitRevisionRef.current === authority.committedRevision, []);
+  const capturePaneAuthority = useCallback(
+    (sessionId = viewedSessionIdRef.current): PaneAuthoritySnapshot => ({
+      sessionId,
+      desiredSessionId: desiredSessionIdRef.current,
+      runEpochGeneration: runEpochGenerationRef.current,
+      navigationEpoch: navigationEpochRef.current,
+      committedRevision: paneCommitRevisionRef.current,
+      committedIdentity: committedPaneIdentityRef.current,
+      draftGeneration: draftGenerationRef.current,
+    }),
+    [],
+  );
+  const paneAuthorityCanCommit = useCallback(
+    (authority: PaneAuthoritySnapshot) =>
+      Boolean(authority.sessionId) &&
+      authority.desiredSessionId === authority.sessionId &&
+      desiredSessionIdRef.current === authority.sessionId &&
+      runEpochGenerationRef.current === authority.runEpochGeneration &&
+      navigationEpochRef.current === authority.navigationEpoch &&
+      paneCommitRevisionRef.current === authority.committedRevision &&
+      committedPaneIdentityRef.current.kind ===
+        authority.committedIdentity.kind &&
+      committedPaneIdentityRef.current.sessionId ===
+        authority.committedIdentity.sessionId &&
+      draftGenerationRef.current === authority.draftGeneration,
+    [],
+  );
+  const captureDraftPaneAuthority = useCallback(
+    (): DraftPaneAuthority => ({
+      runEpochGeneration: runEpochGenerationRef.current,
+      navigationEpoch: navigationEpochRef.current,
+      committedRevision: paneCommitRevisionRef.current,
+      draftGeneration: draftGenerationRef.current,
+    }),
+    [],
+  );
+  const draftAuthorityCanCommit = useCallback(
+    (authority: DraftPaneAuthority) =>
+      runEpochGenerationRef.current === authority.runEpochGeneration &&
+      navigationEpochRef.current === authority.navigationEpoch &&
+      draftGenerationRef.current === authority.draftGeneration &&
+      committedPaneIdentityRef.current.kind === "draft" &&
+      paneCommitRevisionRef.current === authority.committedRevision,
+    [],
+  );
 
   // Every session-scoped async action captures the selected view before await.
   // A later response may update that Session cache, but must never paint over a
   // different Session the user navigated to in the meantime.
   const captureViewOperation = () => capturePaneAuthority();
-  const viewOperationIsCurrent = (operation: ReturnType<typeof capturePaneAuthority>) =>
+  // A mutation response may still update its own Session cache after ordinary
+  // A -> B navigation, but never after a replacement has invalidated process
+  // ownership. Keep this narrower than pane authority on purpose.
+  const viewOperationIsInCurrentRun = (
+    operation: ReturnType<typeof capturePaneAuthority>,
+  ) => runEpochGenerationRef.current === operation.runEpochGeneration;
+  const viewOperationIsCurrent = (
+    operation: ReturnType<typeof capturePaneAuthority>,
+  ) =>
+    viewOperationIsInCurrentRun(operation) &&
     paneAuthorityCanCommit(operation) &&
     viewedSessionIdRef.current === operation.sessionId;
 
   /** The only coordinator gateway for an async continuation to paint a pane. */
   const commitPaneIfCurrent = (
     authority: PaneAuthoritySnapshot,
-    action: Exclude<ConversationPaneAction, {
-      type: "COMMIT_BOOTSTRAP" | "COMMIT_VIEW" | "RESET_DRAFT" | "CLEAR_PANE" | "DRAFT_WORKSPACE_SELECTED";
-    }>,
+    action: Exclude<
+      ConversationPaneAction,
+      {
+        type:
+          | "COMMIT_BOOTSTRAP"
+          | "COMMIT_VIEW"
+          | "RESET_DRAFT"
+          | "CLEAR_PANE"
+          | "DRAFT_WORKSPACE_SELECTED";
+      }
+    >,
   ): boolean => {
     if (!paneAuthorityCanCommit(authority)) return false;
     dispatchPane(action);
@@ -718,9 +855,12 @@ export function App() {
   };
   const commitDraftIfCurrent = (
     authority: DraftPaneAuthority,
-    action: Extract<ConversationPaneAction, {
-      type: "DRAFT_WORKSPACE_SELECTED" | "DRAFT_PROMPT_REJECTED";
-    }>,
+    action: Extract<
+      ConversationPaneAction,
+      {
+        type: "DRAFT_WORKSPACE_SELECTED" | "DRAFT_PROMPT_REJECTED";
+      }
+    >,
   ): boolean => {
     if (!draftAuthorityCanCommit(authority)) return false;
     dispatchPane(action);
@@ -731,72 +871,115 @@ export function App() {
   // Bootstrap owns application-wide metadata. Keep it separate from the selected
   // view so a refresh can restore a remembered cold Session without briefly
   // committing the Primary Runtime's blank draft to the timeline.
-  const applyBootstrapMetadata = useCallback((data: BootstrapData) => {
-    // A remembered JSONL view can win the startup race. Only a bootstrap
-    // inventory is allowed to establish sidebar rows in that initial gap.
-    sidebarInventoryReadyRef.current = true;
-    setSidebarInventoryReady(true);
-    for (const session of data.sessions) {
-      if (
-        typeof session.turnCount === "number" &&
-        Number.isFinite(session.turnCount)
-      )
-        recordSourceTurnTotal(session.id, session.turnCount);
-    }
-    const incoming = reconcileOptimisticSessions(data.sessions);
-    setSessions((current) => {
-      if (!showAllSessionsRef.current) return incoming;
-      const updates = new Map(incoming.map((session) => [session.id, session]));
-      return uniqueSessionSummaries(
-        current
-          .filter(
-            (session) =>
-              !optimisticDeletesRef.current.has(session.id) &&
-              !confirmedDeletedSessionIdsRef.current.has(session.id),
-          )
-          .map((session) => updates.get(session.id) || session),
-      );
-    });
-    setSessionsTotal(
-      optimisticSessionsTotal(
-        data.sessions,
-        data.sessionsTotal ?? data.sessions.length,
-      ),
-    );
-    setSessionDirectories(data.sessionDirectories || []);
-    const activeId =
-      data.activeSessionId ||
-      data.sessions.find((session) => session.active)?.id ||
-      "";
-    setActiveSessionId(activeId);
-    const hotIds = data.activeSessionIds || (activeId ? [activeId] : []);
-    setActiveSessionIds(hotIds);
-    viewCacheRef.current.setPinned(hotIds);
-    // A recovering Runtime can briefly return an empty model inventory while
-    // its selected Session model is already known. Retain the last usable
-    // choices through that transient snapshot; ComposerControls also renders a
-    // readable current-model fallback until the inventory catches up.
-    if (data.models.length || !data.state.model) setModels(data.models);
-    const workspaceEpoch = typeof data.workspaceEpoch === "string" ? data.workspaceEpoch : "";
-    const workspaceRevision = typeof data.workspaceRevision === "number" && Number.isFinite(data.workspaceRevision)
-      ? data.workspaceRevision
-      : 0;
-    if (!workspaceEpochRef.current || workspaceEpoch === workspaceEpochRef.current) {
-      if (workspaceRevision >= workspaceRevisionRef.current) {
-        workspaceEpochRef.current = workspaceEpoch || workspaceEpochRef.current;
-        workspaceRevisionRef.current = workspaceRevision;
-        setWorkspaceCwd(data.workspaceCwd);
+  const applySidebarInventory = useCallback(
+    (data: {
+      sessions: SessionSummary[];
+      sessionsTotal?: number;
+      sessionDirectories?: SessionDirectorySummary[];
+    }) => {
+      // A remembered JSONL view can win the startup race. A completed bootstrap
+      // or the independent sidebar endpoint may establish the inventory, but a
+      // single restored pane must never manufacture a one-row sidebar.
+      sidebarInventoryReadyRef.current = true;
+      setSidebarInventoryReady(true);
+      for (const session of data.sessions) {
+        if (
+          typeof session.turnCount === "number" &&
+          Number.isFinite(session.turnCount)
+        )
+          recordSourceTurnTotal(session.id, session.turnCount);
       }
-    }
-    const identity = data.buildIdentity || webBuildIdentity;
-    setServerBuildIdentity(identity);
-    setBuildIdentityMismatch(!buildIdentityMatches(identity));
-    setPrimaryRuntime(
-      data.primaryRuntime || { status: "starting", generation: 0 },
-    );
-    applicationLifecycleRef.current = data.applicationLifecycle || "idle";
-    setApplicationLifecycle(data.applicationLifecycle || "idle");
-  }, []);
+      const incoming = reconcileOptimisticSessions(data.sessions);
+      setSessions((current) => {
+        if (!showAllSessionsRef.current) return incoming;
+        const updates = new Map(
+          incoming.map((session) => [session.id, session]),
+        );
+        return uniqueSessionSummaries(
+          current
+            .filter(
+              (session) =>
+                !optimisticDeletesRef.current.has(session.id) &&
+                !confirmedDeletedSessionIdsRef.current.has(session.id),
+            )
+            .map((session) => updates.get(session.id) || session),
+        );
+      });
+      setSessionsTotal(
+        optimisticSessionsTotal(
+          data.sessions,
+          data.sessionsTotal ?? data.sessions.length,
+        ),
+      );
+      setSessionDirectories(data.sessionDirectories || []);
+      // During a slow bootstrap, directory grouping needs a stable current cwd
+      // to leave the restored Session's group open. The full bootstrap remains
+      // authoritative and replaces this temporary JSONL-derived value later.
+      setWorkspaceCwd((current) => {
+        if (current) return current;
+        const preferredId =
+          viewedSessionIdRef.current || desiredSessionIdRef.current;
+        return (
+          data.sessions.find((session) => session.id === preferredId)?.cwd ||
+          data.sessions[0]?.cwd ||
+          current
+        );
+      });
+    },
+    [],
+  );
+
+  const applyBootstrapMetadata = useCallback(
+    (data: BootstrapData) => {
+      applySidebarInventory(data);
+      const activeId =
+        data.activeSessionId ||
+        data.sessions.find((session) => session.active)?.id ||
+        "";
+      setActiveSessionId(activeId);
+      const hotIds = data.activeSessionIds || (activeId ? [activeId] : []);
+      setActiveSessionIds(hotIds);
+      viewCacheRef.current.setPinned(hotIds);
+      // A recovering Runtime can briefly return an empty model inventory while
+      // its selected Session model is already known. Retain the last usable
+      // choices through that transient snapshot; ComposerControls also renders a
+      // readable current-model fallback until the inventory catches up.
+      if (data.models.length || !data.state.model) setModels(data.models);
+      const workspaceEpoch =
+        typeof data.workspaceEpoch === "string" ? data.workspaceEpoch : "";
+      const workspaceRevision =
+        typeof data.workspaceRevision === "number" &&
+        Number.isFinite(data.workspaceRevision)
+          ? data.workspaceRevision
+          : 0;
+      // Bootstrap may finish before EventSource connects. Record its process epoch
+      // so the first ready frame from a replacement service is detectable.
+      if (!runEpochRef.current && workspaceEpoch)
+        runEpochRef.current = workspaceEpoch;
+      if (
+        !workspaceEpochRef.current ||
+        workspaceEpoch === workspaceEpochRef.current
+      ) {
+        if (workspaceRevision >= workspaceRevisionRef.current) {
+          workspaceEpochRef.current =
+            workspaceEpoch || workspaceEpochRef.current;
+          workspaceRevisionRef.current = workspaceRevision;
+          setWorkspaceCwd(data.workspaceCwd);
+        }
+      }
+      const identity = data.buildIdentity || webBuildIdentity;
+      setServerBuildIdentity(identity);
+      setBuildIdentityMismatch(!buildIdentityMatches(identity));
+      const readiness = data.primaryRuntime || {
+        status: "starting" as const,
+        generation: 0,
+      };
+      setPrimaryRuntime((current) => newerPrimaryReadiness(current, readiness));
+      applicationLifecycleRef.current = data.applicationLifecycle || "idle";
+      setApplicationLifecycle(data.applicationLifecycle || "idle");
+    },
+    [applySidebarInventory],
+  );
 
   const applyBootstrap = useCallback(
     (data: BootstrapData, authority?: PaneAuthoritySnapshot) => {
@@ -846,16 +1029,28 @@ export function App() {
       } else localUserTurnsRef.current.delete(activeViewId);
       applyBootstrapMetadata(data);
       if (activeViewId) updateGateMode(activeViewId, data.gateMode);
-      const staged = activeViewId
-        ? pendingSessionPrefsRef.current.get(activeViewId)
-        : undefined;
+      if (!activeViewId) {
+        // A boot with no restored Session is the same user intent as pressing
+        // New: keep history in the sidebar, but make the writable default cwd
+        // explicit before the first prompt. This remains browser-local until send.
+        pendingSessionPrefsRef.current.set(DRAFT_PREFS_KEY, {
+          model: data.state.model,
+          thinkingLevel: data.state.thinkingLevel as ThinkingLevel | undefined,
+        });
+        commitPane({
+          type: "RESET_DRAFT",
+          model: data.state.model,
+          thinkingLevel: data.state.thinkingLevel,
+          draftWorkspaceCwd: data.workspaceCwd,
+        });
+        return;
+      }
+      const staged = pendingSessionPrefsRef.current.get(activeViewId);
       commitPane({
         type: "COMMIT_BOOTSTRAP",
         pane: {
           ...emptyConversationPane(),
-          identity: activeViewId
-            ? { kind: "session", sessionId: activeViewId }
-            : { kind: "none", sessionId: "" },
+          identity: { kind: "session", sessionId: activeViewId },
           piState: {
             ...data.state,
             ...(staged?.model !== undefined ? { model: staged.model } : null),
@@ -887,7 +1082,12 @@ export function App() {
         },
       });
     },
-    [applyBootstrapMetadata, commitPane, paneAuthorityCanCommit, updateGateMode],
+    [
+      applyBootstrapMetadata,
+      commitPane,
+      paneAuthorityCanCommit,
+      updateGateMode,
+    ],
   );
 
   const tryAutoAllowGate = useCallback(
@@ -939,9 +1139,13 @@ export function App() {
       if (confirmedDeletedSessionIdsRef.current.has(view.session.id)) return;
       // The coordinator, not the reducer, proves that this result still belongs
       // to the visible pane. Session ID alone cannot protect A → B → A.
-      if (authority && ("sessionId" in authority
-        ? !paneAuthorityCanCommit(authority)
-        : !draftAuthorityCanCommit(authority))) return;
+      if (
+        authority &&
+        ("sessionId" in authority
+          ? !paneAuthorityCanCommit(authority)
+          : !draftAuthorityCanCommit(authority))
+      )
+        return;
       // Cache the source view before adding local UI overlays. A cached overlay has
       // a synthetic turnTotal and must never confirm that its own user message was
       // persisted when the user switches away and returns.
@@ -1000,16 +1204,14 @@ export function App() {
       );
       // Same open-mode auto-allow path for pending requests restored via view/bootstrap.
       const pending = view.pendingExtensionRequest || null;
-      const paneAuthority = authority && "sessionId" in authority
-        ? authority
-        : capturePaneAuthority(view.session.id);
-      const extensionRequest = pending && !tryAutoAllowGate(
-        pending,
-        view.session.id,
-        paneAuthority,
-      )
-        ? pending
-        : null;
+      const paneAuthority =
+        authority && "sessionId" in authority
+          ? authority
+          : capturePaneAuthority(view.session.id);
+      const extensionRequest =
+        pending && !tryAutoAllowGate(pending, view.session.id, paneAuthority)
+          ? pending
+          : null;
       commitPane({
         type: "COMMIT_VIEW",
         pane: {
@@ -1041,21 +1243,24 @@ export function App() {
           // A partial refresh of the *currently committed* Session may omit
           // command discovery. Normalize that merge here; the reducer receives
           // only a complete pane projection and never inherits cross-Session data.
-          commands: resolvedView.commands ?? (
-            committedPaneIdentityRef.current.kind === "session" &&
-            committedPaneIdentityRef.current.sessionId === resolvedView.session.id
+          commands:
+            resolvedView.commands ??
+            (committedPaneIdentityRef.current.kind === "session" &&
+            committedPaneIdentityRef.current.sessionId ===
+              resolvedView.session.id
               ? committedPaneCommandsRef.current
-              : []
-          ),
+              : []),
           queue: resolvedView.queue || [],
           queuePaused: resolvedView.queuePaused === true,
           toolStatus: resolvedView.toolStatus || "",
           extensionRequest,
           runtimeStatus: nextRuntimeStatus,
           control: {
-            controlOwner: sourceView.controlOwner ?? sourceView.session.controlOwner,
+            controlOwner:
+              sourceView.controlOwner ?? sourceView.session.controlOwner,
             controlledByThisWindow:
-              sourceView.controlledByThisWindow ?? sourceView.session.controlledByThisWindow,
+              sourceView.controlledByThisWindow ??
+              sourceView.session.controlledByThisWindow,
           },
           gateAvailableOverride:
             typeof view.gateAvailable === "boolean" ? view.gateAvailable : null,
@@ -1072,14 +1277,18 @@ export function App() {
       // Session may restore before bootstrap; update an existing row, but do not
       // turn that one restored pane into a fake one-item sidebar.
       if (view.session.messageCount > 0) {
-        const summary = applyLocalTurnCount(normalizeSessionRunning(view.session));
+        const summary = applyLocalTurnCount(
+          normalizeSessionRunning(view.session),
+        );
         setSessions((current) => {
           const known = current.some((session) => session.id === summary.id);
           if (!known && !sidebarInventoryReadyRef.current) return current;
           return uniqueSessionSummaries(
             known
               ? current.map((session) =>
-                  session.id === summary.id ? { ...session, ...summary } : session,
+                  session.id === summary.id
+                    ? { ...session, ...summary }
+                    : session,
                 )
               : [...current, summary],
           );
@@ -1103,19 +1312,49 @@ export function App() {
     ],
   );
 
-  const ensureHandshake = useCallback(() => {
-    if (handshakeInFlightRef.current) return handshakeInFlightRef.current;
-    const request = api.handshake()
-      .then((handshake) => {
-        setServerBuildIdentity(handshake.buildIdentity);
-        setBuildIdentityMismatch(!buildIdentityMatches(handshake.buildIdentity));
-      })
-      .finally(() => {
-        if (handshakeInFlightRef.current === request) handshakeInFlightRef.current = null;
-      });
-    handshakeInFlightRef.current = request;
-    return request;
-  }, []);
+  const ensureHandshake = useCallback(
+    (refreshEpoch: number, runEpochGeneration: number) => {
+      const current = handshakeInFlightRef.current;
+      if (
+        current &&
+        current.refreshEpoch === refreshEpoch &&
+        current.runEpochGeneration === runEpochGeneration
+      )
+        return current.request;
+      if (current) {
+        // Keep the same service token generation, but prevent this refresh from
+        // joining a promise whose authority closure belongs to an older refresh.
+        api.detachHandshake();
+        handshakeInFlightRef.current = null;
+      }
+      const request = api
+        .handshake()
+        .then((handshake) => {
+          if (
+            refreshEpochRef.current !== refreshEpoch ||
+            runEpochGenerationRef.current !== runEpochGeneration
+          )
+            return false;
+          api.acceptHandshake(handshake);
+          setServerBuildIdentity(handshake.buildIdentity);
+          setBuildIdentityMismatch(
+            !buildIdentityMatches(handshake.buildIdentity),
+          );
+          return true;
+        })
+        .finally(() => {
+          if (handshakeInFlightRef.current?.request === request)
+            handshakeInFlightRef.current = null;
+        });
+      handshakeInFlightRef.current = {
+        refreshEpoch,
+        runEpochGeneration,
+        request,
+      };
+      return request;
+    },
+    [],
+  );
 
   const loadBootstrap = useCallback(() => {
     if (bootstrapInFlightRef.current) return bootstrapInFlightRef.current;
@@ -1133,6 +1372,7 @@ export function App() {
   const refresh = useCallback(async () => {
     const refreshEpoch = ++refreshEpochRef.current;
     const navigationEpoch = navigationEpochRef.current;
+    const runEpochGeneration = runEpochGenerationRef.current;
     const wantedId =
       desiredSessionIdRef.current ||
       viewedSessionIdRef.current ||
@@ -1148,37 +1388,121 @@ export function App() {
       ? capturePaneAuthority(wantedId)
       : undefined;
     let earlyViewRequest: Promise<SessionViewData> | null = null;
-    let earlyViewAuthority: ReturnType<typeof capturePaneAuthority> | null = null;
-    if (wantedId && !viewedSessionIdRef.current && !localDraftRef.current) {
+    let earlyViewAuthority: ReturnType<typeof capturePaneAuthority> | null =
+      null;
+    let earlyViewTimer: number | null = null;
+    let earlySidebarInventoryTimer: number | null = null;
+    // A rejected bootstrap must not suppress the independent JSONL fallback.
+    // Only a successfully committed bootstrap makes its metadata redundant.
+    let bootstrapSucceeded = false;
+    const startEarlyHistoryView = () => {
+      const currentInitialHistory = initialHistoryRef.current;
+      if (
+        refreshEpochRef.current !== refreshEpoch ||
+        runEpochGenerationRef.current !== runEpochGeneration ||
+        bootstrapSucceeded ||
+        !wantedId ||
+        viewedSessionIdRef.current ||
+        localDraftRef.current ||
+        (currentInitialHistory?.id === wantedId &&
+          currentInitialHistory.refreshEpoch === refreshEpoch &&
+          currentInitialHistory.runEpochGeneration === runEpochGeneration)
+      )
+        return;
       desiredSessionIdRef.current = wantedId;
       earlyViewAuthority = capturePaneAuthority(wantedId);
-      if (initialHistoryRef.current?.id !== wantedId) {
-        const request = ensureHandshake()
-          .then(() => api.viewSession(wantedId))
-          .finally(() => {
-            if (initialHistoryRef.current?.request === request) initialHistoryRef.current = null;
+      const request = ensureHandshake(refreshEpoch, runEpochGeneration)
+        .then((accepted) => {
+          if (!accepted) throw new Error("stale handshake");
+          return api.viewSession(wantedId);
+        })
+        .finally(() => {
+          if (initialHistoryRef.current?.request === request)
+            initialHistoryRef.current = null;
+        });
+      initialHistoryRef.current = {
+        id: wantedId,
+        refreshEpoch,
+        runEpochGeneration,
+        request,
+      };
+      earlyViewRequest = request;
+      void request
+        .then((view) => {
+          if (
+            refreshEpochRef.current !== refreshEpoch ||
+            runEpochGenerationRef.current !== runEpochGeneration ||
+            navigationEpochRef.current !== navigationEpoch ||
+            desiredSessionIdRef.current !== wantedId ||
+            localDraftRef.current ||
+            confirmedDeletedSessionIdsRef.current.has(wantedId) ||
+            !earlyViewAuthority ||
+            !paneAuthorityCanCommit(earlyViewAuthority)
+          )
+            return;
+          applySessionView(view, earlyViewAuthority);
+        })
+        .catch(() => undefined);
+    };
+    const bootstrapRequest = loadBootstrap();
+    // Normal reloads resolve bootstrap in a few milliseconds. Waiting briefly
+    // prevents its Primary get_state from racing an unnecessary remembered view.
+    // If startup is genuinely slow, cold JSONL still paints independently.
+    if (wantedId && !viewedSessionIdRef.current && !localDraftRef.current)
+      earlyViewTimer = window.setTimeout(
+        startEarlyHistoryView,
+        EARLY_HISTORY_VIEW_DELAY_MS,
+      );
+    // The sidebar is pure JSONL metadata and must not remain blank behind
+    // bootstrap's model/command/stats probes. This endpoint never reads the
+    // Primary Runtime, so it remains useful immediately after an app restart.
+    earlySidebarInventoryTimer = window.setTimeout(() => {
+      if (bootstrapSucceeded || sidebarInventoryReadyRef.current) return;
+      void api
+        .sessions(showAllSessionsRef.current)
+        .then((result) => {
+          if (
+            refreshEpochRef.current !== refreshEpoch ||
+            runEpochGenerationRef.current !== runEpochGeneration ||
+            bootstrapSucceeded
+          )
+            return;
+          applySidebarInventory({
+            sessions: result.sessions,
+            sessionsTotal: result.total,
+            sessionDirectories: result.directories,
           });
-        initialHistoryRef.current = { id: wantedId, request };
-      }
-      earlyViewRequest = initialHistoryRef.current.request;
-      void earlyViewRequest.then((view) => {
-        if (
-          navigationEpochRef.current !== navigationEpoch ||
-          desiredSessionIdRef.current !== wantedId ||
-          localDraftRef.current ||
-          confirmedDeletedSessionIdsRef.current.has(wantedId) ||
-          !earlyViewAuthority ||
-          !paneAuthorityCanCommit(earlyViewAuthority)
-        ) return;
-        applySessionView(view, earlyViewAuthority);
-      }).catch(() => undefined);
+        })
+        .catch(() => undefined);
+    }, EARLY_SIDEBAR_INVENTORY_DELAY_MS);
+    let data: BootstrapData;
+    try {
+      data = await bootstrapRequest;
+    } catch (cause) {
+      // Browser requests remain uncancelled across handoff. A rejected A
+      // bootstrap must not reach its old caller's error UI after B takes over.
+      if (
+        refreshEpochRef.current !== refreshEpoch ||
+        runEpochGenerationRef.current !== runEpochGeneration ||
+        navigationEpochRef.current !== navigationEpoch
+      )
+        return;
+      throw cause;
     }
-    const data = await loadBootstrap();
+    // An old process request can resolve after a replacement ready has started
+    // a newer refresh. It must not mark that new epoch bootstrapped or cancel
+    // its independent history/sidebar fallback timers.
     if (
       refreshEpochRef.current !== refreshEpoch ||
+      runEpochGenerationRef.current !== runEpochGeneration ||
       navigationEpochRef.current !== navigationEpoch
     )
       return;
+    bootstrapSucceeded = true;
+    bootstrapCompletedRef.current = true;
+    if (earlyViewTimer !== null) window.clearTimeout(earlyViewTimer);
+    if (earlySidebarInventoryTimer !== null)
+      window.clearTimeout(earlySidebarInventoryTimer);
     if (
       wantedId &&
       viewedSessionIdRef.current === wantedId &&
@@ -1202,10 +1526,12 @@ export function App() {
       desiredSessionIdRef.current = wantedId;
       try {
         const viewVersion = sessionEventVersionRef.current.get(wantedId) || 0;
-        const viewAuthority = earlyViewAuthority || capturePaneAuthority(wantedId);
+        const viewAuthority =
+          earlyViewAuthority || capturePaneAuthority(wantedId);
         const view = await (earlyViewRequest || api.viewSession(wantedId));
         if (
           refreshEpochRef.current !== refreshEpoch ||
+          runEpochGenerationRef.current !== runEpochGeneration ||
           navigationEpochRef.current !== navigationEpoch ||
           desiredSessionIdRef.current !== wantedId ||
           !paneAuthorityCanCommit(viewAuthority)
@@ -1231,6 +1557,12 @@ export function App() {
         );
         return;
       } catch (cause) {
+        if (
+          refreshEpochRef.current !== refreshEpoch ||
+          runEpochGenerationRef.current !== runEpochGeneration ||
+          navigationEpochRef.current !== navigationEpoch
+        )
+          return;
         // A busy Runtime can make this best-effort view refresh time out. Keep the
         // already committed conversation painted; Bootstrap owns only global
         // metadata unless the server explicitly confirms the Session is gone.
@@ -1252,16 +1584,82 @@ export function App() {
     }
     applyBootstrap(data, bootstrapAuthority);
     setError((current) => (recoverableRefreshError(current) ? "" : current));
-  }, [applyBootstrap, applyBootstrapMetadata, applySessionView, capturePaneAuthority, ensureHandshake, loadBootstrap, paneAuthorityCanCommit]);
+  }, [
+    applyBootstrap,
+    applyBootstrapMetadata,
+    applySessionView,
+    applySidebarInventory,
+    capturePaneAuthority,
+    ensureHandshake,
+    loadBootstrap,
+    paneAuthorityCanCommit,
+  ]);
+
+  const startIdleRecovery = useCallback(
+    (serverEpochChanged = false, refreshOnOrdinaryIdle = false) => {
+      // Idle is authoritative lifecycle state even when the following bootstrap
+      // is slow or rejected. Do not leave navigation and mutations locked on
+      // stale maintenance state while JSONL fallback remains available.
+      applicationLifecycleRef.current = "idle";
+      setApplicationLifecycle("idle");
+      setNotice("");
+      const replacementBootstrapPending =
+        replacementBootstrapPendingRef.current;
+      const retryFailedInitialBootstrap =
+        !bootstrapCompletedRef.current &&
+        !initialReadyRecoveryRequestedRef.current;
+      const needsRecovery =
+        serverEpochChanged ||
+        replacementBootstrapPending ||
+        retryFailedInitialBootstrap;
+      if (!needsRecovery && !refreshOnOrdinaryIdle) return;
+      // A same-epoch ready can arrive while B's first bootstrap is pending. It
+      // joins that request, so it must not consume the one retry reserved for a
+      // later failed attempt.
+      if (
+        retryFailedInitialBootstrap &&
+        !serverEpochChanged &&
+        !replacementBootstrapPending &&
+        bootstrapInFlightRef.current
+      )
+        return;
+      // A replacement may first announce maintenance, so its later first idle
+      // bootstrap remains distinct from this epoch's one failed-bootstrap retry.
+      replacementBootstrapPendingRef.current = false;
+      if (
+        retryFailedInitialBootstrap &&
+        !serverEpochChanged &&
+        !replacementBootstrapPending
+      )
+        initialReadyRecoveryRequestedRef.current = true;
+      void refresh()
+        .then(() => {
+          const id = viewedSessionIdRef.current;
+          if (id) void api.markSessionViewed(id).catch(() => undefined);
+        })
+        .catch(reportBackgroundRefreshError);
+    },
+    [refresh, reportBackgroundRefreshError],
+  );
 
   const refreshSidebarSessions = useCallback(async () => {
+    const runEpochGeneration = runEpochGenerationRef.current;
     if (sessionRefreshInFlightRef.current) {
-      sessionRefreshRequestedRef.current = true;
-      return;
+      if (sessionRefreshGenerationRef.current === runEpochGeneration) {
+        sessionRefreshRequestedRef.current = true;
+        return;
+      }
+      // A replacement does not cancel browser requests. Detach A's coalescer so
+      // B can read its own Session Index immediately; A's finally is ownership-guarded.
+      sessionRefreshInFlightRef.current = false;
+      sessionRefreshGenerationRef.current = null;
+      sessionRefreshRequestedRef.current = false;
     }
     sessionRefreshInFlightRef.current = true;
+    sessionRefreshGenerationRef.current = runEpochGeneration;
     try {
       const result = await api.sessions(showAllSessionsRef.current);
+      if (runEpochGenerationRef.current !== runEpochGeneration) return;
       for (const session of result.sessions) {
         if (
           typeof session.turnCount === "number" &&
@@ -1277,8 +1675,12 @@ export function App() {
         ),
       );
       setSessionDirectories(result.directories || []);
+    } catch (cause) {
+      if (runEpochGenerationRef.current === runEpochGeneration) throw cause;
     } finally {
+      if (sessionRefreshGenerationRef.current !== runEpochGeneration) return;
       sessionRefreshInFlightRef.current = false;
+      sessionRefreshGenerationRef.current = null;
       if (sessionRefreshRequestedRef.current) {
         sessionRefreshRequestedRef.current = false;
         void refreshSidebarSessions().catch((cause) =>
@@ -1289,11 +1691,18 @@ export function App() {
   }, []);
 
   const loadAllSessions = useCallback(async () => {
-    if (showAllSessionsRef.current || loadingAllSessions) return;
+    const runEpochGeneration = runEpochGenerationRef.current;
+    if (
+      showAllSessionsRef.current ||
+      loadAllSessionsGenerationRef.current === runEpochGeneration
+    )
+      return;
+    loadAllSessionsGenerationRef.current = runEpochGeneration;
     setLoadingAllSessions(true);
     setError("");
     try {
       const result = await api.sessions(true);
+      if (runEpochGenerationRef.current !== runEpochGeneration) return;
       for (const session of result.sessions) {
         if (
           typeof session.turnCount === "number" &&
@@ -1311,17 +1720,51 @@ export function App() {
       );
       setSessionDirectories(result.directories || []);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      if (runEpochGenerationRef.current === runEpochGeneration)
+        setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
+      if (loadAllSessionsGenerationRef.current !== runEpochGeneration) return;
+      loadAllSessionsGenerationRef.current = null;
       setLoadingAllSessions(false);
     }
-  }, [loadingAllSessions]);
+  }, []);
+
+  const loadDirectorySessions = useCallback(
+    async (cwd: string, offset: number) => {
+      const runEpochGeneration = runEpochGenerationRef.current;
+      if (directoryLoadGenerationsRef.current.get(cwd) === runEpochGeneration)
+        return;
+      directoryLoadGenerationsRef.current.set(cwd, runEpochGeneration);
+      setLoadingDirectoryKeys((current) => [...new Set([...current, cwd])]);
+      try {
+        const result = await api.directorySessions(cwd, offset);
+        if (runEpochGenerationRef.current !== runEpochGeneration) return;
+        setSessions((current) =>
+          uniqueSessionSummaries([...current, ...result.sessions]),
+        );
+        setSessionDirectories(result.directories || []);
+      } catch (cause) {
+        if (runEpochGenerationRef.current === runEpochGeneration)
+          setError(cause instanceof Error ? cause.message : String(cause));
+      } finally {
+        if (directoryLoadGenerationsRef.current.get(cwd) !== runEpochGeneration)
+          return;
+        directoryLoadGenerationsRef.current.delete(cwd);
+        setLoadingDirectoryKeys((current) =>
+          current.filter((key) => key !== cwd),
+        );
+      }
+    },
+    [],
+  );
 
   const scheduleSidebarRefresh = useCallback(() => {
+    const runEpochGeneration = runEpochGenerationRef.current;
     if (sessionRefreshTimerRef.current !== null)
       window.clearTimeout(sessionRefreshTimerRef.current);
     sessionRefreshTimerRef.current = window.setTimeout(() => {
       sessionRefreshTimerRef.current = null;
+      if (runEpochGenerationRef.current !== runEpochGeneration) return;
       void refreshSidebarSessions().catch((cause) =>
         setError(cause instanceof Error ? cause.message : String(cause)),
       );
@@ -1337,7 +1780,8 @@ export function App() {
     return () => {
       if (sessionRefreshTimerRef.current !== null)
         window.clearTimeout(sessionRefreshTimerRef.current);
-      for (const request of loadingEarlierRequestsRef.current.values()) request.controller.abort();
+      for (const request of loadingEarlierRequestsRef.current.values())
+        request.controller.abort();
       cancelPendingNavigation();
     };
   }, [cancelPendingNavigation, refresh]);
@@ -1349,7 +1793,10 @@ export function App() {
 
   useEffect(() => saveSidebarOpen(sidebarOpen), [sidebarOpen]);
   useEffect(() => saveSidebarWidth(sidebarWidth), [sidebarWidth]);
-  useEffect(() => saveSessionNavigationPreferences(sessionNavigation), [sessionNavigation]);
+  useEffect(
+    () => saveSessionNavigationPreferences(sessionNavigation),
+    [sessionNavigation],
+  );
 
   // EventSource reconnects after a server restart, but it cannot replay events
   // missed while disconnected. Keep transport ownership in usePiEventSource;
@@ -1364,18 +1811,104 @@ export function App() {
       const ready = parseEventData(rawEvent);
       const readyRunEpoch =
         typeof ready.piChatRunEpoch === "string" ? ready.piChatRunEpoch : "";
-      if (readyRunEpoch && readyRunEpoch !== runEpochRef.current) {
-        workspaceEpochRef.current = typeof ready.workspaceEpoch === "string" ? ready.workspaceEpoch : readyRunEpoch;
+      const serverEpochChanged = Boolean(
+        readyRunEpoch &&
+        runEpochRef.current &&
+        readyRunEpoch !== runEpochRef.current,
+      );
+      if (serverEpochChanged) {
+        // Bootstrap completion is scoped to the server epoch. A successful old
+        // response cannot suppress one recovery retry for this replacement.
+        bootstrapCompletedRef.current = false;
+        initialReadyRecoveryRequestedRef.current = false;
+        replacementBootstrapPendingRef.current = true;
+        // All pre-handoff reads carry the old process token and metadata. They
+        // remain uncancelled, but cannot be reused or commit into this epoch.
+        runEpochGenerationRef.current += 1;
+        // Abort and invalidate A's ordinary navigation before maintenance can
+        // return. Authority generation still rejects uncancellable responses.
+        cancelPendingNavigation();
+        // Detach A's uncancellable Session Index work and its loading state.
+        // B starts independent reads; late A finalizers cannot clear B ownership.
+        if (sessionRefreshTimerRef.current !== null)
+          window.clearTimeout(sessionRefreshTimerRef.current);
+        sessionRefreshTimerRef.current = null;
+        sessionRefreshInFlightRef.current = false;
+        sessionRefreshGenerationRef.current = null;
+        sessionRefreshRequestedRef.current = false;
+        loadAllSessionsGenerationRef.current = null;
+        directoryLoadGenerationsRef.current.clear();
+        setLoadingAllSessions(false);
+        setLoadingDirectoryKeys([]);
+        // A replacement can announce maintenance before its first idle frame.
+        // Detach its bootstrap now, before the lifecycle branch can return.
+        bootstrapInFlightRef.current = null;
+        api.invalidateHandshake();
+        handshakeInFlightRef.current = null;
+        initialHistoryRef.current = null;
+        draftWorkspacePickerTokenRef.current = null;
+        workspaceDefaultPickerTokenRef.current = null;
+        setWorkspacePicking(false);
+        settingsOperationTokenRef.current = null;
+        setSettingsBusy(false);
+        refreshOperationTokenRef.current = null;
+        setRefreshing(false);
+        stoppingOperationTokenRef.current = null;
+        stoppingRef.current = false;
+        setStopping(false);
+        optimisticRenamesRef.current.clear();
+        optimisticDeletesRef.current.clear();
+        syncMutatingSessionIds();
+        busySessionCountsRef.current.clear();
+        setBusySessionIds([]);
+        sidebarInventoryReadyRef.current = false;
+        setSidebarInventoryReady(false);
+        setSessions([]);
+        setSessionsTotal(0);
+        setSessionDirectories([]);
+        // Primary readiness generations are local to one server process. Clear
+        // A's high generation before B reports its own lower-generation state.
+        setPrimaryRuntime({ status: "starting", generation: 0 });
+        workspaceEpochRef.current =
+          typeof ready.workspaceEpoch === "string"
+            ? ready.workspaceEpoch
+            : readyRunEpoch;
         workspaceRevisionRef.current = 0;
         for (const lease of promptBusyReleasesRef.current.values()) {
           lease.markTerminal();
           lease.release();
         }
         promptBusyReleasesRef.current.clear();
+        warmingRuntimeStartsRef.current.clear();
+        warmingSessionIdsRef.current.clear();
+        setWarmingSessionIds([]);
         sessionRunGenerationsRef.current.clear();
         settledRunGenerationsRef.current.clear();
         runEpochRef.current = readyRunEpoch;
+      } else if (readyRunEpoch && !runEpochRef.current) {
+        // The first ready only discovers the initial epoch; it is not a
+        // replacement and must not grant an additional recovery retry.
+        runEpochRef.current = readyRunEpoch;
       }
+      // Bootstrap can legitimately return while Primary is `starting`; the
+      // browser opens SSE only after that first paint. If Primary reaches ready
+      // in between, its status broadcast has no client to receive it. The ready
+      // frame is therefore also a capability snapshot, not merely lifecycle.
+      const readyPrimary = ready.primaryRuntime as
+        Partial<PrimaryRuntimeReadiness> | undefined;
+      if (
+        readyPrimary &&
+        (readyPrimary.status === "starting" ||
+          readyPrimary.status === "ready" ||
+          readyPrimary.status === "failed") &&
+        typeof readyPrimary.generation === "number"
+      )
+        setPrimaryRuntime((current) =>
+          newerPrimaryReadiness(
+            current,
+            readyPrimary as PrimaryRuntimeReadiness,
+          ),
+        );
       if (lifecycleFromEvent(ready) === "restarting") {
         applicationLifecycleRef.current = "restarting";
         setApplicationLifecycle("restarting");
@@ -1407,14 +1940,9 @@ export function App() {
         }
         return;
       }
-      void refresh()
-        .then(() => {
-          const id = viewedSessionIdRef.current;
-          if (id) void api.markSessionViewed(id).catch(() => undefined);
-        })
-        .catch(reportBackgroundRefreshError);
+      startIdleRecovery(serverEpochChanged);
     },
-    [refresh, reportBackgroundRefreshError],
+    [cancelPendingNavigation, startIdleRecovery],
   );
 
   const handlePiEvent = useCallback(
@@ -1431,7 +1959,8 @@ export function App() {
       const eventSessionId =
         typeof event.piChatSessionId === "string"
           ? event.piChatSessionId
-          : type === "pi_chat_session_control_changed" && typeof event.sessionId === "string"
+          : type === "pi_chat_session_control_changed" &&
+              typeof event.sessionId === "string"
             ? event.sessionId
             : "";
       const eventRunEpoch =
@@ -1448,8 +1977,10 @@ export function App() {
           ? event.piChatRunGeneration
           : undefined;
       if (eventSessionId && typeof eventRunGeneration === "number") {
-        const latest = sessionRunGenerationsRef.current.get(eventSessionId) || 0;
-        const settled = settledRunGenerationsRef.current.get(eventSessionId) || 0;
+        const latest =
+          sessionRunGenerationsRef.current.get(eventSessionId) || 0;
+        const settled =
+          settledRunGenerationsRef.current.get(eventSessionId) || 0;
         // A Pi turn is a monotonic lifecycle. Once a generation settles, every
         // non-terminal frame from it is stale, even if SSE/backpressure makes
         // it arrive after settlement. This prevents a late tool completion or
@@ -1459,9 +1990,15 @@ export function App() {
           (eventRunGeneration <= settled && type !== "agent_settled")
         )
           return;
-        sessionRunGenerationsRef.current.set(eventSessionId, Math.max(latest, eventRunGeneration));
+        sessionRunGenerationsRef.current.set(
+          eventSessionId,
+          Math.max(latest, eventRunGeneration),
+        );
         if (type === "agent_settled")
-          settledRunGenerationsRef.current.set(eventSessionId, Math.max(settled, eventRunGeneration));
+          settledRunGenerationsRef.current.set(
+            eventSessionId,
+            Math.max(settled, eventRunGeneration),
+          );
       }
       // Only explicitly global frames may omit a Session ID. A malformed
       // session-scoped frame must never be interpreted as belonging to whatever
@@ -1491,11 +2028,7 @@ export function App() {
         window.setTimeout(() => window.close(), 40);
       } else if (type === "agent_start") {
         if (eventSessionId) {
-          releasePromptBusy(
-            eventSessionId,
-            eventRunGeneration,
-            eventRunEpoch,
-          );
+          releasePromptBusy(eventSessionId, eventRunGeneration, eventRunEpoch);
           sessionRunningOverridesRef.current.set(eventSessionId, true);
           setSessions((current) =>
             current.map((session) =>
@@ -1541,7 +2074,10 @@ export function App() {
             state: { isCompacting: false },
           });
         if (viewingEventSession) {
-          dispatchPane({ type: "COMPACTION_FINISHED", sessionId: eventSessionId });
+          dispatchPane({
+            type: "COMPACTION_FINISHED",
+            sessionId: eventSessionId,
+          });
           const errorMessage =
             typeof event.errorMessage === "string" ? event.errorMessage : "";
           if (errorMessage) setError(errorMessage);
@@ -1569,11 +2105,7 @@ export function App() {
       } else if (type === "message_start" || type === "message_update") {
         const assistant = assistantMessage(event);
         if (assistant && eventSessionId) {
-          releasePromptBusy(
-            eventSessionId,
-            eventRunGeneration,
-            eventRunEpoch,
-          );
+          releasePromptBusy(eventSessionId, eventRunGeneration, eventRunEpoch);
           updateLiveSessionCache(eventSessionId, assistant);
         }
         // Only the selected destination is allowed to turn an SSE draft into a
@@ -1652,6 +2184,18 @@ export function App() {
             status,
           });
       } else if (type === "agent_settled") {
+        if (
+          viewingEventSession &&
+          stoppingOperationTokenRef.current &&
+          stoppingRef.current
+        ) {
+          stoppingOperationTokenRef.current = null;
+          stoppingRef.current = false;
+          setStopping(false);
+          setNotice((current) =>
+            current === "已发送停止请求，Pi 正在结束当前操作" ? "" : current,
+          );
+        }
         if (eventSessionId)
           releasePromptBusy(
             eventSessionId,
@@ -1731,9 +2275,7 @@ export function App() {
           typeof readiness.generation === "number"
         ) {
           const next = readiness as PrimaryRuntimeReadiness;
-          setPrimaryRuntime((current) =>
-            next.generation >= current.generation ? next : current,
-          );
+          setPrimaryRuntime((current) => newerPrimaryReadiness(current, next));
           // Capability metadata becomes available after the Session-first shell
           // is already usable. Refresh it in the background without replacing a
           // selected cold pane (refresh keeps desired/viewed guards).
@@ -1742,12 +2284,23 @@ export function App() {
         }
       } else if (type === "pi_chat_workspace_changed") {
         const cwd = typeof event.cwd === "string" ? event.cwd : "";
-        const workspaceEpoch = typeof event.workspaceEpoch === "string" ? event.workspaceEpoch : runEpochRef.current;
-        const workspaceRevision = typeof event.workspaceRevision === "number" && Number.isFinite(event.workspaceRevision)
-          ? event.workspaceRevision
-          : workspaceRevisionRef.current + 1;
-        if (cwd && (!workspaceEpochRef.current || workspaceEpoch === workspaceEpochRef.current) && workspaceRevision >= workspaceRevisionRef.current) {
-          workspaceEpochRef.current = workspaceEpoch || workspaceEpochRef.current;
+        const workspaceEpoch =
+          typeof event.workspaceEpoch === "string"
+            ? event.workspaceEpoch
+            : runEpochRef.current;
+        const workspaceRevision =
+          typeof event.workspaceRevision === "number" &&
+          Number.isFinite(event.workspaceRevision)
+            ? event.workspaceRevision
+            : workspaceRevisionRef.current + 1;
+        if (
+          cwd &&
+          (!workspaceEpochRef.current ||
+            workspaceEpoch === workspaceEpochRef.current) &&
+          workspaceRevision >= workspaceRevisionRef.current
+        ) {
+          workspaceEpochRef.current =
+            workspaceEpoch || workspaceEpochRef.current;
           workspaceRevisionRef.current = workspaceRevision;
           setWorkspaceCwd(cwd);
         }
@@ -1765,8 +2318,7 @@ export function App() {
         else if (lifecycle === "resources-reloading")
           setNotice("正在更新配置并重载 Runtime…");
         else if (lifecycle === "idle") {
-          setNotice("");
-          void refresh().catch(reportBackgroundRefreshError);
+          startIdleRecovery(false, true);
         }
       } else if (type === "pi_chat_sessions_changed") {
         // Prompt admission and streaming creation events are frequent. Retain the
@@ -1835,11 +2387,13 @@ export function App() {
             sessionId: eventSessionId,
             queue: currentQueue,
             paused: event.paused === true,
-            messages: removeAdmittedTurn && turn
-              ? ((current) => current.filter((candidate) => candidate !== turn.message))
-              : undefined,
+            messages:
+              removeAdmittedTurn && turn
+                ? (current) =>
+                    current.filter((candidate) => candidate !== turn.message)
+                : undefined,
             pendingUserMessage: turn
-              ? ((current) => current === turn.message ? null : current)
+              ? (current) => (current === turn.message ? null : current)
               : undefined,
           });
       } else if (type === "pi_chat_queue_dispatch") {
@@ -1873,9 +2427,10 @@ export function App() {
               pendingUserMessage: (current) =>
                 current === knownLocally.message ? null : current,
               messages: shouldAppend
-                ? ((current) => current.includes(knownLocally.message)
-                  ? current
-                  : [...current, knownLocally.message])
+                ? (current) =>
+                    current.includes(knownLocally.message)
+                      ? current
+                      : [...current, knownLocally.message]
                 : undefined,
             });
           }
@@ -1945,9 +2500,10 @@ export function App() {
             sessionId: eventSessionId,
             ...(currentQueue.length ? { queue: currentQueue } : null),
             ...(event.paused === true ? { paused: true } : null),
-            messages: (current) => current.filter((candidate) =>
-              !failedRenderedTurns.has(candidate),
-            ),
+            messages: (current) =>
+              current.filter(
+                (candidate) => !failedRenderedTurns.has(candidate),
+              ),
             pendingUserMessage: null,
           });
           setError(String(event.error || "队列消息发送失败"));
@@ -1974,7 +2530,10 @@ export function App() {
             const authority = sessionId
               ? capturePaneAuthority(sessionId)
               : null;
-            if (!authority || !tryAutoAllowGate(request, sessionId, authority, true))
+            if (
+              !authority ||
+              !tryAutoAllowGate(request, sessionId, authority, true)
+            )
               dispatchPane({
                 type: "EXTENSION_REQUEST_CHANGED",
                 sessionId,
@@ -2046,22 +2605,42 @@ export function App() {
         if (viewingEventSession)
           setError(String(event.error || "扩展执行失败"));
       } else if (type === "pi_chat_session_status") {
-        const activity = event.activity as Partial<SessionActivityState> | undefined;
+        const activity = event.activity as
+          Partial<SessionActivityState> | undefined;
         if (
-          eventSessionId && activity &&
-          ["idle", "queued", "dispatching", "running", "paused", "failed"].includes(String(activity.execution)) &&
+          eventSessionId &&
+          activity &&
+          [
+            "idle",
+            "queued",
+            "dispatching",
+            "running",
+            "paused",
+            "failed",
+          ].includes(String(activity.execution)) &&
           typeof activity.awaitingConfirmation === "boolean"
         ) {
           const next = activity as SessionActivityState;
           applySessionActivity(eventSessionId, next);
-          const streaming = next.execution === "running" || next.execution === "dispatching";
-          patchSessionCache(eventSessionId, { isStreaming: streaming, state: { isStreaming: streaming } });
+          const streaming =
+            next.execution === "running" || next.execution === "dispatching";
+          patchSessionCache(eventSessionId, {
+            isStreaming: streaming,
+            state: { isStreaming: streaming },
+          });
         } else if (eventSessionId && typeof event.running === "boolean") {
           // Older servers still publish this partial event during a rolling update.
           const running = event.running === true;
           sessionRunningOverridesRef.current.set(eventSessionId, running);
-          setSessions((current) => current.map((session) => session.id === eventSessionId ? { ...session, running } : session));
-          patchSessionCache(eventSessionId, { isStreaming: running, state: { isStreaming: running } });
+          setSessions((current) =>
+            current.map((session) =>
+              session.id === eventSessionId ? { ...session, running } : session,
+            ),
+          );
+          patchSessionCache(eventSessionId, {
+            isStreaming: running,
+            state: { isStreaming: running },
+          });
         }
       } else if (type === "pi_chat_process_recovered") {
         if (eventSessionId)
@@ -2116,6 +2695,7 @@ export function App() {
       scheduleLiveMessage,
       scheduleSidebarRefresh,
       setRuntimeWarming,
+      startIdleRecovery,
       releasePromptBusy,
       tryAutoAllowGate,
       updateGateMode,
@@ -2140,6 +2720,29 @@ export function App() {
         .recoverConnection()
         .then(() => {
           recoveringConnectionRef.current = null;
+          // Recovery may have crossed a service/token boundary without an SSE
+          // ready frame. Invalidate old refresh commits and process-owned UI
+          // leases before bootstrapping with the newly accepted transport token.
+          runEpochGenerationRef.current += 1;
+          bootstrapInFlightRef.current = null;
+          handshakeInFlightRef.current = null;
+          initialHistoryRef.current = null;
+          settingsOperationTokenRef.current = null;
+          setSettingsBusy(false);
+          refreshOperationTokenRef.current = null;
+          setRefreshing(false);
+          stoppingOperationTokenRef.current = null;
+          stoppingRef.current = false;
+          setStopping(false);
+          draftWorkspacePickerTokenRef.current = null;
+          workspaceDefaultPickerTokenRef.current = null;
+          setWorkspacePicking(false);
+          busySessionCountsRef.current.clear();
+          setBusySessionIds([]);
+          promptBusyReleasesRef.current.clear();
+          warmingRuntimeStartsRef.current.clear();
+          warmingSessionIdsRef.current.clear();
+          setWarmingSessionIds([]);
           setError("");
           setEventSourceGeneration((generation) => generation + 1);
           return refresh();
@@ -2306,7 +2909,10 @@ export function App() {
   }, [error, notice]);
 
   const loadingEarlierRequestsRef = useRef(
-    new Map<string, { token: symbol; navigationEpoch: number; controller: AbortController }>(),
+    new Map<
+      string,
+      { token: symbol; navigationEpoch: number; controller: AbortController }
+    >(),
   );
   const loadEarlierTurns = useCallback(async () => {
     const id = viewedSessionIdRef.current;
@@ -2342,21 +2948,30 @@ export function App() {
         // permanently busy although the parsed in-memory history is already ready.
         // Prefer the RPC-free hot-memory snapshot, then use the JSONL-only view for
         // cold/reclaimed Sessions or an incomplete hot history.
-        view = await api.viewSession(id, requestedTurns, { fast: true, signal: controller.signal });
+        view = await api.viewSession(id, requestedTurns, {
+          fast: true,
+          signal: controller.signal,
+        });
         const visible = view.visibleTurnCount ?? 0;
         if (
           view.historyPending ||
           (view.turnTotal ?? 0) < turnTotal ||
           (view.messagesTruncated && visible <= visibleTurnCount)
         )
-          throw new ApiRequestError("热会话历史尚未就绪", 409, "HOT_VIEW_UNAVAILABLE");
+          throw new ApiRequestError(
+            "热会话历史尚未就绪",
+            409,
+            "HOT_VIEW_UNAVAILABLE",
+          );
       } catch (cause) {
         if (
           !(cause instanceof ApiRequestError) ||
           cause.code !== "HOT_VIEW_UNAVAILABLE"
         )
           throw cause;
-        view = await api.viewSession(id, requestedTurns, { signal: controller.signal });
+        view = await api.viewSession(id, requestedTurns, {
+          signal: controller.signal,
+        });
       }
       if (!paneAuthorityCanCommit(authority)) return;
       // Events received while a historical page is loading are already held in
@@ -2388,14 +3003,19 @@ export function App() {
         setError(cause instanceof Error ? cause.message : String(cause));
       }
     } finally {
-      if (
-        loadingEarlierRequestsRef.current.get(id)?.token === requestToken
-      ) {
+      if (loadingEarlierRequestsRef.current.get(id)?.token === requestToken) {
         loadingEarlierRequestsRef.current.delete(id);
         setLoadingEarlierRevision((current) => current + 1);
       }
     }
-  }, [applySessionView, capturePaneAuthority, messagesTruncated, paneAuthorityCanCommit, turnTotal, visibleTurnCount]);
+  }, [
+    applySessionView,
+    capturePaneAuthority,
+    messagesTruncated,
+    paneAuthorityCanCommit,
+    turnTotal,
+    visibleTurnCount,
+  ]);
 
   const rememberCurrentScroll = () => {
     const element = scrollRef.current;
@@ -2535,6 +3155,9 @@ export function App() {
         : userMessage(message, images);
     const localTurn = optimisticMessage || userMessage(message, images);
     let targetSessionId = viewedSessionIdRef.current;
+    const promptRunEpochGeneration = runEpochGenerationRef.current;
+    const promptOperationIsInCurrentRun = () =>
+      runEpochGenerationRef.current === promptRunEpochGeneration;
     let promptAuthority: ReturnType<typeof capturePaneAuthority> | null =
       targetSessionId ? capturePaneAuthority(targetSessionId) : null;
     let promptDraftAuthority: DraftPaneAuthority | null = targetSessionId
@@ -2596,21 +3219,24 @@ export function App() {
       if (command?.[1] === "compact") {
         if (localDraftRef.current)
           throw new Error("新对话尚未发送消息，无需压缩上下文");
+        const authority = captureViewOperation();
         if (runtimeStatus !== "active") {
-          const authority = captureViewOperation();
           dispatchPane({
             type: "RUNTIME_STATUS_CHANGED",
             sessionId: authority.sessionId,
             status: "restoring",
           });
           const view = await api.activateSession(viewedSessionId);
+          if (!viewOperationIsInCurrentRun(authority)) return;
           viewCacheRef.current.forget(view.session.id);
-          if (viewOperationIsCurrent(authority)) applySessionView(view, authority);
+          if (viewOperationIsCurrent(authority))
+            applySessionView(view, authority);
           else rememberSessionView(view);
         }
-        await api.compact(command[2] || "", viewedSessionId);
+        await api.compact(command[2] || "", authority.sessionId);
+        if (!viewOperationIsInCurrentRun(authority)) return;
         await refresh();
-        setNotice("上下文压缩完成");
+        if (viewOperationIsCurrent(authority)) setNotice("上下文压缩完成");
         return;
       }
       if (command?.[1] === "abort") {
@@ -2629,7 +3255,8 @@ export function App() {
         staged?.thinkingLevel !== undefined
           ? staged.thinkingLevel
           : (state.thinkingLevel as ThinkingLevel | undefined);
-      let initialPromptResult: Awaited<ReturnType<typeof api.prompt>> | null = null;
+      let initialPromptResult: Awaited<ReturnType<typeof api.prompt>> | null =
+        null;
       if (localDraftRef.current) {
         const draftAuthority = captureDraftPaneAuthority();
         dispatchPane({
@@ -2640,23 +3267,42 @@ export function App() {
         // Once the combined mutation is written its outcome may be unknown;
         // retain the protected local bubble until SSE/JSONL proves otherwise.
         promptSubmitted = true;
-        await clearViewedPromiseRef.current;
-        clearViewedPromiseRef.current = null;
+        const clearViewedRequest = clearViewedPromiseRef.current;
+        await clearViewedRequest;
+        if (clearViewedPromiseRef.current === clearViewedRequest)
+          clearViewedPromiseRef.current = null;
+        if (!promptOperationIsInCurrentRun()) return;
         // One host transaction owns the empty draft through model/thinking/Gate
         // setup and prompt acceptance. Do not expose three extra browser round
         // trips after the dedicated Runtime has just cold-started.
-        const submitNewSession = api.submitNewSession || (async (input: { cwd?: string; message: string; images: PromptImage[]; model?: ModelInfo | null; thinkingLevel?: ThinkingLevel; gateMode?: GateMode }) => {
-          const view = await api.newSession(input.cwd);
-          await api.prompt(input.message, input.images, view.session.id, input.gateMode);
-          return {
-            sessionId: view.session.id,
-            session: view.session,
-            state: view.state,
-            gateMode: view.gateMode || "strict",
-            accepted: true as const,
-            queued: false as const,
-          };
-        });
+        const submitNewSession =
+          api.submitNewSession ||
+          (async (input: {
+            cwd?: string;
+            message: string;
+            images: PromptImage[];
+            model?: ModelInfo | null;
+            thinkingLevel?: ThinkingLevel;
+            gateMode?: GateMode;
+          }) => {
+            const view = await api.newSession(input.cwd);
+            if (!promptOperationIsInCurrentRun())
+              throw new Error("服务已切换，已取消旧进程的新对话提交");
+            await api.prompt(
+              input.message,
+              input.images,
+              view.session.id,
+              input.gateMode,
+            );
+            return {
+              sessionId: view.session.id,
+              session: view.session,
+              state: view.state,
+              gateMode: view.gateMode || "strict",
+              accepted: true as const,
+              queued: false as const,
+            };
+          });
         const initial = await submitNewSession({
           cwd: draftWorkspaceCwd || workspaceCwd,
           message,
@@ -2664,6 +3310,7 @@ export function App() {
           model: preferredModel,
           thinkingLevel: preferredThinking,
         });
+        if (!promptOperationIsInCurrentRun()) return;
         targetSessionId = initial.sessionId;
         moveSessionBusyTo(targetSessionId);
         protectLocalPrompt();
@@ -2712,14 +3359,20 @@ export function App() {
         // background. Await only its minimal capability promise; do not turn
         // the first prompt into a full history/stats/commands activation.
         const ready = await warmSessionRuntime(targetSessionId);
+        if (!promptOperationIsInCurrentRun()) return;
         // The pane state is optimistic while cold. Compare staged settings to
         // the Runtime state proven by /warm, not to that optimistic snapshot;
         // otherwise a selection made during warm can be skipped accidentally.
-        const latestStaged = pendingSessionPrefsRef.current.get(targetSessionId);
-        preferredModel = latestStaged?.model !== undefined ? latestStaged.model : preferredModel;
-        preferredThinking = latestStaged?.thinkingLevel !== undefined
-          ? latestStaged.thinkingLevel
-          : preferredThinking;
+        const latestStaged =
+          pendingSessionPrefsRef.current.get(targetSessionId);
+        preferredModel =
+          latestStaged?.model !== undefined
+            ? latestStaged.model
+            : preferredModel;
+        preferredThinking =
+          latestStaged?.thinkingLevel !== undefined
+            ? latestStaged.thinkingLevel
+            : preferredThinking;
         const activationIsCurrent = applyWarmReadiness(
           targetSessionId,
           ready,
@@ -2745,17 +3398,22 @@ export function App() {
             preferredModel.id,
             targetSessionId,
           );
+          if (!promptOperationIsInCurrentRun()) return;
           commitPaneIfCurrent(activationAuthority, {
             type: "SETTINGS_CONFIRMED",
             sessionId: targetSessionId,
             state: { model: selected.model },
           });
         }
-        if (preferredThinking && ready.state.thinkingLevel !== preferredThinking) {
+        if (
+          preferredThinking &&
+          ready.state.thinkingLevel !== preferredThinking
+        ) {
           const selected = await api.setThinking(
             preferredThinking,
             targetSessionId,
           );
+          if (!promptOperationIsInCurrentRun()) return;
           commitPaneIfCurrent(activationAuthority, {
             type: "SETTINGS_CONFIRMED",
             sessionId: targetSessionId,
@@ -2781,6 +3439,7 @@ export function App() {
               staged.model.id,
               targetSessionId,
             );
+            if (!promptOperationIsInCurrentRun()) return;
             if (promptAuthority)
               commitPaneIfCurrent(promptAuthority, {
                 type: "SETTINGS_CONFIRMED",
@@ -2793,6 +3452,7 @@ export function App() {
               staged.thinkingLevel,
               targetSessionId,
             );
+            if (!promptOperationIsInCurrentRun()) return;
             if (promptAuthority)
               commitPaneIfCurrent(promptAuthority, {
                 type: "SETTINGS_CONFIRMED",
@@ -2830,12 +3490,10 @@ export function App() {
       const requestedGateMode =
         pendingGateModesRef.current.get(targetSessionId) ??
         gateModesRef.current[targetSessionId];
-      const result = initialPromptResult || await api.prompt(
-        message,
-        images,
-        targetSessionId,
-        requestedGateMode,
-      );
+      if (!promptOperationIsInCurrentRun()) return;
+      const result =
+        initialPromptResult ||
+        (await api.prompt(message, images, targetSessionId, requestedGateMode));
       // HTTP acceptance can mean the prompt was queued, before Gate reaches its
       // dispatch boundary. Retain the staged display/send intent until the
       // matching Runtime-confirmed Gate SSE arrives.
@@ -2906,7 +3564,8 @@ export function App() {
         // the single transition that makes its local user bubble visible.
         const queuedTurn = localTurnEntry();
         const removeQueuedTurn =
-          queuedTurn?.queueState === "waiting" && queuedTurn.renderedInTranscript;
+          queuedTurn?.queueState === "waiting" &&
+          queuedTurn.renderedInTranscript;
         if (removeQueuedTurn) queuedTurn.renderedInTranscript = false;
         // A dispatch event can beat this HTTP acknowledgement. In that race the
         // response contains the old enqueue snapshot, so SSE remains authoritative.
@@ -2914,7 +3573,12 @@ export function App() {
           type: "PROMPT_ACKNOWLEDGED",
           sessionId: targetSessionId,
           ...(removeQueuedTurn
-            ? { messages: (current) => current.filter((candidate) => candidate !== queuedTurn!.message) }
+            ? {
+                messages: (current) =>
+                  current.filter(
+                    (candidate) => candidate !== queuedTurn!.message,
+                  ),
+              }
             : null),
           ...(result.queue && queuedTurn?.queueState !== "dispatched"
             ? { queue: result.queue }
@@ -2943,7 +3607,8 @@ export function App() {
           commitPaneIfCurrent(promptAuthority!, {
             type: "PROMPT_ACKNOWLEDGED",
             sessionId: targetSessionId,
-            messages: (current) => appendLocalTurnOnce(current, localTurnEntry()),
+            messages: (current) =>
+              appendLocalTurnOnce(current, localTurnEntry()),
           });
           try {
             const requestVersion =
@@ -2968,7 +3633,8 @@ export function App() {
           commitPaneIfCurrent(promptAuthority!, {
             type: "PROMPT_ACKNOWLEDGED",
             sessionId: targetSessionId,
-            messages: (current) => appendLocalTurnOnce(current, localTurnEntry()),
+            messages: (current) =>
+              appendLocalTurnOnce(current, localTurnEntry()),
             isStreaming: true,
             toolStatus: "Pi 正在思考…",
           });
@@ -2993,15 +3659,14 @@ export function App() {
           promptTerminalByEvent ||
           !explicitClientRejection);
       let rejectionMessages:
-        | PiMessage[]
-        | ((current: PiMessage[]) => PiMessage[])
-        | undefined;
+        PiMessage[] | ((current: PiMessage[]) => PiMessage[]) | undefined;
       if (localEntry && outcomeUnknown) {
         // The request body reached the prompt endpoint, but its acknowledgement
         // may have been lost after Pi accepted it. SSE or JSONL will confirm the
         // protected row; deleting it here makes an actively running prompt vanish.
         localEntry.queueState = "dispatched";
-        rejectionMessages = (current) => appendLocalTurnOnce(current, localEntry);
+        rejectionMessages = (current) =>
+          appendLocalTurnOnce(current, localEntry);
         schedulePromptReconcile(targetSessionId);
       } else if (localEntry) {
         const pending = localUserTurnsRef.current.get(targetSessionId) || [];
@@ -3047,12 +3712,26 @@ export function App() {
 
   const stopGeneration = async () => {
     if (buildIdentityMismatch || stoppingRef.current) return;
+    const operationToken = Symbol("stop-generation");
+    stoppingOperationTokenRef.current = operationToken;
     stoppingRef.current = true;
     setStopping(true);
     setError("");
     const operation = captureViewOperation();
+    let abortPending = false;
     try {
       const result = await api.abort(operation.sessionId);
+      if (!viewOperationIsInCurrentRun(operation)) return;
+      if (result.abortPending) {
+        abortPending = true;
+        commitPaneIfCurrent(operation, {
+          type: "PROMPT_PREPARING",
+          target: { kind: "session", sessionId: operation.sessionId },
+          status: "已发送停止请求，正在等待当前操作结束…",
+        });
+        setNotice("已发送停止请求，Pi 正在结束当前操作");
+        return;
+      }
       patchSessionCache(operation.sessionId, {
         state: { isStreaming: result.isStreaming },
         isStreaming: result.isStreaming,
@@ -3063,16 +3742,23 @@ export function App() {
       });
       if (!result.isStreaming) {
         sessionRunningOverridesRef.current.set(operation.sessionId, false);
-        setSessions((current) => current.map((session) =>
-          session.id === operation.sessionId ? settleSidebarActivity(session) : session,
-        ));
+        setSessions((current) =>
+          current.map((session) =>
+            session.id === operation.sessionId
+              ? settleSidebarActivity(session)
+              : session,
+          ),
+        );
       }
-      if (!commitPaneIfCurrent(operation, {
-        type: "STOP_COMPLETED",
-        sessionId: operation.sessionId,
-        isStreaming: result.isStreaming,
-        queuePaused: result.queuePaused,
-      })) return;
+      if (
+        !commitPaneIfCurrent(operation, {
+          type: "STOP_COMPLETED",
+          sessionId: operation.sessionId,
+          isStreaming: result.isStreaming,
+          queuePaused: result.queuePaused,
+        })
+      )
+        return;
       if (!result.isStreaming) {
         // Never await full bootstrap/refresh here: while the worker is still
         // draining after abort, get_messages/bootstrap can hang for the full
@@ -3103,8 +3789,15 @@ export function App() {
         setError(cause instanceof Error ? cause.message : String(cause));
       if (viewOperationIsCurrent(operation)) throw cause;
     } finally {
-      stoppingRef.current = false;
-      setStopping(false);
+      if (
+        !abortPending &&
+        stoppingOperationTokenRef.current === operationToken &&
+        viewOperationIsInCurrentRun(operation)
+      ) {
+        stoppingOperationTokenRef.current = null;
+        stoppingRef.current = false;
+        setStopping(false);
+      }
     }
   };
 
@@ -3156,7 +3849,8 @@ export function App() {
     rememberCurrentScroll();
     const rememberedTurns = scrollMemoryRef.current.turns(id);
     cancelPendingNavigation(false);
-    for (const request of loadingEarlierRequestsRef.current.values()) request.controller.abort();
+    for (const request of loadingEarlierRequestsRef.current.values())
+      request.controller.abort();
     const epoch = ++navigationEpochRef.current;
     const controller = new AbortController();
     navigationAbortRef.current = controller;
@@ -3180,7 +3874,10 @@ export function App() {
       // Commit telemetry at the selection point as well as through the normal
       // view applicator: background reconciliation must never obscure a cache hit.
       recordPaneCommit({ ...cached, viewSource: "browser-cache" });
-      applySessionView({ ...cached, viewSource: "browser-cache" }, navigationAuthority);
+      applySessionView(
+        { ...cached, viewSource: "browser-cache" },
+        navigationAuthority,
+      );
       // A cache hit just committed a new pane revision. Its follow-up read must
       // capture that revision, never reuse the old source-pane authority.
       const reconcileAuthority = capturePaneAuthority(id);
@@ -3199,7 +3896,7 @@ export function App() {
         cached.reconcilePending ||
         cached.isStreaming ||
         cached.runtimeStatus === "active" ||
-        Date.now() - cached.cachedAt >= 15_000
+        Date.now() - cached.cachedAt >= 15_000,
       );
       if (!needsReconcile) return;
       const requestVersion = sessionEventVersionRef.current.get(id) || 0;
@@ -3269,7 +3966,10 @@ export function App() {
       )
         return;
       pendingScrollRestoreRef.current = id;
-      const committed = viewCacheRef.current.mergeNavigation(view, requestStartRevision);
+      const committed = viewCacheRef.current.mergeNavigation(
+        view,
+        requestStartRevision,
+      );
       applySessionView(committed, navigationAuthority);
       joinWarmPane(id, capturePaneAuthority(id));
       // Cold history remains view-only after navigation. Explicit mutation or
@@ -3355,8 +4055,12 @@ export function App() {
           ...(pendingSessionPrefsRef.current.get(sessionId)?.model !== undefined
             ? { model: pendingSessionPrefsRef.current.get(sessionId)!.model }
             : null),
-          ...(pendingSessionPrefsRef.current.get(sessionId)?.thinkingLevel !== undefined
-            ? { thinkingLevel: pendingSessionPrefsRef.current.get(sessionId)!.thinkingLevel }
+          ...(pendingSessionPrefsRef.current.get(sessionId)?.thinkingLevel !==
+          undefined
+            ? {
+                thinkingLevel:
+                  pendingSessionPrefsRef.current.get(sessionId)!.thinkingLevel,
+              }
             : null),
         };
     // A returned pane has a newer view projection than the shared warm
@@ -3369,10 +4073,7 @@ export function App() {
     });
   }
 
-  function joinWarmPane(
-    sessionId: string,
-    authority: PaneAuthoritySnapshot,
-  ) {
+  function joinWarmPane(sessionId: string, authority: PaneAuthoritySnapshot) {
     const warm = warmingRuntimeStartsRef.current.get(sessionId);
     if (!warm) return;
     void warm
@@ -3380,10 +4081,13 @@ export function App() {
         applyWarmReadiness(sessionId, ready, authority, true);
       })
       .catch((cause) => {
-        if (!commitPaneIfCurrent(authority, {
-          type: "RUNTIME_FAILED",
-          sessionId,
-        })) return;
+        if (
+          !commitPaneIfCurrent(authority, {
+            type: "RUNTIME_FAILED",
+            sessionId,
+          })
+        )
+          return;
         setError(cause instanceof Error ? cause.message : String(cause));
       });
   }
@@ -3398,10 +4102,13 @@ export function App() {
       if (!sessionId) return Promise.reject(new Error("会话标识无效"));
       const existing = warmingRuntimeStartsRef.current.get(sessionId);
       if (existing) return existing;
+      const runEpochGeneration = runEpochGenerationRef.current;
       setRuntimeWarming(sessionId, true);
       const start = api
         .warmSession(sessionId)
         .then((ready) => {
+          if (runEpochGenerationRef.current !== runEpochGeneration)
+            return ready;
           const staged = pendingSessionPrefsRef.current.get(sessionId);
           const cacheState = {
             ...ready.state,
@@ -3423,9 +4130,13 @@ export function App() {
           return ready;
         })
         .finally(() => {
-          if (warmingRuntimeStartsRef.current.get(sessionId) === start)
+          if (
+            warmingRuntimeStartsRef.current.get(sessionId) === start &&
+            runEpochGenerationRef.current === runEpochGeneration
+          ) {
             warmingRuntimeStartsRef.current.delete(sessionId);
-          setRuntimeWarming(sessionId, false);
+            setRuntimeWarming(sessionId, false);
+          }
         });
       warmingRuntimeStartsRef.current.set(sessionId, start);
       return start;
@@ -3473,18 +4184,24 @@ export function App() {
       return;
     }
     const operation = captureViewOperation();
+    const operationToken = Symbol("set-model");
+    settingsOperationTokenRef.current = operationToken;
     setSettingsBusy(true);
     setError("");
     try {
       const result = await api.setModel(provider, modelId, operation.sessionId);
+      if (!viewOperationIsInCurrentRun(operation)) return;
       patchSessionCache(operation.sessionId, {
         state: { model: result.model },
       });
-      if (!commitPaneIfCurrent(operation, {
-        type: "SETTINGS_CONFIRMED",
-        sessionId: operation.sessionId,
-        state: { model: result.model },
-      })) return;
+      if (
+        !commitPaneIfCurrent(operation, {
+          type: "SETTINGS_CONFIRMED",
+          sessionId: operation.sessionId,
+          state: { model: result.model },
+        })
+      )
+        return;
       setNotice(
         result.pending
           ? `已选择 ${result.model?.name || modelId}，下一轮对话生效`
@@ -3494,7 +4211,13 @@ export function App() {
       if (viewOperationIsCurrent(operation))
         setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      setSettingsBusy(false);
+      if (
+        settingsOperationTokenRef.current === operationToken &&
+        viewOperationIsInCurrentRun(operation)
+      ) {
+        settingsOperationTokenRef.current = null;
+        setSettingsBusy(false);
+      }
     }
   };
 
@@ -3513,18 +4236,24 @@ export function App() {
       return;
     }
     const operation = captureViewOperation();
+    const operationToken = Symbol("set-thinking");
+    settingsOperationTokenRef.current = operationToken;
     setSettingsBusy(true);
     setError("");
     try {
       const result = await api.setThinking(level, operation.sessionId);
+      if (!viewOperationIsInCurrentRun(operation)) return;
       patchSessionCache(operation.sessionId, {
         state: { thinkingLevel: result.level },
       });
-      if (!commitPaneIfCurrent(operation, {
-        type: "SETTINGS_CONFIRMED",
-        sessionId: operation.sessionId,
-        state: { thinkingLevel: result.level },
-      })) return;
+      if (
+        !commitPaneIfCurrent(operation, {
+          type: "SETTINGS_CONFIRMED",
+          sessionId: operation.sessionId,
+          state: { thinkingLevel: result.level },
+        })
+      )
+        return;
       setNotice(
         result.pending
           ? `已选择 ${result.level}，下一轮对话生效`
@@ -3534,7 +4263,13 @@ export function App() {
       if (viewOperationIsCurrent(operation))
         setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      setSettingsBusy(false);
+      if (
+        settingsOperationTokenRef.current === operationToken &&
+        viewOperationIsInCurrentRun(operation)
+      ) {
+        settingsOperationTokenRef.current = null;
+        setSettingsBusy(false);
+      }
     }
   };
 
@@ -3553,7 +4288,8 @@ export function App() {
         !draftAuthorityCanCommit(authority) ||
         result.cancelled ||
         !result.cwd
-      ) return;
+      )
+        return;
       commitDraftIfCurrent(authority, {
         type: "DRAFT_WORKSPACE_SELECTED",
         cwd: result.cwd,
@@ -3563,7 +4299,8 @@ export function App() {
       if (
         draftWorkspacePickerTokenRef.current === token &&
         draftAuthorityCanCommit(authority)
-      ) setError(cause instanceof Error ? cause.message : String(cause));
+      )
+        setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       if (draftWorkspacePickerTokenRef.current === token) {
         draftWorkspacePickerTokenRef.current = null;
@@ -3574,6 +4311,7 @@ export function App() {
 
   const pickDefaultWorkspace = async () => {
     if (workspacePicking || mutationBlocked) return;
+    const runEpochGeneration = runEpochGenerationRef.current;
     const token = Symbol("default-workspace-picker");
     workspaceDefaultPickerTokenRef.current = token;
     setWorkspacePicking(true);
@@ -3581,14 +4319,29 @@ export function App() {
     setNotice("请在弹出的 Windows 窗口中选择默认工作路径");
     try {
       const result = await api.pickWorkspace();
-      if (workspaceDefaultPickerTokenRef.current !== token || result.cancelled || !result.cwd) return;
+      if (
+        workspaceDefaultPickerTokenRef.current !== token ||
+        runEpochGenerationRef.current !== runEpochGeneration ||
+        result.cancelled ||
+        !result.cwd
+      )
+        return;
       // This is global metadata only. A pending draft can have its own selected
       // cwd, and an existing Runtime always keeps its immutable Session cwd.
-      const workspaceEpoch = typeof result.workspaceEpoch === "string" ? result.workspaceEpoch : runEpochRef.current;
-      const workspaceRevision = typeof result.workspaceRevision === "number" && Number.isFinite(result.workspaceRevision)
-        ? result.workspaceRevision
-        : workspaceRevisionRef.current + 1;
-      if ((!workspaceEpochRef.current || workspaceEpoch === workspaceEpochRef.current) && workspaceRevision >= workspaceRevisionRef.current) {
+      const workspaceEpoch =
+        typeof result.workspaceEpoch === "string"
+          ? result.workspaceEpoch
+          : runEpochRef.current;
+      const workspaceRevision =
+        typeof result.workspaceRevision === "number" &&
+        Number.isFinite(result.workspaceRevision)
+          ? result.workspaceRevision
+          : workspaceRevisionRef.current + 1;
+      if (
+        (!workspaceEpochRef.current ||
+          workspaceEpoch === workspaceEpochRef.current) &&
+        workspaceRevision >= workspaceRevisionRef.current
+      ) {
         workspaceEpochRef.current = workspaceEpoch || workspaceEpochRef.current;
         workspaceRevisionRef.current = workspaceRevision;
         setWorkspaceCwd(result.cwd);
@@ -3662,7 +4415,9 @@ export function App() {
     sourceTurnTotalsRef.current.delete(sessionId);
     setSessionNavigation((current) => ({
       ...current,
-      pinnedSessionIds: current.pinnedSessionIds.filter((id) => id !== sessionId),
+      pinnedSessionIds: current.pinnedSessionIds.filter(
+        (id) => id !== sessionId,
+      ),
     }));
     setSessions((current) =>
       current.filter((session) => session.id !== sessionId),
@@ -3682,7 +4437,8 @@ export function App() {
     // A completed user navigation must win over deletion fallback. A deleted
     // visible pane has already been cleared to empty refs by finalization.
     if (
-      (viewedSessionIdRef.current && viewedSessionIdRef.current !== deletedId) ||
+      (viewedSessionIdRef.current &&
+        viewedSessionIdRef.current !== deletedId) ||
       (desiredSessionIdRef.current && desiredSessionIdRef.current !== deletedId)
     )
       return;
@@ -3695,7 +4451,9 @@ export function App() {
 
   /** Resolve only operations proven by a full authoritative Session inventory. */
   const reconcilePendingSessionMutations = async () => {
+    const runEpochGeneration = runEpochGenerationRef.current;
     const result = await api.sessions(true);
+    if (runEpochGenerationRef.current !== runEpochGeneration) return false;
     let confirmed = false;
     const absentRenames: Array<{ id: string; wasViewed: boolean }> = [];
     for (const [id, pending] of optimisticRenamesRef.current) {
@@ -3718,19 +4476,36 @@ export function App() {
     applySessionListSnapshot(result);
     for (const absent of absentRenames)
       selectDeletionFallback(absent.id, result.sessions, absent.wasViewed);
+    return true;
   };
 
   const refreshManually = async () => {
+    const runEpochGeneration = runEpochGenerationRef.current;
+    const operationToken = Symbol("manual-refresh");
+    refreshOperationTokenRef.current = operationToken;
     setRefreshing(true);
     setError("");
     try {
       await refresh();
-      await reconcilePendingSessionMutations();
-      setNotice("会话已刷新");
+      if (runEpochGenerationRef.current !== runEpochGeneration) return;
+      const reconciled = await reconcilePendingSessionMutations();
+      if (
+        reconciled &&
+        refreshOperationTokenRef.current === operationToken &&
+        runEpochGenerationRef.current === runEpochGeneration
+      )
+        setNotice("会话已刷新");
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      if (
+        refreshOperationTokenRef.current === operationToken &&
+        runEpochGenerationRef.current === runEpochGeneration
+      )
+        setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      setRefreshing(false);
+      if (refreshOperationTokenRef.current === operationToken) {
+        refreshOperationTokenRef.current = null;
+        setRefreshing(false);
+      }
     }
   };
 
@@ -3738,7 +4513,15 @@ export function App() {
     // A mismatched bundle has stale browser state by definition. Let the server
     // make the final quiescence decision rather than trapping recovery behind a
     // possibly stale sidebar activity projection.
-    if (busy || lifecycleBlocked || (!buildIdentityMismatch && (anySessionRunning || anySessionQueued || anySessionPendingConfirmation))) return;
+    if (
+      busy ||
+      lifecycleBlocked ||
+      (!buildIdentityMismatch &&
+        (anySessionRunning ||
+          anySessionQueued ||
+          anySessionPendingConfirmation))
+    )
+      return;
     if (
       !window.confirm(
         "完整重启 Pi Chat 并应用本地更新？\n\n将结束 Pi Chat 服务及其所有 Pi RPC 会话进程，重新构建当前工作目录，然后启动全新的 Pi Chat。已保存的前端、服务端、内置组件与本地配置更新都会生效；聊天记录不会删除。\n\n会重新加载当前电脑上已经保存的 Pi Chat、扩展和配置改动。正在生成、排队或等待确认时无法执行。",
@@ -3765,7 +4548,15 @@ export function App() {
   const shutdownPiChat = async () => {
     // See restartPi: only the server's live quiescence check is authoritative
     // when this Web bundle no longer agrees with that server.
-    if (busy || lifecycleBlocked || (!buildIdentityMismatch && (anySessionRunning || anySessionQueued || anySessionPendingConfirmation))) return;
+    if (
+      busy ||
+      lifecycleBlocked ||
+      (!buildIdentityMismatch &&
+        (anySessionRunning ||
+          anySessionQueued ||
+          anySessionPendingConfirmation))
+    )
+      return;
     if (
       !window.confirm(
         "关闭全部 Pi Chat？\n\n将先检查所有窗口中的对话。只要任一对话仍在执行、排队或等待确认，就不会关闭。\n\n确认空闲后，将关闭所有浏览器/PWA 窗口、本地服务和全部 Pi RPC。聊天记录和设置会保留。",
@@ -3797,6 +4588,7 @@ export function App() {
     )
       return;
     const previousName = dialog.session.name;
+    const runEpochGeneration = runEpochGenerationRef.current;
     const token = ++optimisticSessionMutationTokenRef.current;
     optimisticRenamesRef.current.set(sessionId, { token, previousName, name });
     syncMutatingSessionIds();
@@ -3815,6 +4607,10 @@ export function App() {
       .then((data) => {
         if (optimisticRenamesRef.current.get(sessionId)?.token !== token)
           return;
+        if (runEpochGenerationRef.current !== runEpochGeneration) {
+          void reconcilePendingSessionMutations().catch(() => undefined);
+          return;
+        }
         optimisticRenamesRef.current.delete(sessionId);
         syncMutatingSessionIds();
         applyBootstrapMetadata(data);
@@ -3823,14 +4619,24 @@ export function App() {
       .catch(async (cause) => {
         const pending = optimisticRenamesRef.current.get(sessionId);
         if (!pending || pending.token !== token) return;
+        if (runEpochGenerationRef.current !== runEpochGeneration) {
+          void reconcilePendingSessionMutations().catch(() => undefined);
+          return;
+        }
         try {
           const { outcome, result } = await reconcileSessionMutation(
             sessionId,
             "rename",
             name,
           );
-          if (optimisticRenamesRef.current.get(sessionId)?.token !== token)
+          if (
+            optimisticRenamesRef.current.get(sessionId)?.token !== token ||
+            runEpochGenerationRef.current !== runEpochGeneration
+          ) {
+            if (runEpochGenerationRef.current !== runEpochGeneration)
+              void reconcilePendingSessionMutations().catch(() => undefined);
             return;
+          }
           if (outcome === "committed") {
             optimisticRenamesRef.current.delete(sessionId);
             syncMutatingSessionIds();
@@ -3859,6 +4665,10 @@ export function App() {
         }
         if (optimisticRenamesRef.current.get(sessionId)?.token !== token)
           return;
+        if (runEpochGenerationRef.current !== runEpochGeneration) {
+          void reconcilePendingSessionMutations().catch(() => undefined);
+          return;
+        }
         const message = cause instanceof Error ? cause.message : String(cause);
         setError(`重命名结果尚未确认，请刷新页面后核对：${message}`);
       });
@@ -3882,6 +4692,7 @@ export function App() {
     const replacement = wasViewed
       ? sessions.find((session) => session.id !== deletingId)
       : undefined;
+    const runEpochGeneration = runEpochGenerationRef.current;
     const token = ++optimisticSessionMutationTokenRef.current;
     optimisticDeletesRef.current.set(deletingId, {
       token,
@@ -3907,6 +4718,10 @@ export function App() {
       .then((data) => {
         if (optimisticDeletesRef.current.get(deletingId)?.token !== token)
           return;
+        if (runEpochGenerationRef.current !== runEpochGeneration) {
+          void reconcilePendingSessionMutations().catch(() => undefined);
+          return;
+        }
         const finalizedViewed = finalizeDeletedSession(deletingId);
         // Do not replace a newer user selection or local draft while the request settled.
         applyBootstrapMetadata(data);
@@ -3916,17 +4731,31 @@ export function App() {
       .catch(async (cause) => {
         const pending = optimisticDeletesRef.current.get(deletingId);
         if (!pending || pending.token !== token) return;
+        if (runEpochGenerationRef.current !== runEpochGeneration) {
+          void reconcilePendingSessionMutations().catch(() => undefined);
+          return;
+        }
         try {
           const { outcome, result } = await reconcileSessionMutation(
             deletingId,
             "delete",
           );
-          if (optimisticDeletesRef.current.get(deletingId)?.token !== token)
+          if (
+            optimisticDeletesRef.current.get(deletingId)?.token !== token ||
+            runEpochGenerationRef.current !== runEpochGeneration
+          ) {
+            if (runEpochGenerationRef.current !== runEpochGeneration)
+              void reconcilePendingSessionMutations().catch(() => undefined);
             return;
+          }
           if (outcome === "committed") {
             const finalizedViewed = finalizeDeletedSession(deletingId);
             applySessionListSnapshot(result);
-            selectDeletionFallback(deletingId, result.sessions, finalizedViewed);
+            selectDeletionFallback(
+              deletingId,
+              result.sessions,
+              finalizedViewed,
+            );
             setNotice("对话已删除");
             return;
           }
@@ -3944,6 +4773,10 @@ export function App() {
         }
         if (optimisticDeletesRef.current.get(deletingId)?.token !== token)
           return;
+        if (runEpochGenerationRef.current !== runEpochGeneration) {
+          void reconcilePendingSessionMutations().catch(() => undefined);
+          return;
+        }
         const message = cause instanceof Error ? cause.message : String(cause);
         setError(`删除结果尚未确认，请刷新页面后核对：${message}`);
       });
@@ -3978,7 +4811,8 @@ export function App() {
     if (buildIdentityMismatch) return;
     const submittedRequest = extensionRequest;
     if (!submittedRequest) return;
-    const sessionId = submittedRequest.piChatSessionId || viewedSessionIdRef.current;
+    const sessionId =
+      submittedRequest.piChatSessionId || viewedSessionIdRef.current;
     if (!sessionId) {
       setError("确认请求缺少会话标识，已拒绝发送");
       return;
@@ -4034,7 +4868,8 @@ export function App() {
   // by the server's live quiescence barrier; stale browser sidebar state must
   // not deadlock the only recovery route.
   const recoveryActionBlocked = lifecycleBlocked;
-  const globalMutationBlocked = mutationBlocked ||
+  const globalMutationBlocked =
+    mutationBlocked ||
     anySessionRunning ||
     anySessionQueued ||
     anySessionPendingConfirmation;
@@ -4049,12 +4884,13 @@ export function App() {
   // Once Pi has authoritatively started generating, the composer may accept a
   // follow-up into the queue even if the first HTTP acknowledgement is late.
   const currentSessionPreparing = currentSessionBusy && !state.isStreaming;
-  const sidebarViewBlocked = sidebarNavigationBlocked(loading, lifecycleBlocked);
+  const sidebarViewBlocked = sidebarNavigationBlocked(
+    loading,
+    lifecycleBlocked,
+  );
   const conversationName = localDraft
     ? "新对话"
-    : viewedSession?.name ||
-      state.sessionName ||
-      "已保存对话";
+    : viewedSession?.name || state.sessionName || "已保存对话";
   const loadingSession = paneLoading
     ? sessions.find((session) => session.id === paneLoading.sessionId)
     : undefined;
@@ -4071,17 +4907,18 @@ export function App() {
       : primaryRuntime.status === "failed"
         ? `Pi 当前不可用；仍可阅读历史。发送和 Primary 设置将在恢复前不可用。${primaryRuntime.error ? ` ${primaryRuntime.error}` : ""}`
         : "";
-  // Primary settings must wait for capability readiness. Existing dedicated
-  // Secondary Runtimes remain independently configurable if Primary later
-  // fails, so scope this only to the active Primary Session.
+  // Existing dedicated Secondary Runtimes remain independently configurable if
+  // Primary later fails. For the selected Primary, a failed Runtime is still
+  // actionable: the next model/thinking/prompt request is the server's
+  // single-flight recovery trigger, so do not leave the UI permanently locked.
   const primarySettingsUnavailable =
-    viewedSessionId === activeSessionId && primaryRuntime.status !== "ready";
-  const primarySessionFailed =
-    primaryRuntime.status === "failed" && viewedSessionId === activeSessionId;
+    viewedSessionId === activeSessionId && primaryRuntime.status === "starting";
+  const primarySessionFailed = false;
   const gateAvailable = gateAvailableOverride ?? true;
   // A staged value can describe the next prompt in a cold history pane, but
   // never alters gateModesRef, which is the only authority for auto-allow.
-  const gateMode = pendingGateModes[viewedSessionId] ?? gateModes[viewedSessionId];
+  const gateMode =
+    pendingGateModes[viewedSessionId] ?? gateModes[viewedSessionId];
   const effectiveControl = { ...viewedSession, ...viewControl };
   const observing = Boolean(
     effectiveControl.controlOwner && !effectiveControl.controlledByThisWindow,
@@ -4104,11 +4941,15 @@ export function App() {
         runtimeStatus === "active" || (await ensureRuntimeActive());
       if (!activatedHere || !takeoverIsCurrent()) return;
       const result = await api.takeSessionControl(sessionId);
-      if (!takeoverIsCurrent() || !commitPaneIfCurrent(authority, {
-        type: "CONTROL_UPDATED",
-        sessionId,
-        control: result,
-      })) return;
+      if (
+        !takeoverIsCurrent() ||
+        !commitPaneIfCurrent(authority, {
+          type: "CONTROL_UPDATED",
+          sessionId,
+          control: result,
+        })
+      )
+        return;
       setSessions((current) =>
         current.map((session) =>
           session.id === sessionId ? { ...session, ...result } : session,
@@ -4128,7 +4969,9 @@ export function App() {
     void api
       .cancelQueued(id, operation.sessionId)
       .then((result) => {
-        const pending = localUserTurnsRef.current.get(operation.sessionId) || [];
+        if (!viewOperationIsInCurrentRun(operation)) return;
+        const pending =
+          localUserTurnsRef.current.get(operation.sessionId) || [];
         const cancelled = pending.find((turn) => turn.queueId === id);
         const remaining = cancelled
           ? removeLocalTurnAndRebase(pending, cancelled)
@@ -4142,11 +4985,13 @@ export function App() {
             cancelled.expectedTurnTotal - 1,
             ...remaining.map((turn) => turn.expectedTurnTotal),
           );
-          setSessions((current) => current.map((session) =>
-            session.id === operation.sessionId
-              ? { ...session, turnCount: restoredTurnTotal }
-              : session,
-          ));
+          setSessions((current) =>
+            current.map((session) =>
+              session.id === operation.sessionId
+                ? { ...session, turnCount: restoredTurnTotal }
+                : session,
+            ),
+          );
         }
         patchSessionCache(operation.sessionId, {
           queue: result.queue,
@@ -4158,7 +5003,8 @@ export function App() {
           queue: result.queue,
           paused: result.paused,
           messages: cancelled?.renderedInTranscript
-            ? (current) => current.filter((message) => message !== cancelled.message)
+            ? (current) =>
+                current.filter((message) => message !== cancelled.message)
             : undefined,
         });
       })
@@ -4173,6 +5019,7 @@ export function App() {
     void api
       .resumeQueue(operation.sessionId)
       .then((result) => {
+        if (!viewOperationIsInCurrentRun(operation)) return;
         patchSessionCache(operation.sessionId, {
           queue: result.queue,
           queuePaused: result.paused,
@@ -4213,29 +5060,38 @@ export function App() {
     />
   );
 
-  const composerNotices = <>
-    {buildIdentityMismatch && (
-      <div className="primary-runtime-status is-failed" role="status">
-        网页与服务版本不一致，普通操作已暂停。请刷新页面；若仍存在，可在左侧使用“完整重启”，或在设置中关闭 Pi Chat 后重新打开。
-      </div>
-    )}
-    {primaryRuntimeMessage && (
-      <div className={`primary-runtime-status is-${primaryRuntime.status}`} role="status">
-        {primaryRuntimeMessage}
-      </div>
-    )}
-    {promptStarting && currentSessionPreparing && !state.isStreaming && toolStatus && (
-      <div className="composer-preparing-status" role="status">
-        <span className="loader small" />
-        {toolStatus}
-      </div>
-    )}
-    {(error || notice) && (
-      <div className={`app-toast ${error ? "error" : ""}`} role="status">
-        {error || notice}
-      </div>
-    )}
-  </>;
+  const composerNotices = (
+    <>
+      {buildIdentityMismatch && (
+        <div className="primary-runtime-status is-failed" role="status">
+          网页与服务版本不一致，普通操作已暂停。请刷新页面；若仍存在，可在左侧使用“完整重启”，或在设置中关闭
+          Pi Chat 后重新打开。
+        </div>
+      )}
+      {primaryRuntimeMessage && (
+        <div
+          className={`primary-runtime-status is-${primaryRuntime.status}`}
+          role="status"
+        >
+          {primaryRuntimeMessage}
+        </div>
+      )}
+      {promptStarting &&
+        currentSessionPreparing &&
+        !state.isStreaming &&
+        toolStatus && (
+          <div className="composer-preparing-status" role="status">
+            <span className="loader small" />
+            {toolStatus}
+          </div>
+        )}
+      {(error || notice) && (
+        <div className={`app-toast ${error ? "error" : ""}`} role="status">
+          {error || notice}
+        </div>
+      )}
+    </>
+  );
 
   if (closeComplete) {
     const applicationClosed = closeComplete === "application";
@@ -4277,8 +5133,12 @@ export function App() {
         newDisabled={mutationBlocked}
         refreshDisabled={loading || refreshing}
         restartDisabled={
-          loading || busy || refreshing ||
-          (buildIdentityMismatch ? recoveryActionBlocked : globalMutationBlocked)
+          loading ||
+          busy ||
+          refreshing ||
+          (buildIdentityMismatch
+            ? recoveryActionBlocked
+            : globalMutationBlocked)
         }
         viewBusy={sidebarViewBlocked}
         refreshing={refreshing}
@@ -4294,16 +5154,9 @@ export function App() {
         onNew={() => void createSession()}
         onRefresh={() => void refreshManually()}
         onLoadAllSessions={() => void loadAllSessions()}
-        onLoadDirectory={(cwd, offset) => {
-          if (loadingDirectoryKeys.includes(cwd)) return;
-          setLoadingDirectoryKeys((current) => [...current, cwd]);
-          void api.directorySessions(cwd, offset).then((result) => {
-            setSessions((current) => uniqueSessionSummaries([...current, ...result.sessions]));
-            setSessionDirectories(result.directories || []);
-          }).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause))).finally(() =>
-            setLoadingDirectoryKeys((current) => current.filter((key) => key !== cwd)),
-          );
-        }}
+        onLoadDirectory={(cwd, offset) =>
+          void loadDirectorySessions(cwd, offset)
+        }
         onRestart={() => void restartPi()}
         onView={(id) => {
           if (window.matchMedia?.("(max-width: 760px)").matches)
@@ -4313,13 +5166,19 @@ export function App() {
         onTogglePin={(sessionId) =>
           setSessionNavigation((current) => ({
             ...current,
-            pinnedSessionIds: togglePinnedSession(current.pinnedSessionIds, sessionId),
+            pinnedSessionIds: togglePinnedSession(
+              current.pinnedSessionIds,
+              sessionId,
+            ),
           }))
         }
         onToggleDirectoryPin={(cwd) =>
           setSessionNavigation((current) => ({
             ...current,
-            pinnedDirectoryKeys: togglePinnedDirectory(current.pinnedDirectoryKeys, cwd),
+            pinnedDirectoryKeys: togglePinnedDirectory(
+              current.pinnedDirectoryKeys,
+              cwd,
+            ),
           }))
         }
         onSetDirectoryCollapsed={(cwd, collapsed) =>
@@ -4327,8 +5186,24 @@ export function App() {
             const key = normalizeCwdKey(cwd);
             if (!key) return current;
             return collapsed
-              ? { ...current, collapsedDirectoryKeys: [...new Set([...current.collapsedDirectoryKeys, key])], expandedDirectoryKeys: current.expandedDirectoryKeys.filter((value) => value !== key) }
-              : { ...current, collapsedDirectoryKeys: current.collapsedDirectoryKeys.filter((value) => value !== key), expandedDirectoryKeys: [...new Set([...current.expandedDirectoryKeys, key])] };
+              ? {
+                  ...current,
+                  collapsedDirectoryKeys: [
+                    ...new Set([...current.collapsedDirectoryKeys, key]),
+                  ],
+                  expandedDirectoryKeys: current.expandedDirectoryKeys.filter(
+                    (value) => value !== key,
+                  ),
+                }
+              : {
+                  ...current,
+                  collapsedDirectoryKeys: current.collapsedDirectoryKeys.filter(
+                    (value) => value !== key,
+                  ),
+                  expandedDirectoryKeys: [
+                    ...new Set([...current.expandedDirectoryKeys, key]),
+                  ],
+                };
           })
         }
         onRename={(session) => setSessionDialog({ mode: "rename", session })}
@@ -4389,7 +5264,11 @@ export function App() {
         promptQueue={{
           queue,
           paused: queuePaused,
-          busy: currentSessionPreparing || viewSwitching || observing || mutationBlocked,
+          busy:
+            currentSessionPreparing ||
+            viewSwitching ||
+            observing ||
+            mutationBlocked,
           onCancel: cancelQueuedPrompt,
           onResume: resumeQueuedPrompt,
         }}
@@ -4405,24 +5284,24 @@ export function App() {
             mutationBlocked ||
             Boolean(state.isCompacting) ||
             primarySessionFailed,
-          disabledPlaceholder:
-            buildIdentityMismatch
-              ? "网页与服务构建不一致；请刷新页面后再提交操作"
-              : lifecycleBlocked
-                ? "Pi Chat 正在执行全局维护，暂时不能提交新操作"
-                : observing
-                  ? "此对话正在另一窗口中控制；点击“接管控制”后可操作"
-                  : primarySessionFailed
-                    ? "Pi Runtime 当前不可用；历史仍可阅读"
-                    : state.isCompacting
-                      ? "正在压缩上下文，完成后可继续发送…"
-                      : currentSessionPreparing
-                        ? runtimeStatus === "restoring" || runtimeStatus === "draft"
-                          ? "正在准备 Pi；可随时切换到其他对话"
-                          : "正在提交消息…"
-                        : runtimeStatus === "view-only"
-                          ? "当前为历史查看；发送时会自动准备 Pi"
-                          : undefined,
+          disabledPlaceholder: buildIdentityMismatch
+            ? "网页与服务构建不一致；请刷新页面后再提交操作"
+            : lifecycleBlocked
+              ? "Pi Chat 正在执行全局维护，暂时不能提交新操作"
+              : observing
+                ? "此对话正在另一窗口中控制；点击“接管控制”后可操作"
+                : primarySessionFailed
+                  ? "Pi Runtime 当前不可用；历史仍可阅读"
+                  : state.isCompacting
+                    ? "正在压缩上下文，完成后可继续发送…"
+                    : currentSessionPreparing
+                      ? runtimeStatus === "restoring" ||
+                        runtimeStatus === "draft"
+                        ? "正在准备 Pi；可随时切换到其他对话"
+                        : "正在提交消息…"
+                      : runtimeStatus === "view-only"
+                        ? "当前为历史查看；发送时会自动准备 Pi"
+                        : undefined,
           acceptsImages: state.model?.input?.includes("image") === true,
           commands,
           controls: composerControls,
@@ -4445,7 +5324,10 @@ export function App() {
         state={state}
         busy={busy || globalMutationBlocked}
         shutdownBlocked={
-          busy || (buildIdentityMismatch ? recoveryActionBlocked : globalMutationBlocked)
+          busy ||
+          (buildIdentityMismatch
+            ? recoveryActionBlocked
+            : globalMutationBlocked)
         }
         onClose={() => setManagementSection(null)}
         onAppearance={setAppearance}
