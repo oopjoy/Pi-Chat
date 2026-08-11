@@ -4,7 +4,7 @@ import React, { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { JSDOM } from "jsdom";
-import { assistantCopyText, assistantModelLabel, assistantThinkingLabel, ChatMessage, shouldFoldUserText, USER_MESSAGE_FOLD_LINE_LIMIT } from "../src/web/components/ChatMessage";
+import { assistantCopyText, assistantGeneratedAt, assistantModelLabel, assistantThinkingLabel, ChatMessage, shouldFoldUserText, USER_MESSAGE_FOLD_LINE_LIMIT } from "../src/web/components/ChatMessage";
 
 test("user messages stay literal instead of rendering incomplete Markdown or math", () => {
   const source = "**unfinished $x + [link](\\\\server\\share";
@@ -143,11 +143,12 @@ test("assistant messages continue to use Markdown rendering", () => {
   assert.match(html, /aria-label="复制整个回答"/);
 });
 
-test("assistant footer uses the actual message model and copies only visible answer text", () => {
+test("assistant header uses the actual message model and copies only visible answer text", () => {
   const message = {
     role: "assistant",
     provider: "openai",
     model: "gpt-5",
+    timestamp: new Date(2026, 7, 11, 20, 32, 17).getTime(),
     content: [
       { type: "thinking", thinking: "private reasoning" },
       { type: "text", text: "First **paragraph**" },
@@ -160,9 +161,22 @@ test("assistant footer uses the actual message model and copies only visible ans
   const html = renderToStaticMarkup(React.createElement(ChatMessage, { message }));
   assert.match(html, /openai \/ gpt-5/);
   assert.doesNotMatch(html, /private reasoning|secret/);
+  const headerAt = html.indexOf('class="message-assistant-header"');
+  const contentAt = html.indexOf('class="message-content"');
+  const footerAt = html.indexOf('class="message-footer"');
+  assert.ok(headerAt >= 0 && headerAt < contentAt, "model metadata renders above the answer");
+  assert.ok(footerAt > contentAt, "generated time and copy action remain below the answer");
+  assert.doesNotMatch(html.slice(footerAt), /openai \/ gpt-5/);
+  assert.match(html.slice(footerAt), /class="message-generated-at"/);
+  assert.ok(html.indexOf('class="message-generated-at"') < html.indexOf('aria-label="复制整个回答"'));
+
+  const processOwnedHeader = renderToStaticMarkup(React.createElement(ChatMessage, { message, showAssistantMetadata: false }));
+  assert.doesNotMatch(processOwnedHeader, /message-assistant-header|openai \/ gpt-5/);
+  assert.match(processOwnedHeader, /message-generated-at/);
+  assert.match(processOwnedHeader, /aria-label="复制整个回答"/);
 });
 
-test("assistant footer displays only a persisted per-reply thinking strength", () => {
+test("assistant header displays only a persisted per-reply thinking strength", () => {
   const message = { role: "assistant", provider: "openai", model: "gpt-5", thinkingLevel: "medium", content: "Done" };
   assert.equal(assistantThinkingLabel(message), "med");
   assert.equal(assistantThinkingLabel({ ...message, thinkingLevel: "unexpected" }), "");
@@ -173,11 +187,47 @@ test("assistant footer displays only a persisted per-reply thinking strength", (
   assert.doesNotMatch(unknown, /message-thinking/);
 });
 
-test("assistant content sanitized to empty is invisible only after streaming settles", () => {
+test("assistant generated time is compact for today and expands for older replies", () => {
+  const timestamp = new Date(2026, 7, 11, 20, 32, 17).getTime();
+  const today = assistantGeneratedAt(timestamp, new Date(2026, 7, 11, 23, 0).getTime());
+  assert.ok(today);
+  assert.match(today.label, /^生成于 \d{2}:\d{2}$/);
+  assert.equal(today.dateTime, new Date(timestamp).toISOString());
+  assert.match(today.title, /^回复生成时间：/);
+
+  const older = assistantGeneratedAt(timestamp, new Date(2026, 7, 13, 12, 0).getTime());
+  assert.ok(older);
+  assert.match(older.label, /^生成于 \d{2}\/\d{2} \d{2}:\d{2}$/);
+  assert.equal(assistantGeneratedAt(undefined), null);
+  assert.equal(assistantGeneratedAt(Number.NaN), null);
+});
+
+test("an empty streaming reply shows stable model metadata without redundant work text or completion time", () => {
   const leaked = "code**/analysis code**/analysis code**/analysis";
-  const settled = renderToStaticMarkup(React.createElement(ChatMessage, { message: { role: "assistant", content: leaked } }));
-  const streaming = renderToStaticMarkup(React.createElement(ChatMessage, { message: { role: "assistant", content: leaked }, streaming: true }));
+  const timestamp = new Date(2026, 7, 11, 21, 17).getTime();
+  const settled = renderToStaticMarkup(React.createElement(ChatMessage, { message: { role: "assistant", content: leaked, timestamp } }));
+  const streaming = renderToStaticMarkup(React.createElement(ChatMessage, {
+    message: { role: "assistant", content: leaked, timestamp },
+    streaming: true,
+    assistantMetadataFallback: {
+      provider: "cpa-proxy",
+      model: "gpt-5.6-sol",
+      thinkingLevel: "high",
+    },
+  }));
 
   assert.equal(settled, "");
-  assert.match(streaming, /Pi 正在工作/);
+  assert.match(streaming, /cpa-proxy \/ gpt-5\.6-sol/);
+  assert.match(streaming, /class="message-thinking"[^>]*>high/);
+  assert.match(streaming, /aria-label="正在生成"/);
+  assert.doesNotMatch(streaming, /Pi 正在工作|message-generated-at|生成于/);
+});
+
+test("a running turn can suppress completion time without removing its copy action", () => {
+  const html = renderToStaticMarkup(React.createElement(ChatMessage, {
+    message: { role: "assistant", content: "partial answer", timestamp: Date.now() },
+    showGeneratedAt: false,
+  }));
+  assert.doesNotMatch(html, /message-generated-at|生成于/);
+  assert.match(html, /aria-label="复制整个回答"/);
 });

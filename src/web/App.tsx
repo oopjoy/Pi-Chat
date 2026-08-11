@@ -15,6 +15,7 @@ import type {
   PiMessage,
   PiState,
   PrimaryRuntimeReadiness,
+  PromptDelivery,
   PromptImage,
   QueuedPrompt,
   SessionActivityState,
@@ -83,11 +84,13 @@ import {
   appendLocalTurnOnce,
   bindQueuedAdmission,
   bindQueuedDispatch,
+  consumeLocalSteeringTurn,
   localTurnBelongsInTranscript,
   markLocalTurnQueued,
   nextLocalTurnTotal,
   protectTranscriptWithLocalTurns,
   removeLocalTurnAndRebase,
+  removePendingSteeringTurns,
   type LocalUserTurn,
 } from "./lib/local-user-turn";
 import {
@@ -120,6 +123,26 @@ const LOCAL_DRAFT_BUSY_ID = "__local_draft_busy__";
 const EARLY_HISTORY_VIEW_DELAY_MS = 100;
 /** Bootstrap includes Primary capability probes; sidebar JSONL inventory has its own faster read path. */
 const EARLY_SIDEBAR_INVENTORY_DELAY_MS = 250;
+
+/** User-facing reason an accepted Steer was cleared before Pi consumed it. */
+function steeringClearedMessage(reason: string): string {
+  switch (reason) {
+    case "settled-before-consumption":
+      return "Steer 到达时当前生成已经结束，消息未执行，已清除";
+    case "process-error":
+      return "Pi 进程已退出，Steer 消息未执行，已清除";
+    case "abort":
+      return "已停止当前生成，未执行的 Steer 消息已清除";
+    case "recovery":
+      return "对话已恢复，未执行的 Steer 消息已清除";
+    case "reclaim":
+      return "对话已空闲回收，未执行的 Steer 消息已清除";
+    case "deleted":
+      return "对话已删除，未执行的 Steer 消息已清除";
+    default:
+      return "Steer 消息未执行，已清除";
+  }
+}
 
 type PaneAuthority = {
   sessionId: string;
@@ -220,6 +243,12 @@ function newerPrimaryReadiness(
   return incoming;
 }
 
+/** A capability snapshot is usable only for this exact selected-model shape. */
+function modelCapabilityKey(model: ModelInfo | null | undefined): string {
+  if (!model) return "";
+  return [model.provider, model.id, ...(model.input || [])].join("\u0000");
+}
+
 function hasAssistantPayload(message: PiMessage | null): message is PiMessage {
   if (!message) return false;
   return typeof message.content === "string"
@@ -261,6 +290,9 @@ export function App() {
   /** Draft intent is a coordinator guard only; pane.identity is the sole UI fact. */
   const localDraftRef = useRef(false);
   const { piState: state, messages, pendingUserMessage } = pane;
+  /** Refresh continuations read the newest pane model without recreating their bootstrap effect. */
+  const paneModelRef = useRef(state.model);
+  paneModelRef.current = state.model;
   const { messageTotal, turnTotal, visibleTurnCount, messagesTruncated } = pane;
   /** Pagination request authority stays in the coordinator map, not the pane reducer. */
   const [, setLoadingEarlierRevision] = useState(0);
@@ -294,7 +326,33 @@ export function App() {
   const workspaceRevisionRef = useRef(0);
   const { draftWorkspaceCwd } = pane;
   const { commands, gateAvailableOverride, queue, queuePaused } = pane;
-  const [stopping, setStopping] = useState(false);
+  /** Last verified catalog remains usable while a cold/fast view intentionally omits discovery. */
+  const [confirmedCommands, setConfirmedCommands] = useState<SlashCommand[]>(
+    [],
+  );
+  const rememberConfirmedCommands = useCallback(
+    (candidate: SlashCommand[] | undefined) => {
+      if (!candidate?.length) return;
+      setConfirmedCommands((current) => {
+        const unchanged =
+          current.length === candidate.length &&
+          current.every(
+            (command, index) =>
+              command.name === candidate[index]?.name &&
+              command.description === candidate[index]?.description &&
+              command.source === candidate[index]?.source,
+          );
+        return unchanged ? current : candidate;
+      });
+    },
+    [],
+  );
+  // Command discovery is Runtime-scoped, while rendering a cold JSONL view is
+  // deliberately Runtime-free. Keep its known catalog as a capability fallback
+  // rather than waking the Session merely to populate `/` completion.
+  const composerCommands = commands.length ? commands : confirmedCommands;
+  /** Sessions whose abort request is awaiting a terminal confirmation. */
+  const [stoppingSessionIds, setStoppingSessionIds] = useState<string[]>([]);
   const { promptStarting } = pane;
   const [loading, setLoading] = useState(true);
   /** Application-wide maintenance mutation; never used for an ordinary prompt. */
@@ -349,6 +407,17 @@ export function App() {
   const [primaryRuntime, setPrimaryRuntime] = useState<PrimaryRuntimeReadiness>(
     { status: "starting", generation: 0 },
   );
+  /** The latest Bootstrap snapshot that has confirmed a particular model's input capability. */
+  const [primaryCapabilitySnapshot, setPrimaryCapabilitySnapshot] = useState<{
+    generation: number;
+    modelKeys: string[];
+  } | null>(null);
+  // EventSource callbacks retain their transport identity across UI commits.
+  // Read current capability facts from refs instead of re-subscribing on each render.
+  const primaryRuntimeRef = useRef(primaryRuntime);
+  primaryRuntimeRef.current = primaryRuntime;
+  const primaryCapabilitySnapshotRef = useRef(primaryCapabilitySnapshot);
+  primaryCapabilitySnapshotRef.current = primaryCapabilitySnapshot;
   /** Session IDs whose Pi Runtime is being prepared outside the reading path. */
   const [warmingSessionIds, setWarmingSessionIds] = useState<string[]>([]);
   /** Browser-local notice: a background Session completed an assistant reply not yet opened here. */
@@ -383,6 +452,27 @@ export function App() {
     confirmedDeletedSessionIdsRef.current.has(id)
       ? undefined
       : viewCacheRef.current.updateLive(id, message);
+  /**
+   * HTTP acknowledgements and SSE can both be lost during a reconnect. A later
+   * authoritative Session view still contains the scheduler's queue, so bind
+   * its stable queue IDs to matching local admissions before transcript
+   * protection decides whether those rows should remain hidden.
+   */
+  const reconcileQueuedAdmissions = (
+    sessionId: string,
+    queue: QueuedPrompt[] | undefined,
+  ) => {
+    if (!sessionId || !queue?.length) return;
+    const turns = localUserTurnsRef.current.get(sessionId);
+    if (!turns?.length) return;
+    for (const queued of queue)
+      bindQueuedAdmission(
+        turns,
+        queued.id,
+        queued.message,
+        queued.imageCount,
+      );
+  };
   const appendTerminalSessionCache = (id: string, message: PiMessage) =>
     confirmedDeletedSessionIdsRef.current.has(id)
       ? undefined
@@ -443,8 +533,8 @@ export function App() {
   const scrollMemoryRef = useRef(new SessionScrollMemory());
   const pendingScrollRestoreRef = useRef("");
   const conversationNavigationTargetRef = useRef<number | null>(null);
-  const stoppingRef = useRef(false);
-  const stoppingOperationTokenRef = useRef<symbol | null>(null);
+  /** Abort leases are per Runtime Session; A stopping must not block B. */
+  const stoppingOperationTokensRef = useRef(new Map<string, symbol>());
   const lastEventFrameAtRef = useRef(Date.now());
   const sessionEventVersionRef = useRef(new Map<string, number>());
   const lastSessionEventTypeRef = useRef(new Map<string, string>());
@@ -466,6 +556,10 @@ export function App() {
   const navigationStartedAtRef = useRef(new Map<number, number>());
   /** Accepted local user turns remain visible until a JSONL-derived view includes them. */
   const localUserTurnsRef = useRef(new Map<string, LocalUserTurn[]>());
+  /** A terminal compaction frame outranks a later stale hot-memory view until a new compaction begins. */
+  const completedCompactionSessionIdsRef = useRef(new Set<string>());
+  /** Background accepted Steers that were dropped remain explainable when their Session is opened. */
+  const unreadSteeringDropMessagesRef = useRef(new Map<string, string>());
   /** Last authoritative turn count from sidebar/view data, safe inside long-lived SSE callbacks. */
   const sourceTurnTotalsRef = useRef(new Map<string, number>());
   /** Model/thinking chosen on a cold session or local draft before Runtime starts. */
@@ -757,10 +851,12 @@ export function App() {
       if (viewedSessionIdRef.current !== id) clearPendingLiveMessage();
       conversationNavigationTargetRef.current = null;
       committedPaneIdentityRef.current = identity;
-      committedPaneCommandsRef.current =
+      const nextCommands =
         action.type === "COMMIT_BOOTSTRAP" || action.type === "COMMIT_VIEW"
           ? action.pane.commands
           : [];
+      committedPaneCommandsRef.current = nextCommands;
+      rememberConfirmedCommands(nextCommands);
       paneCommitRevisionRef.current += 1;
       if (action.type === "RESET_DRAFT" || action.type === "CLEAR_PANE")
         draftGenerationRef.current += 1;
@@ -770,7 +866,7 @@ export function App() {
       rememberSessionId(id);
       dispatchPane(action);
     },
-    [clearPendingLiveMessage],
+    [clearPendingLiveMessage, rememberConfirmedCommands],
   );
 
   /**
@@ -943,9 +1039,40 @@ export function App() {
     [],
   );
 
+  /**
+   * A ready SSE frame only says Primary passed startup; it does not carry the
+   * selected model's input shape. Release the provisional capability UI only
+   * after a Bootstrap response has been committed for that same model.
+   */
+  const confirmPrimaryCapabilitySnapshot = useCallback(
+    (data: BootstrapData, committedModel: ModelInfo | null | undefined) => {
+      const readiness = data.primaryRuntime;
+      const committedModelKey = modelCapabilityKey(committedModel);
+      const modelKeys = [data.state.model, ...data.models]
+        .map(modelCapabilityKey)
+        .filter(Boolean);
+      if (
+        readiness?.status !== "ready" ||
+        primaryRuntimeRef.current.status !== "ready" ||
+        primaryRuntimeRef.current.generation !== readiness.generation ||
+        !committedModelKey ||
+        !modelKeys.includes(committedModelKey)
+      )
+        return;
+      const snapshot = {
+        generation: readiness.generation,
+        modelKeys: [...new Set(modelKeys)],
+      };
+      primaryCapabilitySnapshotRef.current = snapshot;
+      setPrimaryCapabilitySnapshot(snapshot);
+    },
+    [],
+  );
+
   const applyBootstrapMetadata = useCallback(
     (data: BootstrapData) => {
       applySidebarInventory(data);
+      rememberConfirmedCommands(data.commands);
       const activeId =
         data.activeSessionId ||
         data.sessions.find((session) => session.active)?.id ||
@@ -988,11 +1115,16 @@ export function App() {
         status: "starting" as const,
         generation: 0,
       };
-      setPrimaryRuntime((current) => newerPrimaryReadiness(current, readiness));
+      const acceptedReadiness = newerPrimaryReadiness(
+        primaryRuntimeRef.current,
+        readiness,
+      );
+      primaryRuntimeRef.current = acceptedReadiness;
+      setPrimaryRuntime(acceptedReadiness);
       applicationLifecycleRef.current = data.applicationLifecycle || "idle";
       setApplicationLifecycle(data.applicationLifecycle || "idle");
     },
-    [applySidebarInventory],
+    [applySidebarInventory, rememberConfirmedCommands],
   );
 
   const applyBootstrap = useCallback(
@@ -1026,6 +1158,7 @@ export function App() {
             pendingExtensionRequest: data.pendingExtensionRequest,
           })
         : null;
+      reconcileQueuedAdmissions(activeViewId, sourceView?.queue || data.queue);
       const protectedTranscript = protectTranscriptWithLocalTurns(
         localUserTurnsRef.current.get(activeViewId),
         sourceView?.messages || data.messages,
@@ -1057,9 +1190,12 @@ export function App() {
           thinkingLevel: data.state.thinkingLevel,
           draftWorkspaceCwd: data.workspaceCwd,
         });
+        confirmPrimaryCapabilitySnapshot(data, data.state.model);
         return;
       }
       const staged = pendingSessionPrefsRef.current.get(activeViewId);
+      const committedModel =
+        staged?.model !== undefined ? staged.model : data.state.model;
       commitPane({
         type: "COMMIT_BOOTSTRAP",
         pane: {
@@ -1083,7 +1219,16 @@ export function App() {
           messagesTruncated: data.messagesTruncated === true,
           stats: data.stats,
           liveMessage: sourceView?.liveMessage || data.liveMessage || null,
-          commands: data.commands,
+          // A starting/busy Runtime may return an empty command inventory. Do
+          // not let a transient empty list wipe out already-confirmed slash
+          // commands on a later refresh of the same committed Session.
+          commands:
+            data.commands.length
+              ? data.commands
+              : committedPaneIdentityRef.current.kind === "session" &&
+                  committedPaneIdentityRef.current.sessionId === activeViewId
+                ? committedPaneCommandsRef.current
+                : [],
           queue: data.queue,
           queuePaused: data.queuePaused,
           toolStatus: data.toolStatus || "",
@@ -1095,9 +1240,11 @@ export function App() {
           },
         },
       });
+      confirmPrimaryCapabilitySnapshot(data, committedModel);
     },
     [
       applyBootstrapMetadata,
+      confirmPrimaryCapabilitySnapshot,
       commitPane,
       paneAuthorityCanCommit,
       updateGateMode,
@@ -1143,6 +1290,28 @@ export function App() {
     [buildIdentityMismatch, paneAuthorityCanCommit],
   );
 
+  /** Release an abort lease only for its owning Session (or explicitly all). */
+  const clearStoppingForSession = useCallback(
+    (sessionId?: string, operationToken?: symbol): boolean => {
+      const leases = stoppingOperationTokensRef.current;
+      if (!sessionId) {
+        const hadLeases = leases.size > 0;
+        leases.clear();
+        if (hadLeases) setStoppingSessionIds([]);
+        return hadLeases;
+      }
+      const currentToken = leases.get(sessionId);
+      if (!currentToken || (operationToken && currentToken !== operationToken))
+        return false;
+      leases.delete(sessionId);
+      setStoppingSessionIds((current) =>
+        current.filter((candidate) => candidate !== sessionId),
+      );
+      return true;
+    },
+    [],
+  );
+
   const applySessionView = useCallback(
     (
       view: SessionViewData,
@@ -1160,10 +1329,26 @@ export function App() {
           : !draftAuthorityCanCommit(authority))
       )
         return;
+      // A compaction_end frame is terminal for this Session. Hot-memory views
+      // deliberately avoid a busy RPC probe and may therefore still contain the
+      // pre-end `isCompacting: true` snapshot; never let that stale view relock
+      // a composer after Pi has resumed the actual turn.
+      const normalizedView =
+        completedCompactionSessionIdsRef.current.has(view.session.id) &&
+        view.state.isCompacting
+          ? {
+              ...view,
+              state: { ...view.state, isCompacting: false },
+            }
+          : view;
       // Cache the source view before adding local UI overlays. A cached overlay has
       // a synthetic turnTotal and must never confirm that its own user message was
       // persisted when the user switches away and returns.
-      const sourceView = viewCacheRef.current.remember(view);
+      const sourceView = viewCacheRef.current.remember(normalizedView);
+      // A normalized view is stronger than an earlier local abort intent. Do
+      // not leave a completed Session with a stale stop lease.
+      if (!sourceView.isStreaming)
+        clearStoppingForSession(sourceView.session.id);
       // A committed pane reached through navigation is the browser-local
       // definition of having viewed its latest available reply. Background
       // reconcile/refresh of the already-open pane must not consume an unseen
@@ -1180,6 +1365,7 @@ export function App() {
           sourceView.messages.filter((message) => message.role === "user")
             .length,
       );
+      reconcileQueuedAdmissions(sourceView.session.id, sourceView.queue);
       const protectedTranscript = protectTranscriptWithLocalTurns(
         localUserTurnsRef.current.get(sourceView.session.id),
         sourceView.messages,
@@ -1255,15 +1441,17 @@ export function App() {
           stats: resolvedView.stats,
           liveMessage: resolvedView.liveMessage || null,
           // A partial refresh of the *currently committed* Session may omit
-          // command discovery. Normalize that merge here; the reducer receives
-          // only a complete pane projection and never inherits cross-Session data.
+          // command discovery (or the busy Runtime returns an empty inventory).
+          // Only an explicit non-empty list replaces the last confirmed one;
+          // an empty array must never wipe out working slash completions.
           commands:
-            resolvedView.commands ??
-            (committedPaneIdentityRef.current.kind === "session" &&
-            committedPaneIdentityRef.current.sessionId ===
-              resolvedView.session.id
-              ? committedPaneCommandsRef.current
-              : []),
+            resolvedView.commands?.length
+              ? resolvedView.commands
+              : committedPaneIdentityRef.current.kind === "session" &&
+                  committedPaneIdentityRef.current.sessionId ===
+                    resolvedView.session.id
+                ? committedPaneCommandsRef.current
+                : [],
           queue: resolvedView.queue || [],
           queuePaused: resolvedView.queuePaused === true,
           toolStatus: resolvedView.toolStatus || "",
@@ -1323,6 +1511,7 @@ export function App() {
       setRuntimeWarming,
       tryAutoAllowGate,
       updateGateMode,
+      clearStoppingForSession,
     ],
   );
 
@@ -1520,6 +1709,9 @@ export function App() {
     // may refresh global metadata, but must not replace its unsent composer.
     if (localDraftRef.current) {
       applyBootstrapMetadata(data);
+      // A local draft deliberately retains its own staged model. It may use the
+      // refreshed capability snapshot only when it is the same model shape.
+      confirmPrimaryCapabilitySnapshot(data, paneModelRef.current);
       setError((current) => (recoverableRefreshError(current) ? "" : current));
       return;
     }
@@ -1587,6 +1779,7 @@ export function App() {
     applyBootstrapMetadata,
     applySessionView,
     applySidebarInventory,
+    confirmPrimaryCapabilitySnapshot,
     capturePaneAuthority,
     ensureHandshake,
     loadBootstrap,
@@ -1852,9 +2045,8 @@ export function App() {
         setSettingsBusy(false);
         refreshOperationTokenRef.current = null;
         setRefreshing(false);
-        stoppingOperationTokenRef.current = null;
-        stoppingRef.current = false;
-        setStopping(false);
+        clearStoppingForSession();
+        completedCompactionSessionIdsRef.current.clear();
         optimisticRenamesRef.current.clear();
         optimisticDeletesRef.current.clear();
         syncMutatingSessionIds();
@@ -1867,7 +2059,11 @@ export function App() {
         setSessionDirectories([]);
         // Primary readiness generations are local to one server process. Clear
         // A's high generation before B reports its own lower-generation state.
-        setPrimaryRuntime({ status: "starting", generation: 0 });
+        const replacementReadiness = { status: "starting" as const, generation: 0 };
+        primaryRuntimeRef.current = replacementReadiness;
+        primaryCapabilitySnapshotRef.current = null;
+        setPrimaryRuntime(replacementReadiness);
+        setPrimaryCapabilitySnapshot(null);
         workspaceEpochRef.current =
           typeof ready.workspaceEpoch === "string"
             ? ready.workspaceEpoch
@@ -1895,19 +2091,44 @@ export function App() {
       // frame is therefore also a capability snapshot, not merely lifecycle.
       const readyPrimary = ready.primaryRuntime as
         Partial<PrimaryRuntimeReadiness> | undefined;
+      const readyCarriesNewPrimaryCapability =
+        readyPrimary?.status === "ready" &&
+        typeof readyPrimary.generation === "number" &&
+        primaryRuntimeRef.current.status !== "ready" &&
+        // A Bootstrap that already committed this model shape makes the
+        // ordinary initial SSE ready a no-op.
+        !primaryCapabilitySnapshotRef.current?.modelKeys.includes(
+          modelCapabilityKey(paneModelRef.current),
+        );
       if (
         readyPrimary &&
         (readyPrimary.status === "starting" ||
           readyPrimary.status === "ready" ||
           readyPrimary.status === "failed") &&
         typeof readyPrimary.generation === "number"
-      )
-        setPrimaryRuntime((current) =>
-          newerPrimaryReadiness(
-            current,
-            readyPrimary as PrimaryRuntimeReadiness,
-          ),
-        );
+      ) {
+        const incoming = readyPrimary as PrimaryRuntimeReadiness;
+        const next = newerPrimaryReadiness(primaryRuntimeRef.current, incoming);
+        primaryRuntimeRef.current = next;
+        // No preceding starting/failed frame means this is the ordinary initial
+        // ready snapshot. Preserve its already-committed model catalogue while
+        // rebinding it to the server's compatible readiness generation.
+        if (
+          incoming.status === "ready" &&
+          next === incoming &&
+          primaryCapabilitySnapshotRef.current?.modelKeys.includes(
+            modelCapabilityKey(paneModelRef.current),
+          )
+        ) {
+          const snapshot = {
+            ...primaryCapabilitySnapshotRef.current,
+            generation: incoming.generation,
+          };
+          primaryCapabilitySnapshotRef.current = snapshot;
+          setPrimaryCapabilitySnapshot(snapshot);
+        }
+        setPrimaryRuntime(next);
+      }
       if (lifecycleFromEvent(ready) === "restarting") {
         applicationLifecycleRef.current = "restarting";
         setApplicationLifecycle("restarting");
@@ -1939,9 +2160,12 @@ export function App() {
         }
         return;
       }
-      startIdleRecovery(serverEpochChanged);
+      // The initial ready frame can be the only notification that Primary
+      // finished between Bootstrap and EventSource. Fetch its ModelInfo.input
+      // snapshot before lifting the composer capability-pending state.
+      startIdleRecovery(serverEpochChanged, readyCarriesNewPrimaryCapability);
     },
-    [cancelPendingNavigation, startIdleRecovery],
+    [cancelPendingNavigation, clearStoppingForSession, startIdleRecovery],
   );
 
   const handlePiEvent = useCallback(
@@ -2051,10 +2275,12 @@ export function App() {
           });
         }
       } else if (type === "compaction_start") {
-        if (eventSessionId)
+        if (eventSessionId) {
+          completedCompactionSessionIdsRef.current.delete(eventSessionId);
           patchSessionCache(eventSessionId, {
             state: { isCompacting: true },
           });
+        }
         if (viewingEventSession) {
           const reason = String(event.reason || "");
           dispatchPane({
@@ -2067,11 +2293,13 @@ export function App() {
           });
         }
       } else if (type === "compaction_end") {
-        if (eventSessionId)
+        if (eventSessionId) {
+          completedCompactionSessionIdsRef.current.add(eventSessionId);
           patchSessionCache(eventSessionId, {
             toolStatus: "",
             state: { isCompacting: false },
           });
+        }
         if (viewingEventSession) {
           dispatchPane({
             type: "COMPACTION_FINISHED",
@@ -2102,6 +2330,44 @@ export function App() {
           }
         }
       } else if (type === "message_start" || type === "message_update") {
+        const rawMessage =
+          event.message && typeof event.message === "object"
+            ? (event.message as PiMessage)
+            : null;
+        if (type === "message_start" && rawMessage?.role === "user" && eventSessionId) {
+          const localTurns = localUserTurnsRef.current.get(eventSessionId) || [];
+          // Only a server-verified native steer consumption may reveal a hidden
+          // local Steer turn. Pi dequeues the steering message before forwarding
+          // this message_start, so an ordinary prompt sharing the same text can
+          // never be mistaken for a consumed Steer.
+          const consumed =
+            (event as { nativeSteeringConsumed?: boolean })
+              .nativeSteeringConsumed === true
+              ? consumeLocalSteeringTurn(localTurns, rawMessage)
+              : undefined;
+          if (consumed) {
+            const acceptedTurnTotal = consumed.expectedTurnTotal;
+            setSessions((current) =>
+              current.map((session) =>
+                session.id === eventSessionId &&
+                acceptedTurnTotal > (session.turnCount || 0)
+                  ? { ...session, turnCount: acceptedTurnTotal }
+                  : session,
+              ),
+            );
+          }
+          if (consumed && viewingEventSession) {
+            consumed.renderedInTranscript = true;
+            dispatchPane({
+              type: "PROMPT_ACKNOWLEDGED",
+              sessionId: eventSessionId,
+              messages: (current) =>
+                current.includes(consumed.message)
+                  ? current
+                  : [...current, consumed.message],
+            });
+          }
+        }
         const assistant = assistantMessage(event);
         if (assistant && eventSessionId) {
           releasePromptBusy(eventSessionId, eventRunGeneration, eventRunEpoch);
@@ -2174,23 +2440,70 @@ export function App() {
           });
       } else if (type === "tool_execution_end") {
         const status = `${String(event.toolName || "工具")} ${event.isError ? "执行失败" : "已完成，Pi 正在继续…"}`;
-        if (eventSessionId)
-          patchSessionCache(eventSessionId, { toolStatus: status });
-        if (viewingEventSession)
+        if (eventSessionId) {
+          completedCompactionSessionIdsRef.current.add(eventSessionId);
+          patchSessionCache(eventSessionId, {
+            toolStatus: status,
+            // A terminal tool frame is also proof that Pi left compaction. It
+            // can be the first retained frame after an SSE reconnect, so do
+            // not rely on tool_execution_start having reached this browser.
+            state: { isCompacting: false },
+          });
+        }
+        if (viewingEventSession) {
+          // `COMPACTION_FINISHED` clears the stale lock, then the normal tool
+          // status action retains the useful completion progress.
+          dispatchPane({
+            type: "COMPACTION_FINISHED",
+            sessionId: eventSessionId,
+          });
           dispatchPane({
             type: "TOOL_STATUS_UPDATED",
             sessionId: eventSessionId,
             status,
           });
+        }
+      } else if (type === "pi_chat_native_steering_cleared") {
+        if (eventSessionId) {
+          const pending = localUserTurnsRef.current.get(eventSessionId) || [];
+          const remaining = removePendingSteeringTurns(pending);
+          if (remaining.length)
+            localUserTurnsRef.current.set(eventSessionId, remaining);
+          else localUserTurnsRef.current.delete(eventSessionId);
+          const droppedCount = Number(event.droppedCount || 0);
+          if (viewingEventSession) {
+            dispatchPane({
+              type: "PROMPT_ACKNOWLEDGED",
+              sessionId: eventSessionId,
+              messages: (current) =>
+                current.filter(
+                  (message) =>
+                    !pending.some(
+                      (turn) =>
+                        turn.revealOnMessageStart &&
+                        turn.queueState === "waiting" &&
+                        turn.message === message,
+                    ),
+                ),
+            });
+          }
+          // An accepted Steer can be dropped when Pi settles or crashes before
+          // consuming it. Never let that be silent, including when the user is
+          // currently viewing another Session.
+          if (droppedCount > 0) {
+            const message = steeringClearedMessage(
+              String(event.reason || "cleared"),
+            );
+            if (viewingEventSession) setError(message);
+            else
+              unreadSteeringDropMessagesRef.current.set(
+                eventSessionId,
+                message,
+              );
+          }
+        }
       } else if (type === "agent_settled") {
-        if (
-          viewingEventSession &&
-          stoppingOperationTokenRef.current &&
-          stoppingRef.current
-        ) {
-          stoppingOperationTokenRef.current = null;
-          stoppingRef.current = false;
-          setStopping(false);
+        if (eventSessionId && clearStoppingForSession(eventSessionId)) {
           setNotice((current) =>
             current === "已发送停止请求，Pi 正在结束当前操作" ? "" : current,
           );
@@ -2213,6 +2526,10 @@ export function App() {
           );
         }
         if (eventSessionId) {
+          // Settlement is terminal even if the user navigated away before this
+          // SSE frame arrived; always release the owning stop lease.
+          completedCompactionSessionIdsRef.current.add(eventSessionId);
+          clearStoppingForSession(eventSessionId);
           sessionRunningOverridesRef.current.set(eventSessionId, false);
           setSessions((current) =>
             current.map((session) =>
@@ -2273,12 +2590,27 @@ export function App() {
             readiness.status === "failed") &&
           typeof readiness.generation === "number"
         ) {
-          const next = readiness as PrimaryRuntimeReadiness;
-          setPrimaryRuntime((current) => newerPrimaryReadiness(current, next));
+          const incoming = readiness as PrimaryRuntimeReadiness;
+          const current = primaryRuntimeRef.current;
+          const next = newerPrimaryReadiness(current, incoming);
+          const acceptedTransition =
+            next.generation !== current.generation ||
+            next.status !== current.status ||
+            next.error !== current.error;
+          if (acceptedTransition) {
+            primaryRuntimeRef.current = next;
+            // A new startup or failure invalidates the preceding generation's
+            // ModelInfo.input assertion before a later ready refresh can paint.
+            if (next.status !== "ready") {
+              primaryCapabilitySnapshotRef.current = null;
+              setPrimaryCapabilitySnapshot(null);
+            }
+            setPrimaryRuntime(next);
+          }
           // Capability metadata becomes available after the Session-first shell
           // is already usable. Refresh it in the background without replacing a
           // selected cold pane (refresh keeps desired/viewed guards).
-          if (next.status === "ready")
+          if (incoming.status === "ready")
             void refresh().catch(reportBackgroundRefreshError);
         }
       } else if (type === "pi_chat_workspace_changed") {
@@ -2333,6 +2665,7 @@ export function App() {
         ) {
           viewCacheRef.current.forget(structuralSessionId);
           if (structuralAction === "deleted") {
+            completedCompactionSessionIdsRef.current.delete(structuralSessionId);
             const wasViewed = finalizeDeletedSession(structuralSessionId);
             selectDeletionFallback(
               structuralSessionId,
@@ -2467,6 +2800,11 @@ export function App() {
             state: { isStreaming: true },
             isStreaming: true,
           });
+      } else if (type === "pi_chat_prompt_delivery_uncertain") {
+        if (viewingEventSession)
+          setNotice(
+            "消息已交给 Pi，正在确认执行状态；请勿重复发送",
+          );
       } else if (type === "pi_chat_queue_error") {
         const currentQueue = Array.isArray(event.queue)
           ? (event.queue as unknown as QueuedPrompt[])
@@ -2623,6 +2961,7 @@ export function App() {
           applySessionActivity(eventSessionId, next);
           const streaming =
             next.execution === "running" || next.execution === "dispatching";
+          if (!streaming) clearStoppingForSession(eventSessionId);
           patchSessionCache(eventSessionId, {
             isStreaming: streaming,
             state: { isStreaming: streaming },
@@ -2630,6 +2969,7 @@ export function App() {
         } else if (eventSessionId && typeof event.running === "boolean") {
           // Older servers still publish this partial event during a rolling update.
           const running = event.running === true;
+          if (!running) clearStoppingForSession(eventSessionId);
           sessionRunningOverridesRef.current.set(eventSessionId, running);
           setSessions((current) =>
             current.map((session) =>
@@ -2642,12 +2982,46 @@ export function App() {
           });
         }
       } else if (type === "pi_chat_process_recovered") {
-        if (eventSessionId)
+        if (eventSessionId) {
+          completedCompactionSessionIdsRef.current.delete(eventSessionId);
+          // Recovery itself is authoritative enough to remove an old red
+          // projection. The following session-status frame refines this short
+          // optimistic activity to the recovered Runtime's exact queue/run state.
+          const previous = sessionsRef.current.find(
+            (session) => session.id === eventSessionId,
+          );
+          const activity: SessionActivityState = {
+            execution: previous?.running
+              ? "running"
+              : previous?.queued
+                ? "queued"
+                : "idle",
+            awaitingConfirmation: previous?.pendingConfirmation === true,
+          };
+          sessionRunningOverridesRef.current.set(
+            eventSessionId,
+            activity.execution === "running",
+          );
           setFailedSessionIds((current) =>
             current.filter((id) => id !== eventSessionId),
           );
+          setSessions((current) =>
+            current.map((session) =>
+              session.id === eventSessionId
+                ? {
+                    ...session,
+                    activity,
+                    pendingConfirmation: activity.awaitingConfirmation,
+                  }
+                : session,
+            ),
+          );
+          patchSessionCache(eventSessionId, { sessionActivity: activity });
+        }
       } else if (type === "pi_chat_process_error") {
         if (eventSessionId) {
+          completedCompactionSessionIdsRef.current.delete(eventSessionId);
+          clearStoppingForSession(eventSessionId);
           releasePromptBusy(
             eventSessionId,
             eventRunGeneration,
@@ -2659,10 +3033,24 @@ export function App() {
           setFailedSessionIds((current) => [
             ...new Set([...current, eventSessionId]),
           ]);
+          const error =
+            typeof event.error === "string" && event.error.trim()
+              ? event.error.trim()
+              : undefined;
+          const activity: SessionActivityState = {
+            execution: "failed",
+            awaitingConfirmation: false,
+            ...(error ? { error } : null),
+          };
           setSessions((current) =>
             current.map((session) =>
               session.id === eventSessionId
-                ? { ...session, running: false }
+                ? {
+                    ...session,
+                    running: false,
+                    pendingConfirmation: false,
+                    activity,
+                  }
                 : session,
             ),
           );
@@ -2671,6 +3059,7 @@ export function App() {
             liveMessage: undefined,
             toolStatus: "",
             runtimeStatus: "view-only",
+            sessionActivity: activity,
             state: { isStreaming: false, isCompacting: false },
           });
         }
@@ -2679,9 +3068,11 @@ export function App() {
             window.clearTimeout(promptReconcileTimerRef.current);
           promptReconcileTimerRef.current = null;
           dispatchPane({ type: "PROCESS_FAILED", sessionId: eventSessionId });
-          setError(String(event.error || "Pi RPC 已退出"));
-          stoppingRef.current = false;
-          setStopping(false);
+          setError(
+            Number(event.nativeSteeringDroppedCount || 0) > 0
+              ? steeringClearedMessage("process-error")
+              : String(event.error || "Pi RPC 已退出"),
+          );
         }
       }
     },
@@ -2698,6 +3089,7 @@ export function App() {
       releasePromptBusy,
       tryAutoAllowGate,
       updateGateMode,
+      clearStoppingForSession,
     ],
   );
 
@@ -2730,9 +3122,7 @@ export function App() {
           setSettingsBusy(false);
           refreshOperationTokenRef.current = null;
           setRefreshing(false);
-          stoppingOperationTokenRef.current = null;
-          stoppingRef.current = false;
-          setStopping(false);
+          clearStoppingForSession();
           draftWorkspacePickerTokenRef.current = null;
           workspaceDefaultPickerTokenRef.current = null;
           setWorkspacePicking(false);
@@ -2751,7 +3141,7 @@ export function App() {
           recoveringConnectionRef.current = null;
         });
     },
-    [refresh, reportBackgroundRefreshError],
+    [clearStoppingForSession, refresh, reportBackgroundRefreshError],
   );
 
   const handleOversizedEventSourceFrame = useCallback(
@@ -2869,6 +3259,12 @@ export function App() {
   useEffect(() => {
     if (loading || !viewedSessionId) return;
     void api.markSessionViewed(viewedSessionId).catch(() => undefined);
+    const steeringDrop =
+      unreadSteeringDropMessagesRef.current.get(viewedSessionId);
+    if (steeringDrop) {
+      unreadSteeringDropMessagesRef.current.delete(viewedSessionId);
+      setError(steeringDrop);
+    }
   }, [loading, viewedSessionId]);
 
   useLayoutEffect(() => {
@@ -3129,8 +3525,15 @@ export function App() {
     }, 4_000);
   };
 
-  const send = async (message: string, images: PromptImage[]) => {
+  const send = async (
+    message: string,
+    images: PromptImage[],
+    delivery: PromptDelivery = "queue",
+  ) => {
     if (buildIdentityMismatch) return;
+    const steering = delivery === "steer";
+    if (steering && !state.isStreaming)
+      throw new Error("当前对话已不再运行，无法发送 Steer 消息");
     setError("");
     stickToBottomRef.current = true;
     const initialSessionId =
@@ -3146,7 +3549,7 @@ export function App() {
     };
     const alreadyStreaming = state.isStreaming;
     const willQueueLocally =
-      alreadyStreaming || queuePaused || queue.length > 0;
+      !steering && (alreadyStreaming || queuePaused || queue.length > 0);
     const previousToolStatus = toolStatus;
     const optimisticMessage =
       willQueueLocally || message.startsWith("/")
@@ -3187,7 +3590,10 @@ export function App() {
         message: turn,
         expectedTurnTotal: nextLocalTurnTotal(messages, turnTotal, pending),
         queueState:
-          willQueueLocally && !message.startsWith("/") ? "waiting" : undefined,
+          (willQueueLocally || steering) && !message.startsWith("/")
+            ? "waiting"
+            : undefined,
+        ...(steering ? { revealOnMessageStart: true } : null),
         confirmByPosition: images.length > 0,
       };
       localUserTurnsRef.current.set(targetSessionId, [
@@ -3492,18 +3898,26 @@ export function App() {
       if (!promptOperationIsInCurrentRun()) return;
       const result =
         initialPromptResult ||
-        (await api.prompt(message, images, targetSessionId, requestedGateMode));
+        (steering
+          ? await api.prompt(
+              message,
+              images,
+              targetSessionId,
+              requestedGateMode,
+              "steer",
+            )
+          : await api.prompt(
+              message,
+              images,
+              targetSessionId,
+              requestedGateMode,
+            ));
       // HTTP acceptance can mean the prompt was queued, before Gate reaches its
-      // dispatch boundary. Retain the staged display/send intent until the
-      // matching Runtime-confirmed Gate SSE arrives.
-      // A late acknowledgement is useful for backend reconciliation, but it
-      // cannot write into a later A pane after A → B → A.
-      if (!promptPaneIsCurrent()) {
-        scheduleSidebarRefresh();
-        return;
-      }
-      // Extension commands do not create an ordinary user turn. Queued prompts
-      // do: retain their local bubble immediately, then match its dispatch by ID.
+      // dispatch boundary. First reconcile its Session-local admission even if
+      // a refresh/navigation committed a newer pane while this response was in
+      // flight. In particular, losing the old pane authority must never drop a
+      // queue ID and strand a waiting local turn outside both Queue and history.
+      // Only the later DOM/notice writes are pane-authority guarded.
       if (result.extension && protectedLocalTurn) {
         const pending = localUserTurnsRef.current.get(targetSessionId) || [];
         const remaining = removeLocalTurnAndRebase(pending, protectedLocalTurn);
@@ -3517,10 +3931,10 @@ export function App() {
         // Dispatch SSE may beat this acknowledgement. Never demote a turn that
         // the scheduler has already started into the waiting-only queue UI.
         markLocalTurnQueued(acceptedLocalTurn, result.id);
-      } else if (!result.extension && acceptedLocalTurn) {
+      } else if (!result.extension && !result.steered && acceptedLocalTurn) {
         acceptedLocalTurn.queueState = "dispatched";
       }
-      if (!result.extension && acceptedLocalTurn) {
+      if (!result.extension && !result.steered && acceptedLocalTurn) {
         const acceptedTurnTotal = acceptedLocalTurn.expectedTurnTotal;
         setSessions((current) =>
           current.map((session) =>
@@ -3530,6 +3944,32 @@ export function App() {
               : session,
           ),
         );
+      }
+      // A late acknowledgement is useful for Session reconciliation, but it
+      // must not write into a later A pane after A → B → A. Queue state is
+      // Session-owned: after a same-Session view commit (e.g. an SSE-driven
+      // refresh snapshot taken before the acknowledgement) the ack is the only
+      // authority and must restore the queue. After a real navigation the
+      // newer view is authoritative, so the stale ack must stay inert.
+      if (!promptPaneIsCurrent()) {
+        if (
+          result.queued &&
+          result.queue?.length &&
+          promptAuthority?.navigationEpoch === navigationEpochRef.current &&
+          viewedSessionIdRef.current === targetSessionId &&
+          desiredSessionIdRef.current === targetSessionId
+        ) {
+          patchSessionCache(targetSessionId, { queue: result.queue });
+          const currentAuthority = capturePaneAuthority(targetSessionId);
+          commitPaneIfCurrent(currentAuthority, {
+            type: "PROMPT_ACKNOWLEDGED",
+            sessionId: targetSessionId,
+            queue: result.queue,
+            toolStatus: previousToolStatus,
+          });
+        }
+        scheduleSidebarRefresh();
+        return;
       }
       if (result.extension) {
         commitPaneIfCurrent(promptAuthority!, {
@@ -3548,15 +3988,28 @@ export function App() {
             result.command || "extension",
             result.description
               ? [
-                  ...commands,
+                  ...composerCommands,
                   {
                     name: result.command || "extension",
                     description: result.description,
                     source: "extension",
                   },
                 ]
-              : commands,
+              : composerCommands,
           ),
+        );
+      } else if (result.steered) {
+        protectLocalPrompt(localTurn);
+        commitPaneIfCurrent(promptAuthority!, {
+          type: "PROMPT_ACKNOWLEDGED",
+          sessionId: targetSessionId,
+          isStreaming: true,
+          toolStatus: previousToolStatus,
+        });
+        setNotice(
+          result.deliveryUncertain
+            ? "Steer 已交给 Pi，正在确认执行状态；请勿重复发送"
+            : "Steer 已送达 Pi",
         );
       } else if (result.queued) {
         // A waiting prompt belongs only in PromptQueue. The dispatch event is
@@ -3639,14 +4092,15 @@ export function App() {
           });
           schedulePromptReconcile(targetSessionId);
         }
+        if (result.deliveryUncertain)
+          setNotice("消息已交给 Pi，正在确认执行状态；请勿重复发送");
       }
     } catch (cause) {
-      // Failure recovery changes pending rows, transcript, spinner, and error
-      // presentation. Bind it to the exact pre-request pane as well.
-      if (!promptPaneIsCurrent()) {
-        scheduleSidebarRefresh();
-        return;
-      }
+      // Transport failure recovery has two ownership layers: the local admission
+      // belongs to its Session even if a same-Session refresh committed a newer
+      // pane while the request was in flight; only rendering/error presentation
+      // belongs to a particular pane revision. Never strand a running-turn
+      // admission as hidden `waiting` merely because its old pane token expired.
       const localEntry = localTurnEntry();
       const explicitClientRejection =
         cause instanceof ApiRequestError &&
@@ -3661,12 +4115,15 @@ export function App() {
         PiMessage[] | ((current: PiMessage[]) => PiMessage[]) | undefined;
       if (localEntry && outcomeUnknown) {
         // The request body reached the prompt endpoint, but its acknowledgement
-        // may have been lost after Pi accepted it. SSE or JSONL will confirm the
-        // protected row; deleting it here makes an actively running prompt vanish.
-        localEntry.queueState = "dispatched";
-        rejectionMessages = (current) =>
-          appendLocalTurnOnce(current, localEntry);
-        schedulePromptReconcile(targetSessionId);
+        // may have been lost after Pi accepted it. Native steering remains hidden
+        // until Pi consumes it at message_start; ordinary prompts are already
+        // executing and therefore remain visible while JSONL catches up.
+        if (!steering) {
+          localEntry.queueState = "dispatched";
+          rejectionMessages = (current) =>
+            appendLocalTurnOnce(current, localEntry);
+          schedulePromptReconcile(targetSessionId);
+        }
       } else if (localEntry) {
         const pending = localUserTurnsRef.current.get(targetSessionId) || [];
         const remaining = removeLocalTurnAndRebase(pending, localEntry);
@@ -3678,8 +4135,23 @@ export function App() {
           rejectionMessages = (current) =>
             current.filter((candidate) => candidate !== localEntry.message);
       }
-      const visibleFailure = promptAuthority
-        ? commitPaneIfCurrent(promptAuthority, {
+      // A stale A failure must never surface after A → B → A. A same-session
+      // refresh is different: it only changes the pane revision, and must not
+      // strand this Session-owned admission offscreen while reconciliation is
+      // still pending.
+      const sameSessionRefreshAuthority =
+        promptAuthority &&
+        promptAuthority.navigationEpoch === navigationEpochRef.current &&
+        viewedSessionIdRef.current === targetSessionId &&
+        desiredSessionIdRef.current === targetSessionId
+          ? capturePaneAuthority(targetSessionId)
+          : null;
+      const failureAuthority =
+        promptAuthority && paneAuthorityCanCommit(promptAuthority)
+          ? promptAuthority
+          : sameSessionRefreshAuthority;
+      const visibleFailure = failureAuthority
+        ? commitPaneIfCurrent(failureAuthority, {
             type: "PROMPT_REJECTED",
             sessionId: targetSessionId,
             ...(rejectionMessages ? { messages: rejectionMessages } : null),
@@ -3692,6 +4164,7 @@ export function App() {
               type: "DRAFT_PROMPT_REJECTED",
             }),
           );
+      if (!promptPaneIsCurrent()) scheduleSidebarRefresh();
       if (visibleFailure) {
         const messageText =
           cause instanceof Error ? cause.message : String(cause);
@@ -3710,13 +4183,17 @@ export function App() {
   };
 
   const stopGeneration = async () => {
-    if (buildIdentityMismatch || stoppingRef.current) return;
-    const operationToken = Symbol("stop-generation");
-    stoppingOperationTokenRef.current = operationToken;
-    stoppingRef.current = true;
-    setStopping(true);
-    setError("");
+    if (buildIdentityMismatch) return;
     const operation = captureViewOperation();
+    if (stoppingOperationTokensRef.current.has(operation.sessionId)) return;
+    const operationToken = Symbol("stop-generation");
+    stoppingOperationTokensRef.current.set(operation.sessionId, operationToken);
+    setStoppingSessionIds((current) =>
+      current.includes(operation.sessionId)
+        ? current
+        : [...current, operation.sessionId],
+    );
+    setError("");
     let abortPending = false;
     try {
       const result = await api.abort(operation.sessionId);
@@ -3740,6 +4217,7 @@ export function App() {
           : { liveMessage: undefined, toolStatus: "" }),
       });
       if (!result.isStreaming) {
+        clearStoppingForSession(operation.sessionId, operationToken);
         sessionRunningOverridesRef.current.set(operation.sessionId, false);
         setSessions((current) =>
           current.map((session) =>
@@ -3788,15 +4266,8 @@ export function App() {
         setError(cause instanceof Error ? cause.message : String(cause));
       if (viewOperationIsCurrent(operation)) throw cause;
     } finally {
-      if (
-        !abortPending &&
-        stoppingOperationTokenRef.current === operationToken &&
-        viewOperationIsInCurrentRun(operation)
-      ) {
-        stoppingOperationTokenRef.current = null;
-        stoppingRef.current = false;
-        setStopping(false);
-      }
+      if (!abortPending && viewOperationIsInCurrentRun(operation))
+        clearStoppingForSession(operation.sessionId, operationToken);
     }
   };
 
@@ -4874,6 +5345,10 @@ export function App() {
     anySessionPendingConfirmation;
   const composerQueueMode =
     state.isStreaming || queuePaused || queue.length > 0;
+  // A stop request belongs to one Session. A stale/local abort intent must
+  // never paint a stop button (or disable Send) after this pane has settled.
+  const stoppingCurrentSession =
+    stoppingSessionIds.includes(viewedSessionId) && state.isStreaming;
   const viewedSession = sessions.find(
     (session) => session.id === viewedSessionId,
   );
@@ -4902,7 +5377,7 @@ export function App() {
   // the permission-mode selector disappear.
   const primaryRuntimeMessage =
     primaryRuntime.status === "starting"
-      ? "Pi 正在准备；已保存的对话仍可阅读和切换。发送会等待 Runtime 就绪。"
+      ? "Pi 正在准备；已保存的对话仍可阅读和切换。Runtime ready 后才能输入。"
       : primaryRuntime.status === "failed"
         ? `Pi 当前不可用；仍可阅读历史。发送和 Primary 设置将在恢复前不可用。${primaryRuntime.error ? ` ${primaryRuntime.error}` : ""}`
         : "";
@@ -4912,14 +5387,32 @@ export function App() {
   // single-flight recovery trigger, so do not leave the UI permanently locked.
   const primarySettingsUnavailable =
     viewedSessionId === activeSessionId && primaryRuntime.status === "starting";
-  // An existing Secondary can keep working while Primary starts, but a Primary
-  // pane, cold history, or local New draft still needs Primary compatibility
-  // before its selected model, thinking, and image capability are authoritative.
+  // An existing Secondary can keep working while Primary starts or recovers,
+  // but a Primary pane, cold history, or local New draft needs both a ready
+  // Runtime and a committed same-model Bootstrap snapshot before image input is
+  // authoritative. A ready SSE alone carries no ModelInfo.input capability.
+  const primaryCapabilityRelevant =
+    localDraft ||
+    viewedSessionId === activeSessionId ||
+    runtimeStatus !== "active";
+  const primaryCapabilityConfirmed =
+    primaryRuntime.status === "ready" &&
+    primaryCapabilitySnapshot?.generation === primaryRuntime.generation &&
+    primaryCapabilitySnapshot.modelKeys.includes(modelCapabilityKey(state.model));
+  const primaryRuntimeUnavailable =
+    primaryCapabilityRelevant && primaryRuntime.status !== "ready";
   const primaryCapabilityPending =
-    primaryRuntime.status === "starting" &&
-    (localDraft ||
-      viewedSessionId === activeSessionId ||
-      runtimeStatus !== "active");
+    primaryCapabilityRelevant && !primaryCapabilityConfirmed;
+  const primaryRuntimeDisabledPlaceholder =
+    primaryRuntime.status === "failed"
+      ? "Pi Runtime 当前不可用；恢复 ready 后才能输入"
+      : "Pi 正在准备；Runtime ready 后才能输入";
+  const imageInputPendingMessage =
+    primaryRuntime.status === "failed"
+      ? "Pi 当前不可用，模型图片能力尚未确认"
+      : primaryRuntime.status === "ready"
+        ? "Pi 正在同步，模型图片能力尚未确认"
+        : "Pi 正在准备，模型图片能力尚未确认";
   const primarySessionFailed = false;
   const gateAvailable = gateAvailableOverride ?? true;
   // A staged value can describe the next prompt in a cold history pane, but
@@ -5282,7 +5775,7 @@ export function App() {
         chatInput={{
           streaming: composerQueueMode,
           activelyStreaming: state.isStreaming,
-          stopping,
+          stopping: stoppingCurrentSession,
           disabled:
             loading ||
             currentSessionPreparing ||
@@ -5290,7 +5783,8 @@ export function App() {
             observing ||
             mutationBlocked ||
             Boolean(state.isCompacting) ||
-            primarySessionFailed,
+            primarySessionFailed ||
+            primaryRuntimeUnavailable,
           disabledPlaceholder: buildIdentityMismatch
             ? "网页与服务构建不一致；请刷新页面后再提交操作"
             : lifecycleBlocked
@@ -5299,7 +5793,9 @@ export function App() {
                 ? "此对话正在另一窗口中控制；点击“接管控制”后可操作"
                 : primarySessionFailed
                   ? "Pi Runtime 当前不可用；历史仍可阅读"
-                  : state.isCompacting
+                  : primaryRuntimeUnavailable
+                    ? primaryRuntimeDisabledPlaceholder
+                    : state.isCompacting
                     ? "正在压缩上下文，完成后可继续发送…"
                     : currentSessionPreparing
                       ? runtimeStatus === "restoring" ||
@@ -5309,12 +5805,10 @@ export function App() {
                       : runtimeStatus === "view-only"
                         ? "当前为历史查看；发送时会自动准备 Pi"
                         : undefined,
-          placeholder: primaryCapabilityPending
-            ? "Pi 正在准备；可继续编辑，发送会等待 Runtime 就绪。模型、思考强度和图片能力将在就绪后确认"
-            : undefined,
           acceptsImages: state.model?.input?.includes("image") === true,
           imageInputPending: primaryCapabilityPending,
-          commands,
+          imageInputPendingMessage,
+          commands: composerCommands,
           controls: composerControls,
           notices: composerNotices,
           onSend: send,

@@ -19,6 +19,23 @@ test("sidebar separates normal work from confirmation, paused work, failure, and
   assert.deepEqual(sessionStatus(session(activity("idle", true)), false, true), { kind: "pending", label: "等待权限确认" });
   assert.deepEqual(sessionStatus(session(activity("paused", true)), false, true), { kind: "error", label: "队列已暂停，需要恢复或撤销" });
   assert.deepEqual(sessionStatus(session(activity("failed")), false, true), { kind: "error", label: "会话运行异常" });
+  assert.deepEqual(
+    sessionStatus(
+      session({
+        activity: {
+          execution: "failed",
+          awaitingConfirmation: false,
+          error: "Pi 结算同步失败：RPC 请求超时：get_state",
+        },
+      }),
+      false,
+      true,
+    ),
+    {
+      kind: "error",
+      label: "会话运行异常：Pi 结算同步失败：RPC 请求超时：get_state",
+    },
+  );
   assert.deepEqual(sessionStatus(session(activity("idle")), false, true), { kind: "unread", label: "有新回复" });
 });
 

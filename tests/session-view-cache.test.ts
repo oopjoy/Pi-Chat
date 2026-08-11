@@ -41,6 +41,25 @@ test("partial view omission preserves the cached command inventory", () => {
   assert.deepEqual(cache.get("commands")?.commands, [], "only an explicit empty inventory clears commands");
 });
 
+test("a cold JSONL view does not erase commands cached from its warm Runtime", () => {
+  const cache = new SessionViewCache();
+  cache.remember({
+    ...view("cold-commands"),
+    runtimeStatus: "active",
+    commands: [{ name: "workspace-skill", source: "skill" }],
+  });
+  cache.remember({
+    ...view("cold-commands"),
+    runtimeStatus: "view-only",
+    viewSource: "cold-jsonl",
+    commands: [],
+  });
+  assert.deepEqual(
+    cache.get("cold-commands")?.commands?.map((command) => command.name),
+    ["workspace-skill"],
+  );
+});
+
 test("authoritative Gate updates survive cached session navigation", () => {
   const cache = new SessionViewCache();
   cache.remember({ ...view("gate"), gateMode: "open" });

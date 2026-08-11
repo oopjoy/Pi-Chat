@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { PromptScheduler } from "../src/server/prompt-scheduler.ts";
+import { RpcRequestTimeoutError } from "../src/server/rpc-client.ts";
 
 test("enqueue limits protect queue length and image payload size", () => {
   const events: Record<string, unknown>[] = [];
@@ -35,6 +36,127 @@ test("enqueue limits protect queue length and image payload size", () => {
   assert.ok(events.some((event) => event.type === "pi_chat_queue_update"));
   const lastAdmission = [...events].reverse().find((event) => event.type === "pi_chat_queue_update");
   assert.equal(lastAdmission?.admittedId, lastQueuedId);
+});
+
+test("a timed-out Primary prompt remains conservatively running because Pi may have received it", async () => {
+  let accepted = 0;
+  const scheduler = new PromptScheduler({
+    isClosed: () => false,
+    isLifecycleIdle: () => true,
+    primaryRpc: () => ({
+      send: async () => {
+        throw new RpcRequestTimeoutError("prompt");
+      },
+    } as never),
+    activeSessionId: () => "primary",
+    ensurePrimaryRuntime: async () => {},
+    recoverRuntime: async () => {},
+    acquirePrimaryOperation: () => () => {},
+    acquireRuntimeOperation: () => () => {},
+    touchRuntime: () => {},
+    applyPendingTurnSettings: async () => {},
+    syncGateMode: async () => {},
+    broadcast: () => {},
+    onPrimaryPromptAccepted: () => { accepted += 1; },
+    onSecondaryPromptAccepted: () => {},
+  });
+
+  assert.equal(await scheduler.sendPrimaryPrompt("possibly accepted", []), "unknown");
+  assert.equal(scheduler.primaryRunning, true);
+  assert.equal(accepted, 1);
+});
+
+test("a timed-out queued Primary prompt emits an asynchronous uncertainty verdict", async () => {
+  const events: Record<string, unknown>[] = [];
+  const scheduler = new PromptScheduler({
+    isClosed: () => false,
+    isLifecycleIdle: () => true,
+    primaryRpc: () => ({
+      send: async () => {
+        throw new RpcRequestTimeoutError("prompt");
+      },
+    } as never),
+    activeSessionId: () => "primary",
+    ensurePrimaryRuntime: async () => {},
+    recoverRuntime: async () => {},
+    acquirePrimaryOperation: () => () => {},
+    acquireRuntimeOperation: () => () => {},
+    touchRuntime: () => {},
+    applyPendingTurnSettings: async () => {},
+    syncGateMode: async () => {},
+    broadcast: (event) => events.push(event),
+    onPrimaryPromptAccepted: () => {},
+    onSecondaryPromptAccepted: () => {},
+  });
+  const queued = scheduler.enqueuePrimary("possibly accepted", []);
+
+  await scheduler.dispatchPrimaryNext();
+
+  assert.equal(scheduler.primaryRunning, true);
+  assert.equal(scheduler.primaryDispatching, false);
+  assert.equal(scheduler.primaryQueue.length, 0);
+  assert.ok(
+    events.some(
+      (event) =>
+        event.type === "pi_chat_prompt_delivery_uncertain" &&
+        event.id === queued.id,
+    ),
+  );
+});
+
+test("a timed-out queued Secondary prompt is not requeued and remains conservatively running", async () => {
+  let accepted = 0;
+  const events: Record<string, unknown>[] = [];
+  const rpc = {
+    send: async (command: { type: string }) => {
+      if (command.type === "prompt") throw new RpcRequestTimeoutError("prompt");
+      return { type: "response", success: true };
+    },
+    isRunning: () => true,
+  };
+  const runtime = {
+    id: "secondary",
+    rpc,
+    running: false,
+    queuePaused: false,
+    dispatching: false,
+    promptQueue: [],
+    pendingTurnSettings: {},
+    abortGeneration: 0,
+    failed: false,
+  };
+  const scheduler = new PromptScheduler({
+    isClosed: () => false,
+    isLifecycleIdle: () => true,
+    primaryRpc: () => rpc as never,
+    activeSessionId: () => "primary",
+    ensurePrimaryRuntime: async () => {},
+    recoverRuntime: async () => {},
+    acquirePrimaryOperation: () => () => {},
+    acquireRuntimeOperation: () => () => {},
+    touchRuntime: () => {},
+    applyPendingTurnSettings: async () => {},
+    syncGateMode: async () => {},
+    broadcast: (event) => events.push(event),
+    onPrimaryPromptAccepted: () => {},
+    onSecondaryPromptAccepted: () => { accepted += 1; },
+  });
+  scheduler.enqueueRuntime(runtime as never, "possibly accepted", [], 1234);
+
+  await scheduler.dispatchRuntimeNext(runtime as never);
+
+  assert.equal((runtime as { running: boolean }).running, true);
+  assert.equal((runtime as { dispatching: boolean }).dispatching, false);
+  assert.equal((runtime as { queuePaused: boolean }).queuePaused, false);
+  assert.equal((runtime as { promptQueue: unknown[] }).promptQueue.length, 0);
+  assert.equal(accepted, 1);
+  assert.ok(
+    events.some(
+      (event) =>
+        event.type === "pi_chat_prompt_delivery_uncertain" &&
+        event.piChatSessionId === "secondary",
+    ),
+  );
 });
 
 test("failed queued dispatch reports the requeued prompt for transcript rollback", async () => {

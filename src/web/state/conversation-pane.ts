@@ -94,11 +94,7 @@ export type ConversationPaneAction =
       sessionId: string;
       message: PiMessage;
     }
-  | {
-      type: "TOOL_STATUS_UPDATED";
-      sessionId: string;
-      status: string;
-    }
+  | { type: "TOOL_STATUS_UPDATED"; sessionId: string; status: string }
   | {
       type: "EXTENSION_REQUEST_CHANGED";
       sessionId: string;
@@ -210,6 +206,20 @@ function visibleSession(state: ConversationPaneState, sessionId: string): boolea
   return state.identity.kind === "session" && state.identity.sessionId === sessionId;
 }
 
+function withActiveAssistantMetadata(state: ConversationPaneState, message: PiMessage): PiMessage {
+  if (message.role !== "assistant") return message;
+  const live = state.liveMessage?.role === "assistant" ? state.liveMessage : null;
+  const provider = message.provider || live?.provider || state.piState.model?.provider;
+  const model = message.model || live?.model || state.piState.model?.id;
+  const thinkingLevel = message.thinkingLevel || live?.thinkingLevel || state.piState.thinkingLevel;
+  return {
+    ...message,
+    ...(provider ? { provider } : null),
+    ...(model ? { model } : null),
+    ...(thinkingLevel ? { thinkingLevel } : null),
+  };
+}
+
 function resolve<T>(value: T | ((current: T) => T), current: T): T {
   return typeof value === "function" ? (value as (current: T) => T)(current) : value;
 }
@@ -293,7 +303,9 @@ export function conversationPaneReducer(
       return visibleSession(state, action.sessionId)
         ? {
             ...state,
-            liveMessage: action.message,
+            liveMessage: action.message
+              ? withActiveAssistantMetadata(state, action.message)
+              : null,
             ...(action.message ? { promptStarting: false } : null),
           }
         : state;
@@ -390,7 +402,10 @@ export function conversationPaneReducer(
       return visibleSession(state, action.sessionId)
         ? {
             ...state,
-            messages: appendTerminalMessage(state.messages, action.message),
+            messages: appendTerminalMessage(
+              state.messages,
+              withActiveAssistantMetadata(state, action.message),
+            ),
             liveMessage: null,
             promptStarting: false,
           }

@@ -171,7 +171,47 @@ test("a late child generation cannot emit events or clear a replacement transpor
   assert.deepEqual(events, [{ event: { type: "agent_start" }, generation: 2 }]);
 });
 
-test("global Pi RPC starts and answers state requests", { skip: !piEntry, timeout: 75_000 }, async () => {
+test("process-exit fanout isolates synchronous and asynchronous listeners", async () => {
+  const { child } = fakeChild();
+  const client = new PiRpcClient({ cwd: process.cwd() });
+  const received: Array<{ event: Record<string, unknown>; generation?: number }> = [];
+  client.onEvent(() => {
+    throw new Error("synchronous listener failure");
+  });
+  client.onEvent(async () => {
+    throw new Error("asynchronous listener failure");
+  });
+  client.onEvent((event, source) =>
+    received.push({ event, generation: source?.generation }),
+  );
+  const internals = client as unknown as {
+    child: typeof child | null;
+    source: { generation: number; child: typeof child; stderrTail: string } | null;
+    handleExit(source: { generation: number }, error: Error): void;
+  };
+  internals.child = child;
+  internals.source = { generation: 7, child, stderrTail: "" };
+  const originalConsoleError = console.error;
+  const errors: string[] = [];
+  console.error = (...values: unknown[]) =>
+    errors.push(values.map((value) => String(value)).join(" "));
+  try {
+    assert.doesNotThrow(() =>
+      internals.handleExit({ generation: 7 }, new Error("child exited")),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(internals.child, null);
+    assert.deepEqual(received, [{
+      event: { type: "pi_chat_process_error", error: "child exited" },
+      generation: 7,
+    }]);
+    assert.equal(errors.length, 2, "both faulty listeners are contained and logged");
+  } finally {
+    console.error = originalConsoleError;
+  }
+});
+
+test("global Pi RPC starts and answers state requests",  { skip: !piEntry, timeout: 75_000 }, async () => {
   assert.ok(piEntry);
   const client = new PiRpcClient({
     cwd: process.cwd(),

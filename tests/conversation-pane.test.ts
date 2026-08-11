@@ -136,7 +136,18 @@ test("RESET_DRAFT is the only reducer-owned draft display transition", () => {
 test("terminal, settlement, and failure transitions update their visible fields atomically", () => {
   const terminal: PiMessage = { role: "assistant", content: "done" };
   const started = reduce(
-    { type: "COMMIT_VIEW", pane: commit(sessionA, { liveMessage: { role: "assistant", content: "draft" }, promptStarting: true }) },
+    {
+      type: "COMMIT_VIEW",
+      pane: commit(sessionA, {
+        piState: {
+          model: { id: "gpt-5.6-sol", name: "5.6 Sol", provider: "cpa-proxy" },
+          thinkingLevel: "high",
+          isStreaming: false,
+          sessionId: sessionA,
+        },
+        promptStarting: true,
+      }),
+    },
     { type: "AGENT_STARTED", sessionId: sessionA, toolStatus: "thinking" },
   );
   assert.equal(started.piState.isStreaming, true);
@@ -144,13 +155,25 @@ test("terminal, settlement, and failure transitions update their visible fields 
   assert.equal(started.promptStarting, false);
   assert.equal(started.toolStatus, "thinking");
 
-  const terminalCommitted = conversationPaneReducer(started, {
+  const live = conversationPaneReducer(started, {
+    type: "LIVE_MESSAGE_UPDATED",
+    sessionId: sessionA,
+    message: { role: "assistant", content: "draft" },
+  });
+  assert.equal(live.liveMessage?.provider, "cpa-proxy");
+  assert.equal(live.liveMessage?.model, "gpt-5.6-sol");
+  assert.equal(live.liveMessage?.thinkingLevel, "high");
+
+  const terminalCommitted = conversationPaneReducer(live, {
     type: "TERMINAL_MESSAGE_COMMITTED",
     sessionId: sessionA,
     message: terminal,
   });
   assert.equal(terminalCommitted.liveMessage, null);
   assert.equal(terminalCommitted.messages.at(-1)?.content, "done");
+  assert.equal(terminalCommitted.messages.at(-1)?.provider, "cpa-proxy");
+  assert.equal(terminalCommitted.messages.at(-1)?.model, "gpt-5.6-sol");
+  assert.equal(terminalCommitted.messages.at(-1)?.thinkingLevel, "high");
 
   const settled = conversationPaneReducer(terminalCommitted, {
     type: "AGENT_SETTLED",

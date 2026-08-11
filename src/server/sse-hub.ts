@@ -4,6 +4,11 @@ const MAX_SSE_EVENT_BYTES = 512 * 1024;
 // A slow local browser must not grow server memory without bound. Normal Pi
 // traffic stays far below this because only adjacent cumulative snapshots merge.
 const MAX_PENDING_SSE_BYTES = 2 * 1024 * 1024;
+// The browser already paints cumulative assistant snapshots at this cadence.
+// Sending faster frames only multiplies JSON parsing/EventSource work across
+// parallel Sessions and makes Chromium deliver an accumulated burst after a
+// short main-thread stall.
+const DEFAULT_SNAPSHOT_INTERVAL_MS = 50;
 
 function eventFrame(event: Record<string, unknown>): string {
   const data = JSON.stringify(event);
@@ -28,6 +33,11 @@ interface PendingFrames {
   bytes: number;
 }
 
+interface ScheduledSnapshot {
+  event: Record<string, unknown>;
+  timer: ReturnType<typeof setTimeout>;
+}
+
 export type SseDisconnectReason = "request-close" | "write-error" | "pending-buffer-limit" | "shutdown";
 export interface SseDisconnectInfo {
   reason: SseDisconnectReason;
@@ -46,7 +56,11 @@ export class SseHub {
   private readonly clients = new Map<ServerResponse, string>();
   private readonly backpressured = new Set<ServerResponse>();
   private readonly pendingFrames = new Map<ServerResponse, PendingFrames>();
+  private readonly scheduledSnapshots = new Map<ServerResponse, Map<string, ScheduledSnapshot>>();
+  private readonly lastSnapshotWrites = new Map<ServerResponse, Map<string, number>>();
   private readonly disconnectListeners = new Set<(response: ServerResponse, clientId: string, info: SseDisconnectInfo) => void>();
+
+  constructor(private readonly snapshotIntervalMs = DEFAULT_SNAPSHOT_INTERVAL_MS) {}
 
   get size(): number {
     return this.clients.size;
@@ -71,6 +85,10 @@ export class SseHub {
     if (!this.clients.delete(response)) return "";
     this.backpressured.delete(response);
     this.pendingFrames.delete(response);
+    const scheduled = this.scheduledSnapshots.get(response);
+    if (scheduled) for (const snapshot of scheduled.values()) clearTimeout(snapshot.timer);
+    this.scheduledSnapshots.delete(response);
+    this.lastSnapshotWrites.delete(response);
     for (const listener of this.disconnectListeners) listener(response, clientId, info);
     return clientId;
   }
@@ -85,11 +103,24 @@ export class SseHub {
   }
 
   broadcast(event: Record<string, unknown>): void {
+    if (!this.clients.size) return;
+    const type = String(event.type || "");
+    const sessionKey = String(event.piChatSessionId || "primary");
+    if (type === "message_update") {
+      // Delay JSON serialization along with delivery. Pi snapshots contain the
+      // whole assistant message, so serializing every discarded intermediate
+      // frame creates quadratic work during long parallel responses.
+      for (const client of this.clients.keys()) this.writeSnapshot(client, event, sessionKey);
+      return;
+    }
+    const snapshotKey = type === "message_start" ? sessionKey : undefined;
     const frame = eventFrame(event);
-    const snapshotKey = event.type === "message_start" || event.type === "message_update"
-      ? String(event.piChatSessionId || "primary")
-      : undefined;
-    for (const client of this.clients.keys()) this.write(client, frame, snapshotKey);
+    for (const client of this.clients.keys()) {
+      // A terminal/tool/lifecycle frame must never overtake a throttled
+      // cumulative snapshot from the same Session.
+      this.flushScheduledSnapshot(client, sessionKey);
+      if (this.clients.has(client)) this.write(client, frame, snapshotKey);
+    }
   }
 
   heartbeat(response: ServerResponse, at = Date.now()): void {
@@ -120,6 +151,54 @@ export class SseHub {
     }
     this.backpressured.clear();
     this.pendingFrames.clear();
+    this.scheduledSnapshots.clear();
+    this.lastSnapshotWrites.clear();
+  }
+
+  private writeSnapshot(client: ServerResponse, event: Record<string, unknown>, snapshotKey: string): void {
+    // Once Node reports socket pressure, retain the existing immediate enqueue
+    // path: enqueue() already coalesces adjacent cumulative snapshots and its
+    // drain ordering is covered independently.
+    if (this.backpressured.has(client) || this.snapshotIntervalMs <= 0) {
+      this.markSnapshotWritten(client, snapshotKey);
+      this.write(client, eventFrame(event), snapshotKey);
+      return;
+    }
+    const lastWrite = this.lastSnapshotWrites.get(client)?.get(snapshotKey) || 0;
+    const elapsed = Date.now() - lastWrite;
+    const pendingBySession = this.scheduledSnapshots.get(client) || new Map<string, ScheduledSnapshot>();
+    const pending = pendingBySession.get(snapshotKey);
+    if (!pending && elapsed >= this.snapshotIntervalMs) {
+      this.markSnapshotWritten(client, snapshotKey);
+      this.write(client, eventFrame(event), snapshotKey);
+      return;
+    }
+    if (pending) {
+      pending.event = event;
+      return;
+    }
+    const delay = Math.max(0, this.snapshotIntervalMs - elapsed);
+    const timer = setTimeout(() => this.flushScheduledSnapshot(client, snapshotKey), delay);
+    pendingBySession.set(snapshotKey, { event, timer });
+    this.scheduledSnapshots.set(client, pendingBySession);
+  }
+
+  private flushScheduledSnapshot(client: ServerResponse, snapshotKey: string): void {
+    const pendingBySession = this.scheduledSnapshots.get(client);
+    const pending = pendingBySession?.get(snapshotKey);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    pendingBySession?.delete(snapshotKey);
+    if (pendingBySession && !pendingBySession.size) this.scheduledSnapshots.delete(client);
+    if (!this.clients.has(client)) return;
+    this.markSnapshotWritten(client, snapshotKey);
+    this.write(client, eventFrame(pending.event), snapshotKey);
+  }
+
+  private markSnapshotWritten(client: ServerResponse, snapshotKey: string): void {
+    const writes = this.lastSnapshotWrites.get(client) || new Map<string, number>();
+    writes.set(snapshotKey, Date.now());
+    this.lastSnapshotWrites.set(client, writes);
   }
 
   private write(client: ServerResponse, frame: string, snapshotKey?: string): void {

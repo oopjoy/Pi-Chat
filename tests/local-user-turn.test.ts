@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { appendPendingUserMessage, bindQueuedAdmission, bindQueuedDispatch, markLocalTurnQueued, nextLocalTurnTotal, protectTranscriptWithLocalTurns, removeLocalTurnAndRebase, transcriptConfirmsLocalTurn, transcriptTurnTotal, type LocalUserTurn } from "../src/web/lib/local-user-turn";
+import { appendPendingUserMessage, bindQueuedAdmission, bindQueuedDispatch, consumeLocalSteeringTurn, markLocalTurnQueued, nextLocalTurnTotal, protectTranscriptWithLocalTurns, removeLocalTurnAndRebase, removePendingSteeringTurns, transcriptConfirmsLocalTurn, transcriptTurnTotal, type LocalUserTurn } from "../src/web/lib/local-user-turn";
 import { SessionViewCache } from "../src/web/lib/session-view-cache";
 import type { PiMessage, SessionViewData } from "../src/shared/types";
 
@@ -124,6 +124,62 @@ test("cancelling an earlier queued turn rebases every later local turn", () => {
   assert.deepEqual(removeLocalTurnAndRebase([first, second, third], first), [second, third]);
   assert.equal(second.expectedTurnTotal, 2);
   assert.equal(third.expectedTurnTotal, 3);
+});
+
+test("native steering stays hidden until Pi consumes it and clears safely before consumption", () => {
+  const steering: LocalUserTurn = {
+    sessionId: "session-a",
+    message: { role: "user", content: "redirect now" },
+    expectedTurnTotal: 2,
+    queueState: "waiting",
+    revealOnMessageStart: true,
+  };
+  assert.deepEqual(
+    protectTranscriptWithLocalTurns([steering], [previous], 1, 1).messages,
+    [previous],
+  );
+  assert.equal(
+    consumeLocalSteeringTurn(
+      [steering],
+      { role: "user", content: "redirect now" },
+    ),
+    steering,
+  );
+  assert.equal(steering.queueState, "dispatched");
+  assert.deepEqual(
+    protectTranscriptWithLocalTurns([steering], [previous], 1, 1).messages,
+    [previous, steering.message],
+  );
+
+  const unconsumed: LocalUserTurn = {
+    sessionId: "session-a",
+    message: { role: "user", content: "never consumed" },
+    expectedTurnTotal: 3,
+    queueState: "waiting",
+    revealOnMessageStart: true,
+  };
+  assert.deepEqual(removePendingSteeringTurns([steering, unconsumed]), [steering]);
+
+  const imageOnly: LocalUserTurn = {
+    sessionId: "session-a",
+    message: {
+      role: "user",
+      content: [{ type: "image", data: "local", mimeType: "image/png" }],
+    },
+    expectedTurnTotal: 3,
+    queueState: "waiting",
+    revealOnMessageStart: true,
+  };
+  assert.equal(
+    consumeLocalSteeringTurn([imageOnly], {
+      role: "user",
+      content: [
+        { type: "text", text: "请查看这些图片。" },
+        { type: "image", data: "local", mimeType: "image/png" },
+      ],
+    }),
+    imageOnly,
+  );
 });
 
 test("an observer image placeholder is confirmed by its authoritative turn position", () => {

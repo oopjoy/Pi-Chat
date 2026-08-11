@@ -404,15 +404,17 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .welcome p { max-width: 520px; margin: 0; font-size: 14px; line-height: 1.7; }
 
 .message { margin: 0 0 18px; }
-.message > header { display: flex; align-items: center; min-height: 22px; gap: 8px; margin-bottom: 2px; }
-.message-assistant > header { display: none; }
+.message > header, .message-assistant-header { display: flex; align-items: center; min-height: 22px; gap: 8px; margin-bottom: 2px; }
+.message-assistant-header { justify-content: flex-start; font-family: var(--app-font); }
+.message-assistant-header .streaming-dot { flex: 0 0 auto; }
 .message-role { font-size: 12px; font-weight: 750; letter-spacing: .02em; }
 .message-user .message-role { color: var(--accent); }
 .message-metadata { display: flex; min-width: 0; align-items: center; gap: 7px; overflow: hidden; color: var(--muted); font-size: 11px; white-space: nowrap; }
 .message-model { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .message-thinking { flex: 0 0 auto; padding-left: 7px; border-left: 1px solid color-mix(in srgb, var(--line), transparent 28%); }
-.message-footer { display: flex; min-height: 29px; align-items: center; justify-content: space-between; gap: 12px; margin-top: 6px; padding-top: 5px; border-top: 1px solid color-mix(in srgb, var(--line), transparent 42%); font-family: var(--app-font); }
-.message-footer > button { display: grid; width: 27px; height: 27px; flex: 0 0 auto; place-items: center; padding: 0; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; }
+.message-footer { display: flex; min-height: 29px; align-items: center; gap: 12px; margin-top: 6px; padding-top: 5px; border-top: 1px solid color-mix(in srgb, var(--line), transparent 42%); font-family: var(--app-font); }
+.message-generated-at { min-width: 0; overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.message-footer > button { display: grid; width: 27px; height: 27px; flex: 0 0 auto; place-items: center; margin-left: auto; padding: 0; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; }
 .message-footer > button:hover { border-color: var(--line); background: var(--surface-hover); color: var(--text); }
 .message-footer > button svg { width: 17px; height: 17px; }
 .streaming-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: pulse 1.2s infinite; }
@@ -658,8 +660,11 @@ details.conversation-process { display: block; padding: 0; }
 .command-suggestions span { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .command-suggestions small { padding: 2px 4px; border-radius: 4px; background: var(--surface-soft); color: var(--muted); font-size: 8px; text-transform: uppercase; }
 .visually-hidden { position: absolute !important; width: 1px !important; height: 1px !important; overflow: hidden !important; clip: rect(0 0 0 0) !important; white-space: nowrap !important; }
-.queue-submit-button { height: 28px; min-width: 46px; padding: 0 8px; border: 1px solid color-mix(in srgb, #d89318, transparent 48%); border-radius: 8px; background: color-mix(in srgb, #d89318, transparent 84%); color: #986300; cursor: pointer; font-size: 12px; font-weight: 650; transition: border-color .12s ease, background-color .12s ease, color .12s ease; }
+.queue-submit-button, .steer-submit-button { height: 28px; min-width: 46px; padding: 0 8px; border-radius: 8px; cursor: pointer; font-size: 12px; font-weight: 650; transition: border-color .12s ease, background-color .12s ease, color .12s ease; }
+.queue-submit-button { border: 1px solid color-mix(in srgb, #d89318, transparent 48%); background: color-mix(in srgb, #d89318, transparent 84%); color: #986300; }
 .queue-submit-button:hover:not(:disabled) { border-color: color-mix(in srgb, #d89318, transparent 25%); background: color-mix(in srgb, #d89318, transparent 72%); color: #754b00; }
+.steer-submit-button { border: 1px solid color-mix(in srgb, var(--accent), transparent 45%); background: color-mix(in srgb, var(--accent), transparent 88%); color: var(--accent); }
+.steer-submit-button:hover:not(:disabled) { border-color: color-mix(in srgb, var(--accent), transparent 20%); background: color-mix(in srgb, var(--accent), transparent 78%); color: var(--accent-hover); }
 .send-button, .stop-button { display: grid; width: 28px; height: 28px; min-width: 28px; place-items: center; padding: 0; border-radius: 50%; cursor: pointer; }
 .send-button { border: 1px solid color-mix(in srgb, var(--accent), #fff 24%); background: var(--accent); color: white; }
 .send-button svg { width: 17px; height: 17px; }
@@ -667,7 +672,7 @@ details.conversation-process { display: block; padding: 0; }
 .stop-button { border: 1px solid var(--danger); background: transparent; }
 .stop-button > span { width: 10px; height: 10px; border-radius: 2px; background: var(--danger); }
 .stop-button:hover:not(:disabled) { background: color-mix(in srgb, var(--danger), transparent 88%); }
-.queue-submit-button:disabled, .send-button:disabled, .stop-button:disabled { cursor: default; opacity: .45; }
+.queue-submit-button:disabled, .steer-submit-button:disabled, .send-button:disabled, .stop-button:disabled { cursor: default; opacity: .45; }
 .app-toast { padding: 9px 13px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); box-shadow: var(--shadow); color: var(--text); font-size: 12px; line-height: 1.45; text-align: center; }
 .app-toast.error { border-color: color-mix(in srgb, var(--danger), transparent 50%); color: var(--danger); }
 .primary-runtime-status { padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; color: var(--muted); font-size: 12px; line-height: 1.45; text-align: center; background: color-mix(in srgb, var(--surface), transparent 20%); }
@@ -896,5 +901,5 @@ details.conversation-process { display: block; padding: 0; }
   .composer-usage { min-width: 60px; flex: 0 0 60px; padding-right: 6px; padding-left: 6px; }
   .composer-usage > span { min-width: 0; }
   .composer-actions { width: 100%; justify-content: flex-end; }
-  .queue-submit-button { min-width: 44px; padding: 0 6px; }
+  .queue-submit-button, .steer-submit-button { min-width: 44px; padding: 0 6px; }
 }

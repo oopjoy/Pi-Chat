@@ -1,4 +1,4 @@
-import type { BootstrapData, BootstrapHandshakeData, ExtensionResource, GateMode, InitialPromptData, ModelInfo, PackageResource, PromptImage, QueuedPrompt, ResourceResponse, SessionDirectorySummary, SessionRuntimeReadyData, SessionSummary, SessionViewData, SkillResource, ThinkingLevel } from "../shared/types";
+import type { BootstrapData, BootstrapHandshakeData, ExtensionResource, GateMode, InitialPromptData, ModelInfo, PackageResource, PromptDelivery, PromptImage, QueuedPrompt, ResourceResponse, SessionDirectorySummary, SessionRuntimeReadyData, SessionSummary, SessionViewData, SkillResource, ThinkingLevel } from "../shared/types";
 
 export type ExtensionResponseInput = {
   id: string;
@@ -196,9 +196,9 @@ export const api = {
     return navigator.sendBeacon(`/api/window/close?${query}`);
   },
   shutdown: () => request<{ shuttingDown: true }>("/api/shutdown", { method: "POST" }),
-  prompt: (message: string, images: PromptImage[] = [], sessionId: string, gateMode?: GateMode) => request<{ accepted: boolean; queued: boolean; extension?: boolean; command?: string; description?: string; isStreaming?: boolean; id?: string; queue?: QueuedPrompt[] }>("/api/chat/prompt", {
+  prompt: (message: string, images: PromptImage[] = [], sessionId: string, gateMode?: GateMode, delivery: PromptDelivery = "queue") => request<{ accepted: boolean; queued: boolean; steered?: boolean; /** Pi received the JSONL command but its response timed out; final execution remains event-confirmed. */ deliveryUncertain?: boolean; extension?: boolean; command?: string; description?: string; isStreaming?: boolean; id?: string; queue?: QueuedPrompt[] }>("/api/chat/prompt", {
     method: "POST",
-    body: JSON.stringify({ message, sessionId, gateMode, images: images.map(({ type, data, mimeType }) => ({ type, data, mimeType })) }),
+    body: JSON.stringify({ message, sessionId, gateMode, delivery, images: images.map(({ type, data, mimeType }) => ({ type, data, mimeType })) }),
   }, PROMPT_PREPARE_TIMEOUT_MS),
   pickLocalFiles: () => request<{ paths: string[] }>("/api/local-files/pick", { method: "POST" }),
   clipboardLocalFiles: () => request<{ paths: string[] }>("/api/local-files/clipboard", { method: "POST" }),

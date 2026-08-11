@@ -155,7 +155,9 @@ const app = new PiChatApp({
   devMiddleware: vite ? (request, response, next) => vite.middlewares(request, response, next) : undefined,
   allowedHosts: [],
   applicationRestart: prepareApplicationRestart,
-  applicationShutdown: (reason) => setTimeout(() => void shutdown(reason).then(() => process.exit(0)), 0),
+  applicationShutdown: (reason) => setTimeout(() => void shutdown(reason).then(() => {
+    if (!fatalShutdownRequested) process.exit(0);
+  }), 0),
   primaryRuntime,
   buildIdentity,
 });
@@ -170,23 +172,99 @@ const port = typeof address === "object" && address ? address.port : options.por
 const authority = options.host.includes(":") ? `[${options.host}]:${port}` : `${options.host}:${port}`;
 app.setAllowedHosts([authority]);
 console.log(`[Pi Chat] 已启动：http://${options.host}:${port}`);
-type ShutdownReason = "sigint" | "sigterm" | "api-shutdown" | "last-window-close" | "restart-handoff";
+type ShutdownReason = "sigint" | "sigterm" | "api-shutdown" | "last-window-close" | "restart-handoff" | "uncaught-exception" | "unhandled-rejection";
+const FATAL_SHUTDOWN_TIMEOUT_MS = 15_000;
 
-let shuttingDown = false;
-async function shutdown(reason: ShutdownReason): Promise<void> {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  console.log(`\n[Pi Chat] 正在关闭（reason=${reason}）…`);
-  // End SSE clients and secondary workers before server.close(): Node waits for
-  // long-lived SSE connections, so closing the listener first can deadlock a
-  // self-restart indefinitely.
-  await app.close();
-  await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
-  await vite?.close();
-  // If shutdown races initial spawn, wait for it before the final bounded stop.
-  await primaryStartup.catch(() => undefined);
-  await rpc.stop();
+let shutdownPromise: Promise<void> | null = null;
+let fatalShutdownRequested = false;
+
+function errorDetail(error: unknown): string {
+  return error instanceof Error ? (error.stack || error.message) : String(error);
 }
 
-process.once("SIGINT", () => void shutdown("sigint").then(() => process.exit(0)));
-process.once("SIGTERM", () => void shutdown("sigterm").then(() => process.exit(0)));
+async function shutdownStep(name: string, action: () => Promise<void>): Promise<void> {
+  try {
+    await action();
+  } catch (error) {
+    // A best-effort close must not prevent later steps from freeing the HTTP
+    // listener or Pi child. The original fatal error is already in stderr.
+    console.error(`[Pi Chat] 关闭步骤失败（${name}）：${errorDetail(error)}`);
+  }
+}
+
+function closeHttpServer(): Promise<void> {
+  return new Promise((resolveClose, rejectClose) => {
+    server.close((error) => (error ? rejectClose(error) : resolveClose()));
+  });
+}
+
+function shutdown(reason: ShutdownReason): Promise<void> {
+  if (shutdownPromise) return shutdownPromise;
+  console.log(`\n[Pi Chat] 正在关闭（reason=${reason}）…`);
+  shutdownPromise = (async () => {
+    // End SSE clients and secondary workers before server.close(): Node waits
+    // for long-lived SSE connections, so closing the listener first can
+    // deadlock a self-restart indefinitely.
+    await shutdownStep("应用", () => app.close());
+    await shutdownStep("HTTP", closeHttpServer);
+    await shutdownStep("Vite", async () => {
+      await vite?.close();
+    });
+    // If shutdown races initial spawn, wait for it before the final stop.
+    await primaryStartup.catch(() => undefined);
+    await shutdownStep("Primary Pi RPC", () => rpc.stop());
+  })();
+  return shutdownPromise;
+}
+
+/** Unknown process-level failures cannot safely leave a mutable chat service running. */
+function fatalShutdown(
+  reason: "uncaught-exception" | "unhandled-rejection",
+  error: unknown,
+): void {
+  if (fatalShutdownRequested) return;
+  fatalShutdownRequested = true;
+  process.exitCode = 1;
+  const label =
+    reason === "unhandled-rejection" ? "未处理的 Promise 拒绝" : "未捕获异常";
+  console.error(`[Pi Chat] ${label}：${errorDetail(error)}`);
+  const deadline = setTimeout(() => {
+    console.error(`[Pi Chat] 致命异常关闭超过 ${FATAL_SHUTDOWN_TIMEOUT_MS}ms，强制退出`);
+    try {
+      server.closeAllConnections();
+    } catch {
+      // The process exits immediately below; never recurse through another
+      // uncaughtException while reporting a terminal close failure.
+    }
+    process.exit(1);
+  }, FATAL_SHUTDOWN_TIMEOUT_MS);
+  deadline.unref();
+  void shutdown(reason).then(
+    () => {
+      clearTimeout(deadline);
+      process.exit(1);
+    },
+    (shutdownError) => {
+      clearTimeout(deadline);
+      console.error(`[Pi Chat] 致命异常关闭失败：${errorDetail(shutdownError)}`);
+      process.exit(1);
+    },
+  );
+}
+
+// Node ≥15 otherwise promotes an unhandled rejection to a fatal exception.
+// Handle both process-level failure modes through one bounded close sequence;
+// event listener isolation belongs in PiRpcClient, not this last-resort path.
+process.on("unhandledRejection", (reason) =>
+  fatalShutdown("unhandled-rejection", reason),
+);
+process.on("uncaughtException", (error) =>
+  fatalShutdown("uncaught-exception", error),
+);
+
+process.once("SIGINT", () => void shutdown("sigint").then(() => {
+  if (!fatalShutdownRequested) process.exit(0);
+}));
+process.once("SIGTERM", () => void shutdown("sigterm").then(() => {
+  if (!fatalShutdownRequested) process.exit(0);
+}));

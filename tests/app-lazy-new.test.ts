@@ -2571,6 +2571,289 @@ test("a transient empty model inventory never leaks the Composer's internal mode
   }
 });
 
+test("slash suggestions survive an empty command inventory refresh", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const slashCommands = [
+    { name: "gate", description: "Gate 模式", source: "extension" },
+    { name: "compact", description: "压缩上下文", source: "builtin" },
+  ];
+  let requests = 0;
+  Object.assign(api, {
+    bootstrap: async () => {
+      requests += 1;
+      // A busy/starting Primary legitimately returns an empty inventory on a
+      // later refresh; it must not erase already-working slash completions.
+      return requests === 1
+        ? { ...bootstrap, commands: slashCommands }
+        : { ...bootstrap, commands: [], models: [] };
+    },
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    const typeSlash = () =>
+      act(async () => {
+        Object.getOwnPropertyDescriptor(
+          dom.window.HTMLTextAreaElement.prototype,
+          "value",
+        )?.set?.call(textarea, "/");
+        textarea.dispatchEvent(
+          new dom.window.InputEvent("input", {
+            bubbles: true,
+            inputType: "insertText",
+            data: "/",
+          }),
+        );
+      });
+    await typeSlash();
+    assert.ok(
+      dom.window.document.querySelectorAll(".command-suggestions button").length >= 2,
+      "initial commands render slash suggestions",
+    );
+    // A refresh whose command inventory is empty must keep the last confirmed
+    // completions instead of wiping them (the pre-fix `??` treated [] as
+    // authoritative). A Primary status SSE triggers the background refresh.
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () =>
+      source.emitPi({
+        type: "pi_chat_primary_runtime_status",
+        primaryRuntime: { status: "ready", generation: 1 },
+      }),
+    );
+    assert.ok(requests >= 2, "a ready status refresh fetched the inventory");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "/comp");
+      textarea.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: "/comp",
+        }),
+      );
+    });
+    assert.ok(
+      dom.window.document.querySelectorAll(".command-suggestions button").length >= 1,
+      "slash suggestions survive an empty command inventory refresh",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("slash suggestions return after a starting bootstrap refreshes to ready", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const slashCommands = [
+    { name: "gate", description: "Gate 模式", source: "extension" },
+  ];
+  let requests = 0;
+  Object.assign(api, {
+    bootstrap: async () => {
+      requests += 1;
+      if (requests === 1)
+        return {
+          ...bootstrap,
+          commands: [],
+          primaryRuntime: { status: "starting" as const, generation: 1 },
+        };
+      return {
+        ...bootstrap,
+        commands: slashCommands,
+        primaryRuntime: { status: "ready" as const, generation: 1 },
+      };
+    },
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    assert.equal(textarea.disabled, true, "starting Primary blocks input");
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () =>
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "idle",
+            primaryRuntime: { status: "ready", generation: 1 },
+          }),
+        }),
+      ),
+    );
+    assert.equal(textarea.disabled, false, "ready unlocks the composer");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "/");
+      textarea.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: "/",
+        }),
+      );
+    });
+    assert.ok(
+      dom.window.document.querySelectorAll(".command-suggestions button").length >= 1,
+      "the refreshed ready inventory restores slash suggestions",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("cold and capability-only hot panes retain the confirmed slash catalog", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const coldId = "abcdef0123456789abcd";
+  const hotId = "fedcba9876543210abcd";
+  const slashCommands = [
+    { name: "gate", description: "Gate 模式", source: "extension" as const },
+    { name: "compact", description: "压缩上下文", source: "builtin" as const },
+  ];
+  const cold: SessionViewData = {
+    ...draftView,
+    session: {
+      ...draftView.session,
+      id: coldId,
+      sessionId: "cold-commands",
+      name: "Cold commands",
+      messageCount: 1,
+      active: false,
+      writable: true,
+    },
+    state: { ...draftView.state, sessionId: "cold-commands" },
+    isActive: false,
+    runtimeStatus: "view-only",
+    commands: [],
+  };
+  const hot: SessionViewData = {
+    ...draftView,
+    session: {
+      ...draftView.session,
+      id: hotId,
+      sessionId: "hot-commands",
+      name: "Hot commands",
+      messageCount: 1,
+      active: false,
+      writable: true,
+    },
+    state: { ...draftView.state, sessionId: "hot-commands" },
+    isActive: true,
+    runtimeStatus: "active",
+    // A lightweight hot-memory view intentionally has not probed get_commands.
+    commands: undefined,
+  };
+  let warmCalls = 0;
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      commands: slashCommands,
+      sessions: [...bootstrap.sessions, cold.session, hot.session],
+      sessionsTotal: 3,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    viewSession: async (id: string) => {
+      if (id === coldId) return cold;
+      if (id === hotId) return hot;
+      throw new Error(`unexpected view ${id}`);
+    },
+    warmSession: async () => {
+      warmCalls += 1;
+      throw new Error("slash completion must not warm a Runtime");
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  const select = async (name: string) => {
+    const row = [...dom.window.document.querySelectorAll<HTMLElement>(".session-row")]
+      .find((candidate) => candidate.textContent?.includes(name));
+    assert.ok(row, `missing ${name} row`);
+    await act(async () => {
+      row.querySelector<HTMLButtonElement>(".session-item")?.click();
+      await Promise.resolve();
+    });
+  };
+  const typeSlash = async () => {
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "/");
+      textarea.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: "/",
+        }),
+      );
+    });
+  };
+  const clearInput = async () => {
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "");
+      textarea.dispatchEvent(
+        new dom.window.InputEvent("input", { bubbles: true }),
+      );
+    });
+  };
+  try {
+    await act(async () => root.render(createElement(App)));
+    await select("Cold commands");
+    await typeSlash();
+    assert.equal(
+      dom.window.document.querySelectorAll(".command-suggestions button").length,
+      slashCommands.length,
+      "JSONL-only cold navigation retains the confirmed command catalog",
+    );
+    await clearInput();
+    await select("Hot commands");
+    await typeSlash();
+    assert.equal(
+      dom.window.document.querySelectorAll(".command-suggestions button").length,
+      slashCommands.length,
+      "a hot-memory view without get_commands uses the same confirmed catalog",
+    );
+    assert.equal(warmCalls, 0);
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
 test("the initial ready frame releases controls when Primary became ready after bootstrap", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");
@@ -2682,22 +2965,646 @@ test("Primary startup marks composer capability and image input as pending", asy
     const input = dom.window.document.querySelector<HTMLTextAreaElement>(
       ".composer textarea",
     )!;
-    assert.equal(input.disabled, false, "text may still be drafted while Pi starts");
-    assert.match(
-      input.placeholder,
-      /Pi 正在准备；可继续编辑，发送会等待 Runtime 就绪/,
-    );
+    assert.equal(input.disabled, true, "text waits until the Runtime is ready");
+    assert.match(input.placeholder, /Runtime ready 后才能输入/);
     const attachment = dom.window.document.querySelector<HTMLButtonElement>(
       ".attachment-button",
     )!;
-    await act(async () => attachment.click());
-    const imageItem = [
-      ...dom.window.document.querySelectorAll<HTMLButtonElement>(
-        ".attachment-menu [role='menuitem']",
+    assert.equal(attachment.disabled, true, "attachments wait for the same ready boundary");
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("Primary ready keeps image input pending until its refreshed capability snapshot commits", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  let requests = 0;
+  let resolveRefresh: ((data: BootstrapData) => void) | undefined;
+  const imageModel = {
+    provider: "test",
+    id: "image-ready",
+    name: "Image ready",
+    input: ["text", "image"],
+    reasoning: true,
+  };
+  Object.assign(api, {
+    bootstrap: async () => {
+      requests += 1;
+      if (requests === 1)
+        return {
+          ...bootstrap,
+          state: { ...bootstrap.state, model: null },
+          models: [],
+          primaryRuntime: { status: "starting" as const, generation: 1 },
+        };
+      return new Promise<BootstrapData>((resolve) => {
+        resolveRefresh = resolve;
+      });
+    },
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  const imageMenuItem = () =>
+    [...dom.window.document.querySelectorAll<HTMLButtonElement>(
+      ".attachment-menu [role='menuitem']",
+    )].find((item) => item.textContent?.includes("图片"))!;
+  try {
+    await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () =>
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "idle",
+            piChatRunEpoch: "epoch-ready-capability",
+            workspaceEpoch: "epoch-ready-capability",
+            primaryRuntime: { status: "ready", generation: 1 },
+          }),
+        }),
       ),
-    ].find((item) => item.textContent?.includes("图片"))!;
-    assert.equal(imageItem.disabled, true);
-    assert.match(imageItem.textContent || "", /正在确认模型图片能力/);
+    );
+    assert.equal(requests, 2, "a ready frame that missed the status SSE refreshes its capability snapshot");
+    assert.equal(
+      dom.window.document.querySelector<HTMLTextAreaElement>(".composer textarea")!.disabled,
+      false,
+      "Runtime ready unlocks editing independently of model capability metadata",
+    );
+    assert.equal(
+      dom.window.document.querySelector<HTMLButtonElement>(".attachment-button")!.disabled,
+      false,
+    );
+    await act(async () =>
+      dom.window.document.querySelector<HTMLButtonElement>(".attachment-button")!.click(),
+    );
+    assert.equal(imageMenuItem().disabled, false);
+    assert.match(imageMenuItem().textContent || "", /发送前等待模型能力同步/);
+    await act(async () => {
+      resolveRefresh!({
+        ...bootstrap,
+        state: { ...bootstrap.state, model: imageModel },
+        models: [imageModel],
+        primaryRuntime: { status: "ready", generation: 1 },
+      });
+      await Promise.resolve();
+    });
+    assert.equal(
+      dom.window.document.querySelector<HTMLTextAreaElement>(".composer textarea")!.disabled,
+      false,
+    );
+    assert.equal(imageMenuItem().disabled, false);
+    assert.match(imageMenuItem().textContent || "", /直接解析/);
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a new Primary generation keeps prior image capability pending until its refresh commits", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const imageModel = {
+    provider: "test",
+    id: "generation-image",
+    name: "Generation image",
+    input: ["text", "image"],
+    reasoning: true,
+  };
+  let requests = 0;
+  const resolveRefreshes: Array<(data: BootstrapData) => void> = [];
+  Object.assign(api, {
+    bootstrap: async () => {
+      requests += 1;
+      if (requests === 1)
+        return {
+          ...bootstrap,
+          state: { ...bootstrap.state, model: imageModel },
+          models: [imageModel],
+          primaryRuntime: { status: "ready" as const, generation: 1 },
+        };
+      return new Promise<BootstrapData>((resolve) => {
+        resolveRefreshes.push(resolve);
+      });
+    },
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  const imageMenuItem = () =>
+    [...dom.window.document.querySelectorAll<HTMLButtonElement>(
+      ".attachment-menu [role='menuitem']",
+    )].find((item) => item.textContent?.includes("图片"))!;
+  try {
+    await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    // Begin an old-generation refresh, then let Primary begin generation 2
+    // before that response returns.
+    await act(async () =>
+      source.emitPi({
+        type: "pi_chat_primary_runtime_status",
+        primaryRuntime: { status: "ready", generation: 1 },
+      }),
+    );
+    assert.equal(requests, 2);
+    await act(async () =>
+      source.emitPi({
+        type: "pi_chat_primary_runtime_status",
+        primaryRuntime: { status: "starting", generation: 2 },
+      }),
+    );
+    await act(async () => {
+      resolveRefreshes.shift()!({
+        ...bootstrap,
+        state: { ...bootstrap.state, model: imageModel },
+        models: [imageModel],
+        primaryRuntime: { status: "ready", generation: 1 },
+      });
+      await Promise.resolve();
+    });
+    await act(async () =>
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "idle",
+            primaryRuntime: { status: "ready", generation: 2 },
+          }),
+        }),
+      ),
+    );
+    assert.equal(requests, 3);
+    assert.equal(
+      dom.window.document.querySelector<HTMLTextAreaElement>(".composer textarea")!.disabled,
+      false,
+    );
+    assert.equal(
+      dom.window.document.querySelector<HTMLButtonElement>(".attachment-button")!.disabled,
+      false,
+    );
+    await act(async () =>
+      dom.window.document.querySelector<HTMLButtonElement>(".attachment-button")!.click(),
+    );
+    assert.equal(imageMenuItem().disabled, false);
+    assert.match(imageMenuItem().textContent || "", /发送前等待模型能力同步/);
+    await act(async () => {
+      resolveRefreshes.shift()!({
+        ...bootstrap,
+        state: { ...bootstrap.state, model: imageModel },
+        models: [imageModel],
+        primaryRuntime: { status: "ready", generation: 2 },
+      });
+      await Promise.resolve();
+    });
+    assert.equal(
+      dom.window.document.querySelector<HTMLTextAreaElement>(".composer textarea")!.disabled,
+      false,
+    );
+    assert.equal(imageMenuItem().disabled, false);
+    assert.match(imageMenuItem().textContent || "", /直接解析/);
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("Primary failure keeps cached image capability unconfirmed", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const imageModel = {
+    provider: "test",
+    id: "cached-image",
+    name: "Cached image",
+    input: ["text", "image"],
+    reasoning: true,
+  };
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, model: imageModel },
+      models: [imageModel],
+      primaryRuntime: {
+        status: "failed" as const,
+        generation: 2,
+        error: "simulated failure",
+      },
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const input = dom.window.document.querySelector<HTMLTextAreaElement>(
+      ".composer textarea",
+    )!;
+    assert.equal(input.disabled, true);
+    assert.match(input.placeholder, /Pi Runtime 当前不可用；恢复 ready 后才能输入/);
+    assert.equal(
+      dom.window.document.querySelector<HTMLButtonElement>(".attachment-button")!.disabled,
+      true,
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("ChatInput accepts an image draft and checks model support only at submit time", async () => {
+  const { dom } = installDom();
+  Object.assign(globalThis, { FileReader: dom.window.FileReader });
+  const { createRoot } = await import("react-dom/client");
+  const { ChatInput } = await import("../src/web/components/ChatInput");
+  const sent: unknown[][] = [];
+  const errors: string[] = [];
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  const render = (acceptsImages: boolean) =>
+    createElement(ChatInput, {
+      streaming: false,
+      stopping: false,
+      disabled: false,
+      acceptsImages,
+      commands: [],
+      onSend: async (message: string, images: unknown[]) => { sent.push([message, images]); },
+      onAbort: async () => undefined,
+      onPickLocalFiles: async () => [],
+      onReadClipboardFiles: async () => [],
+      onError: (message: string) => { errors.push(message); },
+    });
+  try {
+    await act(async () => root.render(render(false)));
+    const fileInput = dom.window.document.querySelector<HTMLInputElement>(
+      "input[type='file']",
+    )!;
+    Object.defineProperty(fileInput, "files", {
+      configurable: true,
+      value: [new dom.window.File(["image"], "retained.png", { type: "image/png" })],
+    });
+    await act(async () => {
+      fileInput.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+      const deadline = Date.now() + 250;
+      while (!dom.window.document.querySelector(".image-preview") && Date.now() < deadline)
+        await new Promise((resolve) => dom.window.setTimeout(resolve, 5));
+    });
+    assert.ok(
+      dom.window.document.querySelector(".image-preview"),
+      "a ready composer accepts an image before capability validation",
+    );
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "send retained image");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", {
+        bubbles: true,
+        inputType: "insertText",
+        data: "send retained image",
+      }));
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+    });
+    assert.deepEqual(sent, []);
+    assert.equal(errors.at(-1), "当前模型不支持图片输入");
+    assert.ok(dom.window.document.querySelector(".image-preview"), "rejected images remain removable");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+test("ChatInput never shows Stop from a stale stopping flag after streaming ended", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { ChatInput } = await import("../src/web/components/ChatInput");
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () =>
+      root.render(
+        createElement(ChatInput, {
+          streaming: false,
+          activelyStreaming: false,
+          stopping: true,
+          disabled: false,
+          acceptsImages: true,
+          commands: [],
+          onSend: async () => undefined,
+          onAbort: async () => undefined,
+          onPickLocalFiles: async () => [],
+          onReadClipboardFiles: async () => [],
+          onError: () => undefined,
+        }),
+      ),
+    );
+    assert.equal(
+      dom.window.document.querySelector(".stop-button"),
+      null,
+      "Stop belongs exclusively to an active streaming turn",
+    );
+    assert.ok(
+      dom.window.document.querySelector(".send-button"),
+      "a settled composer retains the regular Send action",
+    );
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+test("ChatInput places Steer beside Queue and sends explicit steering delivery", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { ChatInput } = await import("../src/web/components/ChatInput");
+  const sent: Array<{ message: string; delivery?: string }> = [];
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () =>
+      root.render(
+        createElement(ChatInput, {
+          streaming: true,
+          activelyStreaming: true,
+          stopping: false,
+          disabled: false,
+          acceptsImages: true,
+          commands: [],
+          onSend: async (message: string, _images: unknown[], delivery?: string) => {
+            sent.push({ message, delivery });
+          },
+          onAbort: async () => undefined,
+          onPickLocalFiles: async () => [],
+          onReadClipboardFiles: async () => [],
+          onError: () => undefined,
+        }),
+      ),
+    );
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    const queueButton = dom.window.document.querySelector<HTMLButtonElement>(
+      ".queue-submit-button",
+    )!;
+    const steerButton = dom.window.document.querySelector<HTMLButtonElement>(
+      ".steer-submit-button",
+    )!;
+    assert.equal(queueButton.textContent, "排队");
+    assert.equal(steerButton.textContent, "Steer");
+    assert.equal(queueButton.nextElementSibling, steerButton);
+    assert.equal(steerButton.nextElementSibling?.className, "attachment-control");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "change direction now");
+      textarea.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: "change direction now",
+        }),
+      );
+      steerButton.click();
+    });
+    assert.deepEqual(sent, [
+      { message: "change direction now", delivery: "steer" },
+    ]);
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+test("App reveals a Steer turn only when Pi consumes it", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const promptCalls: unknown[][] = [];
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true },
+      sessions: bootstrap.sessions.map((session) => ({
+        ...session,
+        running: true,
+      })),
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    prompt: async (...args: unknown[]) => {
+      promptCalls.push(args);
+      return { accepted: true, queued: false, steered: true };
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "redirect consumed later");
+      textarea.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: "redirect consumed later",
+        }),
+      );
+      dom.window.document
+        .querySelector<HTMLButtonElement>(".steer-submit-button")!
+        .click();
+    });
+    assert.equal(promptCalls[0]?.[4], "steer");
+    assert.equal(
+      dom.window.document.querySelectorAll(".message-user").length,
+      0,
+      "native steering stays hidden while it is only queued inside Pi",
+    );
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () =>
+      source.emitPi({
+        type: "message_start",
+        piChatSessionId: activeId,
+        message: { role: "user", content: "redirect consumed later" },
+      }),
+    );
+    assert.equal(
+      dom.window.document.querySelectorAll(".message-user").length,
+      0,
+      "an unverified user message_start must not reveal a hidden Steer",
+    );
+    await act(async () =>
+      source.emitPi({
+        type: "message_start",
+        piChatSessionId: activeId,
+        nativeSteeringConsumed: true,
+        message: { role: "user", content: "redirect consumed later" },
+      }),
+    );
+    assert.equal(
+      dom.window.document.querySelectorAll(".message-user").length,
+      1,
+      "a server-verified native steer consumption reveals the local Steer turn",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a cleared Steer with a reason surfaces the drop instead of staying silent", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true },
+      sessions: bootstrap.sessions.map((session) => ({
+        ...session,
+        running: true,
+      })),
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    prompt: async () => ({ accepted: true, queued: false, steered: true }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "dropped steer");
+      textarea.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: "dropped steer",
+        }),
+      );
+      dom.window.document
+        .querySelector<HTMLButtonElement>(".steer-submit-button")!
+        .click();
+    });
+    assert.equal(dom.window.document.querySelectorAll(".message-user").length, 0);
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () =>
+      source.emitPi({
+        type: "pi_chat_native_steering_cleared",
+        piChatSessionId: activeId,
+        reason: "settled-before-consumption",
+        droppedCount: 1,
+      }),
+    );
+    const toast = dom.window.document.querySelector(".app-toast.error");
+    assert.ok(toast, "an accepted-but-cleared Steer must surface a reason");
+    assert.match(toast!.textContent || "", /已清除/);
+    await act(async () =>
+      source.emitPi({
+        type: "pi_chat_process_error",
+        piChatSessionId: activeId,
+        error: "worker crashed",
+        nativeSteeringDroppedCount: 1,
+      }),
+    );
+    const retainedDropReason =
+      dom.window.document.querySelector(".app-toast.error")?.textContent || "";
+    assert.match(retainedDropReason, /Steer/);
+    assert.match(
+      retainedDropReason,
+      /未执行/,
+      "the following generic process error must not overwrite the specific drop reason",
+    );
+    assert.equal(
+      dom.window.document.querySelectorAll(".message-user").length,
+      0,
+      "the hidden local turn must be removed with the drop",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a background Session preserves its dropped Steer reason until opened", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const backgroundId = draftView.session.id;
+  const backgroundView: SessionViewData = {
+    ...draftView,
+    session: {
+      ...draftView.session,
+      id: backgroundId,
+      name: "Background",
+      active: true,
+      writable: true,
+    },
+    runtimeStatus: "active",
+  };
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      sessions: [bootstrap.sessions[0], backgroundView.session],
+      sessionsTotal: 2,
+      activeSessionIds: [activeId, backgroundId],
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async (id: string) => ({ viewing: id }),
+    viewSession: async (id: string) =>
+      id === backgroundId ? backgroundView : draftView,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () =>
+      source.emitPi({
+        type: "pi_chat_native_steering_cleared",
+        piChatSessionId: backgroundId,
+        reason: "process-error",
+        droppedCount: 1,
+      }),
+    );
+    assert.equal(
+      dom.window.document.querySelector(".app-toast.error"),
+      null,
+      "a background drop must not overwrite the current Session's UI",
+    );
+    const backgroundRow = [
+      ...dom.window.document.querySelectorAll<HTMLElement>(".session-row"),
+    ].find((row) => row.textContent?.includes("Background"));
+    assert.ok(backgroundRow);
+    await act(async () =>
+      backgroundRow
+        .querySelector<HTMLButtonElement>(".session-item")
+        ?.click(),
+    );
+    assert.match(
+      dom.window.document.querySelector(".app-toast.error")?.textContent || "",
+      /Steer 消息未执行/,
+      "opening the affected Session must reveal its stored drop reason",
+    );
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);
@@ -4194,7 +5101,7 @@ test("a stale sidebar snapshot cannot restore the running spinner after settleme
   }
 });
 
-test("failed Primary keeps historical navigation and a recovery-triggering composer available", async () => {
+test("failed Primary keeps historical navigation while disabling the composer", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
@@ -4228,8 +5135,8 @@ test("failed Primary keeps historical navigation and a recovery-triggering compo
     const input = dom.window.document.querySelector<HTMLTextAreaElement>(
       "textarea[aria-label='消息输入']",
     )!;
-    assert.equal(input.disabled, false);
-    assert.match(input.placeholder, /输入消息/);
+    assert.equal(input.disabled, true);
+    assert.match(input.placeholder, /Pi Runtime 当前不可用；恢复 ready 后才能输入/);
     // The server's ready SSE triggers a guarded background metadata refresh;
     // the status transition itself is covered by server contract tests. Keep
     // this JSDOM test focused on the failed-readiness capability boundary.
@@ -5269,14 +6176,16 @@ test("agent settlement clears a completed tool status left after compaction", as
       }),
     );
     assert.match(
-      dom.window.document.querySelector(".agent-status.is-compacting")
-        ?.textContent || "",
+      dom.window.document.querySelector(".agent-status")?.textContent || "",
       /bash 已完成，Pi 正在继续…/,
     );
     assert.ok(
-      dom.window.document.querySelector(
-        ".agent-status.is-compacting .loader.small",
-      ),
+      dom.window.document.querySelector(".agent-status .loader.small"),
+    );
+    assert.equal(
+      dom.window.document.querySelector(".agent-status.is-compacting"),
+      null,
+      "a completed tool frame proves Pi has resumed work after compaction",
     );
 
     await act(async () =>
@@ -6791,6 +7700,53 @@ test("late model and thinking responses from A do not overwrite the Session B co
   }
 });
 
+test("an abort result confirming settlement clears Stop without waiting for SSE", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true },
+      sessions: [{ ...bootstrap.sessions[0], running: true }],
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    abort: async () => ({
+      ok: true,
+      abortPending: false,
+      isStreaming: false,
+      queuePaused: false,
+    }),
+    viewSession: async () => ({
+      ...draftView,
+      session: bootstrap.sessions[0],
+      state: { ...draftView.state, isStreaming: false },
+      isStreaming: false,
+    }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    await act(async () =>
+      dom.window.document
+        .querySelector<HTMLButtonElement>(".stop-button")!
+        .click(),
+    );
+    assert.equal(
+      dom.window.document.querySelector(".stop-button"),
+      null,
+      "an authoritative non-streaming abort result must remove Stop immediately",
+    );
+    assert.ok(dom.window.document.querySelector(".send-button"));
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
 test("a pending abort stays in stopping state until agent settlement", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");
@@ -6851,6 +7807,15 @@ test("a pending abort stays in stopping state until agent settlement", async () 
     assert.doesNotMatch(
       dom.window.document.querySelector(".app-toast")?.textContent || "",
       /正在结束当前操作/,
+    );
+    assert.equal(
+      dom.window.document.querySelector(".stop-button"),
+      null,
+      "a terminal SSE must remove Stop rather than leave a stale abort control",
+    );
+    assert.ok(
+      dom.window.document.querySelector(".send-button"),
+      "the settled composer returns to its normal Send action",
     );
   } finally {
     await act(async () => root.unmount());
@@ -6991,6 +7956,12 @@ test("late stop and queue actions from A do not overwrite Session B", async () =
         .click(),
     );
     await visitB();
+    assert.equal(
+      dom.window.document.querySelector<HTMLButtonElement>(".stop-button")
+        ?.disabled,
+      false,
+      "A pending abort must not disable Session B's independent Stop control",
+    );
     await act(async () =>
       resolveAbort({ ok: true, isStreaming: false, queuePaused: true }),
     );
@@ -8863,6 +9834,74 @@ test("a lost prompt acknowledgement cannot remove a user turn after SSE proves a
   }
 });
 
+test("a lost prompt acknowledgement after a same-session refresh keeps its user turn visible", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  let rejectPrompt!: (cause: Error) => void;
+  const pendingPrompt = new Promise<never>((_resolve, reject) => {
+    rejectPrompt = reject;
+  });
+  Object.assign(api, {
+    bootstrap: async () => bootstrap,
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    prompt: async () => pendingPrompt,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "survive refresh and lost ack");
+      textarea.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: "survive refresh and lost ack",
+        }),
+      );
+      dom.window.document
+        .querySelector<HTMLButtonElement>(".send-button")!
+        .click();
+      await Promise.resolve();
+    });
+    // A user refresh commits a newer revision of the same Session while the
+    // browser still waits for the prompt HTTP acknowledgement.
+    await act(async () => {
+      dom.window.document
+        .querySelector<HTMLButtonElement>(".refresh-chat")!
+        .click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      rejectPrompt(new Error("network response lost after refresh"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(
+      dom.window.document.querySelectorAll(".message-user").length,
+      1,
+      "a same-session refresh must not strand an unknown accepted turn",
+    );
+    assert.equal(
+      dom.window.document.querySelector(".message-user")?.textContent,
+      "survive refresh and lost ack",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
 test("an explicit prompt rejection rolls back the local user turn", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");
@@ -8909,6 +9948,186 @@ test("an explicit prompt rejection rolls back the local user turn", async () => 
       textarea.value,
       "restore rejected text",
       "a definite rejection restores the composer for correction or retry",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a late queued acknowledgement survives a newer same-session view commit", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const queued = {
+    id: "00000000-0000-4000-8000-000000000099",
+    message: "late queued turn",
+    imageCount: 0,
+    createdAt: 1,
+  };
+  let resolvePrompt!: (value: {
+    accepted: boolean;
+    queued: true;
+    id: string;
+    queue: typeof queued[];
+  }) => void;
+  const pendingPrompt = new Promise<{
+    accepted: boolean;
+    queued: true;
+    id: string;
+    queue: typeof queued[];
+  }>((resolve) => {
+    resolvePrompt = resolve;
+  });
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true },
+      sessions: [{ ...bootstrap.sessions[0], running: true }],
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    prompt: async () => pendingPrompt,
+    // This read starts before the queue acknowledgement and therefore contains
+    // the old empty queue, invalidating the original pane authority.
+    viewSession: async () => ({
+      ...draftView,
+      session: { ...bootstrap.sessions[0], running: false },
+      state: { ...draftView.state, isStreaming: false },
+      isStreaming: false,
+      queue: [],
+      queuePaused: false,
+    }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, queued.message);
+      textarea.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: queued.message,
+        }),
+      );
+      dom.window.document
+        .querySelector<HTMLButtonElement>(".queue-submit-button")!
+        .click();
+      await Promise.resolve();
+    });
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.emitPi({ type: "agent_settled", piChatSessionId: activeId });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () =>
+      resolvePrompt({
+        accepted: true,
+        queued: true,
+        id: queued.id,
+        queue: [queued],
+      }),
+    );
+    assert.match(
+      dom.window.document.querySelector(".prompt-queue")?.textContent || "",
+      /late queued turn/,
+      "a late queue acknowledgement must recover its stable queue entry",
+    );
+    assert.equal(
+      dom.window.document.querySelectorAll(".message-user").length,
+      0,
+      "a waiting queued turn belongs in Queue, not an invisible orphan bubble",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a queued dispatch timeout surfaces an asynchronous delivery uncertainty notice", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  Object.assign(api, {
+    bootstrap: async () => bootstrap,
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () =>
+      source.emitPi({
+        type: "pi_chat_prompt_delivery_uncertain",
+        piChatSessionId: activeId,
+        id: "queued-timeout",
+      }),
+    );
+    assert.match(
+      dom.window.document.querySelector(".app-toast")?.textContent || "",
+      /请勿重复发送/,
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("an uncertain prompt delivery remains visible and tells the user not to retry", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  Object.assign(api, {
+    bootstrap: async () => bootstrap,
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    prompt: async () => ({
+      accepted: true,
+      queued: false,
+      deliveryUncertain: true,
+    }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "possibly delivered");
+      textarea.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: "possibly delivered",
+        }),
+      );
+      dom.window.document
+        .querySelector<HTMLButtonElement>(".send-button")!
+        .click();
+    });
+    assert.equal(dom.window.document.querySelectorAll(".message-user").length, 1);
+    assert.match(
+      dom.window.document.querySelector(".app-toast")?.textContent || "",
+      /请勿重复发送/,
     );
   } finally {
     await act(async () => root.unmount());
@@ -8993,6 +10212,122 @@ test("a view that confirms a pending prompt before its acknowledgement leaves on
     assert.equal(
       dom.window.document.querySelector(".message-user")?.textContent,
       "acknowledgement race",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a stale hot view cannot restore the composer compaction lock after compaction_end", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const staleHotView: SessionViewData = {
+    ...draftView,
+    session: { ...bootstrap.sessions[0], active: true, writable: true },
+    state: { ...bootstrap.state, isStreaming: true, isCompacting: true },
+    isStreaming: true,
+    runtimeStatus: "active",
+    toolStatus: "Pi 正在思考…",
+  };
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true, isCompacting: false },
+      sessions: [{ ...bootstrap.sessions[0], running: true }],
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    viewSession: async () => staleHotView,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const input = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () =>
+      source.emitPi({ type: "compaction_start", piChatSessionId: activeId }),
+    );
+    assert.equal(input.disabled, true, "compaction owns the composer while active");
+
+    await act(async () => {
+      source.emitPi({
+        type: "compaction_end",
+        piChatSessionId: activeId,
+        aborted: false,
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(
+      input.disabled,
+      false,
+      "a stale hot-memory view must not relock input after compaction completed",
+    );
+    assert.doesNotMatch(input.placeholder, /正在压缩上下文/);
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a recovered Runtime clears the sidebar's retained failure reason before its status refresh", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  Object.assign(api, {
+    bootstrap: async () => bootstrap,
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  const status = () =>
+    dom.window.document.querySelector<HTMLElement>(
+      ".session-row.is-active .session-status",
+    );
+  try {
+    await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () =>
+      source.emitPi({
+        type: "pi_chat_process_error",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 7,
+        error: "worker crashed while syncing state",
+      }),
+    );
+    assert.ok(status()?.classList.contains("is-error"));
+    assert.match(status()?.getAttribute("title") || "", /worker crashed while syncing state/);
+
+    await act(async () =>
+      source.emitPi({
+        type: "pi_chat_process_recovered",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 8,
+      }),
+    );
+    assert.equal(status()?.classList.contains("is-error"), false);
+    assert.doesNotMatch(status()?.getAttribute("title") || "", /worker crashed/);
+
+    await act(async () =>
+      source.emitPi({
+        type: "pi_chat_process_error",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 7,
+        error: "late old worker crash",
+      }),
+    );
+    assert.equal(
+      status()?.classList.contains("is-error"),
+      false,
+      "an old worker generation cannot re-red a recovered Session",
     );
   } finally {
     await act(async () => root.unmount());

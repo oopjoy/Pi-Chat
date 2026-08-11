@@ -1,3 +1,6 @@
+/** Explicit delivery behavior for a message submitted while Pi is already running. */
+export type PromptDelivery = "queue" | "steer";
+
 /** Authoritative Runtime work phase for Sidebar presentation and HTTP snapshots. */
 export type SessionExecutionState = "idle" | "queued" | "dispatching" | "running" | "paused" | "failed";
 
@@ -5,6 +8,8 @@ export type SessionExecutionState = "idle" | "queued" | "dispatching" | "running
 export interface SessionActivityState {
   execution: SessionExecutionState;
   awaitingConfirmation: boolean;
+  /** Short runtime diagnostic retained while this Session remains failed. */
+  error?: string;
 }
 
 export interface SessionDirectorySummary {
@@ -178,6 +183,8 @@ export interface InitialPromptData extends SessionRuntimeReadyData {
   session: SessionSummary;
   accepted: boolean;
   queued: false;
+  /** Pi received the initial JSONL command but its response timed out. */
+  deliveryUncertain?: boolean;
   extension?: boolean;
   command?: string;
   description?: string;

@@ -27,7 +27,13 @@ export function sessionStatus(session: SessionSummary, failed: boolean, hasUnsee
   const activity = session.activity || legacyActivity(session, failed);
   // Failure is actionable even while an old Gate request remains visible.
   if (activity.execution === "paused") return { kind: "error", label: "队列已暂停，需要恢复或撤销" };
-  if (activity.execution === "failed") return { kind: "error", label: "会话运行异常" };
+  if (activity.execution === "failed") {
+    const detail = typeof activity.error === "string" ? activity.error.trim() : "";
+    return {
+      kind: "error",
+      label: detail ? `会话运行异常：${detail}` : "会话运行异常",
+    };
+  }
   if (activity.awaitingConfirmation) return { kind: "pending", label: "等待权限确认" };
   if (activity.execution === "queued") return { kind: "running", label: "消息等待自动执行" };
   if (activity.execution === "dispatching") return { kind: "running", label: "正在派发队列消息" };

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent, type ReactNode } from "react";
-import type { PromptImage, SlashCommand } from "../../shared/types";
+import type { PromptDelivery, PromptImage, SlashCommand } from "../../shared/types";
 import { CloseIcon, FileSearchIcon, ImageIcon, PaperclipIcon, SendIcon } from "./Icons";
 
 const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
@@ -61,7 +61,7 @@ export function commandMatches(value: string, commands: SlashCommand[]): SlashCo
   }).sort((a, b) => a.rank - b.rank || a.score - b.score || a.command.name.localeCompare(b.command.name)).slice(0, 9).map(({ command }) => command);
 }
 
-export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, placeholder, acceptsImages, imageInputPending = false, commands, controls, notices, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles, onError }: {
+export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, placeholder, acceptsImages, imageInputPending = false, imageInputPendingMessage = "模型图片能力尚未确认", commands, controls, notices, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles, onError }: {
   /** True when a submission will enter the local queue. */
   streaming: boolean;
   /** True only while Pi is actively generating and can be stopped. */
@@ -69,16 +69,17 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   stopping: boolean;
   disabled: boolean;
   disabledPlaceholder?: string;
-  /** A capability-pending prompt may still permit drafting text. */
   placeholder?: string;
   acceptsImages: boolean;
   /** The selected model is provisional until the current Runtime confirms it. */
   imageInputPending?: boolean;
+  /** Explains whether preparation, metadata synchronization, or recovery owns the wait. */
+  imageInputPendingMessage?: string;
   commands: SlashCommand[];
   controls?: ReactNode;
   /** System status sits immediately above the actual Composer, never over its input. */
   notices?: ReactNode;
-  onSend: (message: string, images: PromptImage[]) => Promise<void>;
+  onSend: (message: string, images: PromptImage[], delivery?: PromptDelivery) => Promise<void>;
   onAbort: () => Promise<void>;
   onPickLocalFiles: () => Promise<string[]>;
   onReadClipboardFiles: () => Promise<string[]>;
@@ -115,18 +116,21 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   }, [activelyStreaming]);
 
   useEffect(() => {
+    if (disabled) {
+      setAttachmentOpen(false);
+      setDragging(false);
+      return;
+    }
     if (!attachmentOpen) return;
     const close = (event: PointerEvent) => {
       if (!attachmentRef.current?.contains(event.target as Node)) setAttachmentOpen(false);
     };
     document.addEventListener("pointerdown", close);
     return () => document.removeEventListener("pointerdown", close);
-  }, [attachmentOpen]);
+  }, [attachmentOpen, disabled]);
 
   const addImages = async (files: File[]) => {
-    if (imageInputPending)
-      return onError("Pi 正在准备，模型图片能力尚未确认");
-    if (!acceptsImages) return onError("当前模型不支持图片输入");
+    if (disabled) return;
     const candidates = files.filter((file) => file.type.startsWith("image/"));
     if (!candidates.length) return;
     if (images.length + candidates.length > MAX_IMAGES) return onError(`一次最多添加 ${MAX_IMAGES} 张图片`);
@@ -144,11 +148,19 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     requestAnimationFrame(() => textareaRef.current?.focus());
   };
 
-  const submit = async () => {
+  const submit = async (delivery: PromptDelivery = "queue") => {
     const message = value.trim();
     if ((!message && !images.length) || disabled || sending) return;
-    if (images.length && imageInputPending) {
-      onError("Pi 正在准备，模型图片能力尚未确认");
+    if (delivery === "steer" && message.startsWith("/")) {
+      onError("Slash 指令不能作为 Steer 消息发送");
+      return;
+    }
+    if (images.length && (imageInputPending || !acceptsImages)) {
+      onError(
+        imageInputPending
+          ? imageInputPendingMessage
+          : "当前模型不支持图片输入",
+      );
       return;
     }
     const pendingImages = images;
@@ -156,7 +168,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     setValue("");
     setImages([]);
     try {
-      await onSend(message, pendingImages);
+      await onSend(message, pendingImages, delivery);
     } catch {
       setValue(message);
       setImages(pendingImages);
@@ -180,6 +192,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   };
 
   const appendFileReferences = (paths: string[]) => {
+    if (disabled) return;
     const references = fileReferences(paths);
     if (references) setValue((current) => current.trim() ? `${current.trimEnd()}\n\n${references}` : references);
   };
@@ -212,6 +225,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   const drop = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault();
     setDragging(false);
+    if (disabled) return;
     const files = [...event.dataTransfer.files];
     const imageFiles = files.filter((file) => file.type.startsWith("image/"));
     const ordinaryFiles = files.filter((file) => !file.type.startsWith("image/"));
@@ -226,6 +240,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   };
 
   const pickFiles = async () => {
+    if (disabled) return;
     setAttachmentOpen(false);
     setPickingFiles(true);
     try {
@@ -242,23 +257,24 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   return (
     <div className="composer-wrap">
       {notices && <div className="system-notice-stack" aria-live="polite">{notices}</div>}
-      <div className={`composer ${dragging ? "is-dragging" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }} onDrop={drop}>
-        {suggestions.length > 0 && <div className="command-suggestions" role="listbox" aria-label="Pi 指令联想">{suggestions.map((command, index) => <button type="button" role="option" aria-selected={index === suggestionIndex} className={index === suggestionIndex ? "is-active" : ""} key={`${command.source}-${command.name}`} onMouseDown={(event) => event.preventDefault()} onClick={() => completeCommand(command)}><strong>/{command.name}</strong><span>{command.description || "Pi 指令"}</span><small>{command.source}</small></button>)}</div>}
-        {images.length > 0 && <div className="image-previews">{images.map((image, index) => <div className="image-preview" key={`${image.fileName}-${index}`}><img src={`data:${image.mimeType};base64,${image.data}`} alt={image.fileName || `图片 ${index + 1}`} /><button type="button" onClick={() => setImages((current) => current.filter((_, itemIndex) => itemIndex !== index))} aria-label={`移除 ${image.fileName || "图片"}`}><CloseIcon /></button><small>{image.fileName || "粘贴的图片"}</small></div>)}</div>}
+      <div className={`composer ${dragging ? "is-dragging" : ""}`} onDragOver={(event) => { event.preventDefault(); if (!disabled) setDragging(true); }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }} onDrop={drop}>
+        {!disabled && suggestions.length > 0 && <div className="command-suggestions" role="listbox" aria-label="Pi 指令联想">{suggestions.map((command, index) => <button type="button" role="option" aria-selected={index === suggestionIndex} className={index === suggestionIndex ? "is-active" : ""} key={`${command.source}-${command.name}`} onMouseDown={(event) => event.preventDefault()} onClick={() => completeCommand(command)}><strong>/{command.name}</strong><span>{command.description || "Pi 指令"}</span><small>{command.source}</small></button>)}</div>}
+        {images.length > 0 && <div className="image-previews">{images.map((image, index) => <div className="image-preview" key={`${image.fileName}-${index}`}><img src={`data:${image.mimeType};base64,${image.data}`} alt={image.fileName || `图片 ${index + 1}`} /><button type="button" disabled={disabled} onClick={() => setImages((current) => current.filter((_, itemIndex) => itemIndex !== index))} aria-label={`移除 ${image.fileName || "图片"}`}><CloseIcon /></button><small>{image.fileName || "粘贴的图片"}</small></div>)}</div>}
         <textarea ref={textareaRef} value={value} onChange={(event) => setValue(event.target.value)} onPaste={paste} onKeyDown={keyDown} disabled={disabled} rows={1} placeholder={disabled ? disabledPlaceholder || "正在切换会话…" : placeholder || (streaming ? "继续输入，发送后加入队列；输入 / 查看指令" : "输入消息，或粘贴、拖入附件")} aria-label="消息输入" />
         <div className="composer-toolbar">
           <div className="composer-toolbar-controls">{controls}</div>
           <div className="composer-actions">
-            {streaming && <button type="button" className="queue-submit-button" disabled={(!value.trim() && !images.length) || disabled || sending || stopping} onClick={() => void submit()}>{sending ? (isExtensionCommand ? "执行中…" : "排队中…") : isExtensionCommand ? "执行" : "排队"}</button>}
+            {streaming && <button type="button" className="queue-submit-button" disabled={(!value.trim() && !images.length) || disabled || sending || stopping} onClick={() => void submit("queue")}>{sending ? (isExtensionCommand ? "执行中…" : "排队中…") : isExtensionCommand ? "执行" : "排队"}</button>}
+            {activelyStreaming && !value.trimStart().startsWith("/") && <button type="button" className="steer-submit-button" disabled={(!value.trim() && !images.length) || disabled || sending || stopping} onClick={() => void submit("steer")} title="在当前 assistant turn 的工具调用结束后、下一次模型调用前优先送达">Steer</button>}
             <div className="attachment-control" ref={attachmentRef}>
               <button type="button" className={`attachment-button ${attachmentOpen ? "is-open" : ""}`} disabled={disabled || pickingFiles} onClick={() => setAttachmentOpen((open) => !open)} title="添加附件" aria-label="添加附件" aria-haspopup="menu" aria-expanded={attachmentOpen}><PaperclipIcon /></button>
               {attachmentOpen && <div className="attachment-menu" role="menu">
-                <button type="button" role="menuitem" disabled={imageInputPending || !acceptsImages || images.length >= MAX_IMAGES} onClick={() => { setAttachmentOpen(false); imageInputRef.current?.click(); }}><ImageIcon className="attachment-menu-icon" /><strong>图片</strong><small>{imageInputPending ? "正在确认模型图片能力" : acceptsImages ? "直接解析，可粘贴或拖入" : "当前模型不支持图片"}</small></button>
+                <button type="button" role="menuitem" disabled={images.length >= MAX_IMAGES} onClick={() => { setAttachmentOpen(false); imageInputRef.current?.click(); }}><ImageIcon className="attachment-menu-icon" /><strong>图片</strong><small>{imageInputPending ? "可添加；发送前等待模型能力同步" : acceptsImages ? "直接解析，可粘贴或拖入" : "可添加；发送时检查模型支持"}</small></button>
                 <button type="button" role="menuitem" disabled={pickingFiles} onClick={() => void pickFiles()}><FileSearchIcon className="attachment-menu-icon" /><strong>{pickingFiles ? "选择中…" : "本地文件"}</strong><small>引用 Windows 绝对路径</small></button>
               </div>}
               <input ref={imageInputRef} className="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple onChange={(event) => { void addImages([...event.target.files || []]); event.target.value = ""; }} />
             </div>
-            {(activelyStreaming || stopping)
+            {activelyStreaming
               ? <button type="button" className="stop-button" disabled={disabled || stopping} onClick={() => void onAbort()} aria-label={stopping ? "正在停止" : "停止生成"} title={stopping ? "正在停止" : "停止生成"}><span aria-hidden="true" /></button>
               : !streaming && <button type="button" className="send-button" disabled={(!value.trim() && !images.length) || disabled || sending || stopping} onClick={() => void submit()} aria-label={sending ? "正在发送" : isExtensionCommand ? "执行指令" : "发送消息"} title={sending ? "正在发送" : isExtensionCommand ? "执行指令" : "发送消息"}><SendIcon /></button>}
           </div>

@@ -9,8 +9,8 @@ export type ProcessEntry =
   | { kind: "tool"; id?: string; name: string; arguments?: string; editDiff?: ToolEditDiff; result?: string; completed?: boolean; isError?: boolean };
 
 export type ConversationItem =
-  | { kind: "message"; message: PiMessage; key: string }
-  | { kind: "process"; entries: ProcessEntry[]; key: string };
+  | { kind: "message"; message: PiMessage; key: string; hideAssistantMetadata?: boolean }
+  | { kind: "process"; entries: ProcessEntry[]; key: string; assistantHeader?: PiMessage };
 
 /**
  * Stable list keys for React. Intentionally ignore growing thinking/note text so
@@ -269,10 +269,11 @@ export function groupConversation(messages: PiMessage[], options: { liveMessage?
   const processOrdinalsByAnchor = new Map<string, number>();
   let precedingProcessAnchor = "start";
   let processAssistantTimestamp: number | null = null;
+  let processAssistantHeader: PiMessage | null = null;
   let processHasThinking = false;
   const processToolIds = new Set<string>();
-  const flushProcess = () => {
-    if (!processEntries.length) return;
+  const flushProcess = (fallbackHeader?: PiMessage): boolean => {
+    if (!processEntries.length) return false;
     const entries = mergeProcessEntries(processEntries);
     const toolIdentity = [...processToolIds].sort().join(",");
     const processAnchor = processAssistantTimestamp !== null
@@ -282,11 +283,20 @@ export function groupConversation(messages: PiMessage[], options: { liveMessage?
         : precedingProcessAnchor;
     const ordinal = processOrdinalsByAnchor.get(processAnchor) || 0;
     processOrdinalsByAnchor.set(processAnchor, ordinal + 1);
-    items.push({ kind: "process", entries, key: processItemKey(processAnchor, ordinal) });
+    const assistantHeader = processAssistantHeader
+      || (fallbackHeader?.role === "assistant" ? fallbackHeader : null);
+    items.push({
+      kind: "process",
+      entries,
+      key: processItemKey(processAnchor, ordinal),
+      ...(assistantHeader ? { assistantHeader } : null),
+    });
     processEntries = [];
     processAssistantTimestamp = null;
+    processAssistantHeader = null;
     processHasThinking = false;
     processToolIds.clear();
+    return Boolean(assistantHeader);
   };
 
   const groupedMessages = withLiveAssistantSnapshot(messages, options.liveMessage);
@@ -294,8 +304,11 @@ export function groupConversation(messages: PiMessage[], options: { liveMessage?
     const message = groupedMessages[messageIndex];
     const { entries, visibleMessage } = processFromMessage(message);
     if (entries.length) {
-      if (message.role === "assistant" && typeof message.timestamp === "number" && Number.isFinite(message.timestamp)) {
-        processAssistantTimestamp = processAssistantTimestamp === null ? message.timestamp : Math.min(processAssistantTimestamp, message.timestamp);
+      if (message.role === "assistant") {
+        processAssistantHeader = message;
+        if (typeof message.timestamp === "number" && Number.isFinite(message.timestamp)) {
+          processAssistantTimestamp = processAssistantTimestamp === null ? message.timestamp : Math.min(processAssistantTimestamp, message.timestamp);
+        }
       }
       if (entries.some((entry) => entry.kind === "thinking")) processHasThinking = true;
       for (const entry of entries) {
@@ -304,8 +317,15 @@ export function groupConversation(messages: PiMessage[], options: { liveMessage?
     }
     processEntries.push(...entries);
     if (visibleMessage) {
-      flushProcess();
-      items.push({ kind: "message", message: visibleMessage, key: uniqueMessageKey(visibleMessage) });
+      const metadataRenderedWithProcess = flushProcess(visibleMessage);
+      items.push({
+        kind: "message",
+        message: visibleMessage,
+        key: uniqueMessageKey(visibleMessage),
+        ...(metadataRenderedWithProcess && visibleMessage.role === "assistant"
+          ? { hideAssistantMetadata: true }
+          : null),
+      });
       precedingProcessAnchor = compactContentKey(visibleMessage);
     } else if (
       options.preserveTrailingAssistantPlaceholder
@@ -313,8 +333,13 @@ export function groupConversation(messages: PiMessage[], options: { liveMessage?
       && message.role === "assistant"
       && entries.length === 0
     ) {
-      flushProcess();
-      items.push({ kind: "message", message, key: uniqueMessageKey(message) });
+      const metadataRenderedWithProcess = flushProcess(message);
+      items.push({
+        kind: "message",
+        message,
+        key: uniqueMessageKey(message),
+        ...(metadataRenderedWithProcess ? { hideAssistantMetadata: true } : null),
+      });
     }
   }
   flushProcess();

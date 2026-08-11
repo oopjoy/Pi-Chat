@@ -10,6 +10,8 @@ export interface LocalUserTurn {
   queueId?: string;
   /** Queued turns stay out of the transcript until the scheduler dispatches them. */
   queueState?: "waiting" | "dispatched";
+  /** Native Pi steering stays hidden until Pi consumes it at message_start. */
+  revealOnMessageStart?: boolean;
   /** Observer queue events omit image bytes, so only the authoritative turn slot can confirm them. */
   confirmByPosition?: boolean;
   /** True after a stale view has rendered this message into the transcript. */
@@ -81,6 +83,31 @@ export function appendLocalTurnOnce(messages: PiMessage[], turn: LocalUserTurn |
 export function markLocalTurnQueued(turn: LocalUserTurn, queueId: string): void {
   turn.queueId = queueId;
   if (turn.queueState !== "dispatched") turn.queueState = "waiting";
+}
+
+/** Reveal the first matching native steering turn when Pi actually consumes it. */
+export function consumeLocalSteeringTurn(turns: LocalUserTurn[], message: PiMessage): LocalUserTurn | undefined {
+  const incoming = textAndImageCount(message);
+  const turn = turns.find((candidate) => {
+    if (!candidate.revealOnMessageStart || candidate.queueState !== "waiting") return false;
+    const shape = textAndImageCount(candidate.message);
+    const sameText =
+      shape.text === incoming.text ||
+      (!shape.text && incoming.text === "请查看这些图片。");
+    return sameText && shape.imageCount === incoming.imageCount;
+  });
+  if (turn) turn.queueState = "dispatched";
+  return turn;
+}
+
+/** Drop every unconsumed native steering turn after its Runtime is reset. */
+export function removePendingSteeringTurns(turns: LocalUserTurn[]): LocalUserTurn[] {
+  let remaining = turns;
+  for (const turn of turns) {
+    if (turn.revealOnMessageStart && turn.queueState === "waiting")
+      remaining = removeLocalTurnAndRebase(remaining, turn);
+  }
+  return remaining;
 }
 
 export function removeLocalTurnAndRebase(turns: LocalUserTurn[], removed: LocalUserTurn): LocalUserTurn[] {

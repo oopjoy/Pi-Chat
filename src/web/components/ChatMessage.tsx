@@ -37,7 +37,75 @@ export function assistantThinkingLabel(message: PiMessage): string {
   return "";
 }
 
-export const ChatMessage = memo(function ChatMessage({ message, streaming = false }: { message: PiMessage; streaming?: boolean }) {
+export interface AssistantGeneratedAt {
+  label: string;
+  dateTime: string;
+  title: string;
+}
+
+const replyTimeFormatter = new Intl.DateTimeFormat("zh-CN", {
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+const replyMonthDayFormatter = new Intl.DateTimeFormat("zh-CN", {
+  month: "2-digit",
+  day: "2-digit",
+});
+const replyFullFormatter = new Intl.DateTimeFormat("zh-CN", {
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false,
+});
+
+export function assistantGeneratedAt(timestamp: number | undefined, now = Date.now()): AssistantGeneratedAt | null {
+  if (typeof timestamp !== "number" || !Number.isFinite(timestamp)) return null;
+  const generated = new Date(timestamp);
+  if (Number.isNaN(generated.getTime())) return null;
+  const current = new Date(now);
+  const sameYear = generated.getFullYear() === current.getFullYear();
+  const sameDay = sameYear
+    && generated.getMonth() === current.getMonth()
+    && generated.getDate() === current.getDate();
+  const time = replyTimeFormatter.format(generated);
+  const compact = sameDay
+    ? time
+    : sameYear
+      ? `${replyMonthDayFormatter.format(generated)} ${time}`
+      : `${generated.getFullYear()}/${replyMonthDayFormatter.format(generated)} ${time}`;
+  return {
+    label: `生成于 ${compact}`,
+    dateTime: generated.toISOString(),
+    title: `回复生成时间：${replyFullFormatter.format(generated)}`,
+  };
+}
+
+type AssistantMetadataFallback = Pick<PiMessage, "provider" | "model" | "thinkingLevel">;
+
+export function AssistantMessageHeader({ message, streaming = false, fallback }: { message: PiMessage; streaming?: boolean; fallback?: AssistantMetadataFallback }) {
+  const resolvedMessage = {
+    ...message,
+    provider: message.provider || fallback?.provider,
+    model: message.model || fallback?.model,
+    thinkingLevel: message.thinkingLevel || fallback?.thinkingLevel,
+  };
+  const modelLabel = assistantModelLabel(resolvedMessage);
+  const thinkingLabel = assistantThinkingLabel(resolvedMessage);
+  if (!modelLabel && !thinkingLabel && !streaming) return null;
+  return <header className="message-assistant-header">
+    <span className="message-metadata">
+      {modelLabel && <span className="message-model" title={modelLabel}>{modelLabel}</span>}
+      {thinkingLabel && <span className="message-thinking" title={`思考强度：${thinkingLabel}`}>{thinkingLabel}</span>}
+    </span>
+    {streaming && <span className="streaming-dot" aria-label="正在生成" />}
+  </header>;
+}
+
+export const ChatMessage = memo(function ChatMessage({ message, streaming = false, showAssistantMetadata = true, showGeneratedAt = true, assistantMetadataFallback }: { message: PiMessage; streaming?: boolean; showAssistantMetadata?: boolean; showGeneratedAt?: boolean; assistantMetadataFallback?: AssistantMetadataFallback }) {
   const [copied, setCopied] = useState(false);
   const [expandedUserText, setExpandedUserText] = useState(false);
   const [previewImage, setPreviewImage] = useState<{ src: string; alt: string; width: number; height: number } | null>(null);
@@ -72,13 +140,14 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
     (block.type === "text" && Boolean(block.text))
     || (block.type === "image" && Boolean(block.data && block.mimeType)),
   );
-  if (!streaming && !hasVisibleContent) return null;
+  if (!hasVisibleContent && (!streaming || !showAssistantMetadata)) return null;
   const copyText = message.role === "assistant" ? assistantCopyText(content) : "";
   const userTextBlocks = message.role === "user" ? content.filter((block): block is PiContentBlock & { text: string } => block.type === "text" && typeof block.text === "string" && Boolean(block.text)) : [];
   const userImageBlocks = message.role === "user" ? content.filter((block): block is PiContentBlock & { data: string; mimeType: string } => block.type === "image" && typeof block.data === "string" && typeof block.mimeType === "string") : [];
   const userTextNeedsFolding = userTextBlocks.some((block) => shouldFoldUserText(block.text));
-  const modelLabel = message.role === "assistant" ? assistantModelLabel(message) : "";
-  const thinkingLabel = message.role === "assistant" ? assistantThinkingLabel(message) : "";
+  const generatedAt = message.role === "assistant" && !streaming && showGeneratedAt
+    ? assistantGeneratedAt(message.timestamp)
+    : null;
   const copyAnswer = async () => {
     if (!copyText) return;
     await navigator.clipboard.writeText(copyText);
@@ -89,9 +158,7 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
 
   return (
     <article className={`message message-${message.role}${userTextNeedsFolding ? " is-foldable" : ""}`}>
-      {message.role === "assistant" && streaming && <header>
-        <span className="streaming-dot" aria-label="正在生成" />
-      </header>}
+      {message.role === "assistant" && showAssistantMetadata && <AssistantMessageHeader message={message} streaming={streaming} fallback={assistantMetadataFallback} />}
       {message.role === "user" && userImageBlocks.length > 0 && <div className="message-user-attachments" aria-label="用户附加图片">
         {userImageBlocks.map((block, index) => {
           const src = `data:${block.mimeType};base64,${block.data}`;
@@ -116,7 +183,6 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
             if (block.type === "image" && block.data && block.mimeType) return <img className="message-image" key={index} src={`data:${block.mimeType};base64,${block.data}`} alt="用户附加图片" />;
             return null;
           })}
-        {streaming && !content.some((block) => block.type === "text" && block.text) && <div className="working">Pi 正在工作…</div>}
         {message.role === "user" && userTextNeedsFolding && <button
           type="button"
           className="user-message-fold-toggle"
@@ -145,11 +211,8 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
           />
         </section>
       </div>}
-      {message.role === "assistant" && (modelLabel || thinkingLabel || copyText) && <footer className="message-footer">
-        <span className="message-metadata">
-          {modelLabel && <span className="message-model" title={modelLabel}>{modelLabel}</span>}
-          {thinkingLabel && <span className="message-thinking" title={`思考强度：${thinkingLabel}`}>{thinkingLabel}</span>}
-        </span>
+      {message.role === "assistant" && (generatedAt || copyText) && <footer className="message-footer">
+        {generatedAt && <time className="message-generated-at" dateTime={generatedAt.dateTime} title={generatedAt.title}>{generatedAt.label}</time>}
         {copyText && <button type="button" onClick={() => void copyAnswer()} aria-label={copied ? "回答已复制" : "复制整个回答"} title={copied ? "已复制" : "复制整个回答"}>
           {copied ? <CheckIcon /> : <CopyIcon />}
         </button>}

@@ -46,6 +46,54 @@ test("oversized events are replaced with a bounded diagnostic frame", () => {
   assert.match(client.frames[0], /extension_event/);
 });
 
+test("healthy sockets coalesce rapid assistant snapshots at the browser render cadence", async () => {
+  const hub = new SseHub(20);
+  const client = stubClient();
+  hub.add(client as never, "client-a");
+
+  hub.broadcast({ type: "message_update", piChatSessionId: "session-a", n: 1 });
+  hub.broadcast({ type: "message_update", piChatSessionId: "session-a", n: 2 });
+  hub.broadcast({ type: "message_update", piChatSessionId: "session-a", n: 3 });
+  // A parallel Session has an independent cadence and must not be starved by A.
+  hub.broadcast({ type: "message_update", piChatSessionId: "session-b", n: 4 });
+  assert.equal(client.frames.length, 2);
+  assert.match(client.frames[0], /"piChatSessionId":"session-a","n":1/);
+  assert.match(client.frames[1], /"piChatSessionId":"session-b","n":4/);
+
+  await new Promise((resolve) => setTimeout(resolve, 35));
+  assert.equal(client.frames.length, 3);
+  assert.match(client.frames[2], /"piChatSessionId":"session-a","n":3/);
+  assert.doesNotMatch(client.frames.join("\n"), /"n":2/);
+  hub.closeAll();
+});
+
+test("ordered Session events flush the latest throttled snapshot before themselves", () => {
+  const hub = new SseHub(1_000);
+  const client = stubClient();
+  hub.add(client as never, "client-a");
+
+  hub.broadcast({ type: "message_update", piChatSessionId: "session-a", n: 1 });
+  hub.broadcast({ type: "message_update", piChatSessionId: "session-a", n: 2 });
+  assert.equal(client.frames.length, 1);
+  hub.broadcast({ type: "tool_execution_end", piChatSessionId: "session-a", toolCallId: "done" });
+
+  assert.equal(client.frames.length, 3);
+  assert.match(client.frames[1], /"type":"message_update".*"n":2/);
+  assert.match(client.frames[2], /"type":"tool_execution_end".*"toolCallId":"done"/);
+  hub.closeAll();
+});
+
+test("removing a client cancels its delayed healthy-socket snapshot", () => {
+  const hub = new SseHub(1_000);
+  const client = stubClient();
+  hub.add(client as never, "client-a");
+  hub.broadcast({ type: "message_update", n: 1 });
+  hub.broadcast({ type: "message_update", n: 2 });
+  assert.equal(client.frames.length, 1);
+  hub.remove(client as never);
+  assert.equal(client.frames.length, 1);
+});
+
 test("backpressured sockets coalesce adjacent assistant snapshots but retain terminal tool events in order", () => {
   const hub = new SseHub();
   const client = stubClient(false);

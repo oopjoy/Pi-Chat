@@ -1,9 +1,9 @@
-import type { ComponentProps, RefObject } from "react";
+import { Fragment, type ComponentProps, type RefObject } from "react";
 import type { PiMessage, PiState } from "../../shared/types";
 import { appendPendingUserMessage } from "../lib/local-user-turn";
 import { groupConversation } from "../lib/conversation-process";
 import { ChatInput } from "./ChatInput";
-import { ChatMessage } from "./ChatMessage";
+import { AssistantMessageHeader, ChatMessage } from "./ChatMessage";
 import { ConversationProcess } from "./ConversationProcess";
 import { FolderIcon, PiMarkIcon } from "./Icons";
 import { PromptQueue } from "./PromptQueue";
@@ -85,6 +85,32 @@ export function ConversationPane({
     },
   );
   const paneKey = viewedSessionId || "draft";
+  const activeTurnStart = conversationItems.reduce(
+    (latest, item, index) => item.kind === "message" && item.message.role === "user" ? index : latest,
+    -1,
+  );
+  const activeAssistantMetadata = {
+    provider: state.model?.provider,
+    model: state.model?.id,
+    thinkingLevel: state.thinkingLevel,
+  };
+  const activeTurnItemStart = state.isStreaming ? activeTurnStart + 1 : -1;
+  let activeHeaderMessage: PiMessage | null = state.isStreaming ? liveMessage : null;
+  if (state.isStreaming && !activeHeaderMessage) {
+    for (let index = activeTurnItemStart; index < conversationItems.length; index += 1) {
+      const item = conversationItems[index];
+      const candidate = item?.kind === "process"
+        ? item.assistantHeader
+        : item?.message.role === "assistant"
+          ? item.message
+          : undefined;
+      if (candidate) {
+        activeHeaderMessage = candidate;
+        break;
+      }
+    }
+    activeHeaderMessage ||= { role: "assistant" };
+  }
 
   return <main className="chat-shell">
     <TopBar {...topBar} />
@@ -126,22 +152,44 @@ export function ConversationPane({
             <span>当前显示最近 {visibleTurnCount} 轮（共 {turnTotal} 轮、{messageTotal} 条消息）</span>
             <button type="button" onClick={onLoadEarlier} disabled={loadingEarlier}>{loadingEarlier ? "正在加载…" : "加载更早 10 轮"}</button>
           </div>}
-          {conversationItems.map((item, index) =>
-            item.kind === "process" ? (
-              <ConversationProcess
-                key={`${paneKey}:${item.key}`}
-                disclosureKey={`${paneKey}:${item.key}`}
-                entries={item.entries}
-                streaming={state.isStreaming && index === conversationItems.length - 1}
-              />
-            ) : (
+          {conversationItems.map((item, index) => {
+            const inActiveRunningTurn = state.isStreaming && index >= activeTurnItemStart;
+            const activeHeader = index === activeTurnItemStart && activeHeaderMessage
+              ? <AssistantMessageHeader
+                  message={activeHeaderMessage}
+                  streaming
+                  fallback={activeAssistantMetadata}
+                />
+              : null;
+            if (item.kind === "process") {
+              return <Fragment key={`${paneKey}:${item.key}`}>
+                {activeHeader}
+                {!inActiveRunningTurn && item.assistantHeader && <AssistantMessageHeader message={item.assistantHeader} />}
+                <ConversationProcess
+                  disclosureKey={`${paneKey}:${item.key}`}
+                  entries={item.entries}
+                  streaming={state.isStreaming && index === conversationItems.length - 1}
+                />
+              </Fragment>;
+            }
+            const messageStreaming = state.isStreaming
+              && index === conversationItems.length - 1
+              && Boolean(liveMessage);
+            return <Fragment key={`${paneKey}:${item.key}`}>
+              {activeHeader}
               <ChatMessage
-                key={`${paneKey}:${item.key}`}
                 message={item.message}
-                streaming={state.isStreaming && index === conversationItems.length - 1 && Boolean(liveMessage)}
+                streaming={messageStreaming}
+                showAssistantMetadata={!inActiveRunningTurn && !item.hideAssistantMetadata}
+                showGeneratedAt={!inActiveRunningTurn}
               />
-            ),
-          )}
+            </Fragment>;
+          })}
+          {state.isStreaming && activeTurnItemStart >= conversationItems.length && activeHeaderMessage && <AssistantMessageHeader
+            message={activeHeaderMessage}
+            streaming
+            fallback={activeAssistantMetadata}
+          />}
         </>}
         {state.isCompacting && <div className="agent-status is-compacting" role="status">
           <span className="loader small" />

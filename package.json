@@ -41,6 +41,7 @@
     "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit",
     "pretest": "npm run build",
     "test": "node scripts/run-tests.mjs",
+    "measure:first-token": "node --import tsx scripts/measure-first-token.mts",
     "test:e2e": "npm run build && playwright test",
     "test:e2e:ui": "npm run build && playwright test --ui",
     "install:shortcuts": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-shortcuts.ps1"

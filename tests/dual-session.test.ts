@@ -23,6 +23,8 @@ class FakeRpc {
   restartCount = 0;
   restartFailures = 0;
   alive = true;
+  /** Faithful Pi steering queue: queue_update carries the whole backlog, and consumption removes one message before message_start. */
+  readonly steeringQueue: string[] = [];
 
   constructor(readonly path: string, readonly sessionId: string) {}
   onEvent(listener: (event: Record<string, unknown>) => void) {
@@ -65,6 +67,11 @@ class FakeRpc {
     if (command.type === "get_commands") return { type: "response", success: true, data: { commands: [] } };
     if (command.type === "get_session_stats") return { type: "response", success: true, data: { tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
     if (command.type === "prompt") { this.streaming = true; this.emit({ type: "agent_start" }); return { type: "response", success: true }; }
+    if (command.type === "steer") {
+      this.steeringQueue.push(String(command.message));
+      this.emit({ type: "queue_update", steering: [...this.steeringQueue], followUp: [] });
+      return { type: "response", success: true };
+    }
     if (command.type === "abort") { this.streaming = false; this.emit({ type: "agent_settled" }); return { type: "response", success: true }; }
     return { type: "response", success: true, data: {} };
   }
@@ -263,6 +270,76 @@ test("new-session initial submit accepts a >1 MB image body and performs model, 
     );
     const prompt = draft.commands.find((command) => command.type === "prompt" && command.message === "first") as { images?: Array<{ data: string }> } | undefined;
     assert.equal(prompt?.images?.[0]?.data.length, imageData.length);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("an initial draft prompt timeout stays uncertain and protects the following prompt", async () => {
+  const primaryPath = "C:\\sessions\\initial-timeout-primary.jsonl";
+  const draftPath = "C:\\sessions\\initial-timeout-draft.jsonl";
+  const primaryId = idForPath(primaryPath);
+  class InitialPromptTimeoutRpc extends FakeRpc {
+    override async send(command: Record<string, unknown>, timeoutMs?: number) {
+      if (command.type === "prompt" && command.message === "possibly initial") {
+        this.commands.push(command);
+        this.streaming = true;
+        this.emit({ type: "agent_start" });
+        throw new RpcRequestTimeoutError("prompt");
+      }
+      return super.send(command, timeoutMs);
+    }
+  }
+  const primary = new FakeRpc(primaryPath, "initial-timeout-primary");
+  const draft = new InitialPromptTimeoutRpc(draftPath, "initial-timeout-draft");
+  const sessions = {
+    list: async () => [{ id: primaryId, sessionId: "initial-timeout-primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+    pathForId: () => primaryPath,
+    summaryForId: () => null,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, createRpc: () => draft as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    await fetch(`${origin}/api/bootstrap`);
+    const initial = await fetch(`${origin}/api/sessions/new`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ initial: { message: "possibly initial" } }),
+    });
+    assert.equal(initial.status, 202);
+    const initialBody = await initial.json() as {
+      accepted: boolean;
+      queued: boolean;
+      deliveryUncertain?: boolean;
+      session: { id: string };
+    };
+    assert.equal(initialBody.deliveryUncertain, true);
+
+    const following = await fetch(`${origin}/api/chat/prompt`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: initialBody.session.id, message: "must wait" }),
+    });
+    assert.equal(following.status, 202);
+    const followingBody = await following.json() as {
+      queued: boolean;
+      queue: Array<{ message: string }>;
+    };
+    assert.equal(followingBody.queued, true);
+    assert.deepEqual(followingBody.queue.map((item) => item.message), ["must wait"]);
+    assert.deepEqual(
+      draft.commands
+        .filter((command) => command.type === "prompt")
+        .map((command) => command.message),
+      ["possibly initial"],
+      "the following prompt must not race an initial write Pi may have accepted",
+    );
   } finally {
     server.close();
     await app.close();
@@ -1583,13 +1660,29 @@ test("a crashed primary RPC leaves persisted history readable until the next wri
     primary.streaming = true;
     primary.emit({ type: "agent_start" });
     primary.crash();
-    const recovered = await (await fetch(`${origin}/api/bootstrap`)).json() as { state: { isStreaming: boolean }; sessions: Array<{ id: string; running?: boolean }> };
+    const failedBootstrap = await (await fetch(`${origin}/api/bootstrap`)).json() as {
+      state: { isStreaming: boolean };
+      sessions: Array<{
+        id: string;
+        running?: boolean;
+        activity?: { execution?: string; error?: string };
+      }>;
+    };
     assert.equal(primary.restartCount, 0, "reading bootstrap must not wake a failed Primary Runtime");
-    assert.equal(recovered.state.isStreaming, false);
-    assert.equal(recovered.sessions.find((session) => session.id === id)?.running, false);
+    assert.equal(failedBootstrap.state.isStreaming, false);
+    const failedSession = failedBootstrap.sessions.find((session) => session.id === id);
+    assert.equal(failedSession?.running, false);
+    assert.equal(failedSession?.activity?.execution, "failed");
+    assert.equal(failedSession?.activity?.error, "worker crashed");
     const prompt = await fetch(`${origin}/api/chat/prompt`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message: "recover on write", sessionId: id }) });
     assert.equal(prompt.status, 202);
     assert.equal(primary.restartCount, 1);
+    const recovered = await (await fetch(`${origin}/api/bootstrap`)).json() as {
+      sessions: Array<{ id: string; activity?: { execution?: string; error?: string } }>;
+    };
+    const recoveredSession = recovered.sessions.find((session) => session.id === id);
+    assert.notEqual(recoveredSession?.activity?.execution, "failed");
+    assert.equal(recoveredSession?.activity?.error, undefined);
   } finally {
     server.close();
     await app.close();
@@ -1702,6 +1795,158 @@ test("running Sessions stage model and thinking changes until their next prompt"
     assert.equal(prompt.status, 202);
     const types = primary.commands.map((command) => command.type);
     assert.deepEqual(types.slice(-3), ["set_model", "set_thinking_level", "prompt"]);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("a crash during a settlement barrier recovers and dispatches existing Secondary queue work", async () => {
+  const primaryPath = "C:\\sessions\\barrier-primary.jsonl";
+  const secondaryPath = "C:\\sessions\\barrier-secondary.jsonl";
+  const primaryId = idForPath(primaryPath);
+  const secondaryId = idForPath(secondaryPath);
+  const primary = new FakeRpc(primaryPath, "primary");
+  const secondary = new FakeRpc(secondaryPath, "secondary");
+  const summaries = [
+    { id: primaryId, sessionId: "barrier-primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 2, messageCount: 1, active: true },
+    { id: secondaryId, sessionId: "barrier-secondary", name: "Secondary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: false },
+  ];
+  const sessions = {
+    list: async () => summaries,
+    pathForId: (id: string) => id === primaryId ? primaryPath : id === secondaryId ? secondaryPath : null,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, createRpc: () => secondary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    assert.equal((await fetch(`${origin}/api/sessions/${secondaryId}/activate`, { method: "POST" })).status, 200);
+    // Simulate a settlement FIFO barrier holding the dispatch lock when the
+    // live child dies mid-turn.
+    const internals = app as unknown as {
+      runtimePool: {
+        get(id: string): {
+          dispatching: boolean;
+          queuePaused: boolean;
+          promptQueue: Array<{
+            id: string;
+            message: string;
+            images: [];
+            imageCount: number;
+            createdAt: number;
+          }>;
+        } | undefined;
+      };
+    };
+    const runtime = internals.runtimePool.get(secondaryId);
+    assert.ok(runtime, "activated Secondary exists");
+    runtime.promptQueue.push({
+      id: "00000000-0000-4000-8000-000000000701",
+      message: "queued before crash",
+      images: [],
+      imageCount: 0,
+      createdAt: 1,
+    });
+    runtime.dispatching = true;
+    secondary.crash();
+    assert.equal(
+      runtime.dispatching,
+      false,
+      "process_error releases the stale dispatch lock",
+    );
+    assert.equal(runtime.queuePaused, false, "the crash does not pause the queue");
+    // The next prompt must recover the worker and actually dispatch instead of
+    // being silently swallowed behind the stale lock.
+    const prompt = await fetch(`${origin}/api/chat/prompt`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "after crash", sessionId: secondaryId }),
+    });
+    assert.equal(prompt.status, 202);
+    assert.equal(secondary.restartCount, 1);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(
+      secondary.commands
+        .filter((command) => command.type === "prompt")
+        .map((command) => command.message),
+      ["queued before crash"],
+      "recovery dispatches the pre-crash FIFO head exactly once",
+    );
+    assert.deepEqual(
+      runtime.promptQueue.map((item) => item.message),
+      ["after crash"],
+      "the new request queues behind the recovered head rather than stranding both",
+    );
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("a Primary crash recovers and dispatches existing queue work", async () => {
+  const path = "C:\\sessions\\barrier-primary-queued.jsonl";
+  const id = idForPath(path);
+  const primary = new FakeRpc(path, "barrier-primary-queued");
+  const sessions = {
+    list: async () => [{ id, sessionId: "barrier-primary-queued", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+    pathForId: (candidate: string) => candidate === id ? path : null,
+    summaryForId: () => null,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const internals = app as unknown as {
+    promptQueue: Array<{
+      id: string;
+      message: string;
+      images: [];
+      imageCount: number;
+      createdAt: number;
+    }>;
+    dispatching: boolean;
+    queuePaused: boolean;
+  };
+  try {
+    await fetch(`${origin}/api/bootstrap`);
+    internals.promptQueue.push({
+      id: "00000000-0000-4000-8000-000000000702",
+      message: "primary queued before crash",
+      images: [],
+      imageCount: 0,
+      createdAt: 1,
+    });
+    internals.dispatching = true;
+    primary.crash();
+    assert.equal(internals.dispatching, false);
+    assert.equal(internals.queuePaused, false);
+
+    const prompt = await fetch(`${origin}/api/chat/prompt`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: id, message: "primary after crash" }),
+    });
+    assert.equal(prompt.status, 202);
+    assert.equal(primary.restartCount, 1);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(
+      primary.commands
+        .filter((command) => command.type === "prompt")
+        .map((command) => command.message),
+      ["primary queued before crash"],
+      "Primary recovery dispatches the pre-crash FIFO head exactly once",
+    );
+    assert.deepEqual(
+      internals.promptQueue.map((item) => item.message),
+      ["primary after crash"],
+    );
   } finally {
     server.close();
     await app.close();
@@ -2249,6 +2494,867 @@ test("Primary and Secondary settlement dispatch every queued follow-up", async (
       await settle(rpc);
       assert.deepEqual(rpc.commands.filter((command) => command.type === "prompt").map((command) => command.message), [`${prefix}-A`, `${prefix}-B`, `${prefix}-C`]);
     }
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("steering bypasses local queues for running Primary and Secondary only", async () => {
+  const primaryPath = "C:\\sessions\\steer-primary.jsonl";
+  const secondaryPath = "C:\\sessions\\steer-secondary.jsonl";
+  const primaryId = idForPath(primaryPath);
+  const secondaryId = idForPath(secondaryPath);
+  const primary = new FakeRpc(primaryPath, "steer-primary");
+  const secondary = new FakeRpc(secondaryPath, "steer-secondary");
+  const summaries = [
+    { id: primaryId, sessionId: "steer-primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 2, messageCount: 1, active: true },
+    { id: secondaryId, sessionId: "steer-secondary", name: "Secondary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: false },
+  ];
+  const sessions = {
+    list: async () => summaries,
+    pathForId: (id: string) => id === primaryId ? primaryPath : id === secondaryId ? secondaryPath : null,
+    summaryForId: (id: string) => summaries.find((session) => session.id === id) || null,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, createRpc: () => secondary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const steer = (sessionId: string, message: string) => fetch(`${origin}/api/chat/prompt`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sessionId, message, delivery: "steer" }),
+  });
+  try {
+    await fetch(`${origin}/api/bootstrap`);
+    await fetch(`${origin}/api/sessions/${secondaryId}/warm`, { method: "POST" });
+
+    const idle = await steer(primaryId, "too late");
+    assert.equal(idle.status, 409);
+    assert.match((await idle.json() as { error: string }).error, /未在运行/);
+    assert.equal(primary.commands.some((command) => command.type === "steer"), false);
+
+    primary.streaming = true;
+    secondary.streaming = true;
+    primary.emit({ type: "agent_start" });
+    secondary.emit({ type: "agent_start" });
+    const primarySteer = await steer(primaryId, "redirect primary");
+    const secondarySteer = await steer(secondaryId, "redirect secondary");
+    assert.equal(primarySteer.status, 202);
+    assert.deepEqual(await primarySteer.json(), {
+      accepted: true,
+      queued: false,
+      steered: true,
+    });
+    assert.equal(secondarySteer.status, 202);
+    assert.deepEqual(await secondarySteer.json(), {
+      accepted: true,
+      queued: false,
+      steered: true,
+    });
+    assert.deepEqual(
+      primary.commands.filter((command) => command.type === "steer").map((command) => command.message),
+      ["redirect primary"],
+    );
+    assert.deepEqual(
+      secondary.commands.filter((command) => command.type === "steer").map((command) => command.message),
+      ["redirect secondary"],
+    );
+    assert.deepEqual((app as unknown as { promptQueue: unknown[] }).promptQueue, []);
+    assert.deepEqual(
+      (app as unknown as { runtimePool: { get(id: string): { promptQueue: unknown[] } | undefined } }).runtimePool.get(secondaryId)?.promptQueue,
+      [],
+    );
+
+    const abortSecondary = await fetch(`${origin}/api/chat/abort`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: secondaryId }),
+    });
+    assert.equal(abortSecondary.status, 200);
+    assert.equal(secondary.restartCount, 1, "Stop must reset an unconsumed native steering queue");
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("a Steer that reaches an already-settled Pi is rejected and cleared without becoming a prompt", async () => {
+  const path = "C:\\sessions\\steer-settle-race.jsonl";
+  const id = idForPath(path);
+  class SettledBeforeSteerAckRpc extends FakeRpc {
+    override async send(command: Record<string, unknown>, timeoutMs?: number) {
+      if (command.type === "steer") {
+        const response = await super.send(command, timeoutMs);
+        this.streaming = false;
+        this.emit({ type: "agent_settled" });
+        return response;
+      }
+      return super.send(command, timeoutMs);
+    }
+  }
+  const primary = new SettledBeforeSteerAckRpc(path, "steer-settle-race");
+  primary.streaming = true;
+  const summaries = [
+    { id, sessionId: "steer-settle-race", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true },
+  ];
+  const sessions = {
+    list: async () => summaries,
+    pathForId: (candidate: string) => candidate === id ? path : null,
+    summaryForId: () => summaries[0],
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    await fetch(`${origin}/api/bootstrap`);
+    primary.emit({ type: "agent_start" });
+    const response = await fetch(`${origin}/api/chat/prompt`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: id, message: "too late", delivery: "steer" }),
+    });
+    assert.equal(response.status, 409);
+    assert.match((await response.json() as { error: string }).error, /已结束/);
+    assert.equal(primary.restartCount, 1);
+    assert.equal(
+      primary.commands.some(
+        (command) => command.type === "prompt" && command.message === "too late",
+      ),
+      false,
+    );
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("settlement clears native steering even when the post-Steer state snapshot was still running", async () => {
+  const path = "C:\\sessions\\steer-late-settle.jsonl";
+  const id = idForPath(path);
+  const primary = new FakeRpc(path, "steer-late-settle");
+  primary.streaming = true;
+  const summaries = [
+    { id, sessionId: "steer-late-settle", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true },
+  ];
+  const sessions = {
+    list: async () => summaries,
+    pathForId: (candidate: string) => candidate === id ? path : null,
+    summaryForId: () => summaries[0],
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    await fetch(`${origin}/api/bootstrap`);
+    primary.emit({ type: "agent_start" });
+    const response = await fetch(`${origin}/api/chat/prompt`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: id, message: "accepted before late settle", delivery: "steer" }),
+    });
+    assert.equal(response.status, 202);
+    primary.streaming = false;
+    primary.emit({ type: "agent_settled" });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(primary.restartCount, 1);
+    assert.equal(
+      primary.commands.some(
+        (command) =>
+          command.type === "prompt" &&
+          command.message === "accepted before late settle",
+      ),
+      false,
+    );
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("a crashed worker's stale steering state cannot reset the recovered Runtime", async () => {
+  const path = "C:\\sessions\\steer-crash-recover.jsonl";
+  const id = idForPath(path);
+  const primary = new FakeRpc(path, "steer-crash-recover");
+  primary.streaming = true;
+  const summaries = [
+    { id, sessionId: "steer-crash-recover", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true },
+  ];
+  const sessions = {
+    list: async () => summaries,
+    pathForId: (candidate: string) => candidate === id ? path : null,
+    summaryForId: () => summaries[0],
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const prompt = (message: string, delivery?: string) => fetch(`${origin}/api/chat/prompt`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sessionId: id, message, ...(delivery ? { delivery } : {}) }),
+  });
+  try {
+    await fetch(`${origin}/api/bootstrap`);
+    primary.emit({ type: "agent_start" });
+    const steer = await prompt("queued before crash", "steer");
+    assert.equal(steer.status, 202);
+    // The worker crashes before consuming: process-error must clear the stale
+    // steering bookkeeping instead of leaving it for the replacement worker.
+    primary.crash();
+    // A later ordinary prompt recovers the Runtime and runs normally.
+    const recovered = await prompt("recover me");
+    assert.equal(recovered.status, 202);
+    // The recovered worker settles; stale steering must not reset it again.
+    primary.streaming = false;
+    primary.emit({ type: "agent_settled" });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(primary.restartCount, 1, "only the recovery restart may occur");
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("only a verified dequeue consumes a Steer admission, never a same-text ordinary prompt", async () => {
+  const path = "C:\\sessions\\steer-verified-consume.jsonl";
+  const id = idForPath(path);
+  const primary = new FakeRpc(path, "steer-verified-consume");
+  primary.streaming = true;
+  const summaries = [
+    { id, sessionId: "steer-verified-consume", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true },
+  ];
+  const sessions = {
+    list: async () => summaries,
+    pathForId: (candidate: string) => candidate === id ? path : null,
+    summaryForId: () => summaries[0],
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const state = app as unknown as {
+    nativeSteeringAdmissionsBySession: Map<string, { generation: number; items: Array<{ message: string; promptAt: number }> }>;
+    lastUserPromptAtBySession: Map<string, number>;
+  };
+  try {
+    await fetch(`${origin}/api/bootstrap`);
+    primary.emit({ type: "agent_start" });
+    const steer = await fetch(`${origin}/api/chat/prompt`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: id, message: "继续", delivery: "steer" }),
+    });
+    assert.equal(steer.status, 202);
+    assert.equal(state.nativeSteeringAdmissionsBySession.get(id)?.items.length, 1);
+    // An ordinary prompt with the identical text emits message_start without a
+    // prior dequeue; it must not consume the admission.
+    primary.emit({ type: "message_start", message: { role: "user", content: "继续" } });
+    assert.equal(
+      state.nativeSteeringAdmissionsBySession.get(id)?.items.length,
+      1,
+      "text-only message_start must not consume a Steer admission",
+    );
+    // Pi consumes the steer: it dequeues (queue_update shrinks) immediately
+    // before the consuming message_start.
+    primary.emit({ type: "queue_update", steering: [], followUp: [] });
+    primary.emit({ type: "message_start", message: { role: "user", content: "继续" } });
+    assert.equal(
+      state.nativeSteeringAdmissionsBySession.get(id),
+      undefined,
+      "verified dequeue + message_start consumes the admission",
+    );
+    assert.equal(state.lastUserPromptAtBySession.has(id), true);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("identical native Steers are consumed as distinct queue occurrences", async () => {
+  const path = "C:\\sessions\\steer-identical.jsonl";
+  const id = idForPath(path);
+  const primary = new FakeRpc(path, "steer-identical");
+  primary.streaming = true;
+  const summaries = [
+    { id, sessionId: "steer-identical", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true },
+  ];
+  const sessions = {
+    list: async () => summaries,
+    pathForId: (candidate: string) => candidate === id ? path : null,
+    summaryForId: () => summaries[0],
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const state = app as unknown as {
+    pendingNativeSteeringBySession: Map<string, { messages: string[]; dequeued: string[] }>;
+    nativeSteeringAdmissionsBySession: Map<string, { items: Array<{ message: string }> }>;
+  };
+  const steer = () => fetch(`${origin}/api/chat/prompt`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sessionId: id, message: "继续", delivery: "steer" }),
+  });
+  try {
+    await fetch(`${origin}/api/bootstrap`);
+    primary.emit({ type: "agent_start" });
+    assert.equal((await steer()).status, 202);
+    assert.equal((await steer()).status, 202);
+    assert.deepEqual(primary.steeringQueue, ["继续", "继续"]);
+    assert.equal(state.nativeSteeringAdmissionsBySession.get(id)?.items.length, 2);
+
+    primary.steeringQueue.shift();
+    primary.emit({ type: "queue_update", steering: [...primary.steeringQueue], followUp: [] });
+    primary.emit({ type: "message_start", message: { role: "user", content: "继续" } });
+    assert.equal(state.nativeSteeringAdmissionsBySession.get(id)?.items.length, 1);
+    assert.deepEqual(state.pendingNativeSteeringBySession.get(id), {
+      generation: 0,
+      messages: ["继续"],
+      dequeued: [],
+    });
+
+    primary.steeringQueue.shift();
+    primary.emit({ type: "queue_update", steering: [], followUp: [] });
+    primary.emit({ type: "message_start", message: { role: "user", content: "继续" } });
+    assert.equal(state.nativeSteeringAdmissionsBySession.get(id), undefined);
+    assert.equal(state.pendingNativeSteeringBySession.get(id), undefined);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("a verified Steer dequeue survives an intervening queue_update", async () => {
+  const path = "C:\\sessions\\steer-dequeue-gap.jsonl";
+  const id = idForPath(path);
+  const primary = new FakeRpc(path, "steer-dequeue-gap");
+  primary.streaming = true;
+  const summaries = [
+    { id, sessionId: "steer-dequeue-gap", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true },
+  ];
+  const sessions = {
+    list: async () => summaries,
+    pathForId: (candidate: string) => candidate === id ? path : null,
+    summaryForId: () => summaries[0],
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const state = app as unknown as {
+    pendingNativeSteeringBySession: Map<string, { messages: string[]; dequeued: string[] }>;
+    nativeSteeringAdmissionsBySession: Map<string, { items: Array<{ message: string }> }>;
+  };
+  const steer = (message: string) => fetch(`${origin}/api/chat/prompt`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sessionId: id, message, delivery: "steer" }),
+  });
+  try {
+    await fetch(`${origin}/api/bootstrap`);
+    primary.emit({ type: "agent_start" });
+    assert.equal((await steer("A")).status, 202);
+    assert.equal((await steer("B")).status, 202);
+    primary.steeringQueue.shift();
+    primary.emit({ type: "queue_update", steering: [...primary.steeringQueue], followUp: [] });
+    assert.deepEqual(state.pendingNativeSteeringBySession.get(id)?.dequeued, ["A"]);
+
+    assert.equal((await steer("C")).status, 202);
+    assert.deepEqual(
+      state.pendingNativeSteeringBySession.get(id),
+      { generation: 0, messages: ["B", "C"], dequeued: ["A"] },
+      "a later queue_update must retain the earlier verified dequeue",
+    );
+    primary.emit({ type: "message_start", message: { role: "user", content: "A" } });
+    assert.deepEqual(
+      state.nativeSteeringAdmissionsBySession.get(id)?.items.map((item) => item.message),
+      ["B", "C"],
+    );
+    assert.deepEqual(state.pendingNativeSteeringBySession.get(id), {
+      generation: 0,
+      messages: ["B", "C"],
+      dequeued: [],
+    });
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("failed settlement reset still clears lost native Steers and broadcasts the reason", async () => {
+  const path = "C:\\sessions\\steer-reset-failure.jsonl";
+  const id = idForPath(path);
+  const primary = new FakeRpc(path, "steer-reset-failure");
+  primary.streaming = true;
+  const summaries = [
+    { id, sessionId: "steer-reset-failure", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true },
+  ];
+  const sessions = {
+    list: async () => summaries,
+    pathForId: (candidate: string) => candidate === id ? path : null,
+    summaryForId: () => summaries[0],
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const frames: string[] = [];
+  const clients = (app as unknown as { sseClients: Map<{ write: (frame: string) => boolean }, string> }).sseClients;
+  clients.set({ write: (frame) => { frames.push(frame); return true; } }, "11111111-1111-4111-8111-111111111111");
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const state = app as unknown as {
+    pendingNativeSteeringBySession: Map<string, unknown>;
+    nativeSteeringAdmissionsBySession: Map<string, unknown>;
+  };
+  try {
+    await fetch(`${origin}/api/bootstrap`);
+    primary.emit({ type: "agent_start" });
+    const accepted = await fetch(`${origin}/api/chat/prompt`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: id, message: "lost during reset", delivery: "steer" }),
+    });
+    assert.equal(accepted.status, 202);
+    primary.restartFailures = 1;
+    primary.streaming = false;
+    primary.emit({ type: "agent_settled" });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    assert.equal(primary.restartCount, 1);
+    assert.equal(state.pendingNativeSteeringBySession.get(id), undefined);
+    assert.equal(state.nativeSteeringAdmissionsBySession.get(id), undefined);
+    const cleared = frames.find((frame) =>
+      frame.includes('"type":"pi_chat_native_steering_cleared"'),
+    );
+    assert.ok(cleared, "restart failure must settle accepted Steers");
+    assert.match(cleared, /"reason":"process-error"/);
+    assert.match(cleared, /"droppedCount":1/);
+    const processError = frames.find((frame) =>
+      frame.includes('"type":"pi_chat_process_error"'),
+    );
+    assert.match(
+      processError || "",
+      /"nativeSteeringDroppedCount":1/,
+      "the synthesized process error must preserve the specific drop verdict",
+    );
+  } finally {
+    clients.clear();
+    server.close();
+    await app.close();
+  }
+});
+
+test("a post-Steer get_state timeout keeps the accepted Steer as 202", async () => {
+  const path = "C:\\sessions\\steer-probe-timeout.jsonl";
+  const id = idForPath(path);
+  class StateTimeoutAfterSteerRpc extends FakeRpc {
+    override async send(command: Record<string, unknown>, timeoutMs?: number) {
+      if (
+        command.type === "get_state" &&
+        this.commands.some((candidate) => candidate.type === "steer")
+      ) {
+        this.commands.push(command);
+        throw new RpcRequestTimeoutError("get_state");
+      }
+      return super.send(command, timeoutMs);
+    }
+  }
+  const primary = new StateTimeoutAfterSteerRpc(path, "steer-probe-timeout");
+  primary.streaming = true;
+  const summaries = [
+    { id, sessionId: "steer-probe-timeout", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true },
+  ];
+  const sessions = {
+    list: async () => summaries,
+    pathForId: (candidate: string) => candidate === id ? path : null,
+    summaryForId: () => summaries[0],
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    await fetch(`${origin}/api/bootstrap`);
+    primary.emit({ type: "agent_start" });
+    const response = await fetch(`${origin}/api/chat/prompt`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: id, message: "accepted under timeout", delivery: "steer" }),
+    });
+    assert.equal(response.status, 202);
+    assert.deepEqual(await response.json(), {
+      accepted: true,
+      queued: false,
+      steered: true,
+    });
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("a timed-out Steer write retains its admission for later verified consumption", async () => {
+  const path = "C:\\sessions\\steer-write-timeout.jsonl";
+  const id = idForPath(path);
+  class SteerTimeoutRpc extends FakeRpc {
+    override async send(command: Record<string, unknown>, timeoutMs?: number) {
+      if (command.type === "steer") {
+        await super.send(command, timeoutMs);
+        throw new RpcRequestTimeoutError("steer");
+      }
+      return super.send(command, timeoutMs);
+    }
+  }
+  const primary = new SteerTimeoutRpc(path, "steer-write-timeout");
+  primary.streaming = true;
+  const summaries = [
+    { id, sessionId: "steer-write-timeout", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true },
+  ];
+  const sessions = {
+    list: async () => summaries,
+    pathForId: (candidate: string) => candidate === id ? path : null,
+    summaryForId: () => summaries[0],
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const state = app as unknown as {
+    nativeSteeringAdmissionsBySession: Map<string, { items: unknown[] }>;
+  };
+  try {
+    await fetch(`${origin}/api/bootstrap`);
+    primary.emit({ type: "agent_start" });
+    const response = await fetch(`${origin}/api/chat/prompt`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: id, message: "possibly queued", delivery: "steer" }),
+    });
+    assert.equal(response.status, 202);
+    assert.deepEqual(await response.json(), {
+      accepted: true,
+      queued: false,
+      steered: true,
+      deliveryUncertain: true,
+    });
+    assert.equal(state.nativeSteeringAdmissionsBySession.get(id)?.items.length, 1);
+    primary.steeringQueue.shift();
+    primary.emit({ type: "queue_update", steering: [], followUp: [] });
+    primary.emit({ type: "message_start", message: { role: "user", content: "possibly queued" } });
+    assert.equal(state.nativeSteeringAdmissionsBySession.get(id), undefined);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("a timed-out Steer without queue_update is cleared when the active turn settles", async () => {
+  const path = "C:\\sessions\\steer-timeout-no-snapshot.jsonl";
+  const id = idForPath(path);
+  class LostSteerTimeoutRpc extends FakeRpc {
+    override async send(command: Record<string, unknown>, timeoutMs?: number) {
+      if (command.type === "steer") {
+        // Model a write that reached an indeterminate transport boundary: no
+        // queue_update proves Pi accepted it, but the local admission remains.
+        this.commands.push(command);
+        throw new RpcRequestTimeoutError("steer");
+      }
+      return super.send(command, timeoutMs);
+    }
+  }
+  const primary = new LostSteerTimeoutRpc(path, "steer-timeout-no-snapshot");
+  primary.streaming = true;
+  const summaries = [
+    { id, sessionId: "steer-timeout-no-snapshot", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true },
+  ];
+  const sessions = {
+    list: async () => summaries,
+    pathForId: (candidate: string) => candidate === id ? path : null,
+    summaryForId: () => summaries[0],
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const state = app as unknown as {
+    pendingNativeSteeringBySession: Map<string, unknown>;
+    nativeSteeringAdmissionsBySession: Map<string, { items: unknown[] }>;
+  };
+  try {
+    await fetch(`${origin}/api/bootstrap`);
+    primary.emit({ type: "agent_start" });
+    const response = await fetch(`${origin}/api/chat/prompt`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: id, message: "possibly lost", delivery: "steer" }),
+    });
+    assert.equal(response.status, 202);
+    assert.equal((await response.json() as { deliveryUncertain?: boolean }).deliveryUncertain, true);
+    assert.equal(state.pendingNativeSteeringBySession.get(id), undefined);
+    assert.equal(state.nativeSteeringAdmissionsBySession.get(id)?.items.length, 1);
+
+    primary.streaming = false;
+    primary.emit({ type: "agent_settled" });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(primary.restartCount, 1);
+    assert.equal(state.pendingNativeSteeringBySession.get(id), undefined);
+    assert.equal(state.nativeSteeringAdmissionsBySession.get(id), undefined);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("native steering backlog is bounded and rejects the 21st Steer", async () => {
+  const path = "C:\\sessions\\steer-backlog.jsonl";
+  const id = idForPath(path);
+  const primary = new FakeRpc(path, "steer-backlog");
+  primary.streaming = true;
+  const summaries = [
+    { id, sessionId: "steer-backlog", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true },
+  ];
+  const sessions = {
+    list: async () => summaries,
+    pathForId: (candidate: string) => candidate === id ? path : null,
+    summaryForId: () => summaries[0],
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const steer = (message: string) => fetch(`${origin}/api/chat/prompt`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sessionId: id, message, delivery: "steer" }),
+  });
+  try {
+    await fetch(`${origin}/api/bootstrap`);
+    primary.emit({ type: "agent_start" });
+    for (let index = 0; index < 20; index += 1) {
+      const response = await steer(`steer ${index}`);
+      assert.equal(response.status, 202, `steer ${index} should be accepted`);
+    }
+    const overflow = await steer("steer overflow");
+    assert.equal(overflow.status, 409);
+    assert.match((await overflow.json() as { error: string }).error, /已满/);
+    assert.equal(
+      primary.commands.filter((command) => command.type === "steer").length,
+      20,
+      "the 21st Steer must never reach Pi",
+    );
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("native steering image payload is bounded", async () => {
+  const path = "C:\\sessions\\steer-image-bound.jsonl";
+  const id = idForPath(path);
+  const primary = new FakeRpc(path, "steer-image-bound");
+  primary.streaming = true;
+  const summaries = [
+    { id, sessionId: "steer-image-bound", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true },
+  ];
+  const sessions = {
+    list: async () => summaries,
+    pathForId: (candidate: string) => candidate === id ? path : null,
+    summaryForId: () => summaries[0],
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const steerWithImages = (message: string, imageData: string[]) => fetch(`${origin}/api/chat/prompt`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      sessionId: id,
+      message,
+      delivery: "steer",
+      images: imageData.map((data) => ({ mimeType: "image/png", data })),
+    }),
+  });
+  try {
+    await fetch(`${origin}/api/bootstrap`);
+    primary.emit({ type: "agent_start" });
+    // ~33 MB chars of queued images stay under the 45 MB bound.
+    const accepted = await steerWithImages("look", ["a".repeat(11_000_000), "a".repeat(11_000_000), "a".repeat(11_000_000)]);
+    assert.equal(accepted.status, 202);
+    // The next payload pushes the queued total over the bound.
+    const overflow = await steerWithImages("look again", ["b".repeat(6_100_000), "b".repeat(6_100_000)]);
+    assert.equal(overflow.status, 409);
+    assert.match((await overflow.json() as { error: string }).error, /图片总量/);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("a Steer admitted while abort is in flight is reset by the live pending re-check", async () => {
+  const path = "C:\\sessions\\steer-during-abort.jsonl";
+  const id = idForPath(path);
+  class GatedAbortRpc extends FakeRpc {
+    releaseAbort!: () => void;
+    private readonly abortGate = new Promise<void>((resolve) => {
+      this.releaseAbort = resolve;
+    });
+    override async send(command: Record<string, unknown>) {
+      if (command.type === "abort") {
+        this.commands.push(command);
+        await this.abortGate;
+        this.streaming = false;
+        return { type: "response", success: true };
+      }
+      return super.send(command);
+    }
+  }
+  const primary = new GatedAbortRpc(path, "steer-during-abort");
+  primary.streaming = true;
+  const summaries = [
+    { id, sessionId: "steer-during-abort", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true },
+  ];
+  const sessions = {
+    list: async () => summaries,
+    pathForId: (candidate: string) => candidate === id ? path : null,
+    summaryForId: () => summaries[0],
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    await fetch(`${origin}/api/bootstrap`);
+    primary.emit({ type: "agent_start" });
+    const abort = fetch(`${origin}/api/chat/abort`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: id }),
+    });
+    // Steer arrives while the abort command is still in flight.
+    const steer = await fetch(`${origin}/api/chat/prompt`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: id, message: "during abort", delivery: "steer" }),
+    });
+    assert.equal(steer.status, 202);
+    primary.releaseAbort();
+    const abortResponse = await abort;
+    assert.equal(abortResponse.status, 200);
+    assert.equal(primary.restartCount, 1, "the live pending re-check must reset the unconsumed Steer");
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("a timed-out Primary prompt returns deliveryUncertain and queues the next message safely", async () => {
+  const path = "C:\\sessions\\primary-prompt-timeout.jsonl";
+  const id = idForPath(path);
+  class PromptTimeoutRpc extends FakeRpc {
+    override async send(command: Record<string, unknown>, timeoutMs?: number) {
+      if (command.type === "prompt") {
+        this.commands.push(command);
+        this.streaming = true;
+        this.emit({ type: "agent_start" });
+        throw new RpcRequestTimeoutError("prompt");
+      }
+      return super.send(command, timeoutMs);
+    }
+  }
+  const primary = new PromptTimeoutRpc(path, "primary-prompt-timeout");
+  const summaries = [
+    { id, sessionId: "primary-prompt-timeout", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true },
+  ];
+  const sessions = {
+    list: async () => summaries,
+    pathForId: (candidate: string) => candidate === id ? path : null,
+    summaryForId: () => summaries[0],
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const prompt = (message: string) => fetch(`${origin}/api/chat/prompt`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sessionId: id, message }),
+  });
+  try {
+    await fetch(`${origin}/api/bootstrap`);
+    const uncertain = await prompt("possibly accepted");
+    assert.equal(uncertain.status, 202);
+    assert.deepEqual(await uncertain.json(), {
+      accepted: true,
+      queued: false,
+      deliveryUncertain: true,
+    });
+    const queued = await prompt("must wait behind uncertain turn");
+    assert.equal(queued.status, 202);
+    const body = await queued.json() as {
+      accepted: boolean;
+      queued: boolean;
+      queue: Array<{ message: string }>;
+    };
+    assert.equal(body.queued, true);
+    assert.deepEqual(body.queue.map((item) => item.message), [
+      "must wait behind uncertain turn",
+    ]);
+    assert.deepEqual(
+      primary.commands
+        .filter((command) => command.type === "prompt")
+        .map((command) => command.message),
+      ["possibly accepted"],
+      "the next prompt must not race a command Pi may already be executing",
+    );
   } finally {
     server.close();
     await app.close();

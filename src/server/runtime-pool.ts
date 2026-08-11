@@ -468,6 +468,10 @@ export class RuntimePool {
         runtime.running = state.isStreaming;
         runtime.failed = false;
         runtime.toolStatus = "";
+        // A crash can leave a stale dispatch lock or a paused queue behind.
+        // Recovery must re-open both so the next prompt can actually dispatch.
+        runtime.dispatching = false;
+        runtime.queuePaused = false;
         if (desiredGateMode !== "strict") {
           await runtime.rpc.send({ type: "prompt", message: `/gate ${desiredGateMode}` });
         }

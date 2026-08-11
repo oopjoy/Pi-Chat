@@ -41,7 +41,10 @@ export interface RpcEventSource {
   generation: number;
 }
 
-type EventListener = (event: Record<string, unknown>, source?: RpcEventSource) => void;
+type EventListener = (
+  event: Record<string, unknown>,
+  source?: RpcEventSource,
+) => void | Promise<void>;
 
 export function resolvePiEntry(env: NodeJS.ProcessEnv = process.env): string | null {
   const configured = env.PI_CHAT_PI_ENTRY;
@@ -142,23 +145,57 @@ export class PiRpcClient {
     return this.send({ type: "get_state" }, startupTimeoutMs);
   }
 
+  private logRpcError(kind: string, error: unknown): void {
+    const detail =
+      error instanceof Error ? (error.stack || error.message) : String(error);
+    console.error(`[Pi Chat] RPC ${kind}：${detail}`);
+  }
+
+  /** Every Pi lifecycle frame, including child exit, crosses this containment boundary. */
+  private emitEvent(event: Record<string, unknown>, source?: RpcEventSource): void {
+    for (const listener of this.listeners) {
+      try {
+        // Keep stream ordering synchronous while also containing an accidental
+        // async listener rejection from a future host integration.
+        void Promise.resolve(listener(event, source)).catch((error) =>
+          this.logRpcError("事件处理错误", error),
+        );
+      } catch (error) {
+        this.logRpcError("事件处理错误", error);
+      }
+    }
+  }
+
   private attachJsonlReader(stream: NodeJS.ReadableStream, source?: RpcEventSource): void {
     const decoder = new StringDecoder("utf8");
     let buffer = "";
     stream.on("data", (chunk: Buffer | string) => {
-      buffer += typeof chunk === "string" ? chunk : decoder.write(chunk);
-      while (true) {
-        const newline = buffer.indexOf("\n");
-        if (newline < 0) break;
-        let line = buffer.slice(0, newline);
-        buffer = buffer.slice(newline + 1);
-        if (line.endsWith("\r")) line = line.slice(0, -1);
-        if (line) this.handleLine(line, source);
+      try {
+        buffer += typeof chunk === "string" ? chunk : decoder.write(chunk);
+        while (true) {
+          const newline = buffer.indexOf("\n");
+          if (newline < 0) break;
+          let line = buffer.slice(0, newline);
+          buffer = buffer.slice(newline + 1);
+          if (line.endsWith("\r")) line = line.slice(0, -1);
+          if (line) this.handleLine(line, source);
+        }
+      } catch (error) {
+        this.logRpcError("流解析错误", error);
       }
     });
+    stream.on("error", (error) => this.logRpcError("流读取错误", error));
     stream.on("end", () => {
-      buffer += decoder.end();
-      if (buffer) this.handleLine(buffer.endsWith("\r") ? buffer.slice(0, -1) : buffer, source);
+      try {
+        buffer += decoder.end();
+        if (buffer)
+          this.handleLine(
+            buffer.endsWith("\r") ? buffer.slice(0, -1) : buffer,
+            source,
+          );
+      } catch (error) {
+        this.logRpcError("流解析错误", error);
+      }
     });
   }
 
@@ -190,7 +227,7 @@ export class PiRpcClient {
       // response and must never leak into the unsolicited event/SSE channel.
       return;
     }
-    for (const listener of this.listeners) listener(data, source);
+    this.emitEvent(data, source);
   }
 
   private rejectPending(error: Error): void {
@@ -208,7 +245,10 @@ export class PiRpcClient {
     this.child = null;
     this.source = null;
     this.rejectPending(error);
-    for (const listener of this.listeners) listener({ type: "pi_chat_process_error", error: error.message });
+    this.emitEvent(
+      { type: "pi_chat_process_error", error: error.message },
+      source,
+    );
   }
 
   onEvent(listener: EventListener): () => void {

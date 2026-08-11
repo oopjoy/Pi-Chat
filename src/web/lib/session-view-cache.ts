@@ -160,9 +160,13 @@ export class SessionViewCache {
         ? view.liveMessage || previous?.liveMessage
         : view.liveMessage,
       // A hot partial view intentionally omits commands while its Runtime is
-      // busy. `undefined` means "not refreshed", not "command discovery is
-      // empty"; only an explicit [] may clear the prior inventory.
-      commands: view.commands ?? previous?.commands,
+      // busy. A cold JSONL view likewise has no Runtime command discovery at
+      // all, so its protocol-level [] is not evidence that a previously warm
+      // Session lost its commands. Only an explicit non-cold [] clears cache.
+      commands:
+        view.viewSource === "cold-jsonl" && !view.commands?.length
+          ? previous?.commands
+          : view.commands ?? previous?.commands,
       cachedAt: this.now(),
     };
     this.views.delete(id);

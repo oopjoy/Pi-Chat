@@ -154,19 +154,39 @@ test("streaming thinking-only assistant turns fold into a process without a body
   assert.deepEqual(items[0].entries, [{ kind: "thinking", text: "先规划再动手。" }]);
 });
 
-test("streaming thinking plus final text keeps thinking folded and text as the body", () => {
-  const items = groupConversation([{
+test("streaming thinking plus final text places reply metadata above the process only once", () => {
+  const source = {
     role: "assistant",
+    provider: "cpa-proxy",
+    model: "gpt-5.6-sol",
+    thinkingLevel: "high",
+    timestamp: 123,
     content: [
-      { type: "thinking", thinking: "内部推理" },
-      { type: "text", text: "这是给用户看的答案。" },
+      { type: "thinking" as const, thinking: "内部推理" },
+      { type: "text" as const, text: "这是给用户看的答案。" },
     ],
-  }]);
+  };
+  const items = groupConversation([source]);
   assert.equal(items.length, 2);
   assert.equal(items[0].kind, "process");
   assert.equal(items[1].kind, "message");
-  if (items[1].kind !== "message") throw new Error("Expected message");
+  if (items[0].kind !== "process" || items[1].kind !== "message") throw new Error("Expected process then message");
+  assert.equal(items[0].assistantHeader?.provider, "cpa-proxy");
+  assert.equal(items[0].assistantHeader?.model, "gpt-5.6-sol");
+  assert.equal(items[0].assistantHeader?.thinkingLevel, "high");
+  assert.equal(items[1].hideAssistantMetadata, true);
   assert.deepEqual(items[1].message.content, [{ type: "text", text: "这是给用户看的答案。" }]);
+});
+
+test("a process reconstructed from a tool result uses the following reply as its metadata header", () => {
+  const items = groupConversation([
+    { role: "toolResult", toolCallId: "tool-1", toolName: "read", content: "done" },
+    { role: "assistant", provider: "cpa-proxy", model: "gpt-5.6-sol", thinkingLevel: "high", content: "最终答案" },
+  ]);
+  assert.equal(items.length, 2);
+  if (items[0]?.kind !== "process" || items[1]?.kind !== "message") throw new Error("Expected process then message");
+  assert.equal(items[0].assistantHeader?.model, "gpt-5.6-sol");
+  assert.equal(items[1].hideAssistantMetadata, true);
 });
 
 test("contiguous persisted tools and a live thought combine into one process card", () => {
@@ -207,7 +227,7 @@ test("visible assistant commentary remains a real boundary between processes", (
   assert.deepEqual(items.map((item) => item.kind), ["process", "message", "process"]);
 });
 
-test("only an explicitly live trailing empty assistant keeps a working placeholder", () => {
+test("only an explicitly live trailing empty assistant keeps a metadata placeholder", () => {
   assert.deepEqual(groupConversation([{ role: "assistant", content: "" }]), []);
   const live = groupConversation([{ role: "assistant", content: "", timestamp: 10 }], { preserveTrailingAssistantPlaceholder: true });
   assert.equal(live.length, 1);

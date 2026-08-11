@@ -21,6 +21,7 @@ import type {
   PiMessage,
   PiState,
   PrimaryRuntimeReadiness,
+  PromptDelivery,
   PromptImage,
   QueuedPrompt,
   SessionActivityState,
@@ -101,6 +102,7 @@ import {
 import {
   PromptScheduler,
   PROMPT_PREPARE_TIMEOUT_MS,
+  type PromptAcceptance,
 } from "./prompt-scheduler.js";
 import {
   PrimaryRuntimeUnavailableError,
@@ -137,6 +139,9 @@ const DEFAULT_HANDSHAKE_PAGE_TIMEOUT_MS = 30_000;
 // `agent_settled` is followed by a FIFO state barrier. Like cold startup, a
 // fully configured Pi Runtime can take longer than a few seconds to answer it.
 const SETTLEMENT_STATE_TIMEOUT_MS = 60_000;
+/** Bounded native steering backlog: Pi's queue, admissions, snapshots, and hidden local turns all grow with every accepted Steer. */
+const MAX_NATIVE_STEERING = 20;
+const MAX_NATIVE_STEERING_IMAGE_CHARS = 45_000_000;
 // Pi may emit agent_settled before the new JSONL user record is visible to a
 // concurrent reader. Keep the draft's provisional sidebar summary only across
 // this small bounded visibility window.
@@ -236,6 +241,36 @@ export interface PiChatAppOptions {
   pickWorkspaceFolder?: (initialPath?: string) => Promise<string | null>;
 }
 
+/** Per-worker native steering snapshot with Pi's queue contents and verified dequeues. */
+interface NativeSteeringSnapshot {
+  /** RPC worker generation this snapshot belongs to. */
+  generation: number;
+  /** Messages still queued inside Pi (from the latest queue_update). */
+  messages: string[];
+  /**
+   * Messages Pi dequeued (queue_update shrank) whose consuming user
+   * message_start is expected next. Pi removes a steering message BEFORE it
+   * forwards the message_start, so a matching dequeue verifies consumption.
+   */
+  dequeued: string[];
+}
+
+/** Accepted native steers waiting for Pi consumption, scoped to one worker generation. */
+interface NativeSteeringAdmissions {
+  generation: number;
+  items: Array<{ message: string; promptAt: number; imageChars: number }>;
+}
+
+class NativeSteeringResetError extends Error {
+  readonly droppedCount: number;
+
+  constructor(cause: unknown, droppedCount: number) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = "NativeSteeringResetError";
+    this.droppedCount = droppedCount;
+  }
+}
+
 export class PiChatApp {
   private readonly sseHub = new SseHub();
   /** Same Map as SseHub; dual-session tests seed write stubs here. */
@@ -313,6 +348,8 @@ export class PiChatApp {
   private primaryPendingTerminalSessionId = "";
   private readonly contextUsagePendingRefresh = new Set<string>();
   private readonly contextUsageRefreshTurn = new Set<string>();
+  /** Short, Session-scoped reason retained only while an owned Runtime is failed. */
+  private readonly runtimeFailureReasonsBySession = new Map<string, string>();
   /** Fresh accepted prompts win over JSONL mtime while a Runtime is alive. */
   private readonly lastUserPromptAtBySession = new Map<string, number>();
   /** Preserve arrival order even when two local requests share one Date.now() millisecond. */
@@ -323,6 +360,20 @@ export class PiChatApp {
   private readonly runGenerationsBySession = new Map<string, number>();
   /** Session preference survives Runtime reclaim, but never outlives the Pi Chat process. */
   private readonly gateModesBySession = new Map<string, GateMode>();
+  /** Pi-native steering is private to each RPC worker until message_start consumes it. */
+  private readonly pendingNativeSteeringBySession = new Map<
+    string,
+    NativeSteeringSnapshot
+  >();
+  /** Admission timestamps become sidebar recency only when Pi consumes the steering message. */
+  private readonly nativeSteeringAdmissionsBySession = new Map<
+    string,
+    NativeSteeringAdmissions
+  >();
+  /** Session → generation whose settlement deferred steering cleanup. */
+  private readonly nativeSteeringResetAfterSettlement = new Map<string, number>();
+  /** Route, Stop, and settlement cleanup share one Runtime reset per Session. */
+  private readonly nativeSteeringResets = new Map<string, Promise<void>>();
 
   // Primary queue/runtime flags live on PromptScheduler; aliases keep route handlers stable.
   private get promptQueue() {
@@ -504,7 +555,26 @@ export class PiChatApp {
       onSecondaryEvent: (runtime, event, source) =>
         this.handleSecondaryEvent(runtime, event, source),
       activeSessionIds: () => this.activeSessionIds(),
-      broadcast: (event) => this.broadcast(event),
+      broadcast: (event) => {
+        // RuntimePool owns worker restart, while App owns the browser-visible
+        // lifecycle generation. Stamp recovery before it reaches SSE so a
+        // queued old-child error can never repaint a recovered Session.
+        if (
+          event.type === "pi_chat_process_recovered" &&
+          typeof event.piChatSessionId === "string"
+        ) {
+          const piChatRunGeneration = this.advanceSessionRunGeneration(
+            event.piChatSessionId,
+          );
+          this.broadcast({
+            ...event,
+            piChatRunEpoch: this.runEpoch,
+            piChatRunGeneration,
+          });
+          return;
+        }
+        this.broadcast(event);
+      },
     });
     this.runtimes = this.runtimePool.runtimes;
     this.sseHub.onDisconnect((_response, clientId, info) => {
@@ -750,6 +820,38 @@ export class PiChatApp {
     return this.scheduler.publicQueue(queue);
   }
 
+  /** Keep failed-runtime diagnostics useful in the sidebar without leaking an unbounded raw transport payload. */
+  private recordRuntimeFailure(sessionId: string, error: unknown): void {
+    if (!sessionId) return;
+    const raw =
+      error instanceof Error
+        ? error.message
+        : typeof error === "string"
+          ? error
+          : "";
+    const message = raw.replace(/[\r\n\t]+/g, " ").replace(/\s{2,}/g, " ").trim();
+    if (message) this.runtimeFailureReasonsBySession.set(sessionId, message.slice(0, 280));
+  }
+
+  private clearRuntimeFailure(sessionId: string): void {
+    if (sessionId) this.runtimeFailureReasonsBySession.delete(sessionId);
+  }
+
+  /** Events are authoritative over a hot-memory get_state snapshot that may lag compaction lifecycle frames. */
+  private updateHotCompactionState(
+    runtime: SecondaryRuntime | undefined,
+    isCompacting: boolean,
+  ): void {
+    if (runtime) {
+      runtime.lastState = {
+        ...(runtime.lastState || { model: null, isStreaming: runtime.running }),
+        isCompacting,
+      };
+      return;
+    }
+    this.lastPrimaryState = { ...this.lastPrimaryState, isCompacting };
+  }
+
   private sessionActivity(sessionId: string): SessionActivityState {
     const runtime = this.runtimePool.get(sessionId);
     const primary = sessionId === this.activeSessionId && !runtime;
@@ -766,8 +868,12 @@ export class PiChatApp {
     const queued = primary
       ? this.promptQueue.length > 0
       : (runtime?.promptQueue.length || 0) > 0;
+    const failureReason = failed
+      ? this.runtimeFailureReasonsBySession.get(sessionId)
+      : undefined;
     return {
-      // `dispatching` also covers the post-settlement FIFO get_state barrier.
+      ...(failureReason ? { error: failureReason } : null),
+      // `dispatching` also covers the post-settlement FIFO get_state barrier,
       // That barrier keeps restart/shutdown safe, but with no queued turn it is
       // not visible conversation work and must not leave a blue sidebar ring.
       execution: failed
@@ -786,6 +892,13 @@ export class PiChatApp {
   }
 
   /** One server-derived snapshot prevents Sidebar reconstruction from racing queue/RPC events. */
+  /** A recovered worker is a fresh event source; fence off all old-child frames. */
+  private advanceSessionRunGeneration(sessionId: string): number {
+    const generation = (this.runGenerationsBySession.get(sessionId) || 0) + 1;
+    this.runGenerationsBySession.set(sessionId, generation);
+    return generation;
+  }
+
   private broadcastSessionActivity(sessionId = this.activeSessionId): void {
     if (!sessionId) return;
     const activity = this.sessionActivity(sessionId);
@@ -1027,6 +1140,7 @@ export class PiChatApp {
     }
     const runtime = this.runtimePool.get(sessionId);
     if (!runtime || !this.runtimePool.canReclaim(runtime)) return false;
+    this.clearNativeSteeringState(sessionId, "reclaim");
     return this.runtimePool.reclaim(sessionId, "idle");
   }
 
@@ -1209,6 +1323,190 @@ export class PiChatApp {
     return transition;
   }
 
+  /** Whether this generation still has an admitted or observed native Steer to settle. */
+  private hasNativeSteeringPending(
+    sessionId: string,
+    generation: number,
+  ): boolean {
+    const snapshot = this.pendingNativeSteeringBySession.get(sessionId);
+    const admissions = this.nativeSteeringAdmissionsBySession.get(sessionId);
+    return Boolean(
+      (snapshot &&
+        snapshot.generation === generation &&
+        (snapshot.messages.length || snapshot.dequeued.length)) ||
+        (admissions &&
+          admissions.generation === generation &&
+          admissions.items.length),
+    );
+  }
+
+  /**
+   * Drop every native-steering bookkeeping entry for a Session and notify the
+   * UI with the reason and how many accepted steers could never execute. Called
+   * at process-error, recovery, reclaim, delete, and reset boundaries so stale
+   * bookkeeping from a dead worker generation can never pollute a replacement.
+   */
+  private clearNativeSteeringState(sessionId: string, reason: string): number {
+    const snapshot = this.pendingNativeSteeringBySession.get(sessionId);
+    const admissions = this.nativeSteeringAdmissionsBySession.get(sessionId);
+    const droppedCount = Math.max(
+      admissions?.items.length || 0,
+      snapshot?.messages.length || 0,
+    );
+    this.pendingNativeSteeringBySession.delete(sessionId);
+    this.nativeSteeringAdmissionsBySession.delete(sessionId);
+    this.nativeSteeringResetAfterSettlement.delete(sessionId);
+    if (droppedCount > 0)
+      this.broadcast({
+        type: "pi_chat_native_steering_cleared",
+        piChatSessionId: sessionId,
+        reason,
+        droppedCount,
+      });
+    return droppedCount;
+  }
+
+  private nativeSteeringMessageText(event: Record<string, unknown>): string {
+    const message =
+      event.message && typeof event.message === "object"
+        ? (event.message as PiMessage)
+        : null;
+    if (!message || message.role !== "user") return "";
+    if (typeof message.content === "string") return message.content;
+    if (!Array.isArray(message.content)) return "";
+    return message.content
+      .filter((block) => block.type === "text")
+      .map((block) => block.text || "")
+      .join("\n");
+  }
+
+  /**
+   * Returns true when this user message_start is a *verified* native steer
+   * consumption: Pi dequeued the matching steering message (queue_update
+   * shrank) immediately before forwarding it. A text-only match without a
+   * prior dequeue may be an ordinary prompt whose text equals a pending steer
+   * and must not consume the admission or reveal the local turn.
+   */
+  private consumeNativeSteeringAdmission(
+    sessionId: string,
+    event: Record<string, unknown>,
+    generation: number,
+  ): boolean {
+    if (event.type !== "message_start") return false;
+    const text = this.nativeSteeringMessageText(event);
+    const snapshot = this.pendingNativeSteeringBySession.get(sessionId);
+    const admissions = this.nativeSteeringAdmissionsBySession.get(sessionId);
+    if (!text || !snapshot || !admissions) return false;
+    if (
+      snapshot.generation !== generation ||
+      admissions.generation !== generation
+    )
+      return false;
+    const dequeuedIndex = snapshot.dequeued.indexOf(text);
+    if (dequeuedIndex < 0) return false;
+    const index = admissions.items.findIndex(
+      (admission) => admission.message === text,
+    );
+    if (index < 0) return false;
+    snapshot.dequeued.splice(dequeuedIndex, 1);
+    const [consumed] = admissions.items.splice(index, 1);
+    if (admissions.items.length)
+      this.nativeSteeringAdmissionsBySession.set(sessionId, admissions);
+    else this.nativeSteeringAdmissionsBySession.delete(sessionId);
+    if (snapshot.messages.length || snapshot.dequeued.length)
+      this.pendingNativeSteeringBySession.set(sessionId, snapshot);
+    else this.pendingNativeSteeringBySession.delete(sessionId);
+    this.nativeSteeringResetAfterSettlement.delete(sessionId);
+    this.noteUserPrompt(sessionId, consumed.promptAt);
+    return true;
+  }
+
+  private updateNativeSteeringSnapshot(
+    sessionId: string,
+    event: Record<string, unknown>,
+    generation: number,
+  ): void {
+    if (event.type !== "queue_update" || !Array.isArray(event.steering)) return;
+    const steering = event.steering.filter(
+      (message): message is string => typeof message === "string",
+    );
+    const previous = this.pendingNativeSteeringBySession.get(sessionId);
+    const sameGeneration = previous?.generation === generation;
+    const previousMessages = sameGeneration ? previous.messages : [];
+    // Compute a multiset difference, not a Set difference: two identical Steer
+    // messages are distinct queue entries. Preserve earlier verified dequeues
+    // until their matching message_start arrives because another queue_update
+    // can be emitted in that extension-controlled gap.
+    const remainingCounts = new Map<string, number>();
+    for (const message of steering)
+      remainingCounts.set(message, (remainingCounts.get(message) || 0) + 1);
+    const newlyDequeued: string[] = [];
+    for (const message of previousMessages) {
+      const remaining = remainingCounts.get(message) || 0;
+      if (remaining > 0) remainingCounts.set(message, remaining - 1);
+      else newlyDequeued.push(message);
+    }
+    const dequeued = [
+      ...(sameGeneration ? previous.dequeued : []),
+      ...newlyDequeued,
+    ];
+    if (steering.length || dequeued.length)
+      this.pendingNativeSteeringBySession.set(sessionId, {
+        generation,
+        messages: steering,
+        dequeued,
+      });
+    else this.pendingNativeSteeringBySession.delete(sessionId);
+  }
+
+  private async resetNativeSteering(
+    sessionId: string,
+    runtime?: SecondaryRuntime,
+    reason = "settled-before-consumption",
+  ): Promise<void> {
+    const existing = this.nativeSteeringResets.get(sessionId);
+    if (existing) return existing;
+    const reset = (async () => {
+      try {
+        if (runtime) {
+          await this.runtimePool.recover(runtime);
+          this.clearRuntimeFailure(runtime.id);
+          this.broadcastSessionActivity(runtime.id);
+        } else {
+          await this.restartPrimaryRuntime(this.activeSessionPath || undefined);
+          const state = asState(
+            await this.options.rpc.send({ type: "get_state" }),
+          );
+          this.lastPrimaryState = state;
+          this.bindPrimaryIdentity(state);
+          this.clearRuntimeFailure(sessionId);
+          this.running = state.isStreaming;
+          this.primaryFailed = false;
+          this.toolStatus = "";
+        }
+        this.clearNativeSteeringState(sessionId, reason);
+      } catch (error) {
+        // restart() stops the old worker before starting its replacement. Once
+        // replacement startup fails, every queued native Steer is definitively
+        // lost and must be settled even though recovery itself rejected.
+        const droppedCount = this.clearNativeSteeringState(
+          sessionId,
+          "process-error",
+        );
+        if (droppedCount > 0)
+          throw new NativeSteeringResetError(error, droppedCount);
+        throw error;
+      }
+    })();
+    this.nativeSteeringResets.set(sessionId, reset);
+    try {
+      await reset;
+    } finally {
+      if (this.nativeSteeringResets.get(sessionId) === reset)
+        this.nativeSteeringResets.delete(sessionId);
+    }
+  }
+
   private handleSecondaryEvent(
     runtime: SecondaryRuntime,
     event: Record<string, unknown>,
@@ -1222,12 +1520,43 @@ export class PiChatApp {
     )
       return;
     const type = String(event.type || "");
+    const generation = runtime.rpcGeneration;
+    let droppedNativeSteering = 0;
+    if (type === "pi_chat_process_error") {
+      this.recordRuntimeFailure(runtime.id, event.error);
+      droppedNativeSteering = this.clearNativeSteeringState(
+        runtime.id,
+        "process-error",
+      );
+    }
+    if (type === "compaction_start")
+      this.updateHotCompactionState(runtime, true);
+    else if (
+      type === "compaction_end" ||
+      type === "agent_settled" ||
+      type === "pi_chat_process_error"
+    )
+      this.updateHotCompactionState(runtime, false);
+    this.updateNativeSteeringSnapshot(runtime.id, event, generation);
+    const consumedSteering = this.consumeNativeSteeringAdmission(
+      runtime.id,
+      event,
+      generation,
+    );
     this.runtimePool.touch(runtime);
     const transition = this.applyRuntimeEventTransition(
       runtime.id,
       runtime,
       event,
     );
+    if (consumedSteering || droppedNativeSteering > 0)
+      transition.broadcastEvent = {
+        ...transition.broadcastEvent,
+        ...(consumedSteering ? { nativeSteeringConsumed: true } : null),
+        ...(droppedNativeSteering > 0
+          ? { nativeSteeringDroppedCount: droppedNativeSteering }
+          : null),
+      };
     this.broadcastRpcEvent(
       transition.broadcastEvent,
       runtime.id,
@@ -1245,6 +1574,8 @@ export class PiChatApp {
     if (settled) {
       void this.finalizePersistedDraftWhenVisible(runtime);
       setTimeout(() => this.warmRuntimeMessageSnapshot(runtime), 0);
+      if (this.hasNativeSteeringPending(runtime.id, generation))
+        this.nativeSteeringResetAfterSettlement.set(runtime.id, generation);
       // Pi's RPC event schema has no run ID. Its JSONL stdout ordering is the
       // only usable ordering contract, so place a response barrier after the
       // terminal event before admitting another prompt. Frames preceding this
@@ -1257,6 +1588,18 @@ export class PiChatApp {
         void this.drainSecondaryAfterSettlement(runtime, runtime.rpcGeneration);
       }
     } else if (type === "agent_start") {
+      this.broadcastSessionActivity(runtime.id);
+    } else if (type === "pi_chat_process_error") {
+      // The raw error frame opens the pane-level error; this activity frame
+      // retains the concise reason in sidebar/cache snapshots too. A crash
+      // while dispatching or waiting on a settlement barrier must not leave
+      // this Session's queue permanently stuck: release the dispatch lock and
+      // unpause so the next mutation can recover and continue.
+      runtime.dispatching = false;
+      runtime.queuePaused = false;
+      // transitionRuntimeEvent published its conservative paused state before
+      // this crash cleanup. Publish the released state as the final authority.
+      this.broadcastQueue(runtime.id);
       this.broadcastSessionActivity(runtime.id);
     }
   }
@@ -1289,6 +1632,23 @@ export class PiChatApp {
         return;
       runtime.lastState = state;
       runtime.running = state.isStreaming;
+      if (
+        !runtime.running &&
+        this.nativeSteeringResetAfterSettlement.get(runtime.id) ===
+          sourceGeneration &&
+        this.hasNativeSteeringPending(runtime.id, sourceGeneration)
+      ) {
+        await this.resetNativeSteering(
+          runtime.id,
+          runtime,
+          "settled-before-consumption",
+        );
+        runtime.dispatching = false;
+        this.broadcastSessionActivity(runtime.id);
+        void this.dispatchRuntimeNext(runtime);
+        void this.runtimePool.sweep();
+        return;
+      }
       runtime.dispatching = false;
       this.broadcastSessionActivity(runtime.id);
       if (!runtime.running) {
@@ -1304,11 +1664,16 @@ export class PiChatApp {
       runtime.dispatching = false;
       runtime.failed = true;
       runtime.queuePaused = runtime.promptQueue.length > 0;
+      const message = `Pi 结算同步失败：${error instanceof Error ? error.message : String(error)}`;
+      this.recordRuntimeFailure(runtime.id, message);
       this.broadcastQueue(runtime.id);
       this.broadcast({
         type: "pi_chat_process_error",
         piChatSessionId: runtime.id,
-        error: `Pi 结算同步失败：${error instanceof Error ? error.message : String(error)}`,
+        error: message,
+        ...(error instanceof NativeSteeringResetError
+          ? { nativeSteeringDroppedCount: error.droppedCount }
+          : null),
       });
       this.broadcastSessionActivity(runtime.id);
     }
@@ -1335,6 +1700,22 @@ export class PiChatApp {
         return;
       this.lastPrimaryState = state;
       this.running = state.isStreaming;
+      if (
+        !this.running &&
+        this.nativeSteeringResetAfterSettlement.get(sessionId) ===
+          sourceGeneration &&
+        this.hasNativeSteeringPending(sessionId, sourceGeneration)
+      ) {
+        await this.resetNativeSteering(
+          sessionId,
+          undefined,
+          "settled-before-consumption",
+        );
+        this.dispatching = false;
+        this.broadcastSessionActivity(sessionId);
+        void this.dispatchNext();
+        return;
+      }
       this.dispatching = false;
       this.broadcastSessionActivity(sessionId);
       if (!this.running) void this.dispatchNext();
@@ -1347,18 +1728,30 @@ export class PiChatApp {
       this.dispatching = false;
       this.primaryFailed = true;
       this.queuePaused = this.promptQueue.length > 0;
+      const message = `Pi 结算同步失败：${error instanceof Error ? error.message : String(error)}`;
+      this.recordRuntimeFailure(sessionId, message);
       this.broadcastQueue();
       this.broadcast({
         type: "pi_chat_process_error",
         piChatSessionId: sessionId,
-        error: `Pi 结算同步失败：${error instanceof Error ? error.message : String(error)}`,
+        error: message,
+        ...(error instanceof NativeSteeringResetError
+          ? { nativeSteeringDroppedCount: error.droppedCount }
+          : null),
       });
       this.broadcastSessionActivity(sessionId);
     }
   }
 
   private async ensureRuntime(id: string): Promise<SecondaryRuntime> {
-    const runtime = await this.runtimePool.ensure(id);
+    // Keep every failed-worker recovery in the App owner: it clears
+    // generation-scoped Steer state and resumes already-admitted FIFO work.
+    const existing = this.runtimePool.get(id);
+    let runtime: SecondaryRuntime;
+    if (existing && this.secondaryNeedsRecovery(existing)) {
+      await this.recoverRuntime(existing);
+      runtime = existing;
+    } else runtime = await this.runtimePool.ensure(id);
     if (!runtime.summarySnapshot)
       runtime.summarySnapshot =
         this.options.sessions.summaryForId?.(id) || undefined;
@@ -1375,8 +1768,15 @@ export class PiChatApp {
   }
 
   private async recoverRuntime(runtime: SecondaryRuntime): Promise<void> {
+    // A failed/replaced worker can never deliver steers queued in its old
+    // process. Drop the stale bookkeeping so the recovered worker's settlement
+    // cannot mistake it for a live leftover and reset itself again.
+    this.clearNativeSteeringState(runtime.id, "recovery");
     await this.runtimePool.recover(runtime);
+    this.clearRuntimeFailure(runtime.id);
+    this.broadcastQueue(runtime.id);
     this.broadcastSessionActivity(runtime.id);
+    this.resumeRecoveredRuntimeQueue(runtime);
   }
 
   private acquireDraftRuntime(
@@ -1541,11 +1941,41 @@ export class PiChatApp {
       return;
     const sessionId = this.primaryBoundSessionId;
     const type = String(event.type || "");
+    const generation = this.primaryRpcGeneration;
+    let droppedNativeSteering = 0;
+    if (type === "pi_chat_process_error") {
+      this.recordRuntimeFailure(sessionId, event.error);
+      droppedNativeSteering = this.clearNativeSteeringState(
+        sessionId,
+        "process-error",
+      );
+    }
+    if (type === "compaction_start") this.updateHotCompactionState(undefined, true);
+    else if (
+      type === "compaction_end" ||
+      type === "agent_settled" ||
+      type === "pi_chat_process_error"
+    )
+      this.updateHotCompactionState(undefined, false);
+    this.updateNativeSteeringSnapshot(sessionId, event, generation);
+    const consumedSteering = this.consumeNativeSteeringAdmission(
+      sessionId,
+      event,
+      generation,
+    );
     const transition = this.applyRuntimeEventTransition(
       sessionId,
       undefined,
       event,
     );
+    if (consumedSteering || droppedNativeSteering > 0)
+      transition.broadcastEvent = {
+        ...transition.broadcastEvent,
+        ...(consumedSteering ? { nativeSteeringConsumed: true } : null),
+        ...(droppedNativeSteering > 0
+          ? { nativeSteeringDroppedCount: droppedNativeSteering }
+          : null),
+      };
     this.broadcastRpcEvent(
       transition.broadcastEvent,
       sessionId,
@@ -1562,12 +1992,22 @@ export class PiChatApp {
     );
     if (settled) {
       setTimeout(() => this.warmPrimaryMessageSnapshot(), 0);
+      if (this.hasNativeSteeringPending(sessionId, generation))
+        this.nativeSteeringResetAfterSettlement.set(sessionId, generation);
       if (!this.dispatching) {
         this.dispatching = true;
         this.broadcastSessionActivity(sessionId);
         void this.drainPrimaryAfterSettlement(sessionId, sourceGeneration);
       }
     } else if (type === "agent_start") this.broadcastSessionActivity(sessionId);
+    else if (type === "pi_chat_process_error") {
+      // Never leave the Primary queue stuck behind a stale dispatch lock after
+      // the live child exits (see the Secondary branch for the same contract).
+      this.dispatching = false;
+      this.queuePaused = false;
+      this.broadcastQueue(sessionId);
+      this.broadcastSessionActivity(sessionId);
+    }
   }
 
   private primaryReadiness(): PrimaryRuntimeReadiness {
@@ -1625,12 +2065,14 @@ export class PiChatApp {
     if (!this.primaryNeedsRecovery(readiness)) return;
     if (this.primaryRecovery) return this.primaryRecovery;
     const desiredGateMode = this.primaryGateMode;
+    let restarted = false;
     const recovery = (async () => {
       try {
         // A cold service may still be completing its initial asynchronous
         // Primary spawn. If it won the race, consume that worker rather than
         // stopping/restarting it a second time.
         if (this.primaryNeedsRecovery(readiness)) {
+          this.clearNativeSteeringState(this.activeSessionId, "recovery");
           // An initial failure and a post-ready crash both recover only through
           // the controller, which restarts and repeats compatibility probing
           // before PiChatApp sends.
@@ -1644,15 +2086,23 @@ export class PiChatApp {
               this.activeSessionPath || undefined,
               this.primaryRuntimeCwd,
             );
+          restarted = true;
         }
         const state = asState(
           await this.options.rpc.send({ type: "get_state" }),
         );
         this.lastPrimaryState = state;
         this.bindPrimaryIdentity(state);
+        this.clearRuntimeFailure(this.activeSessionId);
         this.running = state.isStreaming;
         this.primaryFailed = false;
         this.toolStatus = "";
+        if (restarted) {
+          // A failed settlement marks queued work paused. A successful fresh
+          // Primary is idle and can resume that same FIFO without user action.
+          this.queuePaused = false;
+          this.broadcastQueue();
+        }
         if (desiredGateMode !== "strict") {
           await this.options.rpc.send(
             { type: "prompt", message: `/gate ${desiredGateMode}` },
@@ -1660,11 +2110,17 @@ export class PiChatApp {
           );
         }
         this.primaryGateMode = desiredGateMode;
+        const runGeneration = this.advanceSessionRunGeneration(
+          this.activeSessionId,
+        );
         this.broadcast({
           type: "pi_chat_process_recovered",
           piChatSessionId: this.activeSessionId,
+          piChatRunEpoch: this.runEpoch,
+          piChatRunGeneration: runGeneration,
         });
         this.broadcastSessionActivity(this.activeSessionId);
+        if (restarted) this.resumeRecoveredPrimaryQueue();
       } catch (error) {
         this.primaryFailed = true;
         if (error instanceof PrimaryRuntimeUnavailableError) throw error;
@@ -1837,8 +2293,13 @@ export class PiChatApp {
     images: PromptImage[],
     promptAt = this.now(),
     gateMode?: GateMode,
-  ): Promise<void> {
-    await this.scheduler.sendPrimaryPrompt(message, images, promptAt, gateMode);
+  ): Promise<PromptAcceptance> {
+    return this.scheduler.sendPrimaryPrompt(
+      message,
+      images,
+      promptAt,
+      gateMode,
+    );
   }
 
   private warmRuntimeMessageSnapshot(runtime: SecondaryRuntime): void {
@@ -1882,6 +2343,33 @@ export class PiChatApp {
         }
       })
       .catch(() => undefined);
+  }
+
+  /** Recovery is demand-driven, but work already accepted before a crash must not strand. */
+  private resumeRecoveredRuntimeQueue(runtime: SecondaryRuntime): void {
+    if (
+      this.closed ||
+      this.applicationLifecycle !== "idle" ||
+      runtime.running ||
+      runtime.dispatching ||
+      runtime.queuePaused ||
+      !runtime.promptQueue.length
+    )
+      return;
+    void this.dispatchRuntimeNext(runtime);
+  }
+
+  private resumeRecoveredPrimaryQueue(): void {
+    if (
+      this.closed ||
+      this.applicationLifecycle !== "idle" ||
+      this.running ||
+      this.dispatching ||
+      this.queuePaused ||
+      !this.promptQueue.length
+    )
+      return;
+    void this.dispatchNext();
   }
 
   private async dispatchRuntimeNext(runtime: SecondaryRuntime): Promise<void> {
@@ -2175,6 +2663,7 @@ export class PiChatApp {
     // A Runtime created only to rename a cold Session is not retained. Its
     // dedicated process is safely reclaimed after its mutation lease releases.
     if (!wasOpen && runtime && !runtime.running) {
+      this.clearNativeSteeringState(id, "reclaim");
       await this.runtimePool.reclaim(id, "idle");
     }
     await this.options.sessions.list(this.activeSessionPath, this.currentCwd);
@@ -2240,6 +2729,8 @@ export class PiChatApp {
     if (path && existsSync(path)) await unlink(path);
     this.lastUserPromptAtBySession.delete(id);
     this.gateModesBySession.delete(id);
+    this.clearRuntimeFailure(id);
+    this.clearNativeSteeringState(id, "deleted");
     this.sessionControl.clearSession(id);
     await this.options.sessions.list(this.activeSessionPath, this.currentCwd);
     this.broadcast({
@@ -3324,6 +3815,14 @@ export class PiChatApp {
         body.gateMode === "strict" || body.gateMode === "open"
           ? body.gateMode
           : undefined;
+      if (
+        body.delivery !== undefined &&
+        body.delivery !== "queue" &&
+        body.delivery !== "steer"
+      )
+        return json(response, 400, { error: "消息交付方式无效" });
+      const delivery: PromptDelivery =
+        body.delivery === "steer" ? "steer" : "queue";
       const images = promptImages(body.images);
       if (!message && !images.length)
         return json(response, 400, { error: "消息或图片不能为空" });
@@ -3339,6 +3838,153 @@ export class PiChatApp {
         // independent Primary startup subsequently fails.
         const existingSecondary =
           this.runtimePool.get(requestedSessionId) || null;
+        // Steering changes an already-running agent. It must never wake a cold
+        // Session, recover a failed worker, or bind a new Primary identity.
+        if (delivery === "steer") {
+          const requestedIsPrimary =
+            Boolean(this.activeSessionId) &&
+            requestedSessionId === this.activeSessionId;
+          const steeringRuntime = requestedIsPrimary
+            ? null
+            : existingSecondary;
+          const targetRpc = steeringRuntime?.rpc || this.options.rpc;
+          const targetGeneration = requestedIsPrimary
+            ? this.primaryRpcGeneration
+            : (steeringRuntime?.rpcGeneration || 0);
+          const targetRunning = requestedIsPrimary
+            ? this.running
+            : steeringRuntime?.running === true;
+          if (
+            (!requestedIsPrimary && !steeringRuntime) ||
+            !targetRunning ||
+            targetRpc.isRunning?.() === false
+          )
+            return json(response, 409, {
+              error: "当前对话未在运行，无法发送 Steer 消息",
+            });
+          releaseRuntimeAdmission = steeringRuntime
+            ? this.runtimePool.acquireOperation(steeringRuntime)
+            : this.primaryOperationAdmission.acquire().release;
+          if (message.startsWith("/"))
+            return json(response, 400, {
+              error: "Slash 指令不能作为 Steer 消息发送",
+            });
+          // Bounded native steering backlog: Pi's own queue, this admission
+          // bookkeeping, the text snapshot, and the browser's hidden local
+          // turns all grow with every accepted Steer. Reuse the queue caps so
+          // a long tool call cannot accumulate an unbounded steer backlog.
+          const existingAdmissions =
+            this.nativeSteeringAdmissionsBySession.get(requestedSessionId);
+          const currentAdmissions =
+            existingAdmissions &&
+            existingAdmissions.generation === targetGeneration
+              ? existingAdmissions
+              : { generation: targetGeneration, items: [] };
+          if (currentAdmissions.items.length >= MAX_NATIVE_STEERING)
+            return json(response, 409, {
+              error: `Steer 队列已满，最多保留 ${MAX_NATIVE_STEERING} 条未执行的 Steer`,
+            });
+          const incomingImageChars = images.reduce(
+            (sum, image) => sum + image.data.length,
+            0,
+          );
+          const queuedImageChars = currentAdmissions.items.reduce(
+            (sum, admission) => sum + admission.imageChars,
+            0,
+          );
+          if (queuedImageChars + incomingImageChars > MAX_NATIVE_STEERING_IMAGE_CHARS)
+            return json(response, 409, {
+              error: "Steer 排队图片总量超限",
+            });
+          const steeringMessage = message || "请查看这些图片。";
+          currentAdmissions.items.push({
+            message: steeringMessage,
+            promptAt,
+            imageChars: incomingImageChars,
+          });
+          this.nativeSteeringAdmissionsBySession.set(
+            requestedSessionId,
+            currentAdmissions,
+          );
+          let deliveryUncertain = false;
+          try {
+            await targetRpc.send(
+              {
+                type: "steer",
+                message: steeringMessage,
+                ...(images.length ? { images } : {}),
+              },
+              PROMPT_PREPARE_TIMEOUT_MS,
+            );
+          } catch (error) {
+            if (error instanceof RpcRequestTimeoutError) {
+              // The steer JSONL command may already be in Pi stdin (and Pi may
+              // even have emitted queue_update). Retain its admission so later
+              // dequeue/clear events can settle the hidden local turn.
+              deliveryUncertain = true;
+            } else {
+              const current =
+                this.nativeSteeringAdmissionsBySession.get(requestedSessionId);
+              if (current && current.generation === targetGeneration) {
+                const index = current.items.findIndex(
+                  (admission) =>
+                    admission.message === steeringMessage &&
+                    admission.promptAt === promptAt,
+                );
+                if (index >= 0) current.items.splice(index, 1);
+                if (current.items.length)
+                  this.nativeSteeringAdmissionsBySession.set(
+                    requestedSessionId,
+                    current,
+                  );
+                else
+                  this.nativeSteeringAdmissionsBySession.delete(
+                    requestedSessionId,
+                  );
+              }
+              throw error;
+            }
+          }
+          // Auxiliary probe only: a timeout must not rewrite an already
+          // accepted Steer into a 500. A dead worker, however, can never
+          // deliver it, so clean up and reject instead.
+          let probeState: ReturnType<typeof asState> | null = null;
+          try {
+            probeState = asState(
+              await targetRpc.send({ type: "get_state" }, 2_000),
+            );
+          } catch (error) {
+            if (error instanceof RpcRequestTimeoutError) {
+              probeState = null;
+            } else {
+              this.clearNativeSteeringState(requestedSessionId, "process-error");
+              return json(response, 409, {
+                error: "Pi 已退出，Steer 消息未执行",
+              });
+            }
+          }
+          if (
+            probeState &&
+            !probeState.isStreaming &&
+            this.hasNativeSteeringPending(requestedSessionId, targetGeneration)
+          ) {
+            await this.resetNativeSteering(
+              requestedSessionId,
+              steeringRuntime || undefined,
+              "settled-before-consumption",
+            );
+            return json(response, 409, {
+              error: "当前对话已结束，Steer 消息未执行",
+            });
+          }
+          json(response, 202, {
+            accepted: true,
+            queued: false,
+            steered: true,
+            ...(deliveryUncertain ? { deliveryUncertain: true } : null),
+          });
+          return;
+        }
         // Production readiness must bind the primary before allocating a worker;
         // legacy in-process test hosts have no startup controller and retain the
         // historical lazy identity behavior for their minimal RPC doubles.
@@ -3454,14 +4100,31 @@ export class PiChatApp {
             );
             secondaryRuntime.running = true;
             this.broadcastSessionActivity(secondaryRuntime.id);
-            await secondaryRuntime.rpc.send(
-              {
-                type: "prompt",
-                message: message || "请查看这些图片。",
-                ...(images.length ? { images } : {}),
-              },
-              PROMPT_PREPARE_TIMEOUT_MS,
-            );
+            try {
+              await secondaryRuntime.rpc.send(
+                {
+                  type: "prompt",
+                  message: message || "请查看这些图片。",
+                  ...(images.length ? { images } : {}),
+                },
+                PROMPT_PREPARE_TIMEOUT_MS,
+              );
+            } catch (error) {
+              // The command may already be buffered in Pi stdin. Preserve the
+              // running state and let its lifecycle event decide; treating this
+              // as a definite failure can race/duplicate a following prompt.
+              if (!(error instanceof RpcRequestTimeoutError)) throw error;
+              this.scheduler.notifySecondaryPromptAccepted(
+                secondaryRuntime,
+                promptAt,
+              );
+              json(response, 202, {
+                accepted: true,
+                queued: false,
+                deliveryUncertain: true,
+              });
+              return;
+            }
             this.scheduler.notifySecondaryPromptAccepted(
               secondaryRuntime,
               promptAt,
@@ -3495,8 +4158,17 @@ export class PiChatApp {
           });
           return;
         }
-        await this.sendPrompt(message, images, promptAt, requestedGateMode);
-        json(response, 202, { accepted: true, queued: false });
+        const acceptance = await this.sendPrompt(
+          message,
+          images,
+          promptAt,
+          requestedGateMode,
+        );
+        json(response, 202, {
+          accepted: true,
+          queued: false,
+          ...(acceptance === "unknown" ? { deliveryUncertain: true } : null),
+        });
         return;
       } finally {
         releaseRuntimeAdmission?.();
@@ -3695,6 +4367,12 @@ export class PiChatApp {
             });
           if (runtime.promptQueue.length || runtime.dispatching)
             runtime.queuePaused = true;
+          const steeringGeneration = runtime.rpcGeneration;
+          if (this.hasNativeSteeringPending(sessionId, steeringGeneration))
+            this.nativeSteeringResetAfterSettlement.set(
+              sessionId,
+              steeringGeneration,
+            );
           try {
             await runtime.rpc.send({ type: "abort" }, 5_000);
           } catch (error) {
@@ -3728,6 +4406,18 @@ export class PiChatApp {
             isStreaming = false;
           }
           runtime.running = isStreaming;
+          // Re-check accepted admissions after abort: a concurrent Steer may
+          // have been admitted while abort was in flight even if Pi never
+          // emitted the queue_update snapshot for an uncertain write.
+          if (this.hasNativeSteeringPending(sessionId, steeringGeneration)) {
+            await this.resetNativeSteering(
+              sessionId,
+              runtime,
+              "abort",
+            );
+            isStreaming = false;
+            runtime.running = false;
+          }
           this.broadcastQueue(sessionId);
           this.broadcastSessionActivity(sessionId);
           return json(response, 200, {
@@ -3753,6 +4443,12 @@ export class PiChatApp {
         this.scheduler.primaryAbortGeneration += 1;
         if (this.promptQueue.length || this.dispatching)
           this.queuePaused = true;
+        const steeringGeneration = this.primaryRpcGeneration;
+        if (this.hasNativeSteeringPending(sessionId, steeringGeneration))
+          this.nativeSteeringResetAfterSettlement.set(
+            sessionId,
+            steeringGeneration,
+          );
         try {
           await this.options.rpc.send({ type: "abort" }, 5_000);
         } catch (error) {
@@ -3784,6 +4480,14 @@ export class PiChatApp {
           isStreaming = false;
         }
         this.running = isStreaming;
+        // Re-check accepted admissions after abort: a concurrent Steer may
+        // have been admitted while abort was in flight even if Pi never
+        // emitted the queue_update snapshot for an uncertain write.
+        if (this.hasNativeSteeringPending(sessionId, steeringGeneration)) {
+          await this.resetNativeSteering(sessionId, undefined, "abort");
+          isStreaming = false;
+          this.running = false;
+        }
         this.broadcastSessionActivity(sessionId);
         json(response, 200, {
           ok: true,
@@ -4069,6 +4773,7 @@ export class PiChatApp {
           await this.syncGateMode(runtime.rpc, runtime.id, initialGateMode);
           runtime.running = true;
           this.broadcastSessionActivity(runtime.id);
+          let deliveryUncertain = false;
           try {
             await runtime.rpc.send(
               {
@@ -4095,9 +4800,17 @@ export class PiChatApp {
               this.scheduler.notifySecondaryPromptAccepted(runtime, promptAt);
             }
           } catch (error) {
-            runtime.running = false;
-            this.broadcastSessionActivity(runtime.id);
-            throw error;
+            if (error instanceof RpcRequestTimeoutError) {
+              // The initial draft request is still a write to Pi stdin. Do not
+              // discard its newly-created Runtime or let a later prompt race a
+              // turn Pi may have accepted after the HTTP acknowledgement timer.
+              deliveryUncertain = true;
+              this.scheduler.notifySecondaryPromptAccepted(runtime, promptAt);
+            } else {
+              runtime.running = false;
+              this.broadcastSessionActivity(runtime.id);
+              throw error;
+            }
           }
           json(response, 202, {
             ...this.runtimeReady(runtime),
@@ -4116,7 +4829,10 @@ export class PiChatApp {
             },
             accepted: true,
             queued: false,
-            ...(extensionCommand
+            ...(deliveryUncertain ? { deliveryUncertain: true } : null),
+            // A timed-out extension write has not been proven to execute; use
+            // the ordinary uncertain-prompt UX instead of claiming success.
+            ...(extensionCommand && !deliveryUncertain
               ? {
                   extension: true,
                   command: extensionCommand.name,

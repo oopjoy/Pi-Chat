@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { GateMode, PromptImage, QueuedPrompt } from "../shared/types.js";
 import type { PendingTurnSettings, RuntimeQueuedPrompt, SecondaryRuntime } from "./runtime-pool.js";
-import type { PiRpcClient } from "./rpc-client.js";
+import { RpcRequestTimeoutError, type PiRpcClient } from "./rpc-client.js";
 
 /** Prompt RPC resolves only after Pi preflight (may auto-compact). */
 export const PROMPT_PREPARE_TIMEOUT_MS = 200_000;
+/** A write timeout means Pi may still process the already-written JSONL RPC command. */
+export type PromptAcceptance = "confirmed" | "unknown";
 const MAX_QUEUE_LENGTH = 20;
 const MAX_QUEUED_IMAGE_CHARS = 45_000_000;
 
@@ -130,7 +132,7 @@ export class PromptScheduler {
     return runtime.running || runtime.dispatching || runtime.promptQueue.length > 0 || runtime.queuePaused;
   }
 
-  async sendPrimaryPrompt(message: string, images: PromptImage[], promptAt = Date.now(), gateMode?: GateMode): Promise<void> {
+  async sendPrimaryPrompt(message: string, images: PromptImage[], promptAt = Date.now(), gateMode?: GateMode): Promise<PromptAcceptance> {
     const releaseOperation = this.host.acquirePrimaryOperation();
     try {
       await this.host.ensurePrimaryRuntime();
@@ -146,7 +148,19 @@ export class PromptScheduler {
           PROMPT_PREPARE_TIMEOUT_MS,
         );
         this.host.onPrimaryPromptAccepted(this.host.activeSessionId(), promptAt);
+        return "confirmed";
       } catch (error) {
+        // Pi's RPC protocol has no cancellation. Once stdin accepted the JSONL
+        // command, a caller timeout cannot prove the prompt was rejected. Keep
+        // the turn in the running/queue state so a following browser prompt is
+        // queued behind it instead of racing a possibly active Pi turn.
+        if (error instanceof RpcRequestTimeoutError) {
+          // Conservatively retain recency/history overlays too. Pi may emit
+          // agent_start after this response timer has elapsed.
+          this.host.onPrimaryPromptAccepted(this.host.activeSessionId(), promptAt);
+          this.host.publishSessionActivity?.(this.host.activeSessionId());
+          return "unknown";
+        }
         this.primaryRunning = false;
         this.host.publishSessionActivity?.(this.host.activeSessionId());
         throw error;
@@ -182,7 +196,25 @@ export class PromptScheduler {
       piChatSessionId: this.host.activeSessionId(),
     });
     try {
-      await this.sendPrimaryPrompt(next.message, next.images, next.createdAt, next.gateMode);
+      const acceptance = await this.sendPrimaryPrompt(
+        next.message,
+        next.images,
+        next.createdAt,
+        next.gateMode,
+      );
+      if (acceptance === "unknown") {
+        // Normal prompt acceptance is released by Pi's ordered agent_start
+        // event. A response timeout may never receive that frame, so release
+        // only this indeterminate preparation lease; a later agent_settled
+        // will then schedule the required FIFO state barrier.
+        this.primaryDispatching = false;
+        this.host.broadcast({
+          type: "pi_chat_prompt_delivery_uncertain",
+          id: next.id,
+          piChatSessionId: this.host.activeSessionId(),
+        });
+        this.host.publishSessionActivity?.(this.host.activeSessionId());
+      }
     } catch (error) {
       this.primaryDispatching = false;
       this.primaryQueuePaused = true;
@@ -265,6 +297,21 @@ export class PromptScheduler {
       );
       this.host.onSecondaryPromptAccepted(runtime, next.createdAt);
     } catch (error) {
+      // A write timeout can occur after the prompt JSONL command reached Pi
+      // stdin. Requeueing here could duplicate a turn Pi accepts later. Keep
+      // the Runtime conservatively running until its event stream or process
+      // failure gives a definitive verdict.
+      if (error instanceof RpcRequestTimeoutError) {
+        runtime.dispatching = false;
+        this.host.onSecondaryPromptAccepted(runtime, next.createdAt);
+        this.host.broadcast({
+          type: "pi_chat_prompt_delivery_uncertain",
+          id: next.id,
+          piChatSessionId: runtime.id,
+        });
+        this.host.publishSessionActivity?.(runtime.id);
+        return;
+      }
       runtime.running = false;
       runtime.dispatching = false;
       runtime.queuePaused = true;
