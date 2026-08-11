@@ -2662,6 +2662,48 @@ test("Primary startup disables cached model choices until Runtime readiness", as
   }
 });
 
+test("Primary startup marks composer capability and image input as pending", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      primaryRuntime: { status: "starting" as const, generation: 1 },
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const input = dom.window.document.querySelector<HTMLTextAreaElement>(
+      ".composer textarea",
+    )!;
+    assert.equal(input.disabled, false, "text may still be drafted while Pi starts");
+    assert.match(
+      input.placeholder,
+      /Pi 正在准备；可继续编辑，发送会等待 Runtime 就绪/,
+    );
+    const attachment = dom.window.document.querySelector<HTMLButtonElement>(
+      ".attachment-button",
+    )!;
+    await act(async () => attachment.click());
+    const imageItem = [
+      ...dom.window.document.querySelectorAll<HTMLButtonElement>(
+        ".attachment-menu [role='menuitem']",
+      ),
+    ].find((item) => item.textContent?.includes("图片"))!;
+    assert.equal(imageItem.disabled, true);
+    assert.match(imageItem.textContent || "", /正在确认模型图片能力/);
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
 test("system Gate selector remains visible when startup command inventory is empty", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");

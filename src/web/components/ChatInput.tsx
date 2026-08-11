@@ -61,7 +61,7 @@ export function commandMatches(value: string, commands: SlashCommand[]): SlashCo
   }).sort((a, b) => a.rank - b.rank || a.score - b.score || a.command.name.localeCompare(b.command.name)).slice(0, 9).map(({ command }) => command);
 }
 
-export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, acceptsImages, commands, controls, notices, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles, onError }: {
+export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, placeholder, acceptsImages, imageInputPending = false, commands, controls, notices, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles, onError }: {
   /** True when a submission will enter the local queue. */
   streaming: boolean;
   /** True only while Pi is actively generating and can be stopped. */
@@ -69,7 +69,11 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   stopping: boolean;
   disabled: boolean;
   disabledPlaceholder?: string;
+  /** A capability-pending prompt may still permit drafting text. */
+  placeholder?: string;
   acceptsImages: boolean;
+  /** The selected model is provisional until the current Runtime confirms it. */
+  imageInputPending?: boolean;
   commands: SlashCommand[];
   controls?: ReactNode;
   /** System status sits immediately above the actual Composer, never over its input. */
@@ -120,6 +124,8 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   }, [attachmentOpen]);
 
   const addImages = async (files: File[]) => {
+    if (imageInputPending)
+      return onError("Pi 正在准备，模型图片能力尚未确认");
     if (!acceptsImages) return onError("当前模型不支持图片输入");
     const candidates = files.filter((file) => file.type.startsWith("image/"));
     if (!candidates.length) return;
@@ -141,6 +147,10 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   const submit = async () => {
     const message = value.trim();
     if ((!message && !images.length) || disabled || sending) return;
+    if (images.length && imageInputPending) {
+      onError("Pi 正在准备，模型图片能力尚未确认");
+      return;
+    }
     const pendingImages = images;
     setSending(true);
     setValue("");
@@ -235,7 +245,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
       <div className={`composer ${dragging ? "is-dragging" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }} onDrop={drop}>
         {suggestions.length > 0 && <div className="command-suggestions" role="listbox" aria-label="Pi 指令联想">{suggestions.map((command, index) => <button type="button" role="option" aria-selected={index === suggestionIndex} className={index === suggestionIndex ? "is-active" : ""} key={`${command.source}-${command.name}`} onMouseDown={(event) => event.preventDefault()} onClick={() => completeCommand(command)}><strong>/{command.name}</strong><span>{command.description || "Pi 指令"}</span><small>{command.source}</small></button>)}</div>}
         {images.length > 0 && <div className="image-previews">{images.map((image, index) => <div className="image-preview" key={`${image.fileName}-${index}`}><img src={`data:${image.mimeType};base64,${image.data}`} alt={image.fileName || `图片 ${index + 1}`} /><button type="button" onClick={() => setImages((current) => current.filter((_, itemIndex) => itemIndex !== index))} aria-label={`移除 ${image.fileName || "图片"}`}><CloseIcon /></button><small>{image.fileName || "粘贴的图片"}</small></div>)}</div>}
-        <textarea ref={textareaRef} value={value} onChange={(event) => setValue(event.target.value)} onPaste={paste} onKeyDown={keyDown} disabled={disabled} rows={1} placeholder={disabled ? disabledPlaceholder || "正在切换会话…" : streaming ? "继续输入，发送后加入队列；输入 / 查看指令" : "输入消息，或粘贴、拖入附件"} aria-label="消息输入" />
+        <textarea ref={textareaRef} value={value} onChange={(event) => setValue(event.target.value)} onPaste={paste} onKeyDown={keyDown} disabled={disabled} rows={1} placeholder={disabled ? disabledPlaceholder || "正在切换会话…" : placeholder || (streaming ? "继续输入，发送后加入队列；输入 / 查看指令" : "输入消息，或粘贴、拖入附件")} aria-label="消息输入" />
         <div className="composer-toolbar">
           <div className="composer-toolbar-controls">{controls}</div>
           <div className="composer-actions">
@@ -243,7 +253,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
             <div className="attachment-control" ref={attachmentRef}>
               <button type="button" className={`attachment-button ${attachmentOpen ? "is-open" : ""}`} disabled={disabled || pickingFiles} onClick={() => setAttachmentOpen((open) => !open)} title="添加附件" aria-label="添加附件" aria-haspopup="menu" aria-expanded={attachmentOpen}><PaperclipIcon /></button>
               {attachmentOpen && <div className="attachment-menu" role="menu">
-                <button type="button" role="menuitem" disabled={!acceptsImages || images.length >= MAX_IMAGES} onClick={() => { setAttachmentOpen(false); imageInputRef.current?.click(); }}><ImageIcon className="attachment-menu-icon" /><strong>图片</strong><small>{acceptsImages ? "直接解析，可粘贴或拖入" : "当前模型不支持图片"}</small></button>
+                <button type="button" role="menuitem" disabled={imageInputPending || !acceptsImages || images.length >= MAX_IMAGES} onClick={() => { setAttachmentOpen(false); imageInputRef.current?.click(); }}><ImageIcon className="attachment-menu-icon" /><strong>图片</strong><small>{imageInputPending ? "正在确认模型图片能力" : acceptsImages ? "直接解析，可粘贴或拖入" : "当前模型不支持图片"}</small></button>
                 <button type="button" role="menuitem" disabled={pickingFiles} onClick={() => void pickFiles()}><FileSearchIcon className="attachment-menu-icon" /><strong>{pickingFiles ? "选择中…" : "本地文件"}</strong><small>引用 Windows 绝对路径</small></button>
               </div>}
               <input ref={imageInputRef} className="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple onChange={(event) => { void addImages([...event.target.files || []]); event.target.value = ""; }} />

@@ -4912,6 +4912,14 @@ export function App() {
   // single-flight recovery trigger, so do not leave the UI permanently locked.
   const primarySettingsUnavailable =
     viewedSessionId === activeSessionId && primaryRuntime.status === "starting";
+  // An existing Secondary can keep working while Primary starts, but a Primary
+  // pane, cold history, or local New draft still needs Primary compatibility
+  // before its selected model, thinking, and image capability are authoritative.
+  const primaryCapabilityPending =
+    primaryRuntime.status === "starting" &&
+    (localDraft ||
+      viewedSessionId === activeSessionId ||
+      runtimeStatus !== "active");
   const primarySessionFailed = false;
   const gateAvailable = gateAvailableOverride ?? true;
   // A staged value can describe the next prompt in a cold history pane, but
@@ -5301,7 +5309,11 @@ export function App() {
                       : runtimeStatus === "view-only"
                         ? "当前为历史查看；发送时会自动准备 Pi"
                         : undefined,
+          placeholder: primaryCapabilityPending
+            ? "Pi 正在准备；可继续编辑，发送会等待 Runtime 就绪。模型、思考强度和图片能力将在就绪后确认"
+            : undefined,
           acceptsImages: state.model?.input?.includes("image") === true,
+          imageInputPending: primaryCapabilityPending,
           commands,
           controls: composerControls,
           notices: composerNotices,
