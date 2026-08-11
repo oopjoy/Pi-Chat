@@ -14,6 +14,7 @@ import type { SessionSummary } from "../src/shared/types";
 
 class FakeRpc {
   readonly commands: Record<string, unknown>[] = [];
+  readonly requestTimeouts: Array<{ type: unknown; timeoutMs: number | undefined }> = [];
   private listeners = new Set<(event: Record<string, unknown>) => void>();
   /** Captures callbacks once registered so a test can model an already-buffered old-child frame after unsubscribe. */
   private readonly historicalListeners = new Set<(event: Record<string, unknown>) => void>();
@@ -47,8 +48,9 @@ class FakeRpc {
   }
   sendRaw(command: Record<string, unknown>) { this.commands.push(command); }
   crash() { this.alive = false; this.emit({ type: "pi_chat_process_error", error: "worker crashed" }); }
-  async send(command: Record<string, unknown>) {
+  async send(command: Record<string, unknown>, timeoutMs?: number) {
     this.commands.push(command);
+    this.requestTimeouts.push({ type: command.type, timeoutMs });
     if (command.type === "get_state") return { type: "response", success: true, data: { model: null, sessionFile: this.path, sessionId: this.sessionId, isStreaming: this.streaming } };
     if (command.type === "get_messages") return { type: "response", success: true, data: { messages: [] } };
     if (command.type === "get_available_models") return { type: "response", success: true, data: { models: [{ provider: "test", id: "next", name: "Next", reasoning: true }] } };
@@ -534,25 +536,48 @@ test("closing the last window waits for a quiescent grace before shutting down",
   }
 });
 
-test("a same-window refresh during grace cancels last-window auto shutdown", async () => {
+test("a reload handshake during grace cancels last-window auto shutdown", async () => {
   const primary = new FakeRpc("C:\\sessions\\refresh.jsonl", "primary");
   const shutdownReasons: string[] = [];
   const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), lastWindowShutdownGraceMs: 30, lastWindowShutdownPollMs: 5, applicationShutdown: (reason) => { shutdownReasons.push(reason); } });
   const client = "11111111-1111-4111-8111-111111111111";
-  const internals = app as unknown as { connectedClients: Map<string, number>; clientConnected(clientId: string): void; clientDisconnected(clientId: string): void };
+  const oldPage = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const newPage = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const internals = app as unknown as {
+    connectedClients: Map<string, number>;
+    connectedPageClients: Map<string, string>;
+    clientConnected(clientId: string, pageId?: string): void;
+    clientDisconnected(clientId: string): void;
+  };
   internals.connectedClients.set(client, 1);
+  internals.connectedPageClients.set(oldPage, client);
   const server = createServer((request, response) => void app.handle(request, response));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   assert.ok(address && typeof address === "object");
   try {
-    await fetch(`http://127.0.0.1:${address.port}/api/window/close`, { method: "POST", headers: { "x-pi-chat-client": client } });
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    internals.clientConnected(client);
+    await fetch(`http://127.0.0.1:${address.port}/api/window/close?page=${oldPage}`, { method: "POST", headers: { "x-pi-chat-client": client } });
+    // The closing renderer's SSE disconnect removes its one real transport
+    // lease before the replacement has reached EventSource.
     internals.clientDisconnected(client);
+    assert.equal(internals.connectedClients.has(client), false);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const handshake = await fetch(`http://127.0.0.1:${address.port}/api/bootstrap/handshake`, {
+      headers: { "x-pi-chat-client": client, "x-pi-chat-page": newPage },
+    });
+    assert.equal(handshake.status, 200);
+    assert.equal(
+      internals.connectedClients.has(client),
+      false,
+      "a handshake registers the page but must not leak an SSE transport lease",
+    );
+    internals.clientConnected(client, newPage);
+    assert.equal(internals.connectedClients.get(client), 1);
+    internals.clientDisconnected(client);
+    assert.equal(internals.connectedClients.has(client), false);
     await new Promise((resolve) => setTimeout(resolve, 45));
     assert.deepEqual(shutdownReasons, []);
-    assert.equal(internals.connectedClients.get(client), 1);
+    assert.equal(internals.connectedPageClients.get(newPage), client);
   } finally {
     server.close();
     await app.close();
@@ -2158,6 +2183,13 @@ test("Primary and Secondary settlement dispatch every queued follow-up", async (
       await prompt(id, `${prefix}-B`);
       await prompt(id, `${prefix}-C`);
       await settle(rpc);
+      assert.ok(
+        rpc.requestTimeouts.some(
+          ({ type, timeoutMs }) =>
+            type === "get_state" && timeoutMs === 60_000,
+        ),
+        "the post-settlement FIFO barrier must tolerate a slow fully configured Runtime",
+      );
       assert.deepEqual(rpc.commands.filter((command) => command.type === "prompt").map((command) => command.message), [`${prefix}-A`, `${prefix}-B`]);
       await settle(rpc);
       assert.deepEqual(rpc.commands.filter((command) => command.type === "prompt").map((command) => command.message), [`${prefix}-A`, `${prefix}-B`, `${prefix}-C`]);

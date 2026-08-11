@@ -131,6 +131,9 @@ const DEFAULT_SECONDARY_RUNTIME_SWEEP_MS = 60 * 1_000;
 const DEFAULT_GATE_REQUEST_TIMEOUT_MS = 10 * 60 * 1_000;
 const DEFAULT_LAST_WINDOW_SHUTDOWN_GRACE_MS = 10_000;
 const DEFAULT_LAST_WINDOW_SHUTDOWN_POLL_MS = 500;
+// `agent_settled` is followed by a FIFO state barrier. Like cold startup, a
+// fully configured Pi Runtime can take longer than a few seconds to answer it.
+const SETTLEMENT_STATE_TIMEOUT_MS = 60_000;
 // Pi may emit agent_settled before the new JSONL user record is visible to a
 // concurrent reader. Keep the draft's provisional sidebar summary only across
 // this small bounded visibility window.
@@ -821,9 +824,16 @@ export class PiChatApp {
     this.sessionControl.requireControl(sessionId, clientId);
   }
 
-  private clientConnected(clientId: string, pageId = ""): void {
-    if (pageId) this.connectedPageClients.set(pageId, clientId);
+  /** Register a browser page before SSE, without creating a transport lease. */
+  private registerWindowPage(clientId: string, pageId: string): void {
+    if (!clientId || !pageId) return;
+    this.connectedPageClients.set(pageId, clientId);
     this.cancelLastWindowShutdown();
+  }
+
+  private clientConnected(clientId: string, pageId = ""): void {
+    if (pageId) this.registerWindowPage(clientId, pageId);
+    else this.cancelLastWindowShutdown();
     this.sessionControl.clientConnected(clientId);
   }
 
@@ -1222,7 +1232,10 @@ export class PiChatApp {
   ): Promise<void> {
     try {
       const state = asState(
-        await runtime.rpc.send({ type: "get_state" }, 3_000),
+        await runtime.rpc.send(
+          { type: "get_state" },
+          SETTLEMENT_STATE_TIMEOUT_MS,
+        ),
       );
       if (
         this.runtimePool.get(runtime.id) !== runtime ||
@@ -1262,7 +1275,10 @@ export class PiChatApp {
   ): Promise<void> {
     try {
       const state = asState(
-        await this.options.rpc.send({ type: "get_state" }, 3_000),
+        await this.options.rpc.send(
+          { type: "get_state" },
+          SETTLEMENT_STATE_TIMEOUT_MS,
+        ),
       );
       if (
         sessionId !== this.primaryBoundSessionId ||
@@ -3090,6 +3106,8 @@ export class PiChatApp {
           openWindowCount: () => this.openWindowCount(),
           cancelLastWindowShutdown: () => this.cancelLastWindowShutdown(),
           scheduleLastWindowShutdown: () => this.scheduleLastWindowShutdown(),
+          registerWindowPage: (id, pageId) =>
+            this.registerWindowPage(id, pageId),
           bootstrap: (id) => this.bootstrap(id),
         },
         request,

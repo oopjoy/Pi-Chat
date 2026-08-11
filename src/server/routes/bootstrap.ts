@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { ApplicationLifecycle, BootstrapData, BuildIdentity, HealthData } from "../../shared/types.js";
-import { json, methodNotAllowed } from "../http-transport.js";
+import { json, methodNotAllowed, requestPageId } from "../http-transport.js";
 
 export type BootstrapRouteHost = {
   lifecycle(): ApplicationLifecycle;
@@ -10,6 +10,7 @@ export type BootstrapRouteHost = {
   openWindowCount(): number;
   cancelLastWindowShutdown(): void;
   scheduleLastWindowShutdown(): void;
+  registerWindowPage(clientId: string, pageId: string): void;
   bootstrap(clientId: string): Promise<BootstrapData>;
 };
 
@@ -39,6 +40,11 @@ export async function handleBootstrapRoute(
       methodNotAllowed(response);
       return true;
     }
+    // A reload's old renderer can send its unload beacon before the replacement
+    // page reaches EventSource. Register this page at its first authenticated
+    // browser request so the last-window grace cannot stop the service mid-F5.
+    const pageId = requestPageId(request);
+    if (clientId && pageId) host.registerWindowPage(clientId, pageId);
     json(response, 200, {
       requestToken: host.requestToken(),
       buildIdentity: host.buildIdentity(),
