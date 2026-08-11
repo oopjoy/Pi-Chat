@@ -80,6 +80,27 @@ test("a coalesced read caller keeps its own shorter timeout budget", async () =>
   await client.stop();
 });
 
+test("an independent read is queued after, not coalesced with, a short read", async () => {
+  const { child, writes } = fakeChild();
+  const client = new PiRpcClient({ cwd: process.cwd() });
+  Object.assign(client, { child });
+  const short = client.send({ type: "get_state" }, 5);
+  const barrier = client.send(
+    { type: "get_state" },
+    1_000,
+    { independentRead: true },
+  );
+  await assert.rejects(short, /请求超时/);
+  assert.equal(writes.length, 2, "the FIFO barrier must not inherit the ordinary reader's timeout");
+  const firstId = (JSON.parse(writes[0]) as { id: string }).id;
+  const barrierId = (JSON.parse(writes[1]) as { id: string }).id;
+  const internals = client as unknown as { handleLine(line: string): void };
+  internals.handleLine(JSON.stringify({ type: "response", id: firstId, success: true, data: { isStreaming: false } }));
+  internals.handleLine(JSON.stringify({ type: "response", id: barrierId, success: true, data: { isStreaming: false } }));
+  assert.equal((await barrier).data.isStreaming, false);
+  await client.stop();
+});
+
 test("timed-out read queries reject duplicates until their late response is consumed", async () => {
   const { child, writes } = fakeChild();
   const client = new PiRpcClient({ cwd: process.cwd() });

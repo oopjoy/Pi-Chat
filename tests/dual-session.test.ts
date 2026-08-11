@@ -14,7 +14,7 @@ import type { SessionSummary } from "../src/shared/types";
 
 class FakeRpc {
   readonly commands: Record<string, unknown>[] = [];
-  readonly requestTimeouts: Array<{ type: unknown; timeoutMs: number | undefined }> = [];
+  readonly requestTimeouts: Array<{ type: unknown; timeoutMs: number | undefined; independentRead: boolean }> = [];
   private listeners = new Set<(event: Record<string, unknown>) => void>();
   /** Captures callbacks once registered so a test can model an already-buffered old-child frame after unsubscribe. */
   private readonly historicalListeners = new Set<(event: Record<string, unknown>) => void>();
@@ -48,9 +48,17 @@ class FakeRpc {
   }
   sendRaw(command: Record<string, unknown>) { this.commands.push(command); }
   crash() { this.alive = false; this.emit({ type: "pi_chat_process_error", error: "worker crashed" }); }
-  async send(command: Record<string, unknown>, timeoutMs?: number) {
+  async send(
+    command: Record<string, unknown>,
+    timeoutMs?: number,
+    options?: { independentRead?: boolean },
+  ) {
     this.commands.push(command);
-    this.requestTimeouts.push({ type: command.type, timeoutMs });
+    this.requestTimeouts.push({
+      type: command.type,
+      timeoutMs,
+      independentRead: options?.independentRead === true,
+    });
     if (command.type === "get_state") return { type: "response", success: true, data: { model: null, sessionFile: this.path, sessionId: this.sessionId, isStreaming: this.streaming } };
     if (command.type === "get_messages") return { type: "response", success: true, data: { messages: [] } };
     if (command.type === "get_available_models") return { type: "response", success: true, data: { models: [{ provider: "test", id: "next", name: "Next", reasoning: true }] } };
@@ -539,13 +547,14 @@ test("closing the last window waits for a quiescent grace before shutting down",
 test("a reload handshake during grace cancels last-window auto shutdown", async () => {
   const primary = new FakeRpc("C:\\sessions\\refresh.jsonl", "primary");
   const shutdownReasons: string[] = [];
-  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), lastWindowShutdownGraceMs: 30, lastWindowShutdownPollMs: 5, applicationShutdown: (reason) => { shutdownReasons.push(reason); } });
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), handshakePageTimeoutMs: 15, lastWindowShutdownGraceMs: 30, lastWindowShutdownPollMs: 5, applicationShutdown: (reason) => { shutdownReasons.push(reason); } });
   const client = "11111111-1111-4111-8111-111111111111";
   const oldPage = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const newPage = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
   const internals = app as unknown as {
     connectedClients: Map<string, number>;
     connectedPageClients: Map<string, string>;
+    pendingWindowPageTimers: Map<string, NodeJS.Timeout>;
     clientConnected(clientId: string, pageId?: string): void;
     clientDisconnected(clientId: string): void;
   };
@@ -572,12 +581,56 @@ test("a reload handshake during grace cancels last-window auto shutdown", async 
       "a handshake registers the page but must not leak an SSE transport lease",
     );
     internals.clientConnected(client, newPage);
+    assert.equal(internals.pendingWindowPageTimers.has(newPage), false, "SSE promotes and consumes the temporary handshake lease");
     assert.equal(internals.connectedClients.get(client), 1);
     internals.clientDisconnected(client);
     assert.equal(internals.connectedClients.has(client), false);
     await new Promise((resolve) => setTimeout(resolve, 45));
     assert.deepEqual(shutdownReasons, []);
     assert.equal(internals.connectedPageClients.get(newPage), client);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("a handshake-only page expires instead of permanently holding the last-window lease", async () => {
+  const primary = new FakeRpc("C:\\sessions\\handshake-expiry.jsonl", "primary");
+  const shutdownReasons: string[] = [];
+  const app = new PiChatApp({
+    rpc: primary as unknown as PiRpcClient,
+    sessions: {} as SessionIndex,
+    resources: {} as ResourceManager,
+    cwd: process.cwd(),
+    webRoot: process.cwd(),
+    handshakePageTimeoutMs: 15,
+    lastWindowShutdownGraceMs: 15,
+    lastWindowShutdownPollMs: 5,
+    applicationShutdown: (reason) => { shutdownReasons.push(reason); },
+  });
+  const client = "11111111-1111-4111-8111-111111111111";
+  const page = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const internals = app as unknown as {
+    connectedClients: Map<string, number>;
+    connectedPageClients: Map<string, string>;
+    pendingWindowPageTimers: Map<string, NodeJS.Timeout>;
+  };
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    const handshake = await fetch(`http://127.0.0.1:${address.port}/api/bootstrap/handshake`, {
+      headers: { "x-pi-chat-client": client, "x-pi-chat-page": page },
+    });
+    assert.equal(handshake.status, 200);
+    assert.equal(internals.connectedClients.has(client), false, "handshake is not an SSE lease");
+    assert.equal(internals.connectedPageClients.get(page), client);
+    assert.equal(internals.pendingWindowPageTimers.has(page), true);
+    await new Promise((resolve) => setTimeout(resolve, 70));
+    assert.equal(internals.connectedPageClients.has(page), false, "a crashed pre-SSE renderer must release its temporary page record");
+    assert.equal(internals.pendingWindowPageTimers.has(page), false);
+    assert.deepEqual(shutdownReasons, ["last-window-close"]);
   } finally {
     server.close();
     await app.close();
@@ -2185,10 +2238,12 @@ test("Primary and Secondary settlement dispatch every queued follow-up", async (
       await settle(rpc);
       assert.ok(
         rpc.requestTimeouts.some(
-          ({ type, timeoutMs }) =>
-            type === "get_state" && timeoutMs === 60_000,
+          ({ type, timeoutMs, independentRead }) =>
+            type === "get_state" &&
+            timeoutMs === 60_000 &&
+            independentRead,
         ),
-        "the post-settlement FIFO barrier must tolerate a slow fully configured Runtime",
+        "the post-settlement FIFO barrier must be a long independent state read",
       );
       assert.deepEqual(rpc.commands.filter((command) => command.type === "prompt").map((command) => command.message), [`${prefix}-A`, `${prefix}-B`]);
       await settle(rpc);

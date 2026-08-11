@@ -27,6 +27,15 @@ export interface PiRpcCompatibility {
   diagnostics: string[];
 }
 
+export interface RpcSendOptions {
+  /**
+   * Send a read command as its own FIFO request instead of joining a matching
+   * read. Used only by ordering barriers that cannot inherit another caller's
+   * shorter timeout budget.
+   */
+  independentRead?: boolean;
+}
+
 export interface RpcEventSource {
   /** Monotonic per-child spawn identity; stale children can never impersonate a replacement. */
   generation: number;
@@ -227,12 +236,17 @@ export class PiRpcClient {
     });
   }
 
-  async send(command: Record<string, unknown>, timeoutMs = 30_000): Promise<Record<string, unknown>> {
+  async send(
+    command: Record<string, unknown>,
+    timeoutMs = 30_000,
+    options: RpcSendOptions = {},
+  ): Promise<Record<string, unknown>> {
     const child = this.child;
     if (!child || child.exitCode !== null) throw new Error("Pi RPC 未运行");
     const type = typeof command.type === "string" ? command.type : "";
     const readOnly = Object.keys(command).length === 1 && ["get_state", "get_messages", "get_available_models", "get_commands", "get_session_stats"].includes(type);
-    if (readOnly) {
+    const sharedRead = readOnly && !options.independentRead;
+    if (sharedRead) {
       const existing = this.readQueries.get(type);
       if (existing) return this.waitForReadQuery(existing, type, timeoutMs);
       // A timed-out query is still inside Pi until its late response arrives.
@@ -240,7 +254,7 @@ export class PiRpcClient {
       if (this.outstandingReadQueryIds.has(type)) throw new Error(`Pi RPC 查询仍在处理中：${type}`);
     }
     const id = `pi-chat-${++this.requestId}`;
-    if (readOnly) this.outstandingReadQueryIds.set(type, id);
+    if (sharedRead) this.outstandingReadQueryIds.set(type, id);
     const payload = { ...command, id };
     const request = new Promise<Record<string, unknown>>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -252,11 +266,11 @@ export class PiRpcClient {
         if (!error) return;
         clearTimeout(timer);
         this.pending.delete(id);
-        if (readOnly && this.outstandingReadQueryIds.get(type) === id) this.outstandingReadQueryIds.delete(type);
+        if (sharedRead && this.outstandingReadQueryIds.get(type) === id) this.outstandingReadQueryIds.delete(type);
         reject(error);
       });
     });
-    if (readOnly) {
+    if (sharedRead) {
       this.readQueries.set(type, request);
       const clear = () => { if (this.readQueries.get(type) === request) this.readQueries.delete(type); };
       request.then(clear, clear);

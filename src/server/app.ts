@@ -131,6 +131,9 @@ const DEFAULT_SECONDARY_RUNTIME_SWEEP_MS = 60 * 1_000;
 const DEFAULT_GATE_REQUEST_TIMEOUT_MS = 10 * 60 * 1_000;
 const DEFAULT_LAST_WINDOW_SHUTDOWN_GRACE_MS = 10_000;
 const DEFAULT_LAST_WINDOW_SHUTDOWN_POLL_MS = 500;
+// A handshake is early enough to protect an F5 replacement from the old page's
+// close beacon, but it is not proof that a renderer survived to open SSE.
+const DEFAULT_HANDSHAKE_PAGE_TIMEOUT_MS = 30_000;
 // `agent_settled` is followed by a FIFO state barrier. Like cold startup, a
 // fully configured Pi Runtime can take longer than a few seconds to answer it.
 const SETTLEMENT_STATE_TIMEOUT_MS = 60_000;
@@ -216,6 +219,8 @@ export interface PiChatAppOptions {
   lastWindowShutdownGraceMs?: number;
   /** Busy-state polling interval while the last-window shutdown waits for work. */
   lastWindowShutdownPollMs?: number;
+  /** Time a handshake-only page can defer last-window shutdown before SSE confirms it. */
+  handshakePageTimeoutMs?: number;
   now?: () => number;
   allowedHosts?: string[];
   requestToken?: string;
@@ -276,11 +281,14 @@ export class PiChatApp {
   private readonly secondaryRuntimeSweepTimer: NodeJS.Timeout;
   private readonly lastWindowShutdownGraceMs: number;
   private readonly lastWindowShutdownPollMs: number;
+  private readonly handshakePageTimeoutMs: number;
   private lastWindowShutdownTimer: NodeJS.Timeout | null = null;
   private lastWindowIdleSince: number | null = null;
   private autoShutdownRunning = false;
   /** Page-instance registry is separate from client identity used for control. */
   private readonly connectedPageClients = new Map<string, string>();
+  /** Handshake pages expire unless their own EventSource promotes them. */
+  private readonly pendingWindowPageTimers = new Map<string, NodeJS.Timeout>();
   private readonly requestToken: string;
   private readonly buildIdentity: BuildIdentity;
   private allowedHosts: string[];
@@ -404,6 +412,10 @@ export class PiChatApp {
     this.lastWindowShutdownPollMs = Math.max(
       10,
       options.lastWindowShutdownPollMs ?? DEFAULT_LAST_WINDOW_SHUTDOWN_POLL_MS,
+    );
+    this.handshakePageTimeoutMs = Math.max(
+      10,
+      options.handshakePageTimeoutMs ?? DEFAULT_HANDSHAKE_PAGE_TIMEOUT_MS,
     );
     this.sessionControl = new SessionControl({
       controllerReleaseMs: options.controllerReleaseMs,
@@ -692,6 +704,8 @@ export class PiChatApp {
     // state afterwards so those callbacks cannot leave fresh release timers.
     this.sseHub.closeAll();
     this.sessionControl.clear();
+    for (const timer of this.pendingWindowPageTimers.values()) clearTimeout(timer);
+    this.pendingWindowPageTimers.clear();
     this.connectedPageClients.clear();
     this.scheduler.clearPrimary();
     for (const timer of this.pendingExtensionTimers.values())
@@ -824,16 +838,40 @@ export class PiChatApp {
     this.sessionControl.requireControl(sessionId, clientId);
   }
 
-  /** Register a browser page before SSE, without creating a transport lease. */
+  private clearPendingWindowPage(pageId: string): void {
+    const timer = this.pendingWindowPageTimers.get(pageId);
+    if (timer) clearTimeout(timer);
+    this.pendingWindowPageTimers.delete(pageId);
+  }
+
+  /**
+   * Register a browser page before SSE, without creating a transport lease.
+   * The record is deliberately temporary: a crashed renderer has no unload
+   * beacon, so only that page's EventSource may promote it to an open window.
+   */
   private registerWindowPage(clientId: string, pageId: string): void {
     if (!clientId || !pageId) return;
     this.connectedPageClients.set(pageId, clientId);
+    this.clearPendingWindowPage(pageId);
+    const timer = setTimeout(() => {
+      if (this.pendingWindowPageTimers.get(pageId) !== timer) return;
+      this.pendingWindowPageTimers.delete(pageId);
+      if (this.connectedPageClients.get(pageId) !== clientId) return;
+      this.connectedPageClients.delete(pageId);
+      if (this.openWindowCount() === 0) this.scheduleLastWindowShutdown();
+    }, this.handshakePageTimeoutMs);
+    timer.unref();
+    this.pendingWindowPageTimers.set(pageId, timer);
     this.cancelLastWindowShutdown();
   }
 
+  /** EventSource proves the page is alive; it replaces its temporary lease. */
   private clientConnected(clientId: string, pageId = ""): void {
-    if (pageId) this.registerWindowPage(clientId, pageId);
-    else this.cancelLastWindowShutdown();
+    if (pageId) {
+      this.connectedPageClients.set(pageId, clientId);
+      this.clearPendingWindowPage(pageId);
+    }
+    this.cancelLastWindowShutdown();
     this.sessionControl.clientConnected(clientId);
   }
 
@@ -930,7 +968,9 @@ export class PiChatApp {
 
   private releaseClient(clientId: string): string {
     for (const [pageId, owner] of this.connectedPageClients) {
-      if (owner === clientId) this.connectedPageClients.delete(pageId);
+      if (owner !== clientId) continue;
+      this.clearPendingWindowPage(pageId);
+      this.connectedPageClients.delete(pageId);
     }
     return this.sessionControl.releaseClient(clientId);
   }
@@ -938,6 +978,7 @@ export class PiChatApp {
   private closeWindowClient(clientId: string, pageId: string): string {
     if (!pageId || this.connectedPageClients.get(pageId) !== clientId)
       return "";
+    this.clearPendingWindowPage(pageId);
     this.connectedPageClients.delete(pageId);
     const clientStillOpen = [...this.connectedPageClients.values()].some(
       (owner) => owner === clientId,
@@ -1235,6 +1276,10 @@ export class PiChatApp {
         await runtime.rpc.send(
           { type: "get_state" },
           SETTLEMENT_STATE_TIMEOUT_MS,
+          // A short ordinary reader may already own get_state. This barrier
+          // must be a later FIFO command, not a coalesced waiter that inherits
+          // that reader's caller timeout.
+          { independentRead: true },
         ),
       );
       if (
@@ -1278,6 +1323,9 @@ export class PiChatApp {
         await this.options.rpc.send(
           { type: "get_state" },
           SETTLEMENT_STATE_TIMEOUT_MS,
+          // Preserve the post-settlement FIFO position even if a regular
+          // short-budget state read is currently in flight.
+          { independentRead: true },
         ),
       );
       if (
