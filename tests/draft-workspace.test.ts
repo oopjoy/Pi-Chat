@@ -86,7 +86,7 @@ test("a stale draft workspace picker cannot overwrite a later New draft", async 
     );
     await act(async () => newButton().click());
     assert.equal(
-      dom.window.document.querySelector(".draft-workspace code")?.textContent,
+      dom.window.document.querySelector(".draft-workspace-select .compact-select-trigger span")?.textContent,
       "C:/work",
     );
     await act(async () => {
@@ -95,7 +95,7 @@ test("a stale draft workspace picker cannot overwrite a later New draft", async 
       await Promise.resolve();
     });
     assert.equal(
-      dom.window.document.querySelector(".draft-workspace code")?.textContent,
+      dom.window.document.querySelector(".draft-workspace-select .compact-select-trigger span")?.textContent,
       "C:/work",
       "the first draft's picker result must not alter the later draft cwd",
     );
@@ -135,10 +135,10 @@ test("an independent default workspace picker completes after New without changi
       await Promise.resolve();
       await Promise.resolve();
     });
-    assert.equal(dom.window.document.querySelector(".draft-workspace code")?.textContent, "C:/work", "the already-created draft retains the default it captured");
+    assert.equal(dom.window.document.querySelector(".draft-workspace-select .compact-select-trigger span")?.textContent, "C:/work", "the already-created draft retains the default it captured");
     assert.equal(dom.window.document.querySelector(".workspace-setting-control code")?.textContent, "D:/later-default");
     await act(async () => newButton.click());
-    assert.equal(dom.window.document.querySelector(".draft-workspace code")?.textContent, "D:/later-default", "a later New inherits the committed global default");
+    assert.equal(dom.window.document.querySelector(".draft-workspace-select .compact-select-trigger span")?.textContent, "D:/later-default", "a later New inherits the committed global default");
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);
@@ -175,7 +175,7 @@ test("settings changes the default workspace only for later New drafts", async (
     const newButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
       .find((button) => button.textContent?.trim() === "New")!;
     await act(async () => newButton.click());
-    assert.equal(dom.window.document.querySelector(".draft-workspace code")?.textContent, "D:/default-workspace");
+    assert.equal(dom.window.document.querySelector(".draft-workspace-select .compact-select-trigger span")?.textContent, "D:/default-workspace");
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);
@@ -218,7 +218,7 @@ test("a running Session never disables New or the independent draft workspace pi
     assert.equal(picker.disabled, false);
     assert.ok(picker.querySelector("svg"));
     await act(async () => picker.click());
-    assert.equal(dom.window.document.querySelector(".draft-workspace code")?.textContent, "D:/selected");
+    assert.equal(dom.window.document.querySelector(".draft-workspace-select .compact-select-trigger span")?.textContent, "D:/selected");
     const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
     await act(async () => {
       Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "hello");

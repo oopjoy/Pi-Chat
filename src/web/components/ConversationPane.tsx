@@ -4,6 +4,7 @@ import { appendPendingUserMessage } from "../lib/local-user-turn";
 import { groupConversation } from "../lib/conversation-process";
 import { ChatInput } from "./ChatInput";
 import { AssistantMessageHeader, ChatMessage } from "./ChatMessage";
+import { CompactSelect } from "./CompactSelect";
 import { ConversationProcess } from "./ConversationProcess";
 import { FolderIcon, PiMarkIcon } from "./Icons";
 import { PromptQueue } from "./PromptQueue";
@@ -28,6 +29,8 @@ export interface ConversationPaneProps {
   draftWorkspaceCwd: string;
   workspaceCwd: string;
   workspacePicking: boolean;
+  draftWorkspaceOptions: string[];
+  onSelectDraftWorkspace: (cwd: string) => void;
   onPickDraftWorkspace: () => void;
   messagesTruncated: boolean;
   visibleTurnCount: number;
@@ -63,6 +66,8 @@ export function ConversationPane({
   draftWorkspaceCwd,
   workspaceCwd,
   workspacePicking,
+  draftWorkspaceOptions,
+  onSelectDraftWorkspace,
   onPickDraftWorkspace,
   messagesTruncated,
   visibleTurnCount,
@@ -142,9 +147,20 @@ export function ConversationPane({
             <p>支持流式输出、Markdown、KaTeX，以及复制原始 LaTeX 源码。</p>
             {localDraft && <div className="draft-workspace">
               <span>新对话工作路径</span>
-              <code title={draftWorkspaceCwd || workspaceCwd}>{draftWorkspaceCwd || workspaceCwd || "未设置工作路径"}</code>
-              <button type="button" disabled={workspacePicking} onClick={onPickDraftWorkspace} title="浏览新对话工作路径" aria-label="浏览新对话工作路径"><FolderIcon /></button>
-              <small>仅影响新对话；首次发送时在该路径创建 Session，左侧历史会话始终跨工作路径显示。</small>
+              <CompactSelect
+                value={draftWorkspaceCwd || workspaceCwd || ""}
+                options={draftWorkspaceOptions.map((cwd) => ({ value: cwd, label: cwd, title: cwd }))}
+                disabled={workspacePicking || draftWorkspaceOptions.length === 0}
+                ariaLabel="选择常用新对话工作路径"
+                title={draftWorkspaceOptions.length ? "点击选择历史 Session 使用过的工作路径" : "暂无历史 Session 工作路径，请使用右侧浏览按钮"}
+                align="left"
+                checkPosition="start"
+                className="draft-workspace-select"
+                fallbackLabel={draftWorkspaceCwd || workspaceCwd || "未设置工作路径"}
+                onChange={onSelectDraftWorkspace}
+              />
+              <button className="draft-workspace-picker" type="button" disabled={workspacePicking} onClick={onPickDraftWorkspace} title="浏览新对话工作路径" aria-label="浏览新对话工作路径"><FolderIcon /></button>
+              <small>点击路径可快速选择历史 Session 使用过的目录；浏览按钮可选择新目录。首次发送时才创建 Session。</small>
             </div>}
           </section>
         ) : <>

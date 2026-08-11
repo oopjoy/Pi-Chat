@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.4.3
+
+### Runtime, RPC, and settlement recovery
+
+- Primary startup now uses one 60-second `get_state` readiness request, reuses that state for compatibility validation, and recovers failed children through single-flight mutation boundaries without deleting Session history or changing user configuration.
+- Post-settlement Primary and Secondary FIFO barriers use independent 60-second reads, so an ordinary coalesced query cannot lend them a shorter timeout or allow stale RPC frames into the next turn.
+- Abort timeouts distinguish "accepted and still settling" from failure; queue, Steer, and terminal bookkeeping remain generation-scoped while slow Pi/tool shutdown completes.
+- RPC stream listeners and JSONL parsing are isolated from handler exceptions, process-level rejection/exception diagnostics are retained, and crashed Runtime recovery releases stale dispatch locks instead of permanently stranding queued prompts.
+
+### Reload, multi-session, and authority hardening
+
+- Bootstrap, SSE readiness, handshake leases, replacement processes, navigation, Session views, prompt acknowledgements, failures, and cache refreshes are guarded by process/run/navigation authority so stale A-to-B-to-A continuations cannot repaint or lock a newer pane.
+- F5 and replacement handshakes use temporary page leases that expire unless promoted by SSE, avoiding both premature last-window shutdown and leaked page ownership.
+- A default New view stays local until its first prompt, preserves its captured workspace, and does not create an empty JSONL or eager Secondary Runtime.
+- Prompt/Steer admission, recovery, queue ordering, compaction settlement, and first-token timing have expanded deterministic regression coverage.
+
+### Streaming and Composer behavior
+
+- Healthy SSE connections coalesce cumulative assistant snapshots per client and Session at the browser render cadence before JSON serialization; terminal/tool/lifecycle frames flush the newest snapshot first, reducing bursty catch-up when several conversations stream in parallel.
+- Primary-relevant Composer editing is disabled until Runtime readiness, while healthy Secondary panes remain independent. Ready drafts accept image attachments immediately and validate pending/unsupported model image capability only at submission without losing text or previews.
+- Confirmed slash-command inventories survive transient empty Runtime refreshes, and capability snapshots are scoped to the exact Primary generation and model shape.
+
+### Conversation and workspace interface
+
+- Per-reply model and thinking strength render once above the full thinking/tool process. The active turn receives stable metadata from its first frame, removes the redundant `Pi 正在工作…` placeholder, and reveals its generated time only after streaming fully settles; the copy action remains at bottom-right.
+- New-draft workspace paths have an accessible hover/focus dropdown populated from the complete Session directory inventory, ordered by recent use and deduplicated case-insensitively. Quick selection remains local until the first prompt, while the native folder browser remains available for new directories.
+- Provider hover text follows each model row, sidebar/runtime status retains concise failure reasons, and completed compaction/tool state no longer leaves stale spinners or paused follow-up prompts.
+
+### Verification and package scope
+
+- Local validation passes TypeScript checks, diff checks, and 526 source tests.
+- `pi-chat-windows-0.4.3.zip` is the runnable Windows package. GitHub-generated source archives remain development inputs and require dependency installation plus a source build.
+- Pi Chat remains loopback-only and local-first; this release does not add remote hosting, a desktop shell, or a replacement Pi agent loop.
+
 ## 0.4.2
 
 ### Startup and recovery reliability

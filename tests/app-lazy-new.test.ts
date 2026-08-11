@@ -468,7 +468,7 @@ test("a bootstrap without a restored Session opens a local New draft with the de
       "新对话",
     );
     assert.equal(
-      dom.window.document.querySelector(".draft-workspace code")?.textContent,
+      dom.window.document.querySelector(".draft-workspace-select .compact-select-trigger span")?.textContent,
       "C:/work",
     );
     assert.equal(
@@ -476,6 +476,73 @@ test("a bootstrap without a restored Session opens a local New draft with the de
       0,
       "startup must not create an empty persisted Session",
     );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a New draft can choose a recently used Session workspace from the path dropdown", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  let createdSessions = 0;
+  let pickerCalls = 0;
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      activeSessionId: "",
+      activeSessionIds: [],
+      sessions: [
+        { ...bootstrap.sessions[0], id: "11111111111111111111", active: false, cwd: "C:/work", updatedAt: 10 },
+        { ...bootstrap.sessions[0], id: "22222222222222222222", active: false, cwd: "D:/research", updatedAt: 40 },
+        { ...bootstrap.sessions[0], id: "33333333333333333333", active: false, cwd: "d:\\RESEARCH\\", updatedAt: 20 },
+      ],
+      sessionDirectories: [
+        { cwd: "E:/archived", count: 8, lastUserPromptAt: 60 },
+        { cwd: "D:/research", count: 2, lastUserPromptAt: 40 },
+        { cwd: "C:/work", count: 1, lastUserPromptAt: 10 },
+      ],
+    }),
+    eventsUrl: () => "/api/events",
+    newSession: async () => {
+      createdSessions += 1;
+      return draftView;
+    },
+    pickDraftWorkspace: async () => {
+      pickerCalls += 1;
+      return { cancelled: true };
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const trigger = dom.window.document.querySelector<HTMLButtonElement>(
+      ".draft-workspace-select .compact-select-trigger",
+    )!;
+    assert.equal(trigger.disabled, false);
+    assert.equal(trigger.getAttribute("aria-expanded"), "false");
+    await act(async () => trigger.click());
+    assert.equal(trigger.getAttribute("aria-expanded"), "true");
+    const options = [
+      ...dom.window.document.querySelectorAll<HTMLElement>(
+        ".draft-workspace-select .compact-select-option",
+      ),
+    ];
+    assert.deepEqual(
+      options.map((option) => option.textContent?.trim()),
+      ["E:/archived", "D:/research", "C:/work"],
+      "complete directory inventory is ordered and case-insensitive duplicates collapse",
+    );
+    await act(async () => options[1].click());
+    assert.equal(
+      trigger.querySelector("span")?.textContent,
+      "D:/research",
+    );
+    assert.equal(createdSessions, 0, "quick selection remains a local draft mutation");
+    assert.equal(pickerCalls, 0, "quick selection does not open the native folder picker");
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);
@@ -502,7 +569,7 @@ test("a workspace SSE updates the default only for a later New draft", async () 
     ].find((button) => button.textContent?.trim() === "New")!;
     await act(async () => newButton.click());
     assert.equal(
-      dom.window.document.querySelector(".draft-workspace code")?.textContent,
+      dom.window.document.querySelector(".draft-workspace-select .compact-select-trigger span")?.textContent,
       "C:/work",
     );
     const source = FakeEventSource.instances.at(-1)!;
@@ -515,13 +582,13 @@ test("a workspace SSE updates the default only for a later New draft", async () 
       }),
     );
     assert.equal(
-      dom.window.document.querySelector(".draft-workspace code")?.textContent,
+      dom.window.document.querySelector(".draft-workspace-select .compact-select-trigger span")?.textContent,
       "C:/work",
       "an existing draft retains its captured cwd",
     );
     await act(async () => newButton.click());
     assert.equal(
-      dom.window.document.querySelector(".draft-workspace code")?.textContent,
+      dom.window.document.querySelector(".draft-workspace-select .compact-select-trigger span")?.textContent,
       "D:/shared-default",
     );
   } finally {
@@ -585,7 +652,7 @@ test("a stale bootstrap cannot undo a newer workspace SSE default", async () => 
     ].find((button) => button.textContent?.trim() === "New")!;
     await act(async () => newButton.click());
     assert.equal(
-      dom.window.document.querySelector(".draft-workspace code")?.textContent,
+      dom.window.document.querySelector(".draft-workspace-select .compact-select-trigger span")?.textContent,
       "D:/newer-default",
     );
   } finally {
@@ -815,7 +882,7 @@ test("a replacement process workspace epoch accepts its fresh default after an o
     ].find((button) => button.textContent?.trim() === "New")!;
     await act(async () => newButton.click());
     assert.equal(
-      dom.window.document.querySelector(".draft-workspace code")?.textContent,
+      dom.window.document.querySelector(".draft-workspace-select .compact-select-trigger span")?.textContent,
       "D:/replacement-default",
     );
   } finally {
@@ -1081,7 +1148,7 @@ test("a replacement maintenance ready detaches an old bootstrap before its later
     ].find((button) => button.textContent?.trim() === "New")!;
     await act(async () => newBeforeIdle.click());
     assert.notEqual(
-      dom.window.document.querySelector(".draft-workspace code")?.textContent,
+      dom.window.document.querySelector(".draft-workspace-select .compact-select-trigger span")?.textContent,
       "E:/stale-before-idle",
       "an old bootstrap resolving during maintenance cannot commit its metadata",
     );
@@ -1107,7 +1174,7 @@ test("a replacement maintenance ready detaches an old bootstrap before its later
     ].find((button) => button.textContent?.trim() === "New")!;
     await act(async () => newButton.click());
     assert.equal(
-      dom.window.document.querySelector(".draft-workspace code")?.textContent,
+      dom.window.document.querySelector(".draft-workspace-select .compact-select-trigger span")?.textContent,
       "D:/replacement-default",
     );
   } finally {
@@ -1953,7 +2020,7 @@ test("a replacement ready starts a new bootstrap instead of joining an old pendi
       "replacement ready must issue a bootstrap to the new service",
     );
     assert.equal(
-      dom.window.document.querySelector(".draft-workspace code"),
+      dom.window.document.querySelector(".draft-workspace-select .compact-select-trigger span"),
       null,
     );
     const newButton = [
@@ -1961,7 +2028,7 @@ test("a replacement ready starts a new bootstrap instead of joining an old pendi
     ].find((button) => button.textContent?.trim() === "New")!;
     await act(async () => newButton.click());
     assert.equal(
-      dom.window.document.querySelector(".draft-workspace code")?.textContent,
+      dom.window.document.querySelector(".draft-workspace-select .compact-select-trigger span")?.textContent,
       "D:/replacement-default",
     );
     await act(async () => {
@@ -1974,7 +2041,7 @@ test("a replacement ready starts a new bootstrap instead of joining an old pendi
       await Promise.resolve();
     });
     assert.equal(
-      dom.window.document.querySelector(".draft-workspace code")?.textContent,
+      dom.window.document.querySelector(".draft-workspace-select .compact-select-trigger span")?.textContent,
       "D:/replacement-default",
       "the old bootstrap cannot overwrite the replacement epoch",
     );
@@ -2086,7 +2153,7 @@ test("a stale old bootstrap cannot suppress replacement-ready recovery after its
     ].find((button) => button.textContent?.trim() === "New")!;
     await act(async () => newButton.click());
     assert.equal(
-      dom.window.document.querySelector(".draft-workspace code")?.textContent,
+      dom.window.document.querySelector(".draft-workspace-select .compact-select-trigger span")?.textContent,
       "D:/replacement-default",
     );
     await act(async () =>

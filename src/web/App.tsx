@@ -54,6 +54,7 @@ import {
   activeSessionIdsFromEvent,
   applyActiveSessionIds,
 } from "./lib/active-sessions";
+import { recentSessionWorkspaces } from "./lib/session-workspaces";
 import { adjacentUserMessageOffset } from "./lib/conversation-navigation";
 import { extensionExecutionNotice } from "./lib/extension-notice";
 import {
@@ -4743,6 +4744,18 @@ export function App() {
     }
   };
 
+  const selectDraftWorkspace = (cwd: string) => {
+    const selected = cwd.trim();
+    if (workspacePicking || !localDraftRef.current || !selected) return;
+    const authority = captureDraftPaneAuthority();
+    setError("");
+    commitDraftIfCurrent(authority, {
+      type: "DRAFT_WORKSPACE_SELECTED",
+      cwd: selected,
+    });
+    setNotice(`新对话将使用工作目录：${selected}`);
+  };
+
   const pickDraftWorkspace = async () => {
     if (workspacePicking || !localDraftRef.current) return;
     const authority = captureDraftPaneAuthority();
@@ -5370,6 +5383,14 @@ export function App() {
     : undefined;
   const conversationWorkspace =
     loadingSession?.cwd || viewedSession?.cwd || workspaceCwd;
+  const draftWorkspaceOptions = recentSessionWorkspaces([
+    ...sessionDirectories.map((directory) => ({
+      cwd: directory.cwd,
+      updatedAt: directory.lastUserPromptAt,
+      lastUserPromptAt: directory.lastUserPromptAt,
+    })),
+    ...sessions,
+  ]);
   const displayedConversationName = paneLoading?.name || conversationName;
   // Gate is a verified Pi Chat system component, not an optional entry in
   // Pi's transient command inventory. A cold/starting Runtime may legitimately
@@ -5746,6 +5767,8 @@ export function App() {
         draftWorkspaceCwd={draftWorkspaceCwd}
         workspaceCwd={workspaceCwd}
         workspacePicking={workspacePicking}
+        draftWorkspaceOptions={draftWorkspaceOptions}
+        onSelectDraftWorkspace={selectDraftWorkspace}
         onPickDraftWorkspace={() => void pickDraftWorkspace()}
         messagesTruncated={messagesTruncated}
         visibleTurnCount={visibleTurnCount}
