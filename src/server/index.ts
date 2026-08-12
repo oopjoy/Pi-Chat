@@ -85,14 +85,9 @@ if (gateComponent.status === "conflict" || gateComponent.status === "source-miss
 const rpc = new PiRpcClient({ cwd: options.cwd });
 
 // Session/JSONL browsing starts independently. This controller is the sole
-// owner of Primary start/restart plus compatibility verification.
+// owner of Primary start/restart plus compatibility verification. Its App-side
+// adoption barrier is installed below before start() can publish ready.
 const primaryRuntime = new PrimaryRuntimeReadinessController(rpc);
-console.log("[Pi Chat] 正在准备 Pi Runtime…");
-const primaryStartup = primaryRuntime.start();
-void primaryStartup.then(() => console.log("[Pi Chat] Pi Runtime 已就绪。")).catch((cause) => {
-  const error = cause instanceof Error ? cause : new Error(String(cause));
-  console.error(`[Pi Chat] Pi Runtime 暂不可用：${error.message}`);
-});
 
 let vite: Awaited<ReturnType<typeof import("vite")["createServer"]>> | undefined;
 if (options.dev) {
@@ -161,6 +156,13 @@ const app = new PiChatApp({
   primaryRuntime,
   buildIdentity,
 });
+console.log("[Pi Chat] 正在准备 Pi Runtime…");
+const primaryStartup = primaryRuntime.start();
+void primaryStartup.then(() => console.log("[Pi Chat] Pi Runtime 已就绪。")).catch((cause) => {
+  const error = cause instanceof Error ? cause : new Error(String(cause));
+  console.error(`[Pi Chat] Pi Runtime 暂不可用：${error.message}`);
+});
+
 const server = createHttpServer((request, response) => void app.handle(request, response));
 
 await new Promise<void>((resolveListen, reject) => {

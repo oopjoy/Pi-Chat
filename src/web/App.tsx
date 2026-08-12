@@ -241,7 +241,10 @@ function newerPrimaryReadiness(
   if (incoming.generation < current.generation) return current;
   if (incoming.status === "starting" && current.status !== "starting")
     return current;
-  return incoming;
+  // SSE/legacy snapshots may omit adopted model/session fields. Equal-generation
+  // frames refine one readiness record; they must never erase capability proof
+  // that came from the controller's atomic adoption.
+  return { ...current, ...incoming };
 }
 
 /** A capability snapshot is usable only for this exact selected-model shape. */
@@ -2087,20 +2090,17 @@ export function App() {
         runEpochRef.current = readyRunEpoch;
       }
       // Bootstrap can legitimately return while Primary is `starting`; the
-      // browser opens SSE only after that first paint. If Primary reaches ready
-      // in between, its status broadcast has no client to receive it. The ready
-      // frame is therefore also a capability snapshot, not merely lifecycle.
+      // browser opens SSE only after that first paint. The initial ready frame
+      // therefore carries the exact state/capability already adopted by App —
+      // it is never a signal to issue another bootstrap/get_state.
       const readyPrimary = ready.primaryRuntime as
         Partial<PrimaryRuntimeReadiness> | undefined;
-      const readyCarriesNewPrimaryCapability =
+      const readyNeedsMetadataRefresh =
         readyPrimary?.status === "ready" &&
         typeof readyPrimary.generation === "number" &&
-        primaryRuntimeRef.current.status !== "ready" &&
-        // A Bootstrap that already committed this model shape makes the
-        // ordinary initial SSE ready a no-op.
-        !primaryCapabilitySnapshotRef.current?.modelKeys.includes(
-          modelCapabilityKey(paneModelRef.current),
-        );
+        !readyPrimary.model &&
+        (primaryRuntimeRef.current.status !== "ready" ||
+          primaryRuntimeRef.current.generation !== readyPrimary.generation);
       if (
         readyPrimary &&
         (readyPrimary.status === "starting" ||
@@ -2111,24 +2111,41 @@ export function App() {
         const incoming = readyPrimary as PrimaryRuntimeReadiness;
         const next = newerPrimaryReadiness(primaryRuntimeRef.current, incoming);
         primaryRuntimeRef.current = next;
-        // No preceding starting/failed frame means this is the ordinary initial
-        // ready snapshot. Preserve its already-committed model catalogue while
-        // rebinding it to the server's compatible readiness generation.
-        if (
-          incoming.status === "ready" &&
-          next === incoming &&
-          primaryCapabilitySnapshotRef.current?.modelKeys.includes(
-            modelCapabilityKey(paneModelRef.current),
-          )
-        ) {
+        setPrimaryRuntime(next);
+        const acceptedReady =
+          next.status === "ready" &&
+          next.generation === incoming.generation &&
+          incoming.status === "ready";
+        if (acceptedReady && next.model) {
+          const target = localDraftRef.current
+            ? { kind: "draft" as const }
+            : next.sessionId
+              ? { kind: "session" as const, sessionId: next.sessionId }
+              : { kind: "draft" as const };
+          const preferenceKey = localDraftRef.current
+            ? DRAFT_PREFS_KEY
+            : next.sessionId || "";
+          const staged = preferenceKey
+            ? pendingSessionPrefsRef.current.get(preferenceKey)
+            : undefined;
+          const selectedModel =
+            staged?.model !== undefined ? staged.model : next.model;
           const snapshot = {
-            ...primaryCapabilitySnapshotRef.current,
-            generation: incoming.generation,
+            generation: next.generation,
+            modelKeys: [modelCapabilityKey(next.model)].filter(Boolean),
           };
           primaryCapabilitySnapshotRef.current = snapshot;
           setPrimaryCapabilitySnapshot(snapshot);
+          dispatchPane({
+            type: "PREFERENCES_STAGED",
+            target,
+            model: selectedModel,
+            thinkingLevel:
+              staged?.thinkingLevel !== undefined
+                ? staged.thinkingLevel
+                : next.thinkingLevel,
+          });
         }
-        setPrimaryRuntime(next);
       }
       if (lifecycleFromEvent(ready) === "restarting") {
         applicationLifecycleRef.current = "restarting";
@@ -2161,10 +2178,10 @@ export function App() {
         }
         return;
       }
-      // The initial ready frame can be the only notification that Primary
-      // finished between Bootstrap and EventSource. Fetch its ModelInfo.input
-      // snapshot before lifting the composer capability-pending state.
-      startIdleRecovery(serverEpochChanged, readyCarriesNewPrimaryCapability);
+      // Readiness already includes the adopted selected-model capability. A
+      // lightweight metadata refresh can still discover commands/stats/models;
+      // the server reuses its adopted state and does not issue another get_state.
+      startIdleRecovery(serverEpochChanged, readyNeedsMetadataRefresh);
     },
     [cancelPendingNavigation, clearStoppingForSession, startIdleRecovery],
   );
@@ -2601,16 +2618,42 @@ export function App() {
           if (acceptedTransition) {
             primaryRuntimeRef.current = next;
             // A new startup or failure invalidates the preceding generation's
-            // ModelInfo.input assertion before a later ready refresh can paint.
+            // ModelInfo.input assertion before a later ready can paint.
             if (next.status !== "ready") {
               primaryCapabilitySnapshotRef.current = null;
               setPrimaryCapabilitySnapshot(null);
             }
             setPrimaryRuntime(next);
+            // Ready is now an adopted state/capability snapshot, not a request
+            // to issue another bootstrap/get_state. Update only the exact
+            // visible Primary pane or local draft; cold/Secondary panes keep
+            // their independent Session state.
+            if (next.status === "ready" && next.model) {
+              const target = localDraftRef.current
+                ? { kind: "draft" as const }
+                : next.sessionId
+                  ? { kind: "session" as const, sessionId: next.sessionId }
+                  : { kind: "draft" as const };
+              const preferenceKey = localDraftRef.current
+                ? DRAFT_PREFS_KEY
+                : next.sessionId || "";
+              const staged = preferenceKey
+                ? pendingSessionPrefsRef.current.get(preferenceKey)
+                : undefined;
+              dispatchPane({
+                type: "PREFERENCES_STAGED",
+                target,
+                model: staged?.model !== undefined ? staged.model : next.model,
+                thinkingLevel:
+                  staged?.thinkingLevel !== undefined
+                    ? staged.thinkingLevel
+                    : next.thinkingLevel,
+              });
+            }
           }
-          // Capability metadata becomes available after the Session-first shell
-          // is already usable. Refresh it in the background without replacing a
-          // selected cold pane (refresh keeps desired/viewed guards).
+          // Commands, stats, and the complete model catalogue remain Bootstrap
+          // metadata. This refresh is safe after atomic adoption because the
+          // server no longer sends a second get_state for an adopted child.
           if (incoming.status === "ready")
             void refresh().catch(reportBackgroundRefreshError);
         }
@@ -5416,23 +5459,42 @@ export function App() {
     localDraft ||
     viewedSessionId === activeSessionId ||
     runtimeStatus !== "active";
+  const stagedPrimaryPreference = pendingSessionPrefsRef.current.get(
+    localDraft
+      ? DRAFT_PREFS_KEY
+      : primaryRuntime.sessionId || viewedSessionId,
+  );
+  const selectedPrimaryModel =
+    stagedPrimaryPreference?.model !== undefined
+      ? stagedPrimaryPreference.model
+      : state.model;
   const primaryCapabilityConfirmed =
     primaryRuntime.status === "ready" &&
-    primaryCapabilitySnapshot?.generation === primaryRuntime.generation &&
-    primaryCapabilitySnapshot.modelKeys.includes(modelCapabilityKey(state.model));
+    ((Object.prototype.hasOwnProperty.call(primaryRuntime, "model") &&
+      modelCapabilityKey(primaryRuntime.model) ===
+        modelCapabilityKey(selectedPrimaryModel)) ||
+      (primaryCapabilitySnapshot?.generation === primaryRuntime.generation &&
+        primaryCapabilitySnapshot.modelKeys.includes(
+          modelCapabilityKey(selectedPrimaryModel),
+        )));
   const primaryRuntimeUnavailable =
-    primaryCapabilityRelevant && primaryRuntime.status !== "ready";
+    primaryCapabilityRelevant &&
+    (primaryRuntime.status !== "ready" || !primaryCapabilityConfirmed);
   const primaryCapabilityPending =
-    primaryCapabilityRelevant && !primaryCapabilityConfirmed;
+    primaryCapabilityRelevant &&
+    primaryRuntime.status === "ready" &&
+    !primaryCapabilityConfirmed;
   const primaryRuntimeDisabledPlaceholder =
     primaryRuntime.status === "failed"
       ? "Pi Runtime 当前不可用；恢复 ready 后才能输入"
-      : "Pi 正在准备；Runtime ready 后才能输入";
+      : primaryRuntime.status === "ready"
+        ? "Pi Runtime 正在完成状态同步；完成后才能输入"
+        : "Pi 正在准备；Runtime ready 后才能输入";
   const imageInputPendingMessage =
     primaryRuntime.status === "failed"
       ? "Pi 当前不可用，模型图片能力尚未确认"
       : primaryRuntime.status === "ready"
-        ? "Pi 正在同步，模型图片能力尚未确认"
+        ? "Pi Runtime 已就绪，正在确认模型图片能力"
         : "Pi 正在准备，模型图片能力尚未确认";
   const primarySessionFailed = false;
   const gateAvailable = gateAvailableOverride ?? true;

@@ -1,5 +1,5 @@
-import type { PrimaryRuntimeReadiness } from "../shared/types.js";
-import type { PiRpcClient } from "./rpc-client.js";
+import type { PiState, PrimaryRuntimeReadiness } from "../shared/types.js";
+import { RpcRequestTimeoutError, rpcData, type PiRpcClient } from "./rpc-client.js";
 
 export class PrimaryRuntimeUnavailableError extends Error {
   constructor(readonly readiness: PrimaryRuntimeReadiness) {
@@ -10,10 +10,28 @@ export class PrimaryRuntimeUnavailableError extends Error {
   }
 }
 
+export interface PrimaryRuntimeAdoptionContext {
+  generation: number;
+  restart: boolean;
+  sessionFile?: string;
+  cwd?: string;
+}
+
+export type PrimaryRuntimeAdopter = (
+  response: Record<string, unknown>,
+  context: PrimaryRuntimeAdoptionContext,
+) => void | Promise<void>;
+
 export interface PrimaryRuntimeReadinessBridge {
   snapshot(): PrimaryRuntimeReadiness;
   waitUntilReady(): Promise<void>;
   recover(sessionFile?: string, cwd?: string): Promise<void>;
+  /**
+   * Install the host-side adoption barrier. A controller that supports this
+   * never publishes ready until the App has bound the child generation,
+   * Session identity, state, Gate mode, and selected-model capability.
+   */
+  setAdopter?(adopter: PrimaryRuntimeAdopter): void;
   /** Propagate an unexpected live child failure into the readiness projection. */
   markFailed(error: unknown): void;
   subscribe(listener: (readiness: PrimaryRuntimeReadiness) => void): () => void;
@@ -26,9 +44,15 @@ export interface PrimaryRuntimeReadinessBridge {
 export class PrimaryRuntimeReadinessController implements PrimaryRuntimeReadinessBridge {
   private readiness: PrimaryRuntimeReadiness = { status: "starting", generation: 0 };
   private operation: Promise<void> | null = null;
+  private adopter: PrimaryRuntimeAdopter | null = null;
   private readonly listeners = new Set<(readiness: PrimaryRuntimeReadiness) => void>();
 
   constructor(private readonly rpc: Pick<PiRpcClient, "start" | "restart" | "stop" | "probeCompatibility">) {}
+
+  setAdopter(adopter: PrimaryRuntimeAdopter): void {
+    if (this.operation) throw new Error("Primary Runtime 启动期间不能更换采用器");
+    this.adopter = adopter;
+  }
 
   snapshot(): PrimaryRuntimeReadiness { return this.readiness; }
 
@@ -68,25 +92,59 @@ export class PrimaryRuntimeReadinessController implements PrimaryRuntimeReadines
     const generation = this.readiness.generation + 1;
     this.publish({ status: "starting", generation });
     const operation = (async () => {
-      try {
-        const initialState = restart
-          ? await this.rpc.restart(sessionFile, cwd)
-          : await this.rpc.start();
-        // PiRpcClient.start()/restart() already perform and return the
-        // readiness get_state probe. Reuse it so Primary does not immediately
-        // enqueue a second identical query. Legacy test/embedding doubles may
-        // return void, in which case probeCompatibility performs the fallback.
-        const compatibility = await this.rpc.probeCompatibility(initialState || undefined);
-        if (!compatibility.compatible) {
+      let lastCause: unknown;
+      // Pi RPC has no request cancellation. Retrying get_state inside one child
+      // would only queue behind the stuck command, so the sole safe transient
+      // retry boundary is the entire process. One replacement is enough to
+      // escape an intermittent extension/startup deadlock without creating an
+      // unbounded respawn loop for deterministic configuration failures.
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          const initialState = restart || attempt > 0
+            ? await this.rpc.restart(sessionFile, cwd)
+            : await this.rpc.start();
+          // PiRpcClient.start()/restart() already perform and return the
+          // readiness get_state probe. Reuse it so Primary does not immediately
+          // enqueue a second identical query. Legacy test/embedding doubles may
+          // return void, in which case probeCompatibility performs the fallback.
+          const compatibility = await this.rpc.probeCompatibility(initialState || undefined);
+          if (!compatibility.compatible)
+            throw new Error(`当前 Pi RPC 协议不兼容 Pi Chat：${compatibility.diagnostics.join("；")}`);
+          // This is the atomic ownership handoff. Keep readiness at `starting`
+          // until the host has consumed the exact startup response and completed
+          // every invariant required for browser mutations.
+          if (initialState && this.adopter)
+            await this.adopter(initialState, {
+              generation,
+              restart: restart || attempt > 0,
+              sessionFile,
+              cwd,
+            });
+          const state = initialState ? rpcData<PiState>(initialState) : undefined;
+          this.publish({
+            status: "ready",
+            generation,
+            ...(state?.model !== undefined ? { model: state.model } : null),
+            ...(state?.thinkingLevel !== undefined
+              ? { thinkingLevel: state.thinkingLevel }
+              : null),
+            ...(state?.sessionId ? { sessionId: state.sessionId } : null),
+          });
+          return;
+        } catch (cause) {
+          lastCause = cause;
           await this.rpc.stop().catch(() => undefined);
-          throw new Error(`当前 Pi RPC 协议不兼容 Pi Chat：${compatibility.diagnostics.join("；")}`);
+          const transient =
+            cause instanceof RpcRequestTimeoutError ||
+            /Pi RPC (?:已退出|启动失败|在初始化期间退出|请求超时)/.test(
+              cause instanceof Error ? cause.message : String(cause),
+            );
+          if (!transient || attempt === 1) break;
         }
-        this.publish({ status: "ready", generation });
-      } catch (cause) {
-        const error = cause instanceof Error ? cause.message : String(cause);
-        this.publish({ status: "failed", error, generation });
-        throw new PrimaryRuntimeUnavailableError(this.readiness);
       }
+      const error = lastCause instanceof Error ? lastCause.message : String(lastCause);
+      this.publish({ status: "failed", error, generation });
+      throw new PrimaryRuntimeUnavailableError(this.readiness);
     })();
     this.operation = operation;
     void operation.finally(() => { if (this.operation === operation) this.operation = null; }).catch(() => undefined);

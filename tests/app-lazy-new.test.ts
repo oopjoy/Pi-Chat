@@ -137,7 +137,19 @@ const bootstrap: BootstrapData = {
   activeSessionId: activeId,
   activeSessionIds: [activeId],
   applicationLifecycle: "idle",
-  primaryRuntime: { status: "ready", generation: 0 },
+  primaryRuntime: {
+    status: "ready",
+    generation: 0,
+    model: {
+      id: "model",
+      name: "Model",
+      provider: "test",
+      input: ["text"],
+      reasoning: true,
+    },
+    thinkingLevel: "medium",
+    sessionId: activeId,
+  },
 };
 
 const draftView: SessionViewData = {
@@ -2688,12 +2700,17 @@ test("slash suggestions survive an empty command inventory refresh", async () =>
     );
     // A refresh whose command inventory is empty must keep the last confirmed
     // completions instead of wiping them (the pre-fix `??` treated [] as
-    // authoritative). A Primary status SSE triggers the background refresh.
+    // authoritative). A newer Primary generation triggers the background refresh.
     const source = FakeEventSource.instances.at(-1)!;
     await act(async () =>
       source.emitPi({
         type: "pi_chat_primary_runtime_status",
-        primaryRuntime: { status: "ready", generation: 1 },
+        primaryRuntime: {
+          status: "ready",
+          generation: 1,
+          model: bootstrap.state.model,
+          sessionId: activeId,
+        },
       }),
     );
     assert.ok(requests >= 2, "a ready status refresh fetched the inventory");
@@ -2958,7 +2975,7 @@ test("the initial ready frame releases controls when Primary became ready after 
             lifecycle: "idle",
             piChatRunEpoch: "epoch-ready-snapshot",
             workspaceEpoch: "epoch-ready-snapshot",
-            primaryRuntime: { status: "ready", generation: 1 },
+            primaryRuntime: { status: "ready", generation: 1, model: cached },
           }),
         }),
       ),
@@ -2967,6 +2984,141 @@ test("the initial ready frame releases controls when Primary became ready after 
       model().disabled,
       false,
       "ready carries the missed Primary capability transition without requiring another bootstrap",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("same-generation initial ready adopts its model without waiting for Bootstrap refresh", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const adoptedModel = {
+    provider: "test",
+    id: "adopted-ready",
+    name: "Adopted ready",
+    input: ["text", "image"],
+    reasoning: true,
+  };
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, model: null },
+      models: [],
+      primaryRuntime: { status: "starting" as const, generation: 9 },
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () =>
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "idle",
+            primaryRuntime: {
+              status: "ready",
+              generation: 9,
+              model: adoptedModel,
+              thinkingLevel: "high",
+              sessionId: activeId,
+            },
+          }),
+        }),
+      ),
+    );
+    const input = dom.window.document.querySelector<HTMLTextAreaElement>(
+      ".composer textarea",
+    )!;
+    assert.equal(input.disabled, false);
+    const modelTrigger = dom.window.document.querySelector<HTMLButtonElement>(
+      ".composer-model-select .compact-select-trigger",
+    )!;
+    assert.match(modelTrigger.textContent || "", /Adopted ready/);
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("Primary ready preserves a staged draft model and keeps its capability unconfirmed", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const runtimeModel = {
+    provider: "test",
+    id: "runtime-model",
+    name: "Runtime model",
+    input: ["text", "image"],
+    reasoning: true,
+  };
+  const stagedModel = {
+    provider: "test",
+    id: "staged-model",
+    name: "Staged model",
+    input: ["text"],
+    reasoning: true,
+  };
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      activeSessionId: "",
+      activeSessionIds: [],
+      sessions: [],
+      state: { ...bootstrap.state, model: runtimeModel },
+      models: [runtimeModel, stagedModel],
+      primaryRuntime: {
+        status: "ready" as const,
+        generation: 11,
+        model: runtimeModel,
+        sessionId: activeId,
+      },
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: "" }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const trigger = dom.window.document.querySelector<HTMLButtonElement>(
+      ".composer-model-select .compact-select-trigger",
+    )!;
+    await act(async () => trigger.click());
+    const stagedOption = [...dom.window.document.querySelectorAll<HTMLButtonElement>(
+      ".composer-model-select [role='option']",
+    )].find((option) => option.textContent?.includes("Staged model"))!;
+    await act(async () => stagedOption.click());
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () =>
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "idle",
+            primaryRuntime: {
+              status: "ready",
+              generation: 12,
+              model: runtimeModel,
+              sessionId: activeId,
+            },
+          }),
+        }),
+      ),
+    );
+    assert.match(trigger.textContent || "", /Staged model/);
+    assert.equal(
+      dom.window.document.querySelector<HTMLTextAreaElement>(".composer textarea")!
+        .disabled,
+      true,
+      "Runtime model A cannot confirm staged model B",
     );
   } finally {
     await act(async () => root.unmount());
@@ -3044,7 +3196,7 @@ test("Primary startup marks composer capability and image input as pending", asy
   }
 });
 
-test("Primary ready keeps image input pending until its refreshed capability snapshot commits", async () => {
+test("a legacy ready without adopted capability keeps the Composer disabled until refresh", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
@@ -3099,18 +3251,14 @@ test("Primary ready keeps image input pending until its refreshed capability sna
     assert.equal(requests, 2, "a ready frame that missed the status SSE refreshes its capability snapshot");
     assert.equal(
       dom.window.document.querySelector<HTMLTextAreaElement>(".composer textarea")!.disabled,
-      false,
-      "Runtime ready unlocks editing independently of model capability metadata",
+      true,
+      "a ready frame without adopted model capability cannot unlock text",
     );
     assert.equal(
       dom.window.document.querySelector<HTMLButtonElement>(".attachment-button")!.disabled,
-      false,
+      true,
+      "attachments use the same unified readiness boundary",
     );
-    await act(async () =>
-      dom.window.document.querySelector<HTMLButtonElement>(".attachment-button")!.click(),
-    );
-    assert.equal(imageMenuItem().disabled, false);
-    assert.match(imageMenuItem().textContent || "", /发送前等待模型能力同步/);
     await act(async () => {
       resolveRefresh!({
         ...bootstrap,
@@ -3123,6 +3271,9 @@ test("Primary ready keeps image input pending until its refreshed capability sna
     assert.equal(
       dom.window.document.querySelector<HTMLTextAreaElement>(".composer textarea")!.disabled,
       false,
+    );
+    await act(async () =>
+      dom.window.document.querySelector<HTMLButtonElement>(".attachment-button")!.click(),
     );
     assert.equal(imageMenuItem().disabled, false);
     assert.match(imageMenuItem().textContent || "", /直接解析/);
@@ -3155,7 +3306,12 @@ test("a new Primary generation keeps prior image capability pending until its re
           ...bootstrap,
           state: { ...bootstrap.state, model: imageModel },
           models: [imageModel],
-          primaryRuntime: { status: "ready" as const, generation: 1 },
+          primaryRuntime: {
+            status: "ready" as const,
+            generation: 1,
+            model: imageModel,
+            sessionId: activeId,
+          },
         };
       return new Promise<BootstrapData>((resolve) => {
         resolveRefreshes.push(resolve);
@@ -3201,12 +3357,21 @@ test("a new Primary generation keeps prior image capability pending until its re
         new dom.window.MessageEvent("ready", {
           data: JSON.stringify({
             lifecycle: "idle",
-            primaryRuntime: { status: "ready", generation: 2 },
+            primaryRuntime: {
+              status: "ready",
+              generation: 2,
+              model: imageModel,
+              sessionId: activeId,
+            },
           }),
         }),
       ),
     );
-    assert.equal(requests, 3);
+    assert.equal(
+      requests,
+      2,
+      "an adopted ready snapshot needs no capability Bootstrap round trip",
+    );
     assert.equal(
       dom.window.document.querySelector<HTMLTextAreaElement>(".composer textarea")!.disabled,
       false,
@@ -3219,16 +3384,7 @@ test("a new Primary generation keeps prior image capability pending until its re
       dom.window.document.querySelector<HTMLButtonElement>(".attachment-button")!.click(),
     );
     assert.equal(imageMenuItem().disabled, false);
-    assert.match(imageMenuItem().textContent || "", /发送前等待模型能力同步/);
-    await act(async () => {
-      resolveRefreshes.shift()!({
-        ...bootstrap,
-        state: { ...bootstrap.state, model: imageModel },
-        models: [imageModel],
-        primaryRuntime: { status: "ready", generation: 2 },
-      });
-      await Promise.resolve();
-    });
+    assert.match(imageMenuItem().textContent || "", /直接解析/);
     assert.equal(
       dom.window.document.querySelector<HTMLTextAreaElement>(".composer textarea")!.disabled,
       false,

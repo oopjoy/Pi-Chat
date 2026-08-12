@@ -105,7 +105,9 @@ import {
   type PromptAcceptance,
 } from "./prompt-scheduler.js";
 import {
+  PrimaryRuntimeReadinessController,
   PrimaryRuntimeUnavailableError,
+  type PrimaryRuntimeAdoptionContext,
   type PrimaryRuntimeReadinessBridge,
 } from "./primary-runtime-readiness.js";
 import { SseHub } from "./sse-hub.js";
@@ -423,10 +425,16 @@ export class PiChatApp {
     this.currentCwd = resolve(options.cwd);
     this.primaryRuntimeCwd = this.currentCwd;
     this.startupModels = this.readStartupModels();
+    // Install adoption before index.ts starts the controller. Readiness remains
+    // `starting` until this App has consumed the exact startup response and
+    // completed all state required for browser mutations.
+    options.primaryRuntime?.setAdopter?.((response, context) =>
+      this.adoptPrimaryRuntime(response, context),
+    );
     options.primaryRuntime?.subscribe((readiness) => {
       this.broadcast({
         type: "pi_chat_primary_runtime_status",
-        primaryRuntime: readiness,
+        primaryRuntime: this.browserPrimaryReadiness(readiness),
       });
     });
     this.sseClients = this.sseHub.clientMap;
@@ -1473,16 +1481,10 @@ export class PiChatApp {
           this.clearRuntimeFailure(runtime.id);
           this.broadcastSessionActivity(runtime.id);
         } else {
+          // Controller-managed restart adopts the startup state before resolve.
+          // Re-reading get_state here used to reopen the same split authority.
           await this.restartPrimaryRuntime(this.activeSessionPath || undefined);
-          const state = asState(
-            await this.options.rpc.send({ type: "get_state" }),
-          );
-          this.lastPrimaryState = state;
-          this.bindPrimaryIdentity(state);
           this.clearRuntimeFailure(sessionId);
-          this.running = state.isStreaming;
-          this.primaryFailed = false;
-          this.toolStatus = "";
         }
         this.clearNativeSteeringState(sessionId, reason);
       } catch (error) {
@@ -2010,13 +2012,62 @@ export class PiChatApp {
     }
   }
 
+  private browserPrimaryReadiness(
+    readiness = this.options.primaryRuntime?.snapshot() || {
+      status: "ready" as const,
+      generation: 0,
+    },
+  ): PrimaryRuntimeReadiness {
+    if (readiness.status !== "ready") return readiness;
+    return {
+      ...readiness,
+      ...(this.primaryBoundSessionId
+        ? { sessionId: this.primaryBoundSessionId }
+        : null),
+    };
+  }
+
   private primaryReadiness(): PrimaryRuntimeReadiness {
-    return (
-      this.options.primaryRuntime?.snapshot() || {
-        status: "ready",
-        generation: 0,
-      }
-    );
+    return this.browserPrimaryReadiness();
+  }
+
+  /**
+   * Atomically adopt the exact get_state response that certified this child.
+   * The controller publishes ready only after this returns, so bootstrap/SSE,
+   * App routing, and Composer capability all observe one ownership boundary.
+   */
+  private async adoptPrimaryRuntime(
+    response: Record<string, unknown>,
+    context: PrimaryRuntimeAdoptionContext,
+  ): Promise<void> {
+    const state = asState(response);
+    const childGeneration = this.options.rpc.currentGeneration?.() || 0;
+    if (!childGeneration)
+      throw new Error("Primary Runtime 启动响应缺少进程 generation");
+    this.lastPrimaryState = state;
+    this.running = state.isStreaming;
+    this.primaryFailed = false;
+    this.toolStatus = "";
+    this.bindPrimaryIdentity(state);
+    if (!this.primaryBoundSessionId || this.primaryRpcGeneration !== childGeneration)
+      throw new Error("Primary Runtime 启动响应缺少可绑定的 Session identity");
+    if (state.model) {
+      this.rememberModelContextWindows([state.model]);
+      this.lastAvailableModels = [state.model];
+    }
+    const desiredGateMode = context.sessionFile
+      ? this.gateModesBySession.get(this.activeSessionId) || this.primaryGateMode
+      : "strict";
+    if (desiredGateMode !== "strict")
+      await this.options.rpc.send(
+        { type: "prompt", message: `/gate ${desiredGateMode}` },
+        PROMPT_PREPARE_TIMEOUT_MS,
+      );
+    this.primaryGateMode = desiredGateMode;
+    if (context.restart) {
+      this.queuePaused = false;
+      this.broadcastQueue();
+    }
   }
 
   private primaryReadReady(): boolean {
@@ -2064,8 +2115,6 @@ export class PiChatApp {
     // the single-flight recovery below.
     if (!this.primaryNeedsRecovery(readiness)) return;
     if (this.primaryRecovery) return this.primaryRecovery;
-    const desiredGateMode = this.primaryGateMode;
-    let restarted = false;
     const recovery = (async () => {
       try {
         // A cold service may still be completing its initial asynchronous
@@ -2073,54 +2122,54 @@ export class PiChatApp {
         // stopping/restarting it a second time.
         if (this.primaryNeedsRecovery(readiness)) {
           this.clearNativeSteeringState(this.activeSessionId, "recovery");
-          // An initial failure and a post-ready crash both recover only through
-          // the controller, which restarts and repeats compatibility probing
-          // before PiChatApp sends.
-          if (primaryRuntime)
+          // The controller's adopter completes App binding before recover()
+          // resolves. Never issue a second get_state here: that recreated the
+          // split authority where SSE said ready while App was still adopting.
+          if (primaryRuntime) {
             await primaryRuntime.recover(
               this.activeSessionPath || undefined,
               this.primaryRuntimeCwd,
             );
-          else
-            await this.options.rpc.restart(
+            if (!(primaryRuntime instanceof PrimaryRuntimeReadinessController)) {
+              const state = asState(
+                await this.options.rpc.send({ type: "get_state" }),
+              );
+              this.lastPrimaryState = state;
+              this.running = state.isStreaming;
+              this.primaryFailed = false;
+              this.toolStatus = "";
+              this.bindPrimaryIdentity(state);
+            }
+          } else {
+            // Legacy in-process embeddings do not have the controller/adopter
+            // contract. Preserve their explicit post-restart state bind; the
+            // production entrypoint always takes the controller branch above.
+            const response = await this.options.rpc.restart(
               this.activeSessionPath || undefined,
               this.primaryRuntimeCwd,
             );
-          restarted = true;
-        }
-        const state = asState(
-          await this.options.rpc.send({ type: "get_state" }),
-        );
-        this.lastPrimaryState = state;
-        this.bindPrimaryIdentity(state);
-        this.clearRuntimeFailure(this.activeSessionId);
-        this.running = state.isStreaming;
-        this.primaryFailed = false;
-        this.toolStatus = "";
-        if (restarted) {
-          // A failed settlement marks queued work paused. A successful fresh
-          // Primary is idle and can resume that same FIFO without user action.
-          this.queuePaused = false;
-          this.broadcastQueue();
-        }
-        if (desiredGateMode !== "strict") {
-          await this.options.rpc.send(
-            { type: "prompt", message: `/gate ${desiredGateMode}` },
-            PROMPT_PREPARE_TIMEOUT_MS,
+            const state = asState(
+              response || (await this.options.rpc.send({ type: "get_state" })),
+            );
+            this.lastPrimaryState = state;
+            this.running = state.isStreaming;
+            this.primaryFailed = false;
+            this.toolStatus = "";
+            this.bindPrimaryIdentity(state);
+          }
+          this.clearRuntimeFailure(this.activeSessionId);
+          const runGeneration = this.advanceSessionRunGeneration(
+            this.activeSessionId,
           );
+          this.broadcast({
+            type: "pi_chat_process_recovered",
+            piChatSessionId: this.activeSessionId,
+            piChatRunEpoch: this.runEpoch,
+            piChatRunGeneration: runGeneration,
+          });
+          this.broadcastSessionActivity(this.activeSessionId);
+          this.resumeRecoveredPrimaryQueue();
         }
-        this.primaryGateMode = desiredGateMode;
-        const runGeneration = this.advanceSessionRunGeneration(
-          this.activeSessionId,
-        );
-        this.broadcast({
-          type: "pi_chat_process_recovered",
-          piChatSessionId: this.activeSessionId,
-          piChatRunEpoch: this.runEpoch,
-          piChatRunGeneration: runGeneration,
-        });
-        this.broadcastSessionActivity(this.activeSessionId);
-        if (restarted) this.resumeRecoveredPrimaryQueue();
       } catch (error) {
         this.primaryFailed = true;
         if (error instanceof PrimaryRuntimeUnavailableError) throw error;
@@ -2153,6 +2202,9 @@ export class PiChatApp {
   private async ensurePrimaryIdentity(): Promise<void> {
     if (this.activeSessionId) return;
     await this.ensurePrimaryRuntime();
+    // Controller-managed startup adopts identity before publishing ready. Keep
+    // a fallback only for legacy embedding doubles that do not expose an adopter.
+    if (this.activeSessionId) return;
     const state = asState(await this.options.rpc.send({ type: "get_state" }));
     this.lastPrimaryState = state;
     this.running = state.isStreaming;
@@ -2527,19 +2579,25 @@ export class PiChatApp {
   ): Promise<void> {
     if (cwd !== this.primaryRuntimeCwd)
       throw new Error("Primary Runtime 工作目录不可在原进程上重绑定");
+    if (this.options.primaryRuntime) {
+      await this.options.primaryRuntime.recover(sessionFile, cwd);
+      // The production controller exposes setAdopter(). Test/embedding bridges
+      // may implement the optional method without installing an adopter, so
+      // only the concrete controller uses this early return.
+      if (this.options.primaryRuntime instanceof PrimaryRuntimeReadinessController)
+        return;
+    } else await this.options.rpc.restart(sessionFile, cwd);
+    // Legacy embedding bridges have no adoption callback; preserve their old
+    // post-restart Gate synchronization without affecting production.
     const desiredGateMode = sessionFile
       ? this.gateModesBySession.get(this.activeSessionId) ||
         this.primaryGateMode
       : "strict";
-    if (this.options.primaryRuntime)
-      await this.options.primaryRuntime.recover(sessionFile, cwd);
-    else await this.options.rpc.restart(sessionFile, cwd);
-    if (desiredGateMode !== "strict") {
+    if (desiredGateMode !== "strict")
       await this.options.rpc.send(
         { type: "prompt", message: `/gate ${desiredGateMode}` },
         PROMPT_PREPARE_TIMEOUT_MS,
       );
-    }
     this.primaryGateMode = desiredGateMode;
   }
 
@@ -2930,14 +2988,19 @@ export class PiChatApp {
       primaryAvailable &&
       !(id !== this.activeSessionId && targetRuntimeBusy)
     ) {
-      // Skip get_state only when we already know which Primary Session is live.
-      // A view that arrives before bootstrap (or after a restart) still needs one
-      // short probe so activeSessionId/path are bound; otherwise we mis-route to cold.
+      // Controller-managed startup already adopted the exact state response
+      // that certified this child. A view must never reopen authority binding
+      // with another get_state; retain a legacy fallback only when no adopted
+      // generation exists.
+      const currentPrimaryGeneration =
+        this.options.rpc.currentGeneration?.() || 0;
       const canSkipStateProbe =
-        (this.running ||
-          (id === this.activeSessionId && Boolean(this.liveMessage))) &&
         Boolean(this.activeSessionId) &&
-        Boolean(this.activeSessionPath);
+        Boolean(this.activeSessionPath) &&
+        (currentPrimaryGeneration
+          ? this.primaryRpcGeneration === currentPrimaryGeneration
+          : this.running ||
+            (id === this.activeSessionId && Boolean(this.liveMessage)));
       if (canSkipStateProbe) {
         state = { ...this.lastPrimaryState, isStreaming: true };
       } else {
@@ -3071,10 +3134,17 @@ export class PiChatApp {
       let commandsResponse: Record<string, unknown> | null = null;
       if (!busy) {
         try {
+          const primaryAdopted =
+            id === this.activeSessionId &&
+            Boolean(this.primaryRpcGeneration) &&
+            this.primaryRpcGeneration ===
+              (this.options.rpc.currentGeneration?.() || 0);
           const probes = await Promise.all([
-            runtime.rpc
-              .send({ type: "get_state" }, SHORT_RPC_MS)
-              .catch(() => null),
+            primaryAdopted
+              ? Promise.resolve(null)
+              : runtime.rpc
+                  .send({ type: "get_state" }, SHORT_RPC_MS)
+                  .catch(() => null),
             runtime.rpc
               .send({ type: "get_session_stats" }, SHORT_RPC_MS)
               .catch(() => null),
@@ -3308,7 +3378,11 @@ export class PiChatApp {
     };
   }
 
-  private async bootstrap(clientId = ""): Promise<BootstrapData> {
+  private async bootstrap(
+    clientId = "",
+    coherenceRetry = 0,
+  ): Promise<BootstrapData> {
+    const readinessAtStart = this.primaryReadiness();
     if (
       this.applicationLifecycle !== "idle" &&
       (this.primaryFailed || this.options.rpc.isRunning?.() === false)
@@ -3322,9 +3396,22 @@ export class PiChatApp {
     // the service wait for a stopped Primary. A healthy existing worker still
     // provides its current state, while a missing/crashed worker is recovered
     // only at the first real write (or an explicit activation).
-    const primaryAvailable = this.primaryReadReady();
+    const primaryAvailable =
+      readinessAtStart.status === "ready" &&
+      !this.primaryFailed &&
+      this.options.rpc.isRunning?.() !== false;
+    const primaryStateAdopted = Boolean(
+      this.primaryBoundSessionId &&
+        this.primaryRpcGeneration &&
+        this.primaryRpcGeneration ===
+          (this.options.rpc.currentGeneration?.() || this.primaryRpcGeneration),
+    );
     let state = this.lastPrimaryState;
-    if (primaryAvailable && !(this.running && this.activeSessionPath)) {
+    if (
+      primaryAvailable &&
+      !primaryStateAdopted &&
+      !(this.running && this.activeSessionPath)
+    ) {
       try {
         state = asState(
           await this.options.rpc.send(
@@ -3429,6 +3516,18 @@ export class PiChatApp {
     this.primarySummarySnapshot =
       sidebar.sessions.find((session) => session.id === this.activeSessionId) ||
       this.primarySummarySnapshot;
+    const readinessAtEnd = this.primaryReadiness();
+    if (
+      coherenceRetry < 1 &&
+      (readinessAtEnd.generation !== readinessAtStart.generation ||
+        readinessAtEnd.status !== readinessAtStart.status)
+    ) {
+      // Startup/recovery crossed this request while independent Session/JSONL
+      // work was awaiting. Never return old state with a newer ready marker (or
+      // the reverse); rebuild once from the already-adopted generation. This
+      // does not send another get_state for a controller-owned Primary.
+      return this.bootstrap(clientId, coherenceRetry + 1);
+    }
     return {
       buildIdentity: this.buildIdentity,
       state,
@@ -3461,7 +3560,7 @@ export class PiChatApp {
       sessionDirectories: sidebar.directories,
       sessionsTotal: sidebar.total,
       applicationLifecycle: this.applicationLifecycle,
-      primaryRuntime: this.primaryReadiness(),
+      primaryRuntime: readinessAtStart,
     };
   }
 

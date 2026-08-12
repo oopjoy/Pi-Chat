@@ -3,16 +3,17 @@ import { createServer } from "node:http";
 import test from "node:test";
 import { PiChatApp } from "../src/server/app";
 import { PrimaryRuntimeReadinessController, PrimaryRuntimeUnavailableError, type PrimaryRuntimeReadinessBridge } from "../src/server/primary-runtime-readiness";
-import type { PiRpcClient } from "../src/server/rpc-client";
+import { RpcRequestTimeoutError, type PiRpcClient } from "../src/server/rpc-client";
 import { idForPath } from "../src/server/session-index";
 import type { SessionIndex } from "../src/server/session-index";
 import type { ResourceManager } from "../src/server/resource-manager";
-import type { PrimaryRuntimeReadiness } from "../src/shared/types";
+import type { PiState, PrimaryRuntimeReadiness } from "../src/shared/types";
 
 class ReadinessFakeRpc {
   readonly commands: Record<string, unknown>[] = [];
   alive = true;
   restartCount = 0;
+  model: PiState["model"] = null;
   private listeners = new Set<(event: Record<string, unknown>) => void>();
 
   constructor(readonly path: string, readonly sessionId: string) {}
@@ -24,7 +25,7 @@ class ReadinessFakeRpc {
   isRunning() { return this.alive; }
   async send(command: Record<string, unknown>) {
     this.commands.push(command);
-    if (command.type === "get_state") return { type: "response", success: true, data: { model: null, sessionFile: this.path, sessionId: this.sessionId, isStreaming: false } };
+    if (command.type === "get_state") return { type: "response", success: true, data: { model: this.model, sessionFile: this.path, sessionId: this.sessionId, isStreaming: false } };
     if (command.type === "get_messages") return { type: "response", success: true, data: { messages: [] } };
     if (command.type === "get_available_models") return { type: "response", success: true, data: { models: [] } };
     if (command.type === "get_commands") return { type: "response", success: true, data: { commands: [] } };
@@ -40,8 +41,22 @@ class ControllerRpc {
   probes = 0;
   stateProbes = 0;
   compatible = true;
-  async start() { this.starts += 1; return { type: "response", success: true, data: { isStreaming: false } }; }
-  async restart() { this.restarts += 1; return { type: "response", success: true, data: { isStreaming: false } }; }
+  startFailure: Error | null = null;
+  startResponse: Record<string, unknown> = {
+    type: "response",
+    success: true,
+    data: { model: null, sessionId: "controller", isStreaming: false },
+  };
+  async start() {
+    this.starts += 1;
+    if (this.startFailure) {
+      const error = this.startFailure;
+      this.startFailure = null;
+      throw error;
+    }
+    return this.startResponse;
+  }
+  async restart() { this.restarts += 1; return this.startResponse; }
   async stop() { this.stops += 1; }
   async probeCompatibility(initialState?: Record<string, unknown>) {
     if (initialState) this.stateProbes += 1;
@@ -104,7 +119,12 @@ test("Primary recovery repeats compatibility probing before reporting ready", as
   const rpc = new ControllerRpc();
   const controller = new PrimaryRuntimeReadinessController(rpc as unknown as PiRpcClient);
   await controller.start();
-  assert.deepEqual(controller.snapshot(), { status: "ready", generation: 1 });
+  assert.deepEqual(controller.snapshot(), {
+    status: "ready",
+    generation: 1,
+    model: null,
+    sessionId: "controller",
+  });
   assert.equal(rpc.probes, 1);
   assert.equal(rpc.stateProbes, 1);
 
@@ -116,6 +136,74 @@ test("Primary recovery repeats compatibility probing before reporting ready", as
   assert.equal(rpc.stops, 1);
 });
 
+test("Primary publishes ready only after the App adopts the startup state", async () => {
+  const rpc = new ControllerRpc();
+  rpc.startResponse = {
+    type: "response",
+    success: true,
+    data: {
+      model: {
+        provider: "test",
+        id: "image-model",
+        name: "Image model",
+        input: ["text", "image"],
+      },
+      thinkingLevel: "high",
+      sessionId: "adopted-session",
+      isStreaming: false,
+    },
+  };
+  const controller = new PrimaryRuntimeReadinessController(
+    rpc as unknown as PiRpcClient,
+  );
+  const transitions: PrimaryRuntimeReadiness[] = [];
+  controller.subscribe((value) => transitions.push(value));
+  let releaseAdoption: (() => void) | undefined;
+  const adoption = new Promise<void>((resolve) => {
+    releaseAdoption = resolve;
+  });
+  controller.setAdopter(async (response) => {
+    assert.equal(response, rpc.startResponse);
+    await adoption;
+  });
+  const start = controller.start();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(controller.snapshot(), { status: "starting", generation: 1 });
+  assert.equal(transitions.some((value) => value.status === "ready"), false);
+  releaseAdoption!();
+  await start;
+  assert.deepEqual(controller.snapshot(), {
+    status: "ready",
+    generation: 1,
+    model: {
+      provider: "test",
+      id: "image-model",
+      name: "Image model",
+      input: ["text", "image"],
+    },
+    thinkingLevel: "high",
+    sessionId: "adopted-session",
+  });
+});
+
+test("a startup timeout retries only by replacing the whole Pi process", async () => {
+  const rpc = new ControllerRpc();
+  rpc.startFailure = new RpcRequestTimeoutError("get_state");
+  const controller = new PrimaryRuntimeReadinessController(
+    rpc as unknown as PiRpcClient,
+  );
+  let adoptions = 0;
+  controller.setAdopter(() => {
+    adoptions += 1;
+  });
+  await controller.start();
+  assert.equal(rpc.starts, 1);
+  assert.equal(rpc.restarts, 1);
+  assert.equal(rpc.stops, 1);
+  assert.equal(adoptions, 1);
+  assert.equal(controller.snapshot().status, "ready");
+});
+
 test("a live Primary child failure advances readiness before recovery", async () => {
   const rpc = new ControllerRpc();
   const controller = new PrimaryRuntimeReadinessController(rpc as unknown as PiRpcClient);
@@ -123,7 +211,12 @@ test("a live Primary child failure advances readiness before recovery", async ()
   controller.markFailed(new Error("worker exited"));
   assert.deepEqual(controller.snapshot(), { status: "failed", generation: 2, error: "worker exited" });
   await controller.recover();
-  assert.deepEqual(controller.snapshot(), { status: "ready", generation: 3 });
+  assert.deepEqual(controller.snapshot(), {
+    status: "ready",
+    generation: 3,
+    model: null,
+    sessionId: "controller",
+  });
   assert.equal(rpc.restarts, 1);
 });
 
@@ -145,6 +238,78 @@ for (const readiness of [
     } finally { await f.close(); }
   });
 }
+
+test("bootstrap never mixes a starting state projection with a later ready generation", async () => {
+  const path = "C:\\sessions\\coherent-bootstrap.jsonl";
+  const id = idForPath(path);
+  const rpc = new ReadinessFakeRpc(path, "coherent-bootstrap");
+  const bridge = new ReadinessBridge({ status: "starting", generation: 1 });
+  let releaseList: (() => void) | undefined;
+  let listCalls = 0;
+  const firstList = new Promise<void>((resolve) => {
+    releaseList = resolve;
+  });
+  const sessions = {
+    list: async () => {
+      listCalls += 1;
+      if (listCalls === 1) await firstList;
+      return [{
+        id,
+        sessionId: "coherent-bootstrap",
+        name: "Coherent",
+        preview: "saved",
+        cwd: process.cwd(),
+        updatedAt: 1,
+        messageCount: 1,
+        active: true,
+      }];
+    },
+    pathForId: () => path,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({
+    rpc: rpc as unknown as PiRpcClient,
+    sessions,
+    resources: {} as ResourceManager,
+    cwd: process.cwd(),
+    webRoot: process.cwd(),
+    primaryRuntime: bridge,
+  });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    const pending = fetch(`http://127.0.0.1:${address.port}/api/bootstrap`);
+    for (let attempt = 0; attempt < 20 && listCalls === 0; attempt += 1)
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    assert.equal(listCalls, 1, "the first starting-generation projection is blocked mid-request");
+    rpc.model = {
+      provider: "test",
+      id: "ready",
+      name: "Ready",
+      input: ["text", "image"],
+    };
+    bridge.set({
+      status: "ready",
+      generation: 1,
+      model: rpc.model,
+      sessionId: id,
+    });
+    releaseList!();
+    const body = await (await pending).json() as {
+      primaryRuntime: PrimaryRuntimeReadiness;
+      state: { model: { id: string } | null };
+    };
+    assert.equal(body.primaryRuntime.status, "ready");
+    assert.equal(body.primaryRuntime.model?.id, "ready");
+    assert.equal(body.state.model?.id, "ready");
+    assert.equal(listCalls, 2, "one coherence rebuild replaces the mixed snapshot");
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
 
 test("an unbound Primary exit is visible as failed readiness to bootstrap", async () => {
   const f = await fixture({ status: "ready", generation: 1 });
@@ -295,10 +460,14 @@ test("New uses the complete Primary recovery finalizer after a bound crash", asy
     const created = await fetch(`${origin}/api/sessions/new`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({}) });
     assert.equal(created.status, 200);
     assert.equal(bridge.recoverCalls, 1);
-    assert.equal(primary.commands.filter((command) => command.type === "get_state").length >= 2, true, "recovery refreshes Primary state before allocating the draft");
+    assert.equal(primary.commands.filter((command) => command.type === "get_state").length >= 2, true, "legacy bridge recovery refreshes Primary state before allocating the draft");
 
     const afterNew = await (await fetch(`${origin}/api/bootstrap`)).json() as { primaryRuntime: PrimaryRuntimeReadiness };
-    assert.deepEqual(afterNew.primaryRuntime, { status: "ready", generation: 3 });
+    assert.deepEqual(afterNew.primaryRuntime, {
+      status: "ready",
+      generation: 3,
+      sessionId: primaryId,
+    });
     assert.equal((await fetch(`${origin}/api/sessions/${primaryId}/warm`, { method: "POST" })).status, 200);
     assert.equal(bridge.recoverCalls, 1, "returning to Primary must reuse the recovery finalized for New");
   } finally { server.close(); await app.close(); }

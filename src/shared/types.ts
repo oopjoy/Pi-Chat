@@ -235,6 +235,14 @@ export interface PrimaryRuntimeReadiness {
   error?: string;
   /** Monotonic controller generation; guards later retry/recovery transitions. */
   generation: number;
+  /**
+   * Present only on adopted ready snapshots. This is selected-model capability
+   * evidence from the same startup response that the App bound to the child.
+   */
+  model?: ModelInfo | null;
+  thinkingLevel?: string;
+  /** App-adopted Session identity, added only to browser-facing projections. */
+  sessionId?: string;
 }
 
 export interface BuildIdentity {

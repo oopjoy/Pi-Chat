@@ -49,7 +49,7 @@ const bootstrap: BootstrapData = {
   state: { model: null, isStreaming: false, sessionId: "active", sessionFile: "C:/sessions/active.jsonl" },
   messages: [],
   sessions: [{ id: activeId, sessionId: "active", name: "Busy", preview: "", cwd: "C:/work", updatedAt: 1, messageCount: 1, running: true, active: true, writable: true }],
-  models: [], commands: [], queue: [], queuePaused: false, workspaceCwd: "C:/work", activeSessionId: activeId, activeSessionIds: [activeId], applicationLifecycle: "idle", primaryRuntime: { status: "ready", generation: 0 },
+  models: [], commands: [], queue: [], queuePaused: false, workspaceCwd: "C:/work", activeSessionId: activeId, activeSessionIds: [activeId], applicationLifecycle: "idle", primaryRuntime: { status: "ready", generation: 0, model: null, sessionId: activeId },
 };
 
 const draftView: SessionViewData = {
