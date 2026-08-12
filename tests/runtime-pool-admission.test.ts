@@ -56,6 +56,25 @@ test("failed Runtime stop reopens admission and leaves the worker attached", asy
   targetPool.acquireOperation(target)();
 });
 
+test("stopAll retains ownership and rejects when a child exit is unconfirmed", async () => {
+  let healthyUnsubscribed = 0;
+  let failedUnsubscribed = 0;
+  const healthy = runtime(async () => {});
+  healthy.id = "healthy";
+  healthy.unsubscribe = () => { healthyUnsubscribed += 1; };
+  const failed = runtime(async () => { throw new Error("exit unconfirmed"); });
+  failed.id = "failed";
+  failed.unsubscribe = () => { failedUnsubscribed += 1; };
+  const targetPool = pool();
+  targetPool.runtimes.set(healthy.id, healthy);
+  targetPool.runtimes.set(failed.id, failed);
+  await assert.rejects(() => targetPool.stopAll(), /exit unconfirmed/);
+  assert.equal(targetPool.get(healthy.id), undefined);
+  assert.equal(targetPool.get(failed.id), failed);
+  assert.equal(healthyUnsubscribed, 1);
+  assert.equal(failedUnsubscribed, 0);
+});
+
 test("draft handoff lease blocks reclaim while an empty draft probe is pending", async () => {
   const messages = deferred<{ type: string; success: boolean; data: { messages: [] } }>();
   let stopCount = 0;

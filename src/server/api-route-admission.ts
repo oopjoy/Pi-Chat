@@ -1,4 +1,5 @@
 import type { IncomingMessage } from "node:http";
+import { MAX_PROMPT_HTTP_BODY_BYTES } from "../shared/rpc-contracts.js";
 
 export type ApiRouteAdmission = {
   bodyBeforeMutationLease: boolean;
@@ -8,7 +9,7 @@ export type ApiRouteAdmission = {
   ordinaryMutation: boolean;
 };
 
-export const PROMPT_BODY_LIMIT = 45_000_000;
+export const PROMPT_BODY_LIMIT = MAX_PROMPT_HTTP_BODY_BYTES;
 
 const SESSION_BODY_MUTATIONS = new Set([
   "/api/chat/prompt",

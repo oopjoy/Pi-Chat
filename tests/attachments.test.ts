@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import test from "node:test";
+import { MAX_PROMPT_IMAGE_BYTES } from "../src/shared/rpc-contracts";
 import { PiChatApp, promptImages } from "../src/server/app";
 import { parsePickerOutput } from "../src/server/file-picker";
 import type { PiRpcClient } from "../src/server/rpc-client";
@@ -15,6 +16,9 @@ test("prompt image validation accepts Pi image content and rejects unsafe payloa
   assert.throws(() => promptImages([{ data: "aGVsbG8=", mimeType: "image/svg+xml" }]), /仅支持/);
   assert.throws(() => promptImages(Array.from({ length: 5 }, () => ({ data: "YQ==", mimeType: "image/png" }))), /最多/);
   assert.throws(() => promptImages([{ data: "not base64!", mimeType: "image/png" }]), /Base64/);
+  assert.throws(() => promptImages([{ data: "YQ=", mimeType: "image/png" }]), /Base64/);
+  const oversized = Buffer.alloc(MAX_PROMPT_IMAGE_BYTES + 1).toString("base64");
+  assert.throws(() => promptImages([{ data: oversized, mimeType: "image/png" }]), /8 MB/);
 });
 
 test("Windows file picker output keeps only absolute drive paths", () => {

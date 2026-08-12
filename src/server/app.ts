@@ -68,6 +68,7 @@ import {
 import { ResourceManager } from "./resource-manager.js";
 import {
   PiRpcClient,
+  RpcFrameTooLargeError,
   RpcRequestTimeoutError,
   rpcData,
   type RpcEventSource,
@@ -1185,21 +1186,13 @@ export class PiChatApp {
       const targetRpc =
         runtime?.rpc ||
         (sessionId === this.activeSessionId ? this.options.rpc : null);
-      if (
-        this.clearPendingRequest(sessionId, request.id) &&
-        targetRpc &&
-        targetRpc.isRunning?.() !== false
-      ) {
+      if (targetRpc && targetRpc.isRunning?.() !== false) {
+        let write: void | Promise<void>;
         try {
-          targetRpc.sendRaw({
+          write = targetRpc.sendRaw({
             type: "extension_ui_response",
             id: request.id,
             cancelled: true,
-          });
-          this.broadcast({
-            type: "pi_chat_extension_request_timeout",
-            piChatSessionId: sessionId,
-            id: request.id,
           });
         } catch (error) {
           this.broadcast({
@@ -1207,7 +1200,25 @@ export class PiChatApp {
             piChatSessionId: sessionId,
             error: `权限确认超时清理失败：${error instanceof Error ? error.message : String(error)}`,
           });
+          return;
         }
+        void Promise.resolve(write).then(() => {
+          // Clear only after Node confirms the frame was accepted by stdin.
+          // A failed/unknown write keeps the request visible for diagnosis or
+          // an explicit retry instead of pretending Pi consumed it.
+          if (!this.clearPendingRequest(sessionId, request.id)) return;
+          this.broadcast({
+            type: "pi_chat_extension_request_timeout",
+            piChatSessionId: sessionId,
+            id: request.id,
+          });
+        }).catch((error) => {
+          this.broadcast({
+            type: "pi_chat_process_error",
+            piChatSessionId: sessionId,
+            error: `权限确认超时清理失败：${error instanceof Error ? error.message : String(error)}`,
+          });
+        });
       }
     }, this.gateRequestTimeoutMs);
     timer.unref();
@@ -3618,7 +3629,7 @@ export class PiChatApp {
         error instanceof OperationAdmissionClosedError
       )
         return json(response, 409, { error: error.message });
-      if (error instanceof HttpRequestError)
+      if (error instanceof HttpRequestError || error instanceof RpcFrameTooLargeError)
         return json(response, error.status, { error: error.message });
       if (response.headersSent) {
         response.end();
@@ -4016,7 +4027,7 @@ export class PiChatApp {
               PROMPT_PREPARE_TIMEOUT_MS,
             );
           } catch (error) {
-            if (error instanceof RpcRequestTimeoutError) {
+            if (error instanceof RpcRequestTimeoutError && error.outcomeUnknown) {
               // The steer JSONL command may already be in Pi stdin (and Pi may
               // even have emitted queue_update). Retain its admission so later
               // dequeue/clear events can settle the hidden local turn.
@@ -4212,7 +4223,7 @@ export class PiChatApp {
               // The command may already be buffered in Pi stdin. Preserve the
               // running state and let its lifecycle event decide; treating this
               // as a definite failure can race/duplicate a following prompt.
-              if (!(error instanceof RpcRequestTimeoutError)) throw error;
+              if (!(error instanceof RpcRequestTimeoutError) || !error.outcomeUnknown) throw error;
               this.scheduler.notifySecondaryPromptAccepted(
                 secondaryRuntime,
                 promptAt,
@@ -4477,6 +4488,7 @@ export class PiChatApp {
           } catch (error) {
             if (
               !(error instanceof RpcRequestTimeoutError) ||
+              !error.outcomeUnknown ||
               error.requestType !== "abort"
             )
               throw error;
@@ -4553,6 +4565,7 @@ export class PiChatApp {
         } catch (error) {
           if (
             !(error instanceof RpcRequestTimeoutError) ||
+            !error.outcomeUnknown ||
             error.requestType !== "abort"
           )
             throw error;
@@ -4899,7 +4912,7 @@ export class PiChatApp {
               this.scheduler.notifySecondaryPromptAccepted(runtime, promptAt);
             }
           } catch (error) {
-            if (error instanceof RpcRequestTimeoutError) {
+            if (error instanceof RpcRequestTimeoutError && error.outcomeUnknown) {
               // The initial draft request is still a write to Pi stdin. Do not
               // discard its newly-created Runtime or let a later prompt race a
               // turn Pi may have accepted after the HTTP acknowledgement timer.
@@ -5290,7 +5303,17 @@ export class PiChatApp {
           command.confirmed = body.confirmed;
         else if (typeof body.value === "string") command.value = body.value;
         else command.cancelled = true;
-        targetRpc.sendRaw(command);
+        try {
+          await targetRpc.sendRaw(command);
+        } catch (error) {
+          if (error instanceof RpcRequestTimeoutError && error.outcomeUnknown) {
+            // The frame may have reached Pi. Clear the single-use request so a
+            // second browser attempt cannot duplicate the Gate decision.
+            this.clearPendingRequest(sessionId, body.id);
+            return json(response, 202, { ok: true, deliveryUncertain: true });
+          }
+          throw error;
+        }
         this.clearPendingRequest(sessionId, body.id);
         json(response, 200, { ok: true });
       } finally {

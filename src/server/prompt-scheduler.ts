@@ -154,7 +154,7 @@ export class PromptScheduler {
         // command, a caller timeout cannot prove the prompt was rejected. Keep
         // the turn in the running/queue state so a following browser prompt is
         // queued behind it instead of racing a possibly active Pi turn.
-        if (error instanceof RpcRequestTimeoutError) {
+        if (error instanceof RpcRequestTimeoutError && error.outcomeUnknown) {
           // Conservatively retain recency/history overlays too. Pi may emit
           // agent_start after this response timer has elapsed.
           this.host.onPrimaryPromptAccepted(this.host.activeSessionId(), promptAt);
@@ -301,7 +301,7 @@ export class PromptScheduler {
       // stdin. Requeueing here could duplicate a turn Pi accepts later. Keep
       // the Runtime conservatively running until its event stream or process
       // failure gives a definitive verdict.
-      if (error instanceof RpcRequestTimeoutError) {
+      if (error instanceof RpcRequestTimeoutError && error.outcomeUnknown) {
         runtime.dispatching = false;
         this.host.onSecondaryPromptAccepted(runtime, next.createdAt);
         this.host.broadcast({

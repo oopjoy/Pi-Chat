@@ -2,10 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { IncomingMessage } from "node:http";
 import { apiRouteAdmission, PROMPT_BODY_LIMIT } from "../src/server/api-route-admission";
+import { MAX_PROMPT_HTTP_BODY_BYTES } from "../src/shared/rpc-contracts";
 
 function route(method: string, path: string) {
   return apiRouteAdmission({ method } as IncomingMessage, new URL(path, "http://127.0.0.1"));
 }
+
+test("prompt HTTP admission shares the RPC transport budget authority", () => {
+  assert.equal(PROMPT_BODY_LIMIT, MAX_PROMPT_HTTP_BODY_BYTES);
+});
 
 test("session-body routes parse and validate before acquiring a lifecycle lease", () => {
   assert.deepEqual(route("POST", "/api/chat/prompt"), {

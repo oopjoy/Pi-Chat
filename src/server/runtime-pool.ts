@@ -702,12 +702,22 @@ export class RuntimePool {
     await Promise.allSettled(this.runtimeStops.values());
     const runtimes = [...this.runtimes.values()];
     await Promise.allSettled(runtimes.map((runtime) => runtime.recovery).filter((recovery): recovery is Promise<void> => Boolean(recovery)));
-    this.runtimes.clear();
-    for (const runtime of runtimes) runtime.unsubscribe();
-    await Promise.allSettled(runtimes.map(async (runtime) => {
-      await runtime.rpc.stop();
+    const results = await Promise.allSettled(runtimes.map((runtime) => runtime.rpc.stop()));
+    let failure: unknown;
+    for (let index = 0; index < runtimes.length; index += 1) {
+      const runtime = runtimes[index];
+      const result = results[index];
+      if (result.status === "rejected") {
+        failure ??= result.reason;
+        continue;
+      }
+      if (this.runtimes.get(runtime.id) === runtime) this.runtimes.delete(runtime.id);
+      runtime.unsubscribe();
       if (options?.cleanupDrafts) await this.cleanupEmptyDraft(runtime);
-    }));
+    }
+    // A Runtime whose child exit was not proved remains owned and blocks a
+    // replacement writer; lifecycle reload/restart must fail closed.
+    if (failure) throw failure;
   }
 
   /**

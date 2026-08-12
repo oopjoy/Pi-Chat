@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import test from "node:test";
-import { PiRpcClient, RpcRequestTimeoutError, resolvePiEntry, rpcData } from "../src/server/rpc-client";
+import { MAX_RPC_INBOUND_LINE_BYTES, MAX_RPC_OUTBOUND_LINE_BYTES } from "../src/shared/rpc-contracts";
+import {
+  PiRpcClient,
+  RpcFrameTooLargeError,
+  RpcProcessExitUnconfirmedError,
+  RpcRequestTimeoutError,
+  resolvePiEntry,
+  rpcData,
+} from "../src/server/rpc-client";
 
 const piEntry = resolvePiEntry();
 
@@ -24,10 +33,13 @@ test("RPC compatibility probe reports missing required capabilities", async () =
 
 function fakeChild() {
   const writes: string[] = [];
-  const child = new EventEmitter() as EventEmitter & { exitCode: number | null; killed: boolean; stdin: { write: (value: string, callback?: (error?: Error | null) => void) => boolean }; kill: (signal: string) => boolean };
+  const child = new EventEmitter() as EventEmitter & { exitCode: number | null; killed: boolean; stdin: EventEmitter & { writable: boolean; write: (value: string, callback?: (error?: Error | null) => void) => boolean }; kill: (signal: string) => boolean };
   child.exitCode = null;
   child.killed = false;
-  child.stdin = { write: (value, callback) => { writes.push(value); callback?.(null); return true; } };
+  child.stdin = Object.assign(new EventEmitter(), {
+    writable: true,
+    write: (value: string, callback?: (error?: Error | null) => void) => { writes.push(value); callback?.(null); return true; },
+  });
   child.kill = () => { child.killed = true; child.exitCode = 0; queueMicrotask(() => child.emit("exit", 0, null)); return true; };
   return { child, writes };
 }
@@ -44,13 +56,158 @@ test("RPC request timeouts retain their command identity", async () => {
   await client.stop();
 });
 
-test("stopping RPC rejects pending requests immediately instead of leaking timers", async () => {
+test("deliberate stop rejects pending requests immediately instead of leaking timers", async () => {
   const { child } = fakeChild();
   const client = new PiRpcClient({ cwd: process.cwd() });
   Object.assign(client, { child });
   const pending = client.send({ type: "never_answers" }, 60_000);
   await client.stop();
   await assert.rejects(pending, /Pi RPC 已停止/);
+});
+
+test("an unexpected child exit reports a written mutation as outcome unknown", async () => {
+  const { child } = fakeChild();
+  const client = new PiRpcClient({ cwd: process.cwd() });
+  const source = { generation: 3, child, stderrTail: "" };
+  const internals = client as unknown as {
+    child: typeof child | null;
+    source: typeof source | null;
+    handleExit(source: typeof source, error: Error): void;
+  };
+  internals.child = child;
+  internals.source = source;
+  const pending = client.send({ type: "never_answers" }, 60_000);
+  internals.handleExit(source, new Error("child crashed"));
+  await assert.rejects(
+    pending,
+    (error) => error instanceof RpcRequestTimeoutError
+      && error.requestType === "never_answers"
+      && error.outcomeUnknown,
+  );
+});
+
+test("RPC rejects an oversized outbound frame before writing it", async () => {
+  const { child, writes } = fakeChild();
+  const client = new PiRpcClient({ cwd: process.cwd() });
+  Object.assign(client, { child });
+  await assert.rejects(
+    client.send({ type: "prompt", message: "x".repeat(MAX_RPC_OUTBOUND_LINE_BYTES) }),
+    (error) => error instanceof RpcFrameTooLargeError
+      && error.direction === "stdin"
+      && error.status === 413,
+  );
+  assert.equal(writes.length, 0);
+});
+
+test("RPC reports a written mutation timeout as outcome unknown", async () => {
+  const { child } = fakeChild();
+  const client = new PiRpcClient({ cwd: process.cwd() });
+  Object.assign(client, { child });
+  await assert.rejects(
+    client.send({ type: "abort" }, 5),
+    (error) => error instanceof RpcRequestTimeoutError
+      && error.requestType === "abort"
+      && error.outcome === "written-outcome-unknown",
+  );
+});
+
+test("a synchronous stdin rejection remains definitely not written", async () => {
+  const { child } = fakeChild();
+  const rejection = new Error("stdin rejected");
+  child.stdin.write = (_value, callback) => {
+    callback?.(rejection);
+    return false;
+  };
+  const client = new PiRpcClient({ cwd: process.cwd() });
+  Object.assign(client, { child });
+  await assert.rejects(client.send({ type: "abort" }, 1_000), rejection);
+});
+
+test("an asynchronous stdin failure after write returns is outcome unknown", async () => {
+  const { child } = fakeChild();
+  child.stdin.write = (_value, callback) => {
+    queueMicrotask(() => callback?.(new Error("pipe closed")));
+    return true;
+  };
+  const client = new PiRpcClient({ cwd: process.cwd() });
+  Object.assign(client, { child });
+  await assert.rejects(
+    client.send({ type: "abort" }, 1_000),
+    (error) => error instanceof RpcRequestTimeoutError
+      && error.outcome === "written-outcome-unknown",
+  );
+});
+
+test("an oversized inbound line fails the active child and releases buffered memory", async () => {
+  const stream = new PassThrough();
+  const { child } = fakeChild();
+  const client = new PiRpcClient({ cwd: process.cwd() });
+  const events: Record<string, unknown>[] = [];
+  client.onEvent((event) => events.push(event));
+  const source = { generation: 1, child, stderrTail: "" };
+  const internals = client as unknown as {
+    child: typeof child | null;
+    source: typeof source | null;
+    attachJsonlReader(stream: NodeJS.ReadableStream, source: typeof source): void;
+  };
+  internals.child = child;
+  internals.source = source;
+  internals.attachJsonlReader(stream, source);
+  stream.write(Buffer.alloc(MAX_RPC_INBOUND_LINE_BYTES + 1, 0x61));
+  assert.equal(internals.child, null);
+  assert.equal(child.killed, true);
+  assert.match(String(events[0]?.error), /stdout.*安全上限/);
+});
+
+test("stop fails closed and retains ownership when neither termination is observed", async () => {
+  const { child } = fakeChild();
+  child.kill = () => {
+    child.killed = true;
+    return true;
+  };
+  const client = new PiRpcClient({ cwd: process.cwd() });
+  Object.assign(client, { child });
+  const originalSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = ((callback: (...args: unknown[]) => void, _delay?: number, ...args: unknown[]) =>
+    originalSetTimeout(callback, 0, ...args)) as typeof setTimeout;
+  try {
+    await assert.rejects(
+      client.stop(),
+      (error) => error instanceof RpcProcessExitUnconfirmedError,
+    );
+    await assert.rejects(
+      client.stop(),
+      (error) => error instanceof RpcProcessExitUnconfirmedError,
+      "a later stop must not forget the same unconfirmed child",
+    );
+    await assert.rejects(
+      client.start(),
+      /未确认退出/,
+      "a replacement writer must remain blocked",
+    );
+    child.exitCode = 0;
+    await client.stop();
+    assert.equal(
+      (client as unknown as { unconfirmedChild: unknown }).unconfirmedChild,
+      null,
+      "a later observed exit releases the retained ownership barrier",
+    );
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("sendRaw has a bounded unknown outcome when stdin never acknowledges", async () => {
+  const { child } = fakeChild();
+  child.stdin.write = () => true;
+  const client = new PiRpcClient({ cwd: process.cwd() });
+  Object.assign(client, { child });
+  await assert.rejects(
+    client.sendRaw({ type: "extension_ui_response", id: "gate" }, 5),
+    (error) => error instanceof RpcRequestTimeoutError
+      && error.requestType === "extension_ui_response"
+      && error.outcomeUnknown,
+  );
 });
 
 test("concurrent identical read queries share one RPC command", async () => {
