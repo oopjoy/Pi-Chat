@@ -237,7 +237,17 @@ export class PiRpcClient {
         ? this.source
         : null;
       if (activeSource) {
-        this.handleExit(activeSource, error);
+        // Reject transport work immediately, but retain the child as owned until
+        // stop() observes exit. A successful kill() call proves only signal
+        // delivery, not process termination, especially on Windows.
+        this.child = null;
+        this.unconfirmedChild = activeSource.child;
+        this.source = null;
+        this.rejectPending(error, true);
+        this.emitEvent(
+          { type: "pi_chat_process_error", error: error.message },
+          activeSource,
+        );
         activeSource.child.kill("SIGKILL");
       }
     };

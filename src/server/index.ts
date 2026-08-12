@@ -12,7 +12,12 @@ import { PiRpcClient } from "./rpc-client.js";
 import { SessionIndex } from "./session-index.js";
 import { loadWorkspace } from "./workspace-state.js";
 import { ensurePiChatSystemGate } from "./system-gate-installer.js";
-import { buildPiChat, cleanupStaleDistArtifacts, handOffApplicationRestart } from "./application-restart.js";
+import {
+  buildPiChat,
+  cleanupStaleDistArtifacts,
+  handOffAfterConfirmedShutdown,
+  handOffApplicationRestart,
+} from "./application-restart.js";
 import { loadBuildIdentity } from "./build-identity.js";
 
 interface CliOptions {
@@ -111,24 +116,34 @@ async function prepareApplicationRestart() {
       // Yield one event-loop turn so the browser receives the 202 response before
       // the listener and its SSE streams close.
       setTimeout(() => {
-        handOffApplicationRestart({
-          projectRoot,
-          // Always hand off to the compiled entry under live dist. After promote,
-          // that tree contains the freshly built server; during promote-after-exit
-          // the helper swaps dist before spawning this path.
-          serverEntry: resolve(projectRoot, "dist", "server", "server", "index.js"),
-          host: options.host,
-          port: options.port,
-          cwd: options.cwd,
-          dev: options.dev,
-          expectedBuildFingerprint: build.buildFingerprint,
-          promoteAfterExit: {
-            liveDist: build.liveDist,
-            stagedDist: build.distPath,
-            previousDist: build.previousDist,
+        void handOffAfterConfirmedShutdown(
+          () => shutdown("restart-handoff"),
+          () => {
+            // Start the detached promoter only after every Session writer has a
+            // confirmed exit. Otherwise an orphaned old Pi process could overlap
+            // the replacement server and mutate the same JSONL.
+            handOffApplicationRestart({
+              projectRoot,
+              // Always hand off to the compiled entry under live dist. After promote,
+              // that tree contains the freshly built server; during promote-after-exit
+              // the helper swaps dist before spawning this path.
+              serverEntry: resolve(projectRoot, "dist", "server", "server", "index.js"),
+              host: options.host,
+              port: options.port,
+              cwd: options.cwd,
+              dev: options.dev,
+              expectedBuildFingerprint: build.buildFingerprint,
+              promoteAfterExit: {
+                liveDist: build.liveDist,
+                stagedDist: build.distPath,
+                previousDist: build.previousDist,
+              },
+            });
           },
+        ).then(() => process.exit(0)).catch((error) => {
+          console.error(`[Pi Chat] 重启关闭失败，已取消替代进程：${errorDetail(error)}`);
+          process.exitCode = 1;
         });
-        void shutdown("restart-handoff").then(() => process.exit(0));
       }, 0);
     },
   };
@@ -150,9 +165,15 @@ const app = new PiChatApp({
   devMiddleware: vite ? (request, response, next) => vite.middlewares(request, response, next) : undefined,
   allowedHosts: [],
   applicationRestart: prepareApplicationRestart,
-  applicationShutdown: (reason) => setTimeout(() => void shutdown(reason).then(() => {
-    if (!fatalShutdownRequested) process.exit(0);
-  }), 0),
+  applicationShutdown: (reason) => setTimeout(() => void shutdown(reason).then(
+    () => {
+      if (!fatalShutdownRequested) process.exit(0);
+    },
+    (error) => {
+      console.error(`[Pi Chat] 应用关闭失败：${errorDetail(error)}`);
+      process.exitCode = 1;
+    },
+  ), 0),
   primaryRuntime,
   buildIdentity,
 });
@@ -204,17 +225,31 @@ function shutdown(reason: ShutdownReason): Promise<void> {
   if (shutdownPromise) return shutdownPromise;
   console.log(`\n[Pi Chat] 正在关闭（reason=${reason}）…`);
   shutdownPromise = (async () => {
+    const errors: Error[] = [];
+    const requiredStop = async (name: string, action: () => Promise<void>) => {
+      try {
+        await action();
+      } catch (error) {
+        const normalized = error instanceof Error ? error : new Error(String(error));
+        errors.push(normalized);
+        console.error(`[Pi Chat] 关闭步骤失败（${name}）：${errorDetail(normalized)}`);
+      }
+    };
     // End SSE clients and secondary workers before server.close(): Node waits
     // for long-lived SSE connections, so closing the listener first can
-    // deadlock a self-restart indefinitely.
-    await shutdownStep("应用", () => app.close());
+    // deadlock a self-restart indefinitely. Unlike disposable HTTP/Vite close
+    // errors, unconfirmed Pi child exits are hard barriers to replacement.
+    await requiredStop("应用", () => app.close());
     await shutdownStep("HTTP", closeHttpServer);
     await shutdownStep("Vite", async () => {
       await vite?.close();
     });
     // If shutdown races initial spawn, wait for it before the final stop.
     await primaryStartup.catch(() => undefined);
-    await shutdownStep("Primary Pi RPC", () => rpc.stop());
+    await requiredStop("Primary Pi RPC", () => rpc.stop());
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1)
+      throw new AggregateError(errors, "一个或多个 Pi RPC 进程退出无法确认");
   })();
   return shutdownPromise;
 }
@@ -264,9 +299,17 @@ process.on("uncaughtException", (error) =>
   fatalShutdown("uncaught-exception", error),
 );
 
-process.once("SIGINT", () => void shutdown("sigint").then(() => {
-  if (!fatalShutdownRequested) process.exit(0);
-}));
-process.once("SIGTERM", () => void shutdown("sigterm").then(() => {
-  if (!fatalShutdownRequested) process.exit(0);
-}));
+function signalShutdown(reason: "sigint" | "sigterm"): void {
+  void shutdown(reason).then(
+    () => {
+      if (!fatalShutdownRequested) process.exit(0);
+    },
+    (error) => {
+      console.error(`[Pi Chat] 信号关闭失败：${errorDetail(error)}`);
+      process.exitCode = 1;
+    },
+  );
+}
+
+process.once("SIGINT", () => signalShutdown("sigint"));
+process.once("SIGTERM", () => signalShutdown("sigterm"));

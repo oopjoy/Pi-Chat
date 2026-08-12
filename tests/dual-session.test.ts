@@ -1297,6 +1297,40 @@ test("global shutdown refuses while any conversation is still busy", async () =>
   }
 });
 
+test("app close releases browser resources but preserves an unconfirmed Runtime failure", async () => {
+  const primary = new FakeRpc("primary");
+  const secondary = new FakeRpc("secondary");
+  secondary.stop = async () => { throw new Error("Pi RPC 进程退出无法确认"); };
+  const app = new PiChatApp({
+    rpc: primary as unknown as PiRpcClient,
+    sessions: {} as SessionIndex,
+    resources: {} as ResourceManager,
+    cwd: process.cwd(),
+    webRoot: process.cwd(),
+    createRpc: () => secondary as unknown as PiRpcClient,
+  });
+  const internal = app as unknown as {
+    runtimePool: { runtimes: Map<string, unknown> };
+    sseHub: { closeAll(): void };
+    closed: boolean;
+  };
+  internal.runtimePool.runtimes.set("secondary", {
+    id: "secondary",
+    rpc: secondary,
+    recovery: null,
+    unsubscribe: () => undefined,
+    draftSession: false,
+    prompted: true,
+  });
+  let hubClosed = false;
+  internal.sseHub.closeAll = () => { hubClosed = true; };
+
+  await assert.rejects(app.close(), /退出无法确认/);
+  assert.equal(internal.closed, true);
+  assert.equal(hubClosed, true);
+  assert.equal(internal.runtimePool.runtimes.has("secondary"), true);
+});
+
 test("global shutdown broadcasts to every window before stopping the application", async () => {
   const path = "C:\\sessions\\primary.jsonl";
   const primary = new FakeRpc(path, "primary");

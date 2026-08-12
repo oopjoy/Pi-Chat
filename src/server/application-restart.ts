@@ -288,6 +288,14 @@ export function restartServerArgs(options: ApplicationRestartOptions): string[] 
  * this listener to release its port (and optionally promotes staged dist after
  * file handles are released), then starts the freshly built server.
  */
+export async function handOffAfterConfirmedShutdown(
+  shutdown: () => Promise<void>,
+  handoff: () => void,
+): Promise<void> {
+  await shutdown();
+  handoff();
+}
+
 export function handOffApplicationRestart(options: ApplicationRestartOptions): void {
   const handoff = fileURLToPath(new URL("./restart-handoff.js", import.meta.url));
   const authority = options.host.includes(":") ? `[${options.host}]:${options.port}` : `${options.host}:${options.port}`;

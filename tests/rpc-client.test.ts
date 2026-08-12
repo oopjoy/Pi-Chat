@@ -138,9 +138,13 @@ test("an asynchronous stdin failure after write returns is outcome unknown", asy
   );
 });
 
-test("an oversized inbound line fails the active child and releases buffered memory", async () => {
+test("an oversized inbound line retains child ownership until exit is proved", async () => {
   const stream = new PassThrough();
   const { child } = fakeChild();
+  child.kill = () => {
+    child.killed = true;
+    return true;
+  };
   const client = new PiRpcClient({ cwd: process.cwd() });
   const events: Record<string, unknown>[] = [];
   client.onEvent((event) => events.push(event));
@@ -148,6 +152,7 @@ test("an oversized inbound line fails the active child and releases buffered mem
   const internals = client as unknown as {
     child: typeof child | null;
     source: typeof source | null;
+    unconfirmedChild: typeof child | null;
     attachJsonlReader(stream: NodeJS.ReadableStream, source: typeof source): void;
   };
   internals.child = child;
@@ -155,8 +160,17 @@ test("an oversized inbound line fails the active child and releases buffered mem
   internals.attachJsonlReader(stream, source);
   stream.write(Buffer.alloc(MAX_RPC_INBOUND_LINE_BYTES + 1, 0x61));
   assert.equal(internals.child, null);
+  assert.equal(internals.unconfirmedChild, child);
   assert.equal(child.killed, true);
   assert.match(String(events[0]?.error), /stdout.*安全上限/);
+  await assert.rejects(
+    client.start(),
+    /未确认退出/,
+    "a protocol-violating child must still block a replacement writer",
+  );
+  child.exitCode = 0;
+  await client.stop();
+  assert.equal(internals.unconfirmedChild, null);
 });
 
 test("stop fails closed and retains ownership when neither termination is observed", async () => {

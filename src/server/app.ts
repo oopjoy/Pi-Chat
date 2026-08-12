@@ -778,7 +778,14 @@ export class PiChatApp {
     this.unsubscribe();
     // Distinct Session workers can stop concurrently. Sequential forced-stop
     // windows made shutdown/restart scale by roughly three seconds per worker.
-    await this.runtimePool.stopAll({ cleanupDrafts: true });
+    // Preserve a failed worker's ownership, but still release SSE/HTTP-facing
+    // resources so the caller can finish a bounded fail-closed shutdown.
+    let runtimeStopFailure: unknown;
+    try {
+      await this.runtimePool.stopAll({ cleanupDrafts: true });
+    } catch (error) {
+      runtimeStopFailure = error;
+    }
     // Closing the hub emits the canonical disconnect callbacks. Clear control
     // state afterwards so those callbacks cannot leave fresh release timers.
     this.sseHub.closeAll();
@@ -792,6 +799,7 @@ export class PiChatApp {
     this.pendingExtensionTimers.clear();
     this.claimingExtensionRequests.clear();
     this.promptAdmissionTails.clear();
+    if (runtimeStopFailure) throw runtimeStopFailure;
   }
 
   private broadcast(event: Record<string, unknown>): void {

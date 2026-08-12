@@ -4,7 +4,7 @@ import test from "node:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { buildPiChat, cleanupStaleDistArtifacts, promoteStagedDist, rollbackPromotedDist, restartServerArgs, terminateProcessTree } from "../src/server/application-restart";
+import { buildPiChat, cleanupStaleDistArtifacts, handOffAfterConfirmedShutdown, promoteStagedDist, rollbackPromotedDist, restartServerArgs, terminateProcessTree } from "../src/server/application-restart";
 
 test("local application build stages a complete replacement without touching live dist", { skip: process.platform !== "win32", timeout: 120_000 }, async () => {
   const compiledDist = resolve(process.cwd(), process.env.PI_CHAT_DIST_DIR || "dist");
@@ -91,6 +91,25 @@ setInterval(() => undefined, 1000);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("restart handoff begins only after every hosted writer confirms shutdown", async () => {
+  const order: string[] = [];
+  await handOffAfterConfirmedShutdown(
+    async () => { order.push("shutdown"); },
+    () => { order.push("handoff"); },
+  );
+  assert.deepEqual(order, ["shutdown", "handoff"]);
+
+  let handedOff = false;
+  await assert.rejects(
+    handOffAfterConfirmedShutdown(
+      async () => { throw new Error("Pi RPC 进程退出无法确认"); },
+      () => { handedOff = true; },
+    ),
+    /退出无法确认/,
+  );
+  assert.equal(handedOff, false);
 });
 
 test("application handoff restarts the same Pi Chat entry with its listener and workspace arguments", () => {
