@@ -1,191 +1,29 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { beforeEach } from "node:test";
 import { act, createElement } from "react";
-import { JSDOM } from "jsdom";
 import type { BootstrapData, SessionViewData } from "../src/shared/types";
+import {
+  activeSessionId as activeId,
+  createBootstrapFixture,
+  createSessionViewFixture,
+} from "./fixtures/app-bootstrap";
+import { captureApiSnapshot } from "./helpers/api-stub";
+import { installAppDom as installDom } from "./helpers/app-dom";
 
-function installDom() {
-  const dom = new JSDOM(
-    "<!doctype html><html><body><div id='root'></div></body></html>",
-    { url: "http://127.0.0.1:30170/" },
-  );
-  Object.assign(globalThis, {
-    window: dom.window,
-    document: dom.window.document,
-    Node: dom.window.Node,
-    HTMLElement: dom.window.HTMLElement,
-    HTMLTextAreaElement: dom.window.HTMLTextAreaElement,
-    Event: dom.window.Event,
-    MouseEvent: dom.window.MouseEvent,
-    InputEvent: dom.window.InputEvent,
-    KeyboardEvent: dom.window.KeyboardEvent,
-    sessionStorage: dom.window.sessionStorage,
-    localStorage: dom.window.localStorage,
-    history: dom.window.history,
-    location: dom.window.location,
-    IS_REACT_ACT_ENVIRONMENT: true,
-    requestAnimationFrame: (callback: FrameRequestCallback) => {
-      callback(0);
-      return 1;
-    },
-    cancelAnimationFrame: () => undefined,
-  });
-  Object.defineProperty(globalThis, "navigator", {
-    value: dom.window.navigator,
-    configurable: true,
-  });
-  Object.defineProperty(dom.window, "matchMedia", {
-    value: () => ({
-      matches: false,
-      addEventListener() {},
-      removeEventListener() {},
-    }),
-    configurable: true,
-  });
-  Object.defineProperty(dom.window.document, "hasFocus", {
-    value: () => true,
-    configurable: true,
-  });
-  Object.defineProperty(dom.window.HTMLElement.prototype, "scrollTo", {
-    value() {},
-    configurable: true,
-  });
-  Object.defineProperty(dom.window.HTMLElement.prototype, "attachEvent", {
-    value() {},
-    configurable: true,
-  });
-  Object.defineProperty(dom.window.HTMLElement.prototype, "detachEvent", {
-    value() {},
-    configurable: true,
-  });
-  class FakeEventSource {
-    static readonly CONNECTING = 0;
-    static readonly OPEN = 1;
-    static readonly CLOSED = 2;
-    static instances: FakeEventSource[] = [];
-    readonly CONNECTING = 0;
-    readonly OPEN = 1;
-    readonly CLOSED = 2;
-    readyState = 1;
-    onerror: ((event: Event) => void) | null = null;
-    private listeners = new Map<string, Set<(event: Event) => void>>();
-    constructor(readonly url: string | URL) {
-      FakeEventSource.instances.push(this);
-    }
-    addEventListener(type: string, listener: (event: Event) => void) {
-      const listeners = this.listeners.get(type) || new Set();
-      listeners.add(listener);
-      this.listeners.set(type, listeners);
-    }
-    removeEventListener(type: string, listener: (event: Event) => void) {
-      this.listeners.get(type)?.delete(listener);
-    }
-    close() {
-      this.readyState = 2;
-    }
-    dispatchEvent(event: Event) {
-      for (const listener of this.listeners.get(event.type) || [])
-        listener(event);
-      return true;
-    }
-    emitPi(payload: Record<string, unknown>) {
-      this.dispatchEvent(
-        new dom.window.MessageEvent("pi", { data: JSON.stringify(payload) }),
-      );
-    }
-  }
-  Object.assign(globalThis, { EventSource: FakeEventSource });
-  return { dom, FakeEventSource };
-}
+let bootstrap: BootstrapData;
+let draftView: SessionViewData;
 
-const activeId = "0123456789abcdefabcd";
-const bootstrap: BootstrapData = {
-  state: {
-    model: {
-      id: "model",
-      name: "Model",
-      provider: "test",
-      input: ["text"],
-      reasoning: true,
-    },
-    thinkingLevel: "medium",
-    isStreaming: false,
-    sessionId: "active",
-    sessionFile: "C:/sessions/active.jsonl",
-  },
-  messages: [],
-  sessions: [
-    {
-      id: activeId,
-      sessionId: "active",
-      name: "Active",
-      preview: "",
-      cwd: "C:/work",
-      updatedAt: 1,
-      messageCount: 1,
-      active: true,
-      writable: true,
-    },
-  ],
-  models: [{ id: "model", name: "Model", provider: "test", input: ["text"] }],
-  commands: [],
-  queue: [],
-  queuePaused: false,
-  workspaceCwd: "C:/work",
-  // The server scopes workspace revisions with its per-process run epoch.
-  workspaceEpoch: "epoch-a",
-  activeSessionId: activeId,
-  activeSessionIds: [activeId],
-  applicationLifecycle: "idle",
-  primaryRuntime: {
-    status: "ready",
-    generation: 0,
-    model: {
-      id: "model",
-      name: "Model",
-      provider: "test",
-      input: ["text"],
-      reasoning: true,
-    },
-    thinkingLevel: "medium",
-    sessionId: activeId,
-  },
-};
-
-const draftView: SessionViewData = {
-  session: {
-    id: "fedcba9876543210abcd",
-    sessionId: "draft",
-    name: "新对话",
-    preview: "尚未发送消息",
-    cwd: "C:/work",
-    updatedAt: 2,
-    messageCount: 0,
-    active: false,
-    writable: true,
-  },
-  state: {
-    ...bootstrap.state,
-    sessionId: "draft",
-    sessionFile: "C:/sessions/draft.jsonl",
-    messageCount: 0,
-  },
-  messages: [],
-  messageTotal: 0,
-  messagesTruncated: false,
-  isActive: true,
-  runtimeStatus: "active",
-  isStreaming: false,
-  queue: [],
-  queuePaused: false,
-};
+beforeEach(() => {
+  bootstrap = createBootstrapFixture();
+  draftView = createSessionViewFixture();
+});
 
 test("foreground presence renews on ready, visible lifecycle events, stays quiet while hidden, and cleans up on unmount", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   let renewals = 0;
   let relinquishments = 0;
   let closeSignals = 0;
@@ -326,7 +164,7 @@ test("foreground presence renews on ready, visible lifecycle events, stays quiet
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -340,7 +178,7 @@ test("a build mismatch blocks ordinary mutations but preserves server-guarded li
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const testGlobal = globalThis as typeof globalThis & {
     __PI_CHAT_TEST_WEB_BUILD_IDENTITY__?: BootstrapData["buildIdentity"];
   };
@@ -445,7 +283,7 @@ test("a build mismatch blocks ordinary mutations but preserves server-guarded li
   } finally {
     await act(async () => root.unmount());
     delete testGlobal.__PI_CHAT_TEST_WEB_BUILD_IDENTITY__;
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -454,7 +292,7 @@ test("a bootstrap without a restored Session opens a local New draft with the de
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   let createdSessions = 0;
   Object.assign(api, {
     bootstrap: async () => ({
@@ -490,7 +328,7 @@ test("a bootstrap without a restored Session opens a local New draft with the de
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -499,7 +337,7 @@ test("a New draft can choose a recently used Session workspace from the path dro
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   let createdSessions = 0;
   let pickerCalls = 0;
   Object.assign(api, {
@@ -557,7 +395,7 @@ test("a New draft can choose a recently used Session workspace from the path dro
     assert.equal(pickerCalls, 0, "quick selection does not open the native folder picker");
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -566,7 +404,7 @@ test("a workspace SSE updates the default only for a later New draft", async () 
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   Object.assign(api, {
     bootstrap: async () => bootstrap,
     eventsUrl: () => "/api/events",
@@ -605,7 +443,7 @@ test("a workspace SSE updates the default only for a later New draft", async () 
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -614,7 +452,7 @@ test("a stale bootstrap cannot undo a newer workspace SSE default", async () => 
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   let bootstrapCalls = 0;
   let resolveStaleBootstrap!: (value: BootstrapData) => void;
   const staleBootstrap = new Promise<BootstrapData>((resolve) => {
@@ -669,7 +507,7 @@ test("a stale bootstrap cannot undo a newer workspace SSE default", async () => 
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -679,7 +517,7 @@ for (const terminal of ["ready", "failed"] as const) {
     const { createRoot } = await import("react-dom/client");
     const { api } = await import("../src/web/api");
     const { App } = await import("../src/web/App");
-    const originals = { ...api };
+    const restoreApi = captureApiSnapshot(api);
     let bootstrapCalls = 0;
     let resolveStaleBootstrap!: (value: BootstrapData) => void;
     const staleBootstrap = new Promise<BootstrapData>((resolve) => {
@@ -748,7 +586,7 @@ for (const terminal of ["ready", "failed"] as const) {
       }
     } finally {
       await act(async () => root.unmount());
-      Object.assign(api, originals);
+      restoreApi();
     }
   });
 }
@@ -758,7 +596,7 @@ test("a replacement clears the old Primary readiness generation before accepting
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   let bootstrapCalls = 0;
   let resolveReplacementBootstrap!: (value: BootstrapData) => void;
   const pendingReplacementBootstrap = new Promise<BootstrapData>((resolve) => {
@@ -841,7 +679,7 @@ test("a replacement clears the old Primary readiness generation before accepting
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -850,7 +688,7 @@ test("a replacement process workspace epoch accepts its fresh default after an o
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   let bootstrapCalls = 0;
   Object.assign(api, {
     bootstrap: async () => {
@@ -899,7 +737,7 @@ test("a replacement process workspace epoch accepts its fresh default after an o
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -909,7 +747,7 @@ test("lifecycle idle consumes replacement bootstrap accounting before a later re
     const { createRoot } = await import("react-dom/client");
     const { api } = await import("../src/web/api");
     const { App } = await import("../src/web/App");
-    const originals = { ...api };
+    const restoreApi = captureApiSnapshot(api);
     let bootstrapCalls = 0;
     let rejectReplacementBootstrap!: (cause: Error) => void;
     const rejectedReplacementBootstrap = new Promise<BootstrapData>(
@@ -1007,7 +845,7 @@ test("lifecycle idle consumes replacement bootstrap accounting before a later re
       );
     } finally {
       await act(async () => root.unmount());
-      Object.assign(api, originals);
+      restoreApi();
     }
   }
 });
@@ -1017,7 +855,7 @@ test("a stale bootstrap rejection during replacement maintenance cannot surface 
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   let bootstrapCalls = 0;
   let rejectOldBootstrap!: (cause: Error) => void;
   const oldBootstrap = new Promise<BootstrapData>((_resolve, reject) => {
@@ -1082,7 +920,7 @@ test("a stale bootstrap rejection during replacement maintenance cannot surface 
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -1091,7 +929,7 @@ test("a replacement maintenance ready detaches an old bootstrap before its later
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   let bootstrapCalls = 0;
   let resolveOldBootstrap!: (value: BootstrapData) => void;
   const oldBootstrap = new Promise<BootstrapData>((resolve) => {
@@ -1191,7 +1029,7 @@ test("a replacement maintenance ready detaches an old bootstrap before its later
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -1200,7 +1038,7 @@ test("replacement detaches a pending scheduled Session Index refresh before appl
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const oldSession = {
     ...bootstrap.sessions[0],
     id: "cccccccccccccccccccc",
@@ -1349,7 +1187,7 @@ test("replacement detaches a pending scheduled Session Index refresh before appl
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -1359,7 +1197,7 @@ test("replacement pane authority rejects late A navigation success and failure w
     const { createRoot } = await import("react-dom/client");
     const { api } = await import("../src/web/api");
     const { App } = await import("../src/web/App");
-    const originals = { ...api };
+    const restoreApi = captureApiSnapshot(api);
     const oldId = `aaaaaaaaaaaaaaaaaaa${outcome === "success" ? "1" : "2"}`;
     const replacementId = `bbbbbbbbbbbbbbbbbbb${outcome === "success" ? "1" : "2"}`;
     const oldSession = {
@@ -1513,7 +1351,7 @@ test("replacement pane authority rejects late A navigation success and failure w
       );
     } finally {
       await act(async () => root.unmount());
-      Object.assign(api, originals);
+      restoreApi();
     }
   }
 });
@@ -1523,7 +1361,7 @@ test("replacement idle releases maintenance locks before a rejected bootstrap an
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const historyId = "33333333333333333333";
   const replacementSession = {
     ...bootstrap.sessions[0],
@@ -1702,7 +1540,7 @@ test("replacement idle releases maintenance locks before a rejected bootstrap an
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -1711,7 +1549,7 @@ test("a same-epoch ready joining a failed replacement bootstrap preserves its on
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   let bootstrapCalls = 0;
   let rejectReplacementBootstrap!: (cause: Error) => void;
   const pendingReplacementBootstrap = new Promise<BootstrapData>(
@@ -1814,7 +1652,7 @@ test("a same-epoch ready joining a failed replacement bootstrap preserves its on
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -1823,7 +1661,7 @@ test("maintenance replacement rejects an old Session Index response and still ru
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   let bootstrapCalls = 0;
   let rejectInitialBootstrap!: (cause: Error) => void;
   const initialBootstrap = new Promise<BootstrapData>((_resolve, reject) => {
@@ -1964,7 +1802,7 @@ test("maintenance replacement rejects an old Session Index response and still ru
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -1973,7 +1811,7 @@ test("a replacement ready starts a new bootstrap instead of joining an old pendi
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   let bootstrapCalls = 0;
   let resolveOldBootstrap!: (value: BootstrapData) => void;
   const oldBootstrap = new Promise<BootstrapData>((resolve) => {
@@ -2059,7 +1897,7 @@ test("a replacement ready starts a new bootstrap instead of joining an old pendi
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -2068,7 +1906,7 @@ test("a stale old bootstrap cannot suppress replacement-ready recovery after its
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   let bootstrapCalls = 0;
   let resolveOldBootstrap!: (value: BootstrapData) => void;
   let rejectReplacementBootstrap!: (cause: Error) => void;
@@ -2186,7 +2024,7 @@ test("a stale old bootstrap cannot suppress replacement-ready recovery after its
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -2195,7 +2033,7 @@ test("a replacement invalidates an old early handshake and starts a fresh histor
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const coldId = "abcdef0123456789abcd";
   dom.window.history.replaceState(null, "", `/?session=${coldId}`);
   let bootstrapCalls = 0;
@@ -2365,7 +2203,7 @@ test("a replacement invalidates an old early handshake and starts a fresh histor
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -2374,7 +2212,7 @@ test("a replacement clears old sidebar inventory so its slow bootstrap still use
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   let bootstrapCalls = 0;
   let sessionReads = 0;
   const pendingReplacementBootstrap = new Promise<BootstrapData>(
@@ -2455,7 +2293,7 @@ test("a replacement clears old sidebar inventory so its slow bootstrap still use
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -2464,7 +2302,7 @@ test("a same-epoch recovery refresh detaches an older early handshake and paints
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const coldId = "abcdef0123456789abcd";
   dom.window.history.replaceState(null, "", `/?session=${coldId}`);
   let bootstrapCalls = 0;
@@ -2604,7 +2442,7 @@ test("a same-epoch recovery refresh detaches an older early handshake and paints
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -2613,7 +2451,7 @@ test("a transient empty model inventory never leaks the Composer's internal mode
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const selected = {
     provider: "xwill",
     id: "gpt-5.6-sol",
@@ -2646,7 +2484,7 @@ test("a transient empty model inventory never leaks the Composer's internal mode
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -2655,7 +2493,7 @@ test("slash suggestions survive an empty command inventory refresh", async () =>
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const slashCommands = [
     { name: "gate", description: "Gate 模式", source: "extension" },
     { name: "compact", description: "压缩上下文", source: "builtin" },
@@ -2733,7 +2571,7 @@ test("slash suggestions survive an empty command inventory refresh", async () =>
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -2742,7 +2580,7 @@ test("slash suggestions return after a starting bootstrap refreshes to ready", a
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const slashCommands = [
     { name: "gate", description: "Gate 模式", source: "extension" },
   ];
@@ -2803,7 +2641,7 @@ test("slash suggestions return after a starting bootstrap refreshes to ready", a
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -2812,7 +2650,7 @@ test("cold and capability-only hot panes retain the confirmed slash catalog", as
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const coldId = "abcdef0123456789abcd";
   const hotId = "fedcba9876543210abcd";
   const slashCommands = [
@@ -2953,7 +2791,7 @@ test("cold and capability-only hot panes retain the confirmed slash catalog", as
     assert.equal(warmCalls, 0);
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -2962,7 +2800,7 @@ test("the initial ready frame releases controls when Primary became ready after 
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const cached = {
     provider: "cached",
     id: "ready-between-bootstrap-and-sse",
@@ -3006,7 +2844,7 @@ test("the initial ready frame releases controls when Primary became ready after 
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -3015,7 +2853,7 @@ test("same-generation initial ready adopts its model without waiting for Bootstr
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const adoptedModel = {
     provider: "test",
     id: "adopted-ready",
@@ -3063,7 +2901,7 @@ test("same-generation initial ready adopts its model without waiting for Bootstr
     assert.match(modelTrigger.textContent || "", /Adopted ready/);
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -3072,7 +2910,7 @@ test("Primary ready preserves a staged draft model and keeps its capability unco
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   let newSessionCalls = 0;
   const runtimeModel = {
     provider: "test",
@@ -3210,7 +3048,7 @@ test("Primary ready preserves a staged draft model and keeps its capability unco
     assert.equal(newSessionCalls, 0);
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -3219,7 +3057,7 @@ test("Primary startup disables cached model choices until Runtime readiness", as
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const cached = {
     provider: "cached",
     id: "ready-later",
@@ -3248,7 +3086,7 @@ test("Primary startup disables cached model choices until Runtime readiness", as
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -3257,7 +3095,7 @@ test("Primary startup marks composer capability and image input as pending", asy
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   Object.assign(api, {
     bootstrap: async () => ({
       ...bootstrap,
@@ -3280,7 +3118,7 @@ test("Primary startup marks composer capability and image input as pending", asy
     assert.equal(attachment.disabled, true, "attachments wait for the same ready boundary");
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -3290,7 +3128,7 @@ test("a legacy ready without adopted capability allows text while image capabili
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   let requests = 0;
   let resolveRefresh: ((data: BootstrapData) => void) | undefined;
   const promptCalls: unknown[][] = [];
@@ -3424,7 +3262,7 @@ test("a legacy ready without adopted capability allows text while image capabili
     assert.equal(promptCalls.length, 1, "confirmed image capability permits submission");
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -3433,7 +3271,7 @@ test("a new Primary generation keeps prior image capability pending until its re
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const imageModel = {
     provider: "test",
     id: "generation-image",
@@ -3538,7 +3376,7 @@ test("a new Primary generation keeps prior image capability pending until its re
     assert.match(imageMenuItem().textContent || "", /直接解析/);
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -3547,7 +3385,7 @@ test("Primary failure keeps cached image capability unconfirmed", async () => {
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const imageModel = {
     provider: "test",
     id: "cached-image",
@@ -3583,7 +3421,7 @@ test("Primary failure keeps cached image capability unconfirmed", async () => {
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -3753,7 +3591,7 @@ test("App reveals a Steer turn only when Pi consumes it", async () => {
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const promptCalls: unknown[][] = [];
   Object.assign(api, {
     bootstrap: async () => ({
@@ -3827,7 +3665,7 @@ test("App reveals a Steer turn only when Pi consumes it", async () => {
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -3836,7 +3674,7 @@ test("a cleared Steer with a reason surfaces the drop instead of staying silent"
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   Object.assign(api, {
     bootstrap: async () => ({
       ...bootstrap,
@@ -3908,7 +3746,7 @@ test("a cleared Steer with a reason surfaces the drop instead of staying silent"
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -3917,7 +3755,7 @@ test("a background Session preserves its dropped Steer reason until opened", asy
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const backgroundId = draftView.session.id;
   const backgroundView: SessionViewData = {
     ...draftView,
@@ -3975,7 +3813,7 @@ test("a background Session preserves its dropped Steer reason until opened", asy
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -3984,7 +3822,7 @@ test("system Gate selector remains visible when startup command inventory is emp
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   Object.assign(api, {
     bootstrap: async () => ({
       ...bootstrap,
@@ -4007,7 +3845,7 @@ test("system Gate selector remains visible when startup command inventory is emp
     assert.equal(gate.textContent?.trim(), "严格");
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -4016,7 +3854,7 @@ test("conversation controls live in the composer while settings moves to the top
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   Object.assign(api, {
     bootstrap: async () => ({
       ...bootstrap,
@@ -4111,7 +3949,7 @@ test("conversation controls live in the composer while settings moves to the top
     assert.equal(settings.getAttribute("aria-label"), "关闭设置");
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -4124,7 +3962,7 @@ test("ChatInput keeps an unsent draft and image attachment across Session naviga
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const secondId = "draft-preservation-123";
   const imageModel = {
     ...bootstrap.state.model!,
@@ -4247,7 +4085,7 @@ test("ChatInput keeps an unsent draft and image attachment across Session naviga
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -4256,7 +4094,7 @@ test("loading earlier history is isolated per Session across a pane switch", asy
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const secondId = "11111111111111111111";
   const summaryB = {
     ...bootstrap.sessions[0],
@@ -4372,7 +4210,7 @@ test("loading earlier history is isolated per Session across a pane switch", asy
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -4381,7 +4219,7 @@ test("an old history request cannot affect a later visit to the same Session", a
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const secondId = "22222222222222222222";
   const summaryB = {
     ...bootstrap.sessions[0],
@@ -4494,7 +4332,7 @@ test("an old history request cannot affect a later visit to the same Session", a
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -4503,7 +4341,7 @@ test("a fast bootstrap restores its remembered active Session without a competin
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   dom.window.history.replaceState(null, "", `/?session=${activeId}`);
   let viewCalls = 0;
   let bootstrapCalls = 0;
@@ -4552,7 +4390,7 @@ test("a fast bootstrap restores its remembered active Session without a competin
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -4561,7 +4399,7 @@ test("remembered cold history paints before global bootstrap finishes while muta
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const coldId = "abcdef0123456789abcd";
   dom.window.history.replaceState(null, "", `/?session=${coldId}`);
   const cold: SessionViewData = {
@@ -4667,7 +4505,7 @@ test("remembered cold history paints before global bootstrap finishes while muta
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -4676,7 +4514,7 @@ test("initial idle ready retries one rejected bootstrap and restores the page pr
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   let bootstrapCalls = 0;
   Object.assign(api, {
     bootstrap: async () => {
@@ -4737,7 +4575,7 @@ test("initial idle ready retries one rejected bootstrap and restores the page pr
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -4746,7 +4584,7 @@ test("an initial ready consumes its only retry even when that retry fails", asyn
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   let bootstrapCalls = 0;
   Object.assign(api, {
     bootstrap: async () => {
@@ -4790,7 +4628,7 @@ test("an initial ready consumes its only retry even when that retry fails", asyn
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -4799,7 +4637,7 @@ test("a slow bootstrap still completes the sidebar inventory through its indepen
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const pendingBootstrap = new Promise<BootstrapData>(() => undefined);
   let sessionReads = 0;
   Object.assign(api, {
@@ -4853,7 +4691,7 @@ test("a slow bootstrap still completes the sidebar inventory through its indepen
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -4862,7 +4700,7 @@ test("a rejected bootstrap does not discard an already-started sidebar inventory
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   let rejectBootstrap!: (cause: Error) => void;
   let resolveSessions!: (value: {
     sessions: typeof bootstrap.sessions;
@@ -4926,7 +4764,7 @@ test("a rejected bootstrap does not discard an already-started sidebar inventory
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -4935,7 +4773,7 @@ test("a bootstrap rejected before the sidebar delay leaves its independent inven
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   let rejectBootstrap!: (cause: Error) => void;
   const pendingBootstrap = new Promise<BootstrapData>((_resolve, reject) => {
     rejectBootstrap = reject;
@@ -5003,7 +4841,7 @@ test("a bootstrap rejected before the sidebar delay leaves its independent inven
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -5012,7 +4850,7 @@ test("opening a cold conversation paints JSONL without starting a dedicated Runt
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const coldId = "abcdef0123456789abcd";
   const cold: SessionViewData = {
     ...draftView,
@@ -5141,7 +4979,7 @@ test("opening a cold conversation paints JSONL without starting a dedicated Runt
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -5151,7 +4989,7 @@ test("a cold image prompt prepares its Runtime before validating model support",
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const coldId = "cold-image-1234567890";
   const imageModel = {
     provider: "archive",
@@ -5244,7 +5082,7 @@ test("a cold image prompt prepares its Runtime before validating model support",
     assert.equal((promptCalls[0]?.[1] as unknown[])?.length, 1);
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -5253,7 +5091,7 @@ test("a background completed reply becomes green until this browser opens the co
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const backgroundId = "abcdef0123456789abcd";
   const background: SessionViewData = {
     ...draftView,
@@ -5354,7 +5192,7 @@ test("a background completed reply becomes green until this browser opens the co
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -5363,7 +5201,7 @@ test("opening an unread conversation preserves a newer running state", async () 
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const backgroundId = "unread-running-123456";
   const background: SessionViewData = {
     ...draftView,
@@ -5433,7 +5271,7 @@ test("opening an unread conversation preserves a newer running state", async () 
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -5442,7 +5280,7 @@ test("a reply viewed before settlement does not become unread after leaving", as
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const backgroundId = "viewed-before-settle";
   const background: SessionViewData = {
     ...draftView,
@@ -5509,7 +5347,7 @@ test("a reply viewed before settlement does not become unread after leaving", as
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -5518,7 +5356,7 @@ test("a stale sidebar snapshot cannot restore the running spinner after settleme
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const backgroundId = "running-stale-012345";
   const background = {
     ...draftView.session,
@@ -5599,7 +5437,7 @@ test("a stale sidebar snapshot cannot restore the running spinner after settleme
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -5608,7 +5446,7 @@ test("failed Primary keeps historical navigation while disabling the composer", 
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   Object.assign(api, {
     bootstrap: async () => ({
       ...bootstrap,
@@ -5645,7 +5483,7 @@ test("failed Primary keeps historical navigation while disabling the composer", 
     assert.ok(FakeEventSource.instances.length > 0);
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -5654,7 +5492,7 @@ test("changing Gate on cold history stages the next prompt without activating it
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const coldId = "gate-cold-1234567890";
   const coldSummary = {
     ...bootstrap.sessions[0],
@@ -5758,7 +5596,7 @@ test("changing Gate on cold history stages the next prompt without activating it
     assert.deepEqual(promptCalls, [["first message", [], coldId, "open"]]);
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -5767,7 +5605,7 @@ test("an explicit active Gate choice supersedes an older cold staged mode", asyn
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const coldId = "gate-active-choice-123";
   const coldSummary = {
     ...bootstrap.sessions[0],
@@ -5929,7 +5767,7 @@ test("an explicit active Gate choice supersedes an older cold staged mode", asyn
     ]);
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -5938,7 +5776,7 @@ test("a staged cold Gate mode cannot auto-allow before Runtime confirmation", as
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const coldId = "gate-confirmation-123";
   const coldSummary = {
     ...bootstrap.sessions[0],
@@ -6055,7 +5893,7 @@ test("a staged cold Gate mode cannot auto-allow before Runtime confirmation", as
     ]);
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -6064,7 +5902,7 @@ test("Gate mode changes only after the Runtime confirms the command", async () =
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   let resolveGate!: (value: {
     accepted: boolean;
     queued: boolean;
@@ -6136,7 +5974,7 @@ test("Gate mode changes only after the Runtime confirms the command", async () =
     assert.equal(trigger.textContent?.trim(), "放行");
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -6145,7 +5983,7 @@ test("the next turn carries the Gate mode shown after refresh", async () => {
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const promptCalls: unknown[][] = [];
   Object.assign(api, {
     bootstrap: async () => ({ ...bootstrap, gateMode: "strict" }),
@@ -6184,7 +6022,7 @@ test("the next turn carries the Gate mode shown after refresh", async () => {
     assert.deepEqual(promptCalls, [["next turn", [], activeId, "strict"]]);
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -6193,7 +6031,7 @@ test("an accepted prompt advances the sidebar turn count before stale metadata c
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const existingMessages = [
     { role: "user" as const, content: "first" },
     { role: "assistant" as const, content: "reply" },
@@ -6284,7 +6122,7 @@ test("an accepted prompt advances the sidebar turn count before stale metadata c
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -6293,7 +6131,7 @@ test("cancelling an admitted queued prompt restores its text over the current Co
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const queuedItem = {
     id: "00000000-0000-4000-8000-000000000002",
     message: "cancel this turn",
@@ -6386,7 +6224,7 @@ test("cancelling an admitted queued prompt restores its text over the current Co
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -6399,7 +6237,7 @@ test("cancelling a locally queued image prompt restores its attachment", async (
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const imageModel = {
     ...bootstrap.state.model!,
     input: ["text", "image"],
@@ -6476,7 +6314,7 @@ test("cancelling a locally queued image prompt restores its attachment", async (
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -6485,7 +6323,7 @@ test("successive queue cancellations keep only the latest restored message", asy
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const first = {
     id: "00000000-0000-4000-8000-000000000011",
     message: "first cancelled prompt",
@@ -6562,7 +6400,7 @@ test("successive queue cancellations keep only the latest restored message", asy
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -6571,7 +6409,7 @@ test("a delayed queue cancellation does not overwrite draft edits made after the
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const queued = {
     id: "00000000-0000-4000-8000-000000000020",
     message: "restore only if draft unchanged",
@@ -6618,7 +6456,7 @@ test("a delayed queue cancellation does not overwrite draft edits made after the
     assert.equal(dom.window.document.querySelector(".prompt-queue"), null);
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -6627,7 +6465,7 @@ test("opening the image picker prevents a delayed cancellation from replacing th
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const queued = {
     id: "00000000-0000-4000-8000-000000000028",
     message: "do not restore over image intent",
@@ -6677,7 +6515,7 @@ test("opening the image picker prevents a delayed cancellation from replacing th
     assert.equal(textarea.value, "keep this draft");
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -6686,7 +6524,7 @@ test("a cancellation response cannot erase a newer queue admission", async () =>
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const cancelled = {
     id: "00000000-0000-4000-8000-000000000026",
     message: "cancel old item",
@@ -6736,7 +6574,7 @@ test("a cancellation response cannot erase a newer queue admission", async () =>
     assert.match(queueText, /newer admitted item/);
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -6745,7 +6583,7 @@ test("a stale resume response cannot erase a newer same-session admission", asyn
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const existing = {
     id: "00000000-0000-4000-8000-000000000029",
     message: "existing resume item",
@@ -6802,7 +6640,7 @@ test("a stale resume response cannot erase a newer same-session admission", asyn
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -6811,7 +6649,7 @@ test("reverse queue cancellation response order still restores the last-clicked 
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const first = {
     id: "00000000-0000-4000-8000-000000000023",
     message: "first click first response",
@@ -6865,7 +6703,7 @@ test("reverse queue cancellation response order still restores the last-clicked 
     assert.equal(dom.window.document.querySelector(".prompt-queue"), null);
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -6874,7 +6712,7 @@ test("a stale queue SSE cannot resurrect a successfully cancelled item", async (
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const queued = {
     id: "00000000-0000-4000-8000-000000000025",
     message: "stay cancelled",
@@ -6915,7 +6753,7 @@ test("a stale queue SSE cannot resurrect a successfully cancelled item", async (
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -6924,7 +6762,7 @@ test("out-of-order queue cancellation responses keep the last-clicked message in
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const first = {
     id: "00000000-0000-4000-8000-000000000021",
     message: "slow first undo",
@@ -6986,7 +6824,7 @@ test("out-of-order queue cancellation responses keep the last-clicked message in
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -6995,7 +6833,7 @@ test("queued prompt moves exclusively between queue and transcript across dispat
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const queuedId = "00000000-0000-4000-8000-000000000001";
   const queuedItem = {
     id: queuedId,
@@ -7154,7 +6992,7 @@ test("queued prompt moves exclusively between queue and transcript across dispat
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -7163,7 +7001,7 @@ test("dispatch before HTTP acknowledgement cannot resurrect an executing queue i
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const queuedItem = {
     id: "00000000-0000-4000-8000-000000000031",
     message: "dispatch wins over ack",
@@ -7251,7 +7089,7 @@ test("dispatch before HTTP acknowledgement cannot resurrect an executing queue i
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -7260,7 +7098,7 @@ test("queue SSE invalidates an older Session view before it can erase queue stat
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const queuedItem = {
     id: "00000000-0000-4000-8000-000000000099",
     message: "SSE queue state wins",
@@ -7323,7 +7161,7 @@ test("queue SSE invalidates an older Session view before it can erase queue stat
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -7332,7 +7170,7 @@ test("agent settlement clears a completed tool status left after compaction", as
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const settledView: SessionViewData = {
     ...draftView,
     session: {
@@ -7456,7 +7294,7 @@ test("agent settlement clears a completed tool status left after compaction", as
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -7465,7 +7303,7 @@ test("extension resolution invalidates an older Session view before it can reope
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const request = {
     type: "extension_ui_request",
     id: "pending-confirm",
@@ -7525,7 +7363,7 @@ test("extension resolution invalidates an older Session view before it can reope
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -7534,7 +7372,7 @@ test("a late cold activation from A cannot overwrite the Session B composer", as
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const coldId = "aaaaaaaaaaaaaaaaaaaa";
   const secondId = "bbbbbbbbbbbbbbbbbbbb";
   const modelA = {
@@ -7708,7 +7546,7 @@ test("a late cold activation from A cannot overwrite the Session B composer", as
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -7717,7 +7555,7 @@ test("a stale A Runtime warm cannot overwrite a newer A revisit", async () => {
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const coldId = "warm-a-12345678901234";
   const secondId = "warm-b-12345678901234";
   const modelA = {
@@ -7898,7 +7736,7 @@ test("a stale A Runtime warm cannot overwrite a newer A revisit", async () => {
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -7907,7 +7745,7 @@ test("a replacement ignores stale A warm cache writes", async () => {
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const coldId = "replacement-warm-12345";
   let promptCalls = 0;
   const coldSession = {
@@ -8013,7 +7851,7 @@ test("a replacement ignores stale A warm cache writes", async () => {
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -8022,7 +7860,7 @@ test("a stale A prompt acknowledgement cannot modify a newer A revisit", async (
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const secondId = "prompt-b-123456789012";
   const summaryB = {
     ...bootstrap.sessions[0],
@@ -8143,7 +7981,7 @@ test("a stale A prompt acknowledgement cannot modify a newer A revisit", async (
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -8152,7 +7990,7 @@ test("a stale A prompt failure cannot modify a newer A revisit", async () => {
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const secondId = "prompt-failure-b-12345";
   const summaryB = {
     ...bootstrap.sessions[0],
@@ -8239,7 +8077,7 @@ test("a stale A prompt failure cannot modify a newer A revisit", async () => {
     assert.equal(dom.window.document.querySelector(".prompt-queue"), null);
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -8248,7 +8086,7 @@ test("a stale A extension failure cannot reopen a newer A pane", async () => {
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const coldAId = "extension-a-123456789";
   const secondId = "extension-b-123456789";
   const summaryA = {
@@ -8345,7 +8183,7 @@ test("a stale A extension failure cannot reopen a newer A pane", async () => {
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -8354,7 +8192,7 @@ test("a stale A reconcile rejection cannot retry or show an error on a newer A p
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const secondId = "reconcile-b-123456789";
   const summaryB = {
     ...bootstrap.sessions[0],
@@ -8458,7 +8296,7 @@ test("a stale A reconcile rejection cannot retry or show an error on a newer A p
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -8467,7 +8305,7 @@ test("a stale Gate auto-allow result cannot show feedback after A → B → A", 
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const secondId = "gate-feedback-b-12345";
   const summaryB = {
     ...bootstrap.sessions[0],
@@ -8540,7 +8378,7 @@ test("a stale Gate auto-allow result cannot show feedback after A → B → A", 
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -8549,7 +8387,7 @@ test("a stale Gate auto-allow failure cannot show an error after A → B", async
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const secondId = "gate-feedback-failure-b";
   const summaryB = {
     ...bootstrap.sessions[0],
@@ -8623,7 +8461,7 @@ test("a stale Gate auto-allow failure cannot show an error after A → B", async
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -8632,7 +8470,7 @@ test("a stale A takeover cannot overwrite a newer A revisit or control SSE", asy
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const secondId = "takeover-b-1234567890";
   const summaryA = {
     ...bootstrap.sessions[0],
@@ -8746,7 +8584,7 @@ test("a stale A takeover cannot overwrite a newer A revisit or control SSE", asy
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -8755,7 +8593,7 @@ test("late model and thinking responses from A do not overwrite the Session B co
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const secondId = "11111111111111111111";
   const modelA = {
     id: "model",
@@ -8913,7 +8751,7 @@ test("late model and thinking responses from A do not overwrite the Session B co
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -8922,7 +8760,7 @@ test("an abort result confirming settlement clears Stop without waiting for SSE"
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   Object.assign(api, {
     bootstrap: async () => ({
       ...bootstrap,
@@ -8960,7 +8798,7 @@ test("an abort result confirming settlement clears Stop without waiting for SSE"
     assert.ok(dom.window.document.querySelector(".send-button"));
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -8969,7 +8807,7 @@ test("a pending abort stays in stopping state until agent settlement", async () 
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   Object.assign(api, {
     bootstrap: async () => ({
       ...bootstrap,
@@ -9036,7 +8874,7 @@ test("a pending abort stays in stopping state until agent settlement", async () 
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -9045,7 +8883,7 @@ test("late stop and queue actions from A do not overwrite Session B", async () =
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const secondId = "22222222222222222222";
   const queuedA = {
     id: "queue-a",
@@ -9244,7 +9082,7 @@ test("late stop and queue actions from A do not overwrite Session B", async () =
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -9253,7 +9091,7 @@ test("EventSource reconnect refreshes an authoritative terminal without duplicat
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const terminal = {
     role: "assistant",
     content: "terminal recovered after reconnect",
@@ -9300,7 +9138,7 @@ test("EventSource reconnect refreshes an authoritative terminal without duplicat
     assert.ok(FakeEventSource.instances.length >= 2);
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -9309,7 +9147,7 @@ test("New is instant and the first send shows Pi startup before materializing a 
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   let newSessionCalls = 0;
   let clearViewedCalls = 0;
   let promptCalls = 0;
@@ -9436,7 +9274,7 @@ test("New is instant and the first send shows Pi startup before materializing a 
     assert.equal(dom.window.document.querySelector(".stop-button"), null);
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -9445,7 +9283,7 @@ test("draft startup races keep the composer usable, preserve newer control, and 
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   let resolveNew!: (view: SessionViewData) => void;
   let resolvePrompt!: (value: { accepted: boolean; queued: boolean }) => void;
   let resolveSecondPrompt!: (value: {
@@ -9832,7 +9670,7 @@ test("draft startup races keep the composer usable, preserve newer control, and 
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -9841,7 +9679,7 @@ test("rename updates the sidebar and current title before confirmation, then rol
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   let rejectRename!: (reason?: unknown) => void;
   const pendingRename = new Promise<BootstrapData>((_resolve, reject) => {
     rejectRename = reject;
@@ -9927,7 +9765,7 @@ test("rename updates the sidebar and current title before confirmation, then rol
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -9936,7 +9774,7 @@ test("a replacement clears stale rename intent and ignores its old finalization"
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   let resolveRename!: (value: BootstrapData) => void;
   const pendingRename = new Promise<BootstrapData>((resolve) => {
     resolveRename = resolve;
@@ -10032,7 +9870,7 @@ test("a replacement clears stale rename intent and ignores its old finalization"
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -10041,7 +9879,7 @@ test("delete restores a rejected row without overriding the newer local draft", 
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   let rejectDelete!: (reason?: unknown) => void;
   const pendingDelete = new Promise<BootstrapData>((_resolve, reject) => {
     rejectDelete = reject;
@@ -10124,7 +9962,7 @@ test("delete restores a rejected row without overriding the newer local draft", 
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -10133,7 +9971,7 @@ test("rename and delete keep their immediate changes when the backend confirms",
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   let resolveRename!: (value: BootstrapData) => void;
   const pendingRename = new Promise<BootstrapData>((resolve) => {
     resolveRename = resolve;
@@ -10206,7 +10044,7 @@ test("rename and delete keep their immediate changes when the backend confirms",
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -10215,7 +10053,7 @@ test("viewed delete immediately selects an existing replacement and success keep
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const replacement = {
     ...bootstrap.sessions[0],
     id: "abcdef0123456789abcd",
@@ -10302,7 +10140,7 @@ test("viewed delete immediately selects an existing replacement and success keep
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -10311,7 +10149,7 @@ test("local delete keeps its deferred replacement navigation after success settl
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const replacement = {
     ...bootstrap.sessions[0],
     id: "abcdef0123456789abcd",
@@ -10405,7 +10243,7 @@ test("local delete keeps its deferred replacement navigation after success settl
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -10414,7 +10252,7 @@ test("a deleted session cannot return from a deferred activation response", asyn
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const target = {
     ...bootstrap.sessions[0],
     id: "abcdef0123456789abcd",
@@ -10512,7 +10350,7 @@ test("a deleted session cannot return from a deferred activation response", asyn
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -10521,7 +10359,7 @@ test("a structural delete cancels a deferred target view before it can resurrect
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const target = {
     ...bootstrap.sessions[0],
     id: "abcdef0123456789abcd",
@@ -10608,7 +10446,7 @@ test("a structural delete cancels a deferred target view before it can resurrect
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -10617,7 +10455,7 @@ test("pending rename survives a stale refresh and an indeterminate response reta
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   let rejectRename!: (reason?: unknown) => void;
   const pendingRename = new Promise<BootstrapData>((_resolve, reject) => {
     rejectRename = reject;
@@ -10704,7 +10542,7 @@ test("pending rename survives a stale refresh and an indeterminate response reta
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -10713,7 +10551,7 @@ test("a full inventory absent rename installs a tombstone against an older sideb
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   let rejectRename!: (reason?: unknown) => void;
   let resolveStaleSidebar!: (value: {
     sessions: typeof bootstrap.sessions;
@@ -10810,7 +10648,7 @@ test("a full inventory absent rename installs a tombstone against an older sideb
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -10819,7 +10657,7 @@ test("session search loads the full inventory and pinning persists across remoun
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const secondId = "pin-search-123456789";
   const second = {
     ...bootstrap.sessions[0],
@@ -10956,7 +10794,7 @@ test("session search loads the full inventory and pinning persists across remoun
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -10965,7 +10803,7 @@ test("App collapses duplicate Session IDs from bootstrap to one latest sidebar r
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const stale = {
     ...bootstrap.sessions[0],
     name: "stale duplicate",
@@ -11004,7 +10842,7 @@ test("App collapses duplicate Session IDs from bootstrap to one latest sidebar r
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -11013,7 +10851,7 @@ test("a lost prompt acknowledgement cannot remove a user turn after SSE proves a
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   let rejectPrompt!: (cause: Error) => void;
   const pendingPrompt = new Promise<never>((_resolve, reject) => {
     rejectPrompt = reject;
@@ -11077,7 +10915,7 @@ test("a lost prompt acknowledgement cannot remove a user turn after SSE proves a
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -11086,7 +10924,7 @@ test("a lost prompt acknowledgement after a same-session refresh keeps its user 
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   let rejectPrompt!: (cause: Error) => void;
   const pendingPrompt = new Promise<never>((_resolve, reject) => {
     rejectPrompt = reject;
@@ -11145,7 +10983,7 @@ test("a lost prompt acknowledgement after a same-session refresh keeps its user 
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -11154,7 +10992,7 @@ test("an explicit prompt rejection rolls back the local user turn", async () => 
   const { createRoot } = await import("react-dom/client");
   const { ApiRequestError, api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   Object.assign(api, {
     bootstrap: async () => bootstrap,
     eventsUrl: () => "/api/events",
@@ -11207,7 +11045,7 @@ test("an explicit prompt rejection rolls back the local user turn", async () => 
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -11216,7 +11054,7 @@ test("a late queued acknowledgement survives a newer same-session view commit", 
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const queued = {
     id: "00000000-0000-4000-8000-000000000099",
     message: "late queued turn",
@@ -11306,7 +11144,7 @@ test("a late queued acknowledgement survives a newer same-session view commit", 
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -11315,7 +11153,7 @@ test("a queued dispatch timeout surfaces an asynchronous delivery uncertainty no
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   Object.assign(api, {
     bootstrap: async () => bootstrap,
     eventsUrl: () => "/api/events",
@@ -11338,7 +11176,7 @@ test("a queued dispatch timeout surfaces an asynchronous delivery uncertainty no
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -11347,7 +11185,7 @@ test("an uncertain prompt delivery remains visible and tells the user not to ret
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   Object.assign(api, {
     bootstrap: async () => bootstrap,
     eventsUrl: () => "/api/events",
@@ -11387,7 +11225,7 @@ test("an uncertain prompt delivery remains visible and tells the user not to ret
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -11396,7 +11234,7 @@ test("a view that confirms a pending prompt before its acknowledgement leaves on
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   let resolvePrompt!: (value: { accepted: boolean; queued: boolean }) => void;
   const pendingPrompt = new Promise<{ accepted: boolean; queued: boolean }>(
     (resolve) => {
@@ -11471,7 +11309,7 @@ test("a view that confirms a pending prompt before its acknowledgement leaves on
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -11480,7 +11318,7 @@ test("a stale hot view cannot restore the composer compaction lock after compact
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   const staleHotView: SessionViewData = {
     ...draftView,
     session: { ...bootstrap.sessions[0], active: true, writable: true },
@@ -11528,7 +11366,7 @@ test("a stale hot view cannot restore the composer compaction lock after compact
     assert.doesNotMatch(input.placeholder, /正在压缩上下文/);
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
 
@@ -11537,7 +11375,7 @@ test("a recovered Runtime clears the sidebar's retained failure reason before it
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
-  const originals = { ...api };
+  const restoreApi = captureApiSnapshot(api);
   Object.assign(api, {
     bootstrap: async () => bootstrap,
     eventsUrl: () => "/api/events",
@@ -11590,6 +11428,6 @@ test("a recovered Runtime clears the sidebar's retained failure reason before it
     );
   } finally {
     await act(async () => root.unmount());
-    Object.assign(api, originals);
+    restoreApi();
   }
 });
