@@ -4,9 +4,80 @@ import { cp, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { expect, test as base } from "@playwright/test";
+import { expect, test as base, type TestInfo } from "@playwright/test";
 
 const projectRoot = resolve(import.meta.dirname, "..");
+
+const maxCapturedBytesPerStream = 256 * 1024;
+const maxErrorSummaryCharacters = 16 * 1024;
+
+class BoundedStreamCapture {
+  private retained = Buffer.alloc(0);
+  private totalBytes = 0;
+  append(chunk: Buffer | string): void {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    this.totalBytes += buffer.length;
+    if (buffer.length >= maxCapturedBytesPerStream) {
+      this.retained = buffer.subarray(buffer.length - maxCapturedBytesPerStream);
+      return;
+    }
+    const overflow = this.retained.length + buffer.length - maxCapturedBytesPerStream;
+    this.retained = overflow > 0 ? Buffer.concat([this.retained.subarray(overflow), buffer]) : Buffer.concat([this.retained, buffer]);
+  }
+  snapshot(): Buffer { return this.retained; }
+  metadata(): { totalBytes: number; retainedBytes: number; truncated: boolean } {
+    return { totalBytes: this.totalBytes, retainedBytes: this.retained.length, truncated: this.totalBytes > this.retained.length };
+  }
+}
+
+type ServerCapture = { stdout: BoundedStreamCapture; stderr: BoundedStreamCapture; spawnError?: string };
+
+function captureServerOutput(child: ChildProcess): ServerCapture {
+  const capture: ServerCapture = { stdout: new BoundedStreamCapture(), stderr: new BoundedStreamCapture() };
+  child.stdout?.on("data", (chunk: Buffer | string) => capture.stdout.append(chunk));
+  child.stderr?.on("data", (chunk: Buffer | string) => capture.stderr.append(chunk));
+  child.once("error", (error) => { capture.spawnError = error.stack || error.message; });
+  return capture;
+}
+
+function errorSummary(error: unknown): string | undefined {
+  if (error === undefined) return undefined;
+  const summary = error instanceof Error ? error.stack || error.message : String(error);
+  return summary.length > maxErrorSummaryCharacters
+    ? `${summary.slice(0, maxErrorSummaryCharacters)}
+...[truncated]`
+    : summary;
+}
+
+function testStatusIsFailure(testInfo: TestInfo): boolean {
+  return testInfo.status === "failed" || testInfo.status === "timedOut" || testInfo.status === "interrupted";
+}
+
+async function attachServerDiagnostics(options: {
+  testInfo: TestInfo; label: string; origin: string; port: number; child: ChildProcess; capture: ServerCapture;
+  runtimeDist: string; e2eTestId: string; fixtureError?: unknown; teardownError?: unknown;
+}): Promise<void> {
+  const { testInfo, label, origin, port, child, capture } = options;
+  const stdoutPath = testInfo.outputPath(`${label}-stdout.log`);
+  const stderrPath = testInfo.outputPath(`${label}-stderr.log`);
+  const metadataPath = testInfo.outputPath(`${label}-metadata.json`);
+  await Promise.all([
+    writeFile(stdoutPath, capture.stdout.snapshot()),
+    writeFile(stderrPath, capture.stderr.snapshot()),
+    writeFile(metadataPath, `${JSON.stringify({
+      origin, port, pid: child.pid ?? null, projectName: testInfo.project.name, testId: testInfo.testId,
+      e2eTestId: options.e2eTestId, runtimeDist: options.runtimeDist, status: testInfo.status, expectedStatus: testInfo.expectedStatus,
+      exitState: { exitCode: child.exitCode, signalCode: child.signalCode, killed: child.killed, spawnError: capture.spawnError ?? null },
+      capture: { maxBytesPerStream: maxCapturedBytesPerStream, stdout: capture.stdout.metadata(), stderr: capture.stderr.metadata() },
+      fixtureError: errorSummary(options.fixtureError) ?? null, teardownError: errorSummary(options.teardownError) ?? null,
+    }, null, 2)}\n`, "utf8"),
+  ]);
+  await Promise.all([
+    testInfo.attach(`${label}-stdout`, { path: stdoutPath, contentType: "text/plain" }),
+    testInfo.attach(`${label}-stderr`, { path: stderrPath, contentType: "text/plain" }),
+    testInfo.attach(`${label}-metadata`, { path: metadataPath, contentType: "application/json" }),
+  ]);
+}
 
 function runtimeDist(): string {
   return resolve(process.env.PI_CHAT_E2E_DIST || process.env.PI_CHAT_DIST_DIR || join(projectRoot, "dist"));
@@ -71,6 +142,39 @@ async function stopServer(origin: string, child: ChildProcess): Promise<void> {
   await Promise.race([exited, new Promise((resolveDelay) => setTimeout(resolveDelay, 5_000))]);
 }
 
+async function runCapturedServerFixture(options: {
+  testInfo: TestInfo; label: string; port: number; runtimeDist: string; env: NodeJS.ProcessEnv;
+  use: (origin: string) => Promise<void>; afterStop?: () => Promise<void>;
+}): Promise<void> {
+  const origin = `http://127.0.0.1:${options.port}`;
+  const e2eTestId = options.env.PI_CHAT_E2E_TEST_ID || `${options.testInfo.project.name}-${options.testInfo.testId}`;
+  const child = spawn(process.execPath, [resolve(projectRoot, "scripts", "e2e-server.mjs"), "--port", String(options.port)], {
+    cwd: projectRoot, env: options.env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
+  });
+  const capture = captureServerOutput(child);
+  let fixtureError: unknown;
+  let teardownError: unknown;
+  try {
+    await waitForServer(origin, child);
+    await options.use(origin);
+  } catch (error) {
+    fixtureError = error;
+    throw error;
+  } finally {
+    try {
+      await stopServer(origin, child);
+      await options.afterStop?.();
+    } catch (error) {
+      teardownError = error;
+    }
+    if (fixtureError !== undefined || teardownError !== undefined || testStatusIsFailure(options.testInfo)) {
+      await attachServerDiagnostics({ testInfo: options.testInfo, label: options.label, origin, port: options.port, child, capture,
+        runtimeDist: options.runtimeDist, e2eTestId, fixtureError, teardownError });
+    }
+    if (teardownError !== undefined) throw teardownError;
+  }
+}
+
 async function replaceFingerprint(root: string, from: string, to: string): Promise<number> {
   let replacements = 0;
   for (const entry of await readdir(root, { withFileTypes: true })) {
@@ -92,19 +196,14 @@ async function replaceFingerprint(root: string, from: string, to: string): Promi
 export const test = base.extend<{ isolatedBaseURL: string; mismatchedBaseURL: string }>({
   isolatedBaseURL: [async ({}, use, testInfo) => {
     const port = await freePort();
-    const origin = `http://127.0.0.1:${port}`;
-    const child = spawn(process.execPath, [resolve(projectRoot, "scripts", "e2e-server.mjs"), "--port", String(port)], {
-      cwd: projectRoot,
+    await runCapturedServerFixture({
+      testInfo,
+      label: "isolated-server",
+      port,
+      runtimeDist: runtimeDist(),
       env: { ...process.env, PI_CHAT_E2E_TEST_ID: `${testInfo.project.name}-${testInfo.testId}` },
-      stdio: "ignore",
-      windowsHide: true,
+      use,
     });
-    try {
-      await waitForServer(origin, child);
-      await use(origin);
-    } finally {
-      await stopServer(origin, child);
-    }
   }, { auto: true }],
   baseURL: async ({ isolatedBaseURL }, use) => {
     await use(isolatedBaseURL);
@@ -123,25 +222,20 @@ export const test = base.extend<{ isolatedBaseURL: string; mismatchedBaseURL: st
     }
 
     const port = await freePort();
-    const origin = `http://127.0.0.1:${port}`;
-    const child = spawn(process.execPath, [resolve(projectRoot, "scripts", "e2e-server.mjs"), "--port", String(port)], {
-      cwd: projectRoot,
+    await runCapturedServerFixture({
+      testInfo,
+      label: "mismatched-server",
+      port,
+      runtimeDist: hybridDist,
       env: {
         ...process.env,
         PI_CHAT_E2E_TEST_ID: `mismatch-${testInfo.project.name}-${testInfo.testId}`,
         PI_CHAT_E2E_DIST: hybridDist,
         PI_CHAT_E2E_SERVER_DIST: serverDist,
       },
-      stdio: "ignore",
-      windowsHide: true,
+      use,
+      afterStop: () => rm(hybridDist, { recursive: true, force: true }),
     });
-    try {
-      await waitForServer(origin, child);
-      await use(origin);
-    } finally {
-      await stopServer(origin, child);
-      await rm(hybridDist, { recursive: true, force: true });
-    }
   },
 });
 
