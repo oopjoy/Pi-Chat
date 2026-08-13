@@ -1,7 +1,7 @@
 import { performance } from "node:perf_hooks";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { messageWindow } from "../src/server/pi-data.js";
 import { SessionIndex, readSessionSnapshot } from "../src/server/session-index.js";
@@ -16,7 +16,7 @@ export interface TimingSummary {
 }
 
 export interface ServerBenchmarkResult {
-  schemaVersion: 1;
+  schemaVersion: 2;
   benchmark: "pi-chat-long-session";
   generatedAt: string;
   environment: { node: string; platform: NodeJS.Platform; arch: string };
@@ -28,11 +28,11 @@ export interface ServerBenchmarkResult {
     recordCount: number;
     messageCount: number;
     userTurns: number;
-    discoveryCold: TimingSummary;
-    discoveryCached: TimingSummary;
+    sessionIndexDiscoveryCacheMiss: TimingSummary;
+    sessionIndexDiscoveryCacheHit: TimingSummary;
     parseSnapshot: TimingSummary;
-    snapshotCold: TimingSummary;
-    snapshotHot: TimingSummary;
+    sessionIndexSnapshotCacheMiss: TimingSummary;
+    sessionIndexSnapshotCacheHit: TimingSummary;
     windowRecent10: TimingSummary & { returnedMessages: number; visibleTurns: number; truncated: boolean };
     windowEarlier50: TimingSummary & { returnedMessages: number; visibleTurns: number; truncated: boolean };
   }>;
@@ -127,25 +127,27 @@ export async function runLongSessionBenchmark(options: { scenarios?: FixtureScen
   const fixtures: FixtureManifest[] = [];
   try {
     for (const scenario of scenarios) {
-      fixtures.push(await generateFixture({ scenario, outputPath: join(fixtureRoot, `${scenario}.jsonl`) }));
+      const fixturePath = join(fixtureRoot, `${scenario}.jsonl`);
+      fixtures.push(await generateFixture({ scenario, outputPath: fixturePath }));
     }
     const measurements: ServerBenchmarkResult["measurements"] = [];
     let cacheSequence = 0;
     for (const fixture of fixtures) {
       const isolatedRoot = join(root, `isolated-${fixture.scenario}`);
-      const isolatedFixture = await generateFixture({ scenario: fixture.scenario, outputPath: join(isolatedRoot, basename(fixture.path)), targetBytes: fixture.targetBytes ?? undefined });
-      const discoveryCold = await measure(iterations, async () => {
+      const isolatedFixturePath = join(isolatedRoot, fixture.fixtureName);
+      await generateFixture({ scenario: fixture.scenario, outputPath: isolatedFixturePath, minimumBytes: fixture.minimumBytes ?? undefined });
+      const sessionIndexDiscoveryCacheMiss = await measure(iterations, async () => {
         const index = new SessionIndex(isolatedRoot, join(root, `cold-cache-${fixture.scenario}-${cacheSequence++}.json`));
         return index.list();
       });
       const cachedIndex = new SessionIndex(isolatedRoot, join(root, `cached-${fixture.scenario}.json`));
       await cachedIndex.list();
-      const discoveryCached = await measure(iterations, () => cachedIndex.list());
-      const parseSnapshot = await measure(iterations, () => readSessionSnapshot(isolatedFixture.path));
+      const sessionIndexDiscoveryCacheHit = await measure(iterations, () => cachedIndex.list());
+      const parseSnapshot = await measure(iterations, () => readSessionSnapshot(isolatedFixturePath));
       const indexForSnapshot = new SessionIndex(isolatedRoot, join(root, `snapshot-${fixture.scenario}.json`));
       const [summary] = await indexForSnapshot.list();
-      const snapshotCold = await measure(1, () => indexForSnapshot.snapshotForId(summary.id));
-      const snapshotHot = await measure(iterations, () => indexForSnapshot.snapshotForId(summary.id));
+      const sessionIndexSnapshotCacheMiss = await measure(1, () => indexForSnapshot.snapshotForId(summary.id));
+      const sessionIndexSnapshotCacheHit = await measure(iterations, () => indexForSnapshot.snapshotForId(summary.id));
       const messages = parseSnapshot.value.messages;
       const recent = await measure(Math.max(iterations, 5), () => messageWindow(messages, 10));
       const earlier = await measure(Math.max(iterations, 5), () => messageWindow(messages, 50));
@@ -155,17 +157,17 @@ export async function runLongSessionBenchmark(options: { scenarios?: FixtureScen
         recordCount: fixture.records,
         messageCount: messages.length,
         userTurns: fixture.userTurns,
-        discoveryCold: discoveryCold.summary,
-        discoveryCached: discoveryCached.summary,
+        sessionIndexDiscoveryCacheMiss: sessionIndexDiscoveryCacheMiss.summary,
+        sessionIndexDiscoveryCacheHit: sessionIndexDiscoveryCacheHit.summary,
         parseSnapshot: parseSnapshot.summary,
-        snapshotCold: snapshotCold.summary,
-        snapshotHot: snapshotHot.summary,
+        sessionIndexSnapshotCacheMiss: sessionIndexSnapshotCacheMiss.summary,
+        sessionIndexSnapshotCacheHit: sessionIndexSnapshotCacheHit.summary,
         windowRecent10: { ...recent.summary, returnedMessages: recent.value.messages.length, visibleTurns: recent.value.visibleTurns, truncated: recent.value.truncated },
         windowEarlier50: { ...earlier.summary, returnedMessages: earlier.value.messages.length, visibleTurns: earlier.value.visibleTurns, truncated: earlier.value.truncated },
       });
     }
     const result: ServerBenchmarkResult = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       benchmark: "pi-chat-long-session",
       generatedAt: new Date().toISOString(),
       environment: { node: process.version, platform: process.platform, arch: process.arch },
@@ -187,15 +189,15 @@ export async function runLongSessionBenchmark(options: { scenarios?: FixtureScen
 
 export function printSummary(result: ServerBenchmarkResult): void {
   console.log("Pi Chat long-session benchmark (descriptive baseline; no pass/fail thresholds)");
-  console.log("scenario                  MiB   parse p50  snapshot cold  snapshot hot  discovery cold  window10");
+  console.log("scenario                  MiB   parse p50  snapshot miss  snapshot hit  discovery miss  window10");
   for (const row of result.measurements) {
     const fields = [
       row.scenario.padEnd(25),
       (row.fixtureBytes / 1024 / 1024).toFixed(2).padStart(6),
       `${row.parseSnapshot.medianMs.toFixed(2)} ms`.padStart(11),
-      `${row.snapshotCold.medianMs.toFixed(2)} ms`.padStart(14),
-      `${row.snapshotHot.medianMs.toFixed(2)} ms`.padStart(13),
-      `${row.discoveryCold.medianMs.toFixed(2)} ms`.padStart(16),
+      `${row.sessionIndexSnapshotCacheMiss.medianMs.toFixed(2)} ms`.padStart(14),
+      `${row.sessionIndexSnapshotCacheHit.medianMs.toFixed(2)} ms`.padStart(13),
+      `${row.sessionIndexDiscoveryCacheMiss.medianMs.toFixed(2)} ms`.padStart(16),
       `${row.windowRecent10.medianMs.toFixed(3)} ms`.padStart(11),
     ];
     console.log(fields.join("  "));

@@ -18,22 +18,22 @@ type JsonRecord = Record<string, unknown>;
 export interface FixtureOptions {
   scenario: FixtureScenario;
   outputPath: string;
-  targetBytes?: number;
+  minimumBytes?: number;
 }
 
 export interface FixtureManifest {
-  schemaVersion: 1;
+  schemaVersion: 2;
   scenario: FixtureScenario;
-  path: string;
+  fixtureName: string;
   bytes: number;
-  targetBytes: number | null;
+  minimumBytes: number | null;
   sessionId: string;
   records: number;
   messages: number;
   userTurns: number;
   toolCalls: number;
   imageBlocks: number;
-  sha256Seed: string;
+  contentSha256: string;
 }
 
 const MIB = 1024 * 1024;
@@ -72,7 +72,7 @@ function message(id: string, parentId: string | null, role: string, content: unk
 
 function header(scenario: FixtureScenario): JsonRecord[] {
   return [
-    { type: "session", version: 3, id: `bench-${scenario}`, timestamp: timestamp(0), cwd: resolve("benchmarks", "fixture-workspace") },
+    { type: "session", version: 3, id: `bench-${scenario}`, timestamp: timestamp(0), cwd: "/pi-chat-benchmark/fixture-workspace" },
     { type: "session_info", id: "info-000000", parentId: null, name: `Long Session Benchmark: ${scenario}` },
     { type: "model_change", id: "model-000000", parentId: "info-000000", provider: "benchmark-provider", modelId: "deterministic-model" },
     { type: "thinking_level_change", id: "thinking-000000", parentId: "model-000000", thinkingLevel: "medium" },
@@ -202,14 +202,14 @@ function encoded(record: JsonRecord): string {
   return `${JSON.stringify(record)}\n`;
 }
 
-async function appendPadding(path: string, leafId: string, targetBytes: number, startIndex: number): Promise<{ records: number; messages: number }> {
+async function appendPadding(path: string, leafId: string, minimumBytes: number, startIndex: number): Promise<{ records: number; messages: number }> {
   const file = await open(path, "a");
   let current = (await file.stat()).size;
   let records = 0;
   let messages = 0;
   try {
-    while (current < targetBytes) {
-      const remaining = targetBytes - current;
+    while (current < minimumBytes) {
+      const remaining = minimumBytes - current;
       const id = `padding-${String(startIndex + records).padStart(8, "0")}`;
       const emptyLine = encoded(message(id, leafId, "assistant", "", startIndex + records));
       const fixedBytes = Buffer.byteLength(emptyLine) - 2;
@@ -233,7 +233,7 @@ export async function generateFixture(options: FixtureOptions): Promise<FixtureM
   const outputPath = resolve(options.outputPath);
   await mkdir(dirname(outputPath), { recursive: true });
   const shape = shapeFor(options.scenario);
-  const targetBytes = options.targetBytes ?? DEFAULT_TARGETS[options.scenario] ?? null;
+  const minimumBytes = options.minimumBytes ?? DEFAULT_TARGETS[options.scenario] ?? null;
   const file = await open(outputPath, "w");
   try {
     for (const record of shape.records) await file.write(encoded(record));
@@ -241,38 +241,79 @@ export async function generateFixture(options: FixtureOptions): Promise<FixtureM
     await file.close();
   }
   let padding = { records: 0, messages: 0 };
-  if (targetBytes) padding = await appendPadding(outputPath, shape.leafId, targetBytes, shape.records.length + 1);
+  if (minimumBytes) padding = await appendPadding(outputPath, shape.leafId, minimumBytes, shape.records.length + 1);
   const bytes = (await stat(outputPath)).size;
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     scenario: options.scenario,
-    path: outputPath,
+    fixtureName: `${options.scenario}.jsonl`,
     bytes,
-    targetBytes,
+    minimumBytes,
     sessionId: `bench-${options.scenario}`,
     records: shape.records.length + padding.records,
     messages: shape.messages + padding.messages,
     userTurns: shape.userTurns,
     toolCalls: shape.toolCalls,
     imageBlocks: shape.imageBlocks,
-    sha256Seed: createHash("sha256").update(`${options.scenario}:2026-01-01:v1`).digest("hex"),
+    contentSha256: createHash("sha256").update(await readFile(outputPath)).digest("hex"),
   };
 }
 
-export async function validateFixture(path: string): Promise<{ records: number; sessionHeaders: number; invalidLines: number }> {
+export interface FixtureValidation {
+  records: number;
+  sessionHeaders: number;
+  invalidLines: number;
+  duplicateIds: string[];
+  unresolvedParentIds: string[];
+  cyclicParentChains: string[];
+}
+
+export async function validateFixture(path: string): Promise<FixtureValidation> {
   const text = await readFile(path, "utf8");
   let records = 0;
   let sessionHeaders = 0;
   let invalidLines = 0;
+  const parentsById = new Map<string, string | null>();
+  const duplicateIds = new Set<string>();
   for (const line of text.split(/\r?\n/)) {
     if (!line) continue;
     try {
       const record = JSON.parse(line) as JsonRecord;
       records += 1;
       if (record.type === "session" && typeof record.id === "string" && typeof record.cwd === "string") sessionHeaders += 1;
+      if (typeof record.id === "string") {
+        if (parentsById.has(record.id)) duplicateIds.add(record.id);
+        else parentsById.set(record.id, typeof record.parentId === "string" ? record.parentId : null);
+      }
     } catch {
       invalidLines += 1;
     }
   }
-  return { records, sessionHeaders, invalidLines };
+  const unresolvedParentIds = new Set<string>();
+  const cyclicParentChains = new Set<string>();
+  for (const id of parentsById.keys()) {
+    const visited = new Set<string>();
+    let current: string | null = id;
+    while (current) {
+      if (visited.has(current)) {
+        cyclicParentChains.add(id);
+        break;
+      }
+      visited.add(current);
+      const parent = parentsById.get(current);
+      if (parent === undefined) {
+        unresolvedParentIds.add(current);
+        break;
+      }
+      current = parent;
+    }
+  }
+  return {
+    records,
+    sessionHeaders,
+    invalidLines,
+    duplicateIds: [...duplicateIds].sort(),
+    unresolvedParentIds: [...unresolvedParentIds].sort(),
+    cyclicParentChains: [...cyclicParentChains].sort(),
+  };
 }

@@ -11,7 +11,7 @@ This directory is benchmark/test infrastructure only. It imports the current ser
 
 ## Commands
 
-Generate one deterministic fixture:
+Generate one deterministic fixture (optionally pass `--minimum-bytes N`; generated content may intrinsically be larger):
 
 ```sh
 node --import tsx benchmarks/generate-long-session-fixture.mts --scenario ordinary-10mib --output ./tmp/ordinary.jsonl
@@ -30,5 +30,7 @@ node --import tsx benchmarks/run-long-session-bench.mts --scenario thousand-user
 ```
 
 Supported fixtures cover ordinary 10 MiB and 50 MiB sessions, 1000 user turns, a tool/process-heavy turn, Markdown/KaTeX-heavy content, image metadata, and encoded image content.
+
+Persisted fixture descriptors use stable logical names and content SHA-256 values, never deleted temporary paths. Server timings explicitly distinguish `SessionIndex` discovery/snapshot cache misses and hits; they do not claim OS-cold filesystem I/O.
 
 The JSON result embeds a browser scenario contract for cold first pane, hot switch, and load-earlier measurements, including DOM count, long tasks, and heap. The contract intentionally does not start a browser or production server; a future isolated Chromium lane can consume it without depending on live user state.
