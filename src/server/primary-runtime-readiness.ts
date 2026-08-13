@@ -53,10 +53,18 @@ export interface PrimaryRuntimeReadinessOptions {
   lifecycle?: () => import("../shared/types.js").ApplicationLifecycle;
 }
 
+interface PrimaryRuntimeAttempt {
+  readonly token: symbol;
+  failure: {
+    cause: unknown;
+    readiness: PrimaryRuntimeReadiness;
+  } | null;
+}
+
 export class PrimaryRuntimeReadinessController implements PrimaryRuntimeReadinessBridge {
   private readiness: PrimaryRuntimeReadiness = { status: "starting", generation: 0 };
   private operation: Promise<void> | null = null;
-  private operationFailure: unknown = null;
+  private activeAttempt: PrimaryRuntimeAttempt | null = null;
   private adopter: PrimaryRuntimeAdopter | null = null;
   private readonly listeners = new Set<(readiness: PrimaryRuntimeReadiness) => void>();
 
@@ -83,6 +91,11 @@ export class PrimaryRuntimeReadinessController implements PrimaryRuntimeReadines
   recover(sessionFile?: string, cwd?: string): Promise<void> { return this.begin(true, sessionFile, cwd); }
 
   markFailed(cause: unknown): void {
+    const attempt = this.activeAttempt;
+    // App source-generation filtering guarantees the event belongs to the
+    // current child. The attempt token additionally prevents a completed or
+    // replaced attempt from being mutated through the public readiness state.
+    if (!attempt || attempt.failure) return;
     const error = cause instanceof Error
       ? cause.message
       : cause && typeof cause === "object" && typeof (cause as Record<string, unknown>).error === "string"
@@ -102,10 +115,6 @@ export class PrimaryRuntimeReadinessController implements PrimaryRuntimeReadines
         errorCode,
       },
     );
-    // App source-generation filtering guarantees this is the current child. If
-    // adoption is still blocking, latch the transport failure onto this exact
-    // operation so releasing the barrier can never publish ready afterward.
-    if (this.readiness.status === "starting") this.operationFailure = cause;
     const failed: PrimaryRuntimeReadiness = {
       status: "failed",
       error,
@@ -115,6 +124,7 @@ export class PrimaryRuntimeReadinessController implements PrimaryRuntimeReadines
         : this.readiness.generation + 1,
     };
     attachIncidentReference(failed, incident, errorCode);
+    attempt.failure = { cause, readiness: failed };
     this.publish(failed);
   }
 
@@ -132,7 +142,6 @@ export class PrimaryRuntimeReadinessController implements PrimaryRuntimeReadines
   private begin(restart: boolean, sessionFile?: string, cwd?: string): Promise<void> {
     if (this.operation) return this.operation;
     const generation = this.readiness.generation + 1;
-    this.operationFailure = null;
     this.publish({ status: "starting", generation });
     const operation = (async () => {
       let lastCause: unknown;
@@ -142,6 +151,11 @@ export class PrimaryRuntimeReadinessController implements PrimaryRuntimeReadines
       // escape an intermittent extension/startup deadlock without creating an
       // unbounded respawn loop for deterministic configuration failures.
       for (let attempt = 0; attempt < 2; attempt += 1) {
+        const attemptRecord: PrimaryRuntimeAttempt = {
+          token: Symbol(`primary-runtime-attempt-${attempt + 1}`),
+          failure: null,
+        };
+        this.activeAttempt = attemptRecord;
         try {
           const initialState = restart || attempt > 0
             ? await this.rpc.restart(sessionFile, cwd)
@@ -163,7 +177,11 @@ export class PrimaryRuntimeReadinessController implements PrimaryRuntimeReadines
               sessionFile,
               cwd,
             });
-          if (this.operationFailure) throw this.operationFailure;
+          if (
+            this.activeAttempt?.token !== attemptRecord.token ||
+            attemptRecord.failure
+          )
+            throw attemptRecord.failure?.cause || new Error("Primary Runtime 启动尝试已被替换");
           const state = initialState ? rpcData<PiState>(initialState) : undefined;
           this.publish({
             status: "ready",
@@ -183,9 +201,14 @@ export class PrimaryRuntimeReadinessController implements PrimaryRuntimeReadines
             /Pi RPC (?:已退出|启动失败|在初始化期间退出|请求超时)/.test(
               cause instanceof Error ? cause.message : String(cause),
             );
-          if (!transient || attempt === 1) break;
+          if (!transient || attempt === 1) {
+            if (attemptRecord.failure)
+              throw new PrimaryRuntimeUnavailableError(attemptRecord.failure.readiness);
+            break;
+          }
         }
       }
+      this.activeAttempt = null;
       const error = lastCause instanceof Error ? lastCause.message : String(lastCause);
       const errorCode = incidentErrorCode(lastCause) || "PRIMARY_RUNTIME_UNAVAILABLE";
       const incident = incidentReference(lastCause) || recordIncident(

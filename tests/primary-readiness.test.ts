@@ -154,6 +154,51 @@ test("Primary recovery repeats compatibility probing before reporting ready", as
   assert.equal(rpc.stops, 1);
 });
 
+test("a failed first child attempt cannot poison the built-in replacement attempt", async () => {
+  let controller: PrimaryRuntimeReadinessController;
+  const processFailure = {
+    type: "pi_chat_process_error",
+    error: "attempt one child exited",
+    incidentId: "PC-RETRY001",
+    errorCode: "RPC_CHILD_EXIT",
+  };
+  const rpc = new class extends ControllerRpc {
+    override async start() {
+      this.starts += 1;
+      controller.markFailed(processFailure);
+      const rejection = new Error("Pi RPC 在初始化期间退出：attempt one");
+      Object.defineProperty(rejection, "incidentId", { value: processFailure.incidentId });
+      Object.defineProperty(rejection, "errorCode", { value: processFailure.errorCode });
+      throw rejection;
+    }
+  }();
+  controller = new PrimaryRuntimeReadinessController(rpc as unknown as PiRpcClient);
+  const transitions: PrimaryRuntimeReadiness[] = [];
+  controller.subscribe((value) => transitions.push(value));
+
+  await controller.start();
+
+  assert.equal(rpc.starts, 1);
+  assert.equal(rpc.restarts, 1);
+  assert.equal(rpc.stops, 1);
+  assert.equal(
+    transitions.filter((value) => value.status === "failed").length,
+    1,
+    "attempt one publishes only its process failure",
+  );
+  assert.deepEqual(controller.snapshot(), {
+    status: "ready",
+    generation: 1,
+    model: null,
+    sessionId: "controller",
+  });
+  for (let index = 1; index < transitions.length; index += 1)
+    assert.ok(
+      transitions[index].generation >= transitions[index - 1].generation,
+      "readiness generations must never regress across child attempts",
+    );
+});
+
 test("a current-child failure while adoption is blocked latches the startup operation failed", async () => {
   const rpc = new ControllerRpc();
   const controller = new PrimaryRuntimeReadinessController(
@@ -187,7 +232,18 @@ test("a current-child failure while adoption is blocked latches the startup oper
 
   releaseAdoption!();
   await assert.rejects(start, PrimaryRuntimeUnavailableError);
-  assert.equal(controller.snapshot().status, "failed");
+  const finalFailure = controller.snapshot() as PrimaryRuntimeReadiness & {
+    errorCode?: string;
+  };
+  assert.equal(finalFailure.status, "failed");
+  assert.equal(finalFailure.error, "child exited during adoption");
+  assert.equal(finalFailure.incidentId, "PC-START001");
+  assert.equal(finalFailure.errorCode, "RPC_CHILD_EXIT");
+  assert.equal(
+    transitions.filter((value) => value.status === "failed").length,
+    1,
+    "the attempt's already-published terminal failure must not be republished",
+  );
   assert.equal(
     transitions.some((value) => value.status === "ready"),
     false,
