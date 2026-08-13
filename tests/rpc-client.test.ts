@@ -181,6 +181,45 @@ test("an asynchronous stdin failure after write returns is outcome unknown", asy
   );
 });
 
+test("an oversized inbound frame correlates a written mutation with the process event", async () => {
+  const stream = new PassThrough();
+  const { child } = fakeChild();
+  const incidents = incidentCollector();
+  child.kill = () => { child.killed = true; return true; };
+  const client = new PiRpcClient({
+    cwd: process.cwd(),
+    diagnostics: incidents.diagnostics,
+    runtimeKind: "primary",
+  });
+  const events: Record<string, unknown>[] = [];
+  client.onEvent((event) => events.push(event));
+  const source = { generation: 4, childPid: 4321, child, stderrTail: "" };
+  Object.assign(child, { pid: 4321 });
+  const internals = client as unknown as {
+    child: typeof child | null;
+    source: typeof source | null;
+    attachJsonlReader(stream: NodeJS.ReadableStream, source: typeof source): void;
+  };
+  internals.child = child;
+  internals.source = source;
+  internals.attachJsonlReader(stream, source);
+  const pending = client.send({ type: "prompt", message: "written mutation" }, 60_000);
+  stream.write(Buffer.alloc(MAX_RPC_INBOUND_LINE_BYTES + 1, 0x61));
+  await assert.rejects(pending, (error) => {
+    const value = error as RpcRequestTimeoutError & { incidentId?: string; errorCode?: string };
+    return error instanceof RpcRequestTimeoutError
+      && error.outcomeUnknown
+      && value.incidentId === events[0]?.incidentId
+      && value.errorCode === "PI_RPC_FRAME_TOO_LARGE";
+  });
+  assert.equal(events[0]?.errorCode, "PI_RPC_FRAME_TOO_LARGE");
+  assert.equal(incidents.records.length, 1);
+  assert.equal(incidents.records[0].incidentId, events[0]?.incidentId);
+  assert.equal(incidents.records[0].errorCode, "PI_RPC_FRAME_TOO_LARGE");
+  child.exitCode = 0;
+  await client.stop();
+});
+
 test("an oversized inbound line retains child ownership until exit is proved", async () => {
   const stream = new PassThrough();
   const { child } = fakeChild();
@@ -224,6 +263,35 @@ test("an oversized inbound line retains child ownership until exit is proved", a
   child.exitCode = 0;
   await client.stop();
   assert.equal(internals.unconfirmedChild, null);
+});
+
+test("exit-unconfirmed stop and duplicate-writer diagnostics retain generation and PID", async () => {
+  const { child } = fakeChild();
+  Object.assign(child, { pid: 9876 });
+  child.kill = () => { child.killed = true; return true; };
+  const incidents = incidentCollector();
+  const client = new PiRpcClient({ cwd: process.cwd(), diagnostics: incidents.diagnostics });
+  const source = { generation: 6, childPid: 9876, child, stderrTail: "" };
+  Object.assign(client, { child, source });
+  const originalSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = ((callback: (...args: unknown[]) => void, _delay?: number, ...args: unknown[]) =>
+    originalSetTimeout(callback, 0, ...args)) as typeof setTimeout;
+  try {
+    await assert.rejects(client.stop(), RpcProcessExitUnconfirmedError);
+    await assert.rejects(client.start(), /未确认退出/);
+    assert.deepEqual(
+      incidents.records.slice(-2).map(({ operation, outcome, errorCode, rpcGeneration, childPid }) =>
+        ({ operation, outcome, errorCode, rpcGeneration, childPid })),
+      [
+        { operation: "rpc.stop", outcome: "exit-unconfirmed", errorCode: "PI_RPC_EXIT_UNCONFIRMED", rpcGeneration: 6, childPid: 9876 },
+        { operation: "runtime.start", outcome: "rejected", errorCode: "RPC_DUPLICATE_WRITER_BLOCKED", rpcGeneration: 6, childPid: 9876 },
+      ],
+    );
+    child.exitCode = 0;
+    await client.stop();
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
 });
 
 test("stop fails closed and retains ownership when neither termination is observed", async () => {

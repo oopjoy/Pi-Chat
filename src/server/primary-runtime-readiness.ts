@@ -2,6 +2,7 @@ import type { PiState, PrimaryRuntimeReadiness } from "../shared/types.js";
 import { RpcRequestTimeoutError, rpcData, type PiRpcClient } from "./rpc-client.js";
 import {
   attachIncidentReference,
+  incidentErrorCode,
   incidentReference,
   recordIncident,
   type IncidentDiagnostics,
@@ -55,6 +56,7 @@ export interface PrimaryRuntimeReadinessOptions {
 export class PrimaryRuntimeReadinessController implements PrimaryRuntimeReadinessBridge {
   private readiness: PrimaryRuntimeReadiness = { status: "starting", generation: 0 };
   private operation: Promise<void> | null = null;
+  private operationFailure: unknown = null;
   private adopter: PrimaryRuntimeAdopter | null = null;
   private readonly listeners = new Set<(readiness: PrimaryRuntimeReadiness) => void>();
 
@@ -86,12 +88,7 @@ export class PrimaryRuntimeReadinessController implements PrimaryRuntimeReadines
       : cause && typeof cause === "object" && typeof (cause as Record<string, unknown>).error === "string"
         ? String((cause as Record<string, unknown>).error)
         : String(cause);
-    // A replacement/recovery owns the newer state. Do not let an exit event
-    // from the child it is replacing overwrite its starting projection.
-    if (this.readiness.status === "starting") return;
-    // A live-child failure is a later state transition than the successful
-    // probe. Give it a new generation so a delayed ready bootstrap cannot
-    // repaint the browser with the old generation's capability.
+    const errorCode = incidentErrorCode(cause) || "PRIMARY_RUNTIME_UNAVAILABLE";
     const incident = incidentReference(cause) || recordIncident(
       this.options.diagnostics,
       cause,
@@ -102,16 +99,22 @@ export class PrimaryRuntimeReadinessController implements PrimaryRuntimeReadines
         operation: "runtime.recovery",
         lifecycle: this.options.lifecycle?.() || "idle",
         outcome: "failed",
-        errorCode: "PRIMARY_RUNTIME_UNAVAILABLE",
+        errorCode,
       },
     );
+    // App source-generation filtering guarantees this is the current child. If
+    // adoption is still blocking, latch the transport failure onto this exact
+    // operation so releasing the barrier can never publish ready afterward.
+    if (this.readiness.status === "starting") this.operationFailure = cause;
     const failed: PrimaryRuntimeReadiness = {
       status: "failed",
       error,
       incidentId: incident.incidentId,
-      generation: this.readiness.generation + 1,
+      generation: this.readiness.status === "starting"
+        ? this.readiness.generation
+        : this.readiness.generation + 1,
     };
-    attachIncidentReference(failed, incident, "PRIMARY_RUNTIME_UNAVAILABLE");
+    attachIncidentReference(failed, incident, errorCode);
     this.publish(failed);
   }
 
@@ -129,6 +132,7 @@ export class PrimaryRuntimeReadinessController implements PrimaryRuntimeReadines
   private begin(restart: boolean, sessionFile?: string, cwd?: string): Promise<void> {
     if (this.operation) return this.operation;
     const generation = this.readiness.generation + 1;
+    this.operationFailure = null;
     this.publish({ status: "starting", generation });
     const operation = (async () => {
       let lastCause: unknown;
@@ -159,6 +163,7 @@ export class PrimaryRuntimeReadinessController implements PrimaryRuntimeReadines
               sessionFile,
               cwd,
             });
+          if (this.operationFailure) throw this.operationFailure;
           const state = initialState ? rpcData<PiState>(initialState) : undefined;
           this.publish({
             status: "ready",
@@ -182,6 +187,7 @@ export class PrimaryRuntimeReadinessController implements PrimaryRuntimeReadines
         }
       }
       const error = lastCause instanceof Error ? lastCause.message : String(lastCause);
+      const errorCode = incidentErrorCode(lastCause) || "PRIMARY_RUNTIME_UNAVAILABLE";
       const incident = incidentReference(lastCause) || recordIncident(
         this.options.diagnostics,
         lastCause,
@@ -192,7 +198,7 @@ export class PrimaryRuntimeReadinessController implements PrimaryRuntimeReadines
           operation: "runtime.start",
           lifecycle: this.options.lifecycle?.() || "idle",
           outcome: "failed",
-          errorCode: "PRIMARY_RUNTIME_UNAVAILABLE",
+          errorCode,
         },
       );
       const failed: PrimaryRuntimeReadiness = {
@@ -201,7 +207,7 @@ export class PrimaryRuntimeReadinessController implements PrimaryRuntimeReadines
         incidentId: incident.incidentId,
         generation,
       };
-      attachIncidentReference(failed, incident, "PRIMARY_RUNTIME_UNAVAILABLE");
+      attachIncidentReference(failed, incident, errorCode);
       this.publish(failed);
       throw new PrimaryRuntimeUnavailableError(this.readiness);
     })();

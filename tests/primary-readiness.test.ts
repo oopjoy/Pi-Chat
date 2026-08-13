@@ -154,6 +154,47 @@ test("Primary recovery repeats compatibility probing before reporting ready", as
   assert.equal(rpc.stops, 1);
 });
 
+test("a current-child failure while adoption is blocked latches the startup operation failed", async () => {
+  const rpc = new ControllerRpc();
+  const controller = new PrimaryRuntimeReadinessController(
+    rpc as unknown as PiRpcClient,
+  );
+  let releaseAdoption: (() => void) | undefined;
+  const adoption = new Promise<void>((resolve) => {
+    releaseAdoption = resolve;
+  });
+  controller.setAdopter(async () => adoption);
+  const transitions: PrimaryRuntimeReadiness[] = [];
+  controller.subscribe((value) => transitions.push(value));
+
+  const start = controller.start();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const processFailure = {
+    type: "pi_chat_process_error",
+    error: "child exited during adoption",
+    incidentId: "PC-START001",
+    errorCode: "RPC_CHILD_EXIT",
+  };
+  controller.markFailed(processFailure);
+  const failed = controller.snapshot() as PrimaryRuntimeReadiness & {
+    errorCode?: string;
+  };
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.generation, 1);
+  assert.equal(failed.error, "child exited during adoption");
+  assert.equal(failed.incidentId, "PC-START001");
+  assert.equal(failed.errorCode, "RPC_CHILD_EXIT");
+
+  releaseAdoption!();
+  await assert.rejects(start, PrimaryRuntimeUnavailableError);
+  assert.equal(controller.snapshot().status, "failed");
+  assert.equal(
+    transitions.some((value) => value.status === "ready"),
+    false,
+    "the failed startup operation must never publish ready after adoption releases",
+  );
+});
+
 test("Primary publishes ready only after the App adopts the startup state", async () => {
   const rpc = new ControllerRpc();
   rpc.startResponse = {

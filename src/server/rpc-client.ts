@@ -8,6 +8,7 @@ import {
 } from "../shared/rpc-contracts.js";
 import {
   attachIncidentReference,
+  incidentErrorCode,
   incidentReference,
   recordIncident,
   type IncidentDiagnostics,
@@ -149,6 +150,7 @@ export class PiRpcClient {
   private stderrTail = "";
   /** Retained until exit is observed; a retry must never forget an orphan candidate. */
   private unconfirmedChild: ChildProcessWithoutNullStreams | null = null;
+  private unconfirmedSource: RpcEventSource | null = null;
   private stopOperation: Promise<void> | null = null;
   private diagnosticSessionId = "";
 
@@ -159,9 +161,9 @@ export class PiRpcClient {
   }
 
   /** The currently live child generation, or zero for legacy in-process test doubles. */
-  currentGeneration(): number { return this.source?.generation || 0; }
+  currentGeneration(): number { return this.source?.generation || this.unconfirmedSource?.generation || 0; }
   currentPid(): number | null {
-    const pid = this.child?.pid || this.unconfirmedChild?.pid;
+    const pid = this.child?.pid || this.unconfirmedSource?.childPid || this.unconfirmedChild?.pid;
     return typeof pid === "number" ? pid : null;
   }
 
@@ -325,8 +327,8 @@ export class PiRpcClient {
         // delivery, not process termination, especially on Windows.
         this.child = null;
         this.unconfirmedChild = activeSource.child;
+        this.unconfirmedSource = { generation: activeSource.generation, childPid: activeSource.childPid };
         this.source = null;
-        this.rejectPending(error, true);
         const incident = this.recordTransportIncident(error, {
           operation: "rpc.stdout-frame",
           outcome: "oversized",
@@ -334,6 +336,7 @@ export class PiRpcClient {
           generation: activeSource.generation,
           childPid: activeSource.child.pid,
         });
+        this.rejectPending(error, true);
         this.emitEvent(
           {
             type: "pi_chat_process_error",
@@ -438,7 +441,7 @@ export class PiRpcClient {
         ? new RpcRequestTimeoutError(pending.requestType, "written-outcome-unknown")
         : error;
       if (reference && rejection !== error)
-        attachIncidentReference(rejection, reference, "RPC_CHILD_EXIT");
+        attachIncidentReference(rejection, reference, incidentErrorCode(error) || "RPC_CHILD_EXIT");
       pending.reject(rejection);
     }
     this.pending.clear();
@@ -456,7 +459,10 @@ export class PiRpcClient {
       childPid: source.childPid,
     });
     this.child = null;
-    if (this.unconfirmedChild === this.source.child) this.unconfirmedChild = null;
+    if (this.unconfirmedChild === this.source.child) {
+      this.unconfirmedChild = null;
+      this.unconfirmedSource = null;
+    }
     this.source = null;
     this.rejectPending(error, true);
     this.emitEvent(
@@ -728,15 +734,20 @@ export class PiRpcClient {
     if (!child) return;
     const operation = (async () => {
       const pid = child.pid;
+      const source = this.source?.child === child ? this.source : this.unconfirmedSource;
       this.child = null;
       this.unconfirmedChild = child;
+      if (source) this.unconfirmedSource = { generation: source.generation, childPid: source.childPid ?? pid };
       if (this.source?.child === child) this.source = null;
       this.rejectPending(new Error("Pi RPC 已停止"));
       const waitForExit = (timeoutMs: number) => new Promise<boolean>((resolve) => {
         // Node documents signalCode as nullable, but lightweight embeddings and
         // test doubles may omit it. Only an explicit exit/signal proves exit.
         if (child.exitCode !== null || (child.signalCode !== null && child.signalCode !== undefined)) {
-          if (this.unconfirmedChild === child) this.unconfirmedChild = null;
+          if (this.unconfirmedChild === child) {
+            this.unconfirmedChild = null;
+            this.unconfirmedSource = null;
+          }
           resolve(true);
           return;
         }
@@ -747,7 +758,10 @@ export class PiRpcClient {
           clearTimeout(timer);
           child.off("exit", onExit);
           child.off("close", onExit);
-          if (exited && this.unconfirmedChild === child) this.unconfirmedChild = null;
+          if (exited && this.unconfirmedChild === child) {
+            this.unconfirmedChild = null;
+            this.unconfirmedSource = null;
+          }
           resolve(exited);
         };
         const onExit = () => finish(true);
