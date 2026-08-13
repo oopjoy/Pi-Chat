@@ -1,14 +1,10 @@
 import assert from "node:assert/strict";
 import test, { beforeEach } from "node:test";
 import { act, createElement } from "react";
-import type { BootstrapData, SessionViewData } from "../src/shared/types";
-import {
-  activeSessionId as activeId,
-  createBootstrapFixture,
-  createSessionViewFixture,
-} from "./fixtures/app-bootstrap";
-import { captureApiSnapshot } from "./helpers/api-stub";
-import { installAppDom as installDom } from "./helpers/app-dom";
+import type { BootstrapData, SessionViewData } from "../../src/shared/types";
+import { activeSessionId as activeId, createBootstrapFixture, createSessionViewFixture } from "../fixtures/app-bootstrap";
+import { captureApiSnapshot } from "../helpers/api-stub";
+import { installAppDom as installDom } from "../helpers/app-dom";
 
 let bootstrap: BootstrapData;
 let draftView: SessionViewData;
@@ -18,11 +14,12 @@ beforeEach(() => {
   draftView = createSessionViewFixture();
 });
 
+
 test("an accepted prompt advances the sidebar turn count before stale metadata catches up", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");
-  const { api } = await import("../src/web/api");
-  const { App } = await import("../src/web/App");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
   const restoreApi = captureApiSnapshot(api);
   const existingMessages = [
     { role: "user" as const, content: "first" },
@@ -121,8 +118,8 @@ test("an accepted prompt advances the sidebar turn count before stale metadata c
 test("cancelling an admitted queued prompt restores its text over the current Composer draft and rolls the turn count back", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");
-  const { api } = await import("../src/web/api");
-  const { App } = await import("../src/web/App");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
   const restoreApi = captureApiSnapshot(api);
   const queuedItem = {
     id: "00000000-0000-4000-8000-000000000002",
@@ -227,8 +224,8 @@ test("cancelling a locally queued image prompt restores its attachment", async (
     File: dom.window.File,
   });
   const { createRoot } = await import("react-dom/client");
-  const { api } = await import("../src/web/api");
-  const { App } = await import("../src/web/App");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
   const restoreApi = captureApiSnapshot(api);
   const imageModel = {
     ...bootstrap.state.model!,
@@ -313,8 +310,8 @@ test("cancelling a locally queued image prompt restores its attachment", async (
 test("successive queue cancellations keep only the latest restored message", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");
-  const { api } = await import("../src/web/api");
-  const { App } = await import("../src/web/App");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
   const restoreApi = captureApiSnapshot(api);
   const first = {
     id: "00000000-0000-4000-8000-000000000011",
@@ -399,8 +396,8 @@ test("successive queue cancellations keep only the latest restored message", asy
 test("a delayed queue cancellation does not overwrite draft edits made after the click", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");
-  const { api } = await import("../src/web/api");
-  const { App } = await import("../src/web/App");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
   const restoreApi = captureApiSnapshot(api);
   const queued = {
     id: "00000000-0000-4000-8000-000000000020",
@@ -455,8 +452,8 @@ test("a delayed queue cancellation does not overwrite draft edits made after the
 test("opening the image picker prevents a delayed cancellation from replacing the draft", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");
-  const { api } = await import("../src/web/api");
-  const { App } = await import("../src/web/App");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
   const restoreApi = captureApiSnapshot(api);
   const queued = {
     id: "00000000-0000-4000-8000-000000000028",
@@ -514,8 +511,8 @@ test("opening the image picker prevents a delayed cancellation from replacing th
 test("a cancellation response cannot erase a newer queue admission", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");
-  const { api } = await import("../src/web/api");
-  const { App } = await import("../src/web/App");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
   const restoreApi = captureApiSnapshot(api);
   const cancelled = {
     id: "00000000-0000-4000-8000-000000000026",
@@ -573,8 +570,8 @@ test("a cancellation response cannot erase a newer queue admission", async () =>
 test("a stale resume response cannot erase a newer same-session admission", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");
-  const { api } = await import("../src/web/api");
-  const { App } = await import("../src/web/App");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
   const restoreApi = captureApiSnapshot(api);
   const existing = {
     id: "00000000-0000-4000-8000-000000000029",
@@ -639,8 +636,8 @@ test("a stale resume response cannot erase a newer same-session admission", asyn
 test("reverse queue cancellation response order still restores the last-clicked message", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");
-  const { api } = await import("../src/web/api");
-  const { App } = await import("../src/web/App");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
   const restoreApi = captureApiSnapshot(api);
   const first = {
     id: "00000000-0000-4000-8000-000000000023",
@@ -702,8 +699,8 @@ test("reverse queue cancellation response order still restores the last-clicked 
 test("a stale queue SSE cannot resurrect a successfully cancelled item", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");
-  const { api } = await import("../src/web/api");
-  const { App } = await import("../src/web/App");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
   const restoreApi = captureApiSnapshot(api);
   const queued = {
     id: "00000000-0000-4000-8000-000000000025",
@@ -752,8 +749,8 @@ test("a stale queue SSE cannot resurrect a successfully cancelled item", async (
 test("out-of-order queue cancellation responses keep the last-clicked message in the Composer", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");
-  const { api } = await import("../src/web/api");
-  const { App } = await import("../src/web/App");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
   const restoreApi = captureApiSnapshot(api);
   const first = {
     id: "00000000-0000-4000-8000-000000000021",
@@ -823,8 +820,8 @@ test("out-of-order queue cancellation responses keep the last-clicked message in
 test("queued prompt moves exclusively between queue and transcript across dispatch failure", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");
-  const { api } = await import("../src/web/api");
-  const { App } = await import("../src/web/App");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
   const restoreApi = captureApiSnapshot(api);
   const queuedId = "00000000-0000-4000-8000-000000000001";
   const queuedItem = {
@@ -991,8 +988,8 @@ test("queued prompt moves exclusively between queue and transcript across dispat
 test("dispatch before HTTP acknowledgement cannot resurrect an executing queue item", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");
-  const { api } = await import("../src/web/api");
-  const { App } = await import("../src/web/App");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
   const restoreApi = captureApiSnapshot(api);
   const queuedItem = {
     id: "00000000-0000-4000-8000-000000000031",
@@ -1088,8 +1085,8 @@ test("dispatch before HTTP acknowledgement cannot resurrect an executing queue i
 test("queue SSE invalidates an older Session view before it can erase queue state", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");
-  const { api } = await import("../src/web/api");
-  const { App } = await import("../src/web/App");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
   const restoreApi = captureApiSnapshot(api);
   const queuedItem = {
     id: "00000000-0000-4000-8000-000000000099",
@@ -1160,8 +1157,8 @@ test("queue SSE invalidates an older Session view before it can erase queue stat
 test("agent settlement clears a completed tool status left after compaction", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");
-  const { api } = await import("../src/web/api");
-  const { App } = await import("../src/web/App");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
   const restoreApi = captureApiSnapshot(api);
   const settledView: SessionViewData = {
     ...draftView,
@@ -1293,8 +1290,8 @@ test("agent settlement clears a completed tool status left after compaction", as
 test("extension resolution invalidates an older Session view before it can reopen confirmation", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");
-  const { api } = await import("../src/web/api");
-  const { App } = await import("../src/web/App");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
   const restoreApi = captureApiSnapshot(api);
   const request = {
     type: "extension_ui_request",
