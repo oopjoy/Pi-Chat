@@ -17,19 +17,19 @@
 
 | 修改目标 | 首要生产入口 | 唯一策略所有者 | 首要测试 |
 |---|---|---|---|
-| Slash 指令联想与 Composer 能力 | `ChatInput.tsx`、`App.tsx` command projection | App coordinator 提交的 Pane commands；组件只渲染 | `app-lazy-new.test.ts`、`session-view-cache.test.ts` |
-| Queue 排队、撤销与恢复 Composer | `App.tsx`、`local-user-turn.ts`、`prompt-scheduler.ts` | 浏览器 local-turn overlay；服务端 `PromptScheduler` | `app-lazy-new.test.ts`、`local-user-turn.test.ts`、`prompt-scheduler.test.ts` |
-| Prompt acknowledgement / delivery uncertain | `App.tsx`、`prompt-scheduler.ts`、`rpc-client.ts` | 服务端调度与 RPC outcome；浏览器 local-turn reconciliation | `app-lazy-new.test.ts`、`dual-session.test.ts`、`prompt-scheduler.test.ts` |
-| Native Steer | `app.ts`、`App.tsx` | `PiChatApp` 的 generation-scoped admission/snapshot；Pi queue 是消费证据 | `dual-session.test.ts`、`app-lazy-new.test.ts` |
-| 冷历史浏览与分页 | `session-index.ts`、`app.ts` Session view、`session-view-cache.ts` | `SessionIndex` 的 JSONL snapshot；App coordinator 决定可见提交 | `session-index.test.ts`、`session-navigation.test.ts`、`app-lazy-new.test.ts` |
-| Session 切换与旧响应隔离 | `App.tsx` authority helpers | App coordinator | `app-lazy-new.test.ts`、`refresh-navigation-guards.test.ts` |
-| Runtime 启动、容量和回收 | `runtime-pool.ts`、`app.ts` integration | `RuntimePool` 持有 Secondary worker/capacity；`PiChatApp` 持有跨域 finalization | `runtime-pool-admission.test.ts`、`dual-session.test.ts` |
-| Primary readiness / recovery | `primary-runtime-readiness.ts`、`app.ts` adoption | `PrimaryRuntimeReadinessController` 与 `PiChatApp` binding | `primary-readiness.test.ts`、`dual-session.test.ts`、`rpc-client.test.ts` |
-| 多窗口观察与控制权 | `session-control.ts`、`app.ts` SSE projection | `SessionControl` | `session-control.test.ts`、`dual-session.test.ts` |
+| Slash 指令联想与 Composer 能力 | `ChatInput.tsx`、`App.tsx` command projection | App coordinator 提交的 Pane commands；组件只渲染 | `web/composer-capabilities.test.ts`、`session-view-cache.test.ts` |
+| Queue 排队、撤销与恢复 Composer | `App.tsx`、`local-user-turn.ts`、`prompt-scheduler.ts` | 浏览器 local-turn overlay；服务端 `PromptScheduler` | `web/queue-steer-extension.test.ts`、`local-user-turn.test.ts`、`prompt-scheduler.test.ts` |
+| Prompt acknowledgement / delivery uncertain | `App.tsx`、`prompt-scheduler.ts`、`rpc-client.ts` | 服务端调度与 RPC outcome；浏览器 local-turn reconciliation | `web/prompt-consistency.test.ts`、`server/prompt-queue-steering.test.ts`、`prompt-scheduler.test.ts` |
+| Native Steer | `app.ts`、`App.tsx` | `PiChatApp` 的 generation-scoped admission/snapshot；Pi queue 是消费证据 | `server/prompt-queue-steering.test.ts`、`web/composer-capabilities.test.ts` |
+| 冷历史浏览与分页 | `session-index.ts`、`app.ts` Session view、`session-view-cache.ts` | `SessionIndex` 的 JSONL snapshot；App coordinator 决定可见提交 | `session-index.test.ts`、`session-navigation.test.ts`、`web/session-navigation-gate.test.ts` |
+| Session 切换与旧响应隔离 | `App.tsx` authority helpers | App coordinator | `web/pane-authority.test.ts`、`web/session-navigation-gate.test.ts`、`refresh-navigation-guards.test.ts` |
+| Runtime 启动、容量和回收 | `runtime-pool.ts`、`app.ts` integration | `RuntimePool` 持有 Secondary worker/capacity；`PiChatApp` 持有跨域 finalization | `runtime-pool-admission.test.ts`、`server/runtime-recovery-capacity.test.ts` |
+| Primary readiness / recovery | `primary-runtime-readiness.ts`、`app.ts` adoption | `PrimaryRuntimeReadinessController` 与 `PiChatApp` binding | `primary-readiness.test.ts`、`server/runtime-recovery-capacity.test.ts`、`rpc-client.test.ts` |
+| 多窗口观察与控制权 | `session-control.ts`、`app.ts` SSE projection | `SessionControl` | `session-control.test.ts`、`server/window-control-lifecycle.test.ts`、`server/shutdown-control.test.ts` |
 | SSE 节流、顺序和背压 | `sse-hub.ts` | `SseHub` 只持有 transport client/pending frame | `sse-hub.test.ts`、`sse-transport-recovery.test.ts` |
-| Workspace 默认值与 draft picker | `App.tsx`、`workspace-state.ts`、`app.ts` | 服务端 workspace snapshot；浏览器各 picker token | `draft-workspace.test.ts`、`workspace-state.test.ts`、`app-lazy-new.test.ts` |
-| Rename / Delete | `App.tsx` optimistic projection、`app.ts` orchestration | App coordinator mutation token/tombstone；服务端 Session mutation | `app-lazy-new.test.ts`、`session-management.test.ts` |
-| Restart / shutdown | `application-lifecycle.ts`、`application-restart.ts`、`app.ts` | lifecycle barrier 与对应资源所有者 | `application-lifecycle.test.ts`、`application-restart.test.ts`、`dual-session.test.ts` |
+| Workspace 默认值与 draft picker | `App.tsx`、`workspace-state.ts`、`app.ts` | 服务端 workspace snapshot；浏览器各 picker token | `draft-workspace.test.ts`、`workspace-state.test.ts`、`web/app-replacement-recovery.test.ts`、`server/workspace-resource-lifecycle.test.ts` |
+| Rename / Delete | `App.tsx` optimistic projection、`app.ts` orchestration | App coordinator mutation token/tombstone；服务端 Session mutation | `web/session-inventory-mutations.test.ts`、`session-management.test.ts` |
+| Restart / shutdown | `application-lifecycle.ts`、`application-restart.ts`、`app.ts` | lifecycle barrier 与对应资源所有者 | `application-lifecycle.test.ts`、`application-restart.test.ts`、`server/application-restart-admission.test.ts`、`server/shutdown-control.test.ts` |
 | Host / Origin / token / Gate 安全 | `request-guard.ts`、`system-gate-installer.ts` | 对应 server guard/installer | `request-guard.test.ts`、`api-recovery-token.test.ts`、`system-gate-installer.test.ts` |
 
 ## 可写状态所有权
@@ -87,17 +87,17 @@
 | 不变量 | 规范 | 首要回归层 |
 |---|---|---|
 | 服务只监听 loopback，并执行精确 Host、Origin、token 校验 | README 安全说明、Architecture security posture | `request-guard`、`api-recovery-token` |
-| 冷历史 browsing/search/pagination 不激活 Runtime | Architecture runtime/session policy | `dual-session`、`session-navigation`、App navigation tests |
-| 一个 live writer，多窗口可观察 | Architecture Session control | `session-control`、`dual-session` |
-| Primary 加最多四个 Secondary | Architecture runtime/session policy | `runtime-pool-admission`、`dual-session` |
-| Runtime identity 与 cwd 在其生命周期内不可重绑 | Architecture workspace/runtime policy | `runtime-pool-admission`、`workspace-state` |
-| Lifecycle barrier 必须 drain 已准入 mutation | Architecture、lifecycle module | `application-lifecycle`、`operation-admission`、`dual-session` |
+| 冷历史 browsing/search/pagination 不激活 Runtime | Architecture runtime/session policy | `server/runtime-bootstrap-drafts.test.ts`、`session-navigation`、`web/session-navigation-gate.test.ts` |
+| 一个 live writer，多窗口可观察 | Architecture Session control | `session-control`、`server/window-control-lifecycle.test.ts` |
+| Primary 加最多四个 Secondary | Architecture runtime/session policy | `runtime-pool-admission`、`server/runtime-recovery-capacity.test.ts` |
+| Runtime identity 与 cwd 在其生命周期内不可重绑 | Architecture workspace/runtime policy | `runtime-pool-admission`、`workspace-state`、`server/workspace-resource-lifecycle.test.ts` |
+| Lifecycle barrier 必须 drain 已准入 mutation | Architecture、lifecycle module | `application-lifecycle`、`operation-admission`、`server/application-restart-admission.test.ts` |
 | SSE 有内存/帧上限，且终态顺序不得被累积快照越过 | `SseHub` contract | `sse-hub`、`sse-transport-recovery` |
-| Persisted history、optimistic turn、cache overlay、terminal SSE 不重复也不丢失 | Frontend/timing docs | `session-view-cache`、`local-user-turn`、App prompt tests |
-| `ConversationPane` 稳定挂载，Session 切换不丢 Composer draft | Frontend ownership plan | App navigation tests、Playwright |
-| 等待中的本地 turn 只在 Queue，dispatch 后才进入 transcript | Prompt/local-turn contract | App queue tests、`local-user-turn`、`prompt-scheduler` |
-| Prompt write timeout 是 outcome unknown，不能自动重试或越过排序 | Prompt/RPC contract | `prompt-scheduler`、`rpc-client`、`dual-session` |
-| Native Steer 只有 Pi queue 的已验证消费才能显现为用户 turn | Steer contract | `dual-session`、App Steer tests |
+| Persisted history、optimistic turn、cache overlay、terminal SSE 不重复也不丢失 | Frontend/timing docs | `session-view-cache`、`local-user-turn`、`web/prompt-consistency.test.ts` |
+| `ConversationPane` 稳定挂载，Session 切换不丢 Composer draft | Frontend ownership plan | `web/session-navigation-gate.test.ts`、Playwright |
+| 等待中的本地 turn 只在 Queue，dispatch 后才进入 transcript | Prompt/local-turn contract | `web/queue-steer-extension.test.ts`、`local-user-turn`、`prompt-scheduler` |
+| Prompt write timeout 是 outcome unknown，不能自动重试或越过排序 | Prompt/RPC contract | `prompt-scheduler`、`rpc-client`、`server/prompt-queue-steering.test.ts` |
+| Native Steer 只有 Pi queue 的已验证消费才能显现为用户 turn | Steer contract | `server/prompt-queue-steering.test.ts`、`web/composer-capabilities.test.ts` |
 | 已移除能力不得留下隐藏 route、browser wrapper、shared type 或专用测试 | Feature surface | source search 与对应 route tests |
 
 ## 验证入口
