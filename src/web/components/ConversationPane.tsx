@@ -173,7 +173,6 @@ export function ConversationPane({
             const activeHeader = index === activeTurnItemStart && activeHeaderMessage
               ? <AssistantMessageHeader
                   message={activeHeaderMessage}
-                  streaming
                   fallback={activeAssistantMetadata}
                 />
               : null;
@@ -203,7 +202,6 @@ export function ConversationPane({
           })}
           {state.isStreaming && activeTurnItemStart >= conversationItems.length && activeHeaderMessage && <AssistantMessageHeader
             message={activeHeaderMessage}
-            streaming
             fallback={activeAssistantMetadata}
           />}
         </>}

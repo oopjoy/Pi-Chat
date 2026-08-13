@@ -410,7 +410,6 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .message { margin: 0 0 18px; }
 .message > header, .message-assistant-header { display: flex; align-items: center; min-height: 22px; gap: 8px; margin-bottom: 2px; }
 .message-assistant-header { justify-content: flex-start; font-family: var(--app-font); }
-.message-assistant-header .streaming-dot { flex: 0 0 auto; }
 .message-role { font-size: 12px; font-weight: 750; letter-spacing: .02em; }
 .message-user .message-role { color: var(--accent); }
 .message-metadata { display: flex; min-width: 0; align-items: center; gap: 7px; overflow: hidden; color: var(--muted); font-size: 11px; white-space: nowrap; }
@@ -421,7 +420,6 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .message-footer > button { display: grid; width: 27px; height: 27px; flex: 0 0 auto; place-items: center; margin-left: auto; padding: 0; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; }
 .message-footer > button:hover { border-color: var(--line); background: var(--surface-hover); color: var(--text); }
 .message-footer > button svg { width: 17px; height: 17px; }
-.streaming-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: pulse 1.2s infinite; }
 .message-content { overflow-wrap: anywhere; font-family: var(--reading-font); font-size: var(--reading-font-size); line-height: var(--reading-line-height); }
 .message-user .message-content { display: flex; box-sizing: border-box; width: fit-content; max-width: 80%; margin-left: auto; padding: 10px 14px; flex-wrap: wrap; gap: 8px; border: 1px solid color-mix(in srgb, var(--accent), transparent 72%); border-radius: 14px 14px 4px 14px; background: var(--user); }
 .message-user.is-foldable .message-content { width: 80%; }
@@ -570,9 +568,10 @@ details.conversation-process { display: block; padding: 0; }
 .prompt-queue article { display: flex; align-items: center; gap: 8px; padding: 7px 9px; border-bottom: 1px solid var(--line); }
 .prompt-queue article:last-child { border-bottom: 0; }
 .prompt-queue article > span { color: var(--muted); font-size: 9px; }
-.prompt-queue article p { min-width: 0; margin: 0; flex: 1; overflow: hidden; font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
-.prompt-queue article small { margin-left: 7px; color: var(--muted); font-size: 9px; }
-.prompt-queue article button { padding: 3px 6px; border: 0; border-radius: 5px; background: transparent; color: var(--danger); cursor: pointer; font-size: 9px; }
+.prompt-queue article p { min-width: 0; margin: 0; flex: 1; overflow: hidden; font-family: var(--reading-font); font-size: calc(var(--reading-font-size) - .5px); line-height: 1.45; text-overflow: ellipsis; white-space: nowrap; }
+.prompt-queue article small { margin-left: 7px; color: var(--muted); font-family: var(--app-font); font-size: 10px; }
+.prompt-queue article .prompt-queue-cancel { height: 28px; min-width: 46px; padding: 0 8px; border: 1px solid color-mix(in srgb, var(--danger), transparent 45%); border-radius: 8px; background: color-mix(in srgb, var(--danger), transparent 88%); color: var(--danger); cursor: pointer; font-size: 12px; font-weight: 650; transition: border-color .12s ease, background-color .12s ease, color .12s ease; }
+.prompt-queue article .prompt-queue-cancel:hover:not(:disabled) { border-color: color-mix(in srgb, var(--danger), transparent 20%); background: color-mix(in srgb, var(--danger), transparent 78%); }
 .prompt-queue.is-paused { border-color: color-mix(in srgb, var(--danger), transparent 65%); }
 /* In flow, the notice stack reserves space instead of covering queue controls above it. */
 .composer-wrap { display: flex; flex: 0 0 auto; flex-direction: column; align-items: center; gap: 4px; padding: 7px 0 15px; background: linear-gradient(transparent, var(--page) 34%); }
@@ -850,7 +849,6 @@ details.conversation-process { display: block; padding: 0; }
 }
 
 @keyframes spin { to { transform: rotate(360deg); } }
-@keyframes pulse { 50% { opacity: .3; transform: scale(.75); } }
 @keyframes fade-in { from { opacity: 0; } }
 
 @media (prefers-reduced-motion: reduce) {

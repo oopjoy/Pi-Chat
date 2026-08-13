@@ -2830,7 +2830,16 @@ test("cold and capability-only hot panes retain the confirmed slash catalog", as
       active: false,
       writable: true,
     },
-    state: { ...draftView.state, sessionId: "cold-commands" },
+    state: {
+      ...draftView.state,
+      sessionId: "cold-commands",
+      model: {
+        provider: "archive",
+        id: "cold-only-model",
+        name: "Cold-only model",
+        input: ["text"],
+      },
+    },
     isActive: false,
     runtimeStatus: "view-only",
     commands: [],
@@ -2917,6 +2926,16 @@ test("cold and capability-only hot panes retain the confirmed slash catalog", as
   try {
     await act(async () => root.render(createElement(App)));
     await select("Cold commands");
+    const coldTextarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    assert.equal(
+      coldTextarea.disabled,
+      false,
+      "a cold history model mismatch must not lock ordinary text input",
+    );
+    assert.match(coldTextarea.placeholder, /输入消息/);
+    assert.doesNotMatch(coldTextarea.placeholder, /状态同步|完成后才能输入/);
     await typeSlash();
     assert.equal(
       dom.window.document.querySelectorAll(".command-suggestions button").length,
@@ -3054,6 +3073,7 @@ test("Primary ready preserves a staged draft model and keeps its capability unco
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
   const originals = { ...api };
+  let newSessionCalls = 0;
   const runtimeModel = {
     provider: "test",
     id: "runtime-model",
@@ -3085,6 +3105,10 @@ test("Primary ready preserves a staged draft model and keeps its capability unco
     }),
     eventsUrl: () => "/api/events",
     markSessionViewed: async () => ({ viewing: "" }),
+    newSession: async () => {
+      newSessionCalls += 1;
+      throw new Error("unconfirmed New-draft image must not reach newSession");
+    },
   });
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {
@@ -3117,9 +3141,73 @@ test("Primary ready preserves a staged draft model and keeps its capability unco
     assert.equal(
       dom.window.document.querySelector<HTMLTextAreaElement>(".composer textarea")!
         .disabled,
-      true,
-      "Runtime model A cannot confirm staged model B",
+      false,
+      "Runtime model A cannot confirm staged model B images, but text drafting remains available",
     );
+    assert.equal(
+      dom.window.document.querySelector<HTMLButtonElement>(".attachment-button")!
+        .disabled,
+      false,
+      "a ready Composer may stage attachments before capability-sensitive submission",
+    );
+    await act(async () =>
+      dom.window.document.querySelector<HTMLButtonElement>(".attachment-button")!.click(),
+    );
+    const imageMenuItem = [...dom.window.document.querySelectorAll<HTMLButtonElement>(
+      ".attachment-menu [role='menuitem']",
+    )].find((item) => item.textContent?.includes("图片"))!;
+    assert.match(
+      imageMenuItem.textContent || "",
+      /发送前等待模型能力同步/,
+      "a New draft never claims that its atomic create call will confirm staged image capability",
+    );
+    Object.assign(globalThis, { FileReader: dom.window.FileReader });
+    const fileInput = dom.window.document.querySelector<HTMLInputElement>(
+      "input[type='file']",
+    )!;
+    Object.defineProperty(fileInput, "files", {
+      configurable: true,
+      value: [
+        new dom.window.File(["image"], "pending-new.png", {
+          type: "image/png",
+        }),
+      ],
+    });
+    await act(async () => {
+      fileInput.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+      const deadline = Date.now() + 250;
+      while (
+        !dom.window.document.querySelector(".image-preview") &&
+        Date.now() < deadline
+      )
+        await new Promise((resolve) => dom.window.setTimeout(resolve, 5));
+    });
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      ".composer textarea",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "new draft image");
+      textarea.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: "new draft image",
+        }),
+      );
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+    });
+    assert.match(
+      dom.window.document.querySelector(".app-toast.error")?.textContent || "",
+      /模型图片能力尚未确认/,
+    );
+    assert.ok(
+      dom.window.document.querySelector(".image-preview"),
+      "the rejected New-draft image remains staged",
+    );
+    assert.equal(newSessionCalls, 0);
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);
@@ -3196,14 +3284,16 @@ test("Primary startup marks composer capability and image input as pending", asy
   }
 });
 
-test("a legacy ready without adopted capability keeps the Composer disabled until refresh", async () => {
+test("a legacy ready without adopted capability allows text while image capability waits for refresh", async () => {
   const { dom, FakeEventSource } = installDom();
+  Object.assign(globalThis, { FileReader: dom.window.FileReader });
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
   const originals = { ...api };
   let requests = 0;
   let resolveRefresh: ((data: BootstrapData) => void) | undefined;
+  const promptCalls: unknown[][] = [];
   const imageModel = {
     provider: "test",
     id: "image-ready",
@@ -3227,6 +3317,10 @@ test("a legacy ready without adopted capability keeps the Composer disabled unti
     },
     eventsUrl: () => "/api/events",
     markSessionViewed: async () => ({ viewing: activeId }),
+    prompt: async (...args: unknown[]) => {
+      promptCalls.push(args);
+      return { accepted: true, queued: false };
+    },
   });
   const root = createRoot(dom.window.document.querySelector("#root")!);
   const imageMenuItem = () =>
@@ -3251,13 +3345,63 @@ test("a legacy ready without adopted capability keeps the Composer disabled unti
     assert.equal(requests, 2, "a ready frame that missed the status SSE refreshes its capability snapshot");
     assert.equal(
       dom.window.document.querySelector<HTMLTextAreaElement>(".composer textarea")!.disabled,
-      true,
-      "a ready frame without adopted model capability cannot unlock text",
+      false,
+      "ready Runtime authority unlocks ordinary text before image capability is confirmed",
     );
     assert.equal(
       dom.window.document.querySelector<HTMLButtonElement>(".attachment-button")!.disabled,
-      true,
-      "attachments use the same unified readiness boundary",
+      false,
+      "attachments may be staged while their submit-time capability check remains pending",
+    );
+    await act(async () =>
+      dom.window.document.querySelector<HTMLButtonElement>(".attachment-button")!.click(),
+    );
+    assert.match(imageMenuItem().textContent || "", /发送前等待模型能力同步/);
+    const fileInput = dom.window.document.querySelector<HTMLInputElement>(
+      "input[type='file']",
+    )!;
+    Object.defineProperty(fileInput, "files", {
+      configurable: true,
+      value: [
+        new dom.window.File(["image"], "pending.png", {
+          type: "image/png",
+        }),
+      ],
+    });
+    await act(async () => {
+      fileInput.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+      const deadline = Date.now() + 250;
+      while (
+        !dom.window.document.querySelector(".image-preview") &&
+        Date.now() < deadline
+      )
+        await new Promise((resolve) => dom.window.setTimeout(resolve, 5));
+    });
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      ".composer textarea",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "send after capability confirmation");
+      textarea.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: "send after capability confirmation",
+        }),
+      );
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+    });
+    assert.equal(promptCalls.length, 0, "pending image capability blocks image submission");
+    assert.match(
+      dom.window.document.querySelector(".app-toast.error")?.textContent || "",
+      /模型图片能力尚未确认/,
+    );
+    assert.ok(
+      dom.window.document.querySelector(".image-preview"),
+      "a capability-rejected image remains in the draft",
     );
     await act(async () => {
       resolveRefresh!({
@@ -3272,11 +3416,12 @@ test("a legacy ready without adopted capability keeps the Composer disabled unti
       dom.window.document.querySelector<HTMLTextAreaElement>(".composer textarea")!.disabled,
       false,
     );
-    await act(async () =>
-      dom.window.document.querySelector<HTMLButtonElement>(".attachment-button")!.click(),
-    );
     assert.equal(imageMenuItem().disabled, false);
     assert.match(imageMenuItem().textContent || "", /直接解析/);
+    await act(async () =>
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click(),
+    );
+    assert.equal(promptCalls.length, 1, "confirmed image capability permits submission");
   } finally {
     await act(async () => root.unmount());
     Object.assign(api, originals);
@@ -5000,6 +5145,109 @@ test("opening a cold conversation paints JSONL without starting a dedicated Runt
   }
 });
 
+test("a cold image prompt prepares its Runtime before validating model support", async () => {
+  const { dom } = installDom();
+  Object.assign(globalThis, { FileReader: dom.window.FileReader });
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const coldId = "cold-image-1234567890";
+  const imageModel = {
+    provider: "archive",
+    id: "cold-image-model",
+    name: "Cold image model",
+    input: ["text", "image"],
+    reasoning: true,
+  };
+  const cold: SessionViewData = {
+    ...draftView,
+    session: {
+      ...draftView.session,
+      id: coldId,
+      sessionId: "cold-image",
+      name: "Cold image",
+      messageCount: 2,
+      active: false,
+      writable: false,
+    },
+    state: { ...draftView.state, sessionId: "cold-image", model: imageModel },
+    isActive: false,
+    runtimeStatus: "view-only",
+  };
+  let warmCalls = 0;
+  const promptCalls: unknown[][] = [];
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      models: [...bootstrap.models, imageModel],
+      sessions: [...bootstrap.sessions, cold.session],
+      sessionsTotal: 2,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    viewSession: async (id: string) => (id === coldId ? cold : draftView),
+    warmSession: async () => {
+      warmCalls += 1;
+      return {
+        sessionId: coldId,
+        state: { ...cold.state, isStreaming: false },
+        gateMode: "strict" as const,
+      };
+    },
+    prompt: async (...args: unknown[]) => {
+      promptCalls.push(args);
+      return { accepted: true, queued: false };
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const row = [...dom.window.document.querySelectorAll<HTMLElement>(".session-row")]
+      .find((candidate) => candidate.textContent?.includes("Cold image"));
+    assert.ok(row);
+    await act(async () =>
+      row.querySelector<HTMLButtonElement>(".session-item")?.click(),
+    );
+    const fileInput = dom.window.document.querySelector<HTMLInputElement>(
+      "input[type='file']",
+    )!;
+    Object.defineProperty(fileInput, "files", {
+      configurable: true,
+      value: [new dom.window.File(["image"], "cold.png", { type: "image/png" })],
+    });
+    await act(async () => {
+      fileInput.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+      const deadline = Date.now() + 250;
+      while (!dom.window.document.querySelector(".image-preview") && Date.now() < deadline)
+        await new Promise((resolve) => dom.window.setTimeout(resolve, 5));
+    });
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "cold image prompt");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", {
+        bubbles: true,
+        inputType: "insertText",
+        data: "cold image prompt",
+      }));
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(warmCalls, 1);
+    assert.equal(promptCalls.length, 1);
+    assert.equal((promptCalls[0]?.[1] as unknown[])?.length, 1);
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
 test("a background completed reply becomes green until this browser opens the conversation", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");
@@ -5281,13 +5529,20 @@ test("a stale sidebar snapshot cannot restore the running spinner after settleme
     active: true,
     writable: true,
   };
-  let sidebarRunning = true;
+  let staleExecution: "running" | "dispatching" = "running";
   Object.assign(api, {
     bootstrap: async () => ({
       ...bootstrap,
       sessions: [
         ...bootstrap.sessions,
-        { ...background, running: sidebarRunning },
+        {
+          ...background,
+          running: true,
+          activity: {
+            execution: staleExecution,
+            awaitingConfirmation: false,
+          },
+        },
       ],
       sessionsTotal: 2,
       activeSessionIds: [activeId, backgroundId],
@@ -5302,21 +5557,45 @@ test("a stale sidebar snapshot cannot restore the running spinner after settleme
     await act(async () =>
       source.emitPi({ type: "agent_settled", piChatSessionId: backgroundId }),
     );
-    sidebarRunning = true; // An older Bootstrap request still says it was running.
+    const statusIsRunning = () => {
+      const row = [
+        ...dom.window.document.querySelectorAll<HTMLElement>(".session-row"),
+      ].find((candidate) =>
+        candidate.textContent?.includes("Previously running"),
+      );
+      assert.ok(row);
+      return row
+        .querySelector(".session-status")
+        ?.classList.contains("is-running");
+    };
     await act(async () => {
       source.emitPi({ type: "pi_chat_sse_resync" });
       await Promise.resolve();
       await Promise.resolve();
     });
-    const row = [
-      ...dom.window.document.querySelectorAll<HTMLElement>(".session-row"),
-    ].find((candidate) =>
-      candidate.textContent?.includes("Previously running"),
-    );
-    assert.ok(row);
     assert.equal(
-      row.querySelector(".session-status")?.classList.contains("is-running"),
+      statusIsRunning(),
       false,
+      "stale running activity cannot override settlement",
+    );
+    staleExecution = "dispatching";
+    await act(async () => {
+      source.emitPi({ type: "pi_chat_sse_resync" });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(
+      statusIsRunning(),
+      false,
+      "stale dispatching activity cannot override settlement",
+    );
+    await act(async () =>
+      source.emitPi({ type: "agent_start", piChatSessionId: backgroundId }),
+    );
+    assert.equal(
+      statusIsRunning(),
+      true,
+      "a later authoritative agent_start must restore the spinner for the new turn",
     );
   } finally {
     await act(async () => root.unmount());
@@ -6009,7 +6288,7 @@ test("an accepted prompt advances the sidebar turn count before stale metadata c
   }
 });
 
-test("cancelling an admitted queued prompt rolls the sidebar turn count back", async () => {
+test("cancelling an admitted queued prompt restores its text over the current Composer draft and rolls the turn count back", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
@@ -6075,17 +6354,635 @@ test("cancelling an admitted queued prompt rolls the sidebar turn count back", a
         ?.title || "",
       /3 turns/,
     );
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "replace this draft");
+      textarea.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: "replace this draft",
+        }),
+      );
+    });
 
     await act(async () =>
       dom.window.document
         .querySelector<HTMLButtonElement>(".prompt-queue article button")!
         .click(),
     );
+    assert.equal(
+      textarea.value,
+      queuedItem.message,
+      "undo restores the cancelled prompt and replaces the current draft",
+    );
     assert.match(
       dom.window.document.querySelector<HTMLButtonElement>(".session-item")
         ?.title || "",
       /2 turns/,
       "a cancelled queue item is no longer an accepted user turn",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("cancelling a locally queued image prompt restores its attachment", async () => {
+  const { dom } = installDom();
+  Object.assign(globalThis, {
+    FileReader: dom.window.FileReader,
+    File: dom.window.File,
+  });
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const imageModel = {
+    ...bootstrap.state.model!,
+    input: ["text", "image"],
+  };
+  const queuedItem = {
+    id: "00000000-0000-4000-8000-000000000010",
+    message: "restore image too",
+    imageCount: 1,
+    createdAt: 3,
+  };
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, model: imageModel, isStreaming: true },
+      models: [imageModel],
+      queuePaused: true,
+      primaryRuntime: { ...bootstrap.primaryRuntime, model: imageModel },
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    prompt: async () => ({
+      accepted: true,
+      queued: true,
+      id: queuedItem.id,
+      queue: [queuedItem],
+    }),
+    cancelQueued: async () => ({ queue: [], paused: true }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    const fileInput = dom.window.document.querySelector<HTMLInputElement>(
+      "input[type='file']",
+    )!;
+    Object.defineProperty(fileInput, "files", {
+      configurable: true,
+      value: [
+        new dom.window.File(["image"], "restore.png", { type: "image/png" }),
+      ],
+    });
+    await act(async () => {
+      fileInput.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+      const deadline = Date.now() + 250;
+      while (!dom.window.document.querySelector(".image-preview") && Date.now() < deadline)
+        await new Promise((resolve) => dom.window.setTimeout(resolve, 5));
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, queuedItem.message);
+      textarea.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: queuedItem.message,
+        }),
+      );
+      dom.window.document
+        .querySelector<HTMLButtonElement>(".queue-submit-button")!
+        .click();
+    });
+    assert.equal(dom.window.document.querySelector(".image-preview"), null);
+    await act(async () =>
+      dom.window.document
+        .querySelector<HTMLButtonElement>(".prompt-queue article button")!
+        .click(),
+    );
+    assert.equal(textarea.value, queuedItem.message);
+    assert.ok(
+      dom.window.document.querySelector(".image-preview img"),
+      "locally retained image bytes are restored with the cancelled prompt",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("successive queue cancellations keep only the latest restored message", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const first = {
+    id: "00000000-0000-4000-8000-000000000011",
+    message: "first cancelled prompt",
+    imageCount: 0,
+    createdAt: 3,
+  };
+  const second = {
+    id: "00000000-0000-4000-8000-000000000012",
+    message: "second cancelled prompt",
+    imageCount: 0,
+    createdAt: 4,
+  };
+  let promptCalls = 0;
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true },
+      queuePaused: true,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    prompt: async (_message: string) => {
+      promptCalls += 1;
+      return {
+        accepted: true,
+        queued: true,
+        id: promptCalls === 1 ? first.id : second.id,
+        queue: promptCalls === 1 ? [first] : [first, second],
+      };
+    },
+    cancelQueued: async (id: string) => ({
+      queue: id === first.id ? [second] : [],
+      paused: true,
+    }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    const submit = async (message: string) => {
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(
+          dom.window.HTMLTextAreaElement.prototype,
+          "value",
+        )?.set?.call(textarea, message);
+        textarea.dispatchEvent(
+          new dom.window.InputEvent("input", {
+            bubbles: true,
+            inputType: "insertText",
+            data: message,
+          }),
+        );
+        dom.window.document
+          .querySelector<HTMLButtonElement>(".queue-submit-button")!
+          .click();
+      });
+    };
+    await submit(first.message);
+    await submit(second.message);
+    const cancelButtons = () => [
+      ...dom.window.document.querySelectorAll<HTMLButtonElement>(
+        ".prompt-queue article button",
+      ),
+    ];
+    await act(async () => cancelButtons()[0]!.click());
+    assert.equal(textarea.value, first.message);
+    await act(async () => cancelButtons()[0]!.click());
+    assert.equal(
+      textarea.value,
+      second.message,
+      "the later undo replaces, rather than appends to, the prior restored draft",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a delayed queue cancellation does not overwrite draft edits made after the click", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const queued = {
+    id: "00000000-0000-4000-8000-000000000020",
+    message: "restore only if draft unchanged",
+    imageCount: 0,
+    createdAt: 3,
+  };
+  let resolveCancel!: (value: { queue: []; paused: true }) => void;
+  const pendingCancel = new Promise<{ queue: []; paused: true }>((resolve) => {
+    resolveCancel = resolve;
+  });
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true },
+      queue: [queued],
+      queuePaused: true,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    cancelQueued: async () => pendingCancel,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    await act(async () =>
+      dom.window.document.querySelector<HTMLButtonElement>(".prompt-queue article button")!.click(),
+    );
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "newer user draft");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", {
+        bubbles: true,
+        inputType: "insertText",
+        data: "newer user draft",
+      }));
+    });
+    await act(async () => resolveCancel({ queue: [], paused: true }));
+    assert.equal(textarea.value, "newer user draft");
+    assert.equal(dom.window.document.querySelector(".prompt-queue"), null);
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("opening the image picker prevents a delayed cancellation from replacing the draft", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const queued = {
+    id: "00000000-0000-4000-8000-000000000028",
+    message: "do not restore over image intent",
+    imageCount: 0,
+    createdAt: 3,
+  };
+  let resolveCancel!: (value: { queue: []; paused: true }) => void;
+  const pendingCancel = new Promise<{ queue: []; paused: true }>((resolve) => {
+    resolveCancel = resolve;
+  });
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true },
+      queue: [queued],
+      queuePaused: true,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    cancelQueued: async () => pendingCancel,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "keep this draft");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", {
+        bubbles: true,
+        inputType: "insertText",
+        data: "keep this draft",
+      }));
+      dom.window.document.querySelector<HTMLButtonElement>(".prompt-queue article button")!.click();
+      dom.window.document.querySelector<HTMLButtonElement>(".attachment-button")!.click();
+    });
+    const imageItem = [...dom.window.document.querySelectorAll<HTMLButtonElement>(
+      ".attachment-menu [role='menuitem']",
+    )].find((item) => item.textContent?.includes("图片"));
+    assert.ok(imageItem);
+    await act(async () => imageItem.click());
+    await act(async () => resolveCancel({ queue: [], paused: true }));
+    assert.equal(textarea.value, "keep this draft");
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a cancellation response cannot erase a newer queue admission", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const cancelled = {
+    id: "00000000-0000-4000-8000-000000000026",
+    message: "cancel old item",
+    imageCount: 0,
+    createdAt: 3,
+  };
+  const admitted = {
+    id: "00000000-0000-4000-8000-000000000027",
+    message: "newer admitted item",
+    imageCount: 0,
+    createdAt: 4,
+  };
+  let resolveCancel!: (value: { queue: []; paused: true }) => void;
+  const pendingCancel = new Promise<{ queue: []; paused: true }>((resolve) => {
+    resolveCancel = resolve;
+  });
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true },
+      queue: [cancelled],
+      queuePaused: true,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    cancelQueued: async () => pendingCancel,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    await act(async () =>
+      dom.window.document.querySelector<HTMLButtonElement>(".prompt-queue article button")!.click(),
+    );
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () =>
+      source.emitPi({
+        type: "pi_chat_queue_update",
+        piChatSessionId: activeId,
+        queue: [cancelled, admitted],
+        admittedId: admitted.id,
+        paused: true,
+      }),
+    );
+    await act(async () => resolveCancel({ queue: [], paused: true }));
+    const queueText = dom.window.document.querySelector(".prompt-queue")?.textContent || "";
+    assert.doesNotMatch(queueText, /cancel old item/);
+    assert.match(queueText, /newer admitted item/);
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a stale resume response cannot erase a newer same-session admission", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const existing = {
+    id: "00000000-0000-4000-8000-000000000029",
+    message: "existing resume item",
+    imageCount: 0,
+    createdAt: 3,
+  };
+  const admitted = {
+    id: "00000000-0000-4000-8000-000000000030",
+    message: "admitted while resume waits",
+    imageCount: 0,
+    createdAt: 4,
+  };
+  let resolveResume!: (value: { queue: typeof existing[]; paused: false }) => void;
+  const pendingResume = new Promise<{ queue: typeof existing[]; paused: false }>(
+    (resolve) => { resolveResume = resolve; },
+  );
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true },
+      queue: [existing],
+      queuePaused: true,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    resumeQueue: async () => pendingResume,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    await act(async () =>
+      dom.window.document.querySelector<HTMLButtonElement>(
+        ".prompt-queue header button",
+      )!.click(),
+    );
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () =>
+      source.emitPi({
+        type: "pi_chat_queue_update",
+        piChatSessionId: activeId,
+        queue: [existing, admitted],
+        admittedId: admitted.id,
+        paused: true,
+      }),
+    );
+    await act(async () => resolveResume({ queue: [existing], paused: false }));
+    const queueText = dom.window.document.querySelector(".prompt-queue")?.textContent || "";
+    assert.match(queueText, /existing resume item/);
+    assert.match(queueText, /admitted while resume waits/);
+    assert.equal(
+      dom.window.document.querySelector(".prompt-queue header button"),
+      null,
+      "the newer successful Resume owns pause state while preserving newer SSE admissions",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("reverse queue cancellation response order still restores the last-clicked message", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const first = {
+    id: "00000000-0000-4000-8000-000000000023",
+    message: "first click first response",
+    imageCount: 0,
+    createdAt: 3,
+  };
+  const second = {
+    id: "00000000-0000-4000-8000-000000000024",
+    message: "second click second response",
+    imageCount: 0,
+    createdAt: 4,
+  };
+  let resolveFirst!: (value: { queue: typeof second[]; paused: true }) => void;
+  let resolveSecond!: (value: { queue: []; paused: true }) => void;
+  const firstPending = new Promise<{ queue: typeof second[]; paused: true }>((resolve) => {
+    resolveFirst = resolve;
+  });
+  const secondPending = new Promise<{ queue: []; paused: true }>((resolve) => {
+    resolveSecond = resolve;
+  });
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true },
+      queue: [first, second],
+      queuePaused: true,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    cancelQueued: async (id: string) => id === first.id ? firstPending : secondPending,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    const buttons = [
+      ...dom.window.document.querySelectorAll<HTMLButtonElement>(
+        ".prompt-queue article button",
+      ),
+    ];
+    await act(async () => {
+      buttons[0]!.click();
+      buttons[1]!.click();
+    });
+    await act(async () => resolveFirst({ queue: [second], paused: true }));
+    assert.equal(textarea.value, first.message);
+    await act(async () => resolveSecond({ queue: [], paused: true }));
+    assert.equal(textarea.value, second.message);
+    assert.equal(dom.window.document.querySelector(".prompt-queue"), null);
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("a stale queue SSE cannot resurrect a successfully cancelled item", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const queued = {
+    id: "00000000-0000-4000-8000-000000000025",
+    message: "stay cancelled",
+    imageCount: 0,
+    createdAt: 3,
+  };
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true },
+      queue: [queued],
+      queuePaused: true,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    cancelQueued: async () => ({ queue: [], paused: true }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    await act(async () =>
+      dom.window.document.querySelector<HTMLButtonElement>(".prompt-queue article button")!.click(),
+    );
+    assert.equal(dom.window.document.querySelector(".prompt-queue"), null);
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () =>
+      source.emitPi({
+        type: "pi_chat_queue_update",
+        piChatSessionId: activeId,
+        queue: [queued],
+        paused: true,
+      }),
+    );
+    assert.equal(
+      dom.window.document.querySelector(".prompt-queue"),
+      null,
+      "a delayed queue snapshot cannot restore a cancelled identity",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("out-of-order queue cancellation responses keep the last-clicked message in the Composer", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const first = {
+    id: "00000000-0000-4000-8000-000000000021",
+    message: "slow first undo",
+    imageCount: 0,
+    createdAt: 3,
+  };
+  const second = {
+    id: "00000000-0000-4000-8000-000000000022",
+    message: "fast second undo",
+    imageCount: 0,
+    createdAt: 4,
+  };
+  let resolveFirst!: (value: { queue: typeof second[]; paused: true }) => void;
+  let resolveSecond!: (value: { queue: []; paused: true }) => void;
+  const firstPending = new Promise<{ queue: typeof second[]; paused: true }>(
+    (resolve) => { resolveFirst = resolve; },
+  );
+  const secondPending = new Promise<{ queue: []; paused: true }>(
+    (resolve) => { resolveSecond = resolve; },
+  );
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true },
+      queue: [first, second],
+      queuePaused: true,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    cancelQueued: async (id: string) => id === first.id ? firstPending : secondPending,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    const buttons = [
+      ...dom.window.document.querySelectorAll<HTMLButtonElement>(
+        ".prompt-queue article button",
+      ),
+    ];
+    await act(async () => {
+      buttons[0]!.click();
+      buttons[1]!.click();
+    });
+    await act(async () => resolveSecond({ queue: [], paused: true }));
+    assert.equal(textarea.value, second.message);
+    await act(async () => resolveFirst({ queue: [second], paused: true }));
+    assert.equal(
+      textarea.value,
+      second.message,
+      "a slower earlier response cannot overwrite the later cancellation",
+    );
+    assert.equal(
+      dom.window.document.querySelector(".prompt-queue"),
+      null,
+      "an older response cannot resurrect an item cancelled by a newer response",
     );
   } finally {
     await act(async () => root.unmount());
@@ -6253,6 +7150,103 @@ test("queued prompt moves exclusively between queue and transcript across dispat
     );
     assert.equal(
       dom.window.document.querySelectorAll(".prompt-queue article").length,
+      1,
+    );
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(api, originals);
+  }
+});
+
+test("dispatch before HTTP acknowledgement cannot resurrect an executing queue item", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../src/web/api");
+  const { App } = await import("../src/web/App");
+  const originals = { ...api };
+  const queuedItem = {
+    id: "00000000-0000-4000-8000-000000000031",
+    message: "dispatch wins over ack",
+    imageCount: 0,
+    createdAt: 2,
+  };
+  let resolvePrompt!: (value: {
+    accepted: true;
+    queued: true;
+    id: string;
+    queue: typeof queuedItem[];
+  }) => void;
+  const pendingPrompt = new Promise<{
+    accepted: true;
+    queued: true;
+    id: string;
+    queue: typeof queuedItem[];
+  }>((resolve) => { resolvePrompt = resolve; });
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true },
+      queue: [],
+      queuePaused: true,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    prompt: async () => pendingPrompt,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, queuedItem.message);
+      textarea.dispatchEvent(new dom.window.InputEvent("input", {
+        bubbles: true,
+        inputType: "insertText",
+        data: queuedItem.message,
+      }));
+      dom.window.document.querySelector<HTMLButtonElement>(
+        ".queue-submit-button",
+      )!.click();
+      await Promise.resolve();
+    });
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.emitPi({
+        type: "pi_chat_queue_update",
+        piChatSessionId: activeId,
+        admittedId: queuedItem.id,
+        queue: [queuedItem],
+        paused: true,
+      });
+      source.emitPi({
+        type: "pi_chat_queue_dispatch",
+        piChatSessionId: activeId,
+        id: queuedItem.id,
+        message: queuedItem.message,
+        imageCount: 0,
+      });
+    });
+    assert.equal(dom.window.document.querySelector(".prompt-queue"), null);
+    await act(async () =>
+      resolvePrompt({
+        accepted: true,
+        queued: true,
+        id: queuedItem.id,
+        queue: [queuedItem],
+      }),
+    );
+    assert.equal(
+      dom.window.document.querySelector(".prompt-queue"),
+      null,
+      "the stale acknowledgement cannot restore a dispatched queue row",
+    );
+    assert.equal(
+      dom.window.document.querySelectorAll(".message-user").length,
       1,
     );
   } finally {
@@ -8047,7 +9041,7 @@ test("a pending abort stays in stopping state until agent settlement", async () 
 });
 
 test("late stop and queue actions from A do not overwrite Session B", async () => {
-  const { dom } = installDom();
+  const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../src/web/api");
   const { App } = await import("../src/web/App");
@@ -8105,7 +9099,7 @@ test("late stop and queue actions from A do not overwrite Session B", async () =
     paused: true;
   }) => void;
   let resolveResume!: (value: {
-    queue: (typeof queuedA)[];
+    queue: typeof viewA.queue;
     paused: false;
   }) => void;
   const pendingAbort = new Promise<{
@@ -8122,7 +9116,7 @@ test("late stop and queue actions from A do not overwrite Session B", async () =
     resolveCancel = resolve;
   });
   const pendingResume = new Promise<{
-    queue: (typeof queuedA)[];
+    queue: typeof viewA.queue;
     paused: false;
   }>((resolve) => {
     resolveResume = resolve;
@@ -8173,6 +9167,7 @@ test("late stop and queue actions from A do not overwrite Session B", async () =
   };
   try {
     await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
     await act(async () =>
       dom.window.document
         .querySelector<HTMLButtonElement>(".stop-button")!
@@ -8207,13 +9202,42 @@ test("late stop and queue actions from A do not overwrite Session B", async () =
     );
 
     await visitA();
+    assert.equal(
+      dom.window.document.querySelector(".prompt-queue"),
+      null,
+      "the completed A cancellation remains projected while its response is stale to B",
+    );
+    await act(async () => {
+      source.emitPi({
+        type: "pi_chat_queue_update",
+        piChatSessionId: activeId,
+        queue: [queuedA],
+        paused: true,
+      });
+    });
+    assert.equal(
+      dom.window.document.querySelector(".prompt-queue"),
+      null,
+      "a stale queue frame cannot resurrect A's cancelled identity",
+    );
+    // Resume remains Session-scoped; start it before navigation using a distinct
+    // surviving item rather than the already-cancelled tombstoned identity.
+    const resumedA = { ...queuedA, id: `${queuedA.id}-resume`, message: "queued A resume" };
+    await act(async () => {
+      source.emitPi({
+        type: "pi_chat_queue_update",
+        piChatSessionId: activeId,
+        queue: [resumedA],
+        paused: true,
+      });
+    });
     await act(async () =>
       dom.window.document
         .querySelector<HTMLButtonElement>(".prompt-queue header button")!
         .click(),
     );
     await visitB();
-    await act(async () => resolveResume({ queue: [queuedA], paused: false }));
+    await act(async () => resolveResume({ queue: [resumedA], paused: false }));
     assert.match(
       dom.window.document.querySelector(".prompt-queue")?.textContent || "",
       /queued B/,

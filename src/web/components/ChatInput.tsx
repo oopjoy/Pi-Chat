@@ -61,7 +61,7 @@ export function commandMatches(value: string, commands: SlashCommand[]): SlashCo
   }).sort((a, b) => a.rank - b.rank || a.score - b.score || a.command.name.localeCompare(b.command.name)).slice(0, 9).map(({ command }) => command);
 }
 
-export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, placeholder, acceptsImages, imageInputPending = false, imageInputPendingMessage = "模型图片能力尚未确认", commands, controls, notices, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles, onError }: {
+export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, placeholder, acceptsImages, imageInputPending = false, imageInputPendingMessage = "模型图片能力尚未确认", resolveImageCapabilityOnSend = false, restoredDraft, onDraftRevisionChange, commands, controls, notices, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles, onError }: {
   /** True when a submission will enter the local queue. */
   streaming: boolean;
   /** True only while Pi is actively generating and can be stopped. */
@@ -75,6 +75,11 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   imageInputPending?: boolean;
   /** Explains whether preparation, metadata synchronization, or recovery owns the wait. */
   imageInputPendingMessage?: string;
+  /** A cold/draft send can prepare its Runtime before validating image support. */
+  resolveImageCapabilityOnSend?: boolean;
+  /** A cancelled queued prompt replaces the current Composer draft. */
+  restoredDraft?: { revision: number; expectedDraftRevision: number; message: string; images: PromptImage[] } | null;
+  onDraftRevisionChange?: (revision: number) => void;
   commands: SlashCommand[];
   controls?: ReactNode;
   /** System status sits immediately above the actual Composer, never over its input. */
@@ -98,6 +103,22 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   const suggestions = useMemo(() => commandMatches(value, commands), [commands, value]);
   const invokedCommand = value.startsWith("/") ? commands.find((command) => command.name === value.slice(1).split(/\s/, 1)[0]) : undefined;
   const isExtensionCommand = invokedCommand?.source === "extension";
+  const restoredDraftRef = useRef(restoredDraft);
+  const draftRevisionRef = useRef(0);
+  const advanceUserDraftRevision = () => {
+    draftRevisionRef.current += 1;
+    onDraftRevisionChange?.(draftRevisionRef.current);
+  };
+
+  useEffect(() => {
+    if (!restoredDraft || restoredDraft === restoredDraftRef.current) return;
+    restoredDraftRef.current = restoredDraft;
+    if (draftRevisionRef.current !== restoredDraft.expectedDraftRevision) return;
+    setValue(restoredDraft.message);
+    setImages(restoredDraft.images);
+    setSuggestionIndex(0);
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }, [restoredDraft]);
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -134,6 +155,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     const candidates = files.filter((file) => file.type.startsWith("image/"));
     if (!candidates.length) return;
     if (images.length + candidates.length > MAX_IMAGES) return onError(`一次最多添加 ${MAX_IMAGES} 张图片`);
+    advanceUserDraftRevision();
     try {
       const added = await Promise.all(candidates.map(imageFromFile));
       setImages((current) => [...current, ...added]);
@@ -145,6 +167,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   const completeCommand = (command: SlashCommand) => {
     setValue(`/${command.name} `);
     setSuggestionIndex(0);
+    advanceUserDraftRevision();
     requestAnimationFrame(() => textareaRef.current?.focus());
   };
 
@@ -155,7 +178,11 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
       onError("Slash 指令不能作为 Steer 消息发送");
       return;
     }
-    if (images.length && (imageInputPending || !acceptsImages)) {
+    if (
+      images.length &&
+      !resolveImageCapabilityOnSend &&
+      (imageInputPending || !acceptsImages)
+    ) {
       onError(
         imageInputPending
           ? imageInputPendingMessage
@@ -167,6 +194,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     setSending(true);
     setValue("");
     setImages([]);
+    advanceUserDraftRevision();
     try {
       await onSend(message, pendingImages, delivery);
     } catch {
@@ -183,7 +211,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
       if (event.key === "ArrowDown") { event.preventDefault(); setSuggestionIndex((index) => (index + 1) % suggestions.length); return; }
       if (event.key === "ArrowUp") { event.preventDefault(); setSuggestionIndex((index) => (index - 1 + suggestions.length) % suggestions.length); return; }
       if (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey && `/${suggestions[suggestionIndex].name}` !== value)) { event.preventDefault(); completeCommand(suggestions[suggestionIndex]); return; }
-      if (event.key === "Escape") { event.preventDefault(); setValue((current) => current === "/" ? "" : current); return; }
+      if (event.key === "Escape") { event.preventDefault(); setValue((current) => current === "/" ? "" : current); advanceUserDraftRevision(); return; }
     }
     if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault();
@@ -194,7 +222,10 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   const appendFileReferences = (paths: string[]) => {
     if (disabled) return;
     const references = fileReferences(paths);
-    if (references) setValue((current) => current.trim() ? `${current.trimEnd()}\n\n${references}` : references);
+    if (references) {
+      setValue((current) => current.trim() ? `${current.trimEnd()}\n\n${references}` : references);
+      advanceUserDraftRevision();
+    }
   };
 
   const paste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
@@ -215,6 +246,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     }
     if (clipboardFiles.length || event.clipboardData.types.includes("Files")) {
       event.preventDefault();
+      advanceUserDraftRevision();
       void onReadClipboardFiles().then((paths) => {
         if (paths.length) appendFileReferences(paths);
         else onError("无法取得文件的本地路径，请使用发送按钮旁的附件按钮选择本地文件");
@@ -243,6 +275,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     if (disabled) return;
     setAttachmentOpen(false);
     setPickingFiles(true);
+    advanceUserDraftRevision();
     try {
       const paths = await onPickLocalFiles();
       appendFileReferences(paths);
@@ -259,8 +292,8 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
       {notices && <div className="system-notice-stack" aria-live="polite">{notices}</div>}
       <div className={`composer ${dragging ? "is-dragging" : ""}`} onDragOver={(event) => { event.preventDefault(); if (!disabled) setDragging(true); }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }} onDrop={drop}>
         {!disabled && suggestions.length > 0 && <div className="command-suggestions" role="listbox" aria-label="Pi 指令联想">{suggestions.map((command, index) => <button type="button" role="option" aria-selected={index === suggestionIndex} className={index === suggestionIndex ? "is-active" : ""} key={`${command.source}-${command.name}`} onMouseDown={(event) => event.preventDefault()} onClick={() => completeCommand(command)}><strong>/{command.name}</strong><span>{command.description || "Pi 指令"}</span><small>{command.source}</small></button>)}</div>}
-        {images.length > 0 && <div className="image-previews">{images.map((image, index) => <div className="image-preview" key={`${image.fileName}-${index}`}><img src={`data:${image.mimeType};base64,${image.data}`} alt={image.fileName || `图片 ${index + 1}`} /><button type="button" disabled={disabled} onClick={() => setImages((current) => current.filter((_, itemIndex) => itemIndex !== index))} aria-label={`移除 ${image.fileName || "图片"}`}><CloseIcon /></button><small>{image.fileName || "粘贴的图片"}</small></div>)}</div>}
-        <textarea ref={textareaRef} value={value} onChange={(event) => setValue(event.target.value)} onPaste={paste} onKeyDown={keyDown} disabled={disabled} rows={1} placeholder={disabled ? disabledPlaceholder || "正在切换会话…" : placeholder || (streaming ? "继续输入，发送后加入队列；输入 / 查看指令" : "输入消息，或粘贴、拖入附件")} aria-label="消息输入" />
+        {images.length > 0 && <div className="image-previews">{images.map((image, index) => <div className="image-preview" key={`${image.fileName}-${index}`}><img src={`data:${image.mimeType};base64,${image.data}`} alt={image.fileName || `图片 ${index + 1}`} /><button type="button" disabled={disabled} onClick={() => { setImages((current) => current.filter((_, itemIndex) => itemIndex !== index)); advanceUserDraftRevision(); }} aria-label={`移除 ${image.fileName || "图片"}`}><CloseIcon /></button><small>{image.fileName || "粘贴的图片"}</small></div>)}</div>}
+        <textarea ref={textareaRef} value={value} onChange={(event) => { setValue(event.target.value); advanceUserDraftRevision(); }} onPaste={paste} onKeyDown={keyDown} disabled={disabled} rows={1} placeholder={disabled ? disabledPlaceholder || "正在切换会话…" : placeholder || (streaming ? "继续输入，发送后加入队列；输入 / 查看指令" : "输入消息，或粘贴、拖入附件")} aria-label="消息输入" />
         <div className="composer-toolbar">
           <div className="composer-toolbar-controls">{controls}</div>
           <div className="composer-actions">
@@ -269,7 +302,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
             <div className="attachment-control" ref={attachmentRef}>
               <button type="button" className={`attachment-button ${attachmentOpen ? "is-open" : ""}`} disabled={disabled || pickingFiles} onClick={() => setAttachmentOpen((open) => !open)} title="添加附件" aria-label="添加附件" aria-haspopup="menu" aria-expanded={attachmentOpen}><PaperclipIcon /></button>
               {attachmentOpen && <div className="attachment-menu" role="menu">
-                <button type="button" role="menuitem" disabled={images.length >= MAX_IMAGES} onClick={() => { setAttachmentOpen(false); imageInputRef.current?.click(); }}><ImageIcon className="attachment-menu-icon" /><strong>图片</strong><small>{imageInputPending ? "可添加；发送前等待模型能力同步" : acceptsImages ? "直接解析，可粘贴或拖入" : "可添加；发送时检查模型支持"}</small></button>
+                <button type="button" role="menuitem" disabled={images.length >= MAX_IMAGES} onClick={() => { setAttachmentOpen(false); advanceUserDraftRevision(); imageInputRef.current?.click(); }}><ImageIcon className="attachment-menu-icon" /><strong>图片</strong><small>{resolveImageCapabilityOnSend ? "可添加；发送时准备 Runtime 并检查支持" : imageInputPending ? "可添加；发送前等待模型能力同步" : acceptsImages ? "直接解析，可粘贴或拖入" : "可添加；发送时检查模型支持"}</small></button>
                 <button type="button" role="menuitem" disabled={pickingFiles} onClick={() => void pickFiles()}><FileSearchIcon className="attachment-menu-icon" /><strong>{pickingFiles ? "选择中…" : "本地文件"}</strong><small>引用 Windows 绝对路径</small></button>
               </div>}
               <input ref={imageInputRef} className="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple onChange={(event) => { void addImages([...event.target.files || []]); event.target.value = ""; }} />

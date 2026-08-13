@@ -86,7 +86,7 @@ export function assistantGeneratedAt(timestamp: number | undefined, now = Date.n
 
 type AssistantMetadataFallback = Pick<PiMessage, "provider" | "model" | "thinkingLevel">;
 
-export function AssistantMessageHeader({ message, streaming = false, fallback }: { message: PiMessage; streaming?: boolean; fallback?: AssistantMetadataFallback }) {
+export function AssistantMessageHeader({ message, fallback }: { message: PiMessage; fallback?: AssistantMetadataFallback }) {
   const resolvedMessage = {
     ...message,
     provider: message.provider || fallback?.provider,
@@ -95,13 +95,12 @@ export function AssistantMessageHeader({ message, streaming = false, fallback }:
   };
   const modelLabel = assistantModelLabel(resolvedMessage);
   const thinkingLabel = assistantThinkingLabel(resolvedMessage);
-  if (!modelLabel && !thinkingLabel && !streaming) return null;
+  if (!modelLabel && !thinkingLabel) return null;
   return <header className="message-assistant-header">
     <span className="message-metadata">
       {modelLabel && <span className="message-model" title={modelLabel}>{modelLabel}</span>}
       {thinkingLabel && <span className="message-thinking" title={`思考强度：${thinkingLabel}`}>{thinkingLabel}</span>}
     </span>
-    {streaming && <span className="streaming-dot" aria-label="正在生成" />}
   </header>;
 }
 
@@ -158,7 +157,7 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
 
   return (
     <article className={`message message-${message.role}${userTextNeedsFolding ? " is-foldable" : ""}`}>
-      {message.role === "assistant" && showAssistantMetadata && <AssistantMessageHeader message={message} streaming={streaming} fallback={assistantMetadataFallback} />}
+      {message.role === "assistant" && showAssistantMetadata && <AssistantMessageHeader message={message} fallback={assistantMetadataFallback} />}
       {message.role === "user" && userImageBlocks.length > 0 && <div className="message-user-attachments" aria-label="用户附加图片">
         {userImageBlocks.map((block, index) => {
           const src = `data:${block.mimeType};base64,${block.data}`;

@@ -157,6 +157,7 @@ export type ConversationPaneAction =
   | {
       type: "QUEUE_DISPATCHED";
       sessionId: string;
+      queue: QueuedPrompt[];
       messages?: PiMessage[] | ((current: PiMessage[]) => PiMessage[]);
       pendingUserMessage?: PiMessage | null | ((current: PiMessage | null) => PiMessage | null);
     }
@@ -435,6 +436,7 @@ export function conversationPaneReducer(
         ? {
             ...state,
             piState: { ...state.piState, isStreaming: true },
+            queue: action.queue,
             ...(action.messages ? { messages: resolve(action.messages, state.messages) } : null),
             ...(action.pendingUserMessage === undefined ? null : { pendingUserMessage: resolve(action.pendingUserMessage, state.pendingUserMessage) }),
           }

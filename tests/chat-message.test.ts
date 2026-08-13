@@ -219,7 +219,7 @@ test("an empty streaming reply shows stable model metadata without redundant wor
   assert.equal(settled, "");
   assert.match(streaming, /cpa-proxy \/ gpt-5\.6-sol/);
   assert.match(streaming, /class="message-thinking"[^>]*>high/);
-  assert.match(streaming, /aria-label="正在生成"/);
+  assert.doesNotMatch(streaming, /streaming-dot|aria-label="正在生成"/);
   assert.doesNotMatch(streaming, /Pi 正在工作|message-generated-at|生成于/);
 });
 

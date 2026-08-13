@@ -214,10 +214,12 @@ test("queue compound transitions preserve queue and transcript exclusivity", () 
   const dispatched = conversationPaneReducer(waiting, {
     type: "QUEUE_DISPATCHED",
     sessionId: sessionA,
+    queue: [],
     messages: [pending],
     pendingUserMessage: null,
   });
   assert.equal(dispatched.piState.isStreaming, true);
+  assert.equal(dispatched.queue.length, 0);
   assert.equal(dispatched.messages[0], pending);
 
   const failed = conversationPaneReducer(dispatched, {

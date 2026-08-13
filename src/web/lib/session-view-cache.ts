@@ -44,6 +44,16 @@ export class SessionViewCache {
     this.evictCold();
   }
 
+  /** A server-process handoff invalidates every Runtime-derived pane fact. */
+  clear(): void {
+    this.views.clear();
+    this.persistedMessages.clear();
+    this.terminalTails.clear();
+    this.overlays.clear();
+    this.pinned.clear();
+    this.revision = 0;
+  }
+
   revisionFor(id: string): number {
     const overlay = this.overlays.get(id);
     if (!overlay) return 0;
