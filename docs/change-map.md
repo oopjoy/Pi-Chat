@@ -9,6 +9,7 @@
 - 进程与服务端所有权：[`architecture.md`](architecture.md)
 - 前端可见状态所有权：[`frontend-state-ownership.md`](frontend-state-ownership.md)
 - revision、generation 与异步写入时序：[`timing-contracts.md`](timing-contracts.md)
+- 本轮维护导航测量与停止结论：[`maintenance-navigation-measurement.md`](maintenance-navigation-measurement.md)
 - 发布步骤：[`release-checklist.md`](release-checklist.md)
 
 若本地图与规范文档或当前代码不一致，应修正过时内容，不得用本地图建立第二套政策。
