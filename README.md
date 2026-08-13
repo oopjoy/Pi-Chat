@@ -75,6 +75,8 @@ npm test -- --test-name-pattern="build mismatch"
 
 不要直接绕过 `scripts/run-tests.mjs` 调用 `node --test`。少数安全边界测试需要 `NODE_ENV=test` 才能使用仅限 JSDOM 的 identity override；生产 Web artifact 不存在该 override。
 
+修改现有功能前，可先查阅 [`docs/change-map.md`](docs/change-map.md)：它把常见改动映射到唯一状态所有者、epoch/generation 边界、关键不变量和聚焦测试入口。详细政策仍以对应架构文档为准。
+
 ## Windows 桌面快捷方式
 
 仓库**不会**提交桌面上的 `.lnk` 文件（会写死本机路径，别人 clone 后失效）。请在**本机项目目录**生成：
@@ -155,4 +157,4 @@ Skills 可以向模型注入指令，Plugins/Packages 可以用当前用户的�
 - **探测方式：** Primary 在后台执行一次针对当前本机 Pi entrypoint 的 RPC 能力探测（`get_state` / `get_messages` / `get_available_models` / `get_commands` / `get_session_stats`）。不兼容时 Session 浏览继续可用，而新的或需要恢复的 Runtime 写操作返回明确的不可用状态；已经健康的 Secondary 保持可用。任何 Primary 恢复都会重新探测
 - 升级 Pi 后若启动失败，请先 `pi --version`，再确认 Pi Chat 是否为最新 0.4.x
 
-更完整的模块边界与拆分优先级见 `docs/architecture.md`。
+更完整的模块边界与拆分优先级见 `docs/architecture.md`；日常维护入口见 [`docs/change-map.md`](docs/change-map.md)。

@@ -115,7 +115,7 @@ Every admitted coordination change must state which existing authority or policy
 
 ## Frontend module map
 
-The step 3 ownership boundary and staged migration are defined in [`frontend-state-ownership.md`](frontend-state-ownership.md). State migration must follow that design gate before component extraction.
+The step 3 ownership boundary and staged migration are defined in [`frontend-state-ownership.md`](frontend-state-ownership.md). State migration must follow that design gate before component extraction. For day-to-day change intake, use [`change-map.md`](change-map.md) to locate the canonical owner, timing domain, invariant, and focused validation; it is an index and does not override this architecture.
 
 | Module | Responsibility |
 |---|---|

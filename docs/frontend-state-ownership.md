@@ -245,10 +245,13 @@ submission paths:
    authority and commits one incremental pane transition.
 
 An asynchronous continuation may not combine a Session-ID comparison and a raw
-dispatch. The captured authority includes the relevant Session ID, navigation
-epoch, current desired and committed identity, and operation-specific token
-(such as pagination request token or draft generation). `takeControl` also
-captures the Session event version, so a newer same-Session control SSE wins
+dispatch. The captured authority includes the relevant Session ID, browser-side
+service-replacement `runEpochGeneration`, navigation epoch, current desired and
+committed identity, and operation-specific token (such as pagination request
+token or draft generation). `runEpochGeneration` invalidates continuations
+admitted under an older Pi Chat service process; it is distinct from server
+`runEpoch`, per-Session run generations, and RPC child generations. `takeControl`
+also captures the Session event version, so a newer same-Session control SSE wins
 over an older HTTP response. This protects both $A \to B$ and $A \to B \to A$:
 an old A result cannot overwrite a newer A commit merely because its Session ID
 matches again.

@@ -45,8 +45,9 @@
 | `paneCommitRevisionRef` | 仅 `commitPane` | pane/draft authority | $A \to B \to A$ 中旧 A 覆盖新 A commit | Pane |
 | `committedPaneIdentityRef` | 仅 `commitPane` | pane/draft authority | 旧 Session 或 draft continuation 写入不同已提交 pane | Pane |
 | `draftGenerationRef` | `RESET_DRAFT`、`CLEAR_PANE` 的 `commitPane` | pane/draft authority | Draft 1 的 picker/first-prompt 结果覆盖 Draft 2 | Pane |
+| `runEpochGenerationRef` | 接受 replacement service epoch 时递增 | pane/draft/refresh authority | 旧 Pi Chat 服务进程中准入的 continuation 写入 replacement 后的 Pane | Pane / process replacement |
 
-`PaneAuthoritySnapshot` 保留 Session ID、desired ID、navigation epoch、committed revision、committed identity 与 draft generation。它是完整的 Session pane 授权证明；`DraftPaneAuthority` 是对应的无 Session draft 证明。
+`PaneAuthoritySnapshot` 保留 Session ID、desired ID、browser-side run-epoch generation、navigation epoch、committed revision、committed identity 与 draft generation。它是完整的 Session pane 授权证明；`DraftPaneAuthority` 是对应的无 Session draft 证明。`runEpochGenerationRef` 是浏览器本地的 service-replacement invalidator，不等同于 server `runEpoch`、per-Session run generation 或 RPC child generation。
 
 ### 唯一公开提交边界
 
