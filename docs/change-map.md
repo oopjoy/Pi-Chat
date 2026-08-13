@@ -104,19 +104,19 @@
 
 ## 验证入口
 
-所有单测必须通过官方 harness（通常为 `npm test`），不得绕过 `scripts/run-tests.mjs`。构建和 E2E 必须串行使用各自的 staging `PI_CHAT_DIST_DIR`，不得写 live `dist`。
+所有单测必须通过官方 `scripts/run-tests.mjs` harness。快速聚焦验证直接调用该脚本，避免 `npm test` 的 `pretest` 全量构建；阶段门禁才使用带独立 staging `PI_CHAT_DIST_DIR` 的 `npm test`。构建和 E2E 必须串行使用各自 staging，不得写 live `dist`。
 
 | 修改类型 | 先跑的聚焦验证 | 阶段门禁 |
 |---|---|---|
 | 文档、纯类型或 owner 名称 | `npm run typecheck` | `git diff --check` |
-| 单一 unit 行为 | `npm test -- --test-name-pattern="<behavior>"` | 隔离 staging 全量 `npm test` |
-| Frontend authority/cache/reducer | 对应 App、pane 或 cache test pattern | 全量单测，再完整 Playwright |
-| Server Runtime/control/queue/SSE | 对应 owner-module test pattern | 全量单测 |
+| 单一 unit 行为 | `node scripts/run-tests.mjs --file tests/<domain>/<name>.test.ts --test-name-pattern="<behavior>"` | 隔离 staging 全量 `npm test` |
+| Frontend authority/cache/reducer | 对应 Web、pane 或 cache 文件的直接 harness pattern | 全量单测，再完整 Playwright |
+| Server Runtime/control/queue/SSE | 对应 owner-module 文件的直接 harness pattern | 全量单测 |
 | Packaging / generated artifact / integration | 对应 focused tests | 隔离 build，再适用的 E2E |
 | Release / launcher | launcher/restart focused tests | build、unit、E2E、release checklist |
-| 测试文件物理拆分 | `npm test -- --file tests/<domain>/<name>.test.ts` | 拆分前后具体测试名称多重集合一致，且全量结果不减少 |
+| 测试文件物理拆分 | `node scripts/run-tests.mjs --file tests/<domain>/<name>.test.ts` | 拆分前后具体测试名称多重集合一致，且全量结果不减少 |
 
-Harness 递归发现 `tests/**/*.test.ts`，正式按文件入口是可重复的 repository-relative `--file`；可与 `--test-name-pattern` 组合。
+Harness 递归发现 `tests/**/*.test.ts`，正式按文件入口是可重复的 repository-relative `--file`；可与 `--test-name-pattern` 组合。名称 pattern 必须匹配所选文件中至少一个可静态解析的具体测试名，否则在启动 Node test runner 前以状态码 `2` 失败。Harness 会展开 `for...of` 字面量数组生成的模板名称；其他无法静态解析的动态名称应改写为明确测试声明。
 
 ## 修改审查模板
 

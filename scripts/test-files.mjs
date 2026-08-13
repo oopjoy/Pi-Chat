@@ -1,6 +1,7 @@
 import { readdirSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { validateSelectedTestNamePattern } from "./test-name-patterns.mjs";
 
 export const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const testsRoot = resolve(repositoryRoot, "tests");
@@ -53,6 +54,20 @@ const NODE_OPTIONS_WITH_SEPARATE_VALUE = new Set([
 
 export class TestHarnessArgumentError extends Error {}
 
+function testNamePatternValue(nodeArguments) {
+  for (let index = 0; index < nodeArguments.length; index += 1) {
+    const argument = nodeArguments[index];
+    if (argument === "--test-name-pattern") return nodeArguments[index + 1];
+    if (argument.startsWith("--test-name-pattern=")) return argument.slice("--test-name-pattern=".length);
+  }
+  return null;
+}
+
+function validateTestNamePattern(pattern, selectedFiles) {
+  const validation = validateSelectedTestNamePattern(pattern, selectedFiles);
+  if (!validation.valid) throw new TestHarnessArgumentError(validation.reason);
+}
+
 export function parseTestArguments(argv, discovered = discoverTestFiles()) {
   const nodeArguments = [];
   const requested = [];
@@ -88,7 +103,11 @@ export function parseTestArguments(argv, discovered = discoverTestFiles()) {
   }
 
   if (!discovered.length) throw new TestHarnessArgumentError("No tests/**/*.test.ts files were discovered");
-  if (!requested.length) return { nodeArguments, selectedFiles: discovered };
+  const testNamePattern = testNamePatternValue(nodeArguments);
+  if (!requested.length) {
+    if (testNamePattern !== null) validateTestNamePattern(testNamePattern, discovered);
+    return { nodeArguments, selectedFiles: discovered };
+  }
 
   const discoveredByName = new Map(
     discovered.map((path) => [selectionKey(repositoryRelativeTestPath(path)), path]),
@@ -107,5 +126,6 @@ export function parseTestArguments(argv, discovered = discoverTestFiles()) {
     selected.add(key);
     selectedFiles.push(path);
   }
+  if (testNamePattern !== null) validateTestNamePattern(testNamePattern, selectedFiles);
   return { nodeArguments, selectedFiles };
 }

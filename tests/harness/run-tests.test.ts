@@ -11,6 +11,7 @@ import {
   repositoryRoot,
   TestHarnessArgumentError,
 } from "../../scripts/test-files.mjs";
+import { declaredTestNamePatterns } from "../../scripts/test-name-patterns.mjs";
 
 test("test discovery recursively finds regular test files in stable order", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-test-discovery-"));
@@ -139,5 +140,81 @@ test("the official harness rejects an external selection before starting tests",
   );
   assert.equal(result.status, 2);
   assert.match(result.stderr, /Unknown test file|repository-relative/);
+  assert.doesNotMatch(result.stdout, /ℹ tests/);
+});
+
+test("test-name discovery ignores test-like calls that are not Node test declarations", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-test-names-"));
+  const path = join(root, "sample.test.ts");
+  try {
+    await writeFile(path, [
+      'test("real declaration", () => undefined);',
+      'assert.match(value, /test(fake)/);',
+      'const selected = items.find((button) => test(button.textContent));',
+      'for (const state of ["ready", "failed"]) test(`template ${state} -> ${state}`, () => undefined);',
+    ].join("\n"));
+    assert.deepEqual(declaredTestNamePatterns(path), [
+      "real declaration",
+      "template ready -> ready",
+      "template failed -> failed",
+    ]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the official harness accepts an exact statically expanded template-generated test name", () => {
+  const result = spawnSync(
+    process.execPath,
+    [
+      join(repositoryRoot, "scripts", "run-tests.mjs"),
+      "--file=tests/web/app-replacement-recovery.test.ts",
+      "--test-name-pattern=^a same-generation stale bootstrap cannot overwrite Primary ready SSE$",
+    ],
+    {
+      cwd: tmpdir(),
+      encoding: "utf8",
+      env: { ...process.env, NODE_TEST_CONTEXT: undefined },
+    },
+  );
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(`${result.stdout}\n${result.stderr}`, /pass 1/);
+});
+
+test("the official harness rejects a pattern that matches only a template prefix", () => {
+  const result = spawnSync(
+    process.execPath,
+    [
+      join(repositoryRoot, "scripts", "run-tests.mjs"),
+      "--file=tests/web/app-replacement-recovery.test.ts",
+      "--test-name-pattern=Primary $",
+    ],
+    {
+      cwd: tmpdir(),
+      encoding: "utf8",
+      env: { ...process.env, NODE_TEST_CONTEXT: undefined },
+    },
+  );
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /matched no statically resolved concrete tests/);
+  assert.doesNotMatch(result.stdout, /ℹ tests/);
+});
+
+test("the official harness rejects a name pattern that matches no concrete selected test", () => {
+  const result = spawnSync(
+    process.execPath,
+    [
+      join(repositoryRoot, "scripts", "run-tests.mjs"),
+      "--file=tests/server/prompt-queue-steering.test.ts",
+      "--test-name-pattern=NO SUCH TEST NAME XYZ",
+    ],
+    {
+      cwd: tmpdir(),
+      encoding: "utf8",
+      env: { ...process.env, NODE_TEST_CONTEXT: undefined },
+    },
+  );
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /matched no statically resolved concrete tests/);
   assert.doesNotMatch(result.stdout, /ℹ tests/);
 });
