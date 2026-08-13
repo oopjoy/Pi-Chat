@@ -5,6 +5,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { expect, test as base, type TestInfo } from "@playwright/test";
+import { observeOwnedProcess, terminateOwnedProcessTree } from "../scripts/e2e-process-tree.mjs";
 
 const projectRoot = resolve(import.meta.dirname, "..");
 
@@ -32,7 +33,7 @@ export class BoundedStreamCapture {
 }
 
 type ServerCapture = { stdout: BoundedStreamCapture; stderr: BoundedStreamCapture; spawnError?: string };
-type ChildClose = { promise: Promise<void>; confirmed: boolean };
+type ChildClose = ReturnType<typeof observeOwnedProcess>;
 
 function captureServerOutput(child: ChildProcess): ServerCapture {
   const capture: ServerCapture = { stdout: new BoundedStreamCapture(), stderr: new BoundedStreamCapture() };
@@ -40,14 +41,6 @@ function captureServerOutput(child: ChildProcess): ServerCapture {
   child.stderr?.on("data", (chunk: Buffer | string) => capture.stderr.append(chunk));
   child.once("error", (error) => { capture.spawnError = error.stack || error.message; });
   return capture;
-}
-
-function observeChildClose(child: ChildProcess): ChildClose {
-  const state: ChildClose = { confirmed: false, promise: Promise.resolve() };
-  state.promise = new Promise<void>((resolveClose) => {
-    child.once("close", () => { state.confirmed = true; resolveClose(); });
-  });
-  return state;
 }
 
 function errorSummary(error: unknown): string | undefined {
@@ -130,13 +123,13 @@ async function waitForServer(origin: string, child: ChildProcess): Promise<void>
 
 async function waitForChildClose(childClose: ChildClose): Promise<boolean> {
   return Promise.race([
-    childClose.promise.then(() => true),
+    childClose.close.promise.then(() => true),
     new Promise<boolean>((resolveDelay) => setTimeout(() => resolveDelay(false), childCloseTimeoutMs)),
   ]);
 }
 
 async function stopServer(origin: string, child: ChildProcess, childClose: ChildClose): Promise<void> {
-  if (!childClose.confirmed && child.exitCode === null && child.signalCode === null) {
+  if (!childClose.close.confirmed && child.exitCode === null && child.signalCode === null) {
     try {
       const handshake = await fetch(`${origin}/api/bootstrap/handshake`, { signal: AbortSignal.timeout(2_000) });
       const data = await handshake.json() as { requestToken?: string };
@@ -149,21 +142,8 @@ async function stopServer(origin: string, child: ChildProcess, childClose: Child
       // Fall through to process-tree termination when graceful shutdown is unavailable.
     }
   }
-  if (childClose.confirmed || await waitForChildClose(childClose)) return;
-  if (process.platform === "win32" && child.pid) {
-    await new Promise<void>((resolveKill) => {
-      const killer = spawn(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", `taskkill /PID ${child.pid} /T /F`], {
-        stdio: "ignore", windowsHide: true,
-      });
-      killer.once("error", () => resolveKill());
-      killer.once("exit", () => resolveKill());
-    });
-  } else {
-    child.kill("SIGTERM");
-  }
-  if (!await waitForChildClose(childClose)) {
-    throw new Error(`E2E 服务进程 ${child.pid ?? "unknown"} 强制终止后仍未确认 stdio 已排空并关闭`);
-  }
+  if (childClose.close.confirmed || await waitForChildClose(childClose)) return;
+  await terminateOwnedProcessTree(childClose, childCloseTimeoutMs);
 }
 
 async function runCapturedServerFixture(options: {
@@ -175,7 +155,7 @@ async function runCapturedServerFixture(options: {
   const child = spawn(process.execPath, [resolve(projectRoot, "scripts", "e2e-server.mjs"), "--port", String(options.port)], {
     cwd: projectRoot, env: options.env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
   });
-  const childClose = observeChildClose(child);
+  const childClose = observeOwnedProcess(child);
   const capture = captureServerOutput(child);
   let primaryError: unknown;
   const teardownErrors: unknown[] = [];
@@ -190,7 +170,7 @@ async function runCapturedServerFixture(options: {
   } catch (error) {
     teardownErrors.push(error);
   }
-  if (testOutcomeIsUnexpected(options.testInfo) && childClose.confirmed) {
+  if (testOutcomeIsUnexpected(options.testInfo) && childClose.close.confirmed) {
     try {
       await attachServerDiagnostics({ testInfo: options.testInfo, label: options.label, origin, port: options.port, child, capture,
         runtimeDist: options.runtimeDist, e2eTestId, fixtureError: primaryError, teardownErrors });

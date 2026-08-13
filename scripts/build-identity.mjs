@@ -1,7 +1,10 @@
+import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { resolve, relative, sep } from "node:path";
+import { promisify } from "node:util";
 
+const execFile = promisify(execFileCallback);
 const projectRoot = resolve(process.cwd());
 const distRoot = resolve(process.env.PI_CHAT_DIST_DIR || "dist");
 const packageJson = JSON.parse(await readFile(resolve(projectRoot, "package.json"), "utf8"));
@@ -31,10 +34,26 @@ for (const file of [...new Set(files)].sort()) {
   hash.update("\0");
 }
 const fingerprint = hash.digest("hex");
+
+async function buildRevision() {
+  const configured = process.env.PI_CHAT_BUILD_REVISION?.trim();
+  if (configured) return configured;
+  try {
+    const { stdout } = await execFile("git", ["rev-parse", "--short", "HEAD"], {
+      cwd: projectRoot,
+      windowsHide: true,
+    });
+    return stdout.trim() || "unknown";
+  } catch {
+    // Packaged/source-only builds may intentionally run without Git metadata.
+    return "unknown";
+  }
+}
+
 const identity = {
   schemaVersion: 1,
   packageVersion: typeof packageJson.version === "string" ? packageJson.version : "unknown",
-  revision: process.env.PI_CHAT_BUILD_REVISION || "unknown",
+  revision: await buildRevision(),
   fingerprint,
   builtAt: new Date().toISOString(),
 };

@@ -19,9 +19,11 @@ jobs:
       - run: npm test
         env:
           PI_CHAT_DIST_DIR: .pi-chat-ci-unit-stage
+          PI_CHAT_BUILD_REVISION: ${{ github.sha }}
       - run: npm run test:e2e
         env:
           PI_CHAT_DIST_DIR: .pi-chat-ci-e2e-stage
+          PI_CHAT_BUILD_REVISION: ${{ github.sha }}
       - name: Upload Playwright diagnostics
         if: always()
         uses: actions/upload-artifact@v6
