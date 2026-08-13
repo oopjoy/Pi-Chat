@@ -212,10 +212,11 @@ async function appendPadding(path: string, leafId: string, minimumBytes: number,
       const remaining = minimumBytes - current;
       const id = `padding-${String(startIndex + records).padStart(8, "0")}`;
       const emptyLine = encoded(message(id, leafId, "assistant", "", startIndex + records));
-      const fixedBytes = Buffer.byteLength(emptyLine) - 2;
-      const payloadBytes = Math.max(1, Math.min(256 * 1024, remaining - fixedBytes));
-      if (remaining <= fixedBytes) break;
-      const line = encoded(message(id, leafId, "assistant", "p".repeat(payloadBytes), startIndex + records));
+      const emptyBytes = Buffer.byteLength(emptyLine);
+      const payloadBytes = Math.max(0, Math.min(256 * 1024, remaining - emptyBytes));
+      const line = payloadBytes === 0
+        ? emptyLine
+        : encoded(message(id, leafId, "assistant", "p".repeat(payloadBytes), startIndex + records));
       await file.write(line);
       current += Buffer.byteLength(line);
       records += 1;

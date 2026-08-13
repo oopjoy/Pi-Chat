@@ -62,6 +62,23 @@ test("minimumBytes is a lower bound when intrinsic fixture content is larger", a
   }
 });
 
+test("minimumBytes just above intrinsic size appends bounded valid padding", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-benchmark-padding-edge-"));
+  try {
+    const intrinsic = await generateFixture({ scenario: "tool-process-heavy", outputPath: join(root, "intrinsic.jsonl"), minimumBytes: 1 });
+    const minimumBytes = intrinsic.bytes + 1;
+    const paddedPath = join(root, "padded.jsonl");
+    const padded = await generateFixture({ scenario: "tool-process-heavy", outputPath: paddedPath, minimumBytes });
+    assert.ok(padded.bytes >= minimumBytes);
+    assert.ok(padded.bytes <= minimumBytes + 512, `fixture exceeded bounded padding record: ${padded.bytes}`);
+    assert.equal(padded.records, intrinsic.records + 1);
+    assert.equal(padded.messages, intrinsic.messages + 1);
+    assert.deepEqual(await validateFixture(paddedPath), { records: padded.records, sessionHeaders: 1, invalidLines: 0, duplicateIds: [], unresolvedParentIds: [], cyclicParentChains: [] });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("1000-turn and content scenarios expose their requested benchmark dimensions", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-benchmark-dimensions-"));
   try {
