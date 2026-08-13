@@ -14,6 +14,7 @@ nul
 .pi-subagents/
 test-results/
 playwright-report/
+.pi-benchmark-results/
 
 dist-local/
 .pi-chat-*/

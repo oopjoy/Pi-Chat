@@ -56,10 +56,10 @@ export interface BrowserScenarioContract {
 
 export const browserScenarioContract: BrowserScenarioContract = {
   schemaVersion: 1,
-  purpose: "Contract for a future isolated Playwright/Chromium lane; it must consume generated temp fixtures and a disposable benchmark server, never live port 30170 or live dist.",
+  purpose: "Contract consumed by the isolated Playwright/Chromium fluency runner; it uses generated temp fixtures, a disposable benchmark server, an explicit staging dist, and never live port 30170 or repository dist.",
   prerequisites: [
     "Generate fixtures into a fresh OS temp directory.",
-    "Start a disposable benchmark-only server on an ephemeral port with a benchmark-owned web build or dev server.",
+    "Start a disposable benchmark-only server on an ephemeral port with an explicitly supplied staging dist that is not repository dist.",
     "Collect Chromium metrics in a fresh browser context and delete all temporary artifacts afterwards.",
   ],
   scenarios: [

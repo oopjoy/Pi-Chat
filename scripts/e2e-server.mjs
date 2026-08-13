@@ -1,16 +1,23 @@
 import { spawn } from "node:child_process";
-import { once } from "node:events";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { e2eSessionIdForPath, importE2eSessionFixtures } from "./e2e-fixture-import.mjs";
+import { observeOwnedProcess, terminateOwnedProcessTree } from "./e2e-process-tree.mjs";
 import { e2eRuntimeDist } from "./e2e-runtime-dist.mjs";
 
 const projectRoot = resolve(import.meta.dirname, "..");
 const runtimeDist = e2eRuntimeDist(process.env, projectRoot);
 const serverDist = resolve(process.env.PI_CHAT_E2E_SERVER_DIST || runtimeDist);
 const portIndex = process.argv.indexOf("--port");
+const fixtureDirectoryIndex = process.argv.indexOf("--fixture-dir");
+const fixtureManifestIndex = process.argv.indexOf("--fixture-manifest");
 const port = portIndex >= 0 ? Number(process.argv[portIndex + 1]) : 30179;
+const fixtureDirectory = fixtureDirectoryIndex >= 0 ? process.argv[fixtureDirectoryIndex + 1] : "";
+const fixtureManifestPath = fixtureManifestIndex >= 0 ? process.argv[fixtureManifestIndex + 1] : "";
 if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error("E2E 端口无效");
+if (fixtureDirectory && !fixtureManifestPath) throw new Error("显式 E2E fixture 导入需要 manifest 输出路径");
+if (!fixtureDirectory && fixtureManifestPath) throw new Error("E2E fixture manifest 只能与 fixture 目录一起使用");
 const root = await mkdtemp(join(tmpdir(), "pi-chat-e2e-"));
 const sessions = join(root, "sessions");
 const agentDir = join(root, "agent");
@@ -38,6 +45,22 @@ await writeFile(join(sessions, "second.jsonl"), [
   { type: "message", id: "second-image", parentId: "second-result", timestamp: "2026-01-02T00:00:04Z", message: { role: "user", timestamp: Date.parse("2026-01-02T00:00:04Z"), content: [{ type: "image", mimeType: "image/svg+xml", data: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="3200" height="1800"><rect width="100%" height="100%" fill="#78b8f5"/><text x="1600" y="900" text-anchor="middle" dominant-baseline="middle" font-size="160" fill="#182131">Preview fixture</text></svg>').toString("base64") }] } },
   { type: "message", id: "second-answer", parentId: "second-image", timestamp: "2026-01-02T00:00:05Z", message: { role: "assistant", provider: "test", model: "gpt-e2e", timestamp: Date.parse("2026-01-02T00:00:05Z"), content: "Final **answer** with `$x = 1$`." } },
 ].map(JSON.stringify).join("\n") + "\n", "utf8");
+
+const importedFixtures = fixtureDirectory
+  ? await importE2eSessionFixtures(fixtureDirectory, sessions)
+  : [];
+if (fixtureManifestPath) {
+  await writeFile(
+    resolve(fixtureManifestPath),
+    `${JSON.stringify({
+      sessions: importedFixtures.map((name) => ({
+        name,
+        id: e2eSessionIdForPath(join(sessions, name)),
+      })),
+    }, null, 2)}\n`,
+    "utf8",
+  );
+}
 
 await writeFile(rpcEntry, String.raw`
 import { createInterface } from "node:readline";
@@ -89,6 +112,7 @@ const child = spawn(process.execPath, [join(serverDist, "server", "server", "ind
   stdio: "inherit",
   windowsHide: true,
 });
+const observedChild = observeOwnedProcess(child);
 
 const delay = (ms) => new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
 const removeRoot = async () => {
@@ -107,24 +131,25 @@ let cleaning = false;
 const cleanup = async () => {
   if (cleaning) return;
   cleaning = true;
-  if (child.exitCode === null && child.signalCode === null) {
-    const exited = once(child, "exit").catch(() => undefined);
-    if (process.platform === "win32" && child.pid) {
-      await new Promise((resolveKill) => {
-        const killer = spawn(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", `taskkill /PID ${child.pid} /T /F`], { stdio: "ignore", windowsHide: true });
-        killer.once("error", resolveKill);
-        killer.once("exit", resolveKill);
-      });
-    } else {
-      child.kill("SIGTERM");
-    }
-    await Promise.race([exited, delay(5_000)]);
+  let failure;
+  try {
+    await terminateOwnedProcessTree(observedChild, 5_000);
+  } catch (error) {
+    failure = error;
   }
   await removeRoot();
+  if (failure) throw failure;
 };
-process.once("SIGINT", () => void cleanup().then(() => process.exit(0)));
-process.once("SIGTERM", () => void cleanup().then(() => process.exit(0)));
+const closeFromSignal = () => void cleanup().then(
+  () => process.exit(0),
+  (error) => {
+    console.error(`[Pi Chat E2E] 子进程树退出无法确认：${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  },
+);
+process.once("SIGINT", closeFromSignal);
+process.once("SIGTERM", closeFromSignal);
 child.once("exit", (code) => {
   if (cleaning) return;
-  void cleanup().then(() => process.exit(code || 0));
+  void removeRoot().then(() => process.exit(code || 0));
 });
