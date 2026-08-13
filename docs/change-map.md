@@ -31,7 +31,8 @@
 | Workspace 默认值与 draft picker | `App.tsx`、`workspace-state.ts`、`app.ts` | 服务端 workspace snapshot；浏览器各 picker token | `draft-workspace.test.ts`、`workspace-state.test.ts`、`web/app-replacement-recovery.test.ts`、`server/workspace-resource-lifecycle.test.ts` |
 | Rename / Delete | `App.tsx` optimistic projection、`app.ts` orchestration | App coordinator mutation token/tombstone；服务端 Session mutation | `web/session-inventory-mutations.test.ts`、`session-management.test.ts` |
 | Restart / shutdown | `application-lifecycle.ts`、`application-restart.ts`、`app.ts` | lifecycle barrier 与对应资源所有者 | `application-lifecycle.test.ts`、`application-restart.test.ts`、`server/application-restart-admission.test.ts`、`server/shutdown-control.test.ts` |
-| Host / Origin / token / Gate 安全 | `request-guard.ts`、`system-gate-installer.ts` | 对应 server guard/installer | `request-guard.test.ts`、`api-recovery-token.test.ts`、`system-gate-installer.test.ts` |
+| Host / Origin / request token admission | `request-guard.ts` | request guard | `request-guard.test.ts`、`api-recovery-token.test.ts` |
+| System Gate 安装与完整性 | `system-gate-installer.ts` | system Gate installer | `system-gate-installer.test.ts` |
 
 ## 可写状态所有权
 

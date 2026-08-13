@@ -72,9 +72,9 @@ npm test
 # 只运行匹配的测试名称；NODE_ENV=test 会由 harness 负责设置
 npm test -- --test-name-pattern="build mismatch"
 # 按文件聚焦；--file 可重复，路径必须是仓库 tests/ 下已发现的 .test.ts
-npm test -- --file tests/app-lazy-new.test.ts
+npm test -- --file tests/web/composer-capabilities.test.ts
 # 文件与名称过滤可以组合
-npm test -- --file tests/app-lazy-new.test.ts --test-name-pattern="slash suggestions"
+npm test -- --file tests/web/composer-capabilities.test.ts --test-name-pattern="slash suggestions"
 ```
 
 Harness 会递归发现 `tests/**/*.test.ts`，不会跟随测试目录中的符号链接；`--file` 同时接受 `/` 和 Windows `\\` 分隔符。不要直接绕过 `scripts/run-tests.mjs` 调用 `node --test`。少数安全边界测试需要 `NODE_ENV=test` 才能使用仅限 JSDOM 的 identity override；生产 Web artifact 不存在该 override。
