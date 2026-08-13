@@ -10,27 +10,29 @@ const projectRoot = resolve(import.meta.dirname, "..");
 
 const maxCapturedBytesPerStream = 256 * 1024;
 const maxErrorSummaryCharacters = 16 * 1024;
+const childCloseTimeoutMs = 5_000;
 
-class BoundedStreamCapture {
+export class BoundedStreamCapture {
   private retained = Buffer.alloc(0);
   private totalBytes = 0;
   append(chunk: Buffer | string): void {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     this.totalBytes += buffer.length;
     if (buffer.length >= maxCapturedBytesPerStream) {
-      this.retained = buffer.subarray(buffer.length - maxCapturedBytesPerStream);
+      this.retained = Buffer.from(buffer.subarray(buffer.length - maxCapturedBytesPerStream));
       return;
     }
     const overflow = this.retained.length + buffer.length - maxCapturedBytesPerStream;
     this.retained = overflow > 0 ? Buffer.concat([this.retained.subarray(overflow), buffer]) : Buffer.concat([this.retained, buffer]);
   }
-  snapshot(): Buffer { return this.retained; }
+  snapshot(): Buffer { return Buffer.from(this.retained); }
   metadata(): { totalBytes: number; retainedBytes: number; truncated: boolean } {
     return { totalBytes: this.totalBytes, retainedBytes: this.retained.length, truncated: this.totalBytes > this.retained.length };
   }
 }
 
 type ServerCapture = { stdout: BoundedStreamCapture; stderr: BoundedStreamCapture; spawnError?: string };
+type ChildClose = { promise: Promise<void>; confirmed: boolean };
 
 function captureServerOutput(child: ChildProcess): ServerCapture {
   const capture: ServerCapture = { stdout: new BoundedStreamCapture(), stderr: new BoundedStreamCapture() };
@@ -38,6 +40,14 @@ function captureServerOutput(child: ChildProcess): ServerCapture {
   child.stderr?.on("data", (chunk: Buffer | string) => capture.stderr.append(chunk));
   child.once("error", (error) => { capture.spawnError = error.stack || error.message; });
   return capture;
+}
+
+function observeChildClose(child: ChildProcess): ChildClose {
+  const state: ChildClose = { confirmed: false, promise: Promise.resolve() };
+  state.promise = new Promise<void>((resolveClose) => {
+    child.once("close", () => { state.confirmed = true; resolveClose(); });
+  });
+  return state;
 }
 
 function errorSummary(error: unknown): string | undefined {
@@ -49,13 +59,20 @@ function errorSummary(error: unknown): string | undefined {
     : summary;
 }
 
-function testStatusIsFailure(testInfo: TestInfo): boolean {
-  return testInfo.status === "failed" || testInfo.status === "timedOut" || testInfo.status === "interrupted";
+function testOutcomeIsUnexpected(testInfo: TestInfo): boolean {
+  return testInfo.status !== testInfo.expectedStatus;
+}
+
+export function combinedFixtureError(primaryError: unknown, secondaryErrors: unknown[], message: string): unknown {
+  const errors = primaryError === undefined ? secondaryErrors : [primaryError, ...secondaryErrors];
+  if (errors.length === 0) return undefined;
+  if (errors.length === 1) return errors[0];
+  return new AggregateError(errors, message, primaryError === undefined ? undefined : { cause: primaryError });
 }
 
 async function attachServerDiagnostics(options: {
   testInfo: TestInfo; label: string; origin: string; port: number; child: ChildProcess; capture: ServerCapture;
-  runtimeDist: string; e2eTestId: string; fixtureError?: unknown; teardownError?: unknown;
+  runtimeDist: string; e2eTestId: string; fixtureError?: unknown; teardownErrors: unknown[];
 }): Promise<void> {
   const { testInfo, label, origin, port, child, capture } = options;
   const stdoutPath = testInfo.outputPath(`${label}-stdout.log`);
@@ -69,7 +86,8 @@ async function attachServerDiagnostics(options: {
       e2eTestId: options.e2eTestId, runtimeDist: options.runtimeDist, status: testInfo.status, expectedStatus: testInfo.expectedStatus,
       exitState: { exitCode: child.exitCode, signalCode: child.signalCode, killed: child.killed, spawnError: capture.spawnError ?? null },
       capture: { maxBytesPerStream: maxCapturedBytesPerStream, stdout: capture.stdout.metadata(), stderr: capture.stderr.metadata() },
-      fixtureError: errorSummary(options.fixtureError) ?? null, teardownError: errorSummary(options.teardownError) ?? null,
+      fixtureError: errorSummary(options.fixtureError) ?? null,
+      teardownErrors: options.teardownErrors.map((error) => errorSummary(error)),
     }, null, 2)}\n`, "utf8"),
   ]);
   await Promise.all([
@@ -110,28 +128,32 @@ async function waitForServer(origin: string, child: ChildProcess): Promise<void>
   throw new Error("E2E 服务启动超时");
 }
 
-async function stopServer(origin: string, child: ChildProcess): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  const exited = once(child, "exit").catch(() => undefined);
-  try {
-    const handshake = await fetch(`${origin}/api/bootstrap/handshake`, { signal: AbortSignal.timeout(2_000) });
-    const data = await handshake.json() as { requestToken?: string };
-    if (handshake.ok && data.requestToken) {
-      await fetch(`${origin}/api/shutdown`, {
-        method: "POST",
-        headers: { origin, "x-pi-chat-token": data.requestToken },
-        signal: AbortSignal.timeout(5_000),
-      });
+async function waitForChildClose(childClose: ChildClose): Promise<boolean> {
+  return Promise.race([
+    childClose.promise.then(() => true),
+    new Promise<boolean>((resolveDelay) => setTimeout(() => resolveDelay(false), childCloseTimeoutMs)),
+  ]);
+}
+
+async function stopServer(origin: string, child: ChildProcess, childClose: ChildClose): Promise<void> {
+  if (!childClose.confirmed && child.exitCode === null && child.signalCode === null) {
+    try {
+      const handshake = await fetch(`${origin}/api/bootstrap/handshake`, { signal: AbortSignal.timeout(2_000) });
+      const data = await handshake.json() as { requestToken?: string };
+      if (handshake.ok && data.requestToken) {
+        await fetch(`${origin}/api/shutdown`, {
+          method: "POST", headers: { origin, "x-pi-chat-token": data.requestToken }, signal: AbortSignal.timeout(5_000),
+        });
+      }
+    } catch {
+      // Fall through to process-tree termination when graceful shutdown is unavailable.
     }
-  } catch {
-    // Fall through to process-tree termination when graceful shutdown is unavailable.
   }
-  if (await Promise.race([exited.then(() => true), new Promise<boolean>((resolveDelay) => setTimeout(() => resolveDelay(false), 5_000))])) return;
+  if (childClose.confirmed || await waitForChildClose(childClose)) return;
   if (process.platform === "win32" && child.pid) {
     await new Promise<void>((resolveKill) => {
       const killer = spawn(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", `taskkill /PID ${child.pid} /T /F`], {
-        stdio: "ignore",
-        windowsHide: true,
+        stdio: "ignore", windowsHide: true,
       });
       killer.once("error", () => resolveKill());
       killer.once("exit", () => resolveKill());
@@ -139,40 +161,45 @@ async function stopServer(origin: string, child: ChildProcess): Promise<void> {
   } else {
     child.kill("SIGTERM");
   }
-  await Promise.race([exited, new Promise((resolveDelay) => setTimeout(resolveDelay, 5_000))]);
+  if (!await waitForChildClose(childClose)) {
+    throw new Error(`E2E 服务进程 ${child.pid ?? "unknown"} 强制终止后仍未确认 stdio 已排空并关闭`);
+  }
 }
 
 async function runCapturedServerFixture(options: {
   testInfo: TestInfo; label: string; port: number; runtimeDist: string; env: NodeJS.ProcessEnv;
-  use: (origin: string) => Promise<void>; afterStop?: () => Promise<void>;
+  use: (origin: string) => Promise<void>;
 }): Promise<void> {
   const origin = `http://127.0.0.1:${options.port}`;
   const e2eTestId = options.env.PI_CHAT_E2E_TEST_ID || `${options.testInfo.project.name}-${options.testInfo.testId}`;
   const child = spawn(process.execPath, [resolve(projectRoot, "scripts", "e2e-server.mjs"), "--port", String(options.port)], {
     cwd: projectRoot, env: options.env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
   });
+  const childClose = observeChildClose(child);
   const capture = captureServerOutput(child);
-  let fixtureError: unknown;
-  let teardownError: unknown;
+  let primaryError: unknown;
+  const teardownErrors: unknown[] = [];
   try {
     await waitForServer(origin, child);
     await options.use(origin);
   } catch (error) {
-    fixtureError = error;
-    throw error;
-  } finally {
-    try {
-      await stopServer(origin, child);
-      await options.afterStop?.();
-    } catch (error) {
-      teardownError = error;
-    }
-    if (fixtureError !== undefined || teardownError !== undefined || testStatusIsFailure(options.testInfo)) {
-      await attachServerDiagnostics({ testInfo: options.testInfo, label: options.label, origin, port: options.port, child, capture,
-        runtimeDist: options.runtimeDist, e2eTestId, fixtureError, teardownError });
-    }
-    if (teardownError !== undefined) throw teardownError;
+    primaryError = error;
   }
+  try {
+    await stopServer(origin, child, childClose);
+  } catch (error) {
+    teardownErrors.push(error);
+  }
+  if (testOutcomeIsUnexpected(options.testInfo) && childClose.confirmed) {
+    try {
+      await attachServerDiagnostics({ testInfo: options.testInfo, label: options.label, origin, port: options.port, child, capture,
+        runtimeDist: options.runtimeDist, e2eTestId, fixtureError: primaryError, teardownErrors });
+    } catch (error) {
+      teardownErrors.push(error);
+    }
+  }
+  const error = combinedFixtureError(primaryError, teardownErrors, `${options.label} fixture and teardown failed`);
+  if (error !== undefined) throw error;
 }
 
 async function replaceFingerprint(root: string, from: string, to: string): Promise<number> {
@@ -214,28 +241,33 @@ export const test = base.extend<{ isolatedBaseURL: string; mismatchedBaseURL: st
     if (!/^[a-f0-9]{64}$/.test(identity.fingerprint)) throw new Error("E2E runtime build fingerprint 无效");
     const webFingerprint = `${identity.fingerprint[0] === "0" ? "1" : "0"}${identity.fingerprint.slice(1)}`;
     const hybridDist = await mkdtemp(join(tmpdir(), "pi-chat-e2e-mismatch-"));
-    await cp(join(serverDist, "web"), join(hybridDist, "web"), { recursive: true });
-    await cp(join(serverDist, "build-identity.json"), join(hybridDist, "build-identity.json"));
-    if (!await replaceFingerprint(join(hybridDist, "web"), identity.fingerprint, webFingerprint)) {
-      await rm(hybridDist, { recursive: true, force: true });
-      throw new Error("未能在 Web artifact 中替换 build fingerprint");
+    let primaryError: unknown;
+    try {
+      await cp(join(serverDist, "web"), join(hybridDist, "web"), { recursive: true });
+      await cp(join(serverDist, "build-identity.json"), join(hybridDist, "build-identity.json"));
+      if (!await replaceFingerprint(join(hybridDist, "web"), identity.fingerprint, webFingerprint)) {
+        throw new Error("未能在 Web artifact 中替换 build fingerprint");
+      }
+      const port = await freePort();
+      await runCapturedServerFixture({
+        testInfo, label: "mismatched-server", port, runtimeDist: hybridDist,
+        env: {
+          ...process.env, PI_CHAT_E2E_TEST_ID: `mismatch-${testInfo.project.name}-${testInfo.testId}`,
+          PI_CHAT_E2E_DIST: hybridDist, PI_CHAT_E2E_SERVER_DIST: serverDist,
+        },
+        use,
+      });
+    } catch (error) {
+      primaryError = error;
     }
-
-    const port = await freePort();
-    await runCapturedServerFixture({
-      testInfo,
-      label: "mismatched-server",
-      port,
-      runtimeDist: hybridDist,
-      env: {
-        ...process.env,
-        PI_CHAT_E2E_TEST_ID: `mismatch-${testInfo.project.name}-${testInfo.testId}`,
-        PI_CHAT_E2E_DIST: hybridDist,
-        PI_CHAT_E2E_SERVER_DIST: serverDist,
-      },
-      use,
-      afterStop: () => rm(hybridDist, { recursive: true, force: true }),
-    });
+    const cleanupErrors: unknown[] = [];
+    try {
+      await rm(hybridDist, { recursive: true, force: true });
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    const error = combinedFixtureError(primaryError, cleanupErrors, "mismatched-server fixture and temporary dist cleanup failed");
+    if (error !== undefined) throw error;
   },
 });
 
