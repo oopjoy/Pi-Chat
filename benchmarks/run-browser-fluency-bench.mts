@@ -103,10 +103,16 @@ async function requiredFile(path: string): Promise<void> {
 
 export async function validateStagingDist(input: string): Promise<{ root: string; identity: BuildIdentity }> {
   if (!input) throw new Error("--dist is required and must point to a staging dist");
-  const root = await realpath(resolve(input)).catch(() => {
-    throw new Error(`Staging dist does not exist: ${resolve(input)}`);
-  });
+  const requestedRoot = resolve(input);
   const liveDistCandidate = resolve(projectRoot, "dist");
+  // Reject the repository-owned live target by identity before probing whether
+  // it currently exists. A clean worktree may have no dist yet, but that must
+  // not weaken the benchmark's explicit staging-only contract.
+  if (samePath(requestedRoot, liveDistCandidate))
+    throw new Error("Browser fluency benchmark refuses the repository live dist; provide an explicit staging dist");
+  const root = await realpath(requestedRoot).catch(() => {
+    throw new Error(`Staging dist does not exist: ${requestedRoot}`);
+  });
   const liveDist = await realpath(liveDistCandidate).catch(() => liveDistCandidate);
   if (samePath(root, liveDist))
     throw new Error("Browser fluency benchmark refuses the repository live dist; provide an explicit staging dist");

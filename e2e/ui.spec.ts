@@ -165,6 +165,10 @@ test("long Runtime notice remains in flow above an unobscured Composer", { tag: 
 test("forced colors keeps CompactSelect focus and active option visibly outlined", { tag: "@forced-only" }, async ({ page }) => {
   await page.emulateMedia({ forcedColors: "active" });
   await page.goto("/");
+  // Wait for the initial Session projection before asserting focus. Draft/view
+  // restoration may legitimately focus the Composer while bootstrap is still
+  // committing, which would make this CSS-focused assertion race page startup.
+  await expect(page.getByText("First answer")).toBeVisible();
   const trigger = page.getByRole("button", { name: "模型" });
   await trigger.focus();
   await expect(trigger).toBeFocused();
