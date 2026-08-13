@@ -90,6 +90,18 @@ class PersistedDraftRpc extends FakeRpc {
   }
 }
 
+async function waitForCondition(
+  predicate: () => boolean,
+  timeoutMs: number,
+  description: string,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${description}`);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 class GateFakeRpc extends FakeRpc {
   override async send(command: Record<string, unknown>) {
     if (command.type === "get_commands") {
@@ -704,7 +716,11 @@ test("a handshake-only page expires instead of permanently holding the last-wind
     assert.equal(internals.connectedClients.has(client), false, "handshake is not an SSE lease");
     assert.equal(internals.connectedPageClients.get(page), client);
     assert.equal(internals.pendingWindowPageTimers.has(page), true);
-    await new Promise((resolve) => setTimeout(resolve, 70));
+    await waitForCondition(
+      () => shutdownReasons.length > 0,
+      500,
+      "handshake expiry and last-window shutdown",
+    );
     assert.equal(internals.connectedPageClients.has(page), false, "a crashed pre-SSE renderer must release its temporary page record");
     assert.equal(internals.pendingWindowPageTimers.has(page), false);
     assert.deepEqual(shutdownReasons, ["last-window-close"]);

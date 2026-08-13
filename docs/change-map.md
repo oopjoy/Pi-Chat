@@ -112,9 +112,9 @@
 | Server Runtime/control/queue/SSE | 对应 owner-module test pattern | 全量单测 |
 | Packaging / generated artifact / integration | 对应 focused tests | 隔离 build，再适用的 E2E |
 | Release / launcher | launcher/restart focused tests | build、unit、E2E、release checklist |
-| 测试文件物理拆分 | 目标文件聚焦运行 | 拆分前后具体测试名称多重集合一致，且全量结果不减少 |
+| 测试文件物理拆分 | `npm test -- --file tests/<domain>/<name>.test.ts` | 拆分前后具体测试名称多重集合一致，且全量结果不减少 |
 
-当前 harness 尚未提供正式的按文件选择；在该能力落地前，只使用已文档化的 `--test-name-pattern`。测试发现机制修改后，本表应补充正式 `--file` 示例。
+Harness 递归发现 `tests/**/*.test.ts`，正式按文件入口是可重复的 repository-relative `--file`；可与 `--test-name-pattern` 组合。
 
 ## 修改审查模板
 
