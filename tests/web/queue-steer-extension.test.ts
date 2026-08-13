@@ -217,6 +217,77 @@ test("cancelling an admitted queued prompt restores its text over the current Co
   }
 });
 
+test("cancelling the last queued prompt clears stale running and tool state after an idle Runtime snapshot", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const queuedItem = {
+    id: "00000000-0000-4000-8000-000000000003",
+    message: "withdraw stale running turn",
+    imageCount: 0,
+    createdAt: 3,
+  };
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true },
+      queue: [queuedItem],
+      queuePaused: true,
+      sessions: bootstrap.sessions.map((session) => ({
+        ...session,
+        running: true,
+        queued: true,
+        activity: { execution: "paused" as const, awaitingConfirmation: false },
+      })),
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    cancelQueued: async () => ({ queue: [], paused: false }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.emitPi({
+        type: "tool_execution_end",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        toolName: "bash",
+        isError: false,
+      });
+    });
+    assert.match(
+      dom.window.document.querySelector(".agent-status")?.textContent || "",
+      /bash 已完成，Pi 正在继续…/,
+    );
+    await act(async () =>
+      dom.window.document
+        .querySelector<HTMLButtonElement>(".prompt-queue article button")!
+        .click(),
+    );
+    await act(async () => {
+      source.emitPi({
+        type: "pi_chat_session_status",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        activity: { execution: "idle", awaitingConfirmation: false },
+      });
+    });
+    assert.equal(dom.window.document.querySelector(".prompt-queue"), null);
+    assert.equal(dom.window.document.querySelector(".agent-status"), null);
+    assert.equal(
+      dom.window.document.querySelector(".session-status.is-running"),
+      null,
+    );
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("cancelling a locally queued image prompt restores its attachment", async () => {
   const { dom } = installDom();
   Object.assign(globalThis, {
@@ -1280,6 +1351,466 @@ test("agent settlement clears a completed tool status left after compaction", as
       dom.window.document.querySelector(".session-status.is-running"),
       null,
       "late running activity must not restore the sidebar spinner",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
+test("idle activity clears a stale tool-completion wait even without agent_settled", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true },
+      sessions: bootstrap.sessions.map((session) => ({
+        ...session,
+        running: true,
+        activity: { execution: "running" as const, awaitingConfirmation: false },
+      })),
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.emitPi({
+        type: "tool_execution_end",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        toolName: "bash",
+        isError: false,
+      });
+    });
+    assert.match(
+      dom.window.document.querySelector(".agent-status")?.textContent || "",
+      /bash 已完成，Pi 正在继续…/,
+    );
+
+    await act(async () => {
+      source.emitPi({
+        type: "pi_chat_session_status",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        activity: { execution: "idle", awaitingConfirmation: false },
+      });
+    });
+    assert.equal(
+      dom.window.document.querySelector(".agent-status"),
+      null,
+      "authoritative idle activity must clear a stale tool wait when settlement SSE was missed",
+    );
+    assert.equal(
+      dom.window.document.querySelector<HTMLTextAreaElement>(
+        "textarea[aria-label='消息输入']",
+      )?.disabled,
+      false,
+    );
+
+    await act(async () => {
+      source.emitPi({
+        type: "tool_execution_end",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        toolName: "bash",
+        isError: false,
+      });
+      source.emitPi({
+        type: "tool_execution_start",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        toolName: "read",
+      });
+      source.emitPi({
+        type: "message_update",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        message: { role: "assistant", content: "late live revival" },
+      });
+      source.emitPi({
+        type: "pi_chat_session_status",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        activity: { execution: "running", awaitingConfirmation: false },
+      });
+    });
+    assert.equal(
+      dom.window.document.querySelector(".agent-status"),
+      null,
+      "late same-generation tool/activity frames cannot resurrect the cleared wait",
+    );
+    assert.doesNotMatch(
+      dom.window.document.querySelector(".timeline")?.textContent || "",
+      /late live revival/,
+    );
+    assert.equal(dom.window.document.querySelector(".stop-button"), null);
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
+test("idle activity cancels a throttled live update before it can repaint the settled pane", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const persistedAnswer = "persisted fallback answer";
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true },
+      sessions: bootstrap.sessions.map((session) => ({
+        ...session,
+        running: true,
+        activity: { execution: "running" as const, awaitingConfirmation: false },
+      })),
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    viewSession: async () => ({
+      ...draftView,
+      session: { ...draftView.session, ...bootstrap.sessions[0] },
+      state: { ...bootstrap.state, isStreaming: false },
+      messages: [{ role: "assistant", content: persistedAnswer }],
+      messageTotal: 1,
+      isActive: true,
+      runtimeStatus: "active",
+      isStreaming: false,
+      toolStatus: "",
+    }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.emitPi({
+        type: "message_update",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        message: { role: "assistant", content: "first live" },
+      });
+      source.emitPi({
+        type: "message_update",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        message: { role: "assistant", content: "late pending" },
+      });
+      source.emitPi({
+        type: "pi_chat_session_status",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        activity: { execution: "idle", awaitingConfirmation: false },
+      });
+      await new Promise((resolve) => dom.window.setTimeout(resolve, 80));
+    });
+    const timelineText =
+      dom.window.document.querySelector(".timeline")?.textContent || "";
+    assert.doesNotMatch(
+      timelineText,
+      /late pending/,
+      "the render throttle cannot restore a live draft after terminal activity",
+    );
+    assert.match(
+      timelineText,
+      new RegExp(persistedAnswer),
+      "terminal activity reconciles the persisted answer when terminal SSE frames were missed",
+    );
+    assert.equal(
+      timelineText.match(new RegExp(persistedAnswer, "g"))?.length,
+      1,
+    );
+    assert.equal(dom.window.document.querySelector(".stop-button"), null);
+    assert.equal(
+      dom.window.document.querySelector<HTMLTextAreaElement>(
+        "textarea[aria-label='消息输入']",
+      )?.disabled,
+      false,
+    );
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
+test("a stale idle reconciliation cannot overwrite a newer same-session run cache", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const secondId = "idle-reconcile-second";
+  const secondSession = {
+    ...bootstrap.sessions[0],
+    id: secondId,
+    sessionId: "second",
+    name: "Second",
+    active: false,
+  };
+  let resolveIdleView!: (view: SessionViewData) => void;
+  const idleView = new Promise<SessionViewData>((resolve) => {
+    resolveIdleView = resolve;
+  });
+  const staleIdleView: SessionViewData = {
+    ...draftView,
+    session: { ...draftView.session, ...bootstrap.sessions[0], running: false },
+    state: { ...bootstrap.state, isStreaming: false },
+    messages: [{ role: "assistant", content: "old idle answer" }],
+    messageTotal: 1,
+    isActive: true,
+    runtimeStatus: "active",
+    isStreaming: false,
+    toolStatus: "",
+  };
+  const secondView: SessionViewData = {
+    ...draftView,
+    session: secondSession,
+    state: { ...bootstrap.state, sessionId: "second", isStreaming: false },
+    isActive: false,
+    runtimeStatus: "view-only",
+    isStreaming: false,
+  };
+  let activeViewCalls = 0;
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true },
+      sessions: [
+        {
+          ...bootstrap.sessions[0],
+          running: true,
+          activity: { execution: "running" as const, awaitingConfirmation: false },
+        },
+        secondSession,
+      ],
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async (id: string) => ({ viewing: id }),
+    viewSession: async (id: string) => {
+      if (id === secondId) return secondView;
+      activeViewCalls += 1;
+      return activeViewCalls === 1 ? idleView : {
+        ...staleIdleView,
+        state: { ...bootstrap.state, isStreaming: true },
+        isStreaming: true,
+        liveMessage: { role: "assistant", content: "new live answer" },
+        toolStatus: "Pi 正在思考…",
+      };
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.emitPi({
+        type: "pi_chat_session_status",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        activity: { execution: "idle", awaitingConfirmation: false },
+      });
+      source.emitPi({
+        type: "agent_start",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 2,
+      });
+      source.emitPi({
+        type: "message_update",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 2,
+        message: { role: "assistant", content: "new live answer" },
+      });
+      resolveIdleView(staleIdleView);
+      await Promise.resolve();
+    });
+    const secondButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>(
+      ".session-item",
+    )].find((button) => button.textContent?.includes("Second"))!;
+    await act(async () => secondButton.click());
+    const activeButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>(
+      ".session-item",
+    )].find((button) => button.textContent?.includes("Active"))!;
+    await act(async () => activeButton.click());
+    assert.match(
+      dom.window.document.querySelector(".timeline")?.textContent || "",
+      /new live answer/,
+      "an older idle response must be discarded after a newer Session event version",
+    );
+    assert.ok(dom.window.document.querySelector(".stop-button"));
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
+test("paused queue activity preserves a still-running turn until terminal activity arrives", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true },
+      sessions: bootstrap.sessions.map((session) => ({
+        ...session,
+        running: true,
+        queued: true,
+        activity: { execution: "running" as const, awaitingConfirmation: false },
+      })),
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.emitPi({
+        type: "pi_chat_session_status",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        activity: { execution: "paused", awaitingConfirmation: false },
+      });
+      source.emitPi({
+        type: "tool_execution_end",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        toolName: "bash",
+        isError: false,
+      });
+    });
+    assert.match(
+      dom.window.document.querySelector(".agent-status")?.textContent || "",
+      /bash 已完成，Pi 正在继续…/,
+      "paused follow-up queue state must not falsely settle the active turn",
+    );
+    assert.ok(dom.window.document.querySelector(".stop-button"));
+    assert.ok(
+      dom.window.document.querySelector(".session-item.is-running"),
+      "paused queue activity preserves the sidebar's active-turn authority",
+    );
+
+    await act(async () => {
+      source.emitPi({
+        type: "pi_chat_queue_update",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        queue: [],
+        paused: true,
+      });
+    });
+    assert.ok(
+      dom.window.document.querySelector(".session-item.is-running"),
+      "removing the last paused follow-up must not manufacture an idle active turn",
+    );
+
+    await act(async () => {
+      source.emitPi({
+        type: "pi_chat_session_status",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        activity: { execution: "idle", awaitingConfirmation: false },
+      });
+    });
+    assert.equal(dom.window.document.querySelector(".agent-status"), null);
+    assert.equal(dom.window.document.querySelector(".stop-button"), null);
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
+test("late tool completion after off-screen idle does not return when the Session is reopened", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const secondId = "late-tool-offscreen-2";
+  const secondSession = {
+    ...bootstrap.sessions[0],
+    id: secondId,
+    sessionId: "second",
+    name: "Second",
+    active: false,
+    running: false,
+    activity: { execution: "idle" as const, awaitingConfirmation: false },
+  };
+  const activeView: SessionViewData = {
+    ...draftView,
+    session: { ...draftView.session, ...bootstrap.sessions[0] },
+    state: { ...bootstrap.state, isStreaming: true },
+    isStreaming: true,
+    toolStatus: "",
+  };
+  const secondView: SessionViewData = {
+    ...draftView,
+    session: secondSession,
+    state: { ...bootstrap.state, sessionId: "second", isStreaming: false },
+    isStreaming: false,
+    toolStatus: "",
+  };
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true },
+      sessions: [
+        {
+          ...bootstrap.sessions[0],
+          running: true,
+          activity: { execution: "running" as const, awaitingConfirmation: false },
+        },
+        secondSession,
+      ],
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async (id: string) => ({ viewing: id }),
+    viewSession: async (id: string) => id === secondId ? secondView : activeView,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    const secondButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>(
+      ".session-item",
+    )].find((button) => button.textContent?.includes("Second"))!;
+    await act(async () => secondButton.click());
+    await act(async () => {
+      source.emitPi({
+        type: "pi_chat_session_status",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        activity: { execution: "idle", awaitingConfirmation: false },
+      });
+      source.emitPi({
+        type: "tool_execution_end",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        toolName: "bash",
+        isError: false,
+      });
+    });
+    const activeButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>(
+      ".session-item",
+    )].find((button) => button.textContent?.includes("Active"))!;
+    await act(async () => activeButton.click());
+    assert.equal(
+      dom.window.document.querySelector(".agent-status"),
+      null,
+      "late terminal tool frames must not repopulate an idle Session cache",
     );
   } finally {
     await act(async () => root.unmount());

@@ -365,6 +365,9 @@ export function App() {
   /** Draft intent is a coordinator guard only; pane.identity is the sole UI fact. */
   const localDraftRef = useRef(false);
   const { piState: state, messages, pendingUserMessage } = pane;
+  /** Long-lived SSE callbacks read the newest Pane state without re-subscribing. */
+  const paneStateRef = useRef(state);
+  paneStateRef.current = state;
   /** Refresh continuations read the newest pane model without recreating their bootstrap effect. */
   const paneModelRef = useRef(state.model);
   paneModelRef.current = state.model;
@@ -581,32 +584,42 @@ export function App() {
   /** Apply only server-authored Sidebar activity; cache overlay protects it from late HTTP views. */
   const applySessionActivity = useCallback(
     (sessionId: string, activity: SessionActivityState) => {
-      sessionRunningOverridesRef.current.set(
-        sessionId,
-        activity.execution === "running" ||
-          activity.execution === "dispatching",
-      );
+      const terminalActivity =
+        activity.execution === "idle" ||
+        activity.execution === "queued" ||
+        activity.execution === "failed";
+      if (activity.execution === "running" || activity.execution === "dispatching")
+        sessionRunningOverridesRef.current.set(sessionId, true);
+      else if (terminalActivity)
+        sessionRunningOverridesRef.current.set(sessionId, false);
+      // `paused` belongs to the follow-up queue and may coexist with an active
+      // turn. Preserve the preceding running/terminal authority instead of
+      // manufacturing either conclusion from paused alone.
       setFailedSessionIds((current) =>
         activity.execution === "failed"
           ? [...new Set([...current, sessionId])]
           : current.filter((id) => id !== sessionId),
       );
       setSessions((current) =>
-        current.map((session) =>
-          session.id === sessionId
-            ? {
-                ...session,
-                activity,
-                running:
-                  activity.execution === "running" ||
-                  activity.execution === "dispatching",
-                queued:
-                  activity.execution === "queued" ||
-                  activity.execution === "paused",
-                pendingConfirmation: activity.awaitingConfirmation,
-              }
-            : session,
-        ),
+        current.map((session) => {
+          if (session.id !== sessionId) return session;
+          const running =
+            activity.execution === "running" ||
+            activity.execution === "dispatching"
+              ? true
+              : terminalActivity
+                ? false
+                : session.running === true;
+          return {
+            ...session,
+            activity,
+            running,
+            queued:
+              activity.execution === "queued" ||
+              activity.execution === "paused",
+            pendingConfirmation: activity.awaitingConfirmation,
+          };
+        }),
       );
       patchSessionCache(sessionId, { sessionActivity: activity });
     },
@@ -2740,7 +2753,10 @@ export function App() {
           });
       } else if (type === "tool_execution_end") {
         const status = `${String(event.toolName || "工具")} ${event.isError ? "执行失败" : "已完成，Pi 正在继续…"}`;
-        if (eventSessionId) {
+        const sessionStillRunning = eventSessionId
+          ? sessionRunningOverridesRef.current.get(eventSessionId) !== false
+          : false;
+        if (eventSessionId && sessionStillRunning) {
           completedCompactionSessionIdsRef.current.add(eventSessionId);
           patchSessionCache(eventSessionId, {
             toolStatus: status,
@@ -2752,16 +2768,20 @@ export function App() {
         }
         if (viewingEventSession) {
           // `COMPACTION_FINISHED` clears the stale lock, then the normal tool
-          // status action retains the useful completion progress.
+          // status action retains the useful completion progress only while
+          // this turn is still active. A same-generation idle activity frame
+          // can arrive before this tool completion; never resurrect a waiting
+          // spinner or its off-screen cache projection after terminal activity.
           dispatchPane({
             type: "COMPACTION_FINISHED",
             sessionId: eventSessionId,
           });
-          dispatchPane({
-            type: "TOOL_STATUS_UPDATED",
-            sessionId: eventSessionId,
-            status,
-          });
+          if (paneStateRef.current.isStreaming && sessionStillRunning)
+            dispatchPane({
+              type: "TOOL_STATUS_UPDATED",
+              sessionId: eventSessionId,
+              status,
+            });
         }
       } else if (type === "pi_chat_native_steering_cleared") {
         if (eventSessionId) {
@@ -3354,14 +3374,81 @@ export function App() {
           applySessionActivity(eventSessionId, next);
           const streaming =
             next.execution === "running" || next.execution === "dispatching";
-          if (!streaming) clearStoppingForSession(eventSessionId);
-          patchSessionCache(eventSessionId, {
-            isStreaming: streaming,
-            state: { isStreaming: streaming },
-          });
+          const terminalActivity =
+            next.execution === "idle" ||
+            next.execution === "queued" ||
+            next.execution === "failed";
+          if (terminalActivity && typeof eventRunGeneration === "number")
+            settledRunGenerationsRef.current.set(
+              eventSessionId,
+              Math.max(
+                settledRunGenerationsRef.current.get(eventSessionId) || 0,
+                eventRunGeneration,
+              ),
+            );
+          // `paused` means the follow-up queue is paused; the current Pi turn
+          // may still be running while abort settles. It is not terminal proof.
+          if (terminalActivity) clearStoppingForSession(eventSessionId);
+          patchSessionCache(eventSessionId, terminalActivity
+            ? {
+                isStreaming: false,
+                liveMessage: undefined,
+                toolStatus: "",
+                state: { isStreaming: false, isCompacting: false },
+              }
+            : streaming
+              ? {
+                  isStreaming: true,
+                  state: { isStreaming: true },
+                }
+              : {});
+          if (terminalActivity) {
+            releasePromptBusy(
+              eventSessionId,
+              eventRunGeneration,
+              eventRunEpoch,
+              true,
+            );
+          }
+          if (viewingEventSession && terminalActivity) {
+            clearPendingLiveMessage();
+            dispatchPane({
+              type: "AGENT_SETTLED",
+              sessionId: eventSessionId,
+            });
+            // This activity fallback is used when message_end/agent_settled was
+            // missed. Reconcile persisted history through the same generation
+            // and pane-authority barriers instead of permanently discarding the
+            // last live draft with no terminal replacement.
+            const requestVersion =
+              sessionEventVersionRef.current.get(eventSessionId) || 0;
+            const queueRequestRevision =
+              queueProjectionRevisionRef.current.get(eventSessionId) || 0;
+            const authority = capturePaneAuthority(eventSessionId);
+            void api
+              .viewSession(eventSessionId)
+              .then((view) => {
+                const versionUnchanged =
+                  (sessionEventVersionRef.current.get(eventSessionId) || 0) ===
+                  requestVersion;
+                if (!versionUnchanged) return;
+                if (paneAuthorityCanCommit(authority))
+                  applySessionView(view, authority, queueRequestRevision);
+                else rememberSessionView(view);
+              })
+              .catch(() => undefined);
+          }
         } else if (eventSessionId && typeof event.running === "boolean") {
           // Older servers still publish this partial event during a rolling update.
           const running = event.running === true;
+          if (!running && typeof eventRunGeneration === "number")
+            settledRunGenerationsRef.current.set(
+              eventSessionId,
+              Math.max(
+                settledRunGenerationsRef.current.get(eventSessionId) || 0,
+                eventRunGeneration,
+              ),
+            );
           if (!running) clearStoppingForSession(eventSessionId);
           sessionRunningOverridesRef.current.set(eventSessionId, running);
           setSessions((current) =>
@@ -3373,8 +3460,48 @@ export function App() {
           );
           patchSessionCache(eventSessionId, {
             isStreaming: running,
-            state: { isStreaming: running },
+            ...(running
+              ? null
+              : {
+                  liveMessage: undefined,
+                  toolStatus: "",
+                }),
+            state: {
+              isStreaming: running,
+              ...(running ? null : { isCompacting: false }),
+            },
           });
+          if (!running)
+            releasePromptBusy(
+              eventSessionId,
+              eventRunGeneration,
+              eventRunEpoch,
+              true,
+            );
+          if (viewingEventSession && !running) {
+            clearPendingLiveMessage();
+            dispatchPane({
+              type: "AGENT_SETTLED",
+              sessionId: eventSessionId,
+            });
+            const requestVersion =
+              sessionEventVersionRef.current.get(eventSessionId) || 0;
+            const queueRequestRevision =
+              queueProjectionRevisionRef.current.get(eventSessionId) || 0;
+            const authority = capturePaneAuthority(eventSessionId);
+            void api
+              .viewSession(eventSessionId)
+              .then((view) => {
+                const versionUnchanged =
+                  (sessionEventVersionRef.current.get(eventSessionId) || 0) ===
+                  requestVersion;
+                if (!versionUnchanged) return;
+                if (paneAuthorityCanCommit(authority))
+                  applySessionView(view, authority, queueRequestRevision);
+                else rememberSessionView(view);
+              })
+              .catch(() => undefined);
+          }
         }
       } else if (type === "pi_chat_process_recovered") {
         if (eventSessionId) {
