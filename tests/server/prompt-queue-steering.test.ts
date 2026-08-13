@@ -4,13 +4,13 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { PiChatApp } from "../src/server/app";
-import { RpcRequestTimeoutError, type PiRpcClient } from "../src/server/rpc-client";
-import { idForPath } from "../src/server/session-index";
-import type { SessionIndex } from "../src/server/session-index";
-import type { ResourceManager } from "../src/server/resource-manager";
-import { ModelManager } from "../src/server/model-manager";
-import type { SessionSummary } from "../src/shared/types";
+import { PiChatApp } from "../../src/server/app";
+import { RpcRequestTimeoutError, type PiRpcClient } from "../../src/server/rpc-client";
+import { idForPath } from "../../src/server/session-index";
+import type { SessionIndex } from "../../src/server/session-index";
+import type { ResourceManager } from "../../src/server/resource-manager";
+import { ModelManager } from "../../src/server/model-manager";
+import type { SessionSummary } from "../../src/shared/types";
 
 class FakeRpc {
   readonly commands: Record<string, unknown>[] = [];
