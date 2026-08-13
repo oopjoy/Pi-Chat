@@ -7,7 +7,7 @@ async function openSecondSession(page: import("@playwright/test").Page) {
   await expect(page.getByText("Final answer with")).toBeVisible();
 }
 
-test("desktop session navigation keeps the left sidebar open", { tag: "@desktop" }, async ({ page }) => {
+test("desktop session navigation keeps the left sidebar open", { tag: "@desktop-only" }, async ({ page }) => {
   await page.goto("/");
   const sidebar = page.locator(".sidebar");
   await expect(sidebar).toHaveClass(/is-open/);
@@ -16,7 +16,7 @@ test("desktop session navigation keeps the left sidebar open", { tag: "@desktop"
   await expect(sidebar).toHaveClass(/is-open/);
 });
 
-test("a mismatched Web artifact blocks mutations but keeps guarded recovery actions", { tag: "@desktop" }, async ({ page, mismatchedBaseURL }) => {
+test("a mismatched Web artifact blocks mutations but keeps guarded recovery actions", { tag: "@desktop-only" }, async ({ page, mismatchedBaseURL }) => {
   await page.goto(mismatchedBaseURL);
   await expect(page.getByText("网页与服务版本不一致")).toBeVisible();
   await expect(page.getByRole("textbox", { name: "消息输入" })).toBeDisabled();
@@ -27,7 +27,7 @@ test("a mismatched Web artifact blocks mutations but keeps guarded recovery acti
   await expect(page.getByRole("button", { name: "关闭 Pi Chat" })).toBeEnabled();
 });
 
-test("cold navigation uses a target-labelled loading pane before replacing the source transcript", { tag: "@desktop" }, async ({ page }) => {
+test("cold navigation uses a target-labelled loading pane before replacing the source transcript", { tag: "@desktop-only" }, async ({ page }) => {
   await page.goto("/");
   await expect(page.getByText("First answer")).toBeVisible();
 
@@ -53,7 +53,7 @@ test("cold navigation uses a target-labelled loading pane before replacing the s
   await page.unrouteAll({ behavior: "ignoreErrors" });
 });
 
-test("cold and hot-memory navigation emit bounded first-pane measurements during a real stream", { tag: "@desktop" }, async ({ page }) => {
+test("cold and hot-memory navigation emit bounded first-pane measurements during a real stream", { tag: "@desktop-only" }, async ({ page }) => {
   const installMetricObserver = () => page.evaluate(() => {
     (window as Window & { paneCommits?: Array<{ source: string; elapsedMs: number }> }).paneCommits = [];
     window.addEventListener("pi-chat:pane-first-commit", ((event: CustomEvent<{ source: string; elapsedMs: number }>) => {
@@ -86,7 +86,7 @@ test("cold and hot-memory navigation emit bounded first-pane measurements during
   expect(hot?.elapsedMs).toBeLessThan(500);
 });
 
-test("focusing a cold Session keeps it neutral until the first send starts Pi", { tag: "@desktop" }, async ({ page }) => {
+test("focusing a cold Session keeps it neutral until the first send starts Pi", { tag: "@desktop-only" }, async ({ page }) => {
   await page.goto("/");
   const secondRow = page.locator(".session-row", { hasText: "Second session" });
   await secondRow.locator(".session-item").click();
@@ -102,7 +102,7 @@ test("focusing a cold Session keeps it neutral until the first send starts Pi", 
   await expect(composer).toBeEnabled();
 });
 
-test("mobile session navigation closes the left sidebar", { tag: "@mobile" }, async ({ page }) => {
+test("mobile session navigation closes the left sidebar", { tag: "@mobile-only" }, async ({ page }) => {
   await page.goto("/");
   const sidebar = page.locator(".sidebar");
   await expect(sidebar).toHaveClass(/is-open/);
@@ -111,7 +111,7 @@ test("mobile session navigation closes the left sidebar", { tag: "@mobile" }, as
   await expect(sidebar).not.toHaveClass(/is-open/);
 });
 
-test("image preview stays inside the viewport and restores thumbnail focus", { tag: ["@desktop", "@mobile"] }, async ({ page }) => {
+test("image preview stays inside the viewport and restores thumbnail focus", { tag: "@desktop-mobile" }, async ({ page }) => {
   await openSecondSession(page);
   const thumbnail = page.getByRole("button", { name: "查看用户附加图片的大图" });
   await thumbnail.focus();
@@ -134,7 +134,7 @@ test("image preview stays inside the viewport and restores thumbnail focus", { t
   await expect(thumbnail).toBeFocused();
 });
 
-test("long Runtime notice remains in flow above an unobscured Composer", { tag: ["@desktop", "@mobile"] }, async ({ page }) => {
+test("long Runtime notice remains in flow above an unobscured Composer", { tag: "@desktop-mobile" }, async ({ page }) => {
   const longNotice = "Refresh failed because the session inventory is temporarily unavailable. ".repeat(8);
   await page.goto("/");
   await page.route("**/api/bootstrap", (route) => route.fulfill({
@@ -162,7 +162,7 @@ test("long Runtime notice remains in flow above an unobscured Composer", { tag: 
   expect(composerBox!.x + composerBox!.width).toBeLessThanOrEqual(viewport.width);
 });
 
-test("forced colors keeps CompactSelect focus and active option visibly outlined", { tag: "@forced-colors" }, async ({ page }) => {
+test("forced colors keeps CompactSelect focus and active option visibly outlined", { tag: "@forced-only" }, async ({ page }) => {
   await page.emulateMedia({ forcedColors: "active" });
   await page.goto("/");
   const trigger = page.getByRole("button", { name: "模型" });
@@ -189,7 +189,7 @@ test("forced colors keeps CompactSelect focus and active option visibly outlined
   expect(forcedColorsDiagnostic.outlineStyle).toBe("solid");
 });
 
-test("session search filters locally and pin persists across reload", { tag: "@desktop" }, async ({ page }) => {
+test("session search filters locally and pin persists across reload", { tag: "@desktop-only" }, async ({ page }) => {
   await page.goto("/");
   const secondRow = page.locator(".session-row", { hasText: "Second session" });
   await secondRow.hover();
@@ -214,7 +214,7 @@ test("session search filters locally and pin persists across reload", { tag: "@d
   await expect(page.locator(".session-row").first()).toContainText("Second session");
 });
 
-test("directory groups collapse, search temporarily expands, and fixed state persists", { tag: "@desktop" }, async ({ page }) => {
+test("directory groups collapse, search temporarily expands, and fixed state persists", { tag: "@desktop-only" }, async ({ page }) => {
   await page.goto("/");
   const directory = page.locator(".session-directory").first();
   const toggle = directory.locator(".session-directory-toggle");
@@ -240,7 +240,7 @@ test("directory groups collapse, search temporarily expands, and fixed state per
   await expect(restored.locator(".session-directory-toggle")).toHaveAttribute("aria-expanded", "false");
 });
 
-test("Diff sidebar slides, remains inert while hidden, and process collapses from the footer", { tag: "@desktop" }, async ({ page }) => {
+test("Diff sidebar slides, remains inert while hidden, and process collapses from the footer", { tag: "@desktop-only" }, async ({ page }) => {
   await openSecondSession(page);
   const process = page.locator(".conversation-process");
   await process.locator(":scope > summary").click();
@@ -257,7 +257,7 @@ test("Diff sidebar slides, remains inert while hidden, and process collapses fro
   await expect(process).not.toHaveAttribute("open", "");
 });
 
-test("answer footer shows the producing model and copies the complete visible answer", { tag: "@desktop" }, async ({ page }) => {
+test("answer footer shows the producing model and copies the complete visible answer", { tag: "@desktop-only" }, async ({ page }) => {
   await openSecondSession(page);
   const answer = page.locator(".message-assistant", { hasText: "Final answer with" });
   await expect(answer.locator(".message-model")).toHaveText("test / gpt-e2e");
