@@ -6,6 +6,14 @@ import {
   MAX_RPC_INBOUND_LINE_BYTES,
   MAX_RPC_OUTBOUND_LINE_BYTES,
 } from "../shared/rpc-contracts.js";
+import {
+  attachIncidentReference,
+  incidentReference,
+  recordIncident,
+  type IncidentDiagnostics,
+  type IncidentOperation,
+  type IncidentRuntimeKind,
+} from "./incident-diagnostics.js";
 
 interface PendingRequest {
   resolve: (value: Record<string, unknown>) => void;
@@ -67,6 +75,10 @@ export interface RpcClientOptions {
   cwd: string;
   piEntry?: string;
   args?: string[];
+  diagnostics?: IncidentDiagnostics;
+  runtimeKind?: Exclude<IncidentRuntimeKind, "host">;
+  sessionId?: () => string;
+  lifecycle?: () => import("../shared/types.js").ApplicationLifecycle;
 }
 
 export interface PiRpcCompatibility {
@@ -86,6 +98,8 @@ export interface RpcSendOptions {
 export interface RpcEventSource {
   /** Monotonic per-child spawn identity; stale children can never impersonate a replacement. */
   generation: number;
+  /** Metadata-only child identity; never exposed as Session content. */
+  childPid?: number;
 }
 
 type EventListener = (
@@ -136,15 +150,70 @@ export class PiRpcClient {
   /** Retained until exit is observed; a retry must never forget an orphan candidate. */
   private unconfirmedChild: ChildProcessWithoutNullStreams | null = null;
   private stopOperation: Promise<void> | null = null;
+  private diagnosticSessionId = "";
 
   constructor(private readonly options: RpcClientOptions) {}
 
+  setDiagnosticSessionId(sessionId: string): void {
+    this.diagnosticSessionId = sessionId;
+  }
+
   /** The currently live child generation, or zero for legacy in-process test doubles. */
   currentGeneration(): number { return this.source?.generation || 0; }
+  currentPid(): number | null {
+    const pid = this.child?.pid || this.unconfirmedChild?.pid;
+    return typeof pid === "number" ? pid : null;
+  }
+
+  private operationForType(type: string): IncidentOperation {
+    if (type === "get_state") return "rpc.get-state";
+    if (type === "get_messages") return "rpc.get-messages";
+    if (type === "get_available_models") return "rpc.get-models";
+    if (type === "get_commands") return "rpc.get-commands";
+    if (type === "get_session_stats") return "rpc.get-stats";
+    if (type === "prompt") return "rpc.prompt";
+    if (type === "abort") return "rpc.abort";
+    if (type === "extension_ui_response") return "rpc.extension-response";
+    return "rpc.other";
+  }
+
+  private recordTransportIncident(
+    error: unknown,
+    input: {
+      operation: IncidentOperation;
+      outcome: import("./incident-diagnostics.js").IncidentOutcome;
+      errorCode: string;
+      generation?: number;
+      childPid?: number;
+      requestId?: string;
+      durationMs?: number;
+    },
+  ) {
+    return recordIncident(this.options.diagnostics, error, {
+      sessionId: this.diagnosticSessionId || this.options.sessionId?.(),
+      runtimeKind: this.options.runtimeKind || "primary",
+      rpcGeneration: input.generation ?? this.currentGeneration(),
+      childPid: input.childPid ?? this.currentPid() ?? undefined,
+      rpcRequestId: input.requestId,
+      operation: input.operation,
+      lifecycle: this.options.lifecycle?.() || "idle",
+      outcome: input.outcome,
+      durationMs: input.durationMs,
+      errorCode: input.errorCode,
+    });
+  }
 
   async start(extraArgs: string[] = []): Promise<Record<string, unknown>> {
-    if (this.child || this.unconfirmedChild)
-      throw new Error("Pi RPC 已有未确认退出的进程，拒绝启动重复 Session writer");
+    if (this.child || this.unconfirmedChild) {
+      const error = new Error("Pi RPC 已有未确认退出的进程，拒绝启动重复 Session writer");
+      this.recordTransportIncident(error, {
+        operation: "runtime.start",
+        outcome: "rejected",
+        errorCode: "RPC_DUPLICATE_WRITER_BLOCKED",
+        childPid: this.currentPid() || undefined,
+      });
+      throw error;
+    }
     const piEntry = this.options.piEntry ?? resolvePiEntry();
     if (!piEntry) {
       throw new Error("找不到全局 Pi。请先安装 Pi，或设置 PI_CHAT_PI_ENTRY 指向 dist/rpc-entry.js。");
@@ -158,7 +227,21 @@ export class PiRpcClient {
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });
-    const source = { generation: ++this.sourceGeneration, child, stderrTail: "" };
+    const source = {
+      generation: ++this.sourceGeneration,
+      childPid: child.pid,
+      child,
+      stderrTail: "",
+    };
+    this.options.diagnostics?.record({
+      sessionId: this.diagnosticSessionId || this.options.sessionId?.(),
+      runtimeKind: this.options.runtimeKind || "primary",
+      rpcGeneration: source.generation,
+      childPid: child.pid,
+      operation: "runtime.start",
+      lifecycle: this.options.lifecycle?.() || "idle",
+      outcome: "started",
+    });
     this.child = child;
     this.source = source;
 
@@ -244,8 +327,20 @@ export class PiRpcClient {
         this.unconfirmedChild = activeSource.child;
         this.source = null;
         this.rejectPending(error, true);
+        const incident = this.recordTransportIncident(error, {
+          operation: "rpc.stdout-frame",
+          outcome: "oversized",
+          errorCode: error.code,
+          generation: activeSource.generation,
+          childPid: activeSource.child.pid,
+        });
         this.emitEvent(
-          { type: "pi_chat_process_error", error: error.message },
+          {
+            type: "pi_chat_process_error",
+            error: error.message,
+            errorCode: error.code,
+            incidentId: incident.incidentId,
+          },
           activeSource,
         );
         activeSource.child.kill("SIGKILL");
@@ -336,13 +431,15 @@ export class PiRpcClient {
   }
 
   private rejectPending(error: Error, unexpected = false): void {
+    const reference = incidentReference(error);
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
-      pending.reject(
-        unexpected && !pending.readOnly && pending.written
-          ? new RpcRequestTimeoutError(pending.requestType, "written-outcome-unknown")
-          : error,
-      );
+      const rejection = unexpected && !pending.readOnly && pending.written
+        ? new RpcRequestTimeoutError(pending.requestType, "written-outcome-unknown")
+        : error;
+      if (reference && rejection !== error)
+        attachIncidentReference(rejection, reference, "RPC_CHILD_EXIT");
+      pending.reject(rejection);
     }
     this.pending.clear();
     this.readQueries.clear();
@@ -351,12 +448,24 @@ export class PiRpcClient {
 
   private handleExit(source: RpcEventSource, error: Error): void {
     if (!this.source || this.source.generation !== source.generation) return;
+    const incident = this.recordTransportIncident(error, {
+      operation: "rpc.child-exit",
+      outcome: "failed",
+      errorCode: "RPC_CHILD_EXIT",
+      generation: source.generation,
+      childPid: source.childPid,
+    });
     this.child = null;
     if (this.unconfirmedChild === this.source.child) this.unconfirmedChild = null;
     this.source = null;
     this.rejectPending(error, true);
     this.emitEvent(
-      { type: "pi_chat_process_error", error: error.message },
+      {
+        type: "pi_chat_process_error",
+        error: error.message,
+        errorCode: "RPC_CHILD_EXIT",
+        incidentId: incident.incidentId,
+      },
       source,
     );
   }
@@ -371,11 +480,26 @@ export class PiRpcClient {
   }
 
   async sendRaw(command: Record<string, unknown>, timeoutMs = 10_000): Promise<void> {
+    const startedAt = Date.now();
     const child = this.child;
     if (!child || child.exitCode !== null || !child.stdin.writable)
       throw new Error("Pi RPC 未运行");
     const requestType = typeof command.type === "string" ? command.type : "unknown";
-    const frame = encodeOutboundFrame(command);
+    let frame: string;
+    try {
+      frame = encodeOutboundFrame(command);
+    } catch (error) {
+      if (error instanceof RpcFrameTooLargeError)
+        this.recordTransportIncident(error, {
+          operation: this.operationForType(requestType),
+          outcome: "oversized",
+          errorCode: error.code,
+          generation: this.currentGeneration(),
+          childPid: child.pid,
+          durationMs: Date.now() - startedAt,
+        });
+      throw error;
+    }
     await new Promise<void>((resolve, reject) => {
       let writeReturned = false;
       let settled = false;
@@ -389,10 +513,21 @@ export class PiRpcClient {
         if (error) reject(error);
         else resolve();
       };
-      const uncertain = () => new RpcRequestTimeoutError(
-        requestType,
-        writeReturned ? "written-outcome-unknown" : "not-written",
-      );
+      const uncertain = () => {
+        const error = new RpcRequestTimeoutError(
+          requestType,
+          writeReturned ? "written-outcome-unknown" : "not-written",
+        );
+        this.recordTransportIncident(error, {
+          operation: this.operationForType(requestType),
+          outcome: error.outcome,
+          errorCode: error.code,
+          generation: this.currentGeneration(),
+          childPid: child.pid,
+          durationMs: Date.now() - startedAt,
+        });
+        return error;
+      };
       const onExit = () => finish(uncertain());
       const onStdinError = () => finish(uncertain());
       const timer = setTimeout(() => finish(uncertain()), timeoutMs);
@@ -407,7 +542,16 @@ export class PiRpcClient {
         });
         writeReturned = true;
       } catch (error) {
-        finish(error instanceof Error ? error : new Error(String(error)));
+        const normalized = error instanceof Error ? error : new Error(String(error));
+        this.recordTransportIncident(normalized, {
+          operation: this.operationForType(requestType),
+          outcome: "not-written",
+          errorCode: "RPC_STDIN_REJECTED",
+          generation: this.currentGeneration(),
+          childPid: child.pid,
+          durationMs: Date.now() - startedAt,
+        });
+        finish(normalized);
       }
     });
   }
@@ -427,6 +571,7 @@ export class PiRpcClient {
     timeoutMs = 30_000,
     options: RpcSendOptions = {},
   ): Promise<Record<string, unknown>> {
+    const startedAt = Date.now();
     const child = this.child;
     if (!child || child.exitCode !== null) throw new Error("Pi RPC 未运行");
     const type = typeof command.type === "string" ? command.type : "";
@@ -448,6 +593,16 @@ export class PiRpcClient {
     } catch (error) {
       if (sharedRead && this.outstandingReadQueryIds.get(type) === id)
         this.outstandingReadQueryIds.delete(type);
+      if (error instanceof RpcFrameTooLargeError)
+        this.recordTransportIncident(error, {
+          operation: this.operationForType(type),
+          outcome: "oversized",
+          errorCode: error.code,
+          generation: this.currentGeneration(),
+          childPid: child.pid,
+          requestId: id,
+          durationMs: Date.now() - startedAt,
+        });
       throw error;
     }
     const request = new Promise<Record<string, unknown>>((resolve, reject) => {
@@ -463,10 +618,20 @@ export class PiRpcClient {
       pending.timer = setTimeout(() => {
         if (this.pending.get(id) !== pending) return;
         this.pending.delete(id);
-        reject(new RpcRequestTimeoutError(
+        const error = new RpcRequestTimeoutError(
           pending.requestType,
           pending.written ? "written-outcome-unknown" : "not-written",
-        ));
+        );
+        this.recordTransportIncident(error, {
+          operation: this.operationForType(pending.requestType),
+          outcome: error.outcome,
+          errorCode: error.code,
+          generation: this.currentGeneration(),
+          childPid: child.pid,
+          requestId: id,
+          durationMs: Date.now() - startedAt,
+        });
+        reject(error);
       }, timeoutMs);
       this.pending.set(id, pending);
       try {
@@ -479,11 +644,23 @@ export class PiRpcClient {
           // A callback invoked before write() returns is a definite rejection.
           // After return, Node may already have buffered bytes even when its
           // eventual callback reports a transport failure.
-          reject(
-            writeReturned && !readOnly
-              ? new RpcRequestTimeoutError(pending.requestType, "written-outcome-unknown")
-              : error,
-          );
+          const rejection = writeReturned && !readOnly
+            ? new RpcRequestTimeoutError(pending.requestType, "written-outcome-unknown")
+            : error;
+          this.recordTransportIncident(rejection, {
+            operation: this.operationForType(pending.requestType),
+            outcome: rejection instanceof RpcRequestTimeoutError
+              ? rejection.outcome
+              : "not-written",
+            errorCode: rejection instanceof RpcRequestTimeoutError
+              ? rejection.code
+              : "RPC_STDIN_REJECTED",
+            generation: this.currentGeneration(),
+            childPid: child.pid,
+            requestId: id,
+            durationMs: Date.now() - startedAt,
+          });
+          reject(rejection);
         });
         // A non-throwing write transfers the frame to Node's stream buffer. From
         // this point the host cannot prove that a mutation was not accepted.
@@ -494,7 +671,17 @@ export class PiRpcClient {
         this.pending.delete(id);
         if (sharedRead && this.outstandingReadQueryIds.get(type) === id)
           this.outstandingReadQueryIds.delete(type);
-        reject(error instanceof Error ? error : new Error(String(error)));
+        const normalized = error instanceof Error ? error : new Error(String(error));
+        this.recordTransportIncident(normalized, {
+          operation: this.operationForType(type),
+          outcome: "not-written",
+          errorCode: "RPC_STDIN_REJECTED",
+          generation: this.currentGeneration(),
+          childPid: child.pid,
+          requestId: id,
+          durationMs: Date.now() - startedAt,
+        });
+        reject(normalized);
       }
     });
     if (sharedRead) {
@@ -574,7 +761,14 @@ export class PiRpcClient {
       child.kill("SIGKILL");
       if (await waitForExit(1_500)) return;
       // Keep unconfirmedChild so every later stop/restart remains fail-closed.
-      throw new RpcProcessExitUnconfirmedError(pid);
+      const error = new RpcProcessExitUnconfirmedError(pid);
+      this.recordTransportIncident(error, {
+        operation: "rpc.stop",
+        outcome: "exit-unconfirmed",
+        errorCode: error.code,
+        childPid: pid,
+      });
+      throw error;
     })();
     this.stopOperation = operation;
     try {

@@ -91,7 +91,21 @@ class ReadinessBridge implements PrimaryRuntimeReadinessBridge {
     await this.waitUntilReady();
   }
   markFailed(error: unknown) {
-    this.set({ status: "failed", generation: this.value.generation + 1, error: error instanceof Error ? error.message : String(error) });
+    const event = error && typeof error === "object"
+      ? error as Record<string, unknown>
+      : null;
+    this.set({
+      status: "failed",
+      generation: this.value.generation + 1,
+      error: error instanceof Error
+        ? error.message
+        : typeof event?.error === "string"
+          ? event.error
+          : String(error),
+      ...(typeof event?.incidentId === "string"
+        ? { incidentId: event.incidentId }
+        : null),
+    });
   }
   subscribe(listener: (value: PrimaryRuntimeReadiness) => void) { this.listeners.add(listener); listener(this.value); return () => this.listeners.delete(listener); }
   set(value: PrimaryRuntimeReadiness) { this.value = value; for (const listener of this.listeners) listener(value); }
@@ -130,7 +144,11 @@ test("Primary recovery repeats compatibility probing before reporting ready", as
 
   rpc.compatible = false;
   await assert.rejects(() => controller.recover(), PrimaryRuntimeUnavailableError);
-  assert.deepEqual(controller.snapshot(), { status: "failed", generation: 2, error: "当前 Pi RPC 协议不兼容 Pi Chat：missing capability" });
+  const incompatible = controller.snapshot();
+  assert.equal(incompatible.status, "failed");
+  assert.equal(incompatible.generation, 2);
+  assert.equal(incompatible.error, "当前 Pi RPC 协议不兼容 Pi Chat：missing capability");
+  assert.match(incompatible.incidentId || "", /^PC-/);
   assert.equal(rpc.restarts, 1);
   assert.equal(rpc.probes, 2);
   assert.equal(rpc.stops, 1);
@@ -209,7 +227,11 @@ test("a live Primary child failure advances readiness before recovery", async ()
   const controller = new PrimaryRuntimeReadinessController(rpc as unknown as PiRpcClient);
   await controller.start();
   controller.markFailed(new Error("worker exited"));
-  assert.deepEqual(controller.snapshot(), { status: "failed", generation: 2, error: "worker exited" });
+  const failed = controller.snapshot();
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.generation, 2);
+  assert.equal(failed.error, "worker exited");
+  assert.match(failed.incidentId || "", /^PC-/);
   await controller.recover();
   assert.deepEqual(controller.snapshot(), {
     status: "ready",
@@ -343,11 +365,10 @@ test("failed recovery preserves the 503 readiness contract", async () => {
     });
     const body = await response.json();
     assert.equal(response.status, 503, JSON.stringify(body));
-    assert.deepEqual(body, {
-      error: "Pi Runtime 不可用：compatibility failed after recovery",
-      code: "PRIMARY_RUNTIME_UNAVAILABLE",
-      primaryRuntime: { status: "failed", generation: 2, error: "compatibility failed after recovery" },
-    });
+    assert.equal(body.error, "Pi Runtime 不可用：compatibility failed after recovery");
+    assert.equal(body.code, "PRIMARY_RUNTIME_UNAVAILABLE");
+    assert.match(body.incidentId, /^PC-/);
+    assert.deepEqual(body.primaryRuntime, { status: "failed", generation: 2, error: "compatibility failed after recovery" });
     assert.equal(f.rpc.commands.some((command) => command.type === "prompt"), false);
   } finally { await f.close(); }
 });
@@ -482,11 +503,10 @@ test("failed Primary mutation returns stable unavailable response without restar
     });
     const body = await response.json();
     assert.equal(response.status, 503, JSON.stringify(body));
-    assert.deepEqual(body, {
-      error: "Pi Runtime 不可用：recovery still unavailable",
-      code: "PRIMARY_RUNTIME_UNAVAILABLE",
-      primaryRuntime: { status: "failed", generation: 3, error: "recovery still unavailable" },
-    });
+    assert.equal(body.error, "Pi Runtime 不可用：recovery still unavailable");
+    assert.equal(body.code, "PRIMARY_RUNTIME_UNAVAILABLE");
+    assert.match(body.incidentId, /^PC-/);
+    assert.deepEqual(body.primaryRuntime, { status: "failed", generation: 3, error: "recovery still unavailable" });
     assert.equal(f.rpc.restartCount, 0);
     assert.equal(f.rpc.commands.some((command) => command.type === "prompt"), false);
   } finally { await f.close(); }

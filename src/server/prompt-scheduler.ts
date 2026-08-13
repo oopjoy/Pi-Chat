@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { GateMode, PromptImage, QueuedPrompt } from "../shared/types.js";
 import type { PendingTurnSettings, RuntimeQueuedPrompt, SecondaryRuntime } from "./runtime-pool.js";
 import { RpcRequestTimeoutError, type PiRpcClient } from "./rpc-client.js";
+import { incidentReference } from "./incident-diagnostics.js";
 
 /** Prompt RPC resolves only after Pi preflight (may auto-compact). */
 export const PROMPT_PREPARE_TIMEOUT_MS = 200_000;
@@ -220,6 +221,7 @@ export class PromptScheduler {
       this.primaryQueuePaused = true;
       this.primaryQueue.unshift(next);
       this.broadcastPrimaryQueue();
+      const incidentId = incidentReference(error)?.incidentId;
       this.host.broadcast({
         type: "pi_chat_queue_error",
         id: next.id,
@@ -227,6 +229,7 @@ export class PromptScheduler {
         paused: true,
         piChatSessionId: this.host.activeSessionId(),
         error: error instanceof Error ? error.message : String(error),
+        ...(incidentId ? { incidentId } : null),
       });
       this.host.publishSessionActivity?.(this.host.activeSessionId());
     }
@@ -261,10 +264,12 @@ export class PromptScheduler {
       } catch (error) {
         runtime.queuePaused = true;
         this.broadcastRuntimeQueue(runtime);
+        const incidentId = incidentReference(error)?.incidentId;
         this.host.broadcast({
           type: "pi_chat_queue_error",
           error: error instanceof Error ? error.message : String(error),
           piChatSessionId: runtime.id,
+          ...(incidentId ? { incidentId } : null),
         });
         this.host.publishSessionActivity?.(runtime.id);
         releaseOperation();
@@ -317,6 +322,7 @@ export class PromptScheduler {
       runtime.queuePaused = true;
       runtime.promptQueue.unshift(next);
       this.broadcastRuntimeQueue(runtime);
+      const incidentId = incidentReference(error)?.incidentId;
       this.host.broadcast({
         type: "pi_chat_queue_error",
         id: next.id,
@@ -324,6 +330,7 @@ export class PromptScheduler {
         paused: true,
         error: error instanceof Error ? error.message : String(error),
         piChatSessionId: runtime.id,
+        ...(incidentId ? { incidentId } : null),
       });
       this.host.publishSessionActivity?.(runtime.id);
     } finally { releaseOperation(); }

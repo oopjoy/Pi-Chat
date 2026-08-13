@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
 import { homedir } from "node:os";
@@ -19,6 +20,10 @@ import {
   handOffApplicationRestart,
 } from "./application-restart.js";
 import { loadBuildIdentity } from "./build-identity.js";
+import {
+  createIncidentDiagnostics,
+  recordIncident,
+} from "./incident-diagnostics.js";
 
 interface CliOptions {
   host: string;
@@ -77,6 +82,19 @@ delete process.env.PI_CHAT_SKIP_STALE_DIST_CLEANUP;
 const cleaned = protectRollbackBackup ? 0 : await cleanupStaleDistArtifacts(projectRoot);
 if (cleaned > 0) console.log(`[Pi Chat] 已清理 ${cleaned} 个残留的 dist 暂存/备份目录。`);
 const buildIdentity = await loadBuildIdentity(runtimeDist);
+const runEpoch = randomBytes(16).toString("base64url");
+const diagnostics = await createIncidentDiagnostics({
+  runEpoch,
+  revision: buildIdentity.revision !== "unknown"
+    ? buildIdentity.revision
+    : buildIdentity.fingerprint.slice(0, 12),
+});
+diagnostics.record({
+  runtimeKind: "host",
+  operation: "host.start",
+  lifecycle: "idle",
+  outcome: "started",
+});
 const agentDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 const gateComponent = await ensurePiChatSystemGate({
   agentDir,
@@ -87,12 +105,21 @@ if (gateComponent.status === "repaired") console.log("[Pi Chat] 已修复内置�
 if (gateComponent.status === "conflict" || gateComponent.status === "source-missing") {
   throw new Error(`[Pi Chat] ${gateComponent.diagnostic || "内置文件权限安全执行组件不可用。"}`);
 }
-const rpc = new PiRpcClient({ cwd: options.cwd });
+let lifecycleForDiagnostics: import("../shared/types.js").ApplicationLifecycle = "idle";
+const rpc = new PiRpcClient({
+  cwd: options.cwd,
+  diagnostics,
+  runtimeKind: "primary",
+  lifecycle: () => lifecycleForDiagnostics,
+});
 
 // Session/JSONL browsing starts independently. This controller is the sole
 // owner of Primary start/restart plus compatibility verification. Its App-side
 // adoption barrier is installed below before start() can publish ready.
-const primaryRuntime = new PrimaryRuntimeReadinessController(rpc);
+const primaryRuntime = new PrimaryRuntimeReadinessController(rpc, {
+  diagnostics,
+  lifecycle: () => lifecycleForDiagnostics,
+});
 
 let vite: Awaited<ReturnType<typeof import("vite")["createServer"]>> | undefined;
 if (options.dev) {
@@ -156,7 +183,12 @@ const app = new PiChatApp({
   // Session's process to another Session.
   maxSecondaryRuntimes: 4,
   maxIdleSecondaryRuntimes: 4,
-  createRpc: (cwd) => new PiRpcClient({ cwd }),
+  createRpc: (cwd) => new PiRpcClient({
+    cwd,
+    diagnostics,
+    runtimeKind: "secondary",
+    lifecycle: () => lifecycleForDiagnostics,
+  }),
   sessions: new SessionIndex(),
   resources: new ResourceManager(),
   modelManager: new ModelManager(),
@@ -176,10 +208,22 @@ const app = new PiChatApp({
   ), 0),
   primaryRuntime,
   buildIdentity,
+  runEpoch,
+  diagnostics,
 });
 console.log("[Pi Chat] 正在准备 Pi Runtime…");
 const primaryStartup = primaryRuntime.start();
-void primaryStartup.then(() => console.log("[Pi Chat] Pi Runtime 已就绪。")).catch((cause) => {
+void primaryStartup.then(() => {
+  console.log("[Pi Chat] Pi Runtime 已就绪。");
+  diagnostics.record({
+    runtimeKind: "primary",
+    rpcGeneration: rpc.currentGeneration(),
+    childPid: rpc.currentPid() || undefined,
+    operation: "host.ready",
+    lifecycle: "idle",
+    outcome: "succeeded",
+  });
+}).catch((cause) => {
   const error = cause instanceof Error ? cause : new Error(String(cause));
   console.error(`[Pi Chat] Pi Runtime 暂不可用：${error.message}`);
 });
@@ -224,6 +268,9 @@ function closeHttpServer(): Promise<void> {
 function shutdown(reason: ShutdownReason): Promise<void> {
   if (shutdownPromise) return shutdownPromise;
   console.log(`\n[Pi Chat] 正在关闭（reason=${reason}）…`);
+  lifecycleForDiagnostics = reason === "restart-handoff"
+    ? "restarting"
+    : "shutting-down";
   shutdownPromise = (async () => {
     const errors: Error[] = [];
     const requiredStop = async (name: string, action: () => Promise<void>) => {
@@ -247,9 +294,27 @@ function shutdown(reason: ShutdownReason): Promise<void> {
     // If shutdown races initial spawn, wait for it before the final stop.
     await primaryStartup.catch(() => undefined);
     await requiredStop("Primary Pi RPC", () => rpc.stop());
-    if (errors.length === 1) throw errors[0];
-    if (errors.length > 1)
-      throw new AggregateError(errors, "一个或多个 Pi RPC 进程退出无法确认");
+    if (errors.length) {
+      const failure = errors.length === 1
+        ? errors[0]
+        : new AggregateError(errors, "一个或多个 Pi RPC 进程退出无法确认");
+      recordIncident(diagnostics, failure, {
+        runtimeKind: "host",
+        operation: "host.shutdown",
+        lifecycle: lifecycleForDiagnostics,
+        outcome: "failed",
+        errorCode: "HOST_SHUTDOWN_FAILED",
+      });
+      await diagnostics.flush();
+      throw failure;
+    }
+    diagnostics.record({
+      runtimeKind: "host",
+      operation: "host.shutdown",
+      lifecycle: lifecycleForDiagnostics,
+      outcome: "succeeded",
+    });
+    await diagnostics.close();
   })();
   return shutdownPromise;
 }

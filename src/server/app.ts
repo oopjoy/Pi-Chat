@@ -67,6 +67,15 @@ import {
 } from "./operation-admission.js";
 import { ResourceManager } from "./resource-manager.js";
 import {
+  incidentErrorCode,
+  incidentReference,
+  recordIncident,
+  type IncidentControlState,
+  type IncidentDiagnostics,
+  type IncidentFields,
+  type IncidentOperation,
+} from "./incident-diagnostics.js";
+import {
   PiRpcClient,
   RpcFrameTooLargeError,
   RpcRequestTimeoutError,
@@ -234,6 +243,9 @@ export interface PiChatAppOptions {
   requestToken?: string;
   /** Identity shared by this Node process and the Web bundle in its runtime dist. */
   buildIdentity?: BuildIdentity;
+  /** Process-wide incident identity shared with RPC and the private JSONL sink. */
+  runEpoch?: string;
+  diagnostics?: IncidentDiagnostics;
   /** Build a staged replacement; PiChatApp promotes it only after its second quiescence check. */
   applicationRestart?: () => Promise<PreparedApplicationRestart>;
   /** Gracefully terminate the entire Pi Chat service process after explicit user intent. */
@@ -353,13 +365,15 @@ export class PiChatApp {
   private readonly contextUsageRefreshTurn = new Set<string>();
   /** Short, Session-scoped reason retained only while an owned Runtime is failed. */
   private readonly runtimeFailureReasonsBySession = new Map<string, string>();
+  /** Same metadata-only incident ID shown in the Sidebar and private JSONL. */
+  private readonly runtimeIncidentIdsBySession = new Map<string, string>();
   /** Fresh accepted prompts win over JSONL mtime while a Runtime is alive. */
   private readonly lastUserPromptAtBySession = new Map<string, number>();
   /** Preserve arrival order even when two local requests share one Date.now() millisecond. */
   private lastPromptOrderAt = 0;
   /** Authoritative mode of the bundled Gate extension in the Primary Runtime. */
   private primaryGateMode: GateMode = "strict";
-  private readonly runEpoch = randomBytes(16).toString("base64url");
+  private readonly runEpoch: string;
   private readonly runGenerationsBySession = new Map<string, number>();
   /** Session preference survives Runtime reclaim, but never outlives the Pi Chat process. */
   private readonly gateModesBySession = new Map<string, GateMode>();
@@ -423,6 +437,7 @@ export class PiChatApp {
   }
 
   constructor(private readonly options: PiChatAppOptions) {
+    this.runEpoch = options.runEpoch || randomBytes(16).toString("base64url");
     this.currentCwd = resolve(options.cwd);
     this.primaryRuntimeCwd = this.currentCwd;
     this.startupModels = this.readStartupModels();
@@ -837,8 +852,60 @@ export class PiChatApp {
     return this.scheduler.publicQueue(queue);
   }
 
+  private incidentControlState(
+    sessionId: string,
+    clientId = "",
+  ): IncidentControlState {
+    if (!clientId) return "no-browser-identity";
+    const owner = this.sessionControllers.get(sessionId);
+    if (!owner) return "unowned";
+    if (owner === clientId) return "owned-by-this-window";
+    return this.sessionControl.isClientPresent(owner)
+      ? "owned-by-other-present-window"
+      : "owned-by-stale-window";
+  }
+
+  private reportIncident(
+    error: unknown,
+    input: Omit<IncidentFields, "lifecycle"> & {
+      lifecycle?: ApplicationLifecycle;
+    },
+  ) {
+    return recordIncident(this.options.diagnostics, error, {
+      ...input,
+      lifecycle: input.lifecycle || this.applicationLifecycle,
+    });
+  }
+
+  private operationForRequest(request: IncomingMessage): IncidentOperation {
+    const pathname = new URL(request.url || "/", "http://127.0.0.1").pathname;
+    if (pathname.startsWith("/api/bootstrap")) return "navigation.bootstrap";
+    if (/^\/api\/sessions\/[^/]+$/.test(pathname)) return "navigation.session-view";
+    if (pathname === "/api/restart") return "lifecycle.restart";
+    if (pathname === "/api/shutdown") return "lifecycle.shutdown";
+    if (pathname === "/api/chat/prompt") return "prompt.send";
+    if (pathname === "/api/chat/abort") return "prompt.abort";
+    if (pathname === "/api/extension/respond") return "extension.respond";
+    if (/^\/api\/sessions\/[^/]+\/control$/.test(pathname)) return "control.takeover";
+    return "navigation.request";
+  }
+
+  private sessionIdForRequest(request: IncomingMessage): string {
+    const admitted = (request as IncomingMessage & {
+      piChatDiagnosticSessionId?: unknown;
+    }).piChatDiagnosticSessionId;
+    if (typeof admitted === "string" && admitted) return admitted;
+    const pathname = new URL(request.url || "/", "http://127.0.0.1").pathname;
+    const match = pathname.match(/^\/api\/sessions\/([a-f0-9-]{16,64})(?:\/|$)/i);
+    return match?.[1] || "";
+  }
+
   /** Keep failed-runtime diagnostics useful in the sidebar without leaking an unbounded raw transport payload. */
-  private recordRuntimeFailure(sessionId: string, error: unknown): void {
+  private recordRuntimeFailure(
+    sessionId: string,
+    error: unknown,
+    incidentIdValue?: string,
+  ): void {
     if (!sessionId) return;
     const raw =
       error instanceof Error
@@ -848,10 +915,14 @@ export class PiChatApp {
           : "";
     const message = raw.replace(/[\r\n\t]+/g, " ").replace(/\s{2,}/g, " ").trim();
     if (message) this.runtimeFailureReasonsBySession.set(sessionId, message.slice(0, 280));
+    const incidentId = incidentIdValue || incidentReference(error)?.incidentId;
+    if (incidentId) this.runtimeIncidentIdsBySession.set(sessionId, incidentId);
   }
 
   private clearRuntimeFailure(sessionId: string): void {
-    if (sessionId) this.runtimeFailureReasonsBySession.delete(sessionId);
+    if (!sessionId) return;
+    this.runtimeFailureReasonsBySession.delete(sessionId);
+    this.runtimeIncidentIdsBySession.delete(sessionId);
   }
 
   /** Events are authoritative over a hot-memory get_state snapshot that may lag compaction lifecycle frames. */
@@ -888,8 +959,12 @@ export class PiChatApp {
     const failureReason = failed
       ? this.runtimeFailureReasonsBySession.get(sessionId)
       : undefined;
+    const failureIncidentId = failed
+      ? this.runtimeIncidentIdsBySession.get(sessionId)
+      : undefined;
     return {
       ...(failureReason ? { error: failureReason } : null),
+      ...(failureIncidentId ? { incidentId: failureIncidentId } : null),
       // `dispatching` also covers the post-settlement FIFO get_state barrier,
       // That barrier keeps restart/shutdown safe, but with no queued turn it is
       // not visible conversation work and must not leave a blue sidebar ring.
@@ -1544,7 +1619,11 @@ export class PiChatApp {
     const generation = runtime.rpcGeneration;
     let droppedNativeSteering = 0;
     if (type === "pi_chat_process_error") {
-      this.recordRuntimeFailure(runtime.id, event.error);
+      this.recordRuntimeFailure(
+        runtime.id,
+        event.error,
+        typeof event.incidentId === "string" ? event.incidentId : undefined,
+      );
       droppedNativeSteering = this.clearNativeSteeringState(
         runtime.id,
         "process-error",
@@ -1686,12 +1765,24 @@ export class PiChatApp {
       runtime.failed = true;
       runtime.queuePaused = runtime.promptQueue.length > 0;
       const message = `Pi 结算同步失败：${error instanceof Error ? error.message : String(error)}`;
-      this.recordRuntimeFailure(runtime.id, message);
+      const incident = this.reportIncident(error, {
+        sessionId: runtime.id,
+        runtimeKind: "secondary",
+        rpcGeneration: runtime.rpcGeneration,
+        childPid: runtime.rpc.currentPid?.() || undefined,
+        operation: "runtime.settlement",
+        queueLength: runtime.promptQueue.length,
+        outcome: "failed",
+        errorCode: "SETTLEMENT_SYNC_FAILED",
+      });
+      this.recordRuntimeFailure(runtime.id, message, incident.incidentId);
       this.broadcastQueue(runtime.id);
       this.broadcast({
         type: "pi_chat_process_error",
         piChatSessionId: runtime.id,
         error: message,
+        errorCode: "SETTLEMENT_SYNC_FAILED",
+        incidentId: incident.incidentId,
         ...(error instanceof NativeSteeringResetError
           ? { nativeSteeringDroppedCount: error.droppedCount }
           : null),
@@ -1750,12 +1841,24 @@ export class PiChatApp {
       this.primaryFailed = true;
       this.queuePaused = this.promptQueue.length > 0;
       const message = `Pi 结算同步失败：${error instanceof Error ? error.message : String(error)}`;
-      this.recordRuntimeFailure(sessionId, message);
+      const incident = this.reportIncident(error, {
+        sessionId,
+        runtimeKind: "primary",
+        rpcGeneration: sourceGeneration,
+        childPid: this.options.rpc.currentPid?.() || undefined,
+        operation: "runtime.settlement",
+        queueLength: this.promptQueue.length,
+        outcome: "failed",
+        errorCode: "SETTLEMENT_SYNC_FAILED",
+      });
+      this.recordRuntimeFailure(sessionId, message, incident.incidentId);
       this.broadcastQueue();
       this.broadcast({
         type: "pi_chat_process_error",
         piChatSessionId: sessionId,
         error: message,
+        errorCode: "SETTLEMENT_SYNC_FAILED",
+        incidentId: incident.incidentId,
         ...(error instanceof NativeSteeringResetError
           ? { nativeSteeringDroppedCount: error.droppedCount }
           : null),
@@ -1793,7 +1896,22 @@ export class PiChatApp {
     // process. Drop the stale bookkeeping so the recovered worker's settlement
     // cannot mistake it for a live leftover and reset itself again.
     this.clearNativeSteeringState(runtime.id, "recovery");
-    await this.runtimePool.recover(runtime);
+    try {
+      await this.runtimePool.recover(runtime);
+    } catch (error) {
+      const incident = this.reportIncident(error, {
+        sessionId: runtime.id,
+        runtimeKind: "secondary",
+        rpcGeneration: runtime.rpcGeneration,
+        childPid: runtime.rpc.currentPid?.() || undefined,
+        operation: "runtime.recovery",
+        queueLength: runtime.promptQueue.length,
+        outcome: "failed",
+        errorCode: "RUNTIME_RECOVERY_FAILED",
+      });
+      this.recordRuntimeFailure(runtime.id, error, incident.incidentId);
+      throw error;
+    }
     this.clearRuntimeFailure(runtime.id);
     this.broadcastQueue(runtime.id);
     this.broadcastSessionActivity(runtime.id);
@@ -1953,7 +2071,7 @@ export class PiChatApp {
       // bound it to a Session. Readiness must reflect that failure even though
       // no Session-scoped transition or SSE frame can yet be attributed. A
       // source-tagged late event from a replaced child cannot fail its successor.
-      this.options.primaryRuntime?.markFailed(event.error || "Pi RPC 已退出");
+      this.options.primaryRuntime?.markFailed(event);
     }
     if (
       !this.primaryBoundSessionId ||
@@ -1965,7 +2083,11 @@ export class PiChatApp {
     const generation = this.primaryRpcGeneration;
     let droppedNativeSteering = 0;
     if (type === "pi_chat_process_error") {
-      this.recordRuntimeFailure(sessionId, event.error);
+      this.recordRuntimeFailure(
+        sessionId,
+        event.error,
+        typeof event.incidentId === "string" ? event.incidentId : undefined,
+      );
       droppedNativeSteering = this.clearNativeSteeringState(
         sessionId,
         "process-error",
@@ -2145,6 +2267,7 @@ export class PiChatApp {
           // resolves. Never issue a second get_state here: that recreated the
           // split authority where SSE said ready while App was still adopting.
           if (primaryRuntime) {
+            this.options.rpc.setDiagnosticSessionId?.(this.activeSessionId);
             await primaryRuntime.recover(
               this.activeSessionPath || undefined,
               this.primaryRuntimeCwd,
@@ -2214,6 +2337,7 @@ export class PiChatApp {
     this.activeSessionId = sessionId;
     this.activeSessionPath = state.sessionFile || this.activeSessionPath;
     this.primaryBoundSessionId = sessionId;
+    this.options.rpc.setDiagnosticSessionId?.(sessionId);
     this.primaryRpcGeneration = this.options.rpc.currentGeneration?.() || 0;
   }
 
@@ -2599,6 +2723,9 @@ export class PiChatApp {
     if (cwd !== this.primaryRuntimeCwd)
       throw new Error("Primary Runtime 工作目录不可在原进程上重绑定");
     if (this.options.primaryRuntime) {
+      this.options.rpc.setDiagnosticSessionId?.(
+        sessionFile ? idForPath(sessionFile) : this.activeSessionId,
+      );
       await this.options.primaryRuntime.recover(sessionFile, cwd);
       // The production controller exposes setAdopter(). Test/embedding bridges
       // may implement the optional method without installing an adopter, so
@@ -3607,7 +3734,48 @@ export class PiChatApp {
       }
       await this.serveStatic(request, response, url.pathname);
     } catch (error) {
+      const clientId = requestClientId(request);
+      const pageId = requestPageId(request);
+      const sessionId = this.sessionIdForRequest(request);
+      const operation = this.operationForRequest(request);
+      const runtime = sessionId ? this.runtimePool.get(sessionId) : undefined;
+      const runtimeKind = sessionId
+        ? runtime
+          ? "secondary"
+          : sessionId === this.activeSessionId
+            ? "primary"
+            : undefined
+        : undefined;
+      const queueLength = runtime
+        ? runtime.promptQueue.length
+        : runtimeKind === "primary"
+          ? this.promptQueue.length
+          : undefined;
+      const rpcGeneration = runtime?.rpcGeneration
+        || (runtimeKind === "primary" ? this.primaryRpcGeneration : undefined);
+      const childPid = runtime?.rpc.currentPid?.()
+        || (runtimeKind === "primary" ? this.options.rpc.currentPid?.() : undefined)
+        || undefined;
+      const report = (
+        outcome: import("./incident-diagnostics.js").IncidentOutcome,
+        errorCode: string,
+      ) => this.reportIncident(error, {
+        sessionId,
+        browserId: clientId,
+        pageId,
+        runtimeKind,
+        rpcGeneration,
+        childPid,
+        operation,
+        queueLength,
+        controlState: sessionId
+          ? this.incidentControlState(sessionId, clientId)
+          : "no-browser-identity",
+        outcome,
+        errorCode,
+      });
       if (error instanceof ApplicationLifecycleConflictError) {
+        const incident = report("rejected", "APPLICATION_LIFECYCLE_BLOCKED");
         response.setHeader("retry-after", "2");
         const isBootstrap =
           new URL(request.url || "/", "http://127.0.0.1").pathname ===
@@ -3617,34 +3785,79 @@ export class PiChatApp {
           code: "APPLICATION_LIFECYCLE_BLOCKED",
           lifecycle: error.lifecycle,
           retryable: true,
+          incidentId: incident.incidentId,
           ...(isBootstrap ? { requestToken: this.requestToken } : {}),
         });
       }
-      if (error instanceof ApplicationBusyError)
+      if (error instanceof ApplicationBusyError) {
+        const incident = report("rejected", "APPLICATION_BUSY");
         return json(response, 409, {
           error: error.message,
           code: "APPLICATION_BUSY",
+          incidentId: incident.incidentId,
         });
-      if (error instanceof PrimaryRuntimeUnavailableError)
+      }
+      if (error instanceof PrimaryRuntimeUnavailableError) {
+        const existing = incidentReference(error.readiness);
+        const incident = existing || report("failed", "PRIMARY_RUNTIME_UNAVAILABLE");
         return json(response, 503, {
           error: error.message,
-          code: "PRIMARY_RUNTIME_UNAVAILABLE",
+          code: incidentErrorCode(error) || "PRIMARY_RUNTIME_UNAVAILABLE",
+          incidentId: incident.incidentId,
           primaryRuntime: error.readiness,
         });
-      if (
-        error instanceof SessionControlConflictError ||
-        error instanceof RuntimeCapacityError ||
-        error instanceof OperationAdmissionClosedError
-      )
-        return json(response, 409, { error: error.message });
-      if (error instanceof HttpRequestError || error instanceof RpcFrameTooLargeError)
-        return json(response, error.status, { error: error.message });
+      }
+      if (error instanceof SessionControlConflictError) {
+        const incident = report("rejected", "SESSION_CONTROL_CONFLICT");
+        return json(response, 409, {
+          error: error.message,
+          code: "SESSION_CONTROL_CONFLICT",
+          incidentId: incident.incidentId,
+        });
+      }
+      if (error instanceof RuntimeCapacityError) {
+        const incident = report("rejected", "RUNTIME_CAPACITY_EXHAUSTED");
+        return json(response, 409, {
+          error: error.message,
+          code: "RUNTIME_CAPACITY_EXHAUSTED",
+          incidentId: incident.incidentId,
+        });
+      }
+      if (error instanceof OperationAdmissionClosedError) {
+        const incident = report("rejected", "OPERATION_ADMISSION_CLOSED");
+        return json(response, 409, {
+          error: error.message,
+          code: "OPERATION_ADMISSION_CLOSED",
+          incidentId: incident.incidentId,
+        });
+      }
+      if (error instanceof HttpRequestError) {
+        const incident = report("rejected", "HTTP_REQUEST_REJECTED");
+        return json(response, error.status, {
+          error: error.message,
+          code: "HTTP_REQUEST_REJECTED",
+          incidentId: incident.incidentId,
+        });
+      }
+      if (error instanceof RpcFrameTooLargeError) {
+        const incident = report("oversized", error.code);
+        return json(response, error.status, {
+          error: error.message,
+          code: error.code,
+          incidentId: incident.incidentId,
+        });
+      }
       if (response.headersSent) {
         response.end();
         return;
       }
+      const incident = report("failed", "UNEXPECTED_SERVER_ERROR");
       const message = error instanceof Error ? error.message : String(error);
-      json(response, 500, { error: message });
+      json(response, 500, {
+        error: message,
+        code: "UNEXPECTED_SERVER_ERROR",
+        incidentId: incident.incidentId,
+      });
     }
   }
 
@@ -3659,7 +3872,13 @@ export class PiChatApp {
     const admission = apiRouteAdmission(request, url);
     if (admission.bodyBeforeMutationLease) {
       const body = await bodyJson(request, admission.bodyLimit);
-      if (admission.validateSessionId) requiredSessionId(body);
+      if (admission.validateSessionId) {
+        const sessionId = requiredSessionId(body);
+        Object.defineProperty(request, "piChatDiagnosticSessionId", {
+          configurable: true,
+          value: sessionId,
+        });
+      }
       const releaseMutation = this.beginMutation();
       try {
         await this.handleApiCore(request, response, url, body);

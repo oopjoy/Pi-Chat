@@ -10,6 +10,8 @@ export interface SessionActivityState {
   awaitingConfirmation: boolean;
   /** Short runtime diagnostic retained while this Session remains failed. */
   error?: string;
+  /** Local metadata-only incident record shown to the user for support correlation. */
+  incidentId?: string;
 }
 
 export interface SessionDirectorySummary {
@@ -233,6 +235,8 @@ export interface PrimaryRuntimeReadiness {
   status: PrimaryRuntimeStatus;
   /** Safe diagnostic for UI; never a stack trace or raw transport payload. */
   error?: string;
+  /** Correlates this failure with the private local incident JSONL. */
+  incidentId?: string;
   /** Monotonic controller generation; guards later retry/recovery transitions. */
   generation: number;
   /**

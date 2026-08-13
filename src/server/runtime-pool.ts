@@ -417,6 +417,7 @@ export class RuntimePool {
         pendingTurnSettings: {},
         gateMode: "strict",
       };
+      rpc.setDiagnosticSessionId?.(id);
       runtime.unsubscribe = rpc.onEvent((event, source) => this.options.onSecondaryEvent(runtime, event, source));
       try {
         const startResult = await rpc.start(["--session", path]);
@@ -650,6 +651,7 @@ export class RuntimePool {
         runtime.lastState = state;
         if (!state.sessionFile) throw new Error("Pi 未返回新会话文件");
         runtime.id = idForPath(state.sessionFile);
+        reservedRpc.setDiagnosticSessionId?.(runtime.id);
         runtime.sessionPath = state.sessionFile;
         runtime.draftSessionPath = state.sessionFile;
         runtime.draftSession = {

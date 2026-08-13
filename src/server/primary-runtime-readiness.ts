@@ -1,5 +1,11 @@
 import type { PiState, PrimaryRuntimeReadiness } from "../shared/types.js";
 import { RpcRequestTimeoutError, rpcData, type PiRpcClient } from "./rpc-client.js";
+import {
+  attachIncidentReference,
+  incidentReference,
+  recordIncident,
+  type IncidentDiagnostics,
+} from "./incident-diagnostics.js";
 
 export class PrimaryRuntimeUnavailableError extends Error {
   constructor(readonly readiness: PrimaryRuntimeReadiness) {
@@ -41,13 +47,22 @@ export interface PrimaryRuntimeReadinessBridge {
  * Sole owner of Primary spawn/restart + protocol verification. A running child
  * is not writable until compatibility has passed; every recovery repeats probe.
  */
+export interface PrimaryRuntimeReadinessOptions {
+  diagnostics?: IncidentDiagnostics;
+  lifecycle?: () => import("../shared/types.js").ApplicationLifecycle;
+}
+
 export class PrimaryRuntimeReadinessController implements PrimaryRuntimeReadinessBridge {
   private readiness: PrimaryRuntimeReadiness = { status: "starting", generation: 0 };
   private operation: Promise<void> | null = null;
   private adopter: PrimaryRuntimeAdopter | null = null;
   private readonly listeners = new Set<(readiness: PrimaryRuntimeReadiness) => void>();
 
-  constructor(private readonly rpc: Pick<PiRpcClient, "start" | "restart" | "stop" | "probeCompatibility">) {}
+  constructor(
+    private readonly rpc: Pick<PiRpcClient, "start" | "restart" | "stop" | "probeCompatibility">
+      & Partial<Pick<PiRpcClient, "currentGeneration" | "currentPid">>,
+    private readonly options: PrimaryRuntimeReadinessOptions = {},
+  ) {}
 
   setAdopter(adopter: PrimaryRuntimeAdopter): void {
     if (this.operation) throw new Error("Primary Runtime 启动期间不能更换采用器");
@@ -66,14 +81,38 @@ export class PrimaryRuntimeReadinessController implements PrimaryRuntimeReadines
   recover(sessionFile?: string, cwd?: string): Promise<void> { return this.begin(true, sessionFile, cwd); }
 
   markFailed(cause: unknown): void {
-    const error = cause instanceof Error ? cause.message : String(cause);
+    const error = cause instanceof Error
+      ? cause.message
+      : cause && typeof cause === "object" && typeof (cause as Record<string, unknown>).error === "string"
+        ? String((cause as Record<string, unknown>).error)
+        : String(cause);
     // A replacement/recovery owns the newer state. Do not let an exit event
     // from the child it is replacing overwrite its starting projection.
     if (this.readiness.status === "starting") return;
     // A live-child failure is a later state transition than the successful
     // probe. Give it a new generation so a delayed ready bootstrap cannot
     // repaint the browser with the old generation's capability.
-    this.publish({ status: "failed", error, generation: this.readiness.generation + 1 });
+    const incident = incidentReference(cause) || recordIncident(
+      this.options.diagnostics,
+      cause,
+      {
+        runtimeKind: "primary",
+        rpcGeneration: this.rpc.currentGeneration?.() || undefined,
+        childPid: this.rpc.currentPid?.() || undefined,
+        operation: "runtime.recovery",
+        lifecycle: this.options.lifecycle?.() || "idle",
+        outcome: "failed",
+        errorCode: "PRIMARY_RUNTIME_UNAVAILABLE",
+      },
+    );
+    const failed: PrimaryRuntimeReadiness = {
+      status: "failed",
+      error,
+      incidentId: incident.incidentId,
+      generation: this.readiness.generation + 1,
+    };
+    attachIncidentReference(failed, incident, "PRIMARY_RUNTIME_UNAVAILABLE");
+    this.publish(failed);
   }
 
   async waitUntilReady(): Promise<void> {
@@ -143,7 +182,27 @@ export class PrimaryRuntimeReadinessController implements PrimaryRuntimeReadines
         }
       }
       const error = lastCause instanceof Error ? lastCause.message : String(lastCause);
-      this.publish({ status: "failed", error, generation });
+      const incident = incidentReference(lastCause) || recordIncident(
+        this.options.diagnostics,
+        lastCause,
+        {
+          runtimeKind: "primary",
+          rpcGeneration: this.rpc.currentGeneration?.() || undefined,
+          childPid: this.rpc.currentPid?.() || undefined,
+          operation: "runtime.start",
+          lifecycle: this.options.lifecycle?.() || "idle",
+          outcome: "failed",
+          errorCode: "PRIMARY_RUNTIME_UNAVAILABLE",
+        },
+      );
+      const failed: PrimaryRuntimeReadiness = {
+        status: "failed",
+        error,
+        incidentId: incident.incidentId,
+        generation,
+      };
+      attachIncidentReference(failed, incident, "PRIMARY_RUNTIME_UNAVAILABLE");
+      this.publish(failed);
       throw new PrimaryRuntimeUnavailableError(this.readiness);
     })();
     this.operation = operation;

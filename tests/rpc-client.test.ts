@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import { MAX_RPC_INBOUND_LINE_BYTES, MAX_RPC_OUTBOUND_LINE_BYTES } from "../src/shared/rpc-contracts";
+import type { IncidentDiagnostics, IncidentFields } from "../src/server/incident-diagnostics";
 import {
   PiRpcClient,
   RpcFrameTooLargeError,
@@ -13,6 +14,25 @@ import {
 } from "../src/server/rpc-client";
 
 const piEntry = resolvePiEntry();
+
+function incidentCollector() {
+  const records: Array<IncidentFields & { incidentId: string }> = [];
+  const diagnostics: IncidentDiagnostics = {
+    directory: null,
+    hostId: "test-host",
+    hashSession: () => "session-hash",
+    hashBrowser: () => "browser-hash",
+    hashPage: () => "page-hash",
+    record: (fields) => {
+      const incidentId = `PC-TEST${String(records.length).padStart(4, "0")}`;
+      records.push({ ...fields, incidentId });
+      return { incidentId };
+    },
+    async flush() {},
+    async close() {},
+  };
+  return { records, diagnostics };
+}
 
 test("RPC compatibility probe reports missing required capabilities", async () => {
   const client = new PiRpcClient({ cwd: process.cwd() });
@@ -67,7 +87,13 @@ test("deliberate stop rejects pending requests immediately instead of leaking ti
 
 test("an unexpected child exit reports a written mutation as outcome unknown", async () => {
   const { child } = fakeChild();
-  const client = new PiRpcClient({ cwd: process.cwd() });
+  const incidents = incidentCollector();
+  const client = new PiRpcClient({
+    cwd: process.cwd(),
+    diagnostics: incidents.diagnostics,
+    runtimeKind: "primary",
+    sessionId: () => "canonical-session",
+  });
   const source = { generation: 3, child, stderrTail: "" };
   const internals = client as unknown as {
     child: typeof child | null;
@@ -82,8 +108,13 @@ test("an unexpected child exit reports a written mutation as outcome unknown", a
     pending,
     (error) => error instanceof RpcRequestTimeoutError
       && error.requestType === "never_answers"
-      && error.outcomeUnknown,
+      && error.outcomeUnknown
+      && /^PC-/.test((error as RpcRequestTimeoutError & { incidentId?: string }).incidentId || ""),
   );
+  assert.equal(incidents.records.length, 1);
+  assert.equal(incidents.records[0].operation, "rpc.child-exit");
+  assert.equal(incidents.records[0].sessionId, "canonical-session");
+  assert.equal(incidents.records[0].rpcGeneration, 3);
 });
 
 test("RPC rejects an oversized outbound frame before writing it", async () => {
@@ -101,14 +132,26 @@ test("RPC rejects an oversized outbound frame before writing it", async () => {
 
 test("RPC reports a written mutation timeout as outcome unknown", async () => {
   const { child } = fakeChild();
-  const client = new PiRpcClient({ cwd: process.cwd() });
+  const incidents = incidentCollector();
+  const client = new PiRpcClient({
+    cwd: process.cwd(),
+    diagnostics: incidents.diagnostics,
+    runtimeKind: "primary",
+    sessionId: () => "session-secret",
+  });
   Object.assign(client, { child });
   await assert.rejects(
     client.send({ type: "abort" }, 5),
     (error) => error instanceof RpcRequestTimeoutError
       && error.requestType === "abort"
-      && error.outcome === "written-outcome-unknown",
+      && error.outcome === "written-outcome-unknown"
+      && /^PC-/.test((error as RpcRequestTimeoutError & { incidentId?: string }).incidentId || ""),
   );
+  assert.equal(incidents.records.length, 1);
+  assert.equal(incidents.records[0].operation, "rpc.abort");
+  assert.equal(incidents.records[0].outcome, "written-outcome-unknown");
+  assert.equal(incidents.records[0].errorCode, "PI_RPC_REQUEST_TIMEOUT");
+  assert.equal(incidents.records[0].sessionId, "session-secret");
 });
 
 test("a synchronous stdin rejection remains definitely not written", async () => {
@@ -141,11 +184,17 @@ test("an asynchronous stdin failure after write returns is outcome unknown", asy
 test("an oversized inbound line retains child ownership until exit is proved", async () => {
   const stream = new PassThrough();
   const { child } = fakeChild();
+  const incidents = incidentCollector();
   child.kill = () => {
     child.killed = true;
     return true;
   };
-  const client = new PiRpcClient({ cwd: process.cwd() });
+  const client = new PiRpcClient({
+    cwd: process.cwd(),
+    diagnostics: incidents.diagnostics,
+    runtimeKind: "secondary",
+    sessionId: () => "session-secret",
+  });
   const events: Record<string, unknown>[] = [];
   client.onEvent((event) => events.push(event));
   const source = { generation: 1, child, stderrTail: "" };
@@ -163,6 +212,10 @@ test("an oversized inbound line retains child ownership until exit is proved", a
   assert.equal(internals.unconfirmedChild, child);
   assert.equal(child.killed, true);
   assert.match(String(events[0]?.error), /stdout.*安全上限/);
+  assert.match(String(events[0]?.incidentId), /^PC-/);
+  assert.equal(incidents.records[0].operation, "rpc.stdout-frame");
+  assert.equal(incidents.records[0].outcome, "oversized");
+  assert.equal(incidents.records[0].rpcGeneration, 1);
   await assert.rejects(
     client.start(),
     /未确认退出/,
@@ -372,10 +425,12 @@ test("process-exit fanout isolates synchronous and asynchronous listeners", asyn
     );
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(internals.child, null);
-    assert.deepEqual(received, [{
-      event: { type: "pi_chat_process_error", error: "child exited" },
-      generation: 7,
-    }]);
+    assert.equal(received.length, 1);
+    assert.equal(received[0].generation, 7);
+    assert.equal(received[0].event.type, "pi_chat_process_error");
+    assert.equal(received[0].event.error, "child exited");
+    assert.equal(received[0].event.errorCode, "RPC_CHILD_EXIT");
+    assert.match(String(received[0].event.incidentId), /^PC-/);
     assert.equal(errors.length, 2, "both faulty listeners are contained and logged");
   } finally {
     console.error = originalConsoleError;

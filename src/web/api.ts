@@ -21,9 +21,20 @@ let handshakeInFlight: Promise<BootstrapHandshakeData> | null = null;
 // from the old process remain uncancelled, so token writes are generation-scoped.
 let connectionGeneration = 0;
 
+function incidentMessage(message: string, incidentId: unknown): string {
+  return typeof incidentId === "string" && /^PC-[A-Z0-9_-]{8}$/.test(incidentId)
+    ? `${message}（事件 ID：${incidentId}）`
+    : message;
+}
+
 export class ApiRequestError extends Error {
-  constructor(message: string, readonly status: number, readonly code?: string) {
-    super(message);
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code?: string,
+    readonly incidentId?: string,
+  ) {
+    super(incidentMessage(message, incidentId));
     this.name = "ApiRequestError";
   }
 }
@@ -121,12 +132,18 @@ async function request<T>(
     }
     throw cause;
   }
-  const value = await response.json().catch(() => ({})) as T & { error?: string; requestToken?: string; code?: string };
+  const value = await response.json().catch(() => ({})) as T & { error?: string; requestToken?: string; code?: string; incidentId?: string };
   // A maintenance-state bootstrap may return 503 while still granting the
   // guarded startup token required to subscribe to lifecycle SSE.
   if (acceptResponseToken && requestGeneration === connectionGeneration)
     storeRequestToken(value.requestToken);
-  if (!response.ok) throw new ApiRequestError(value.error || `请求失败：${response.status}`, response.status, value.code);
+  if (!response.ok)
+    throw new ApiRequestError(
+      value.error || `请求失败：${response.status}`,
+      response.status,
+      value.code,
+      value.incidentId,
+    );
   return value;
 }
 

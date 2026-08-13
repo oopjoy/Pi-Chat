@@ -2887,7 +2887,15 @@ export function App() {
               ),
             pendingUserMessage: null,
           });
-          setError(String(event.error || "队列消息发送失败"));
+          const message = String(event.error || "队列消息发送失败");
+          const incidentId =
+            typeof event.incidentId === "string" &&
+            /^PC-[A-Z0-9_-]{8}$/.test(event.incidentId)
+              ? event.incidentId
+              : "";
+          setError(
+            incidentId ? `${message}（事件 ID：${incidentId}）` : message,
+          );
         }
       } else if (type === "extension_ui_request") {
         const request = event as unknown as ExtensionUiRequest;
@@ -3077,10 +3085,20 @@ export function App() {
           setFailedSessionIds((current) => [
             ...new Set([...current, eventSessionId]),
           ]);
-          const error =
+          const errorText =
             typeof event.error === "string" && event.error.trim()
               ? event.error.trim()
               : undefined;
+          const incidentId =
+            typeof event.incidentId === "string" &&
+            /^PC-[A-Z0-9_-]{8}$/.test(event.incidentId)
+              ? event.incidentId
+              : undefined;
+          const error = errorText
+            ? incidentId
+              ? `${errorText}（事件 ID：${incidentId}）`
+              : errorText
+            : undefined;
           const activity: SessionActivityState = {
             execution: "failed",
             awaitingConfirmation: false,
@@ -3112,10 +3130,17 @@ export function App() {
             window.clearTimeout(promptReconcileTimerRef.current);
           promptReconcileTimerRef.current = null;
           dispatchPane({ type: "PROCESS_FAILED", sessionId: eventSessionId });
-          setError(
+          const message =
             Number(event.nativeSteeringDroppedCount || 0) > 0
               ? steeringClearedMessage("process-error")
-              : String(event.error || "Pi RPC 已退出"),
+              : String(event.error || "Pi RPC 已退出");
+          const incidentId =
+            typeof event.incidentId === "string" &&
+            /^PC-[A-Z0-9_-]{8}$/.test(event.incidentId)
+              ? event.incidentId
+              : "";
+          setError(
+            incidentId ? `${message}（事件 ID：${incidentId}）` : message,
           );
         }
       }
@@ -5443,7 +5468,7 @@ export function App() {
     primaryRuntime.status === "starting"
       ? "Pi 正在准备；已保存的对话仍可阅读和切换。Runtime ready 后才能输入。"
       : primaryRuntime.status === "failed"
-        ? `Pi 当前不可用；仍可阅读历史。发送和 Primary 设置将在恢复前不可用。${primaryRuntime.error ? ` ${primaryRuntime.error}` : ""}`
+        ? `Pi 当前不可用；仍可阅读历史。发送和 Primary 设置将在恢复前不可用。${primaryRuntime.error ? ` ${primaryRuntime.error}` : ""}${primaryRuntime.incidentId ? `（事件 ID：${primaryRuntime.incidentId}）` : ""}`
         : "";
   // Existing dedicated Secondary Runtimes remain independently configurable if
   // Primary later fails. For the selected Primary, a failed Runtime is still

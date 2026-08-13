@@ -10136,7 +10136,12 @@ test("an explicit prompt rejection rolls back the local user turn", async () => 
     eventsUrl: () => "/api/events",
     markSessionViewed: async () => ({ viewing: activeId }),
     prompt: async () => {
-      throw new ApiRequestError("rejected", 409, "APPLICATION_BUSY");
+      throw new ApiRequestError(
+        "rejected",
+        409,
+        "APPLICATION_BUSY",
+        "PC-UIERR001",
+      );
     },
   });
   const root = createRoot(dom.window.document.querySelector("#root")!);
@@ -10171,6 +10176,10 @@ test("an explicit prompt rejection rolls back the local user turn", async () => 
       textarea.value,
       "restore rejected text",
       "a definite rejection restores the composer for correction or retry",
+    );
+    assert.match(
+      dom.window.document.body.textContent || "",
+      /rejected（事件 ID：PC-UIERR001）/,
     );
   } finally {
     await act(async () => root.unmount());
@@ -10524,10 +10533,12 @@ test("a recovered Runtime clears the sidebar's retained failure reason before it
         piChatSessionId: activeId,
         piChatRunGeneration: 7,
         error: "worker crashed while syncing state",
+        incidentId: "PC-SSEERR01",
       }),
     );
     assert.ok(status()?.classList.contains("is-error"));
     assert.match(status()?.getAttribute("title") || "", /worker crashed while syncing state/);
+    assert.match(status()?.getAttribute("title") || "", /事件 ID：PC-SSEERR01/);
 
     await act(async () =>
       source.emitPi({
@@ -10545,6 +10556,7 @@ test("a recovered Runtime clears the sidebar's retained failure reason before it
         piChatSessionId: activeId,
         piChatRunGeneration: 7,
         error: "late old worker crash",
+        incidentId: "PC-STALE001",
       }),
     );
     assert.equal(
