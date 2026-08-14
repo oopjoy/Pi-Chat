@@ -18,6 +18,8 @@
     "scripts/pi-chat-launch-process.ps1",
     "scripts/pi-chat-port-ready.ps1",
     "scripts/assert-safe-live-dist.mjs",
+    "scripts/dist-paths.mjs",
+    "scripts/workspace-artifacts.mjs",
     "scripts/build-server.mjs",
     "scripts/build-web.mjs",
     "scripts/clean-dist.mjs"
@@ -27,6 +29,7 @@
     "dev": "npm run prepare:katex && tsx watch src/server/index.ts --dev",
     "preclean": "node scripts/assert-safe-live-dist.mjs",
     "clean": "node scripts/clean-dist.mjs",
+    "artifacts:scan": "node scripts/workspace-artifacts.mjs",
     "prebuild": "node scripts/assert-safe-live-dist.mjs",
     "build": "npm run clean && npm run build:identity && npm run build:web && npm run build:server && npm run copy:resources",
     "prebuild:identity": "node scripts/assert-safe-live-dist.mjs",

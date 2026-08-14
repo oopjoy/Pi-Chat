@@ -1,13 +1,24 @@
 import { resolve } from "node:path";
+import { UnsafeDistTargetError, validateDistTarget } from "./dist-paths.mjs";
 
 const projectRoot = resolve(import.meta.dirname, "..");
-const liveDist = resolve(projectRoot, "dist");
-const requestedDist = resolve(projectRoot, process.env.PI_CHAT_DIST_DIR || "dist");
+let requestedKind;
+try {
+  const validated = validateDistTarget({
+    projectRoot,
+    requested: process.env.PI_CHAT_DIST_DIR || "dist",
+  });
+  requestedKind = validated.kind;
+} catch (error) {
+  if (!(error instanceof UnsafeDistTargetError)) throw error;
+  console.error(`Pi Chat 构建路径检查失败：${error.message}`);
+  process.exit(1);
+}
 
 // Application restart builds into a sibling staging tree and promotes it only
 // after its own lifecycle barrier. A direct build replaces live dist instead,
 // so never let it overwrite assets served by an already-running Pi Chat.
-if (requestedDist !== liveDist) process.exit(0);
+if (requestedKind !== "live") process.exit(0);
 
 const port = Number(process.env.PI_CHAT_PORT || 30170);
 if (!Number.isInteger(port) || port < 1 || port > 65_535) {
