@@ -1099,16 +1099,30 @@ test("tool activity keeps Sidebar and Composer active when a stale state snapsho
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../../src/web/api");
   const { App } = await import("../../src/web/App");
+  const diagnostics = await import("../../src/web/lib/state-diagnostics");
+  diagnostics.startBrowserStateDiagnostics();
+  const backgroundId = "fedcba9876543210abcd";
   const restoreApi = captureApiSnapshot(api);
   Object.assign(api, {
     bootstrap: async () => ({
       ...bootstrap,
       state: { ...bootstrap.state, isStreaming: false },
-      sessions: bootstrap.sessions.map((session) => ({
-        ...session,
-        running: false,
-        activity: { execution: "idle" as const, awaitingConfirmation: false },
-      })),
+      sessions: [
+        ...bootstrap.sessions.map((session) => ({
+          ...session,
+          running: false,
+          activity: { execution: "idle" as const, awaitingConfirmation: false },
+        })),
+        {
+          ...bootstrap.sessions[0],
+          id: backgroundId,
+          sessionId: "background-diagnostic",
+          active: false,
+          running: false,
+          queued: false,
+          activity: { execution: "idle" as const, awaitingConfirmation: false },
+        },
+      ],
     }),
     eventsUrl: () => "/api/events",
     markSessionViewed: async () => ({ viewing: activeId }),
@@ -1118,6 +1132,75 @@ test("tool activity keeps Sidebar and Composer active when a stale state snapsho
     await act(async () => root.render(createElement(App)));
     assert.ok(dom.window.document.querySelector(".send-button"));
     const source = FakeEventSource.instances.at(-1)!;
+    await act(async () =>
+      source.emitPi({
+        type: "pi_chat_session_control_changed",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        sessionId: activeId,
+        controlOwner: "foreign-window",
+        controlledByThisWindow: false,
+      }),
+    );
+    const observingProjection = diagnostics.browserStateDiagnosticSnapshot().entries
+      .filter((entry) => entry.category === "projection" && entry.name === "ui-state")
+      .at(-1);
+    assert.equal(observingProjection?.details.observing, true);
+    assert.equal(observingProjection?.details.foreignOwnerPresent, true);
+    assert.equal(observingProjection?.details.controlledByThisWindow, false);
+    await act(async () =>
+      source.emitPi({
+        type: "pi_chat_session_control_changed",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        sessionId: activeId,
+        controlOwner: "this-window",
+        controlledByThisWindow: true,
+      }),
+    );
+    const controllingProjection = diagnostics.browserStateDiagnosticSnapshot().entries
+      .filter((entry) => entry.category === "projection" && entry.name === "ui-state")
+      .at(-1);
+    assert.equal(controllingProjection?.details.observing, false);
+    assert.equal(controllingProjection?.details.foreignOwnerPresent, false);
+    assert.equal(controllingProjection?.details.controlledByThisWindow, true);
+
+    await act(async () =>
+      source.emitPi({
+        type: "pi_chat_session_status",
+        piChatSessionId: backgroundId,
+        piChatRunGeneration: 1,
+        activity: { execution: "running", awaitingConfirmation: false },
+      }),
+    );
+    const backgroundProjection = diagnostics.browserStateDiagnosticSnapshot().entries
+      .filter((entry) =>
+        entry.category === "projection" &&
+        entry.name === "sidebar-session" &&
+        entry.sessionId === backgroundId,
+      )
+      .at(-1);
+    assert.equal(backgroundProjection?.details.sidebarExecution, "running");
+    assert.equal(backgroundProjection?.details.sidebarRunning, true);
+    assert.equal(backgroundProjection?.details.viewed, false);
+    await act(async () =>
+      source.emitPi({
+        type: "pi_chat_session_status",
+        piChatSessionId: backgroundId,
+        piChatRunGeneration: 1,
+        activity: { execution: "idle", awaitingConfirmation: false },
+      }),
+    );
+    const settledBackgroundProjection = diagnostics.browserStateDiagnosticSnapshot().entries
+      .filter((entry) =>
+        entry.category === "projection" &&
+        entry.name === "sidebar-session" &&
+        entry.sessionId === backgroundId,
+      )
+      .at(-1);
+    assert.equal(settledBackgroundProjection?.details.sidebarExecution, "idle");
+    assert.equal(settledBackgroundProjection?.details.sidebarRunning, false);
+
     await act(async () =>
       source.emitPi({
         type: "tool_execution_start",
@@ -1131,6 +1214,13 @@ test("tool activity keeps Sidebar and Composer active when a stale state snapsho
     assert.ok(dom.window.document.querySelector(".steer-submit-button"));
     assert.equal(dom.window.document.querySelector(".send-button"), null);
     assert.ok(dom.window.document.querySelector(".session-status.is-running"));
+    const activeProjection = diagnostics.browserStateDiagnosticSnapshot().entries
+      .filter((entry) => entry.category === "projection" && entry.name === "ui-state")
+      .at(-1);
+    assert.equal(activeProjection?.details.toolActive, true);
+    assert.equal(activeProjection?.details.composerStopVisible, true);
+    assert.equal(activeProjection?.details.composerSendVisible, false);
+    assert.equal(activeProjection?.details.sidebarRunning, true);
     await act(async () =>
       source.emitPi({
         type: "tool_execution_end",
@@ -1156,7 +1246,14 @@ test("tool activity keeps Sidebar and Composer active when a stale state snapsho
     assert.equal(dom.window.document.querySelector(".steer-submit-button"), null);
     assert.ok(dom.window.document.querySelector(".send-button"));
     assert.equal(dom.window.document.querySelector(".session-status.is-running"), null);
+    const idleProjection = diagnostics.browserStateDiagnosticSnapshot().entries
+      .filter((entry) => entry.category === "projection" && entry.name === "ui-state")
+      .at(-1);
+    assert.equal(idleProjection?.details.composerStopVisible, false);
+    assert.equal(idleProjection?.details.composerSendVisible, true);
+    assert.equal(idleProjection?.details.sidebarRunning, false);
   } finally {
+    diagnostics.stopBrowserStateDiagnostics();
     await act(async () => root.unmount());
     restoreApi();
   }

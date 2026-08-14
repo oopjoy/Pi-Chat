@@ -7,7 +7,7 @@ import { CompactSelect, type CompactSelectOption } from "./CompactSelect";
 import { CloseIcon, FolderIcon, MinusIcon, PlusIcon } from "./Icons";
 
 export type ManagementSection = "settings" | "models";
-type SettingsTab = "appearance" | "models" | "skills" | "extensions" | "packages";
+type SettingsTab = "appearance" | "models" | "skills" | "extensions" | "packages" | "diagnostics";
 
 const SETTINGS_TABS: Array<{ id: SettingsTab; label: string }> = [
   { id: "appearance", label: "外观" },
@@ -15,6 +15,7 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string }> = [
   { id: "skills", label: "Skills" },
   { id: "extensions", label: "Extensions" },
   { id: "packages", label: "Packages" },
+  { id: "diagnostics", label: "诊断" },
 ];
 
 const THEME_OPTIONS: Array<CompactSelectOption<ThemePreference>> = [
@@ -29,7 +30,7 @@ const FONT_OPTIONS: Array<CompactSelectOption<FontPreference>> = [
   { value: "mono", label: "等宽字体" },
 ];
 
-export function ManagementPanel({ section, appearance, workspaceCwd, workspacePicking, workspaceDisabled, models, state, busy, shutdownBlocked, onClose, onAppearance, onPickWorkspace, onModel, onShutdown }: {
+export function ManagementPanel({ section, appearance, workspaceCwd, workspacePicking, workspaceDisabled, models, state, busy, shutdownBlocked, diagnosticsActive, diagnosticsBusy, diagnosticsEntryCount, onClose, onAppearance, onPickWorkspace, onModel, onStartDiagnostics, onStopDiagnostics, onExportDiagnostics, onShutdown }: {
   section: ManagementSection | null;
   appearance: AppearancePreferences;
   /** Persisted default for future drafts; existing Session cwd values stay immutable. */
@@ -41,10 +42,16 @@ export function ManagementPanel({ section, appearance, workspaceCwd, workspacePi
   busy: boolean;
   /** Identity mismatch blocks ordinary settings, not the guarded shutdown recovery. */
   shutdownBlocked: boolean;
+  diagnosticsActive: boolean;
+  diagnosticsBusy: boolean;
+  diagnosticsEntryCount: number;
   onClose: () => void;
   onAppearance: (value: AppearancePreferences) => void;
   onPickWorkspace: () => void;
   onModel: (provider: string, id: string) => void;
+  onStartDiagnostics: () => Promise<void>;
+  onStopDiagnostics: () => Promise<void>;
+  onExportDiagnostics: () => Promise<void>;
   onShutdown: () => void;
 }) {
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("appearance");
@@ -162,6 +169,14 @@ export function ManagementPanel({ section, appearance, workspaceCwd, workspacePi
                 onBrowseRoot={() => void browseResource("packages-root")}
                 rootLabel="打开 Packages 目录"
               />}
+              {settingsTab === "diagnostics" && <DiagnosticsPanel
+                active={diagnosticsActive}
+                busy={diagnosticsBusy}
+                entryCount={diagnosticsEntryCount}
+                onStart={onStartDiagnostics}
+                onStop={onStopDiagnostics}
+                onExport={onExportDiagnostics}
+              />}
             </div>
           </div>
         )}
@@ -169,6 +184,40 @@ export function ManagementPanel({ section, appearance, workspaceCwd, workspacePi
       </section>
     </div>
   );
+}
+
+function DiagnosticsPanel({ active, busy, entryCount, onStart, onStop, onExport }: {
+  active: boolean;
+  busy: boolean;
+  entryCount: number;
+  onStart: () => Promise<void>;
+  onStop: () => Promise<void>;
+  onExport: () => Promise<void>;
+}) {
+  const [error, setError] = useState("");
+  const run = async (operation: () => Promise<void>) => {
+    setError("");
+    try { await operation(); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+  };
+  return <div className="settings-resource-panel diagnostics-panel">
+    <div className="settings-resource-heading">
+      <div className="settings-resource-title">
+        <h3>状态诊断<span className={`count-badge ${active ? "is-active" : ""}`}>{active ? `录制中 · 当前窗口 ${entryCount} 条` : "未录制"}</span></h3>
+        <p>只在内存中保留最近五分钟的脱敏状态时间线，用于定位 Runtime、SSE、Sidebar、Composer 和队列投影不一致。</p>
+      </div>
+    </div>
+    <div className="diagnostics-privacy">
+      不包含请求 token、聊天正文、草稿正文、图片数据、文件路径、密钥或原始错误堆栈。服务端与当前浏览器窗口各自保存本地顺序；服务或页面重启后记录会消失。
+    </div>
+    {error && <div className="resource-error">{error}</div>}
+    <div className="diagnostics-actions">
+      <button type="button" disabled={busy} onClick={() => void run(onStart)}>{active ? "重新开始录制" : "开始录制"}</button>
+      <button type="button" disabled={busy || !active} onClick={() => void run(onExport)}>导出最近五分钟 JSON</button>
+      <button type="button" disabled={busy || !active} onClick={() => void run(onStop)}>停止录制</button>
+    </div>
+    <p className="resource-loading">建议：开始录制 → 正常复现问题 → 不刷新页面 → 回到这里立即导出。</p>
+  </div>;
 }
 
 function ModelsPanel({ models, state, busy, browseBusy, onModel, onBrowseModels }: {

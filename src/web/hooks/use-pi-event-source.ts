@@ -1,4 +1,8 @@
 import { useEffect } from "react";
+import {
+  browserStateDiagnosticsActive,
+  recordBrowserStateDiagnostic,
+} from "../lib/state-diagnostics";
 
 export function isIgnoredEventSourceFrame(data: unknown): boolean {
   if (typeof data !== "string") return false;
@@ -27,20 +31,62 @@ interface PiEventSourceHandlers {
   onOversized(source: EventSource, size: number): void;
 }
 
+function diagnosticFrame(data: unknown): {
+  eventType: string;
+  sessionId?: string;
+  runGeneration?: number;
+  size: number;
+} {
+  if (typeof data !== "string") return { eventType: "unknown", size: 0 };
+  const prefix = data.slice(0, 2_048);
+  const eventType = /"type"\s*:\s*"([^"]{1,80})"/.exec(prefix)?.[1] || "unknown";
+  const sessionId = /"piChatSessionId"\s*:\s*"([a-f0-9]{20})"/.exec(prefix)?.[1];
+  const runGenerationText = /"piChatRunGeneration"\s*:\s*(\d{1,12})/.exec(prefix)?.[1];
+  return {
+    eventType,
+    ...(sessionId ? { sessionId } : null),
+    ...(runGenerationText ? { runGeneration: Number(runGenerationText) } : null),
+    size: data.length,
+  };
+}
+
 export function usePiEventSource({ enabled, generation = 0, url, onReady, onPi, onError, onOversized }: PiEventSourceHandlers): void {
   useEffect(() => {
     if (!enabled) return;
     const source = new EventSource(url());
-    const ready = (event: Event) => onReady(event, source);
+    const ready = (event: Event) => {
+      if (browserStateDiagnosticsActive()) {
+        const frame = diagnosticFrame((event as MessageEvent<unknown>).data);
+        recordBrowserStateDiagnostic("sse", "received", {
+          sessionId: frame.sessionId,
+          runGeneration: frame.runGeneration,
+          details: { channel: "ready", eventType: frame.eventType, size: frame.size },
+        });
+      }
+      onReady(event, source);
+    };
     const pi = (event: Event) => {
       const data = (event as MessageEvent<unknown>).data;
+      if (browserStateDiagnosticsActive()) {
+        const frame = diagnosticFrame(data);
+        recordBrowserStateDiagnostic("sse", "received", {
+          sessionId: frame.sessionId,
+          runGeneration: frame.runGeneration,
+          details: { channel: "pi", eventType: frame.eventType, size: frame.size },
+        });
+      }
       if (isIgnoredEventSourceFrame(data)) return;
       if (isOversizedEventSourceFrame(data)) onOversized(source, data.length);
       else onPi(event, source);
     };
     source.addEventListener("ready", ready);
     source.addEventListener("pi", pi);
-    source.onerror = () => onError(source);
+    source.onerror = () => {
+      recordBrowserStateDiagnostic("sse", "error", {
+        details: { readyState: source.readyState },
+      });
+      onError(source);
+    };
     return () => {
       source.removeEventListener("ready", ready);
       source.removeEventListener("pi", pi);

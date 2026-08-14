@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
-import { SseHub } from "../src/server/sse-hub.ts";
+import { SseHub, type SseTransportDiagnostic } from "../src/server/sse-hub.ts";
 
 function stubClient(writeResult = true) {
   const frames: string[] = [];
@@ -11,6 +11,15 @@ function stubClient(writeResult = true) {
   client.end = () => { frames.push("END"); };
   return client;
 }
+
+test("diagnostic observer failures never perturb SSE delivery", () => {
+  const hub = new SseHub(0, () => { throw new Error("diagnostic failure"); });
+  const client = stubClient();
+  hub.add(client as never, "client-a");
+  assert.doesNotThrow(() => hub.broadcast({ type: "agent_start" }));
+  assert.match(client.frames[0], /"type":"agent_start"/);
+  hub.closeAll();
+});
 
 test("SseHub broadcasts the same frame to every client", () => {
   const hub = new SseHub();
@@ -159,6 +168,80 @@ test("removing a congested client prevents retained replay on its old drain", ()
   client.write = (frame: string) => { client.frames.push(frame); return true; };
   client.emit("drain");
   assert.equal(client.frames.length, 1);
+});
+
+test("transport diagnostics distinguish intent-free delivery, throttling, replacement, and oversized substitution", async () => {
+  const diagnostics: SseTransportDiagnostic[] = [];
+  const hub = new SseHub(20, (event) => diagnostics.push(event));
+  hub.broadcast({ type: "agent_start", piChatSessionId: "0123456789abcdefabcd", piChatRunGeneration: 4 });
+  assert.equal(diagnostics.at(-1)?.outcome, "no-clients");
+
+  const client = stubClient();
+  hub.add(client as never, "client-a");
+  hub.broadcast({ type: "message_update", piChatSessionId: "0123456789abcdefabcd", n: 1 });
+  hub.broadcast({ type: "message_update", piChatSessionId: "0123456789abcdefabcd", n: 2 });
+  hub.broadcast({ type: "message_update", piChatSessionId: "0123456789abcdefabcd", n: 3 });
+  assert.ok(diagnostics.some((event) => event.outcome === "written" && event.eventType === "message_update"));
+  assert.ok(diagnostics.some((event) => event.outcome === "scheduled"));
+  assert.ok(diagnostics.some((event) => event.outcome === "scheduled-replaced"));
+  await new Promise((resolve) => setTimeout(resolve, 35));
+  assert.equal(client.frames.some((frame) => frame.includes('"n":2')), false);
+  assert.equal(client.frames.some((frame) => frame.includes('"n":3')), true);
+
+  hub.broadcast({
+    type: "extension_event",
+    payload: "x".repeat(600_000),
+    piChatSessionId: "0123456789abcdefabcd",
+  });
+  assert.ok(diagnostics.some((event) =>
+    event.outcome === "oversized-substitute" &&
+    event.eventType === "pi_chat_oversized_event" &&
+    event.originalEventType === "extension_event",
+  ));
+  assert.ok(diagnostics.some((event) =>
+    event.outcome === "written" && event.eventType === "pi_chat_oversized_event",
+  ));
+  hub.closeAll();
+});
+
+test("transport diagnostics expose backpressure queues, per-window control projection, and bounded disconnect", () => {
+  const diagnostics: SseTransportDiagnostic[] = [];
+  const hub = new SseHub(0, (event) => diagnostics.push(event));
+  const owner = stubClient(false);
+  const observer = stubClient();
+  hub.add(owner as never, "owner");
+  hub.add(observer as never, "observer");
+  hub.broadcastEach((clientId) => ({
+    type: "pi_chat_session_control_changed",
+    piChatSessionId: "0123456789abcdefabcd",
+    controlOwner: "owner",
+    controlledByThisWindow: clientId === "owner",
+  }));
+  const controlWrites = diagnostics.filter((event) =>
+    event.eventType === "pi_chat_session_control_changed" &&
+    (event.outcome === "written" || event.outcome === "written-backpressured"),
+  );
+  assert.equal(controlWrites.length, 2);
+  assert.deepEqual(
+    controlWrites.map((event) => event.controlledByThisWindow).sort(),
+    [false, true],
+  );
+  assert.ok(controlWrites.some((event) => event.foreignOwnerPresent === true));
+
+  for (let index = 0; index < 6; index += 1) {
+    hub.broadcast({
+      type: "message_end",
+      piChatSessionId: "0123456789abcdefabcd",
+      payload: `${index}${"x".repeat(450_000)}`,
+    });
+  }
+  assert.ok(diagnostics.some((event) => event.outcome === "queued"));
+  assert.ok(diagnostics.some((event) =>
+    event.outcome === "disconnected" &&
+    event.disconnectReason === "pending-buffer-limit" &&
+    (event.pendingBytes || 0) > 2 * 1024 * 1024,
+  ));
+  hub.closeAll();
 });
 
 test("broadcastEach personalizes control events and closeAll ends sockets", () => {

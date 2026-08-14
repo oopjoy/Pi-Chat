@@ -10,20 +10,94 @@ const MAX_PENDING_SSE_BYTES = 2 * 1024 * 1024;
 // short main-thread stall.
 const DEFAULT_SNAPSHOT_INTERVAL_MS = 50;
 
-function eventFrame(event: Record<string, unknown>): string {
+export type SseTransportOutcome =
+  | "no-clients"
+  | "scheduled"
+  | "scheduled-replaced"
+  | "oversized-substitute"
+  | "written"
+  | "written-backpressured"
+  | "queued"
+  | "queue-replaced"
+  | "write-error"
+  | "disconnected";
+
+export interface SseTransportDiagnostic {
+  outcome: SseTransportOutcome;
+  eventType: string;
+  originalEventType?: string;
+  sessionId?: string;
+  runGeneration?: number;
+  size?: number;
+  transportClients: number;
+  controlledByThisWindow?: boolean;
+  foreignOwnerPresent?: boolean;
+  disconnectReason?: SseDisconnectReason;
+  pendingBytes?: number;
+}
+
+interface FrameMetadata {
+  eventType: string;
+  originalEventType?: string;
+  sessionId?: string;
+  runGeneration?: number;
+  size?: number;
+  controlledByThisWindow?: boolean;
+  foreignOwnerPresent?: boolean;
+}
+
+interface FramedEvent {
+  frame: string;
+  metadata: FrameMetadata;
+}
+
+function eventMetadata(event: Record<string, unknown>): FrameMetadata {
+  return {
+    eventType: typeof event.type === "string" ? event.type : "unknown",
+    ...(typeof event.piChatSessionId === "string"
+      ? { sessionId: event.piChatSessionId }
+      : typeof event.sessionId === "string"
+        ? { sessionId: event.sessionId }
+        : null),
+    ...(typeof event.piChatRunGeneration === "number" && Number.isFinite(event.piChatRunGeneration)
+      ? { runGeneration: Math.max(0, Math.floor(event.piChatRunGeneration)) }
+      : null),
+    ...(typeof event.controlledByThisWindow === "boolean"
+      ? { controlledByThisWindow: event.controlledByThisWindow }
+      : null),
+    ...(typeof event.controlOwner === "string"
+      ? { foreignOwnerPresent: Boolean(event.controlOwner) && event.controlledByThisWindow !== true }
+      : null),
+  };
+}
+
+function eventFrame(event: Record<string, unknown>): FramedEvent {
+  const original = eventMetadata(event);
   const data = JSON.stringify(event);
   const bytes = Buffer.byteLength(data);
-  if (bytes <= MAX_SSE_EVENT_BYTES) return `event: pi\ndata: ${data}\n\n`;
-  return `event: pi\ndata: ${JSON.stringify({
+  if (bytes <= MAX_SSE_EVENT_BYTES) {
+    const frame = `event: pi\ndata: ${data}\n\n`;
+    return { frame, metadata: { ...original, size: Buffer.byteLength(frame) } };
+  }
+  const frame = `event: pi\ndata: ${JSON.stringify({
     type: "pi_chat_oversized_event",
-    originalType: String(event.type || "unknown"),
-    piChatSessionId: typeof event.piChatSessionId === "string" ? event.piChatSessionId : undefined,
+    originalType: original.eventType,
+    piChatSessionId: original.sessionId,
     bytes,
   })}\n\n`;
+  return {
+    frame,
+    metadata: {
+      ...original,
+      eventType: "pi_chat_oversized_event",
+      originalEventType: original.eventType,
+      size: Buffer.byteLength(frame),
+    },
+  };
 }
 
 interface PendingFrame {
-  frame: string;
+  framed: FramedEvent;
   /** Cumulative assistant snapshots may replace only an immediately previous snapshot. */
   snapshotKey?: string;
 }
@@ -59,8 +133,18 @@ export class SseHub {
   private readonly scheduledSnapshots = new Map<ServerResponse, Map<string, ScheduledSnapshot>>();
   private readonly lastSnapshotWrites = new Map<ServerResponse, Map<string, number>>();
   private readonly disconnectListeners = new Set<(response: ServerResponse, clientId: string, info: SseDisconnectInfo) => void>();
+  private diagnosticObserver?: (event: SseTransportDiagnostic) => void;
 
-  constructor(private readonly snapshotIntervalMs = DEFAULT_SNAPSHOT_INTERVAL_MS) {}
+  constructor(
+    private readonly snapshotIntervalMs = DEFAULT_SNAPSHOT_INTERVAL_MS,
+    diagnosticObserver?: (event: SseTransportDiagnostic) => void,
+  ) {
+    this.diagnosticObserver = diagnosticObserver;
+  }
+
+  setDiagnosticObserver(observer?: (event: SseTransportDiagnostic) => void): void {
+    this.diagnosticObserver = observer;
+  }
 
   get size(): number {
     return this.clients.size;
@@ -89,6 +173,10 @@ export class SseHub {
     if (scheduled) for (const snapshot of scheduled.values()) clearTimeout(snapshot.timer);
     this.scheduledSnapshots.delete(response);
     this.lastSnapshotWrites.delete(response);
+    this.observe("disconnected", { eventType: "unknown" }, {
+      disconnectReason: info.reason,
+      ...(typeof info.pendingBytes === "number" ? { pendingBytes: info.pendingBytes } : null),
+    });
     for (const listener of this.disconnectListeners) listener(response, clientId, info);
     return clientId;
   }
@@ -103,7 +191,10 @@ export class SseHub {
   }
 
   broadcast(event: Record<string, unknown>): void {
-    if (!this.clients.size) return;
+    if (!this.clients.size) {
+      this.observe("no-clients", eventMetadata(event));
+      return;
+    }
     const type = String(event.type || "");
     const sessionKey = String(event.piChatSessionId || "primary");
     if (type === "message_update") {
@@ -114,12 +205,14 @@ export class SseHub {
       return;
     }
     const snapshotKey = type === "message_start" ? sessionKey : undefined;
-    const frame = eventFrame(event);
+    const framed = eventFrame(event);
+    if (framed.metadata.originalEventType)
+      this.observe("oversized-substitute", framed.metadata);
     for (const client of this.clients.keys()) {
       // A terminal/tool/lifecycle frame must never overtake a throttled
       // cumulative snapshot from the same Session.
       this.flushScheduledSnapshot(client, sessionKey);
-      if (this.clients.has(client)) this.write(client, frame, snapshotKey);
+      if (this.clients.has(client)) this.write(client, framed, snapshotKey);
     }
   }
 
@@ -136,7 +229,10 @@ export class SseHub {
     for (const [client, clientId] of this.clients) {
       const event = build(clientId);
       if (!event) continue;
-      this.write(client, eventFrame(event));
+      const framed = eventFrame(event);
+      if (framed.metadata.originalEventType)
+        this.observe("oversized-substitute", framed.metadata);
+      this.write(client, framed);
     }
   }
 
@@ -161,7 +257,10 @@ export class SseHub {
     // drain ordering is covered independently.
     if (this.backpressured.has(client) || this.snapshotIntervalMs <= 0) {
       this.markSnapshotWritten(client, snapshotKey);
-      this.write(client, eventFrame(event), snapshotKey);
+      const framed = eventFrame(event);
+      if (framed.metadata.originalEventType)
+        this.observe("oversized-substitute", framed.metadata);
+      this.write(client, framed, snapshotKey);
       return;
     }
     const lastWrite = this.lastSnapshotWrites.get(client)?.get(snapshotKey) || 0;
@@ -170,17 +269,22 @@ export class SseHub {
     const pending = pendingBySession.get(snapshotKey);
     if (!pending && elapsed >= this.snapshotIntervalMs) {
       this.markSnapshotWritten(client, snapshotKey);
-      this.write(client, eventFrame(event), snapshotKey);
+      const framed = eventFrame(event);
+      if (framed.metadata.originalEventType)
+        this.observe("oversized-substitute", framed.metadata);
+      this.write(client, framed, snapshotKey);
       return;
     }
     if (pending) {
       pending.event = event;
+      this.observe("scheduled-replaced", eventMetadata(event));
       return;
     }
     const delay = Math.max(0, this.snapshotIntervalMs - elapsed);
     const timer = setTimeout(() => this.flushScheduledSnapshot(client, snapshotKey), delay);
     pendingBySession.set(snapshotKey, { event, timer });
     this.scheduledSnapshots.set(client, pendingBySession);
+    this.observe("scheduled", eventMetadata(event));
   }
 
   private flushScheduledSnapshot(client: ServerResponse, snapshotKey: string): void {
@@ -192,7 +296,10 @@ export class SseHub {
     if (pendingBySession && !pendingBySession.size) this.scheduledSnapshots.delete(client);
     if (!this.clients.has(client)) return;
     this.markSnapshotWritten(client, snapshotKey);
-    this.write(client, eventFrame(pending.event), snapshotKey);
+    const framed = eventFrame(pending.event);
+    if (framed.metadata.originalEventType)
+      this.observe("oversized-substitute", framed.metadata);
+    this.write(client, framed, snapshotKey);
   }
 
   private markSnapshotWritten(client: ServerResponse, snapshotKey: string): void {
@@ -201,30 +308,39 @@ export class SseHub {
     this.lastSnapshotWrites.set(client, writes);
   }
 
-  private write(client: ServerResponse, frame: string, snapshotKey?: string): void {
+  private write(client: ServerResponse, framed: FramedEvent, snapshotKey?: string): void {
     if (this.backpressured.has(client)) {
-      this.enqueue(client, frame, snapshotKey);
+      this.enqueue(client, framed, snapshotKey);
       return;
     }
     try {
-      if (client.write(frame) !== false) return;
+      if (client.write(framed.frame) !== false) {
+        this.observe("written", framed.metadata);
+        return;
+      }
+      this.observe("written-backpressured", framed.metadata);
       this.backpressured.add(client);
       this.waitForDrain(client);
     } catch {
+      this.observe("write-error", framed.metadata);
       this.disconnect(client, { reason: "write-error" });
     }
   }
 
-  private enqueue(client: ServerResponse, frame: string, snapshotKey?: string): void {
+  private enqueue(client: ServerResponse, framed: FramedEvent, snapshotKey?: string): void {
     const pending = this.pendingFrames.get(client) || { frames: [], bytes: 0 };
     const previous = pending.frames.at(-1);
     // Pi assistant events are cumulative snapshots. Coalescing only adjacent
     // snapshots retains order around tool/terminal/session events.
     if (snapshotKey && previous?.snapshotKey === snapshotKey) {
-      pending.bytes -= Buffer.byteLength(previous.frame);
-      previous.frame = frame;
-    } else pending.frames.push({ frame, snapshotKey });
-    pending.bytes += Buffer.byteLength(frame);
+      pending.bytes -= Buffer.byteLength(previous.framed.frame);
+      previous.framed = framed;
+      this.observe("queue-replaced", framed.metadata);
+    } else {
+      pending.frames.push({ framed, snapshotKey });
+      this.observe("queued", framed.metadata);
+    }
+    pending.bytes += Buffer.byteLength(framed.frame);
     if (pending.bytes > MAX_PENDING_SSE_BYTES) {
       // A reconnect makes the browser fetch an authoritative view. Disconnecting
       // is safer than silently dropping ordered lifecycle/tool terminal events.
@@ -246,17 +362,27 @@ export class SseHub {
     while (pending?.frames.length) {
       const next = pending.frames.shift();
       if (!next) break;
-      pending.bytes -= Buffer.byteLength(next.frame);
+      pending.bytes -= Buffer.byteLength(next.framed.frame);
       if (!pending.frames.length) this.pendingFrames.delete(client);
-      try {
-        if (client.write(next.frame) !== false) continue;
-        this.backpressured.add(client);
-        this.waitForDrain(client);
-        return;
-      } catch {
-        this.disconnect(client, { reason: "write-error" });
-        return;
-      }
+      this.write(client, next.framed, next.snapshotKey);
+      if (this.backpressured.has(client) || !this.clients.has(client)) return;
+    }
+  }
+
+  private observe(
+    outcome: SseTransportOutcome,
+    metadata: FrameMetadata,
+    extra: Pick<SseTransportDiagnostic, "disconnectReason" | "pendingBytes"> = {},
+  ): void {
+    try {
+      this.diagnosticObserver?.({
+        outcome,
+        ...metadata,
+        transportClients: this.clients.size,
+        ...extra,
+      });
+    } catch {
+      // Diagnostics are observational only and may never perturb transport.
     }
   }
 }

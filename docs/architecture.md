@@ -71,8 +71,9 @@ Current ownership still centers on `src/server/app.ts` (`PiChatApp`), with progr
 | `runtime-pool.ts` | Secondary Runtime maps, capacity mutex, ensure/draft/recover/reclaim/sweep/stopAll |
 | `session-control.ts` | Multi-window presence, exclusive control owner, delayed release timers |
 | `prompt-scheduler.ts` | Primary queue/dispatch, secondary queue dispatch, enqueue limits |
-| `sse-hub.ts` | SSE client map, broadcast / broadcastEach |
+| `sse-hub.ts` | SSE client map, broadcast / broadcastEach, and payload-free delivery-outcome observation after throttle/backpressure/oversize decisions |
 | `runtime-event-transition.ts` | Pure shared event-derived Runtime projection; no transport, timer, queue, binding, or provenance ownership |
+| `state-diagnostics.ts` | Explicit five-minute in-memory metadata recorder for closed-schema server API/RPC/SSE/projection timelines, bound to one browser-window capture ID; no Runtime or transport authority |
 | `routes/bootstrap.ts` | Health, handshake, bootstrap HTTP parsing/serialization through explicit App capabilities |
 | `routes/sessions-read.ts` | Read-only Session list/view HTTP parsing/serialization through explicit App capabilities |
 | `api-route-admission.ts` | Pure lifecycle admission classification and prompt body-size policy |
@@ -125,6 +126,7 @@ The step 3 ownership boundary and staged migration are defined in [`frontend-sta
 | `lib/pi-events.ts` | Event parsing |
 | `lib/session-view-cache.ts` | Client-side view LRU |
 | `lib/active-sessions.ts` | Writable/active session helpers |
+| `lib/state-diagnostics.ts` | Page-local bounded diagnostic timeline and combined JSON download; no persistence or pane authority |
 
 Prefer small hooks and pure libs over growing `App.tsx` further.
 
@@ -196,3 +198,4 @@ Startup best-effort removes orphaned staging/previous/failed trees (unless a han
 - Strict Host / Origin checks
 - System Gate is installed and self-healed; not a user-removable ordinary extension
 - No public network deployment story in 0.4.x
+- Diagnostic capture is explicit, loopback-guarded, memory-only, age/count/byte bounded, and closed-schema redacted. Unknown keys are dropped, API routes are canonicalized to known static/dynamic templates, and unknown enum-like values become `unknown`, so attacker-, extension-, or model-controlled strings cannot survive under an innocuous key. A capture ID is bound to one browser-window identity; another window cannot reset, stop, or export it, while explicit closure of the owner's final registered page releases the capture without allowing a stale replaced page to do so. It records structural state metadata and SSE transport outcomes only; request tokens, headers, prompts, transcript/draft content, images, paths, secrets, raw errors, stacks, and client identities are excluded

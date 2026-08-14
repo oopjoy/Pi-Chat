@@ -121,6 +121,7 @@ import {
   type PrimaryRuntimeReadinessBridge,
 } from "./primary-runtime-readiness.js";
 import { SseHub } from "./sse-hub.js";
+import { StateDiagnosticsRecorder } from "./state-diagnostics.js";
 import { saveWorkspace } from "./workspace-state.js";
 import { requestGuardError } from "./request-guard.js";
 import {
@@ -161,6 +162,7 @@ const MAX_NATIVE_STEERING_IMAGE_CHARS = 45_000_000;
 // this small bounded visibility window.
 const DRAFT_PERSISTENCE_RETRY_DELAYS_MS = [40, 120, 300, 700];
 const SESSION_ID_PATTERN = /^[a-f0-9]{20}$/;
+const DIAGNOSTIC_CAPTURE_ID_PATTERN = /^[a-f0-9]{24}$/;
 const BUILTIN_COMMANDS: SlashCommand[] = [
   { name: "new", description: "新建会话", source: "builtin" },
   {
@@ -196,6 +198,13 @@ function requiredSessionId(body: Record<string, unknown>): string {
     throw new HttpRequestError(400, "sessionId 必须是有效的会话标识");
   }
   return sessionId;
+}
+
+function requestDiagnosticCaptureId(request: IncomingMessage): string {
+  const value = request.headers["x-pi-chat-diagnostic-capture"];
+  return typeof value === "string" && DIAGNOSTIC_CAPTURE_ID_PATTERN.test(value)
+    ? value
+    : "";
 }
 
 export interface PreparedApplicationRestart {
@@ -289,7 +298,8 @@ class NativeSteeringResetError extends Error {
 }
 
 export class PiChatApp {
-  private readonly sseHub = new SseHub();
+  private readonly sseHub: SseHub;
+  private readonly stateDiagnostics: StateDiagnosticsRecorder;
   /** Same Map as SseHub; dual-session tests seed write stubs here. */
   private readonly sseClients: Map<ServerResponse, string>;
   private readonly scheduler: PromptScheduler;
@@ -445,6 +455,42 @@ export class PiChatApp {
     this.currentCwd = resolve(options.cwd);
     this.primaryRuntimeCwd = this.currentCwd;
     this.startupModels = this.readStartupModels();
+    this.requestToken =
+      options.requestToken || randomBytes(32).toString("base64url");
+    this.buildIdentity = options.buildIdentity || {
+      schemaVersion: 1,
+      packageVersion: "unknown",
+      revision: "unknown",
+      fingerprint: "unknown",
+      builtAt: "unknown",
+    };
+    this.now = options.now || Date.now;
+    this.stateDiagnostics = new StateDiagnosticsRecorder({
+      runEpoch: this.runEpoch,
+      buildRevision: this.buildIdentity.revision,
+      now: this.now,
+    });
+    this.sseHub = new SseHub();
+    this.sseHub.setDiagnosticObserver((event) => {
+      this.traceState(
+        "sse-transport",
+        event.outcome,
+        event.sessionId || "",
+        {
+          outcome: event.outcome,
+          eventType: event.eventType,
+          originalEventType: event.originalEventType,
+          size: event.size,
+          transportClients: event.transportClients,
+          controlledByThisWindow: event.controlledByThisWindow,
+          foreignOwnerPresent: event.foreignOwnerPresent,
+          disconnectReason: event.disconnectReason,
+          pendingBytes: event.pendingBytes,
+        },
+        undefined,
+        event.runGeneration,
+      );
+    });
     // Install adoption before index.ts starts the controller. Readiness remains
     // `starting` until this App has consumed the exact startup response and
     // completed all state required for browser mutations.
@@ -461,15 +507,6 @@ export class PiChatApp {
     this.lifecycleCoordinator = new ApplicationLifecycleCoordinator(() =>
       this.broadcastLifecycle(),
     );
-    this.requestToken =
-      options.requestToken || randomBytes(32).toString("base64url");
-    this.buildIdentity = options.buildIdentity || {
-      schemaVersion: 1,
-      packageVersion: "unknown",
-      revision: "unknown",
-      fingerprint: "unknown",
-      builtAt: "unknown",
-    };
     // Bare loopback names are used only by in-process test apps. The production
     // entrypoint replaces them with one exact host:port after listen().
     this.allowedHosts = options.allowedHosts || [
@@ -477,7 +514,6 @@ export class PiChatApp {
       "localhost",
       "::1",
     ];
-    this.now = options.now || Date.now;
     this.gateRequestTimeoutMs = Math.max(
       1,
       options.gateRequestTimeoutMs ?? DEFAULT_GATE_REQUEST_TIMEOUT_MS,
@@ -821,7 +857,114 @@ export class PiChatApp {
     if (runtimeStopFailure) throw runtimeStopFailure;
   }
 
+  private diagnosticRuntimeProjection(
+    sessionId: string,
+  ): Record<string, unknown> {
+    const runtime = this.runtimePool.get(sessionId);
+    const primary = sessionId === this.activeSessionId && !runtime;
+    const activity = this.sessionActivity(sessionId);
+    return {
+      execution: activity.execution,
+      running: primary ? this.running : runtime?.running === true,
+      hasLive: primary ? Boolean(this.liveMessage) : Boolean(runtime?.liveMessage),
+      toolActive: primary ? Boolean(this.toolStatus) : Boolean(runtime?.toolStatus),
+      dispatching: primary ? this.dispatching : runtime?.dispatching === true,
+      queuePaused: primary ? this.queuePaused : runtime?.queuePaused === true,
+      queueLength: primary ? this.promptQueue.length : runtime?.promptQueue.length || 0,
+      failed: primary ? this.primaryFailed : runtime?.failed === true,
+    };
+  }
+
+  private traceState(
+    category: string,
+    name: string,
+    sessionId = "",
+    details?: Record<string, unknown>,
+    rpcGeneration?: number,
+    runGeneration?: number,
+  ): void {
+    if (!this.stateDiagnostics.isActive()) return;
+    const runtime = sessionId ? this.runtimePool.get(sessionId) : undefined;
+    this.stateDiagnostics.record({
+      category,
+      name,
+      sessionId,
+      runGeneration: runGeneration ?? (sessionId
+        ? this.runGenerationsBySession.get(sessionId) || 0
+        : undefined),
+      rpcGeneration:
+        rpcGeneration || runtime?.rpcGeneration ||
+        (sessionId === this.activeSessionId ? this.primaryRpcGeneration : undefined),
+      details: {
+        ...(sessionId ? this.diagnosticRuntimeProjection(sessionId) : null),
+        ...details,
+      },
+    });
+  }
+
+  private traceViewProjection(
+    name: string,
+    sessionId: string,
+    view: SessionViewData | null,
+  ): void {
+    this.traceState("projection", name, sessionId, {
+      found: Boolean(view),
+      stateStreaming: view?.state.isStreaming === true,
+      viewStreaming: view?.isStreaming === true,
+      sessionRunning: view?.session.running === true,
+      hasLive: Boolean(view?.liveMessage),
+      toolActive: Boolean(view?.toolStatus),
+      queuePaused: view?.queuePaused === true,
+      queueLength: view?.queue?.length || 0,
+      viewSource: view?.viewSource || "none",
+      runtimeStatus: view?.runtimeStatus || "none",
+      activityExecution: view?.session.activity?.execution || "none",
+    });
+  }
+
+  private traceBootstrapProjection(data: BootstrapData): void {
+    const sessionId = data.activeSessionId || "";
+    const summary = data.sessions.find((session) => session.id === sessionId);
+    this.traceState("projection", "bootstrap", sessionId, {
+      stateStreaming: data.state.isStreaming === true,
+      sessionRunning: summary?.running === true,
+      hasLive: Boolean(data.liveMessage),
+      toolActive: Boolean(data.toolStatus),
+      queuePaused: data.queuePaused === true,
+      queueLength: data.queue.length,
+      activityExecution: summary?.activity?.execution || "none",
+      primaryStatus: data.primaryRuntime.status,
+    });
+  }
+
   private broadcast(event: Record<string, unknown>): void {
+    const sessionId =
+      typeof event.piChatSessionId === "string"
+        ? event.piChatSessionId
+        : typeof event.sessionId === "string"
+          ? event.sessionId
+          : "";
+    this.traceState(
+      "sse",
+      "broadcast-intent",
+      sessionId,
+      {
+        eventType: typeof event.type === "string" ? event.type : "unknown",
+        transportClients: this.sseHub.size,
+        eventRunning: event.running === true,
+        eventQueuePaused: event.paused === true,
+        eventQueueLength: Array.isArray(event.queue) ? event.queue.length : 0,
+        eventExecution:
+          event.activity && typeof event.activity === "object" &&
+          typeof (event.activity as { execution?: unknown }).execution === "string"
+            ? (event.activity as { execution: string }).execution
+            : "none",
+      },
+      undefined,
+      typeof event.piChatRunGeneration === "number"
+        ? event.piChatRunGeneration
+        : undefined,
+    );
     this.sseHub.broadcast(event);
   }
 
@@ -845,6 +988,9 @@ export class PiChatApp {
   }
 
   private broadcastControlState(sessionId: string): void {
+    this.traceState("sse", "broadcast-control", sessionId, {
+      eventType: "pi_chat_session_control_changed",
+    });
     this.sseHub.broadcastEach((clientId) => ({
       type: "pi_chat_session_control_changed",
       sessionId,
@@ -1214,7 +1360,10 @@ export class PiChatApp {
     const clientStillOpen = [...this.connectedPageClients.values()].some(
       (owner) => owner === clientId,
     );
-    return clientStillOpen ? "" : this.sessionControl.closeWindow(clientId);
+    if (clientStillOpen) return "";
+    if (this.stateDiagnostics.isActive() && this.stateDiagnostics.ownedBy(clientId))
+      this.stateDiagnostics.stop();
+    return this.sessionControl.closeWindow(clientId);
   }
 
   private async restSessionAfterWindowClose(
@@ -1653,6 +1802,10 @@ export class PiChatApp {
     const type = String(event.type || "");
     const generation = runtime.rpcGeneration;
     const queuePausedBeforeEvent = runtime.queuePaused;
+    this.traceState("rpc-event", "received", runtime.id, {
+      eventType: type || "unknown",
+      sourceGeneration: source?.generation || 0,
+    }, generation);
     let droppedNativeSteering = 0;
     if (type === "pi_chat_process_error") {
       this.recordRuntimeFailure(
@@ -2122,6 +2275,10 @@ export class PiChatApp {
     const type = String(event.type || "");
     const generation = this.primaryRpcGeneration;
     const queuePausedBeforeEvent = this.queuePaused;
+    this.traceState("rpc-event", "received", sessionId, {
+      eventType: type || "unknown",
+      sourceGeneration,
+    }, generation);
     let droppedNativeSteering = 0;
     if (type === "pi_chat_process_error") {
       this.recordRuntimeFailure(
@@ -3966,34 +4123,61 @@ export class PiChatApp {
     response: ServerResponse,
     url: URL,
   ): Promise<void> {
-    // Parsing/identity validation deliberately precedes the lifecycle lease. A
-    // malformed or stale browser request is not an admitted mutation and cannot
-    // briefly prevent explicit restart/shutdown from reaching quiescence.
-    const admission = apiRouteAdmission(request, url);
-    if (admission.bodyBeforeMutationLease) {
-      const body = await bodyJson(request, admission.bodyLimit);
-      if (admission.validateSessionId) {
-        const sessionId = requiredSessionId(body);
-        Object.defineProperty(request, "piChatDiagnosticSessionId", {
-          configurable: true,
-          value: sessionId,
-        });
-      }
-      const releaseMutation = this.beginMutation();
-      try {
-        await this.handleApiCore(request, response, url, body);
-      } finally {
-        releaseMutation();
-      }
-      return;
-    }
-    const releaseMutation = admission.ordinaryMutation
-      ? this.beginMutation()
-      : null;
+    const diagnosticStartedAt = this.now();
+    let diagnosticEnded = false;
+    response.once("finish", () => {
+      if (diagnosticEnded) return;
+      diagnosticEnded = true;
+      this.traceState("http", "request-end", this.sessionIdForRequest(request), {
+        method: request.method || "GET",
+        route: url.pathname,
+        status: response.statusCode,
+        durationMs: this.now() - diagnosticStartedAt,
+      });
+    });
+    this.traceState("http", "request-start", this.sessionIdForRequest(request), {
+      method: request.method || "GET",
+      route: url.pathname,
+    });
     try {
-      await this.handleApiCore(request, response, url);
-    } finally {
-      releaseMutation?.();
+      // Parsing/identity validation deliberately precedes the lifecycle lease. A
+      // malformed or stale browser request is not an admitted mutation and cannot
+      // briefly prevent explicit restart/shutdown from reaching quiescence.
+      const admission = apiRouteAdmission(request, url);
+      if (admission.bodyBeforeMutationLease) {
+        const body = await bodyJson(request, admission.bodyLimit);
+        if (admission.validateSessionId) {
+          const sessionId = requiredSessionId(body);
+          Object.defineProperty(request, "piChatDiagnosticSessionId", {
+            configurable: true,
+            value: sessionId,
+          });
+        }
+        const releaseMutation = this.beginMutation();
+        try {
+          await this.handleApiCore(request, response, url, body);
+        } finally {
+          releaseMutation();
+        }
+        return;
+      }
+      const releaseMutation = admission.ordinaryMutation
+        ? this.beginMutation()
+        : null;
+      try {
+        await this.handleApiCore(request, response, url);
+      } finally {
+        releaseMutation?.();
+      }
+    } catch (error) {
+      this.traceState("http", "request-error", this.sessionIdForRequest(request), {
+        method: request.method || "GET",
+        route: url.pathname,
+        status: response.headersSent ? response.statusCode : 0,
+        durationMs: this.now() - diagnosticStartedAt,
+        errorType: error instanceof Error ? error.name : typeof error,
+      });
+      throw error;
     }
   }
 
@@ -4066,9 +4250,15 @@ export class PiChatApp {
     fast: boolean;
   }): Promise<SessionViewData | null> {
     // Reading a cold history is deliberately view-only; no Runtime is created.
-    return input.fast
+    const view = input.fast
       ? this.hotMemoryView(input.sessionId, input.turns, input.clientId)
-      : this.sessionView(input.sessionId, input.turns, input.clientId);
+      : await this.sessionView(input.sessionId, input.turns, input.clientId);
+    this.traceViewProjection(
+      input.fast ? "session-view-fast" : "session-view",
+      input.sessionId,
+      view,
+    );
+    return view;
   }
 
   private async handleApiCore(
@@ -4078,6 +4268,46 @@ export class PiChatApp {
     preparedBody?: Record<string, unknown>,
   ): Promise<void> {
     const clientId = requestClientId(request);
+    if (url.pathname === "/api/diagnostics/start") {
+      if (request.method !== "POST") return methodNotAllowed(response);
+      const pageId = requestPageId(request);
+      if (!clientId || !pageId)
+        return json(response, 400, {
+          error: "诊断录制需要浏览器窗口与页面标识",
+          code: "DIAGNOSTIC_CLIENT_REQUIRED",
+        });
+      if (this.connectedPageClients.get(pageId) !== clientId)
+        return json(response, 409, {
+          error: "当前页面已关闭或尚未完成连接，无法开始诊断录制",
+          code: "DIAGNOSTIC_PAGE_NOT_REGISTERED",
+        });
+      if (this.stateDiagnostics.isActive() && !this.stateDiagnostics.ownedBy(clientId))
+        return json(response, 409, {
+          error: "另一浏览器窗口正在录制诊断；请先在该窗口停止或导出",
+          code: "DIAGNOSTIC_CAPTURE_IN_USE",
+        });
+      return json(response, 200, this.stateDiagnostics.start(clientId));
+    }
+    if (url.pathname === "/api/diagnostics/stop") {
+      if (request.method !== "POST") return methodNotAllowed(response);
+      const captureId = requestDiagnosticCaptureId(request);
+      if (!this.stateDiagnostics.ownedBy(clientId) || !this.stateDiagnostics.captureMatches(captureId))
+        return json(response, 409, {
+          error: "诊断录制已被停止、重置或属于另一浏览器窗口",
+          code: "DIAGNOSTIC_CAPTURE_MISMATCH",
+        });
+      return json(response, 200, this.stateDiagnostics.stop());
+    }
+    if (url.pathname === "/api/diagnostics/snapshot") {
+      if (request.method !== "GET") return methodNotAllowed(response);
+      const captureId = requestDiagnosticCaptureId(request);
+      if (!this.stateDiagnostics.ownedBy(clientId) || !this.stateDiagnostics.captureMatches(captureId))
+        return json(response, 409, {
+          error: "诊断录制已被停止、重置或属于另一浏览器窗口",
+          code: "DIAGNOSTIC_CAPTURE_MISMATCH",
+        });
+      return json(response, 200, this.stateDiagnostics.snapshot());
+    }
     if (
       await handleBootstrapRoute(
         {
@@ -4096,7 +4326,11 @@ export class PiChatApp {
           scheduleLastWindowShutdown: () => this.scheduleLastWindowShutdown(),
           registerWindowPage: (id, pageId) =>
             this.registerWindowPage(id, pageId),
-          bootstrap: (id) => this.bootstrap(id),
+          bootstrap: async (id) => {
+            const data = await this.bootstrap(id);
+            this.traceBootstrapProjection(data);
+            return data;
+          },
         },
         request,
         response,
@@ -4141,9 +4375,16 @@ export class PiChatApp {
       response.write(
         `event: ready\ndata: ${JSON.stringify({ ok: true, lifecycle: this.applicationLifecycle, piChatRunEpoch: this.runEpoch, workspaceEpoch: this.runEpoch, primaryRuntime: this.primaryReadiness() })}\n\n`,
       );
+      this.traceState("sse", "ready", this.activeSessionId, {
+        lifecycle: this.applicationLifecycle,
+        primaryStatus: this.primaryReadiness().status,
+      });
       const pageId = requestPageId(request) || clientId;
       this.sseHub.add(response, clientId);
       this.clientConnected(clientId, pageId);
+      this.traceState("sse", "connected", this.activeSessionId, {
+        openWindows: this.openWindowCount(),
+      });
       const timer = setInterval(
         () => this.sseHub.heartbeat(response),
         this.sseHeartbeatMs,

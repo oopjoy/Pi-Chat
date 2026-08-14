@@ -798,6 +798,14 @@ details.conversation-process { display: block; padding: 0; }
 .resource-notice { margin-bottom: 12px; padding: 9px 11px; border-radius: 8px; background: color-mix(in srgb, var(--accent), transparent 90%); color: var(--text); font-size: 11px; white-space: pre-wrap; }
 .resource-loading { padding: 32px 0; color: var(--muted); font-size: 12px; text-align: center; }
 .resource-error { margin-bottom: 12px; padding: 9px 11px; border-radius: 8px; background: color-mix(in srgb, var(--danger), transparent 90%); color: var(--danger); font-size: 11px; white-space: pre-wrap; }
+.diagnostics-panel .count-badge.is-active { background: color-mix(in srgb, #2e9b63, transparent 84%); color: #227548; }
+.diagnostics-privacy { margin-bottom: 16px; padding: 11px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-soft); color: var(--muted); font-size: 11px; line-height: 1.65; }
+.diagnostics-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.diagnostics-actions button { min-height: 34px; padding: 7px 11px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--text); cursor: pointer; font: inherit; font-size: 11px; font-weight: 650; }
+.diagnostics-actions button:first-child { border-color: color-mix(in srgb, var(--accent), transparent 46%); color: var(--accent); }
+.diagnostics-actions button:hover:not(:disabled) { background: var(--surface-hover); }
+.diagnostics-actions button:disabled { cursor: default; opacity: .45; }
+.diagnostics-panel .resource-loading { padding: 18px 0 0; text-align: left; line-height: 1.55; }
 .resource-source { border: 1px solid var(--line); border-radius: 8px; background: var(--surface-soft); }
 .resource-source summary { padding: 9px 11px; cursor: pointer; font-size: 11px; }
 .resource-source pre { max-height: 330px; margin: 0; overflow: auto; padding: 12px; border-top: 1px solid var(--line); white-space: pre-wrap; font: 10.5px/1.55 ui-monospace, Consolas, monospace; }

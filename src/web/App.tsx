@@ -7,6 +7,7 @@ import {
   useState,
 } from "react";
 import { appendTerminalMessage } from "../shared/streaming-assistant";
+import type { StateDiagnosticExportBundle } from "../shared/state-diagnostics";
 import type {
   ApplicationLifecycle,
   BootstrapData,
@@ -81,6 +82,16 @@ import {
   type AppearancePreferences,
 } from "./lib/preferences";
 import { rememberedSessionId, rememberSessionId } from "./lib/session-location";
+import {
+  bindBrowserStateDiagnosticCaptureId,
+  browserStateDiagnosticSnapshot,
+  browserStateDiagnosticStatus,
+  browserStateDiagnosticsActive,
+  downloadStateDiagnosticBundle,
+  recordBrowserStateDiagnostic,
+  startBrowserStateDiagnostics,
+  stopBrowserStateDiagnostics,
+} from "./lib/state-diagnostics";
 import {
   appendLocalTurnOnce,
   bindQueuedAdmission,
@@ -481,6 +492,10 @@ export function App() {
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
   const [managementSection, setManagementSection] =
     useState<ManagementSection | null>(null);
+  const [diagnosticsActive, setDiagnosticsActive] = useState(false);
+  const [diagnosticsBusy, setDiagnosticsBusy] = useState(false);
+  const [diagnosticsCaptureId, setDiagnosticsCaptureId] = useState("");
+  const [diagnosticsEntryCount, setDiagnosticsEntryCount] = useState(0);
   const [closeComplete, setCloseComplete] = useState<
     "window" | "application" | null
   >(null);
@@ -651,6 +666,7 @@ export function App() {
   useEffect(() => {
     sessionsRef.current = sessions;
   }, [sessions]);
+  const diagnosticSidebarRowsRef = useRef(new Map<string, string>());
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const scrollMemoryRef = useRef(new SessionScrollMemory());
@@ -1406,6 +1422,18 @@ export function App() {
         data.activeSessionId ||
         data.sessions.find((item) => item.active)?.id ||
         "";
+      recordBrowserStateDiagnostic("projection", "bootstrap-received", {
+        sessionId: activeViewId,
+        details: {
+          stateStreaming: data.state.isStreaming,
+          hasLive: Boolean(data.liveMessage),
+          toolActive: Boolean(data.toolStatus),
+          queuePaused: data.queuePaused,
+          queueLength: data.queue.length,
+          sessionRunning:
+            data.sessions.find((item) => item.id === activeViewId)?.running === true,
+        },
+      });
       const bootstrapProjection = activeViewId
         ? queueRequestRevision === undefined
           ? acceptQueueProjection(activeViewId, data.queue, data.queuePaused)
@@ -1615,6 +1643,20 @@ export function App() {
       authority?: ReturnType<typeof capturePaneAuthority> | DraftPaneAuthority,
       queueRequestRevision?: number,
     ) => {
+      recordBrowserStateDiagnostic("projection", "session-view-received", {
+        sessionId: view.session.id,
+        details: {
+          viewSource: view.viewSource || "unknown",
+          stateStreaming: view.state.isStreaming,
+          viewStreaming: view.isStreaming,
+          sessionRunning: view.session.running === true,
+          hasLive: Boolean(view.liveMessage),
+          toolActive: Boolean(view.toolStatus),
+          queuePaused: view.queuePaused === true,
+          queueLength: view.queue?.length || 0,
+          authorityPresent: Boolean(authority),
+        },
+      });
       // A structural deletion is terminal. An already-resolved view continuation
       // must not recreate its cache, sidebar row, or selected pane.
       if (confirmedDeletedSessionIdsRef.current.has(view.session.id)) return;
@@ -1794,6 +1836,19 @@ export function App() {
         current?.sessionId === resolvedView.session.id ? null : current,
       );
       recordPaneCommit(resolvedView);
+      recordBrowserStateDiagnostic("projection", "session-view-committed", {
+        sessionId: resolvedView.session.id,
+        details: {
+          stateStreaming: resolvedView.state.isStreaming,
+          viewStreaming: resolvedView.isStreaming,
+          sessionRunning: resolvedView.session.running === true,
+          hasLive: Boolean(resolvedView.liveMessage),
+          toolActive: Boolean(resolvedView.toolStatus),
+          queuePaused: filteredProjection.paused,
+          queueLength: resolvedView.queue?.length || 0,
+          runtimeStatus: nextRuntimeStatus,
+        },
+      });
       // A blank New draft has no persisted user message and intentionally stays
       // out of sidebar history until its first successful prompt. A remembered
       // Session may restore before bootstrap; update an existing row, but do not
@@ -2714,6 +2769,15 @@ export function App() {
         Boolean(eventSessionId) &&
         eventSessionId === viewedSessionIdRef.current &&
         viewedSessionIdRef.current === desiredSessionIdRef.current;
+      recordBrowserStateDiagnostic("sse", "admitted", {
+        sessionId: eventSessionId,
+        runGeneration: eventRunGeneration,
+        details: {
+          eventType: type || "unknown",
+          viewing: viewingEventSession,
+          navigationEpoch: navigationEpochRef.current,
+        },
+      });
       if (eventSessionId && invalidatesSessionViewVersion(type)) {
         sessionEventVersionRef.current.set(
           eventSessionId,
@@ -6065,6 +6129,97 @@ export function App() {
     }
   };
 
+  const startStateDiagnostics = async () => {
+    if (diagnosticsBusy) return;
+    setDiagnosticsBusy(true);
+    setError("");
+    diagnosticSidebarRowsRef.current.clear();
+    startBrowserStateDiagnostics();
+    setDiagnosticsActive(true);
+    setDiagnosticsCaptureId("");
+    setDiagnosticsEntryCount(browserStateDiagnosticStatus().entryCount);
+    try {
+      const status = await api.startStateDiagnostics();
+      if (!status.captureId) throw new Error("服务端未返回诊断录制标识");
+      bindBrowserStateDiagnosticCaptureId(status.captureId);
+      setDiagnosticsCaptureId(status.captureId);
+      recordBrowserStateDiagnostic("capture", "server-started");
+      setDiagnosticsEntryCount(browserStateDiagnosticStatus().entryCount);
+      setNotice("诊断录制已开始；请复现问题后回到设置导出 JSON");
+    } catch (cause) {
+      stopBrowserStateDiagnostics();
+      setDiagnosticsActive(false);
+      setDiagnosticsCaptureId("");
+      setDiagnosticsEntryCount(browserStateDiagnosticStatus().entryCount);
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setDiagnosticsBusy(false);
+    }
+  };
+
+  const stopStateDiagnostics = async () => {
+    if (diagnosticsBusy || !diagnosticsCaptureId) return;
+    setDiagnosticsBusy(true);
+    setError("");
+    try {
+      await api.stopStateDiagnostics(diagnosticsCaptureId);
+      const status = stopBrowserStateDiagnostics();
+      setDiagnosticsActive(false);
+      setDiagnosticsCaptureId("");
+      setDiagnosticsEntryCount(status.entryCount);
+      setNotice("诊断录制已停止；再次开始会清空上一轮内存记录");
+    } catch (cause) {
+      if (
+        cause instanceof ApiRequestError &&
+        cause.code === "DIAGNOSTIC_CAPTURE_MISMATCH"
+      ) {
+        const status = stopBrowserStateDiagnostics();
+        setDiagnosticsActive(false);
+        setDiagnosticsCaptureId("");
+        setDiagnosticsEntryCount(status.entryCount);
+      }
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setDiagnosticsBusy(false);
+    }
+  };
+
+  const exportStateDiagnostics = async () => {
+    if (diagnosticsBusy || !diagnosticsCaptureId) return;
+    setDiagnosticsBusy(true);
+    setError("");
+    try {
+      recordBrowserStateDiagnostic("capture", "export-requested", {
+        sessionId: viewedSessionIdRef.current,
+      });
+      const server = await api.stateDiagnosticSnapshot(diagnosticsCaptureId);
+      const bundle: StateDiagnosticExportBundle = {
+        schemaVersion: 1,
+        generatedAt: new Date().toISOString(),
+        warning:
+          "仅含最近五分钟的脱敏状态元数据；服务端与浏览器各自保持本地顺序，不代表跨进程绝对时钟顺序。",
+        server,
+        browser: browserStateDiagnosticSnapshot(),
+      };
+      const filename = downloadStateDiagnosticBundle(bundle);
+      setDiagnosticsEntryCount(bundle.browser.status.entryCount);
+      setNotice(`诊断已导出：${filename}`);
+    } catch (cause) {
+      if (
+        cause instanceof ApiRequestError &&
+        cause.code === "DIAGNOSTIC_CAPTURE_MISMATCH"
+      ) {
+        const status = stopBrowserStateDiagnostics();
+        setDiagnosticsActive(false);
+        setDiagnosticsCaptureId("");
+        setDiagnosticsEntryCount(status.entryCount);
+      }
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setDiagnosticsBusy(false);
+    }
+  };
+
   const renameSession = (name: string) => {
     if (buildIdentityMismatch) return;
     const dialog = sessionDialog;
@@ -6713,6 +6868,174 @@ export function App() {
       });
   };
 
+  useEffect(() => {
+    if (!diagnosticsActive) return;
+    const update = () =>
+      setDiagnosticsEntryCount(browserStateDiagnosticStatus().entryCount);
+    update();
+    const timer = window.setInterval(update, 1_000);
+    return () => window.clearInterval(timer);
+  }, [diagnosticsActive]);
+
+  const diagnosticProjectionActive =
+    diagnosticsActive || browserStateDiagnosticsActive();
+  const diagnosticSidebarRows = diagnosticProjectionActive
+    ? sessions.flatMap((session) => {
+        const execution = session.activity?.execution ||
+          (session.running ? "running" : session.queued ? "queued" : "idle");
+        const interesting =
+          session.id === viewedSessionId ||
+          execution !== "idle" ||
+          session.pendingConfirmation === true;
+        if (!interesting) return [];
+        const controlledByThisWindow = session.controlledByThisWindow === true;
+        const foreignOwnerPresent = Boolean(
+          session.controlOwner && !controlledByThisWindow,
+        );
+        return [{
+          sessionId: session.id,
+          execution,
+          running: session.running === true,
+          queued: session.queued === true,
+          pendingConfirmation: session.pendingConfirmation === true,
+          controlledByThisWindow,
+          foreignOwnerPresent,
+          viewed: session.id === viewedSessionId,
+          signature: [
+            execution,
+            session.running === true,
+            session.queued === true,
+            session.pendingConfirmation === true,
+            controlledByThisWindow,
+            foreignOwnerPresent,
+            session.id === viewedSessionId,
+          ].join(":"),
+        }];
+      })
+    : [];
+  const diagnosticSidebarSignature = diagnosticSidebarRows
+    .map((row) => `${row.sessionId}:${row.signature}`)
+    .join("|");
+
+  useEffect(() => {
+    if (!browserStateDiagnosticsActive()) return;
+    const controlledByThisWindow = effectiveControl.controlledByThisWindow === true;
+    const foreignOwnerPresent = Boolean(
+      effectiveControl.controlOwner && !controlledByThisWindow,
+    );
+    recordBrowserStateDiagnostic("projection", "ui-state", {
+      sessionId: viewedSessionId,
+      details: {
+        paneKind: pane.identity.kind,
+        stateStreaming: state.isStreaming,
+        compacting: state.isCompacting === true,
+        hasLive: Boolean(liveMessage),
+        toolActive: Boolean(toolStatus),
+        promptStarting,
+        runtimeStatus,
+        queuePaused,
+        queueLength: queue.length,
+        transcriptCount: messages.length,
+        sidebarRows: sessions.length,
+        sidebarRunning: viewedSession?.running === true,
+        sidebarQueued: viewedSession?.queued === true,
+        sidebarExecution: viewedSession?.activity?.execution || "none",
+        sidebarRunningCount: sessions.filter((session) => session.running).length,
+        sidebarQueuedCount: sessions.filter((session) => session.queued).length,
+        sidebarFailedCount: sessions.filter((session) => session.activity?.execution === "failed").length,
+        sidebarPausedCount: sessions.filter((session) => session.activity?.execution === "paused").length,
+        sidebarConfirmationCount: sessions.filter((session) => session.pendingConfirmation).length,
+        sidebarForeignOwnerCount: sessions.filter((session) =>
+          Boolean(session.controlOwner && session.controlledByThisWindow !== true),
+        ).length,
+        observing,
+        controlledByThisWindow,
+        foreignOwnerPresent,
+        authorityPresent: Boolean(effectiveControl.controlOwner),
+        composerQueueVisible: composerQueueMode,
+        composerSteerVisible: state.isStreaming,
+        composerStopVisible: state.isStreaming,
+        composerSendVisible: !composerQueueMode,
+        composerDisabled:
+          loading ||
+          currentSessionPreparing ||
+          viewSwitching ||
+          observing ||
+          mutationBlocked ||
+          Boolean(state.isCompacting) ||
+          primarySessionFailed ||
+          primaryRuntimeUnavailable,
+        stopping: stoppingCurrentSession,
+      },
+    });
+
+    const previousRows = diagnosticSidebarRowsRef.current;
+    const nextRows = new Map<string, string>();
+    const allSessionIds = new Set(sessions.map((session) => session.id));
+    for (const row of diagnosticSidebarRows) {
+      nextRows.set(row.sessionId, row.signature);
+      if (previousRows.get(row.sessionId) === row.signature) continue;
+      recordBrowserStateDiagnostic("projection", "sidebar-session", {
+        sessionId: row.sessionId,
+        details: {
+          found: true,
+          sidebarExecution: row.execution,
+          sidebarRunning: row.running,
+          sidebarQueued: row.queued,
+          pendingConfirmation: row.pendingConfirmation,
+          controlledByThisWindow: row.controlledByThisWindow,
+          foreignOwnerPresent: row.foreignOwnerPresent,
+          viewed: row.viewed,
+        },
+      });
+    }
+    for (const sessionId of previousRows.keys()) {
+      if (nextRows.has(sessionId)) continue;
+      recordBrowserStateDiagnostic("projection", "sidebar-session", {
+        sessionId,
+        details: {
+          found: allSessionIds.has(sessionId),
+          sidebarExecution: "idle",
+          sidebarRunning: false,
+          sidebarQueued: false,
+          pendingConfirmation: false,
+          controlledByThisWindow: false,
+          foreignOwnerPresent: false,
+          viewed: false,
+        },
+      });
+    }
+    diagnosticSidebarRowsRef.current = nextRows;
+  }, [
+    composerQueueMode,
+    currentSessionPreparing,
+    diagnosticSidebarSignature,
+    diagnosticsActive,
+    effectiveControl.controlOwner,
+    effectiveControl.controlledByThisWindow,
+    liveMessage,
+    loading,
+    messages.length,
+    mutationBlocked,
+    observing,
+    pane.identity.kind,
+    primaryRuntimeUnavailable,
+    promptStarting,
+    queue.length,
+    queuePaused,
+    runtimeStatus,
+    sessions.length,
+    state.isCompacting,
+    state.isStreaming,
+    stoppingCurrentSession,
+    toolStatus,
+    viewedSession?.activity?.execution,
+    viewedSession?.queued,
+    viewedSession?.running,
+    viewedSessionId,
+    viewSwitching,
+  ]);
+
   const composerControls = (
     <ComposerControls
       state={state}
@@ -7021,10 +7344,16 @@ export function App() {
             ? recoveryActionBlocked
             : globalMutationBlocked)
         }
+        diagnosticsActive={diagnosticsActive}
+        diagnosticsBusy={diagnosticsBusy}
+        diagnosticsEntryCount={diagnosticsEntryCount}
         onClose={() => setManagementSection(null)}
         onAppearance={setAppearance}
         onPickWorkspace={() => void pickDefaultWorkspace()}
         onModel={(provider, id) => void changeModel(provider, id)}
+        onStartDiagnostics={startStateDiagnostics}
+        onStopDiagnostics={stopStateDiagnostics}
+        onExportDiagnostics={exportStateDiagnostics}
         onShutdown={() => void shutdownPiChat()}
       />
       <SessionDialog

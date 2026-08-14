@@ -1,4 +1,6 @@
+import type { ServerStateDiagnosticSnapshot, StateDiagnosticStatus } from "../shared/state-diagnostics";
 import type { BootstrapData, BootstrapHandshakeData, ExtensionResource, GateMode, InitialPromptData, ModelInfo, PackageResource, PromptDelivery, PromptImage, QueuedPrompt, ResourceResponse, SessionDirectorySummary, SessionRuntimeReadyData, SessionSummary, SessionViewData, SkillResource, ThinkingLevel } from "../shared/types";
+import { recordBrowserStateDiagnostic } from "./lib/state-diagnostics";
 
 export type ExtensionResponseInput = {
   id: string;
@@ -112,6 +114,11 @@ async function request<T>(
   acceptResponseToken = true,
 ): Promise<T> {
   const requestGeneration = connectionGeneration;
+  const diagnosticStartedAt = performance.now();
+  const diagnosticRoute = new URL(path, "http://127.0.0.1").pathname;
+  recordBrowserStateDiagnostic("http", "request-start", {
+    details: { method: options?.method || "GET", route: diagnosticRoute },
+  });
   let response: Response;
   try {
     response = await fetch(path, {
@@ -126,6 +133,14 @@ async function request<T>(
       },
     });
   } catch (cause) {
+    recordBrowserStateDiagnostic("http", "request-error", {
+      details: {
+        method: options?.method || "GET",
+        route: diagnosticRoute,
+        durationMs: Math.round(performance.now() - diagnosticStartedAt),
+        errorType: cause instanceof Error ? cause.name : typeof cause,
+      },
+    });
     if (cause instanceof DOMException && cause.name === "TimeoutError") {
       const seconds = Math.round(timeoutMs / 1_000);
       throw new Error(`Pi Chat 请求超时（${seconds} 秒）。Pi 可能正在压缩上下文或模型服务没有响应；请查看界面状态，必要时重启 Pi RPC 后再试。`);
@@ -137,6 +152,14 @@ async function request<T>(
   // guarded startup token required to subscribe to lifecycle SSE.
   if (acceptResponseToken && requestGeneration === connectionGeneration)
     storeRequestToken(value.requestToken);
+  recordBrowserStateDiagnostic("http", "request-end", {
+    details: {
+      method: options?.method || "GET",
+      route: diagnosticRoute,
+      status: response.status,
+      durationMs: Math.round(performance.now() - diagnosticStartedAt),
+    },
+  });
   if (!response.ok)
     throw new ApiRequestError(
       value.error || `请求失败：${response.status}`,
@@ -218,6 +241,14 @@ export const api = {
     return navigator.sendBeacon(`/api/window/close?${query}`);
   },
   shutdown: () => request<{ shuttingDown: true }>("/api/shutdown", { method: "POST" }),
+  startStateDiagnostics: () => request<StateDiagnosticStatus>("/api/diagnostics/start", { method: "POST" }),
+  stopStateDiagnostics: (captureId: string) => request<StateDiagnosticStatus>("/api/diagnostics/stop", {
+    method: "POST",
+    headers: { "x-pi-chat-diagnostic-capture": captureId },
+  }),
+  stateDiagnosticSnapshot: (captureId: string) => request<ServerStateDiagnosticSnapshot>("/api/diagnostics/snapshot", {
+    headers: { "x-pi-chat-diagnostic-capture": captureId },
+  }),
   prompt: (message: string, images: PromptImage[] = [], sessionId: string, gateMode?: GateMode, delivery: PromptDelivery = "queue") => request<{ accepted: boolean; queued: boolean; steered?: boolean; /** Pi received the JSONL command but its response timed out; final execution remains event-confirmed. */ deliveryUncertain?: boolean; extension?: boolean; command?: string; description?: string; isStreaming?: boolean; id?: string; queue?: QueuedPrompt[] }>("/api/chat/prompt", {
     method: "POST",
     body: JSON.stringify({ message, sessionId, gateMode, delivery, images: images.map(({ type, data, mimeType }) => ({ type, data, mimeType })) }),

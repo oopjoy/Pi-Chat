@@ -22,9 +22,10 @@ Pi Chat 是一个连接本机 Pi RPC 的 local-first Web/PWA 客户端。它提�
 - 文件权限 Gate：作为 Pi Chat 内置安全功能呈现；顶栏可切换“严格 / 放行”。严格模式始终确认 `write` / `edit`，并对可识别的高风险 Bash 做辅助确认；Bash 可运行任意脚本，副作用识别不构成完整 sandbox。随应用自动安装、校验和修复的极小 Pi 工具执行适配器仍在真实工具执行前运行
 - 侧栏提供独立刷新和“完整重启 Pi Chat 并应用更新”：应用级 Lifecycle Barrier 会在构建前同步阻止所有新写操作；新版本先在独立 staging 目录完成并验证，构建失败不会修改当前 `dist`，二次核验全部 Runtime、队列和确认状态通过后才提升产物并执行服务切换。维护期间历史、健康检查和只读 API 保持可用。网页与服务的 build identity 不一致时，普通修改会暂停，但“完整重启”与设置中的“关闭 Pi Chat”仍可请求服务端执行其最终 Busy 检查，避免客户端恢复路径被旧页面状态锁死。SSE/EventSource 是可重连传输，断开不会自动关闭 Pi Chat 服务或托管 RPC；但全部浏览器/PWA 页面都通过非 BFCache 关闭明确离开后，服务会等待生成、队列、确认、恢复、Runtime transition 与 mutation 全部结束，并连续空闲 $10$ 秒后自动退出。设置中的“关闭 Pi Chat”仍可显式立即请求关闭，并同样先执行全局 Busy 检查
 - 外观设置：主题、字体、字号、行距和对话宽度
+- 设置中的“诊断”可显式录制并导出最近五分钟的服务端/当前浏览器状态时间线，用于复现 Runtime、SSE 实际投递、Sidebar、Composer、多窗口控制与队列投影不一致；记录仅驻留内存并受条数和字节上限约束，以窗口绑定的录制 ID 防止其他窗口静默重置，不包含请求 token、聊天/草稿正文、图片、文件路径、密钥或原始错误堆栈
 - 可用模型列表、Models 面板与模型切换；支持基于 `~/.pi/agent/models.json` 的自定义模型 Add/Remove
 - 顶栏 Thinking 强度切换
-- 固定左右布局的设置窗口：左侧依次为外观、Models、Skills、Extensions、Packages；顶栏模型切换与侧栏 Models 快捷入口仍保留
+- 固定左右布局的设置窗口：左侧依次为外观、Models、Skills、Extensions、Packages、诊断；顶栏模型切换与侧栏 Models 快捷入口仍保留
 - Skills、Extensions、Packages 按 Pi 原生资源层级分别呈现：资源只在对应能力页显示一次；包内 Extension 标注“由 Package 管理”，Package 页只显示来源与资源摘要。Model 变更和 Skill/Extension/Package 开关使用原子文件写入；Runtime Reload 失败时恢复原配置并尝试恢复旧 Runtime。目录树安装/卸载不执行自动删除式回滚
 - 设置与 Models 使用居中 Windows 式小窗口
 - Thinking 和工具调用折叠显示

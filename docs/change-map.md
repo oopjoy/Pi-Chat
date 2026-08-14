@@ -32,6 +32,7 @@
 | Rename / Delete | `App.tsx` optimistic projection、`app.ts` orchestration | App coordinator mutation token/tombstone；服务端 Session mutation | `web/session-inventory-mutations.test.ts`、`session-management.test.ts` |
 | Restart / shutdown | `application-lifecycle.ts`、`application-restart.ts`、`app.ts` | lifecycle barrier 与对应资源所有者 | `application-lifecycle.test.ts`、`application-restart.test.ts`、`server/application-restart-admission.test.ts`、`server/shutdown-control.test.ts` |
 | Host / Origin / request token admission | `request-guard.ts` | request guard | `request-guard.test.ts`、`api-recovery-token.test.ts` |
+| 状态诊断录制与 JSON 导出 | `server/state-diagnostics.ts`、`server/sse-hub.ts`、`web/lib/state-diagnostics.ts`、`App.tsx`、`ManagementPanel.tsx` | 服务端与当前浏览器各自的显式、有界、closed-schema 内存 ring；窗口绑定 capture ID；SseHub 只报告无 payload 的实际投递结果；App coordinator 只编排启停/导出 | `state-diagnostics.test.ts`、`server/state-diagnostics-route.test.ts`、`sse-hub.test.ts`、`web/state-diagnostics.test.ts`、`web/diagnostic-settings.test.ts`、`web/composer-capabilities.test.ts` |
 | System Gate 安装与完整性 | `system-gate-installer.ts` | system Gate installer | `system-gate-installer.test.ts` |
 
 ## 可写状态所有权
