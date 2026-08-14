@@ -207,9 +207,14 @@ export const api = {
   waitForApplicationHandoff,
   recoverConnection,
   closeWindow: () => request<{ shuttingDown: boolean; closeWindow: true; sessionId?: string; rested?: boolean; remainingWindows: number; autoShutdownPending?: boolean }>("/api/window/close", { method: "POST" }),
-  signalWindowClose: () => {
+  signalWindowClose: (foreground: boolean) => {
     if (!requestToken || typeof navigator.sendBeacon !== "function") return false;
-    const query = new URLSearchParams({ token: requestToken, client: clientId, page: pageId });
+    const query = new URLSearchParams({
+      token: requestToken,
+      client: clientId,
+      page: pageId,
+      foreground: foreground ? "1" : "0",
+    });
     return navigator.sendBeacon(`/api/window/close?${query}`);
   },
   shutdown: () => request<{ shuttingDown: true }>("/api/shutdown", { method: "POST" }),

@@ -140,6 +140,8 @@ export type ConversationPaneAction =
       type: "PROMPT_REJECTED";
       sessionId: string;
       messages?: PiMessage[] | ((current: PiMessage[]) => PiMessage[]);
+      /** An authoritative Steer conflict can prove the previously shown turn is already idle. */
+      isStreaming?: boolean;
       toolStatus?: string;
     }
   | { type: "DRAFT_PROMPT_REJECTED" }
@@ -380,6 +382,14 @@ export function conversationPaneReducer(
         ? {
             ...state,
             ...(action.messages ? { messages: resolve(action.messages, state.messages) } : null),
+            ...(action.isStreaming === undefined
+              ? null
+              : {
+                  piState: { ...state.piState, isStreaming: action.isStreaming },
+                  ...(action.isStreaming
+                    ? null
+                    : { liveMessage: null, toolStatus: "" }),
+                }),
             ...(action.toolStatus === undefined ? null : { toolStatus: action.toolStatus }),
             pendingUserMessage: null,
             promptStarting: false,

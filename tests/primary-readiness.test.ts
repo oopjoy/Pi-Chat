@@ -40,6 +40,7 @@ class ControllerRpc {
   stops = 0;
   probes = 0;
   stateProbes = 0;
+  generation = 0;
   compatible = true;
   startFailure: Error | null = null;
   startResponse: Record<string, unknown> = {
@@ -49,6 +50,7 @@ class ControllerRpc {
   };
   async start() {
     this.starts += 1;
+    this.generation += 1;
     if (this.startFailure) {
       const error = this.startFailure;
       this.startFailure = null;
@@ -56,8 +58,12 @@ class ControllerRpc {
     }
     return this.startResponse;
   }
-  async restart() { this.restarts += 1; return this.startResponse; }
+  async restart() { this.restarts += 1; this.generation += 1; return this.startResponse; }
   async stop() { this.stops += 1; }
+  onEvent() { return () => {}; }
+  isRunning() { return true; }
+  currentGeneration() { return this.generation; }
+  async send(_command?: Record<string, unknown>) { return { type: "response", success: true, data: {} }; }
   async probeCompatibility(initialState?: Record<string, unknown>) {
     if (initialState) this.stateProbes += 1;
     this.probes += 1;
@@ -299,6 +305,141 @@ test("Primary publishes ready only after the App adopts the startup state", asyn
     thinkingLevel: "high",
     sessionId: "adopted-session",
   });
+});
+
+test("Primary demand recovery preserves a later abort across Queue Resume", async () => {
+  const path = "C:\\sessions\\primary-recover-abort.jsonl";
+  const id = idForPath(path);
+  let releaseRestart!: () => void;
+  let markRestartStarted!: () => void;
+  let recovering = false;
+  const commands: Record<string, unknown>[] = [];
+  const restartStarted = new Promise<void>((resolve) => {
+    markRestartStarted = resolve;
+  });
+  const restartGate = new Promise<void>((resolve) => {
+    releaseRestart = resolve;
+  });
+  const rpc = new class extends ControllerRpc {
+    constructor() {
+      super();
+      this.startResponse = {
+        type: "response",
+        success: true,
+        data: {
+          model: null,
+          sessionFile: path,
+          sessionId: "primary-recover-abort",
+          isStreaming: false,
+        },
+      };
+    }
+    override isRunning() { return !recovering; }
+    override async restart() {
+      this.restarts += 1;
+      this.generation += 1;
+      recovering = true;
+      markRestartStarted();
+      await restartGate;
+      recovering = false;
+      return this.startResponse;
+    }
+    override async send(command?: Record<string, unknown>) {
+      if (command) commands.push(command);
+      return { type: "response", success: true, data: {} };
+    }
+  }();
+  const controller = new PrimaryRuntimeReadinessController(
+    rpc as unknown as PiRpcClient,
+  );
+  const sessions = {
+    list: async () => [{
+      id,
+      sessionId: "primary-recover-abort",
+      name: "Primary",
+      preview: "",
+      cwd: process.cwd(),
+      updatedAt: 1,
+      messageCount: 1,
+      active: true,
+    }],
+    pathForId: (candidate: string) => candidate === id ? path : null,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({
+    rpc: rpc as unknown as PiRpcClient,
+    sessions,
+    resources: {} as ResourceManager,
+    cwd: process.cwd(),
+    webRoot: process.cwd(),
+    primaryRuntime: controller,
+  });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const internals = app as unknown as {
+    promptQueue: Array<{
+      id: string;
+      message: string;
+      images: [];
+      imageCount: number;
+      createdAt: number;
+    }>;
+    queuePaused: boolean;
+  };
+  try {
+    await controller.start();
+    internals.promptQueue.push({
+      id: "00000000-0000-4000-8000-000000000902",
+      message: "remain paused",
+      images: [],
+      imageCount: 0,
+      createdAt: 1,
+    });
+    controller.markFailed(new Error("recover now"));
+    const prompt = fetch(`${origin}/api/chat/prompt`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: id, message: "queue after recovery" }),
+    });
+    await restartStarted;
+    const resume = await fetch(`${origin}/api/chat/queue/resume`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: id }),
+    });
+    assert.equal(resume.status, 200);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(
+      commands.some((command) => command.type === "prompt"),
+      false,
+      "Queue Resume cannot dispatch while Primary recovery owns cleanup",
+    );
+    const abort = await fetch(`${origin}/api/chat/abort`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: id }),
+    });
+    assert.equal(abort.status, 200);
+    assert.equal((await abort.json() as { queuePaused: boolean }).queuePaused, true);
+    releaseRestart();
+    assert.equal((await prompt).status, 202);
+    assert.equal(internals.queuePaused, true);
+    assert.deepEqual(internals.promptQueue.map((item) => item.message), [
+      "remain paused",
+      "queue after recovery",
+    ]);
+    assert.equal(
+      commands.some((command) => command.type === "prompt"),
+      false,
+      "the newer abort remains authoritative after adoption",
+    );
+  } finally {
+    server.close();
+    await app.close();
+  }
 });
 
 test("a startup timeout retries only by replacing the whole Pi process", async () => {

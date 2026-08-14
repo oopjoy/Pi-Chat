@@ -147,6 +147,19 @@ function promptDraftFromMessage(
 }
 
 /** User-facing reason an accepted Steer was cleared before Pi consumed it. */
+function authoritativeStoppedSteerRejection(
+  cause: unknown,
+  steering: boolean,
+): cause is ApiRequestError {
+  if (!steering || !(cause instanceof ApiRequestError) || cause.status !== 409)
+    return false;
+  return (
+    cause.code === "STEER_NOT_RUNNING" ||
+    cause.code === "STEER_ALREADY_SETTLED" ||
+    /当前对话(?:未在运行|已结束)/.test(cause.message)
+  );
+}
+
 function steeringClearedMessage(reason: string): string {
   switch (reason) {
     case "settled-before-consumption":
@@ -2899,46 +2912,71 @@ export function App() {
         }
       } else if (type === "tool_execution_start") {
         const status = `正在运行工具：${String(event.toolName || "unknown")}`;
-        if (eventSessionId)
-          patchSessionCache(eventSessionId, { toolStatus: status });
+        if (eventSessionId) {
+          // A tool invocation is authoritative active-turn evidence even when a
+          // lagging get_state snapshot or a missed agent_start painted idle.
+          releasePromptBusy(eventSessionId, eventRunGeneration, eventRunEpoch);
+          sessionRunningOverridesRef.current.set(eventSessionId, true);
+          setSessions((current) =>
+            current.map((session) =>
+              session.id === eventSessionId
+                ? applySidebarRunningOverride(session, true)
+                : session,
+            ),
+          );
+          patchSessionCache(eventSessionId, {
+            isStreaming: true,
+            toolStatus: status,
+            state: { isStreaming: true, isCompacting: false },
+          });
+        }
         if (viewingEventSession)
           dispatchPane({
-            type: "TOOL_STATUS_UPDATED",
+            type: "AGENT_STARTED",
             sessionId: eventSessionId,
-            status,
+            toolStatus: status,
           });
       } else if (type === "tool_execution_end") {
         const status = `${String(event.toolName || "工具")} ${event.isError ? "执行失败" : "已完成，Pi 正在继续…"}`;
-        const sessionStillRunning = eventSessionId
-          ? sessionRunningOverridesRef.current.get(eventSessionId) !== false
-          : false;
+        // Current servers attach a run generation. If that generation had
+        // already settled, the event fence above returned before this branch;
+        // otherwise this tool frame proves the turn is still active. Preserve
+        // the older-server fallback without reviving an explicitly idle pane.
+        const sessionStillRunning = Boolean(
+          eventSessionId &&
+            (typeof eventRunGeneration === "number" ||
+              sessionRunningOverridesRef.current.get(eventSessionId) !== false),
+        );
         if (eventSessionId && sessionStillRunning) {
+          releasePromptBusy(eventSessionId, eventRunGeneration, eventRunEpoch);
+          sessionRunningOverridesRef.current.set(eventSessionId, true);
+          setSessions((current) =>
+            current.map((session) =>
+              session.id === eventSessionId
+                ? applySidebarRunningOverride(session, true)
+                : session,
+            ),
+          );
           completedCompactionSessionIdsRef.current.add(eventSessionId);
           patchSessionCache(eventSessionId, {
+            isStreaming: true,
             toolStatus: status,
-            // A terminal tool frame is also proof that Pi left compaction. It
-            // can be the first retained frame after an SSE reconnect, so do
-            // not rely on tool_execution_start having reached this browser.
-            state: { isCompacting: false },
+            state: { isStreaming: true, isCompacting: false },
           });
         }
-        if (viewingEventSession) {
-          // `COMPACTION_FINISHED` clears the stale lock, then the normal tool
-          // status action retains the useful completion progress only while
-          // this turn is still active. A same-generation idle activity frame
-          // can arrive before this tool completion; never resurrect a waiting
-          // spinner or its off-screen cache projection after terminal activity.
-          dispatchPane({
-            type: "COMPACTION_FINISHED",
-            sessionId: eventSessionId,
-          });
-          if (paneStateRef.current.isStreaming && sessionStillRunning)
-            dispatchPane({
-              type: "TOOL_STATUS_UPDATED",
-              sessionId: eventSessionId,
-              status,
-            });
-        }
+        if (viewingEventSession)
+          dispatchPane(
+            sessionStillRunning
+              ? {
+                  type: "AGENT_STARTED",
+                  sessionId: eventSessionId,
+                  toolStatus: status,
+                }
+              : {
+                  type: "COMPACTION_FINISHED",
+                  sessionId: eventSessionId,
+                },
+          );
       } else if (type === "pi_chat_native_steering_cleared") {
         if (eventSessionId) {
           const pending = localUserTurnsRef.current.get(eventSessionId) || [];
@@ -3925,6 +3963,7 @@ export function App() {
     // restored PWA page "visible" while another window is the real foreground.
     const isForeground = () =>
       document.visibilityState !== "hidden" && document.hasFocus();
+    let foregroundCloseIntent = false;
     const renewPresence = () => {
       if (!isForeground()) return;
       void api.renewPresence().catch(() => undefined);
@@ -3938,9 +3977,13 @@ export function App() {
     const pausePresenceRenewal = () => undefined;
     const resume = (event?: Event) => {
       if (!isForeground()) {
-        relinquishPresence();
+        // A genuine close/reload commonly becomes hidden between beforeunload
+        // and unload. Preserve its last fresh foreground lease until the close
+        // beacon is sent; ordinary backgrounding has no latch and relinquishes.
+        if (!foregroundCloseIntent) relinquishPresence();
         return;
       }
+      foregroundCloseIntent = false;
       renewPresence();
       // Chromium may preserve a half-open EventSource while a standalone PWA is
       // frozen. A real visibility/pageshow resume always gets a fresh socket;
@@ -3965,17 +4008,19 @@ export function App() {
     window.addEventListener("pageshow", resume);
     window.addEventListener("focus", resume);
     window.addEventListener("online", resume);
+    const latchWindowClose = () => {
+      // beforeunload can be cancelled, so latch only; a surviving pageshow/focus
+      // clears this value. The later unload beacon is the actual close intent.
+      foregroundCloseIntent = isForeground();
+    };
     const signalWindowClose = () => {
-      relinquishPresence();
-      // `pagehide` is not a reliable close signal for installed/frozen PWAs:
-      // some hosts emit it while merely backgrounding a renderer. Treating it
-      // as a final close can turn a hidden long-running task into a service
-      // shutdown. `unload` is deliberately narrower. If a platform cannot
-      // deliver it, the conservative outcome is an idle local service rather
-      // than stopping a Pi worker that may still be doing work.
-      api.signalWindowClose();
+      // pagehide/unload alone can mean PWA discard. Without a foreground latch,
+      // remove only the page record and keep the local service alive.
+      api.signalWindowClose(foregroundCloseIntent);
+      foregroundCloseIntent = false;
     };
     window.addEventListener("blur", pausePresenceRenewal);
+    window.addEventListener("beforeunload", latchWindowClose);
     window.addEventListener("unload", signalWindowClose);
     return () => {
       window.clearInterval(watchdog);
@@ -3985,6 +4030,7 @@ export function App() {
       window.removeEventListener("focus", resume);
       window.removeEventListener("online", resume);
       window.removeEventListener("blur", pausePresenceRenewal);
+      window.removeEventListener("beforeunload", latchWindowClose);
       window.removeEventListener("unload", signalWindowClose);
     };
   }, [loading, refresh, reportBackgroundRefreshError]);
@@ -4958,6 +5004,10 @@ export function App() {
         cause instanceof ApiRequestError &&
         cause.status >= 400 &&
         cause.status < 500;
+      const stoppedSteerRejection = authoritativeStoppedSteerRejection(
+        cause,
+        steering,
+      );
       const outcomeUnknown =
         promptSubmitted &&
         (promptAcceptedByEvent ||
@@ -5002,13 +5052,35 @@ export function App() {
         promptAuthority && paneAuthorityCanCommit(promptAuthority)
           ? promptAuthority
           : sameSessionRefreshAuthority;
+      if (stoppedSteerRejection) {
+        sessionRunningOverridesRef.current.set(targetSessionId, false);
+        setSessions((current) =>
+          current.map((session) =>
+            session.id === targetSessionId
+              ? settleSidebarActivity(session)
+              : session,
+          ),
+        );
+        patchSessionCache(targetSessionId, {
+          isStreaming: false,
+          liveMessage: undefined,
+          toolStatus: "",
+          state: { isStreaming: false, isCompacting: false },
+        });
+        releasePromptBusy(targetSessionId, undefined, undefined, true);
+        clearStoppingForSession(targetSessionId);
+      }
       const visibleFailure = failureAuthority
         ? commitPaneIfCurrent(failureAuthority, {
             type: "PROMPT_REJECTED",
             sessionId: targetSessionId,
             ...(rejectionMessages ? { messages: rejectionMessages } : null),
+            ...(stoppedSteerRejection ? { isStreaming: false } : null),
             toolStatus:
-              !state.isStreaming && !promptAcceptedByEvent ? "" : undefined,
+              stoppedSteerRejection ||
+              (!state.isStreaming && !promptAcceptedByEvent)
+                ? ""
+                : undefined,
           })
         : Boolean(
             promptDraftAuthority &&
@@ -5021,6 +5093,28 @@ export function App() {
         const messageText =
           cause instanceof Error ? cause.message : String(cause);
         setError(messageText);
+      }
+      if (visibleFailure && stoppedSteerRejection) {
+        clearPendingLiveMessage();
+        const requestVersion =
+          sessionEventVersionRef.current.get(targetSessionId) || 0;
+        const queueRequestRevision =
+          queueProjectionRevisionRef.current.get(targetSessionId) || 0;
+        const authority = capturePaneAuthority(targetSessionId);
+        void api
+          .viewSession(targetSessionId)
+          .then((view) => {
+            if (
+              (sessionEventVersionRef.current.get(targetSessionId) || 0) !==
+              requestVersion
+            )
+              return;
+            if (paneAuthorityCanCommit(authority))
+              applySessionView(view, authority, queueRequestRevision);
+            else rememberSessionView(view);
+          })
+          .catch(() => undefined);
+        scheduleSidebarRefresh();
       }
       if (visibleFailure && !outcomeUnknown) throw cause;
     } finally {

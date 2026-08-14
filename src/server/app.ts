@@ -393,6 +393,8 @@ export class PiChatApp {
   private readonly nativeSteeringResetAfterSettlement = new Map<string, number>();
   /** Route, Stop, and settlement cleanup share one Runtime reset per Session. */
   private readonly nativeSteeringResets = new Map<string, Promise<void>>();
+  /** Queue authority captured by the Primary restart currently being adopted. */
+  private primaryRecoveryFence?: { abortGeneration: number };
 
   // Primary queue/runtime flags live on PromptScheduler; aliases keep route handlers stable.
   private get promptQueue() {
@@ -750,7 +752,7 @@ export class PiChatApp {
 
   private busyConversationCount(): number {
     const primaryBusy =
-      this.running ||
+      this.primaryTurnActive() ||
       this.dispatching ||
       this.queuePaused ||
       this.promptQueue.length > 0 ||
@@ -942,6 +944,16 @@ export class PiChatApp {
     this.lastPrimaryState = { ...this.lastPrimaryState, isCompacting };
   }
 
+  /** Event-owned evidence that a Primary turn still has visible or tool work. */
+  private primaryTurnActive(): boolean {
+    return this.running || Boolean(this.liveMessage) || Boolean(this.toolStatus);
+  }
+
+  /** Event-owned evidence that a Secondary turn still has visible or tool work. */
+  private runtimeTurnActive(runtime: SecondaryRuntime): boolean {
+    return runtime.running || Boolean(runtime.liveMessage) || Boolean(runtime.toolStatus);
+  }
+
   private sessionActivity(sessionId: string): SessionActivityState {
     const runtime = this.runtimePool.get(sessionId);
     const primary = sessionId === this.activeSessionId && !runtime;
@@ -950,8 +962,8 @@ export class PiChatApp {
       : runtime?.failed === true || runtime?.rpc.isRunning?.() === false;
     const paused = primary ? this.queuePaused : runtime?.queuePaused === true;
     const running = primary
-      ? this.running || Boolean(this.liveMessage)
-      : runtime?.running === true || Boolean(runtime?.liveMessage);
+      ? this.primaryTurnActive()
+      : Boolean(runtime && this.runtimeTurnActive(runtime));
     const dispatching = primary
       ? this.dispatching
       : runtime?.dispatching === true;
@@ -1058,6 +1070,18 @@ export class PiChatApp {
    */
   private registerWindowPage(clientId: string, pageId: string): void {
     if (!clientId || !pageId) return;
+    // Token recovery can repeat the handshake while this exact page still owns
+    // a healthy SSE transport. Never downgrade that durable page lease back to
+    // a temporary pre-SSE record: its expiry would erase the only open window
+    // and could falsely trigger last-window shutdown after a long idle period.
+    if (
+      this.connectedPageClients.get(pageId) === clientId &&
+      !this.pendingWindowPageTimers.has(pageId) &&
+      this.sessionControl.isClientConnected(clientId)
+    ) {
+      this.cancelLastWindowShutdown();
+      return;
+    }
     this.connectedPageClients.set(pageId, clientId);
     this.clearPendingWindowPage(pageId);
     const timer = setTimeout(() => {
@@ -1202,6 +1226,8 @@ export class PiChatApp {
         this.running ||
         this.dispatching ||
         this.promptQueue.length ||
+        this.liveMessage ||
+        this.toolStatus ||
         this.pendingExtensionRequest
       )
         return false;
@@ -1212,6 +1238,8 @@ export class PiChatApp {
         this.running ||
         this.dispatching ||
         this.promptQueue.length ||
+        this.liveMessage ||
+        this.toolStatus ||
         this.pendingExtensionRequest
       ) {
         this.primaryOperationAdmission.reopen(generation);
@@ -1580,6 +1608,11 @@ export class PiChatApp {
           // Controller-managed restart adopts the startup state before resolve.
           // Re-reading get_state here used to reopen the same split authority.
           await this.restartPrimaryRuntime(this.activeSessionPath || undefined);
+          // The replacement process cannot own the prior generation's live or
+          // tool projection, including legacy embedding bridges without an
+          // adopter callback.
+          this.liveMessage = undefined;
+          this.toolStatus = "";
           this.clearRuntimeFailure(sessionId);
         }
         this.clearNativeSteeringState(sessionId, reason);
@@ -1619,6 +1652,7 @@ export class PiChatApp {
       return;
     const type = String(event.type || "");
     const generation = runtime.rpcGeneration;
+    const queuePausedBeforeEvent = runtime.queuePaused;
     let droppedNativeSteering = 0;
     if (type === "pi_chat_process_error") {
       this.recordRuntimeFailure(
@@ -1689,7 +1723,11 @@ export class PiChatApp {
         this.broadcastSessionActivity(runtime.id);
         void this.drainSecondaryAfterSettlement(runtime, runtime.rpcGeneration);
       }
-    } else if (type === "agent_start") {
+    } else if (
+      type === "agent_start" ||
+      type === "tool_execution_start" ||
+      type === "tool_execution_end"
+    ) {
       this.broadcastSessionActivity(runtime.id);
     } else if (type === "pi_chat_process_error") {
       // The raw error frame opens the pane-level error; this activity frame
@@ -1698,7 +1736,7 @@ export class PiChatApp {
       // this Session's queue permanently stuck: release the dispatch lock and
       // unpause so the next mutation can recover and continue.
       runtime.dispatching = false;
-      runtime.queuePaused = false;
+      runtime.queuePaused = queuePausedBeforeEvent;
       // transitionRuntimeEvent published its conservative paused state before
       // this crash cleanup. Publish the released state as the final authority.
       this.broadcastQueue(runtime.id);
@@ -2002,7 +2040,7 @@ export class PiChatApp {
       sessionId: runtime.id,
       state: {
         ...(runtime.lastState || { model: null, isStreaming: runtime.running }),
-        isStreaming: runtime.running,
+        isStreaming: this.runtimeTurnActive(runtime) || runtime.dispatching,
       },
       gateMode: runtime.gateMode,
     };
@@ -2083,6 +2121,7 @@ export class PiChatApp {
     const sessionId = this.primaryBoundSessionId;
     const type = String(event.type || "");
     const generation = this.primaryRpcGeneration;
+    const queuePausedBeforeEvent = this.queuePaused;
     let droppedNativeSteering = 0;
     if (type === "pi_chat_process_error") {
       this.recordRuntimeFailure(
@@ -2144,12 +2183,16 @@ export class PiChatApp {
         this.broadcastSessionActivity(sessionId);
         void this.drainPrimaryAfterSettlement(sessionId, sourceGeneration);
       }
-    } else if (type === "agent_start") this.broadcastSessionActivity(sessionId);
+    } else if (
+      type === "agent_start" ||
+      type === "tool_execution_start" ||
+      type === "tool_execution_end"
+    ) this.broadcastSessionActivity(sessionId);
     else if (type === "pi_chat_process_error") {
       // Never leave the Primary queue stuck behind a stale dispatch lock after
       // the live child exits (see the Secondary branch for the same contract).
       this.dispatching = false;
-      this.queuePaused = false;
+      this.queuePaused = queuePausedBeforeEvent;
       this.broadcastQueue(sessionId);
       this.broadcastSessionActivity(sessionId);
     }
@@ -2190,6 +2233,7 @@ export class PiChatApp {
     this.lastPrimaryState = state;
     this.running = state.isStreaming;
     this.primaryFailed = false;
+    this.liveMessage = undefined;
     this.toolStatus = "";
     this.bindPrimaryIdentity(state);
     if (!this.primaryBoundSessionId || this.primaryRpcGeneration !== childGeneration)
@@ -2208,7 +2252,12 @@ export class PiChatApp {
       );
     this.primaryGateMode = desiredGateMode;
     if (context.restart) {
-      this.queuePaused = false;
+      const recoveryStillOwnsQueue =
+        !this.primaryRecoveryFence ||
+        this.primaryRecoveryFence.abortGeneration ===
+          this.scheduler.primaryAbortGeneration;
+      if (recoveryStillOwnsQueue) this.queuePaused = false;
+      else if (this.promptQueue.length) this.queuePaused = true;
       this.broadcastQueue();
     }
   }
@@ -2235,6 +2284,27 @@ export class PiChatApp {
   /** Secondary recovery is intentionally separate from abort's no-op policy. */
   private secondaryNeedsRecovery(runtime: SecondaryRuntime): boolean {
     return runtime.failed || runtime.rpc.isRunning?.() === false;
+  }
+
+  private async recoverPrimaryRuntimeWithQueueFence(
+    primaryRuntime: PrimaryRuntimeReadinessBridge,
+    sessionFile?: string,
+    cwd = this.primaryRuntimeCwd,
+  ): Promise<void> {
+    if (this.primaryRecoveryFence) {
+      await primaryRuntime.recover(sessionFile, cwd);
+      return;
+    }
+    const recoveryFence = {
+      abortGeneration: this.scheduler.primaryAbortGeneration,
+    };
+    this.primaryRecoveryFence = recoveryFence;
+    try {
+      await primaryRuntime.recover(sessionFile, cwd);
+    } finally {
+      if (this.primaryRecoveryFence === recoveryFence)
+        this.primaryRecoveryFence = undefined;
+    }
   }
 
   private async ensurePrimaryRuntime(): Promise<void> {
@@ -2270,7 +2340,8 @@ export class PiChatApp {
           // split authority where SSE said ready while App was still adopting.
           if (primaryRuntime) {
             this.options.rpc.setDiagnosticSessionId?.(this.activeSessionId);
-            await primaryRuntime.recover(
+            await this.recoverPrimaryRuntimeWithQueueFence(
+              primaryRuntime,
               this.activeSessionPath || undefined,
               this.primaryRuntimeCwd,
             );
@@ -2398,7 +2469,7 @@ export class PiChatApp {
     this.lastPrimaryState = {
       ...this.lastPrimaryState,
       ...patch,
-      isStreaming: this.running || this.lastPrimaryState.isStreaming,
+      isStreaming: this.primaryTurnActive() || this.lastPrimaryState.isStreaming,
     };
   }
 
@@ -2409,7 +2480,11 @@ export class PiChatApp {
     runtime.lastState = {
       ...(runtime.lastState || { model: null, isStreaming: runtime.running }),
       ...patch,
-      isStreaming: runtime.running || runtime.lastState?.isStreaming || false,
+      isStreaming:
+        this.runtimeTurnActive(runtime) ||
+        runtime.dispatching ||
+        runtime.lastState?.isStreaming ||
+        false,
     };
   }
 
@@ -2547,7 +2622,7 @@ export class PiChatApp {
     if (
       this.closed ||
       this.applicationLifecycle !== "idle" ||
-      runtime.running ||
+      this.runtimeTurnActive(runtime) ||
       runtime.dispatching ||
       runtime.queuePaused ||
       !runtime.promptQueue.length
@@ -2560,7 +2635,7 @@ export class PiChatApp {
     if (
       this.closed ||
       this.applicationLifecycle !== "idle" ||
-      this.running ||
+      this.primaryTurnActive() ||
       this.dispatching ||
       this.queuePaused ||
       !this.promptQueue.length
@@ -2570,10 +2645,14 @@ export class PiChatApp {
   }
 
   private async dispatchRuntimeNext(runtime: SecondaryRuntime): Promise<void> {
+    // Runtime recovery owns stale-lock cleanup. A concurrent Resume must not
+    // create a new dispatch lock that the recovery completion could erase.
+    if (runtime.recovery) return;
     await this.scheduler.dispatchRuntimeNext(runtime);
   }
 
   private async dispatchNext(): Promise<void> {
+    if (this.primaryRecoveryFence) return;
     await this.scheduler.dispatchPrimaryNext();
   }
 
@@ -2595,8 +2674,8 @@ export class PiChatApp {
         ...(lastUserPromptAt !== undefined ? { lastUserPromptAt } : null),
         writable: this.activeSessionIds().includes(session.id),
         running:
-          (this.running && session.id === this.activeSessionId) ||
-          runtime?.running === true,
+          (session.id === this.activeSessionId && this.primaryTurnActive()) ||
+          Boolean(runtime && this.runtimeTurnActive(runtime)),
         queued:
           session.id === this.activeSessionId
             ? this.promptQueue.length > 0
@@ -2611,9 +2690,8 @@ export class PiChatApp {
       if (known.has(runtime.id)) continue;
       if (
         !runtime.prompted &&
-        !runtime.running &&
-        !runtime.dispatching &&
-        !runtime.liveMessage
+        !this.runtimeTurnActive(runtime) &&
+        !runtime.dispatching
       )
         continue;
       // A persisted Session may be momentarily absent from a refresh while its
@@ -2643,9 +2721,7 @@ export class PiChatApp {
         active: true,
         writable: true,
         running:
-          runtime.running ||
-          runtime.dispatching ||
-          Boolean(runtime.liveMessage),
+          this.runtimeTurnActive(runtime) || runtime.dispatching,
         queued: runtime.promptQueue.length > 0,
         pendingConfirmation: Boolean(this.pendingRequestForSession(runtime.id)),
         activity: this.sessionActivity(runtime.id),
@@ -2742,7 +2818,11 @@ export class PiChatApp {
       this.options.rpc.setDiagnosticSessionId?.(
         sessionFile ? idForPath(sessionFile) : this.activeSessionId,
       );
-      await this.options.primaryRuntime.recover(sessionFile, cwd);
+      await this.recoverPrimaryRuntimeWithQueueFence(
+        this.options.primaryRuntime,
+        sessionFile,
+        cwd,
+      );
       // The production controller exposes setAdopter(). Test/embedding bridges
       // may implement the optional method without installing an adopter, so
       // only the concrete controller uses this early return.
@@ -2920,7 +3000,7 @@ export class PiChatApp {
     if (!isPrimary && !path && !runtime) throw new Error("会话不存在");
     if (isPrimary) {
       if (
-        this.running ||
+        this.primaryTurnActive() ||
         this.promptQueue.length ||
         this.pendingExtensionRequest
       )
@@ -2936,7 +3016,7 @@ export class PiChatApp {
       // releaseForDeletion owns admission close-and-drain; do not hold a normal
       // operation lease here or it would correctly block its own stop.
       if (
-        runtime.running ||
+        this.runtimeTurnActive(runtime) ||
         runtime.promptQueue.length ||
         runtime.extensionUiPending
       )
@@ -3055,10 +3135,8 @@ export class PiChatApp {
       ? this.lastPrimaryState
       : runtime!.lastState || { model: null, isStreaming: runtime!.running };
     const streaming = primary
-      ? this.running || Boolean(this.liveMessage)
-      : runtime!.running ||
-        runtime!.dispatching ||
-        Boolean(runtime!.liveMessage);
+      ? this.primaryTurnActive()
+      : this.runtimeTurnActive(runtime!) || runtime!.dispatching;
     return {
       session: {
         ...summary,
@@ -3118,11 +3196,10 @@ export class PiChatApp {
     const knownRuntime = this.runtimePool.get(id);
     const targetRuntimeBusy =
       id === this.activeSessionId
-        ? this.running || Boolean(this.liveMessage)
+        ? this.primaryTurnActive()
         : Boolean(
-            knownRuntime?.running ||
-            knownRuntime?.dispatching ||
-            knownRuntime?.liveMessage,
+            knownRuntime &&
+            (this.runtimeTurnActive(knownRuntime) || knownRuntime.dispatching),
           );
     // Cold history is a pure JSONL read. Avoid waking or querying the Primary RPC
     // and avoid rescanning every Session when the index already knows this ID.
@@ -3161,10 +3238,12 @@ export class PiChatApp {
         Boolean(this.activeSessionPath) &&
         (currentPrimaryGeneration
           ? this.primaryRpcGeneration === currentPrimaryGeneration
-          : this.running ||
-            (id === this.activeSessionId && Boolean(this.liveMessage)));
+          : this.primaryTurnActive());
       if (canSkipStateProbe) {
-        state = { ...this.lastPrimaryState, isStreaming: true };
+        state = {
+          ...this.lastPrimaryState,
+          isStreaming: targetRuntimeBusy,
+        };
       } else {
         try {
           state = asState(
@@ -3185,11 +3264,11 @@ export class PiChatApp {
     const secondaryRuntime = knownRuntime;
     const knownBusy =
       id === this.activeSessionId
-        ? this.running || Boolean(this.liveMessage)
+        ? this.primaryTurnActive()
         : Boolean(
-            secondaryRuntime?.running ||
-            secondaryRuntime?.dispatching ||
-            secondaryRuntime?.liveMessage,
+            secondaryRuntime &&
+            (this.runtimeTurnActive(secondaryRuntime) ||
+              secondaryRuntime.dispatching),
           );
     // A busy Runtime already has a known Session path/index entry. Do not rescan
     // every JSONL merely to switch back to it: streaming writes continuously
@@ -3234,6 +3313,7 @@ export class PiChatApp {
       const busy =
         runtime.running ||
         Boolean(runtime.liveMessage) ||
+        Boolean(runtime.toolStatus) ||
         Boolean((runtime as SecondaryRuntime).dispatching);
       const sessionIndex = this.options.sessions as SessionIndex & {
         cachedSnapshotForId?: (
@@ -3406,7 +3486,7 @@ export class PiChatApp {
         messagesTruncated: windowed.truncated,
         isActive: true,
         runtimeStatus: "active",
-        isStreaming: runtime.running || liveState.isStreaming,
+        isStreaming: busy || liveState.isStreaming,
         liveMessage: runtime.liveMessage,
         toolStatus: runtime.toolStatus,
         stats,
@@ -3572,7 +3652,7 @@ export class PiChatApp {
     if (
       primaryAvailable &&
       !primaryStateAdopted &&
-      !(this.running && this.activeSessionPath)
+      !(this.primaryTurnActive() && this.activeSessionPath)
     ) {
       try {
         state = asState(
@@ -3586,12 +3666,16 @@ export class PiChatApp {
         this.bindPrimaryIdentity(state);
       } catch (error) {
         if (!this.activeSessionPath) throw error;
-        state = { ...this.lastPrimaryState, isStreaming: this.running };
+        state = {
+          ...this.lastPrimaryState,
+          isStreaming: this.primaryTurnActive(),
+        };
       }
-    } else if (this.running && this.activeSessionPath)
+    } else if (this.primaryTurnActive() && this.activeSessionPath)
       state = { ...state, isStreaming: true };
 
-    const busy = this.running || state.isStreaming;
+    const busy = this.primaryTurnActive() || state.isStreaming;
+    if (busy && !state.isStreaming) state = { ...state, isStreaming: true };
     if (!this.lastAvailableModels.length && state.model) {
       this.rememberModelContextWindows([state.model]);
       this.lastAvailableModels = [state.model];
@@ -4102,6 +4186,13 @@ export class PiChatApp {
           this.lifecycleMessage(),
         );
       const pageId = requestPageId(request) || clientId;
+      // `unload` is also emitted for discarded/frozen background renderers on
+      // some Chromium/PWA paths. Only a beacon that explicitly says it came
+      // from the foreground, backed by the server's still-fresh presence lease,
+      // may request service-lifetime shutdown.
+      const foregroundCloseIntent =
+        url.searchParams.get("foreground") === "1" &&
+        this.sessionControl.isClientPresent(clientId);
       const viewedSessionId = this.closeWindowClient(clientId, pageId);
       const otherWindowCount = this.openWindowCount();
       // A Prompt may already hold an admission lease while its request body is
@@ -4112,14 +4203,17 @@ export class PiChatApp {
         this.runtimePool.startingCount === 0
           ? await this.restSessionAfterWindowClose(viewedSessionId)
           : false;
-      if (otherWindowCount === 0) this.scheduleLastWindowShutdown();
+      if (otherWindowCount === 0 && foregroundCloseIntent)
+        this.scheduleLastWindowShutdown();
       json(response, 200, {
         shuttingDown: false,
         closeWindow: true,
         sessionId: viewedSessionId || undefined,
         rested,
         remainingWindows: otherWindowCount,
-        ...(otherWindowCount === 0 && this.options.applicationShutdown
+        ...(otherWindowCount === 0 &&
+        foregroundCloseIntent &&
+        this.options.applicationShutdown
           ? { autoShutdownPending: true }
           : {}),
       });
@@ -4217,9 +4311,12 @@ export class PiChatApp {
           const targetGeneration = requestedIsPrimary
             ? this.primaryRpcGeneration
             : (steeringRuntime?.rpcGeneration || 0);
+          const targetAbortGeneration = requestedIsPrimary
+            ? this.scheduler.primaryAbortGeneration
+            : (steeringRuntime?.abortGeneration || 0);
           const targetRunning = requestedIsPrimary
-            ? this.running
-            : steeringRuntime?.running === true;
+            ? this.running || Boolean(this.liveMessage) || Boolean(this.toolStatus)
+            : steeringRuntime?.running === true || Boolean(steeringRuntime?.liveMessage) || Boolean(steeringRuntime?.toolStatus);
           if (
             (!requestedIsPrimary && !steeringRuntime) ||
             !targetRunning ||
@@ -4227,6 +4324,7 @@ export class PiChatApp {
           )
             return json(response, 409, {
               error: "当前对话未在运行，无法发送 Steer 消息",
+              code: "STEER_NOT_RUNNING",
             });
           releaseRuntimeAdmission = steeringRuntime
             ? this.runtimePool.acquireOperation(steeringRuntime)
@@ -4339,8 +4437,35 @@ export class PiChatApp {
               steeringRuntime || undefined,
               "settled-before-consumption",
             );
+            if (steeringRuntime) {
+              if (steeringRuntime.abortGeneration === targetAbortGeneration) {
+                this.broadcastQueue(steeringRuntime.id);
+                this.broadcastSessionActivity(steeringRuntime.id);
+                if (
+                  !this.runtimeTurnActive(steeringRuntime) &&
+                  !steeringRuntime.dispatching &&
+                  !steeringRuntime.queuePaused
+                )
+                  setTimeout(
+                    () => void this.dispatchRuntimeNext(steeringRuntime),
+                    0,
+                  );
+              }
+            } else if (
+              this.scheduler.primaryAbortGeneration === targetAbortGeneration
+            ) {
+              this.broadcastQueue(requestedSessionId);
+              this.broadcastSessionActivity(requestedSessionId);
+              if (
+                !this.primaryTurnActive() &&
+                !this.dispatching &&
+                !this.queuePaused
+              )
+                setTimeout(() => void this.dispatchNext(), 0);
+            }
             return json(response, 409, {
               error: "当前对话已结束，Steer 消息未执行",
+              code: "STEER_ALREADY_SETTLED",
             });
           }
           json(response, 202, {
@@ -4801,15 +4926,18 @@ export class PiChatApp {
       const releasePrimaryOperation =
         this.primaryOperationAdmission.acquire().release;
       try {
-        if (this.primaryFailed || this.options.rpc.isRunning?.() === false)
+        this.scheduler.primaryAbortGeneration += 1;
+        if (this.promptQueue.length || this.dispatching)
+          this.queuePaused = true;
+        if (this.primaryFailed || this.options.rpc.isRunning?.() === false) {
+          this.broadcastQueue();
+          this.broadcastSessionActivity(sessionId);
           return json(response, 200, {
             ok: true,
             isStreaming: false,
             queuePaused: this.queuePaused,
           });
-        this.scheduler.primaryAbortGeneration += 1;
-        if (this.promptQueue.length || this.dispatching)
-          this.queuePaused = true;
+        }
         const steeringGeneration = this.primaryRpcGeneration;
         if (this.hasNativeSteeringPending(sessionId, steeringGeneration))
           this.nativeSteeringResetAfterSettlement.set(
@@ -4983,7 +5111,10 @@ export class PiChatApp {
         await this.ensurePrimaryRuntime();
         return json(response, 200, {
           sessionId: id,
-          state: { ...this.lastPrimaryState, isStreaming: this.running },
+          state: {
+            ...this.lastPrimaryState,
+            isStreaming: this.primaryTurnActive(),
+          },
           gateMode: this.primaryGateMode,
         } satisfies SessionRuntimeReadyData);
       }
@@ -5205,7 +5336,7 @@ export class PiChatApp {
                   extension: true,
                   command: extensionCommand.name,
                   description: extensionCommand.description,
-                  isStreaming: runtime.running,
+                  isStreaming: this.runtimeTurnActive(runtime),
                 }
               : null),
           } satisfies InitialPromptData);

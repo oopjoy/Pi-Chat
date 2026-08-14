@@ -202,7 +202,7 @@ export class RuntimePool {
   }
 
   isIdle(runtime: SecondaryRuntime): boolean {
-    return !runtime.running && !runtime.dispatching && runtime.operationLeases === 0 && !runtime.queuePaused && runtime.promptQueue.length === 0 && !runtime.extensionUiPending && !runtime.recovery;
+    return !runtime.running && !runtime.dispatching && !runtime.liveMessage && !runtime.toolStatus && runtime.operationLeases === 0 && !runtime.queuePaused && runtime.promptQueue.length === 0 && !runtime.extensionUiPending && !runtime.recovery;
   }
 
   /**
@@ -219,7 +219,7 @@ export class RuntimePool {
 
   busyCount(): number {
     return [...this.runtimes.values()].filter((runtime) =>
-      runtime.running || runtime.dispatching || runtime.operationLeases > 0 || runtime.queuePaused || runtime.promptQueue.length > 0 || runtime.extensionUiPending || Boolean(runtime.recovery)
+      runtime.running || runtime.dispatching || Boolean(runtime.liveMessage) || Boolean(runtime.toolStatus) || runtime.operationLeases > 0 || runtime.queuePaused || runtime.promptQueue.length > 0 || runtime.extensionUiPending || Boolean(runtime.recovery)
     ).length;
   }
 
@@ -460,6 +460,7 @@ export class RuntimePool {
     this.options.assertPrimaryCompatible?.();
     if (!runtime.sessionPath) throw new Error("Pi RPC 已退出，且会话路径不可用");
     const desiredGateMode = runtime.gateMode;
+    const recoveryAbortGeneration = runtime.abortGeneration;
     const recovery = (async () => {
       try {
         const restartResult = await runtime.rpc.restart(runtime.sessionPath, runtime.cwd);
@@ -468,11 +469,15 @@ export class RuntimePool {
         runtime.lastState = state;
         runtime.running = state.isStreaming;
         runtime.failed = false;
+        runtime.liveMessage = undefined;
         runtime.toolStatus = "";
-        // A crash can leave a stale dispatch lock or a paused queue behind.
-        // Recovery must re-open both so the next prompt can actually dispatch.
+        // A crash can leave a stale dispatch lock or paused queue behind, but
+        // a newer abort owns queue pause authority. Never reopen that queue as
+        // a side effect of completing an older recovery.
         runtime.dispatching = false;
-        runtime.queuePaused = false;
+        if (runtime.abortGeneration === recoveryAbortGeneration)
+          runtime.queuePaused = false;
+        else if (runtime.promptQueue.length) runtime.queuePaused = true;
         if (desiredGateMode !== "strict") {
           await runtime.rpc.send({ type: "prompt", message: `/gate ${desiredGateMode}` });
         }

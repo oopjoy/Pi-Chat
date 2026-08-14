@@ -23,7 +23,7 @@ test("foreground presence renews on ready, visible lifecycle events, stays quiet
   const restoreApi = captureApiSnapshot(api);
   let renewals = 0;
   let relinquishments = 0;
-  let closeSignals = 0;
+  const closeForegroundIntents: boolean[] = [];
   Object.assign(api, {
     bootstrap: async () => bootstrap,
     eventsUrl: () => "/api/events",
@@ -36,8 +36,8 @@ test("foreground presence renews on ready, visible lifecycle events, stays quiet
       relinquishments += 1;
       return { present: false as const };
     },
-    signalWindowClose: () => {
-      closeSignals += 1;
+    signalWindowClose: (foreground: boolean) => {
+      closeForegroundIntents.push(foreground);
       return true;
     },
   });
@@ -73,7 +73,7 @@ test("foreground presence renews on ready, visible lifecycle events, stays quiet
       "ordinary blur pauses renewal without immediately releasing foreground control",
     );
     assert.equal(
-      closeSignals,
+      closeForegroundIntents.length,
       0,
       "blur must not declare the browser window closed",
     );
@@ -141,23 +141,61 @@ test("foreground presence renews on ready, visible lifecycle events, stays quiet
       dom.window.dispatchEvent(new dom.window.Event("pageshow")),
     );
     assert.ok(renewals > beforeHidden, "pageshow renews presence");
+    const relinquishmentsBeforeClose = relinquishments;
+    await act(async () =>
+      dom.window.dispatchEvent(new dom.window.Event("beforeunload")),
+    );
+    assert.deepEqual(
+      closeForegroundIntents,
+      [],
+      "beforeunload only latches intent because navigation may still be cancelled",
+    );
+    Object.defineProperty(dom.window.document, "visibilityState", {
+      value: "hidden",
+      configurable: true,
+    });
+    await act(async () =>
+      dom.window.document.dispatchEvent(new dom.window.Event("visibilitychange")),
+    );
+    assert.equal(
+      relinquishments,
+      relinquishmentsBeforeClose,
+      "the latched close sequence preserves the fresh foreground lease required by the server",
+    );
     await act(async () =>
       dom.window.dispatchEvent(
         new dom.window.PageTransitionEvent("pagehide", { persisted: false }),
       ),
     );
-    assert.equal(
-      closeSignals,
-      0,
-      "pagehide can mean PWA backgrounding and must not declare a window closed",
+    await act(async () =>
+      dom.window.dispatchEvent(new dom.window.Event("unload")),
+    );
+    assert.deepEqual(
+      closeForegroundIntents,
+      [true],
+      "unload sends the foreground intent latched before the hidden transition",
+    );
+    Object.defineProperty(dom.window.document, "visibilityState", {
+      value: "visible",
+      configurable: true,
+    });
+    await act(async () =>
+      dom.window.dispatchEvent(new dom.window.Event("pageshow")),
+    );
+    Object.defineProperty(dom.window.document, "visibilityState", {
+      value: "hidden",
+      configurable: true,
+    });
+    await act(async () =>
+      dom.window.document.dispatchEvent(new dom.window.Event("visibilitychange")),
     );
     await act(async () =>
       dom.window.dispatchEvent(new dom.window.Event("unload")),
     );
-    assert.equal(
-      closeSignals,
-      1,
-      "a real renderer unload declares the window closed",
+    assert.deepEqual(
+      closeForegroundIntents,
+      [true, false],
+      "an already-hidden discard without beforeunload cannot request service shutdown",
     );
   } finally {
     await act(async () => root.unmount());

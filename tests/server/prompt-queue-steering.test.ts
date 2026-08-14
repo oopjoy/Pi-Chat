@@ -76,6 +76,97 @@ test("Primary and Secondary settlement dispatch every queued follow-up", async (
   }
 });
 
+test("in-flight tool activity prevents a stale false streaming snapshot from admitting an ordinary prompt", async () => {
+  const path = "C:\\sessions\\tool-active-primary.jsonl";
+  const id = idForPath(path);
+  const primary = new FakeRpc(path, "tool-active-primary");
+  const summary = { id, sessionId: "tool-active-primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true };
+  const sessions = {
+    list: async () => [summary],
+    pathForId: (candidate: string) => candidate === id ? path : null,
+    summaryForId: () => summary,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    await fetch(`${origin}/api/bootstrap`);
+    primary.emit({ type: "agent_start" });
+    primary.emit({ type: "tool_execution_start", toolName: "bash" });
+    // Reproduce the observed contradiction: a lagging state projection says
+    // false while the current assistant turn still owns unresolved tool work.
+    (app as unknown as { running: boolean }).running = false;
+    primary.streaming = false;
+    const inventory = await fetch(`${origin}/api/sessions`);
+    assert.equal(inventory.status, 200);
+    const inventoryBody = await inventory.json() as { sessions: SessionSummary[] };
+    assert.equal(inventoryBody.sessions[0]?.activity?.execution, "running");
+    assert.equal(inventoryBody.sessions[0]?.running, true);
+    const bootstrapProjection = await fetch(`${origin}/api/bootstrap`);
+    assert.equal(bootstrapProjection.status, 200);
+    const bootstrapBody = await bootstrapProjection.json() as { state: { isStreaming: boolean }; toolStatus?: string };
+    assert.equal(bootstrapBody.state.isStreaming, true);
+    assert.match(bootstrapBody.toolStatus || "", /bash/);
+    const viewProjection = await fetch(`${origin}/api/sessions/${id}/view`);
+    assert.equal(viewProjection.status, 200);
+    const viewBody = await viewProjection.json() as { state: { isStreaming: boolean }; isStreaming: boolean; session: SessionSummary; toolStatus?: string };
+    assert.equal(viewBody.state.isStreaming, true);
+    assert.equal(viewBody.isStreaming, true);
+    assert.equal(viewBody.session.running, true);
+    assert.match(viewBody.toolStatus || "", /bash/);
+    const response = await fetch(`${origin}/api/chat/prompt`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: id, message: "must queue behind tool" }),
+    });
+    assert.equal(response.status, 202);
+    const body = await response.json() as { queued?: boolean; queue?: Array<{ message: string }> };
+    assert.equal(body.queued, true);
+    assert.deepEqual(body.queue?.map((item) => item.message), ["must queue behind tool"]);
+    assert.equal(
+      primary.commands.some((command) => command.type === "prompt" && command.message === "must queue behind tool"),
+      false,
+      "ordinary input cannot enter Pi until the tool-owning turn settles",
+    );
+    const resume = await fetch(`${origin}/api/chat/queue/resume`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: id }),
+    });
+    assert.equal(resume.status, 200);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(
+      primary.commands.some((command) => command.type === "prompt" && command.message === "must queue behind tool"),
+      false,
+      "manual queue resume cannot bypass unresolved live/tool activity",
+    );
+    const reconcile = await fetch(`${origin}/api/chat/prompt`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: id, message: "confirm stale tool state", delivery: "steer" }),
+    });
+    assert.equal(reconcile.status, 409);
+    assert.equal(
+      (await reconcile.json() as { code?: string }).code,
+      "STEER_ALREADY_SETTLED",
+    );
+    for (let attempt = 0; attempt < 20 && !primary.commands.some((command) => command.type === "prompt" && command.message === "must queue behind tool"); attempt += 1)
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(
+      primary.commands.some((command) => command.type === "prompt" && command.message === "must queue behind tool"),
+      true,
+      "the authoritative idle probe clears stale tool activity and releases the queued ordinary prompt",
+    );
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
 test("steering bypasses local queues for running Primary and Secondary only", async () => {
   const primaryPath = "C:\\sessions\\steer-primary.jsonl";
   const secondaryPath = "C:\\sessions\\steer-secondary.jsonl";
@@ -110,7 +201,9 @@ test("steering bypasses local queues for running Primary and Secondary only", as
 
     const idle = await steer(primaryId, "too late");
     assert.equal(idle.status, 409);
-    assert.match((await idle.json() as { error: string }).error, /未在运行/);
+    const idleBody = await idle.json() as { error: string; code?: string };
+    assert.match(idleBody.error, /未在运行/);
+    assert.equal(idleBody.code, "STEER_NOT_RUNNING");
     assert.equal(primary.commands.some((command) => command.type === "steer"), false);
 
     primary.streaming = true;
@@ -198,7 +291,9 @@ test("a Steer that reaches an already-settled Pi is rejected and cleared without
       body: JSON.stringify({ sessionId: id, message: "too late", delivery: "steer" }),
     });
     assert.equal(response.status, 409);
-    assert.match((await response.json() as { error: string }).error, /已结束/);
+    const responseBody = await response.json() as { error: string; code?: string };
+    assert.match(responseBody.error, /已结束/);
+    assert.equal(responseBody.code, "STEER_ALREADY_SETTLED");
     assert.equal(primary.restartCount, 1);
     assert.equal(
       primary.commands.some(

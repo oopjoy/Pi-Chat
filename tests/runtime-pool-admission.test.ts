@@ -307,6 +307,46 @@ test("secondary recovery always retains its dedicated Session cwd", async () => 
   assert.deepEqual(restarts, [{ path, cwd: workspaceA }], "recovery never inherits a later application workspace");
 });
 
+test("a newer abort pause survives Secondary recovery completion", async () => {
+  const path = "C:\\sessions\\recover-abort.jsonl";
+  const restart = deferred<Record<string, unknown>>();
+  const target = runtime(async () => {});
+  target.sessionPath = path;
+  target.promptQueue.push({
+    id: "00000000-0000-4000-8000-000000000901",
+    message: "remain paused",
+    images: [],
+    imageCount: 0,
+    createdAt: 1,
+  });
+  target.rpc = {
+    restart: async () => restart.promise,
+    currentGeneration: () => 2,
+    isRunning: () => true,
+    send: async () => ({
+      type: "response",
+      success: true,
+      data: { model: null, isStreaming: false, sessionFile: path },
+    }),
+  } as never;
+  const targetPool = pool();
+  targetPool.runtimes.set(target.id, target);
+  const recovering = targetPool.recover(target);
+  await Promise.resolve();
+  target.abortGeneration += 1;
+  target.queuePaused = true;
+  restart.resolve({
+    type: "response",
+    success: true,
+    data: { model: null, isStreaming: false, sessionFile: path },
+  });
+  await recovering;
+  assert.equal(target.queuePaused, true);
+  assert.deepEqual(target.promptQueue.map((item) => item.message), [
+    "remain paused",
+  ]);
+});
+
 test("concurrent reclaim keeps one stop marker until ensure can safely restart", async () => {
   let releaseStop!: () => void;
   let stopCount = 0;

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test, { beforeEach } from "node:test";
 import { act, createElement } from "react";
-import type { BootstrapData, SessionViewData } from "../../src/shared/types";
+import { LOCAL_COORDINATION_ROLE, type BootstrapData, type SessionViewData } from "../../src/shared/types";
 import { activeSessionId as activeId, createBootstrapFixture, createSessionViewFixture } from "../fixtures/app-bootstrap";
 import { captureApiSnapshot } from "../helpers/api-stub";
 import { installAppDom as installDom } from "../helpers/app-dom";
@@ -1094,6 +1094,74 @@ test("ChatInput never shows Stop from a stale stopping flag after streaming ende
   }
 });
 
+test("tool activity keeps Sidebar and Composer active when a stale state snapshot said idle", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: false },
+      sessions: bootstrap.sessions.map((session) => ({
+        ...session,
+        running: false,
+        activity: { execution: "idle" as const, awaitingConfirmation: false },
+      })),
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    assert.ok(dom.window.document.querySelector(".send-button"));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () =>
+      source.emitPi({
+        type: "tool_execution_start",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        toolName: "bash",
+      }),
+    );
+    assert.ok(dom.window.document.querySelector(".stop-button"));
+    assert.ok(dom.window.document.querySelector(".queue-submit-button"));
+    assert.ok(dom.window.document.querySelector(".steer-submit-button"));
+    assert.equal(dom.window.document.querySelector(".send-button"), null);
+    assert.ok(dom.window.document.querySelector(".session-status.is-running"));
+    await act(async () =>
+      source.emitPi({
+        type: "tool_execution_end",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        toolName: "bash",
+        isError: false,
+      }),
+    );
+    assert.ok(
+      dom.window.document.querySelector(".stop-button"),
+      "tool completion still belongs to the active turn until terminal activity arrives",
+    );
+    await act(async () =>
+      source.emitPi({
+        type: "pi_chat_session_status",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        activity: { execution: "idle", awaitingConfirmation: false },
+      }),
+    );
+    assert.equal(dom.window.document.querySelector(".stop-button"), null);
+    assert.equal(dom.window.document.querySelector(".steer-submit-button"), null);
+    assert.ok(dom.window.document.querySelector(".send-button"));
+    assert.equal(dom.window.document.querySelector(".session-status.is-running"), null);
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("ChatInput places Steer beside Queue and sends explicit steering delivery", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");
@@ -1231,6 +1299,109 @@ test("App reveals a Steer turn only when Pi consumes it", async () => {
       dom.window.document.querySelectorAll(".message-user").length,
       1,
       "a server-verified native steer consumption reveals the local Steer turn",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
+test("an authoritative stopped Steer rejection settles the stale Composer and refreshes persisted answer metadata", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { ApiRequestError, api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const answer = "answer already persisted while settlement SSE was missed";
+  let viewCalls = 0;
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true },
+      messages: [],
+      messageTotal: 0,
+      sessions: bootstrap.sessions.map((session) => ({
+        ...session,
+        running: true,
+        activity: { execution: "running" as const, awaitingConfirmation: false },
+      })),
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    prompt: async () => {
+      throw new ApiRequestError(
+        "当前对话未在运行，无法发送 Steer 消息",
+        409,
+      );
+    },
+    viewSession: async () => {
+      viewCalls += 1;
+      return {
+        ...draftView,
+        session: { ...bootstrap.sessions[0], running: false },
+        state: { ...bootstrap.state, isStreaming: false },
+        messages: [
+          { role: "assistant", content: answer, timestamp: Date.now() - 1_000 },
+          {
+            role: LOCAL_COORDINATION_ROLE,
+            content: "intercom delivery persisted after the answer",
+            timestamp: Date.now() - 500,
+            localCoordination: { source: "peer-session" },
+          },
+        ],
+        messageTotal: 2,
+        isActive: true,
+        runtimeStatus: "active" as const,
+        isStreaming: false,
+        toolStatus: "",
+      };
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    assert.ok(dom.window.document.querySelector(".steer-submit-button"));
+    assert.equal(dom.window.document.querySelector(".message-generated-at"), null);
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "too late steer");
+      textarea.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: "too late steer",
+        }),
+      );
+    });
+    await act(async () => {
+      dom.window.document
+        .querySelector<HTMLButtonElement>(".steer-submit-button")!
+        .click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(textarea.value, "too late steer", "the rejected Steer remains in the draft");
+    assert.equal(dom.window.document.querySelector(".steer-submit-button"), null);
+    assert.equal(dom.window.document.querySelector(".stop-button"), null);
+    assert.ok(dom.window.document.querySelector(".send-button"));
+    assert.equal(dom.window.document.querySelector(".session-status.is-running"), null);
+    assert.ok(
+      dom.window.document.querySelector(".message-generated-at"),
+      "the authoritative persisted view restores the terminal answer timestamp",
+    );
+    assert.match(
+      dom.window.document.querySelector(".timeline")?.textContent || "",
+      /intercom delivery persisted after the answer/,
+      "the same reconciliation exposes persisted coordination records without keeping the Composer busy",
+    );
+    assert.match(
+      dom.window.document.querySelector(".app-toast.error")?.textContent || "",
+      /未在运行/,
     );
   } finally {
     await act(async () => root.unmount());

@@ -126,11 +126,11 @@ export class PromptScheduler {
   }
 
   primaryBusyForQueue(): boolean {
-    return this.primaryRunning || this.primaryDispatching || this.primaryQueue.length > 0 || this.primaryQueuePaused;
+    return Boolean(this.primaryLiveMessage) || Boolean(this.primaryToolStatus) || this.primaryRunning || this.primaryDispatching || this.primaryQueue.length > 0 || this.primaryQueuePaused;
   }
 
   runtimeBusyForQueue(runtime: SecondaryRuntime): boolean {
-    return runtime.running || runtime.dispatching || runtime.promptQueue.length > 0 || runtime.queuePaused;
+    return Boolean(runtime.liveMessage) || Boolean(runtime.toolStatus) || runtime.running || runtime.dispatching || runtime.promptQueue.length > 0 || runtime.queuePaused;
   }
 
   async sendPrimaryPrompt(message: string, images: PromptImage[], promptAt = Date.now(), gateMode?: GateMode): Promise<PromptAcceptance> {
@@ -179,6 +179,8 @@ export class PromptScheduler {
       this.host.isClosed()
       || !this.host.isLifecycleIdle()
       || this.primaryRunning
+      || this.primaryLiveMessage
+      || this.primaryToolStatus
       || this.primaryDispatching
       || this.primaryQueuePaused
       || !this.primaryQueue.length
@@ -245,6 +247,8 @@ export class PromptScheduler {
       this.host.isClosed()
       || !this.host.isLifecycleIdle()
       || runtime.running
+      || runtime.liveMessage
+      || runtime.toolStatus
       || runtime.dispatching
       || runtime.queuePaused
       || !runtime.promptQueue.length

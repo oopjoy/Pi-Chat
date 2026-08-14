@@ -154,19 +154,28 @@ test("an open background transport still prevents last-window auto shutdown", as
   }
 });
 
-test("closing the last window waits for a quiescent grace before shutting down", async () => {
+test("closing the last foreground window waits for a quiescent grace before shutting down", async () => {
   const path = "C:\\sessions\\primary.jsonl";
   const primary = new FakeRpc(path, "primary");
   const shutdownReasons: string[] = [];
   const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), lastWindowShutdownGraceMs: 30, lastWindowShutdownPollMs: 5, applicationShutdown: (reason) => { shutdownReasons.push(reason); } });
   const client = "11111111-1111-4111-8111-111111111111";
-  (app as unknown as { connectedClients: Map<string, number> }).connectedClients.set(client, 1);
+  const internals = app as unknown as {
+    connectedPageClients: Map<string, string>;
+    sessionControl: {
+      clientConnected(clientId: string): void;
+      noteClientPresence(clientId: string): boolean;
+    };
+  };
+  internals.sessionControl.clientConnected(client);
+  internals.connectedPageClients.set(client, client);
+  internals.sessionControl.noteClientPresence(client);
   const server = createServer((request, response) => void app.handle(request, response));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   assert.ok(address && typeof address === "object");
   try {
-    const response = await fetch(`http://127.0.0.1:${address.port}/api/window/close`, { method: "POST", headers: { "x-pi-chat-client": client } });
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/window/close?foreground=1`, { method: "POST", headers: { "x-pi-chat-client": client } });
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), { shuttingDown: false, closeWindow: true, rested: false, remainingWindows: 0, autoShutdownPending: true });
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -175,6 +184,42 @@ test("closing the last window waits for a quiescent grace before shutting down",
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     assert.deepEqual(shutdownReasons, ["last-window-close"]);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("a hidden or discarded renderer cannot request last-window auto shutdown", async () => {
+  const primary = new FakeRpc("C:\\sessions\\discarded.jsonl", "primary");
+  const shutdownReasons: string[] = [];
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), lastWindowShutdownGraceMs: 20, lastWindowShutdownPollMs: 5, applicationShutdown: (reason) => { shutdownReasons.push(reason); } });
+  const client = "11111111-1111-4111-8111-111111111111";
+  const page = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const internals = app as unknown as {
+    connectedPageClients: Map<string, string>;
+    sessionControl: {
+      clientConnected(clientId: string): void;
+      noteClientPresence(clientId: string): boolean;
+      noteClientBackground(clientId: string): boolean;
+    };
+  };
+  internals.sessionControl.clientConnected(client);
+  internals.connectedPageClients.set(page, client);
+  internals.sessionControl.noteClientPresence(client);
+  internals.sessionControl.noteClientBackground(client);
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/window/close?page=${page}`, { method: "POST", headers: { "x-pi-chat-client": client } });
+    assert.equal(response.status, 200);
+    const body = await response.json() as { remainingWindows: number; autoShutdownPending?: boolean };
+    assert.equal(body.remainingWindows, 0);
+    assert.equal(body.autoShutdownPending, undefined);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(shutdownReasons, []);
   } finally {
     server.close();
     await app.close();
@@ -194,15 +239,17 @@ test("a reload handshake during grace cancels last-window auto shutdown", async 
     pendingWindowPageTimers: Map<string, NodeJS.Timeout>;
     clientConnected(clientId: string, pageId?: string): void;
     clientDisconnected(clientId: string): void;
+    sessionControl: { noteClientPresence(clientId: string): boolean };
   };
   internals.connectedClients.set(client, 1);
   internals.connectedPageClients.set(oldPage, client);
+  internals.sessionControl.noteClientPresence(client);
   const server = createServer((request, response) => void app.handle(request, response));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   assert.ok(address && typeof address === "object");
   try {
-    await fetch(`http://127.0.0.1:${address.port}/api/window/close?page=${oldPage}`, { method: "POST", headers: { "x-pi-chat-client": client } });
+    await fetch(`http://127.0.0.1:${address.port}/api/window/close?page=${oldPage}&foreground=1`, { method: "POST", headers: { "x-pi-chat-client": client } });
     // The closing renderer's SSE disconnect removes its one real transport
     // lease before the replacement has reached EventSource.
     internals.clientDisconnected(client);
@@ -225,6 +272,51 @@ test("a reload handshake during grace cancels last-window auto shutdown", async 
     await new Promise((resolve) => setTimeout(resolve, 45));
     assert.deepEqual(shutdownReasons, []);
     assert.equal(internals.connectedPageClients.get(newPage), client);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("a same-page recovery handshake cannot downgrade an SSE-confirmed window to a temporary lease", async () => {
+  const primary = new FakeRpc("C:\\sessions\\same-page-handshake.jsonl", "primary");
+  const shutdownReasons: string[] = [];
+  const app = new PiChatApp({
+    rpc: primary as unknown as PiRpcClient,
+    sessions: {} as SessionIndex,
+    resources: {} as ResourceManager,
+    cwd: process.cwd(),
+    webRoot: process.cwd(),
+    handshakePageTimeoutMs: 15,
+    lastWindowShutdownGraceMs: 15,
+    lastWindowShutdownPollMs: 5,
+    applicationShutdown: (reason) => { shutdownReasons.push(reason); },
+  });
+  const client = "11111111-1111-4111-8111-111111111111";
+  const page = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const internals = app as unknown as {
+    connectedPageClients: Map<string, string>;
+    pendingWindowPageTimers: Map<string, NodeJS.Timeout>;
+    clientConnected(clientId: string, pageId: string): void;
+  };
+  internals.clientConnected(client, page);
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    const handshake = await fetch(`http://127.0.0.1:${address.port}/api/bootstrap/handshake`, {
+      headers: { "x-pi-chat-client": client, "x-pi-chat-page": page },
+    });
+    assert.equal(handshake.status, 200);
+    assert.equal(
+      internals.pendingWindowPageTimers.has(page),
+      false,
+      "token recovery for an already promoted page must not arm handshake expiry",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(internals.connectedPageClients.get(page), client);
+    assert.deepEqual(shutdownReasons, []);
   } finally {
     server.close();
     await app.close();

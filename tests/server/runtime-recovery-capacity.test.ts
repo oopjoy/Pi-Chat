@@ -326,6 +326,65 @@ test("a Primary crash recovers and dispatches existing queue work", async () => 
   }
 });
 
+test("process errors preserve an abort-owned pause for Primary and Secondary queues", async () => {
+  const primaryPath = "C:\\sessions\\paused-crash-primary.jsonl";
+  const secondaryPath = "C:\\sessions\\paused-crash-secondary.jsonl";
+  const primaryId = idForPath(primaryPath);
+  const secondaryId = idForPath(secondaryPath);
+  const primary = new FakeRpc(primaryPath, "paused-crash-primary");
+  const secondary = new FakeRpc(secondaryPath, "paused-crash-secondary");
+  const summaries = [
+    { id: primaryId, sessionId: "paused-crash-primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 2, messageCount: 1, active: true },
+    { id: secondaryId, sessionId: "paused-crash-secondary", name: "Secondary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: false },
+  ];
+  const sessions = {
+    list: async () => summaries,
+    pathForId: (candidate: string) => candidate === primaryId ? primaryPath : candidate === secondaryId ? secondaryPath : null,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, createRpc: () => secondary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const internals = app as unknown as {
+    promptQueue: Array<{ id: string; message: string; images: []; imageCount: number; createdAt: number }>;
+    queuePaused: boolean;
+    runtimePool: {
+      get(id: string): {
+        promptQueue: Array<{ id: string; message: string; images: []; imageCount: number; createdAt: number }>;
+        queuePaused: boolean;
+      } | undefined;
+    };
+  };
+  try {
+    await fetch(`${origin}/api/bootstrap`);
+    assert.equal((await fetch(`${origin}/api/sessions/${secondaryId}/activate`, { method: "POST" })).status, 200);
+    const runtime = internals.runtimePool.get(secondaryId);
+    assert.ok(runtime);
+    internals.promptQueue.push({ id: "00000000-0000-4000-8000-000000000903", message: "primary paused", images: [], imageCount: 0, createdAt: 1 });
+    runtime.promptQueue.push({ id: "00000000-0000-4000-8000-000000000904", message: "secondary paused", images: [], imageCount: 0, createdAt: 1 });
+    internals.queuePaused = true;
+    runtime.queuePaused = true;
+    primary.crash();
+    secondary.crash();
+    assert.equal(internals.queuePaused, true);
+    assert.equal(runtime.queuePaused, true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(primary.commands.some((command) => command.type === "prompt"), false);
+    assert.equal(secondary.commands.some((command) => command.type === "prompt"), false);
+    assert.equal((await fetch(`${origin}/api/chat/queue/resume`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sessionId: secondaryId }) })).status, 200);
+    assert.equal((await fetch(`${origin}/api/chat/queue/resume`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sessionId: primaryId }) })).status, 200);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(secondary.commands.filter((command) => command.type === "prompt").map((command) => command.message), ["secondary paused"]);
+    assert.deepEqual(primary.commands.filter((command) => command.type === "prompt").map((command) => command.message), ["primary paused"]);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
 test("model and thinking changes do not claim or transfer Session control", async () => {
   const path = "C:\\sessions\\primary.jsonl";
   const id = idForPath(path);

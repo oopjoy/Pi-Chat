@@ -30,8 +30,18 @@ test("a final window close never shuts down an actively streaming Pi worker", as
   });
   const client = "11111111-1111-4111-8111-111111111111";
   const page = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-  const internals = app as unknown as { connectedClients: Map<string, number>; connectedPageClients: Map<string, string>; activeSessionId: string; primaryBoundSessionId: string; running: boolean };
-  internals.connectedClients.set(client, 1);
+  const internals = app as unknown as {
+    connectedPageClients: Map<string, string>;
+    activeSessionId: string;
+    primaryBoundSessionId: string;
+    running: boolean;
+    sessionControl: {
+      clientConnected(clientId: string): void;
+      noteClientPresence(clientId: string): boolean;
+    };
+  };
+  internals.sessionControl.clientConnected(client);
+  internals.sessionControl.noteClientPresence(client);
   internals.connectedPageClients.set(page, client);
   internals.activeSessionId = idForPath(path);
   internals.primaryBoundSessionId = idForPath(path);
@@ -41,7 +51,7 @@ test("a final window close never shuts down an actively streaming Pi worker", as
   const address = server.address();
   assert.ok(address && typeof address === "object");
   try {
-    const response = await fetch(`http://127.0.0.1:${address.port}/api/window/close?page=${page}`, { method: "POST", headers: { "x-pi-chat-client": client } });
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/window/close?page=${page}&foreground=1`, { method: "POST", headers: { "x-pi-chat-client": client } });
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), { shuttingDown: false, closeWindow: true, rested: false, remainingWindows: 0, autoShutdownPending: true });
     await new Promise((resolve) => setTimeout(resolve, 70));
@@ -66,15 +76,25 @@ test("last-window auto shutdown waits for dispatch to finish before starting its
   let shutdowns = 0;
   const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), lastWindowShutdownGraceMs: 25, lastWindowShutdownPollMs: 5, applicationShutdown: (_reason) => { shutdowns += 1; } });
   const client = "11111111-1111-4111-8111-111111111111";
-  const internals = app as unknown as { connectedClients: Map<string, number>; dispatching: boolean };
-  internals.connectedClients.set(client, 1);
+  const page = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const internals = app as unknown as {
+    connectedPageClients: Map<string, string>;
+    dispatching: boolean;
+    sessionControl: {
+      clientConnected(clientId: string): void;
+      noteClientPresence(clientId: string): boolean;
+    };
+  };
+  internals.sessionControl.clientConnected(client);
+  internals.sessionControl.noteClientPresence(client);
+  internals.connectedPageClients.set(page, client);
   internals.dispatching = true;
   const server = createServer((request, response) => void app.handle(request, response));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   assert.ok(address && typeof address === "object");
   try {
-    const response = await fetch(`http://127.0.0.1:${address.port}/api/window/close`, { method: "POST", headers: { "x-pi-chat-client": client } });
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/window/close?page=${page}&foreground=1`, { method: "POST", headers: { "x-pi-chat-client": client } });
     assert.equal(response.status, 200);
     await new Promise((resolve) => setTimeout(resolve, 40));
     assert.equal(shutdowns, 0);
