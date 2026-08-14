@@ -16,6 +16,26 @@ test("desktop session navigation keeps the left sidebar open", { tag: "@desktop-
   await expect(sidebar).toHaveClass(/is-open/);
 });
 
+test("sidebar search clear stays at the field edge and restores input focus", { tag: "@desktop-only" }, async ({ page }) => {
+  await page.goto("/");
+  const search = page.getByRole("searchbox", { name: "搜索对话" });
+  await search.fill("First");
+  const clear = page.getByRole("button", { name: "清除对话搜索" });
+  await expect(clear).toBeVisible();
+  const [searchBox, clearBox] = await Promise.all([
+    search.boundingBox(),
+    clear.boundingBox(),
+  ]);
+  expect(searchBox).not.toBeNull();
+  expect(clearBox).not.toBeNull();
+  expect(searchBox!.x + searchBox!.width - (clearBox!.x + clearBox!.width)).toBeLessThanOrEqual(4);
+  expect(clearBox!.x).toBeGreaterThan(searchBox!.x + searchBox!.width - 34);
+  await clear.click();
+  await expect(search).toHaveValue("");
+  await expect(search).toBeFocused();
+  await expect(clear).toHaveCount(0);
+});
+
 test("a mismatched Web artifact blocks mutations but keeps guarded recovery actions", { tag: "@desktop-only" }, async ({ page, mismatchedBaseURL }) => {
   await page.goto(mismatchedBaseURL);
   await expect(page.getByText("网页与服务版本不一致")).toBeVisible();

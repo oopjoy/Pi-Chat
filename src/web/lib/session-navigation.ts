@@ -4,7 +4,10 @@ const MAX_PINNED_IDS = 500;
 const MAX_DIRECTORY_KEY_LENGTH = 1_000;
 
 export interface SessionNavigationGroup {
+  /** Stable browser grouping key; empty persisted cwd uses a presentation sentinel. */
   key: string;
+  /** Raw persisted cwd used by the read API; may intentionally be empty. */
+  cwd: string;
   label: string;
   sessions: SessionSummary[];
   total: number;
@@ -123,11 +126,10 @@ export function groupSessionsForNavigation(
 ): SessionNavigationGroup[] {
   const searching = Boolean(searchQuery.trim());
   const source = filterSessionsBySearch(sessions, searchQuery);
-  const groups = new Map<string, { key: string; label: string; sessions: SessionSummary[]; total: number; lastUserPromptAt: number; index: number }>();
+  const groups = new Map<string, { key: string; cwd: string; label: string; sessions: SessionSummary[]; total: number; lastUserPromptAt: number; index: number }>();
   for (const [index, directory] of directories.entries()) {
-    const key = normalizeCwdKey(directory.cwd);
-    if (!key) continue;
-    groups.set(key, { key, label: directoryLabel(directory.cwd), sessions: [], total: directory.count, lastUserPromptAt: directory.lastUserPromptAt, index });
+    const key = normalizeCwdKey(directory.cwd) || "__unknown_cwd__";
+    groups.set(key, { key, cwd: directory.cwd, label: directoryLabel(directory.cwd), sessions: [], total: directory.count, lastUserPromptAt: directory.lastUserPromptAt, index });
   }
   for (const [index, session] of source.entries()) {
     const key = normalizeCwdKey(session.cwd);
@@ -136,7 +138,7 @@ export function groupSessionsForNavigation(
     if (existing) {
       existing.sessions.push(session);
       existing.lastUserPromptAt = Math.max(existing.lastUserPromptAt, session.lastUserPromptAt ?? session.updatedAt);
-    } else groups.set(groupKey, { key: groupKey, label: directoryLabel(session.cwd), sessions: [session], total: 1, lastUserPromptAt: session.lastUserPromptAt ?? session.updatedAt, index: directories.length + index });
+    } else groups.set(groupKey, { key: groupKey, cwd: session.cwd, label: directoryLabel(session.cwd), sessions: [session], total: 1, lastUserPromptAt: session.lastUserPromptAt ?? session.updatedAt, index: directories.length + index });
   }
   const directoryOrder = new Map(orderedPinnedDirectoryKeys(pinnedDirectoryKeys).map((key, index) => [key, index]));
   const collapsed = new Set(orderedPinnedDirectoryKeys(collapsedDirectoryKeys));
@@ -156,6 +158,7 @@ export function groupSessionsForNavigation(
     })
     .map((group) => ({
       key: group.key,
+      cwd: group.cwd,
       label: group.label,
       sessions: orderSessionsByPins(group.sessions, pinnedSessionIds),
       total: group.total,

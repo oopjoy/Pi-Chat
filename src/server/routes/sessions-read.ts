@@ -5,6 +5,9 @@ export type SessionsReadRouteHost = {
   listSessions(input: {
     clientId: string;
     all: boolean;
+    fresh: boolean;
+    includeIds: string[];
+    directory: boolean;
     cwd: string;
     offset: number;
     limit: number;
@@ -26,7 +29,13 @@ export async function handleSessionsReadRoute(
   response: ServerResponse,
   url: URL,
   clientId: string,
-  options: { recentTurns: number; maxTurns: number; turnIncrement: number; directoryLimit: number },
+  options: {
+    recentTurns: number;
+    maxTurns: number;
+    turnIncrement: number;
+    directoryLimit: number;
+    maxDirectoryLimit: number;
+  },
 ): Promise<boolean> {
   if (url.pathname === "/api/sessions") {
     if (request.method !== "GET") {
@@ -34,10 +43,41 @@ export async function handleSessionsReadRoute(
       return true;
     }
     const all = url.searchParams.get("all") === "1";
+    const fresh = url.searchParams.get("fresh") === "1";
+    const includeIds = [
+      ...new Set(
+        url.searchParams
+          .getAll("include")
+          .flatMap((value) => value.split(","))
+          .map((value) => value.trim().toLowerCase())
+          .filter((value) => /^[a-f0-9]{20}$/.test(value)),
+      ),
+    ].slice(0, 500);
+    const directory = url.searchParams.has("cwd");
     const cwd = url.searchParams.get("cwd") || "";
     const offset = Math.max(0, Number(url.searchParams.get("offset") || "0") || 0);
-    const limit = Math.min(options.directoryLimit, Math.max(1, Number(url.searchParams.get("limit") || options.directoryLimit) || options.directoryLimit));
-    json(response, 200, await host.listSessions({ clientId, all, cwd, offset, limit }));
+    const limit = Math.min(
+      options.maxDirectoryLimit,
+      Math.max(
+        1,
+        Number(url.searchParams.get("limit") || options.directoryLimit) ||
+          options.directoryLimit,
+      ),
+    );
+    json(
+      response,
+      200,
+      await host.listSessions({
+        clientId,
+        all,
+        fresh,
+        includeIds,
+        directory,
+        cwd,
+        offset,
+        limit,
+      }),
+    );
     return true;
   }
   const match = new RegExp(`^/api/sessions/${SESSION_ID}/view$`).exec(url.pathname);

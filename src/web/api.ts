@@ -250,8 +250,38 @@ export const api = {
   markSessionViewed: (id: string) => request<{ viewing: string }>(`/api/sessions/${id}/viewing`, { method: "POST" }),
   clearSessionViewed: (sessionId: string) => request<{ viewing: string }>("/api/sessions/viewing/clear", { method: "POST", body: JSON.stringify({ sessionId }) }),
   activateSession: (id: string) => request<SessionViewData>(`/api/sessions/${id}/activate`, { method: "POST" }),
-  sessions: (all = false) => request<{ sessions: SessionSummary[]; total: number; directories?: SessionDirectorySummary[] }>(`/api/sessions${all ? "?all=1" : ""}`),
-  directorySessions: (cwd: string, offset = 0) => request<{ sessions: SessionSummary[]; total: number; directories?: SessionDirectorySummary[] }>(`/api/sessions?${new URLSearchParams({ cwd, offset: String(offset), limit: "15" })}`),
+  sessions: (
+    all = false,
+    includeIds: string[] = [],
+    fresh = false,
+  ) => {
+    const query = new URLSearchParams();
+    if (all) query.set("all", "1");
+    if (fresh) query.set("fresh", "1");
+    const included = [
+      ...new Set(
+        includeIds
+          .map((id) => id.trim().toLowerCase())
+          .filter((id) => /^[a-f0-9]{20}$/.test(id)),
+      ),
+    ].slice(0, 500);
+    if (included.length) query.set("include", included.join(","));
+    const suffix = query.size ? `?${query}` : "";
+    return request<{
+      sessions: SessionSummary[];
+      total: number;
+      directories?: SessionDirectorySummary[];
+    }>(`/api/sessions${suffix}`);
+  },
+  /** Cumulative directory prefix: a recency reorder between clicks cannot skip rows. */
+  directorySessions: (cwd: string, limit = 15) =>
+    request<{
+      sessions: SessionSummary[];
+      total: number;
+      directories?: SessionDirectorySummary[];
+    }>(
+      `/api/sessions?${new URLSearchParams({ cwd, offset: "0", limit: String(limit) })}`,
+    ),
   renameSession: (id: string, name: string) => request<BootstrapData>(`/api/sessions/${id}`, { method: "PATCH", body: JSON.stringify({ name }) }),
   deleteSession: (id: string) => request<BootstrapData>(`/api/sessions/${id}`, { method: "DELETE" }),
   setModel: (provider: string, modelId: string, sessionId: string) => request<{ model: BootstrapData["state"]["model"]; pending: boolean }>("/api/models/set", {

@@ -63,6 +63,25 @@ test("directory groups keep directory pins outside session pins and normalize Wi
   assert.deepEqual(groups[1].sessions.map((item) => item.id), ["c", "a"]);
 });
 
+test("missing-cwd directories keep their real total and raw read key", () => {
+  const unknown = Array.from({ length: 15 }, (_, index) =>
+    session(`unknown-${index}`, `Unknown ${index}`, "", ""),
+  );
+  const [group] = groupSessionsForNavigation(
+    unknown,
+    [],
+    [],
+    [],
+    "",
+    [{ cwd: "", count: 25, lastUserPromptAt: 1 }],
+  );
+  assert.equal(group.key, "__unknown_cwd__");
+  assert.equal(group.cwd, "");
+  assert.equal(group.label, "未记录工作目录");
+  assert.equal(group.total, 25);
+  assert.equal(group.sessions.length, 15);
+});
+
 test("search opens collapsed matching directories without changing their stored state", () => {
   const groups = groupSessionsForNavigation(sessions, [], [], ["c:/work/one"], "alpha");
   assert.equal(groups.length, 1);

@@ -43,10 +43,165 @@ test("sidebar defaults to at most fifteen rows per directory and can explicitly 
     assert.equal(recent.total, 25);
     assert.equal(recent.sessions.length, 15);
     assert.equal(recent.sessions.some((session) => session.id === activeId), false);
+    const pinned = await (
+      await fetch(`${origin}/api/sessions?include=bad,${activeId},${activeId}`)
+    ).json() as { sessions: Array<{ id: string }>; total: number };
+    assert.equal(pinned.total, 25);
+    assert.equal(pinned.sessions.length, 16);
+    assert.equal(
+      pinned.sessions.filter((session) => session.id === activeId).length,
+      1,
+      "a bounded pin request unions an older Session into the base page exactly once",
+    );
+    const prefixQuery = new URLSearchParams({
+      cwd: process.cwd(),
+      offset: "0",
+      limit: "30",
+    });
+    const prefix = await (
+      await fetch(`${origin}/api/sessions?${prefixQuery}`)
+    ).json() as { sessions: Array<{ id: string }>; total: number };
+    assert.equal(prefix.total, 25);
+    assert.equal(
+      prefix.sessions.length,
+      25,
+      "directory reads may return a cumulative prefix larger than one 15-row page",
+    );
     const all = await (await fetch(`${origin}/api/sessions?all=1`)).json() as { sessions: Array<{ id: string }>; total: number };
     assert.equal(all.total, 25);
     assert.equal(all.sessions.length, 25);
     assert.equal(all.sessions.some((session) => session.id === activeId), true);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("missing-cwd directory pagination uses the empty persisted key instead of the UI sentinel", async () => {
+  const path = "C:\\sessions\\unknown-cwd-primary.jsonl";
+  const primary = new FakeRpc(path, "unknown-cwd-primary");
+  const summaries = Array.from({ length: 25 }, (_, index) => ({
+    id: (index + 300).toString(16).padStart(20, "0"),
+    sessionId: `unknown-cwd-${index}`,
+    name: `Unknown cwd ${index}`,
+    preview: "",
+    cwd: "",
+    updatedAt: 100 - index,
+    messageCount: 1,
+    active: false,
+  }));
+  const sessions = {
+    list: async () => summaries,
+    pathForId: () => path,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({
+    rpc: primary as unknown as PiRpcClient,
+    sessions,
+    resources: {} as ResourceManager,
+    cwd: process.cwd(),
+    webRoot: process.cwd(),
+  });
+  const server = createServer((request, response) =>
+    void app.handle(request, response),
+  );
+  await new Promise<void>((resolve) =>
+    server.listen(0, "127.0.0.1", resolve),
+  );
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    const base = await (await fetch(`${origin}/api/sessions`)).json() as {
+      sessions: unknown[];
+      directories: Array<{ cwd: string; count: number }>;
+    };
+    assert.equal(base.sessions.length, 15);
+    assert.deepEqual(base.directories, [
+      { cwd: "", count: 25, lastUserPromptAt: 100 },
+    ]);
+    const prefix = await (
+      await fetch(`${origin}/api/sessions?cwd=&offset=0&limit=30`)
+    ).json() as { sessions: unknown[]; total: number };
+    assert.equal(prefix.total, 25);
+    assert.equal(prefix.sessions.length, 25);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("an explicit fresh Session inventory awaits the current JSONL index on the first click", async () => {
+  const path = "C:\\sessions\\fresh-primary.jsonl";
+  const primary = new FakeRpc(path, "fresh-primary");
+  const stale = {
+    id: "11111111111111111111",
+    sessionId: "stale",
+    name: "Stale cached Session",
+    preview: "",
+    cwd: process.cwd(),
+    updatedAt: 1,
+    messageCount: 1,
+    active: false,
+  };
+  const fresh = {
+    ...stale,
+    id: "22222222222222222222",
+    sessionId: "fresh",
+    name: "Fresh indexed Session",
+  };
+  let cachedCalls = 0;
+  let freshCalls = 0;
+  const sessions = {
+    listCached: async () => {
+      cachedCalls += 1;
+      return [stale];
+    },
+    list: async () => {
+      freshCalls += 1;
+      return [fresh];
+    },
+    pathForId: () => path,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({
+    rpc: primary as unknown as PiRpcClient,
+    sessions,
+    resources: {} as ResourceManager,
+    cwd: process.cwd(),
+    webRoot: process.cwd(),
+  });
+  const server = createServer((request, response) =>
+    void app.handle(request, response),
+  );
+  await new Promise<void>((resolve) =>
+    server.listen(0, "127.0.0.1", resolve),
+  );
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    const cached = await (await fetch(`${origin}/api/sessions`)).json() as {
+      sessions: Array<{ name: string }>;
+    };
+    assert.deepEqual(cached.sessions.map((session) => session.name), [
+      "Stale cached Session",
+    ]);
+    assert.equal(cachedCalls, 1);
+    assert.equal(freshCalls, 0);
+
+    const current = await (
+      await fetch(`${origin}/api/sessions?all=1&fresh=1`)
+    ).json() as { sessions: Array<{ name: string }> };
+    assert.deepEqual(current.sessions.map((session) => session.name), [
+      "Fresh indexed Session",
+    ]);
+    assert.equal(freshCalls, 1);
+    assert.equal(
+      primary.commands.length,
+      0,
+      "fresh inventory remains a JSONL-only read and never probes the Runtime",
+    );
   } finally {
     server.close();
     await app.close();

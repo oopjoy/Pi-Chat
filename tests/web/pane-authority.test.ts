@@ -1734,6 +1734,87 @@ test("late stop and queue actions from A do not overwrite Session B", async () =
   }
 });
 
+test("token recovery clears full inventory retained by the previous process", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const oldOnly = {
+    ...bootstrap.sessions[0],
+    id: "aaaaaaaaaaaaaaaaaaaa",
+    sessionId: "process-a-only",
+    name: "Process A retained archive",
+    active: false,
+    writable: false,
+  };
+  let recovered = false;
+  Object.assign(api, {
+    bootstrap: async () =>
+      recovered
+        ? { ...bootstrap, sessionsTotal: 1 }
+        : { ...bootstrap, sessionsTotal: 2 },
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    sessions: async (all = false) => ({
+      sessions: all && !recovered
+        ? [bootstrap.sessions[0], oldOnly]
+        : bootstrap.sessions,
+      total: recovered ? 1 : 2,
+    }),
+    recoverConnection: async () => {
+      recovered = true;
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const search = dom.window.document.querySelector<HTMLInputElement>(
+      "input[aria-label='搜索对话']",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLInputElement.prototype,
+        "value",
+      )?.set?.call(search, "archive");
+      search.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: "archive",
+        }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.match(dom.window.document.body.textContent || "", /Process A retained archive/);
+    await act(async () =>
+      dom.window.document
+        .querySelector<HTMLButtonElement>(".session-search-clear")!
+        .click(),
+    );
+
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.onerror?.(new dom.window.Event("error"));
+      await new Promise((resolve) => dom.window.setTimeout(resolve, 0));
+      await new Promise((resolve) => dom.window.setTimeout(resolve, 0));
+    });
+    assert.doesNotMatch(
+      dom.window.document.body.textContent || "",
+      /Process A retained archive/,
+      "a token-only replacement must not merge process-A full inventory into B",
+    );
+    assert.equal(
+      dom.window.document.querySelectorAll(".session-row").length,
+      1,
+    );
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("EventSource reconnect refreshes an authoritative terminal without duplicating it", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");

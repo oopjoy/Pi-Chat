@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent as 
 import { createPortal } from "react-dom";
 import type { SessionActivityState, SessionDirectorySummary, SessionSummary } from "../../shared/types";
 import { SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN } from "../lib/preferences";
-import { ChevronRightIcon, FolderIcon, PanelLeftIcon, PinIcon, PiMarkIcon, PlusIcon, RefreshIcon, SearchIcon } from "./Icons";
+import { ChevronRightIcon, CloseIcon, FolderIcon, PanelLeftIcon, PinIcon, PiMarkIcon, PlusIcon, RefreshIcon, SearchIcon } from "./Icons";
 import { groupSessionsForNavigation } from "../lib/session-navigation";
 
 function relativeTime(timestamp: number): string {
@@ -118,6 +118,7 @@ export function SessionSidebar({ sessions, sessionsTotal, sessionDirectories, in
   const [sessionMenuId, setSessionMenuId] = useState("");
   const [sessionMenuPosition, setSessionMenuPosition] = useState({ top: 0, left: 0 });
   const sessionMenuRef = useRef<HTMLDivElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
     if (!sessionMenuId) return;
     const closeOnOutside = (event: PointerEvent) => {
@@ -183,9 +184,10 @@ export function SessionSidebar({ sessions, sessionsTotal, sessionDirectories, in
           </button>
         </div>
         <div className="session-heading"><span>对话</span><span>{searching ? `${visibleSessionCount} 项` : sessions.length < sessionsTotal ? `${sessions.length}/${sessionsTotal}` : sessionsTotal}</span></div>
-        <label className="session-search">
+        <div className="session-search">
           <SearchIcon />
           <input
+            ref={searchInputRef}
             type="search"
             value={searchQuery}
             onChange={(event) => {
@@ -196,7 +198,17 @@ export function SessionSidebar({ sessions, sessionsTotal, sessionDirectories, in
             placeholder="搜索对话"
             aria-label="搜索对话"
           />
-        </label>
+          {searchQuery.length > 0 && <button
+            type="button"
+            className="session-search-clear"
+            aria-label="清除对话搜索"
+            title="清除搜索"
+            onClick={() => {
+              setSearchQuery("");
+              searchInputRef.current?.focus();
+            }}
+          ><CloseIcon /></button>}
+        </div>
         <nav className="session-list" aria-label="会话列表">
           {groups.map((group) => {
             const groupId = `session-directory-${encodeURIComponent(group.key)}`;
@@ -206,7 +218,7 @@ export function SessionSidebar({ sessions, sessionsTotal, sessionDirectories, in
               <div className="session-directory-header">
                 <button type="button" className="session-directory-toggle" aria-label={`${group.collapsed ? "展开" : "折叠"}目录 ${group.label}，${group.total} 个对话`} aria-expanded={!group.collapsed} aria-controls={groupId} onClick={() => {
                   setSessionMenuId("");
-                  if (group.collapsed && !loadedCount && group.total) onLoadDirectory(group.key, 0);
+                  if (group.collapsed && !loadedCount && group.total) onLoadDirectory(group.cwd, 0);
                   onSetDirectoryCollapsed(group.key, !group.collapsed);
                 }} title={group.label}>
                   <ChevronRightIcon className={group.collapsed ? "" : "is-expanded"} />
@@ -253,7 +265,7 @@ export function SessionSidebar({ sessions, sessionsTotal, sessionDirectories, in
                   </div>;
                 })}
                 {!loadedCount && group.total > 0 && <p className="session-directory-empty">{loadingDirectory ? "正在加载…" : "展开后加载对话"}</p>}
-                {loadedCount < group.total && <button type="button" className="load-directory-sessions" disabled={loadingDirectory} onClick={() => onLoadDirectory(group.key, loadedCount)}>{loadingDirectory ? "正在加载…" : `加载更多（${loadedCount}/${group.total}）`}</button>}
+                {loadedCount < group.total && <button type="button" className="load-directory-sessions" disabled={loadingDirectory} onClick={() => onLoadDirectory(group.cwd, loadedCount)}>{loadingDirectory ? "正在加载…" : `加载更多（${loadedCount}/${group.total}）`}</button>}
               </div>}
             </section>;
           })}

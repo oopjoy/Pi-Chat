@@ -122,6 +122,7 @@ import {
 const LOCAL_DRAFT_BUSY_ID = "__local_draft_busy__";
 /** Let the lightweight bootstrap establish the active Session before racing a cold JSONL view. */
 const EARLY_HISTORY_VIEW_DELAY_MS = 100;
+const MAX_DIRECTORY_PREFIX_SIZE = 5_000;
 /** Bootstrap includes Primary capability probes; sidebar JSONL inventory has its own faster read path. */
 const EARLY_SIDEBAR_INVENTORY_DELAY_MS = 250;
 
@@ -392,7 +393,16 @@ export function App() {
   const [sessionNavigation, setSessionNavigation] = useState(() =>
     loadSessionNavigationPreferences(),
   );
+  const sessionNavigationRef = useRef(sessionNavigation);
+  sessionNavigationRef.current = sessionNavigation;
   const showAllSessionsRef = useRef(false);
+  /** Highest contiguous directory prefix the browser has explicitly loaded. */
+  const directorySessionCoverageRef = useRef(new Map<string, number>());
+  /** Full inventory is a replacement barrier for older base/directory requests. */
+  const sidebarFullRequestSequenceRef = useRef(0);
+  const sidebarCommittedFullSequenceRef = useRef(0);
+  /** Avoid retry loops for stale/deleted local pin IDs within one process epoch. */
+  const pinnedInventoryAttemptRef = useRef("");
   const [activeSessionId, setActiveSessionId] = useState("");
   const [activeSessionIds, setActiveSessionIds] = useState<string[]>([]);
   const viewedSessionId =
@@ -887,6 +897,90 @@ export function App() {
             confirmedDeletedSessionIdsRef.current.has(session.id),
         ).length,
     );
+  const sidebarDirectoryKey = (cwd: string) =>
+    normalizeCwdKey(cwd) || "__unknown_cwd__";
+  /**
+   * Base/bootstrap snapshots own their current page, not rows already retained by
+   * a wider full snapshot, a directory prefix, or a browser-local pin. Directory
+   * responses atomically replace only their cumulative prefix. This keeps a late
+   * background refresh from collapsing a successful “加载更多” click.
+   */
+  const commitSidebarSessions = (
+    incoming: SessionSummary[],
+    scope:
+      | { kind: "base"; fullBarrier?: number }
+      | { kind: "directory"; cwd: string; fullBarrier: number }
+      | { kind: "full"; requestSequence: number },
+  ): boolean => {
+    const normalized = reconcileOptimisticSessions(incoming);
+    const incomingIds = new Set(normalized.map((session) => session.id));
+    const incomingCounts = new Map<string, number>();
+    for (const session of normalized) {
+      const key = sidebarDirectoryKey(session.cwd);
+      incomingCounts.set(key, (incomingCounts.get(key) || 0) + 1);
+    }
+    if (scope.kind === "full") {
+      if (scope.requestSequence < sidebarCommittedFullSequenceRef.current)
+        return false;
+      sidebarCommittedFullSequenceRef.current = scope.requestSequence;
+      showAllSessionsRef.current = true;
+      directorySessionCoverageRef.current = new Map(incomingCounts);
+      setSessions(normalized);
+      return true;
+    }
+    if (
+      scope.fullBarrier !== undefined &&
+      scope.fullBarrier !== sidebarCommittedFullSequenceRef.current
+    )
+      return false;
+    if (scope.kind === "directory") {
+      const key = sidebarDirectoryKey(scope.cwd);
+      directorySessionCoverageRef.current.set(key, normalized.length);
+      const pinned = new Set(sessionNavigationRef.current.pinnedSessionIds);
+      setSessions((current) =>
+        uniqueSessionSummaries([
+          ...normalized,
+          ...current.filter((session) => {
+            const sameDirectory = sidebarDirectoryKey(session.cwd) === key;
+            if (!sameDirectory) return true;
+            if (incomingIds.has(session.id)) return false;
+            return (
+              pinned.has(session.id) ||
+              session.id === viewedSessionIdRef.current
+            );
+          }),
+        ]),
+      );
+      return true;
+    }
+    for (const [key, count] of incomingCounts) {
+      if (!directorySessionCoverageRef.current.has(key))
+        directorySessionCoverageRef.current.set(key, count);
+    }
+    const pinned = new Set(sessionNavigationRef.current.pinnedSessionIds);
+    setSessions((current) => {
+      // Once a full inventory has committed, Bootstrap/base rows are a narrower
+      // projection and cannot add back an ID absent from that full replacement.
+      if (showAllSessionsRef.current) return current;
+      return uniqueSessionSummaries([
+        ...normalized,
+        ...current.filter((session) => {
+          if (incomingIds.has(session.id)) return false;
+          if (
+            pinned.has(session.id) ||
+            session.id === viewedSessionIdRef.current
+          )
+            return true;
+          const key = sidebarDirectoryKey(session.cwd);
+          return (
+            (directorySessionCoverageRef.current.get(key) || 0) >
+            (incomingCounts.get(key) || 0)
+          );
+        }),
+      ]);
+    });
+    return true;
+  };
   const commitLiveMessage = useCallback(
     ({ message, authority }: ScheduledLiveMessage) => {
       paneAuthorityDispatchRef.current(authority, {
@@ -1175,22 +1269,7 @@ export function App() {
         )
           recordSourceTurnTotal(session.id, session.turnCount);
       }
-      const incoming = reconcileOptimisticSessions(data.sessions);
-      setSessions((current) => {
-        if (!showAllSessionsRef.current) return incoming;
-        const updates = new Map(
-          incoming.map((session) => [session.id, session]),
-        );
-        return uniqueSessionSummaries(
-          current
-            .filter(
-              (session) =>
-                !optimisticDeletesRef.current.has(session.id) &&
-                !confirmedDeletedSessionIdsRef.current.has(session.id),
-            )
-            .map((session) => updates.get(session.id) || session),
-        );
-      });
+      commitSidebarSessions(data.sessions, { kind: "base" });
       setSessionsTotal(
         optimisticSessionsTotal(
           data.sessions,
@@ -2138,7 +2217,15 @@ export function App() {
     sessionRefreshInFlightRef.current = true;
     sessionRefreshGenerationRef.current = runEpochGeneration;
     try {
-      const result = await api.sessions(showAllSessionsRef.current);
+      const full = showAllSessionsRef.current;
+      const fullBarrier = sidebarCommittedFullSequenceRef.current;
+      const fullRequestSequence = full
+        ? ++sidebarFullRequestSequenceRef.current
+        : 0;
+      const result = await api.sessions(
+        full,
+        full ? [] : sessionNavigationRef.current.pinnedSessionIds,
+      );
       if (runEpochGenerationRef.current !== runEpochGeneration) return;
       for (const session of result.sessions) {
         if (
@@ -2147,7 +2234,16 @@ export function App() {
         )
           recordSourceTurnTotal(session.id, session.turnCount);
       }
-      setSessions(reconcileOptimisticSessions(result.sessions));
+      const committed = full
+        ? commitSidebarSessions(result.sessions, {
+            kind: "full",
+            requestSequence: fullRequestSequence,
+          })
+        : commitSidebarSessions(result.sessions, {
+            kind: "base",
+            fullBarrier,
+          });
+      if (!committed) return;
       setSessionsTotal(
         optimisticSessionsTotal(
           result.sessions,
@@ -2178,6 +2274,7 @@ export function App() {
     )
       return;
     loadAllSessionsGenerationRef.current = runEpochGeneration;
+    const fullRequestSequence = ++sidebarFullRequestSequenceRef.current;
     setLoadingAllSessions(true);
     setError("");
     try {
@@ -2190,8 +2287,13 @@ export function App() {
         )
           recordSourceTurnTotal(session.id, session.turnCount);
       }
-      showAllSessionsRef.current = true;
-      setSessions(reconcileOptimisticSessions(result.sessions));
+      if (
+        !commitSidebarSessions(result.sessions, {
+          kind: "full",
+          requestSequence: fullRequestSequence,
+        })
+      )
+        return;
       setSessionsTotal(
         optimisticSessionsTotal(
           result.sessions,
@@ -2210,28 +2312,57 @@ export function App() {
   }, []);
 
   const loadDirectorySessions = useCallback(
-    async (cwd: string, offset: number) => {
+    async (cwd: string, renderedCount: number) => {
       const runEpochGeneration = runEpochGenerationRef.current;
-      if (directoryLoadGenerationsRef.current.get(cwd) === runEpochGeneration)
+      const fullBarrier = sidebarCommittedFullSequenceRef.current;
+      const key = sidebarDirectoryKey(cwd);
+      if (directoryLoadGenerationsRef.current.get(key) === runEpochGeneration)
         return;
-      directoryLoadGenerationsRef.current.set(cwd, runEpochGeneration);
-      setLoadingDirectoryKeys((current) => [...new Set([...current, cwd])]);
+      directoryLoadGenerationsRef.current.set(key, runEpochGeneration);
+      setLoadingDirectoryKeys((current) => [...new Set([...current, key])]);
       try {
-        const result = await api.directorySessions(cwd, offset);
+        const covered =
+          directorySessionCoverageRef.current.get(key) ?? renderedCount;
+        if (covered >= MAX_DIRECTORY_PREFIX_SIZE) {
+          const fullRequestSequence = ++sidebarFullRequestSequenceRef.current;
+          const result = await api.sessions(true);
+          if (runEpochGenerationRef.current !== runEpochGeneration) return;
+          if (
+            !commitSidebarSessions(result.sessions, {
+              kind: "full",
+              requestSequence: fullRequestSequence,
+            })
+          )
+            return;
+          setSessionsTotal(
+            optimisticSessionsTotal(
+              result.sessions,
+              result.total ?? result.sessions.length,
+            ),
+          );
+          setSessionDirectories(result.directories || []);
+          return;
+        }
+        const result = await api.directorySessions(cwd, covered + 15);
         if (runEpochGenerationRef.current !== runEpochGeneration) return;
-        setSessions((current) =>
-          uniqueSessionSummaries([...current, ...result.sessions]),
-        );
+        if (
+          !commitSidebarSessions(result.sessions, {
+            kind: "directory",
+            cwd,
+            fullBarrier,
+          })
+        )
+          return;
         setSessionDirectories(result.directories || []);
       } catch (cause) {
         if (runEpochGenerationRef.current === runEpochGeneration)
           setError(cause instanceof Error ? cause.message : String(cause));
       } finally {
-        if (directoryLoadGenerationsRef.current.get(cwd) !== runEpochGeneration)
+        if (directoryLoadGenerationsRef.current.get(key) !== runEpochGeneration)
           return;
-        directoryLoadGenerationsRef.current.delete(cwd);
+        directoryLoadGenerationsRef.current.delete(key);
         setLoadingDirectoryKeys((current) =>
-          current.filter((key) => key !== cwd),
+          current.filter((candidate) => candidate !== key),
         );
       }
     },
@@ -2277,6 +2408,26 @@ export function App() {
     () => saveSessionNavigationPreferences(sessionNavigation),
     [sessionNavigation],
   );
+  useEffect(() => {
+    if (!sidebarInventoryReady || showAllSessionsRef.current) return;
+    const pinned = sessionNavigation.pinnedSessionIds.filter((id) =>
+      /^[a-f0-9]{20}$/i.test(id),
+    );
+    if (!pinned.length) return;
+    const loaded = new Set(sessions.map((session) => session.id));
+    if (pinned.every((id) => loaded.has(id))) return;
+    const attempt = `${runEpochGenerationRef.current}:${pinned.join(",")}`;
+    if (pinnedInventoryAttemptRef.current === attempt) return;
+    pinnedInventoryAttemptRef.current = attempt;
+    void refreshSidebarSessions().catch((cause) =>
+      setError(cause instanceof Error ? cause.message : String(cause)),
+    );
+  }, [
+    refreshSidebarSessions,
+    sessionNavigation.pinnedSessionIds,
+    sessions,
+    sidebarInventoryReady,
+  ]);
 
   // EventSource reconnects after a server restart, but it cannot replay events
   // missed while disconnected. Keep transport ownership in usePiEventSource;
@@ -2318,6 +2469,11 @@ export function App() {
         sessionRefreshRequestedRef.current = false;
         loadAllSessionsGenerationRef.current = null;
         directoryLoadGenerationsRef.current.clear();
+        directorySessionCoverageRef.current.clear();
+        pinnedInventoryAttemptRef.current = "";
+        showAllSessionsRef.current = false;
+        sidebarFullRequestSequenceRef.current = 0;
+        sidebarCommittedFullSequenceRef.current = 0;
         setLoadingAllSessions(false);
         setLoadingDirectoryKeys([]);
         // A replacement can announce maintenance before its first idle frame.
@@ -3656,6 +3812,31 @@ export function App() {
           runEpochGenerationRef.current += 1;
           // A newly accepted transport token may belong to a replacement service
           // even when the old socket closed before delivering its changed epoch.
+          // Detach every process-A sidebar scope before B's base inventory can
+          // otherwise merge with retained full/directory rows from A.
+          if (sessionRefreshTimerRef.current !== null)
+            window.clearTimeout(sessionRefreshTimerRef.current);
+          sessionRefreshTimerRef.current = null;
+          sessionRefreshInFlightRef.current = false;
+          sessionRefreshGenerationRef.current = null;
+          sessionRefreshRequestedRef.current = false;
+          loadAllSessionsGenerationRef.current = null;
+          directoryLoadGenerationsRef.current.clear();
+          directorySessionCoverageRef.current.clear();
+          pinnedInventoryAttemptRef.current = "";
+          showAllSessionsRef.current = false;
+          sidebarFullRequestSequenceRef.current = 0;
+          sidebarCommittedFullSequenceRef.current = 0;
+          setLoadingAllSessions(false);
+          setLoadingDirectoryKeys([]);
+          sidebarInventoryReadyRef.current = false;
+          setSidebarInventoryReady(false);
+          setSessions([]);
+          setSessionsTotal(0);
+          setSessionDirectories([]);
+          optimisticRenamesRef.current.clear();
+          optimisticDeletesRef.current.clear();
+          syncMutatingSessionIds();
           // Drop every process-derived authority before bootstrapping that token.
           sessionRunningOverridesRef.current.clear();
           setFailedSessionIds([]);
@@ -5550,7 +5731,8 @@ export function App() {
     kind: "rename" | "delete",
     expectedName?: string,
   ) => {
-    const result = await api.sessions(true);
+    const fullRequestSequence = ++sidebarFullRequestSequenceRef.current;
+    const result = await api.sessions(true, [], true);
     const session = result.sessions.find((item) => item.id === sessionId);
     const outcome =
       kind === "rename"
@@ -5562,15 +5744,24 @@ export function App() {
         : session
           ? "not-committed"
           : "committed";
-    return { outcome, result } as const;
+    return { outcome, result, fullRequestSequence } as const;
   };
 
   const applySessionListSnapshot = (result: {
     sessions: SessionSummary[];
     total: number;
-  }) => {
-    setSessions(reconcileOptimisticSessions(result.sessions));
+    directories?: SessionDirectorySummary[];
+  }, fullRequestSequence: number) => {
+    if (
+      !commitSidebarSessions(result.sessions, {
+        kind: "full",
+        requestSequence: fullRequestSequence,
+      })
+    )
+      return false;
     setSessionsTotal(optimisticSessionsTotal(result.sessions, result.total));
+    if (result.directories) setSessionDirectories(result.directories);
+    return true;
   };
 
   /**
@@ -5644,8 +5835,13 @@ export function App() {
   /** Resolve only operations proven by a full authoritative Session inventory. */
   const reconcilePendingSessionMutations = async () => {
     const runEpochGeneration = runEpochGenerationRef.current;
-    const result = await api.sessions(true);
-    if (runEpochGenerationRef.current !== runEpochGeneration) return false;
+    const fullRequestSequence = ++sidebarFullRequestSequenceRef.current;
+    const result = await api.sessions(true, [], true);
+    if (
+      runEpochGenerationRef.current !== runEpochGeneration ||
+      fullRequestSequence < sidebarCommittedFullSequenceRef.current
+    )
+      return false;
     let confirmed = false;
     const absentRenames: Array<{ id: string; wasViewed: boolean }> = [];
     for (const [id, pending] of optimisticRenamesRef.current) {
@@ -5665,7 +5861,7 @@ export function App() {
       }
     }
     if (confirmed) syncMutatingSessionIds();
-    applySessionListSnapshot(result);
+    applySessionListSnapshot(result, fullRequestSequence);
     for (const absent of absentRenames)
       selectDeletionFallback(absent.id, result.sessions, absent.wasViewed);
     return true;
@@ -5678,15 +5874,21 @@ export function App() {
     setRefreshing(true);
     setError("");
     try {
-      await refresh();
+      const [metadataResult, inventoryResult] = await Promise.allSettled([
+        refresh(),
+        reconcilePendingSessionMutations(),
+      ]);
       if (runEpochGenerationRef.current !== runEpochGeneration) return;
-      const reconciled = await reconcilePendingSessionMutations();
+      if (inventoryResult.status === "rejected") throw inventoryResult.reason;
       if (
-        reconciled &&
-        refreshOperationTokenRef.current === operationToken &&
-        runEpochGenerationRef.current === runEpochGeneration
+        inventoryResult.value &&
+        refreshOperationTokenRef.current === operationToken
       )
         setNotice("会话已刷新");
+      if (metadataResult.status === "rejected") {
+        const cause = metadataResult.reason;
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
     } catch (cause) {
       if (
         refreshOperationTokenRef.current === operationToken &&
@@ -5816,14 +6018,12 @@ export function App() {
           return;
         }
         try {
-          const { outcome, result } = await reconcileSessionMutation(
-            sessionId,
-            "rename",
-            name,
-          );
+          const { outcome, result, fullRequestSequence } =
+            await reconcileSessionMutation(sessionId, "rename", name);
           if (
             optimisticRenamesRef.current.get(sessionId)?.token !== token ||
-            runEpochGenerationRef.current !== runEpochGeneration
+            runEpochGenerationRef.current !== runEpochGeneration ||
+            fullRequestSequence < sidebarCommittedFullSequenceRef.current
           ) {
             if (runEpochGenerationRef.current !== runEpochGeneration)
               void reconcilePendingSessionMutations().catch(() => undefined);
@@ -5832,25 +6032,34 @@ export function App() {
           if (outcome === "committed") {
             optimisticRenamesRef.current.delete(sessionId);
             syncMutatingSessionIds();
-            applySessionListSnapshot(result);
+            applySessionListSnapshot(result, fullRequestSequence);
             setNotice("对话已重命名");
             return;
           }
           if (outcome === "absent") {
             const wasViewed = finalizeDeletedSession(sessionId);
-            applySessionListSnapshot(result);
+            applySessionListSnapshot(result, fullRequestSequence);
             selectDeletionFallback(sessionId, result.sessions, wasViewed);
             setError("重命名未完成：对话已不存在或已被删除");
             return;
           }
           if (outcome === "not-committed") {
-            optimisticRenamesRef.current.delete(sessionId);
-            syncMutatingSessionIds();
-            applySessionListSnapshot(result);
-            const message =
-              cause instanceof Error ? cause.message : String(cause);
-            setError(`重命名失败，已恢复原名称：${message}`);
-            return;
+            const definiteRejection =
+              cause instanceof ApiRequestError &&
+              cause.status >= 400 &&
+              cause.status < 500;
+            if (definiteRejection) {
+              optimisticRenamesRef.current.delete(sessionId);
+              syncMutatingSessionIds();
+              applySessionListSnapshot(result, fullRequestSequence);
+              setError(`重命名失败，已恢复原名称：${cause.message}`);
+              return;
+            }
+            // A fresh JSONL snapshot is not a completion barrier for the
+            // original request: the server may still be finishing its RPC and
+            // index refresh after the HTTP response was lost. Keep the local
+            // name and mutation guard until positive terminal evidence arrives.
+            applySessionListSnapshot(result, fullRequestSequence);
           }
         } catch {
           // Transport is still indeterminate; retain the local intent and guard.
@@ -5928,13 +6137,12 @@ export function App() {
           return;
         }
         try {
-          const { outcome, result } = await reconcileSessionMutation(
-            deletingId,
-            "delete",
-          );
+          const { outcome, result, fullRequestSequence } =
+            await reconcileSessionMutation(deletingId, "delete");
           if (
             optimisticDeletesRef.current.get(deletingId)?.token !== token ||
-            runEpochGenerationRef.current !== runEpochGeneration
+            runEpochGenerationRef.current !== runEpochGeneration ||
+            fullRequestSequence < sidebarCommittedFullSequenceRef.current
           ) {
             if (runEpochGenerationRef.current !== runEpochGeneration)
               void reconcilePendingSessionMutations().catch(() => undefined);
@@ -5942,7 +6150,7 @@ export function App() {
           }
           if (outcome === "committed") {
             const finalizedViewed = finalizeDeletedSession(deletingId);
-            applySessionListSnapshot(result);
+            applySessionListSnapshot(result, fullRequestSequence);
             selectDeletionFallback(
               deletingId,
               result.sessions,
@@ -5952,13 +6160,22 @@ export function App() {
             return;
           }
           if (outcome === "not-committed") {
-            optimisticDeletesRef.current.delete(deletingId);
-            syncMutatingSessionIds();
-            applySessionListSnapshot(result);
-            const message =
-              cause instanceof Error ? cause.message : String(cause);
-            setError(`删除失败，已恢复对话显示：${message}`);
-            return;
+            const definiteRejection =
+              cause instanceof ApiRequestError &&
+              cause.status >= 400 &&
+              cause.status < 500;
+            if (definiteRejection) {
+              optimisticDeletesRef.current.delete(deletingId);
+              syncMutatingSessionIds();
+              applySessionListSnapshot(result, fullRequestSequence);
+              setError(`删除失败，已恢复对话显示：${cause.message}`);
+              return;
+            }
+            // Presence in a fresh inventory does not prove a timed-out delete
+            // failed; unlink/index refresh may still be in flight. Keep the row
+            // hidden and guarded until absence or a structural SSE proves the
+            // terminal outcome.
+            applySessionListSnapshot(result, fullRequestSequence);
           }
         } catch {
           // Transport is still indeterminate; retain the local intent and guard.
@@ -6528,15 +6745,16 @@ export function App() {
             setSidebarOpen(false);
           void viewSession(id);
         }}
-        onTogglePin={(sessionId) =>
+        onTogglePin={(sessionId) => {
+          pinnedInventoryAttemptRef.current = "";
           setSessionNavigation((current) => ({
             ...current,
             pinnedSessionIds: togglePinnedSession(
               current.pinnedSessionIds,
               sessionId,
             ),
-          }))
-        }
+          }));
+        }}
         onToggleDirectoryPin={(cwd) =>
           setSessionNavigation((current) => ({
             ...current,

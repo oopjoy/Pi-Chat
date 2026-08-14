@@ -141,6 +141,8 @@ export const TURN_WINDOW_INCREMENT = 10;
 const MAX_TURN_WINDOW_SIZE = 10_000;
 const DEFAULT_SESSION_LIST_SIZE = 30;
 const DEFAULT_DIRECTORY_SESSION_LIST_SIZE = 15;
+/** Directory pagination returns a cumulative prefix so recency reordering cannot skip rows. */
+const MAX_DIRECTORY_SESSION_LIST_SIZE = 5_000;
 const DEFAULT_SECONDARY_RUNTIME_SWEEP_MS = 60 * 1_000;
 const DEFAULT_GATE_REQUEST_TIMEOUT_MS = 10 * 60 * 1_000;
 const DEFAULT_LAST_WINDOW_SHUTDOWN_GRACE_MS = 10_000;
@@ -2658,6 +2660,7 @@ export class PiChatApp {
     sessions: SessionSummary[],
     clientId: string,
     all = false,
+    includeIds: readonly string[] = [],
   ): {
     sessions: SessionSummary[];
     total: number;
@@ -2680,7 +2683,8 @@ export class PiChatApp {
       }))
       .sort((left, right) => right.lastUserPromptAt - left.lastUserPromptAt);
     if (all) return { sessions: enriched, total: enriched.length, directories };
-    const cwdKey = (cwd: string) => resolve(cwd || ".").toLowerCase();
+    const cwdKey = (cwd: string) =>
+      cwd ? resolve(cwd).toLowerCase() : "__unknown_cwd__";
     const current =
       [...groups.entries()].find(
         ([cwd]) => cwdKey(cwd) === cwdKey(this.currentCwd),
@@ -2698,6 +2702,18 @@ export class PiChatApp {
           ),
         ),
       );
+    }
+    // Pins are browser-local presentation preferences. The read-only inventory
+    // endpoint may request their bounded stable IDs so an older pinned Session
+    // remains visible without forcing an unbounded all=1 scan into every page.
+    if (includeIds.length) {
+      const selectedIds = new Set(selected.map((session) => session.id));
+      const requested = new Set(includeIds);
+      for (const session of enriched) {
+        if (!requested.has(session.id) || selectedIds.has(session.id)) continue;
+        selected.push(session);
+        selectedIds.add(session.id);
+      }
     }
     return { sessions: selected, total: enriched.length, directories };
   }
@@ -3900,18 +3916,22 @@ export class PiChatApp {
   private async listSessionsRoute(input: {
     clientId: string;
     all: boolean;
+    fresh: boolean;
+    includeIds: string[];
+    directory: boolean;
     cwd: string;
     offset: number;
     limit: number;
   }): Promise<unknown> {
     const page = (sidebar: ReturnType<PiChatApp["sidebarSessions"]>) => {
-      if (!input.cwd)
+      if (!input.directory)
         return {
           sessions: sidebar.sessions,
           total: sidebar.total,
           directories: sidebar.directories,
         };
-      const cwdKey = (cwd: string) => resolve(cwd || ".").toLowerCase();
+      const cwdKey = (cwd: string) =>
+        cwd ? resolve(cwd).toLowerCase() : "__unknown_cwd__";
       const key = cwdKey(input.cwd);
       return {
         sessions: sidebar.sessions
@@ -3923,12 +3943,21 @@ export class PiChatApp {
         directories: sidebar.directories,
       };
     };
+    const list = () =>
+      input.fresh
+        ? this.options.sessions.list(
+            this.activeSessionPath || this.lastPrimaryState.sessionFile,
+          )
+        : this.cachedSessionList(
+            this.activeSessionPath || this.lastPrimaryState.sessionFile,
+          );
     if (this.applicationLifecycle !== "idle") {
       const result = page(
         this.sidebarSessions(
-          await this.cachedSessionList(this.activeSessionPath),
+          await list(),
           input.clientId,
-          input.all || Boolean(input.cwd),
+          input.all || input.directory,
+          input.includeIds,
         ),
       );
       return { ...result, applicationLifecycle: this.applicationLifecycle };
@@ -3937,11 +3966,10 @@ export class PiChatApp {
     // a just-restarted worker can be slow while JSONL metadata is fully usable.
     const result = page(
       this.sidebarSessions(
-        await this.cachedSessionList(
-          this.activeSessionPath || this.lastPrimaryState.sessionFile,
-        ),
+        await list(),
         input.clientId,
-        input.all || Boolean(input.cwd),
+        input.all || input.directory,
+        input.includeIds,
       ),
     );
     return { ...result, applicationLifecycle: this.applicationLifecycle };
@@ -4008,6 +4036,7 @@ export class PiChatApp {
           maxTurns: MAX_TURN_WINDOW_SIZE,
           turnIncrement: TURN_WINDOW_INCREMENT,
           directoryLimit: DEFAULT_DIRECTORY_SESSION_LIST_SIZE,
+          maxDirectoryLimit: MAX_DIRECTORY_SESSION_LIST_SIZE,
         },
       )
     )
