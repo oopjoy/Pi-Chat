@@ -49,7 +49,7 @@ coordination layer:
    render-only boundaries. No further state move, hook extraction, or component
    split is in scope;
 7. each convergence group runs typecheck, a clean-dist full test run, complete
-   Playwright, and `git diff --check` serially. Build and E2E never run in
+   Playwright, and `git diff HEAD --check` serially. Build and E2E never run in
    parallel because both consume generated `dist`.
 
 **Completed 3B convergence.** Prompt acknowledgement/rejection, draft picker,
@@ -446,7 +446,7 @@ Every phase runs:
 - `npm run typecheck`;
 - `npm test` from a clean generated `dist` baseline;
 - complete Playwright desktop/mobile suite;
-- `git diff --check`.
+- `git diff HEAD --check`.
 
 Focused behavioral coverage must include:
 

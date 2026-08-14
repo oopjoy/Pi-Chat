@@ -5,9 +5,10 @@ Run every item from a clean, isolated staging directory. Do not replace the live
 ## Build And Tests
 
 - [ ] `npm run typecheck` passes.
-- [ ] `PI_CHAT_DIST_DIR=.pi-chat-release-unit-stage npm test` passes.
-- [ ] `PI_CHAT_DIST_DIR=.pi-chat-release-e2e-stage npm run test:e2e` passes.
-- [ ] `git diff --check` passes.
+- [ ] Full unit validation passes with a unique absolute `PI_CHAT_DIST_DIR` under the OS temp directory.
+- [ ] Complete Playwright passes with a different unique absolute `PI_CHAT_DIST_DIR` under the OS temp directory.
+- [ ] Release staging paths and `PI_CHAT_BUILD_REVISION` are recorded; do not use the auto-cleaning contributor wrapper for the artifact that will be packaged.
+- [ ] `git diff HEAD --check` passes before commit, and `git show --check --format= HEAD` passes for the release commit.
 - [ ] The staged `build-identity.json` has the intended package version, exact Git revision, and a non-`unknown` fingerprint.
 
 ## Windows Package

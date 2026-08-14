@@ -17,10 +17,14 @@ test("Windows launcher assets are packaged and project shortcuts are ignored", a
   ]);
   const pkg = JSON.parse(packageJson) as { files: string[]; scripts: Record<string, string> };
   assert.match(gitignore, /^\*\.lnk$/m);
-  for (const file of ["start-pi-chat.cmd", "start-pi-chat-ui.ps1", "scripts/install-shortcuts.ps1", "scripts/pi-chat-launch-process.ps1", "scripts/assert-safe-live-dist.mjs", "scripts/dist-paths.mjs", "scripts/workspace-artifacts.mjs", "resources"]) {
+  for (const file of ["CONTRIBUTING.md", "docs", "start-pi-chat.cmd", "start-pi-chat-ui.ps1", "scripts/install-shortcuts.ps1", "scripts/pi-chat-launch-process.ps1", "scripts/assert-safe-live-dist.mjs", "scripts/dist-paths.mjs", "scripts/workspace-artifacts.mjs", "scripts/run-staged-verification.mjs", "resources"]) {
     assert.ok(pkg.files.includes(file), `${file} must be included in the package`);
   }
   assert.equal(pkg.scripts["install:shortcuts"], "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-shortcuts.ps1");
+  assert.equal(pkg.scripts["test:focus"], "node scripts/run-tests.mjs");
+  assert.equal(pkg.scripts["verify:unit"], "node scripts/run-staged-verification.mjs unit");
+  assert.equal(pkg.scripts["verify:e2e"], "node scripts/run-staged-verification.mjs e2e");
+  assert.equal(pkg.scripts.verify, "node scripts/run-staged-verification.mjs all");
   for (const script of ["preclean", "prebuild", "prebuild:identity", "prebuild:web", "prebuild:server", "precopy:resources"]) {
     assert.equal(pkg.scripts[script], "node scripts/assert-safe-live-dist.mjs", `${script} must protect live dist`);
   }

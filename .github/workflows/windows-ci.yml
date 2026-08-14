@@ -9,6 +9,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v5
         with:
           node-version: 22.19.0
@@ -16,14 +18,26 @@ jobs:
       - run: npm ci
       - run: npx playwright install chromium
       - run: npm run typecheck
-      - run: npm test
+      - run: npm run verify:unit
         env:
-          PI_CHAT_DIST_DIR: .pi-chat-ci-unit-stage
           PI_CHAT_BUILD_REVISION: ${{ github.sha }}
-      - run: npm run test:e2e
+      - run: npm run verify:e2e
         env:
-          PI_CHAT_DIST_DIR: .pi-chat-ci-e2e-stage
           PI_CHAT_BUILD_REVISION: ${{ github.sha }}
+      - name: Check pull request diff
+        if: github.event_name == 'pull_request'
+        run: git diff --check "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}"
+      - name: Check push diff
+        if: github.event_name == 'push'
+        shell: pwsh
+        run: |
+          $before = "${{ github.event.before }}"
+          $head = "${{ github.sha }}"
+          if ($before -match '^0+$') {
+            git show --check --format= $head
+          } else {
+            git diff --check $before $head
+          }
       - name: Upload Playwright diagnostics
         if: always()
         uses: actions/upload-artifact@v6
