@@ -8,9 +8,12 @@ import { pathToFileURL } from "node:url";
 import { chromium, type Browser, type Page } from "@playwright/test";
 import {
   observeOwnedProcess,
-  terminateOwnedProcessTree,
-  waitForOwnedProcessTreeExit,
+  terminateOwnedProcessTreeForCleanup,
 } from "../scripts/e2e-process-tree.mjs";
+import {
+  combinedE2eError,
+  removeE2eRootAfterConfirmedTree,
+} from "../scripts/e2e-root.mjs";
 import { generateFixture, type FixtureManifest } from "./long-session-fixtures.mjs";
 import {
   aggregateBrowserFluency,
@@ -52,6 +55,7 @@ type ObservedOwnedProcess = {
 type RunningServer = ObservedOwnedProcess & {
   origin: string;
   manifestPath: string;
+  serverRoot: string;
   stdout: () => string;
   stderr: () => string;
 };
@@ -205,6 +209,7 @@ async function startServer(options: {
     const port = await freePort();
     if (port === LIVE_PORT) continue;
     const origin = `http://127.0.0.1:${port}`;
+    const serverRoot = await mkdtemp(join(tmpdir(), "pi-chat-e2e-root-"));
     const child = spawn(
       process.execPath,
       [
@@ -215,6 +220,8 @@ async function startServer(options: {
         options.fixtureDirectory,
         "--fixture-manifest",
         options.manifestPath,
+        "--root",
+        serverRoot,
       ],
       {
         cwd: projectRoot,
@@ -229,44 +236,36 @@ async function startServer(options: {
     const stderr = captureTail(child, "stderr");
     try {
       await waitForServer(origin, child);
-      return { ...observed, origin, manifestPath: options.manifestPath, stdout, stderr };
+      return { ...observed, origin, manifestPath: options.manifestPath, serverRoot, stdout, stderr };
     } catch (error) {
       lastError = error;
-      await terminateOwnedProcessTree(observed);
-      if (!/EADDRINUSE/i.test(stderr()))
-        throw error instanceof Error ? error : new Error(String(error));
+      const cleanupErrors: unknown[] = [];
+      let treeExitConfirmed = false;
+      try {
+        await terminateOwnedProcessTreeForCleanup(observed);
+        treeExitConfirmed = true;
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+      try {
+        await removeE2eRootAfterConfirmedTree(serverRoot, treeExitConfirmed);
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+      const failure = combinedE2eError(
+        error,
+        cleanupErrors,
+        `Benchmark server startup and teardown failed; retained root: ${serverRoot}`,
+      );
+      if (cleanupErrors.length || !/EADDRINUSE/i.test(stderr()))
+        throw failure;
     }
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
 async function stopServer(server: RunningServer): Promise<void> {
-  const { child } = server;
-  if (child.exitCode === null && child.signalCode === null) {
-    try {
-      const handshake = await fetch(`${server.origin}/api/bootstrap/handshake`, {
-        cache: "no-store",
-        signal: AbortSignal.timeout(2_000),
-      });
-      const data = await handshake.json() as { requestToken?: string };
-      if (handshake.ok && data.requestToken) {
-        await fetch(`${server.origin}/api/shutdown`, {
-          method: "POST",
-          headers: {
-            origin: server.origin,
-            "x-pi-chat-token": data.requestToken,
-          },
-          signal: AbortSignal.timeout(5_000),
-        });
-      }
-    } catch {
-      // Fall through to termination of only the disposable process tree below.
-    }
-  }
-  if (!await waitForOwnedProcessTreeExit(server, SERVER_CLOSE_TIMEOUT_MS))
-    await terminateOwnedProcessTree(server);
-  if (child.signalCode || (child.exitCode !== null && child.exitCode !== 0))
-    throw new Error(`Benchmark server wrapper exited abnormally (code=${child.exitCode ?? "null"}, signal=${child.signalCode ?? "none"})`);
+  await terminateOwnedProcessTreeForCleanup(server, SERVER_CLOSE_TIMEOUT_MS);
 }
 
 async function importedSessions(path: string): Promise<ImportedManifest> {
@@ -526,6 +525,7 @@ async function measureIteration(options: {
     manifestPath,
   });
   let context: Awaited<ReturnType<Browser["newContext"]>> | null = null;
+  let primaryError: unknown;
   try {
     const imported = await importedSessions(server.manifestPath);
     const sessionByName = new Map(imported.sessions.map((session) => [session.name, session.id]));
@@ -617,11 +617,37 @@ async function measureIteration(options: {
       server.stdout() ? `server stdout:\n${server.stdout()}` : "",
       server.stderr() ? `server stderr:\n${server.stderr()}` : "",
     ].filter(Boolean).join("\n\n");
-    throw new Error(details);
+    primaryError = new Error(details);
   } finally {
-    await context?.close().catch(() => undefined);
-    await stopServer(server);
+    const cleanupErrors: unknown[] = [];
+    try {
+      await context?.close();
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    let treeExitConfirmed = false;
+    try {
+      await stopServer(server);
+      treeExitConfirmed = true;
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    try {
+      await removeE2eRootAfterConfirmedTree(
+        server.serverRoot,
+        treeExitConfirmed,
+      );
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    const failure = combinedE2eError(
+      primaryError,
+      cleanupErrors,
+      `Benchmark iteration and teardown failed; retained root: ${iterationRoot}`,
+    );
+    if (failure !== undefined) throw failure;
   }
+  throw new Error("Benchmark iteration ended without samples or an error");
 }
 
 export const BROWSER_FLUENCY_FIXTURE_SCENARIO = "thousand-user-turns" as const;
@@ -638,6 +664,37 @@ async function generateBrowserFixtures(directory: string): Promise<BrowserFixtur
   ];
 }
 
+export async function finalizeBrowserBenchmarkRoot(options: {
+  root: string;
+  browser: Pick<Browser, "close"> | null;
+  completed: boolean;
+  removeRoot?: (root: string) => Promise<void>;
+}): Promise<unknown[]> {
+  const cleanupErrors: unknown[] = [];
+  let browserCloseConfirmed = options.browser === null;
+  if (options.browser) {
+    try {
+      await options.browser.close();
+      browserCloseConfirmed = true;
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  }
+  if (options.completed && browserCloseConfirmed) {
+    try {
+      await (options.removeRoot ?? ((root) =>
+        rm(root, { recursive: true, force: true })))(options.root);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  } else {
+    cleanupErrors.push(
+      new Error(`Browser benchmark root retained after failure: ${options.root}`),
+    );
+  }
+  return cleanupErrors;
+}
+
 export async function runBrowserFluencyBenchmark(options: {
   dist: string;
   iterations?: number;
@@ -647,6 +704,9 @@ export async function runBrowserFluencyBenchmark(options: {
   const iterations = Math.max(1, Math.floor(options.iterations ?? 3));
   const root = await mkdtemp(join(tmpdir(), "pi-chat-browser-fluency-"));
   let browser: Browser | null = null;
+  let completed = false;
+  let primaryError: unknown;
+  let result: BrowserFluencyResult | undefined;
   try {
     const fixtures = await generateBrowserFixtures(join(root, "fixtures"));
     browser = await chromium.launch({
@@ -657,7 +717,7 @@ export async function runBrowserFluencyBenchmark(options: {
     for (let iteration = 1; iteration <= iterations; iteration += 1) {
       samples.push(...await measureIteration({ browser, stagingDist, root, iteration, fixtures }));
     }
-    const result: BrowserFluencyResult = {
+    result = {
       schemaVersion: 1,
       benchmark: "pi-chat-browser-fluency",
       generatedAt: new Date().toISOString(),
@@ -700,11 +760,23 @@ export async function runBrowserFluencyBenchmark(options: {
       await mkdir(dirname(outputPath), { recursive: true });
       await writeFile(outputPath, `${JSON.stringify(result, null, 2)}\n`, "utf8");
     }
-    return result;
-  } finally {
-    await browser?.close().catch(() => undefined);
-    await rm(root, { recursive: true, force: true });
+    completed = true;
+  } catch (error) {
+    primaryError = error;
   }
+  const cleanupErrors = await finalizeBrowserBenchmarkRoot({
+    root,
+    browser,
+    completed,
+  });
+  const failure = combinedE2eError(
+    primaryError,
+    cleanupErrors,
+    `Browser benchmark and cleanup failed; retained root: ${root}`,
+  );
+  if (failure !== undefined) throw failure;
+  if (!result) throw new Error("Browser benchmark completed without a result");
+  return result;
 }
 
 function parseArgs(argv: string[]): { dist: string; iterations?: number; outputPath?: string } {

@@ -12,6 +12,7 @@ import {
 import {
   benchmarkChildEnvironment,
   BROWSER_FLUENCY_FIXTURE_SCENARIO,
+  finalizeBrowserBenchmarkRoot,
   validateStagingDist,
 } from "../benchmarks/run-browser-fluency-bench.mts";
 
@@ -118,6 +119,20 @@ test("browser benchmark child environment forces staging and scrubs inherited ro
   assert.equal(environment.PI_CHAT_E2E_FIXTURE_DIR, undefined);
   assert.equal(environment.PI_CHAT_E2E_MANIFEST_PATH, undefined);
   assert.equal(environment.LOCALAPPDATA, join("C:/stage/state", "local-app-data"));
+});
+
+test("browser benchmark retains its root when browser teardown is unconfirmed", async () => {
+  const closeError = new Error("browser close failed");
+  let removed = false;
+  const cleanupErrors = await finalizeBrowserBenchmarkRoot({
+    root: "C:/Temp/pi-chat-browser-fluency-retained",
+    browser: { close: async () => { throw closeError; } },
+    completed: true,
+    removeRoot: async () => { removed = true; },
+  });
+  assert.equal(removed, false);
+  assert.equal(cleanupErrors[0], closeError);
+  assert.match(String(cleanupErrors[1]), /root retained after failure/);
 });
 
 test("browser benchmark refuses repository live dist before artifact checks", async () => {

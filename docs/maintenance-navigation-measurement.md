@@ -51,7 +51,7 @@ Remeasured on local `main` after Session Inventory, artifact safety, line-ending
 | Window close during admitted mutation | `tests/server/window-control-lifecycle.test.ts:93` | 17.3 ms | 0.51 s | 17.6 ms | 1 passed |
 | Fresh full Session Inventory refresh | `tests/web/session-inventory-mutations.test.ts:1582` | 18.4 ms | 1.36 s | 16.4 ms | 1 passed |
 
-Each owner search remained bounded to three mapped files. The Session Inventory sample reached `reconcilePendingSessionMutations` and its fresh `api.sessions(true, [], true)` call in `src/web/App.tsx` without requiring a repository-wide coordinator read. The complete contributor gate also passed with 624 unit tests (623 passed and one Windows symlink-permission skip) plus 16 Playwright cases; its successful unit and E2E staging directories were removed automatically.
+Each owner search remained bounded to three mapped files. The Session Inventory sample reached `reconcilePendingSessionMutations` and its fresh `api.sessions(true, [], true)` call in `src/web/App.tsx` without requiring a repository-wide coordinator read. The latest isolated gates, including E2E root-lifecycle hardening, passed with 627 unit tests (626 passed and one Windows symlink-permission skip) plus 16 Playwright cases; successful unit, E2E, and benchmark staging roots were removed automatically.
 
 The machine-readable remeasurement is stored outside the repository at `C:/Users/opjoy/AppData/Local/Temp/pi-chat-maintenance-navigation-remeasurement.json`.
 

@@ -5,7 +5,14 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { expect, test as base, type TestInfo } from "@playwright/test";
-import { observeOwnedProcess, terminateOwnedProcessTree } from "../scripts/e2e-process-tree.mjs";
+import {
+  observeOwnedProcess,
+  terminateOwnedProcessTreeForCleanup,
+} from "../scripts/e2e-process-tree.mjs";
+import {
+  combinedE2eError,
+  removeE2eRootAfterConfirmedTree,
+} from "../scripts/e2e-root.mjs";
 
 const projectRoot = resolve(import.meta.dirname, "..");
 
@@ -57,10 +64,7 @@ function testOutcomeIsUnexpected(testInfo: TestInfo): boolean {
 }
 
 export function combinedFixtureError(primaryError: unknown, secondaryErrors: unknown[], message: string): unknown {
-  const errors = primaryError === undefined ? secondaryErrors : [primaryError, ...secondaryErrors];
-  if (errors.length === 0) return undefined;
-  if (errors.length === 1) return errors[0];
-  return new AggregateError(errors, message, primaryError === undefined ? undefined : { cause: primaryError });
+  return combinedE2eError(primaryError, secondaryErrors, message);
 }
 
 async function attachServerDiagnostics(options: {
@@ -121,29 +125,8 @@ async function waitForServer(origin: string, child: ChildProcess): Promise<void>
   throw new Error("E2E 服务启动超时");
 }
 
-async function waitForChildClose(childClose: ChildClose): Promise<boolean> {
-  return Promise.race([
-    childClose.close.promise.then(() => true),
-    new Promise<boolean>((resolveDelay) => setTimeout(() => resolveDelay(false), childCloseTimeoutMs)),
-  ]);
-}
-
-async function stopServer(origin: string, child: ChildProcess, childClose: ChildClose): Promise<void> {
-  if (!childClose.close.confirmed && child.exitCode === null && child.signalCode === null) {
-    try {
-      const handshake = await fetch(`${origin}/api/bootstrap/handshake`, { signal: AbortSignal.timeout(2_000) });
-      const data = await handshake.json() as { requestToken?: string };
-      if (handshake.ok && data.requestToken) {
-        await fetch(`${origin}/api/shutdown`, {
-          method: "POST", headers: { origin, "x-pi-chat-token": data.requestToken }, signal: AbortSignal.timeout(5_000),
-        });
-      }
-    } catch {
-      // Fall through to process-tree termination when graceful shutdown is unavailable.
-    }
-  }
-  if (childClose.close.confirmed || await waitForChildClose(childClose)) return;
-  await terminateOwnedProcessTree(childClose, childCloseTimeoutMs);
+async function stopServer(childClose: ChildClose): Promise<void> {
+  await terminateOwnedProcessTreeForCleanup(childClose, childCloseTimeoutMs);
 }
 
 async function runCapturedServerFixture(options: {
@@ -152,10 +135,21 @@ async function runCapturedServerFixture(options: {
 }): Promise<void> {
   const origin = `http://127.0.0.1:${options.port}`;
   const e2eTestId = options.env.PI_CHAT_E2E_TEST_ID || `${options.testInfo.project.name}-${options.testInfo.testId}`;
-  const child = spawn(process.execPath, [resolve(projectRoot, "scripts", "e2e-server.mjs"), "--port", String(options.port)], {
-    cwd: projectRoot, env: options.env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
+  const serverRoot = await mkdtemp(join(tmpdir(), "pi-chat-e2e-root-"));
+  const child = spawn(process.execPath, [
+    resolve(projectRoot, "scripts", "e2e-server.mjs"),
+    "--port",
+    String(options.port),
+    "--root",
+    serverRoot,
+  ], {
+    cwd: projectRoot,
+    env: options.env,
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
+    detached: process.platform !== "win32",
   });
-  const childClose = observeOwnedProcess(child);
+  const childClose = observeOwnedProcess(child, process.platform !== "win32");
   const capture = captureServerOutput(child);
   let primaryError: unknown;
   const teardownErrors: unknown[] = [];
@@ -165,8 +159,15 @@ async function runCapturedServerFixture(options: {
   } catch (error) {
     primaryError = error;
   }
+  let treeExitConfirmed = false;
   try {
-    await stopServer(origin, child, childClose);
+    await stopServer(childClose);
+    treeExitConfirmed = true;
+  } catch (error) {
+    teardownErrors.push(error);
+  }
+  try {
+    await removeE2eRootAfterConfirmedTree(serverRoot, treeExitConfirmed);
   } catch (error) {
     teardownErrors.push(error);
   }
@@ -222,6 +223,7 @@ export const test = base.extend<{ isolatedBaseURL: string; mismatchedBaseURL: st
     const webFingerprint = `${identity.fingerprint[0] === "0" ? "1" : "0"}${identity.fingerprint.slice(1)}`;
     const hybridDist = await mkdtemp(join(tmpdir(), "pi-chat-e2e-mismatch-"));
     let primaryError: unknown;
+    let completed = false;
     try {
       await cp(join(serverDist, "web"), join(hybridDist, "web"), { recursive: true });
       await cp(join(serverDist, "build-identity.json"), join(hybridDist, "build-identity.json"));
@@ -237,14 +239,21 @@ export const test = base.extend<{ isolatedBaseURL: string; mismatchedBaseURL: st
         },
         use,
       });
+      completed = true;
     } catch (error) {
       primaryError = error;
     }
     const cleanupErrors: unknown[] = [];
-    try {
-      await rm(hybridDist, { recursive: true, force: true });
-    } catch (error) {
-      cleanupErrors.push(error);
+    if (completed) {
+      try {
+        await rm(hybridDist, { recursive: true, force: true });
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    } else {
+      cleanupErrors.push(
+        new Error(`Mismatched E2E dist retained after failure: ${hybridDist}`),
+      );
     }
     const error = combinedFixtureError(primaryError, cleanupErrors, "mismatched-server fixture and temporary dist cleanup failed");
     if (error !== undefined) throw error;

@@ -1,12 +1,20 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { e2eRuntimeDist } from "../scripts/e2e-runtime-dist.mjs";
+import {
+  observeOwnedProcess,
+  terminateOwnedProcessTreeForCleanup,
+} from "../scripts/e2e-process-tree.mjs";
+import {
+  combinedE2eError,
+  removeE2eRootAfterConfirmedTree,
+} from "../scripts/e2e-root.mjs";
 
 const projectRoot = resolve(import.meta.dirname, "..");
 
@@ -51,28 +59,58 @@ test("E2E runtime follows the staged build directory unless explicitly overridde
 test("E2E listener serves the web artifact from its staged runtime", { timeout: 30_000 }, async () => {
   const sourceDist = resolve(process.env.PI_CHAT_DIST_DIR || join(projectRoot, "dist"));
   const stagedDist = await mkdtemp(join(tmpdir(), "pi-chat-e2e-runtime-"));
+  const serverRoot = await mkdtemp(join(tmpdir(), "pi-chat-e2e-root-"));
   const marker = "pi-chat-e2e-staged-web-marker";
   const port = await freePort();
   let child: ReturnType<typeof spawn> | undefined;
+  let observed: ReturnType<typeof observeOwnedProcess> | undefined;
+  let primaryError: unknown;
   try {
     await cp(sourceDist, stagedDist, { recursive: true });
     const indexPath = join(stagedDist, "web", "index.html");
     const index = await readFile(indexPath, "utf8");
     await writeFile(indexPath, index.replace("</body>", `<meta name=\"${marker}\" content=\"${marker}\" /></body>`), "utf8");
-    child = spawn(process.execPath, [join(projectRoot, "scripts", "e2e-server.mjs"), "--port", String(port)], {
+    child = spawn(process.execPath, [
+      join(projectRoot, "scripts", "e2e-server.mjs"),
+      "--port",
+      String(port),
+      "--root",
+      serverRoot,
+    ], {
       cwd: projectRoot,
       env: { ...process.env, PI_CHAT_DIST_DIR: stagedDist },
       stdio: "ignore",
       windowsHide: true,
+      detached: process.platform !== "win32",
     });
+    observed = observeOwnedProcess(child, process.platform !== "win32");
     const page = await waitForResponse(`http://127.0.0.1:${port}/`, child);
     assert.match(page, new RegExp(marker));
-  } finally {
-    if (child && child.exitCode === null && child.signalCode === null) {
-      const exited = once(child, "exit").catch(() => undefined);
-      child.kill("SIGTERM");
-      await Promise.race([exited, new Promise((resolveDelay) => setTimeout(resolveDelay, 5_000))]);
-    }
-    await rm(stagedDist, { recursive: true, force: true });
+  } catch (error) {
+    primaryError = error;
   }
+
+  const cleanupErrors: unknown[] = [];
+  let treeExitConfirmed = observed === undefined;
+  if (observed) {
+    try {
+      await terminateOwnedProcessTreeForCleanup(observed, 5_000);
+      treeExitConfirmed = true;
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  }
+  for (const root of [serverRoot, stagedDist]) {
+    try {
+      await removeE2eRootAfterConfirmedTree(root, treeExitConfirmed);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  }
+  const failure = combinedE2eError(
+    primaryError,
+    cleanupErrors,
+    "E2E staged-runtime assertion and cleanup failed",
+  );
+  if (failure !== undefined) throw failure;
 });

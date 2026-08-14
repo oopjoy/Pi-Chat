@@ -2,11 +2,23 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import { BoundedStreamCapture, combinedFixtureError } from "../e2e/fixtures.ts";
 import { importE2eSessionFixtures } from "../scripts/e2e-fixture-import.mjs";
-import { observeOwnedProcess, requireSuccessfulTaskkill, terminateOwnedProcessTree } from "../scripts/e2e-process-tree.mjs";
+import {
+  observeOwnedProcess,
+  requireSuccessfulTaskkill,
+  terminateOwnedProcessTree,
+  terminateOwnedProcessTreeForCleanup,
+} from "../scripts/e2e-process-tree.mjs";
+import {
+  UnsafeE2eRootError,
+  removeE2eRootAfterConfirmedTree,
+  validateE2eRoot,
+} from "../scripts/e2e-root.mjs";
+
+const projectRoot = resolve(import.meta.dirname, "..");
 
 test("bounded server capture copies a truncated tail out of a giant input allocation", () => {
   const capture = new BoundedStreamCapture();
@@ -93,6 +105,62 @@ test("explicit E2E fixture import rejects a top-level JSONL symlink", async (con
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("caller-owned E2E roots accept only fresh direct named OS-temp directories", async () => {
+  const owned = await mkdtemp(join(tmpdir(), "pi-chat-e2e-root-"));
+  const unrelated = await mkdtemp(join(tmpdir(), "unrelated-e2e-root-"));
+  try {
+    assert.equal(validateE2eRoot({ projectRoot, requested: owned }), owned);
+    assert.throws(
+      () => validateE2eRoot({ projectRoot, requested: join(projectRoot, "dist") }),
+      UnsafeE2eRootError,
+    );
+    assert.throws(
+      () => validateE2eRoot({ projectRoot, requested: join(projectRoot, ".pi-chat-e2e-stage") }),
+      UnsafeE2eRootError,
+    );
+    assert.throws(
+      () => validateE2eRoot({ projectRoot, requested: tmpdir() }),
+      UnsafeE2eRootError,
+    );
+    assert.throws(
+      () => validateE2eRoot({ projectRoot, requested: unrelated }),
+      UnsafeE2eRootError,
+    );
+    await writeFile(join(owned, "occupied.txt"), "occupied", "utf8");
+    assert.throws(
+      () => validateE2eRoot({ projectRoot, requested: owned }),
+      /must be empty/,
+    );
+  } finally {
+    await rm(owned, { recursive: true, force: true });
+    await rm(unrelated, { recursive: true, force: true });
+  }
+});
+
+test("caller-owned E2E roots are retained until process-tree exit is confirmed", async () => {
+  let removed = false;
+  const remove = async () => { removed = true; };
+  await assert.rejects(
+    removeE2eRootAfterConfirmedTree("C:/Temp/retained-e2e-root", false, remove),
+    /retained root/,
+  );
+  assert.equal(removed, false);
+  await removeE2eRootAfterConfirmedTree("C:/Temp/confirmed-e2e-root", true, remove);
+  assert.equal(removed, true);
+});
+
+test("Windows cleanup refuses roots after the wrapper already exited", { skip: process.platform !== "win32" }, async () => {
+  const observed = {
+    child: { pid: 12345 },
+    close: { confirmed: true, promise: Promise.resolve() },
+    processGroup: false,
+  };
+  await assert.rejects(
+    terminateOwnedProcessTreeForCleanup(observed),
+    /exited before its Windows process tree could be confirmed/,
+  );
 });
 
 test("nonzero taskkill status always fails closed", () => {

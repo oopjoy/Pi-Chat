@@ -1,10 +1,10 @@
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { e2eSessionIdForPath, importE2eSessionFixtures } from "./e2e-fixture-import.mjs";
 import { observeOwnedProcess, terminateOwnedProcessTree } from "./e2e-process-tree.mjs";
 import { e2eRuntimeDist } from "./e2e-runtime-dist.mjs";
+import { validateE2eRoot } from "./e2e-root.mjs";
 
 const projectRoot = resolve(import.meta.dirname, "..");
 const runtimeDist = e2eRuntimeDist(process.env, projectRoot);
@@ -12,13 +12,16 @@ const serverDist = resolve(process.env.PI_CHAT_E2E_SERVER_DIST || runtimeDist);
 const portIndex = process.argv.indexOf("--port");
 const fixtureDirectoryIndex = process.argv.indexOf("--fixture-dir");
 const fixtureManifestIndex = process.argv.indexOf("--fixture-manifest");
+const rootIndex = process.argv.indexOf("--root");
 const port = portIndex >= 0 ? Number(process.argv[portIndex + 1]) : 30179;
 const fixtureDirectory = fixtureDirectoryIndex >= 0 ? process.argv[fixtureDirectoryIndex + 1] : "";
 const fixtureManifestPath = fixtureManifestIndex >= 0 ? process.argv[fixtureManifestIndex + 1] : "";
+const requestedRoot = rootIndex >= 0 ? process.argv[rootIndex + 1] : "";
 if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error("E2E 端口无效");
 if (fixtureDirectory && !fixtureManifestPath) throw new Error("显式 E2E fixture 导入需要 manifest 输出路径");
 if (!fixtureDirectory && fixtureManifestPath) throw new Error("E2E fixture manifest 只能与 fixture 目录一起使用");
-const root = await mkdtemp(join(tmpdir(), "pi-chat-e2e-"));
+if (!requestedRoot) throw new Error("E2E server 需要调用方提供 OS 临时目录中的 --root");
+const root = validateE2eRoot({ projectRoot, requested: requestedRoot });
 const sessions = join(root, "sessions");
 const agentDir = join(root, "agent");
 const rpcEntry = join(root, "fake-rpc.mjs");
@@ -114,31 +117,11 @@ const child = spawn(process.execPath, [join(serverDist, "server", "server", "ind
 });
 const observedChild = observeOwnedProcess(child);
 
-const delay = (ms) => new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
-const removeRoot = async () => {
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    try {
-      await rm(root, { recursive: true, force: true });
-      return;
-    } catch (error) {
-      if (!["EPERM", "EBUSY", "ENOTEMPTY"].includes(error?.code) || attempt === 7) return;
-      await delay(80 * (attempt + 1));
-    }
-  }
-};
-
 let cleaning = false;
 const cleanup = async () => {
   if (cleaning) return;
   cleaning = true;
-  let failure;
-  try {
-    await terminateOwnedProcessTree(observedChild, 5_000);
-  } catch (error) {
-    failure = error;
-  }
-  await removeRoot();
-  if (failure) throw failure;
+  await terminateOwnedProcessTree(observedChild, 5_000);
 };
 const closeFromSignal = () => void cleanup().then(
   () => process.exit(0),
@@ -149,7 +132,12 @@ const closeFromSignal = () => void cleanup().then(
 );
 process.once("SIGINT", closeFromSignal);
 process.once("SIGTERM", closeFromSignal);
-child.once("exit", (code) => {
+child.once("exit", (code, signal) => {
   if (cleaning) return;
-  void removeRoot().then(() => process.exit(code || 0));
+  if (signal) {
+    console.error(`[Pi Chat E2E] 服务子进程异常终止：${signal}`);
+    process.exit(1);
+    return;
+  }
+  process.exit(code ?? 1);
 });

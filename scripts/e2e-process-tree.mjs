@@ -88,3 +88,15 @@ export async function terminateOwnedProcessTree(observed, timeoutMs = 10_000) {
   if (!await waitForOwnedProcessTreeExit(observed, timeoutMs))
     throw new Error(`Owned process tree ${pid} did not confirm exit`);
 }
+
+export async function terminateOwnedProcessTreeForCleanup(
+  observed,
+  timeoutMs = 10_000,
+) {
+  if (process.platform === "win32" && observed.close.confirmed) {
+    throw new Error(
+      `Owned wrapper ${observed.child.pid ?? "unknown"} exited before its Windows process tree could be confirmed`,
+    );
+  }
+  await terminateOwnedProcessTree(observed, timeoutMs);
+}
