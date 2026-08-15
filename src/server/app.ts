@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { createReadStream, existsSync, readFileSync } from "node:fs";
 import { stat, unlink } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -82,6 +82,7 @@ import {
   RpcRequestTimeoutError,
   rpcData,
   type RpcEventSource,
+  type RpcRequestObservation,
 } from "./rpc-client.js";
 import {
   asCommands,
@@ -280,6 +281,11 @@ interface NativeSteeringAdmissions {
   items: Array<{ message: string; promptAt: number; imageChars: number }>;
 }
 
+interface ActivePromptDiagnostic {
+  promptId: string;
+  rpcGeneration: number;
+}
+
 class NativeSteeringResetError extends Error {
   readonly droppedCount: number;
 
@@ -325,6 +331,8 @@ export class PiChatApp {
   private readonly claimingExtensionRequests = new Set<string>();
   /** FIFO admission per Session prevents simultaneous prompt requests bypassing the queue. */
   private readonly promptAdmissionTails = new Map<string, Promise<void>>();
+  /** Observation-only prompt correlation; never consulted for scheduling or Runtime state. */
+  private readonly activePromptDiagnostics = new Map<string, ActivePromptDiagnostic>();
   /** Serializes default-workspace commits after native pickers return. */
   private workspaceCommitTail: Promise<void> = Promise.resolve();
   private primaryFailed = false;
@@ -552,6 +560,12 @@ export class PiChatApp {
         this.applyPendingTurnSettings(rpc, pending),
       syncGateMode: (rpc, sessionId, mode) =>
         this.syncGateMode(rpc, sessionId, mode),
+      promptRpcObserver: (rpc, sessionId, promptId) =>
+        this.promptRpcObserver(rpc, sessionId, promptId),
+      tracePrompt: (sessionId, promptId, name) =>
+        this.tracePrompt(name, sessionId, promptId),
+      abandonPromptDiagnostic: (sessionId, promptId) =>
+        this.clearPromptDiagnostic(sessionId, promptId),
       broadcast: (event) => this.broadcast(event),
       publishSessionActivity: (sessionId) =>
         this.broadcastSessionActivity(sessionId),
@@ -859,6 +873,7 @@ export class PiChatApp {
     this.pendingExtensionTimers.clear();
     this.claimingExtensionRequests.clear();
     this.promptAdmissionTails.clear();
+    this.activePromptDiagnostics.clear();
     if (runtimeStopFailure) throw runtimeStopFailure;
   }
 
@@ -887,6 +902,7 @@ export class PiChatApp {
     details?: Record<string, unknown>,
     rpcGeneration?: number,
     runGeneration?: number,
+    promptId?: string,
   ): void {
     if (!shouldRetainStateDiagnosticEvent(category, name, details)) return;
     try {
@@ -895,6 +911,7 @@ export class PiChatApp {
         category,
         name,
         sessionId,
+        promptId,
         runGeneration: runGeneration ?? (sessionId
           ? this.runGenerationsBySession.get(sessionId) || 0
           : undefined),
@@ -908,6 +925,128 @@ export class PiChatApp {
       });
     } catch {
       // Optional observation must never perturb Runtime, HTTP, SSE, or queue work.
+    }
+  }
+
+  private tracePrompt(
+    name: string,
+    sessionId: string,
+    promptId: string,
+    rpcGeneration?: number,
+    runGeneration?: number,
+    details?: Record<string, unknown>,
+  ): void {
+    this.traceState(
+      "prompt",
+      name,
+      sessionId,
+      details,
+      rpcGeneration,
+      runGeneration,
+      promptId,
+    );
+  }
+
+  private activePromptDiagnostic(
+    sessionId: string,
+    rpcGeneration: number,
+  ): ActivePromptDiagnostic | undefined {
+    const active = this.activePromptDiagnostics.get(sessionId);
+    if (!active) return undefined;
+    if (active.rpcGeneration && rpcGeneration && active.rpcGeneration !== rpcGeneration)
+      return undefined;
+    return active;
+  }
+
+  private traceActivePrompt(
+    name: string,
+    sessionId: string,
+    rpcGeneration: number,
+    runGeneration?: number,
+  ): string | undefined {
+    const active = this.activePromptDiagnostic(sessionId, rpcGeneration);
+    if (!active) return undefined;
+    this.tracePrompt(
+      name,
+      sessionId,
+      active.promptId,
+      rpcGeneration,
+      runGeneration,
+    );
+    return active.promptId;
+  }
+
+  private clearPromptDiagnostic(sessionId: string, promptId?: string): void {
+    const active = this.activePromptDiagnostics.get(sessionId);
+    if (!active || (promptId && active.promptId !== promptId)) return;
+    this.activePromptDiagnostics.delete(sessionId);
+  }
+
+  private observePromptRpc(
+    sessionId: string,
+    promptId: string,
+    observation: RpcRequestObservation,
+  ): void {
+    const name = observation.phase === "allocated"
+      ? "rpc-allocated"
+      : observation.phase === "written"
+        ? "rpc-written"
+        : observation.phase === "response"
+          ? "rpc-response"
+          : "rpc-failed";
+    this.tracePrompt(
+      name,
+      sessionId,
+      promptId,
+      observation.generation,
+      undefined,
+      {
+        durationMs: observation.durationMs,
+        failed: observation.outcome === "response-error"
+          || observation.outcome === "not-written"
+          || observation.outcome === "process-rejected",
+      },
+    );
+    if (
+      observation.outcome === "response-error"
+      || observation.outcome === "not-written"
+    ) this.clearPromptDiagnostic(sessionId, promptId);
+  }
+
+  private promptRpcObserver(
+    rpc: PiRpcClient,
+    sessionId: string,
+    promptId: string,
+  ): (observation: RpcRequestObservation) => void {
+    const rpcGeneration = rpc.currentGeneration?.() || 0;
+    this.activePromptDiagnostics.set(sessionId, { promptId, rpcGeneration });
+    return (observation) =>
+      this.observePromptRpc(sessionId, promptId, observation);
+  }
+
+  private async sendPromptRpc(
+    rpc: PiRpcClient,
+    sessionId: string,
+    promptId: string,
+    command: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    let observe: ((observation: RpcRequestObservation) => void) | undefined;
+    try {
+      observe = this.promptRpcObserver(rpc, sessionId, promptId);
+    } catch {
+      // Prompt delivery remains authoritative when observation allocation fails.
+    }
+    this.tracePrompt("dispatch", sessionId, promptId);
+    try {
+      return await rpc.send(
+        command,
+        PROMPT_PREPARE_TIMEOUT_MS,
+        observe ? { observe } : undefined,
+      );
+    } catch (error) {
+      if (!(error instanceof RpcRequestTimeoutError) || !error.outcomeUnknown)
+        this.clearPromptDiagnostic(sessionId, promptId);
+      throw error;
     }
   }
 
@@ -1871,6 +2010,22 @@ export class PiChatApp {
       runtime,
       event,
     );
+    if (type === "agent_start")
+      this.traceActivePrompt(
+        "agent-start",
+        runtime.id,
+        generation,
+        transition.state.runGeneration,
+      );
+    else if (type === "pi_chat_process_error") {
+      const promptId = this.traceActivePrompt(
+        "process-failed",
+        runtime.id,
+        generation,
+        transition.state.runGeneration,
+      );
+      if (promptId) this.clearPromptDiagnostic(runtime.id, promptId);
+    }
     if (consumedSteering || droppedNativeSteering > 0)
       transition.broadcastEvent = {
         ...transition.broadcastEvent,
@@ -1894,6 +2049,12 @@ export class PiChatApp {
       (effect) => effect.type === "settled",
     );
     if (settled) {
+      const promptId = this.traceActivePrompt(
+        "settled",
+        runtime.id,
+        generation,
+        transition.state.runGeneration,
+      );
       void this.finalizePersistedDraftWhenVisible(runtime);
       setTimeout(() => this.warmRuntimeMessageSnapshot(runtime), 0);
       if (this.hasNativeSteeringPending(runtime.id, generation))
@@ -1907,7 +2068,11 @@ export class PiChatApp {
       if (!runtime.dispatching) {
         runtime.dispatching = true;
         this.broadcastSessionActivity(runtime.id);
-        void this.drainSecondaryAfterSettlement(runtime, runtime.rpcGeneration);
+        void this.drainSecondaryAfterSettlement(
+          runtime,
+          runtime.rpcGeneration,
+          promptId,
+        );
       }
     } else if (
       type === "agent_start" ||
@@ -1939,6 +2104,7 @@ export class PiChatApp {
   private async drainSecondaryAfterSettlement(
     runtime: SecondaryRuntime,
     sourceGeneration = runtime.rpcGeneration,
+    promptId?: string,
   ): Promise<void> {
     try {
       const state = asState(
@@ -1956,6 +2122,15 @@ export class PiChatApp {
         sourceGeneration !== runtime.rpcGeneration
       )
         return;
+      if (promptId && this.activePromptDiagnostic(runtime.id, sourceGeneration)?.promptId === promptId) {
+        this.tracePrompt(
+          "settlement-barrier",
+          runtime.id,
+          promptId,
+          sourceGeneration,
+        );
+        this.clearPromptDiagnostic(runtime.id, promptId);
+      }
       runtime.lastState = state;
       runtime.running = state.isStreaming;
       if (
@@ -1987,6 +2162,10 @@ export class PiChatApp {
         sourceGeneration !== runtime.rpcGeneration
       )
         return;
+      if (promptId && this.activePromptDiagnostic(runtime.id, sourceGeneration)?.promptId === promptId) {
+        this.tracePrompt("process-failed", runtime.id, promptId, sourceGeneration);
+        this.clearPromptDiagnostic(runtime.id, promptId);
+      }
       runtime.dispatching = false;
       runtime.failed = true;
       runtime.queuePaused = runtime.promptQueue.length > 0;
@@ -2020,6 +2199,7 @@ export class PiChatApp {
   private async drainPrimaryAfterSettlement(
     sessionId: string,
     sourceGeneration = this.primaryRpcGeneration,
+    promptId?: string,
   ): Promise<void> {
     try {
       const state = asState(
@@ -2036,6 +2216,15 @@ export class PiChatApp {
         sourceGeneration !== this.primaryRpcGeneration
       )
         return;
+      if (promptId && this.activePromptDiagnostic(sessionId, sourceGeneration)?.promptId === promptId) {
+        this.tracePrompt(
+          "settlement-barrier",
+          sessionId,
+          promptId,
+          sourceGeneration,
+        );
+        this.clearPromptDiagnostic(sessionId, promptId);
+      }
       this.lastPrimaryState = state;
       this.running = state.isStreaming;
       if (
@@ -2063,6 +2252,10 @@ export class PiChatApp {
         sourceGeneration !== this.primaryRpcGeneration
       )
         return;
+      if (promptId && this.activePromptDiagnostic(sessionId, sourceGeneration)?.promptId === promptId) {
+        this.tracePrompt("process-failed", sessionId, promptId, sourceGeneration);
+        this.clearPromptDiagnostic(sessionId, promptId);
+      }
       this.dispatching = false;
       this.primaryFailed = true;
       this.queuePaused = this.promptQueue.length > 0;
@@ -2122,6 +2315,7 @@ export class PiChatApp {
     // process. Drop the stale bookkeeping so the recovered worker's settlement
     // cannot mistake it for a live leftover and reset itself again.
     this.clearNativeSteeringState(runtime.id, "recovery");
+    this.clearPromptDiagnostic(runtime.id);
     try {
       await this.runtimePool.recover(runtime);
     } catch (error) {
@@ -2342,6 +2536,22 @@ export class PiChatApp {
       undefined,
       event,
     );
+    if (type === "agent_start")
+      this.traceActivePrompt(
+        "agent-start",
+        sessionId,
+        generation,
+        transition.state.runGeneration,
+      );
+    else if (type === "pi_chat_process_error") {
+      const promptId = this.traceActivePrompt(
+        "process-failed",
+        sessionId,
+        generation,
+        transition.state.runGeneration,
+      );
+      if (promptId) this.clearPromptDiagnostic(sessionId, promptId);
+    }
     if (consumedSteering || droppedNativeSteering > 0)
       transition.broadcastEvent = {
         ...transition.broadcastEvent,
@@ -2365,13 +2575,23 @@ export class PiChatApp {
       (effect) => effect.type === "settled",
     );
     if (settled) {
+      const promptId = this.traceActivePrompt(
+        "settled",
+        sessionId,
+        generation,
+        transition.state.runGeneration,
+      );
       setTimeout(() => this.warmPrimaryMessageSnapshot(), 0);
       if (this.hasNativeSteeringPending(sessionId, generation))
         this.nativeSteeringResetAfterSettlement.set(sessionId, generation);
       if (!this.dispatching) {
         this.dispatching = true;
         this.broadcastSessionActivity(sessionId);
-        void this.drainPrimaryAfterSettlement(sessionId, sourceGeneration);
+        void this.drainPrimaryAfterSettlement(
+          sessionId,
+          sourceGeneration,
+          promptId,
+        );
       }
     } else if (
       type === "agent_start" ||
@@ -2525,6 +2745,7 @@ export class PiChatApp {
         // stopping/restarting it a second time.
         if (this.primaryNeedsRecovery(readiness)) {
           this.clearNativeSteeringState(this.activeSessionId, "recovery");
+          this.clearPromptDiagnostic(this.activeSessionId);
           // The controller's adopter completes App binding before recover()
           // resolves. Never issue a second get_state here: that recreated the
           // split authority where SSE said ready while App was still adopting.
@@ -2755,12 +2976,14 @@ export class PiChatApp {
     images: PromptImage[],
     promptAt = this.now(),
     gateMode?: GateMode,
+    promptId: string = randomUUID(),
   ): Promise<PromptAcceptance> {
     return this.scheduler.sendPrimaryPrompt(
       message,
       images,
       promptAt,
       gateMode,
+      promptId,
     );
   }
 
@@ -4799,6 +5022,12 @@ export class PiChatApp {
             return json(response, 400, {
               error: "Extension 指令不能同时附加图片",
             });
+          // Extension commands are not one ordinary Agent run. If a caller
+          // bypasses the normal browser busy guard, abandon ambiguous
+          // observation rather than attributing its events to an older prompt.
+          this.clearPromptDiagnostic(
+            secondaryRuntime?.id || this.activeSessionId,
+          );
           await targetRpc.send(
             { type: "prompt", message },
             PROMPT_PREPARE_TIMEOUT_MS,
@@ -4852,6 +5081,8 @@ export class PiChatApp {
               promptAt,
               requestedGateMode,
             );
+            this.tracePrompt("admitted", secondaryRuntime.id, queued.id);
+            this.tracePrompt("queued", secondaryRuntime.id, queued.id);
             this.noteUserPrompt(secondaryRuntime.id, promptAt);
             return json(response, 202, {
               accepted: true,
@@ -4860,6 +5091,7 @@ export class PiChatApp {
               queue: this.publicQueue(secondaryRuntime.promptQueue),
             });
           }
+          const promptId = randomUUID();
           const generation = secondaryRuntime.abortGeneration;
           try {
             await this.applyPendingTurnSettings(
@@ -4877,21 +5109,25 @@ export class PiChatApp {
               requestedGateMode,
             );
             secondaryRuntime.running = true;
+            this.tracePrompt("admitted", secondaryRuntime.id, promptId);
             this.broadcastSessionActivity(secondaryRuntime.id);
             try {
-              await secondaryRuntime.rpc.send(
+              await this.sendPromptRpc(
+                secondaryRuntime.rpc,
+                secondaryRuntime.id,
+                promptId,
                 {
                   type: "prompt",
                   message: message || "请查看这些图片。",
                   ...(images.length ? { images } : {}),
                 },
-                PROMPT_PREPARE_TIMEOUT_MS,
               );
             } catch (error) {
               // The command may already be buffered in Pi stdin. Preserve the
               // running state and let its lifecycle event decide; treating this
               // as a definite failure can race/duplicate a following prompt.
               if (!(error instanceof RpcRequestTimeoutError) || !error.outcomeUnknown) throw error;
+              this.tracePrompt("delivery-uncertain", secondaryRuntime.id, promptId);
               this.scheduler.notifySecondaryPromptAccepted(
                 secondaryRuntime,
                 promptAt,
@@ -4927,6 +5163,8 @@ export class PiChatApp {
             promptAt,
             requestedGateMode,
           );
+          this.tracePrompt("admitted", this.activeSessionId, queued.id);
+          this.tracePrompt("queued", this.activeSessionId, queued.id);
           this.noteUserPrompt(this.activeSessionId, promptAt);
           json(response, 202, {
             accepted: true,
@@ -4936,12 +5174,17 @@ export class PiChatApp {
           });
           return;
         }
+        const promptId = randomUUID();
+        this.tracePrompt("admitted", this.activeSessionId, promptId);
         const acceptance = await this.sendPrompt(
           message,
           images,
           promptAt,
           requestedGateMode,
+          promptId,
         );
+        if (acceptance === "unknown")
+          this.tracePrompt("delivery-uncertain", this.activeSessionId, promptId);
         json(response, 202, {
           accepted: true,
           queued: false,
@@ -4972,6 +5215,7 @@ export class PiChatApp {
       const index = queue.findIndex((item) => item.id === queueCancelMatch[1]);
       if (index < 0)
         return json(response, 404, { error: "队列消息不存在或已经开始执行" });
+      this.tracePrompt("cancelled", sessionId, queueCancelMatch[1]);
       queue.splice(index, 1);
       if (runtime) {
         if (!queue.length) runtime.queuePaused = false;
@@ -5557,18 +5801,22 @@ export class PiChatApp {
               error: "Extension 指令不能同时附加图片",
             });
           await this.syncGateMode(runtime.rpc, runtime.id, initialGateMode);
+          const promptId = extensionCommand ? "" : randomUUID();
           runtime.running = true;
+          if (promptId) {
+            this.tracePrompt("admitted", runtime.id, promptId);
+          }
           this.broadcastSessionActivity(runtime.id);
           let deliveryUncertain = false;
           try {
-            await runtime.rpc.send(
-              {
-                type: "prompt",
-                message: initialMessage || "请查看这些图片。",
-                ...(initialImages.length ? { images: initialImages } : {}),
-              },
-              PROMPT_PREPARE_TIMEOUT_MS,
-            );
+            const command = {
+              type: "prompt",
+              message: initialMessage || "请查看这些图片。",
+              ...(initialImages.length ? { images: initialImages } : {}),
+            };
+            if (promptId)
+              await this.sendPromptRpc(runtime.rpc, runtime.id, promptId, command);
+            else await runtime.rpc.send(command, PROMPT_PREPARE_TIMEOUT_MS);
             if (extensionCommand) {
               // Extension commands can complete synchronously without an
               // agent_start event. Refresh only their minimal state so the
@@ -5591,6 +5839,8 @@ export class PiChatApp {
               // discard its newly-created Runtime or let a later prompt race a
               // turn Pi may have accepted after the HTTP acknowledgement timer.
               deliveryUncertain = true;
+              if (promptId)
+                this.tracePrompt("delivery-uncertain", runtime.id, promptId);
               this.scheduler.notifySecondaryPromptAccepted(runtime, promptAt);
             } else {
               runtime.running = false;

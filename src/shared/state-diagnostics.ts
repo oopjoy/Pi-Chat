@@ -8,6 +8,8 @@ export interface StateDiagnosticEntry {
   category: string;
   name: string;
   sessionId?: string;
+  /** Process-local prompt correlation. Export replaces server UUIDs with p1, p2, ... aliases. */
+  promptId?: string;
   runGeneration?: number;
   rpcGeneration?: number;
   details: Record<string, StateDiagnosticValue>;
@@ -22,7 +24,7 @@ export interface StateDiagnosticStatus {
 }
 
 export interface ServerStateDiagnosticSnapshot {
-  schemaVersion: 2;
+  schemaVersion: 3;
   generatedAt: string;
   runEpoch: string;
   buildFingerprint: string;
@@ -31,7 +33,7 @@ export interface ServerStateDiagnosticSnapshot {
 }
 
 export interface BrowserStateDiagnosticSnapshot {
-  schemaVersion: 2;
+  schemaVersion: 3;
   generatedAt: string;
   pageStartedAt: string;
   status: StateDiagnosticStatus;
@@ -39,7 +41,7 @@ export interface BrowserStateDiagnosticSnapshot {
 }
 
 export interface StateDiagnosticExportBundle {
-  schemaVersion: 2;
+  schemaVersion: 3;
   generatedAt: string;
   warning: string;
   server: ServerStateDiagnosticSnapshot;
@@ -270,6 +272,20 @@ const ENUM_DETAIL_VALUES: Record<string, ReadonlySet<string>> = {
 
 const STATE_DIAGNOSTIC_EVENT_PAIRS = new Set([
   "diagnostic:export-requested",
+  "prompt:admitted",
+  "prompt:agent-start",
+  "prompt:cancelled",
+  "prompt:delivery-uncertain",
+  "prompt:dispatch",
+  "prompt:process-failed",
+  "prompt:queued",
+  "prompt:requeued",
+  "prompt:rpc-allocated",
+  "prompt:rpc-failed",
+  "prompt:rpc-response",
+  "prompt:rpc-written",
+  "prompt:settled",
+  "prompt:settlement-barrier",
   "http:request-end",
   "http:request-error",
   "http:request-start",

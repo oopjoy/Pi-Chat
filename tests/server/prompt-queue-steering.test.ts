@@ -53,9 +53,12 @@ test("Primary and Secondary settlement dispatch every queued follow-up", async (
     await fetch(`${origin}/api/bootstrap`);
     await fetch(`${origin}/api/sessions/${idB}/view`);
     for (const [id, rpc, prefix] of [[idA, primary, "primary"], [idB, secondary, "secondary"]] as const) {
-      await prompt(id, `${prefix}-A`);
-      await prompt(id, `${prefix}-B`);
-      await prompt(id, `${prefix}-C`);
+      const first = await prompt(id, `${prefix}-A`);
+      assert.equal(first.status, 202);
+      const second = await prompt(id, `${prefix}-B`);
+      const secondId = (await second.json() as { id: string }).id;
+      const third = await prompt(id, `${prefix}-C`);
+      const thirdId = (await third.json() as { id: string }).id;
       await settle(rpc);
       assert.ok(
         rpc.requestTimeouts.some(
@@ -69,6 +72,42 @@ test("Primary and Secondary settlement dispatch every queued follow-up", async (
       assert.deepEqual(rpc.commands.filter((command) => command.type === "prompt").map((command) => command.message), [`${prefix}-A`, `${prefix}-B`]);
       await settle(rpc);
       assert.deepEqual(rpc.commands.filter((command) => command.type === "prompt").map((command) => command.message), [`${prefix}-A`, `${prefix}-B`, `${prefix}-C`]);
+      await settle(rpc);
+
+      const diagnosticEntries = (app as unknown as {
+        stateDiagnostics: { snapshot(): { entries: Array<{ category: string; name: string; sessionId?: string; promptId?: string }> } };
+        activePromptDiagnostics: Map<string, unknown>;
+      }).stateDiagnostics.snapshot().entries.filter((entry) =>
+        entry.category === "prompt" && entry.sessionId === id
+      );
+      const admittedIds = diagnosticEntries
+        .filter((entry) => entry.name === "admitted")
+        .map((entry) => entry.promptId);
+      assert.equal(admittedIds.length, 3);
+      assert.equal(new Set(admittedIds).size, 3);
+      for (const queuedId of [secondId, thirdId]) {
+        assert.ok(admittedIds.includes(queuedId));
+        const names = diagnosticEntries
+          .filter((entry) => entry.promptId === queuedId)
+          .map((entry) => entry.name);
+        for (const expected of [
+          "admitted",
+          "queued",
+          "dispatch",
+          "rpc-allocated",
+          "rpc-written",
+          "agent-start",
+          "rpc-response",
+          "settled",
+          "settlement-barrier",
+        ]) assert.ok(names.includes(expected), `${prefix} ${queuedId} missing ${expected}`);
+      }
+      assert.equal(
+        (app as unknown as { activePromptDiagnostics: Map<string, unknown> })
+          .activePromptDiagnostics.has(id),
+        false,
+      );
+      assert.equal(JSON.stringify(diagnosticEntries).includes(`${prefix}-A`), false);
     }
   } finally {
     server.close();
@@ -1008,6 +1047,19 @@ test("a timed-out Primary prompt returns deliveryUncertain and queues the next m
       queued: false,
       deliveryUncertain: true,
     });
+    const diagnosticInternals = app as unknown as {
+      activePromptDiagnostics: Map<string, { promptId: string; rpcGeneration: number }>;
+      stateDiagnostics: { snapshot(): { entries: Array<{ category: string; name: string; promptId?: string }> } };
+    };
+    const uncertainPromptId = diagnosticInternals.activePromptDiagnostics.get(id)?.promptId;
+    assert.match(uncertainPromptId || "", /^[a-f0-9-]{36}$/);
+    assert.ok(
+      diagnosticInternals.stateDiagnostics.snapshot().entries.some((entry) =>
+        entry.category === "prompt"
+        && entry.name === "delivery-uncertain"
+        && entry.promptId === uncertainPromptId
+      ),
+    );
     const queued = await prompt("must wait behind uncertain turn");
     assert.equal(queued.status, 202);
     const body = await queued.json() as {

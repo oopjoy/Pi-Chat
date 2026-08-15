@@ -3,6 +3,7 @@ import test from "node:test";
 import { StateDiagnosticsRecorder, sanitizeDiagnosticDetails } from "../src/server/state-diagnostics";
 
 const SESSION_ID = "0123456789abcdefabcd";
+const PROMPT_ID = "11111111-1111-4111-8111-111111111111";
 
 test("state diagnostics is always-on, bounded, ordered, and age-limited", () => {
   let now = Date.parse("2026-08-14T12:00:00.000Z");
@@ -20,12 +21,13 @@ test("state diagnostics is always-on, bounded, ordered, and age-limited", () => 
       category: "projection",
       name: "ui-state",
       sessionId: SESSION_ID,
+      promptId: index === 179 ? PROMPT_ID : undefined,
       runGeneration: index,
       details: { durationMs: index, running: index % 2 === 0 },
     });
   }
   const bounded = recorder.snapshot();
-  assert.equal(bounded.schemaVersion, 2);
+  assert.equal(bounded.schemaVersion, 3);
   assert.ok(bounded.entries.length <= 100);
   assert.ok(bounded.status.approximateBytes <= bounded.status.maximumBytes);
   assert.ok(
@@ -33,6 +35,7 @@ test("state diagnostics is always-on, bounded, ordered, and age-limited", () => 
       index === 0 || entry.sequence > entries[index - 1].sequence,
     ),
   );
+  assert.equal(bounded.entries.at(-1)?.promptId, PROMPT_ID);
 
   now += 11_000;
   recorder.record({ category: "sse", name: "connected" });
@@ -93,6 +96,35 @@ test("state diagnostics keeps only closed-schema values and rejects adversarial 
     "base64",
     "private stack",
   ]) assert.equal(raw.includes(forbidden), false, forbidden);
+});
+
+test("state diagnostics accepts only strict prompt UUID correlation", () => {
+  const recorder = new StateDiagnosticsRecorder({
+    runEpoch: "run",
+    buildFingerprint: "a".repeat(64),
+  });
+  recorder.record({
+    category: "prompt",
+    name: "admitted",
+    sessionId: SESSION_ID,
+    promptId: PROMPT_ID.toUpperCase(),
+  });
+  recorder.record({
+    category: "prompt",
+    name: "queued",
+    sessionId: SESSION_ID,
+    promptId: "private-prompt-content",
+  });
+  recorder.record({
+    category: "prompt",
+    name: "requeued",
+    sessionId: SESSION_ID,
+    promptId: PROMPT_ID,
+  });
+  assert.deepEqual(
+    recorder.snapshot().entries.map((entry) => entry.promptId),
+    [PROMPT_ID, undefined, PROMPT_ID],
+  );
 });
 
 test("state diagnostics applies an approximate byte ceiling independently of count", () => {

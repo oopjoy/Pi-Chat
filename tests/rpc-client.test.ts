@@ -10,6 +10,7 @@ import {
   RpcProcessExitUnconfirmedError,
   RpcRequestTimeoutError,
   resolvePiEntry,
+  type RpcRequestObservation,
   rpcData,
 } from "../src/server/rpc-client";
 
@@ -64,6 +65,86 @@ function fakeChild() {
   return { child, writes };
 }
 
+test("RPC request observer reports allocation, buffering, and matching response without changing payload", async () => {
+  const { child, writes } = fakeChild();
+  const client = new PiRpcClient({ cwd: process.cwd() });
+  const observations: RpcRequestObservation[] = [];
+  const internals = client as unknown as {
+    child: typeof child | null;
+    handleLine(line: string): void;
+  };
+  internals.child = child;
+  const pending = client.send(
+    { type: "prompt", message: "private prompt" },
+    1_000,
+    { observe: (observation) => observations.push(observation) },
+  );
+  const written = JSON.parse(writes[0]) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(written).sort(), ["id", "message", "type"]);
+  assert.equal("promptId" in written, false);
+  internals.handleLine(JSON.stringify({
+    type: "response",
+    id: written.id,
+    success: true,
+  }));
+  assert.equal((await pending).success, true);
+  assert.deepEqual(
+    observations.map(({ phase, outcome }) => ({ phase, outcome })),
+    [
+      { phase: "allocated", outcome: "allocated" },
+      { phase: "written", outcome: "written" },
+      { phase: "response", outcome: "response-success" },
+    ],
+  );
+  assert.ok(observations.every((item) => item.requestId === written.id));
+});
+
+test("RPC request observer is fail-open when it throws", async () => {
+  const { child, writes } = fakeChild();
+  const client = new PiRpcClient({ cwd: process.cwd() });
+  const internals = client as unknown as {
+    child: typeof child | null;
+    handleLine(line: string): void;
+  };
+  internals.child = child;
+  const pending = client.send(
+    { type: "prompt", message: "still works" },
+    1_000,
+    { observe: () => { throw new Error("observer failed"); } },
+  );
+  const written = JSON.parse(writes[0]) as Record<string, unknown>;
+  assert.doesNotThrow(() => internals.handleLine(JSON.stringify({
+    type: "response",
+    id: written.id,
+    success: true,
+  })));
+  assert.equal((await pending).success, true);
+});
+
+test("RPC request observer preserves written-outcome-unknown timeout semantics", async () => {
+  const { child } = fakeChild();
+  const client = new PiRpcClient({ cwd: process.cwd() });
+  const observations: RpcRequestObservation[] = [];
+  Object.assign(client, { child });
+  await assert.rejects(
+    client.send(
+      { type: "prompt", message: "possibly accepted" },
+      5,
+      { observe: (observation) => observations.push(observation) },
+    ),
+    (error) => error instanceof RpcRequestTimeoutError && error.outcomeUnknown,
+  );
+  assert.deepEqual(
+    observations.map(({ phase, outcome }) => ({ phase, outcome })),
+    [
+      { phase: "allocated", outcome: "allocated" },
+      { phase: "written", outcome: "written" },
+      { phase: "failed", outcome: "written-outcome-unknown" },
+    ],
+  );
+  await client.stop();
+});
+
 test("RPC request timeouts retain their command identity", async () => {
   const { child } = fakeChild();
   const client = new PiRpcClient({ cwd: process.cwd() });
@@ -79,10 +160,16 @@ test("RPC request timeouts retain their command identity", async () => {
 test("deliberate stop rejects pending requests immediately instead of leaking timers", async () => {
   const { child } = fakeChild();
   const client = new PiRpcClient({ cwd: process.cwd() });
+  const observations: RpcRequestObservation[] = [];
   Object.assign(client, { child });
-  const pending = client.send({ type: "never_answers" }, 60_000);
+  const pending = client.send(
+    { type: "never_answers" },
+    60_000,
+    { observe: (observation) => observations.push(observation) },
+  );
   await client.stop();
   await assert.rejects(pending, /Pi RPC 已停止/);
+  assert.equal(observations.at(-1)?.outcome, "process-rejected");
 });
 
 test("an unexpected child exit reports a written mutation as outcome unknown", async () => {
@@ -157,13 +244,28 @@ test("RPC reports a written mutation timeout as outcome unknown", async () => {
 test("a synchronous stdin rejection remains definitely not written", async () => {
   const { child } = fakeChild();
   const rejection = new Error("stdin rejected");
+  const observations: RpcRequestObservation[] = [];
   child.stdin.write = (_value, callback) => {
     callback?.(rejection);
     return false;
   };
   const client = new PiRpcClient({ cwd: process.cwd() });
   Object.assign(client, { child });
-  await assert.rejects(client.send({ type: "abort" }, 1_000), rejection);
+  await assert.rejects(
+    client.send(
+      { type: "abort" },
+      1_000,
+      { observe: (observation) => observations.push(observation) },
+    ),
+    rejection,
+  );
+  assert.deepEqual(
+    observations.map(({ phase, outcome }) => ({ phase, outcome })),
+    [
+      { phase: "allocated", outcome: "allocated" },
+      { phase: "failed", outcome: "not-written" },
+    ],
+  );
 });
 
 test("an asynchronous stdin failure after write returns is outcome unknown", async () => {

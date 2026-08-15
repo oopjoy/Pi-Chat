@@ -62,7 +62,7 @@ test("reconnect token acceptance prevents an older response from restoring its t
       return response({ present: true });
     }
     if (path === "/api/diagnostics/snapshot")
-      return response({ schemaVersion: 2, entries: [] });
+      return response({ schemaVersion: 3, entries: [] });
     throw new Error(`unexpected request: ${path}`);
   };
   try {

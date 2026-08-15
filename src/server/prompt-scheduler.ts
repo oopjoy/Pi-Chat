@@ -1,7 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { GateMode, PromptImage, QueuedPrompt } from "../shared/types.js";
 import type { PendingTurnSettings, RuntimeQueuedPrompt, SecondaryRuntime } from "./runtime-pool.js";
-import { RpcRequestTimeoutError, type PiRpcClient } from "./rpc-client.js";
+import {
+  RpcRequestTimeoutError,
+  type PiRpcClient,
+  type RpcRequestObserver,
+} from "./rpc-client.js";
 import { incidentReference } from "./incident-diagnostics.js";
 
 /** Prompt RPC resolves only after Pi preflight (may auto-compact). */
@@ -29,6 +33,14 @@ export interface PromptSchedulerHost {
   touchRuntime(runtime: SecondaryRuntime): void;
   applyPendingTurnSettings(rpc: PiRpcClient, pending: PendingTurnSettings): Promise<void>;
   syncGateMode(rpc: PiRpcClient, sessionId: string, mode?: GateMode): Promise<void>;
+  /** Optional observation seam; it may observe but never proxy prompt delivery. */
+  promptRpcObserver?(
+    rpc: PiRpcClient,
+    sessionId: string,
+    promptId: string,
+  ): RpcRequestObserver | undefined;
+  tracePrompt?(sessionId: string, promptId: string, name: string): void;
+  abandonPromptDiagnostic?(sessionId: string, promptId: string): void;
   broadcast(event: Record<string, unknown>): void;
   /** Publish the server-derived activity snapshot after a queue-state mutation. */
   publishSessionActivity?(sessionId: string): void;
@@ -53,6 +65,34 @@ export class PromptScheduler {
   primaryAbortGeneration = 0;
 
   constructor(private readonly host: PromptSchedulerHost) {}
+
+  private promptRpcObserver(
+    rpc: PiRpcClient,
+    sessionId: string,
+    promptId: string,
+  ): RpcRequestObserver | undefined {
+    try {
+      return this.host.promptRpcObserver?.(rpc, sessionId, promptId);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private tracePrompt(sessionId: string, promptId: string, name: string): void {
+    try {
+      this.host.tracePrompt?.(sessionId, promptId, name);
+    } catch {
+      // Diagnostics cannot perturb queue ordering or prompt delivery.
+    }
+  }
+
+  private abandonPromptDiagnostic(sessionId: string, promptId: string): void {
+    try {
+      this.host.abandonPromptDiagnostic?.(sessionId, promptId);
+    } catch {
+      // Observation cleanup is fail-open too.
+    }
+  }
 
   publicQueue(queue: Array<InternalQueuedPrompt | RuntimeQueuedPrompt> = this.primaryQueue): QueuedPrompt[] {
     return queue.map(({ id, message, imageCount, createdAt }) => ({ id, message, imageCount, createdAt }));
@@ -90,7 +130,12 @@ export class PromptScheduler {
     return null;
   }
 
-  enqueuePrimary(message: string, images: PromptImage[], createdAt = Date.now(), gateMode?: GateMode): InternalQueuedPrompt {
+  enqueuePrimary(
+    message: string,
+    images: PromptImage[],
+    createdAt = Date.now(),
+    gateMode?: GateMode,
+  ): InternalQueuedPrompt {
     const queued: InternalQueuedPrompt = {
       id: randomUUID(),
       message,
@@ -104,7 +149,13 @@ export class PromptScheduler {
     return queued;
   }
 
-  enqueueRuntime(runtime: SecondaryRuntime, message: string, images: PromptImage[], createdAt = Date.now(), gateMode?: GateMode): RuntimeQueuedPrompt {
+  enqueueRuntime(
+    runtime: SecondaryRuntime,
+    message: string,
+    images: PromptImage[],
+    createdAt = Date.now(),
+    gateMode?: GateMode,
+  ): RuntimeQueuedPrompt {
     const queued: RuntimeQueuedPrompt = {
       id: randomUUID(),
       message,
@@ -133,20 +184,31 @@ export class PromptScheduler {
     return Boolean(runtime.liveMessage) || Boolean(runtime.toolStatus) || runtime.running || runtime.dispatching || runtime.promptQueue.length > 0 || runtime.queuePaused;
   }
 
-  async sendPrimaryPrompt(message: string, images: PromptImage[], promptAt = Date.now(), gateMode?: GateMode): Promise<PromptAcceptance> {
+  async sendPrimaryPrompt(
+    message: string,
+    images: PromptImage[],
+    promptAt = Date.now(),
+    gateMode?: GateMode,
+    promptId: string = randomUUID(),
+  ): Promise<PromptAcceptance> {
     const releaseOperation = this.host.acquirePrimaryOperation();
     try {
       await this.host.ensurePrimaryRuntime();
       const generation = this.primaryAbortGeneration;
       await this.host.applyPendingTurnSettings(this.host.primaryRpc(), this.primaryPendingTurnSettings);
       if (generation !== this.primaryAbortGeneration || this.host.isClosed() || !this.host.isLifecycleIdle()) throw new Error("消息发送已取消");
-      await this.host.syncGateMode(this.host.primaryRpc(), this.host.activeSessionId(), gateMode);
+      const rpc = this.host.primaryRpc();
+      const sessionId = this.host.activeSessionId();
+      await this.host.syncGateMode(rpc, sessionId, gateMode);
       this.primaryRunning = true;
-      this.host.publishSessionActivity?.(this.host.activeSessionId());
+      this.host.publishSessionActivity?.(sessionId);
+      const observe = this.promptRpcObserver(rpc, sessionId, promptId);
+      this.tracePrompt(sessionId, promptId, "dispatch");
       try {
-        await this.host.primaryRpc().send(
+        await rpc.send(
           { type: "prompt", message: message || "请查看这些图片。", ...(images.length ? { images } : {}) },
           PROMPT_PREPARE_TIMEOUT_MS,
+          observe ? { observe } : undefined,
         );
         this.host.onPrimaryPromptAccepted(this.host.activeSessionId(), promptAt);
         return "confirmed";
@@ -163,7 +225,8 @@ export class PromptScheduler {
           return "unknown";
         }
         this.primaryRunning = false;
-        this.host.publishSessionActivity?.(this.host.activeSessionId());
+        this.abandonPromptDiagnostic(sessionId, promptId);
+        this.host.publishSessionActivity?.(sessionId);
         throw error;
       }
     } finally { releaseOperation(); }
@@ -204,6 +267,7 @@ export class PromptScheduler {
         next.images,
         next.createdAt,
         next.gateMode,
+        next.id,
       );
       if (acceptance === "unknown") {
         // Normal prompt acceptance is released by Pi's ordered agent_start
@@ -211,6 +275,7 @@ export class PromptScheduler {
         // only this indeterminate preparation lease; a later agent_settled
         // will then schedule the required FIFO state barrier.
         this.primaryDispatching = false;
+        this.tracePrompt(this.host.activeSessionId(), next.id, "delivery-uncertain");
         this.host.broadcast({
           type: "pi_chat_prompt_delivery_uncertain",
           id: next.id,
@@ -222,6 +287,8 @@ export class PromptScheduler {
       this.primaryDispatching = false;
       this.primaryQueuePaused = true;
       this.primaryQueue.unshift(next);
+      this.tracePrompt(this.host.activeSessionId(), next.id, "requeued");
+      this.abandonPromptDiagnostic(this.host.activeSessionId(), next.id);
       this.broadcastPrimaryQueue();
       const incidentId = incidentReference(error)?.incidentId;
       this.host.broadcast({
@@ -300,9 +367,12 @@ export class PromptScheduler {
       await this.host.syncGateMode(runtime.rpc, runtime.id, next.gateMode);
       runtime.running = true;
       this.host.publishSessionActivity?.(runtime.id);
+      const observe = this.promptRpcObserver(runtime.rpc, runtime.id, next.id);
+      this.tracePrompt(runtime.id, next.id, "dispatch");
       await runtime.rpc.send(
         { type: "prompt", message: next.message || "请查看这些图片。", ...(next.images.length ? { images: next.images } : {}) },
         PROMPT_PREPARE_TIMEOUT_MS,
+        observe ? { observe } : undefined,
       );
       this.host.onSecondaryPromptAccepted(runtime, next.createdAt);
     } catch (error) {
@@ -312,6 +382,7 @@ export class PromptScheduler {
       // failure gives a definitive verdict.
       if (error instanceof RpcRequestTimeoutError && error.outcomeUnknown) {
         runtime.dispatching = false;
+        this.tracePrompt(runtime.id, next.id, "delivery-uncertain");
         this.host.onSecondaryPromptAccepted(runtime, next.createdAt);
         this.host.broadcast({
           type: "pi_chat_prompt_delivery_uncertain",
@@ -325,6 +396,8 @@ export class PromptScheduler {
       runtime.dispatching = false;
       runtime.queuePaused = true;
       runtime.promptQueue.unshift(next);
+      this.tracePrompt(runtime.id, next.id, "requeued");
+      this.abandonPromptDiagnostic(runtime.id, next.id);
       this.broadcastRuntimeQueue(runtime);
       const incidentId = incidentReference(error)?.incidentId;
       this.host.broadcast({

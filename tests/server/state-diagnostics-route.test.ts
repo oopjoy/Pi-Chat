@@ -14,6 +14,7 @@ async function fixture() {
   const path = "C:\\sessions\\diagnostic-state.jsonl";
   const id = idForPath(path);
   const rpc = new FakeRpc(path, "diagnostic-state");
+  rpc.generation = 7;
   const summary = {
     id,
     sessionId: "diagnostic-state",
@@ -107,7 +108,7 @@ test("always-on diagnostic snapshot captures redacted API, RPC, SSE, and project
     const result = await snapshot(target.origin, ownerA);
     assert.equal(result.response.status, 200);
     const value = result.value!;
-    assert.equal(value.schemaVersion, 2);
+    assert.equal(value.schemaVersion, 3);
     assert.equal(value.runEpoch, "diagnostic-run");
     assert.equal(value.buildFingerprint, "a".repeat(64));
     assert.ok(value.entries.some((entry) =>
@@ -149,6 +150,125 @@ test("always-on diagnostic snapshot captures redacted API, RPC, SSE, and project
   } finally {
     await target.close();
   }
+});
+
+test("ordinary Primary prompt diagnostics correlate synchronous start through settlement barrier", async () => {
+  const target = await fixture();
+  try {
+    await register(target.origin, ownerA);
+    assert.equal((await fetch(`${target.origin}/api/bootstrap`, { headers: ownerA })).status, 200);
+    const response = await fetch(`${target.origin}/api/chat/prompt`, {
+      method: "POST",
+      headers: { ...ownerA, "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: target.id, message: "private prompt text" }),
+    });
+    assert.equal(response.status, 202);
+    target.rpc.streaming = false;
+    target.rpc.emit({ type: "agent_settled" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const value = (await snapshot(target.origin, ownerA)).value!;
+    const promptEntries = value.entries.filter((entry) => entry.category === "prompt");
+    const promptIds = [...new Set(promptEntries.map((entry) => entry.promptId).filter(Boolean))];
+    assert.equal(promptIds.length, 1);
+    assert.match(promptIds[0] || "", /^[a-f0-9-]{36}$/);
+    assert.ok(
+      promptEntries.every((entry) => entry.rpcGeneration === 7),
+      "production-style prompt correlation must retain the source-tagged child generation",
+    );
+    assert.deepEqual(
+      promptEntries.map((entry) => entry.name),
+      [
+        "admitted",
+        "dispatch",
+        "rpc-allocated",
+        "rpc-written",
+        "agent-start",
+        "rpc-response",
+        "settled",
+        "settlement-barrier",
+      ],
+    );
+    assert.equal(JSON.stringify(value).includes("private prompt text"), false);
+    assert.equal(
+      (target.app as unknown as { activePromptDiagnostics: Map<string, unknown> })
+        .activePromptDiagnostics.size,
+      0,
+    );
+  } finally {
+    await target.close();
+  }
+});
+
+test("current process failure settles and clears active prompt diagnostics", async () => {
+  const target = await fixture();
+  try {
+    await register(target.origin, ownerA);
+    await fetch(`${target.origin}/api/bootstrap`, { headers: ownerA });
+    const response = await fetch(`${target.origin}/api/chat/prompt`, {
+      method: "POST",
+      headers: { ...ownerA, "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: target.id, message: "private crash prompt" }),
+    });
+    assert.equal(response.status, 202);
+    target.rpc.crash();
+    const entries = (await snapshot(target.origin, ownerA)).value!.entries.filter((entry) =>
+      entry.category === "prompt"
+    );
+    assert.ok(entries.some((entry) => entry.name === "process-failed"));
+    assert.equal(JSON.stringify(entries).includes("private crash prompt"), false);
+    assert.equal(
+      (target.app as unknown as { activePromptDiagnostics: Map<string, unknown> })
+        .activePromptDiagnostics.size,
+      0,
+    );
+  } finally {
+    await target.close();
+  }
+});
+
+test("stale RPC generations cannot bind a current prompt diagnostic", async () => {
+  const target = await fixture();
+  const promptId = "33333333-3333-4333-8333-333333333333";
+  const internals = target.app as unknown as {
+    primaryBoundSessionId: string;
+    primaryRpcGeneration: number;
+    activePromptDiagnostics: Map<string, { promptId: string; rpcGeneration: number }>;
+    handleRpcEvent(event: Record<string, unknown>, source: { generation: number }): void;
+    stateDiagnostics: { snapshot(): ServerStateDiagnosticSnapshot };
+  };
+  try {
+    await fetch(`${target.origin}/api/bootstrap`);
+    internals.primaryBoundSessionId = target.id;
+    internals.primaryRpcGeneration = 7;
+    internals.activePromptDiagnostics.set(target.id, { promptId, rpcGeneration: 7 });
+    internals.handleRpcEvent({ type: "agent_start" }, { generation: 6 });
+    assert.equal(
+      internals.stateDiagnostics.snapshot().entries.some((entry) => entry.promptId === promptId),
+      false,
+    );
+    internals.handleRpcEvent({ type: "agent_start" }, { generation: 7 });
+    assert.ok(
+      internals.stateDiagnostics.snapshot().entries.some((entry) =>
+        entry.promptId === promptId && entry.name === "agent-start"
+      ),
+    );
+  } finally {
+    await target.close();
+  }
+});
+
+test("app close clears observation-only prompt correlation", async () => {
+  const target = await fixture();
+  const active = (target.app as unknown as {
+    activePromptDiagnostics: Map<string, { promptId: string; rpcGeneration: number }>;
+  }).activePromptDiagnostics;
+  active.set(target.id, {
+    promptId: "44444444-4444-4444-8444-444444444444",
+    rpcGeneration: 0,
+  });
+  await target.close();
+  assert.equal(active.size, 0);
 });
 
 test("registered pages can independently snapshot one process recorder without ownership", async () => {

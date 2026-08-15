@@ -1,3 +1,4 @@
+import type { RpcEventSource, RpcRequestObserver } from "../../src/server/rpc-client";
 export class FakeRpc {
   readonly commands: Record<string, unknown>[] = [];
   readonly requestTimeouts: Array<{
@@ -5,11 +6,15 @@ export class FakeRpc {
     timeoutMs: number | undefined;
     independentRead: boolean;
   }> = [];
-  private listeners = new Set<(event: Record<string, unknown>) => void>();
+  private listeners = new Set<(
+    event: Record<string, unknown>,
+    source?: RpcEventSource,
+  ) => void>();
   /** Captures callbacks once registered so a test can model an already-buffered old-child frame after unsubscribe. */
-  private readonly historicalListeners = new Set<
-    (event: Record<string, unknown>) => void
-  >();
+  private readonly historicalListeners = new Set<(
+    event: Record<string, unknown>,
+    source?: RpcEventSource,
+  ) => void>();
   streaming = false;
   stopCount = 0;
   restartCount = 0;
@@ -17,25 +22,32 @@ export class FakeRpc {
   alive = true;
   /** Faithful Pi steering queue: queue_update carries the whole backlog, and consumption removes one message before message_start. */
   readonly steeringQueue: string[] = [];
+  private requestId = 0;
+  generation = 0;
 
   constructor(
     readonly path: string,
     readonly sessionId: string,
   ) {}
 
-  onEvent(listener: (event: Record<string, unknown>) => void) {
+  onEvent(listener: (
+    event: Record<string, unknown>,
+    source?: RpcEventSource,
+  ) => void) {
     this.listeners.add(listener);
     this.historicalListeners.add(listener);
     return () => this.listeners.delete(listener);
   }
 
-  emit(event: Record<string, unknown>) {
-    for (const listener of this.listeners) listener(event);
+  emit(event: Record<string, unknown>, generation = this.generation) {
+    const source = { generation };
+    for (const listener of this.listeners) listener(event, source);
   }
 
   /** A stopped child can already have a stdout callback queued when unsubscribe runs. */
-  emitLate(event: Record<string, unknown>) {
-    for (const listener of this.historicalListeners) listener(event);
+  emitLate(event: Record<string, unknown>, generation = this.generation) {
+    const source = { generation };
+    for (const listener of this.historicalListeners) listener(event, source);
   }
 
   async start() {
@@ -49,6 +61,10 @@ export class FakeRpc {
 
   isRunning() {
     return this.alive;
+  }
+
+  currentGeneration() {
+    return this.generation;
   }
 
   async restart() {
@@ -74,8 +90,26 @@ export class FakeRpc {
   async send(
     command: Record<string, unknown>,
     timeoutMs?: number,
-    options?: { independentRead?: boolean },
+    options?: { independentRead?: boolean; observe?: RpcRequestObserver },
   ) {
+    const requestId = `fake-${++this.requestId}`;
+    const startedAt = Date.now();
+    const observe = (phase: "allocated" | "written" | "response", outcome: "allocated" | "written" | "response-success") => {
+      try {
+        options?.observe?.({
+          requestId,
+          requestType: typeof command.type === "string" ? command.type : "unknown",
+          generation: this.generation,
+          phase,
+          outcome,
+          durationMs: Date.now() - startedAt,
+        });
+      } catch {
+        // Mirrors PiRpcClient's fail-open observation boundary.
+      }
+    };
+    observe("allocated", "allocated");
+    observe("written", "written");
     this.commands.push(command);
     this.requestTimeouts.push({
       type: command.type,
@@ -129,6 +163,7 @@ export class FakeRpc {
     if (command.type === "prompt") {
       this.streaming = true;
       this.emit({ type: "agent_start" });
+      observe("response", "response-success");
       return { type: "response", success: true };
     }
     if (command.type === "steer") {

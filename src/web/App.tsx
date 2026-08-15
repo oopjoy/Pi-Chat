@@ -6326,7 +6326,7 @@ export function App() {
       diagnosticCheckpointRef.current();
       const server = await api.stateDiagnosticSnapshot();
       const bundle: StateDiagnosticExportBundle = {
-        schemaVersion: 2,
+        schemaVersion: 3,
         generatedAt: new Date().toISOString(),
         warning:
           "仅含最近五分钟的脱敏结构状态；服务端与当前浏览器页面各自保持本地顺序，时间戳不代表跨进程绝对顺序。",

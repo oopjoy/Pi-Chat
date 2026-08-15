@@ -23,6 +23,10 @@ interface PendingRequest {
   requestType: string;
   written: boolean;
   readOnly: boolean;
+  requestId: string;
+  startedAt: number;
+  generation: number;
+  observe?: RpcRequestObserver;
 }
 
 export type RpcWriteOutcome = "not-written" | "written-outcome-unknown";
@@ -87,6 +91,25 @@ export interface PiRpcCompatibility {
   diagnostics: string[];
 }
 
+export type RpcRequestObservationPhase = "allocated" | "written" | "response" | "failed";
+export type RpcRequestObservationOutcome =
+  | "allocated"
+  | "written"
+  | "response-success"
+  | "response-error"
+  | "not-written"
+  | "written-outcome-unknown"
+  | "process-rejected";
+export interface RpcRequestObservation {
+  requestId: string;
+  requestType: string;
+  generation: number;
+  phase: RpcRequestObservationPhase;
+  outcome: RpcRequestObservationOutcome;
+  durationMs: number;
+}
+export type RpcRequestObserver = (observation: RpcRequestObservation) => void;
+
 export interface RpcSendOptions {
   /**
    * Send a read command as its own FIFO request instead of joining a matching
@@ -94,6 +117,8 @@ export interface RpcSendOptions {
    * shorter timeout budget.
    */
   independentRead?: boolean;
+  /** Metadata-only observer. Failures are swallowed and cannot affect RPC behavior. */
+  observe?: RpcRequestObserver;
 }
 
 export interface RpcEventSource {
@@ -402,6 +427,12 @@ export class PiRpcClient {
     });
   }
 
+  private observeRequest(observer: RpcRequestObserver | undefined, observation: RpcRequestObservation): void {
+    try { observer?.(observation); } catch {
+      // Diagnostics are observational and must never perturb RPC semantics.
+    }
+  }
+
   private handleLine(line: string, source?: RpcEventSource): void {
     // Streams remain readable briefly after SIGTERM on Windows. Do not let an
     // old child resolve current requests or publish unsolicited lifecycle data.
@@ -422,7 +453,16 @@ export class PiRpcClient {
         if (pending) {
           clearTimeout(pending.timer);
           this.pending.delete(data.id);
-          if (data.success === false) pending.reject(new Error(String(data.error || "Pi RPC 请求失败")));
+          const failed = data.success === false;
+          this.observeRequest(pending.observe, {
+            requestId: pending.requestId,
+            requestType: pending.requestType,
+            generation: source?.generation || pending.generation,
+            phase: "response",
+            outcome: failed ? "response-error" : "response-success",
+            durationMs: Date.now() - pending.startedAt,
+          });
+          if (failed) pending.reject(new Error(String(data.error || "Pi RPC 请求失败")));
           else pending.resolve(data);
         }
       }
@@ -442,6 +482,16 @@ export class PiRpcClient {
         : error;
       if (reference && rejection !== error)
         attachIncidentReference(rejection, reference, incidentErrorCode(error) || "RPC_CHILD_EXIT");
+      this.observeRequest(pending.observe, {
+        requestId: pending.requestId,
+        requestType: pending.requestType,
+        generation: pending.generation,
+        phase: "failed",
+        outcome: rejection instanceof RpcRequestTimeoutError
+          ? rejection.outcome
+          : "process-rejected",
+        durationMs: Date.now() - pending.startedAt,
+      });
       pending.reject(rejection);
     }
     this.pending.clear();
@@ -593,6 +643,14 @@ export class PiRpcClient {
     const id = `pi-chat-${++this.requestId}`;
     if (sharedRead) this.outstandingReadQueryIds.set(type, id);
     const payload = { ...command, id };
+    this.observeRequest(options.observe, {
+      requestId: id,
+      requestType: type || "unknown",
+      generation: this.currentGeneration(),
+      phase: "allocated",
+      outcome: "allocated",
+      durationMs: Date.now() - startedAt,
+    });
     let frame: string;
     try {
       frame = encodeOutboundFrame(payload);
@@ -609,6 +667,14 @@ export class PiRpcClient {
           requestId: id,
           durationMs: Date.now() - startedAt,
         });
+      this.observeRequest(options.observe, {
+        requestId: id,
+        requestType: type || "unknown",
+        generation: this.currentGeneration(),
+        phase: "failed",
+        outcome: "not-written",
+        durationMs: Date.now() - startedAt,
+      });
       throw error;
     }
     const request = new Promise<Record<string, unknown>>((resolve, reject) => {
@@ -620,6 +686,10 @@ export class PiRpcClient {
         requestType: type || "unknown",
         written: false,
         readOnly,
+        requestId: id,
+        startedAt,
+        generation: this.currentGeneration(),
+        observe: options.observe,
       };
       pending.timer = setTimeout(() => {
         if (this.pending.get(id) !== pending) return;
@@ -635,6 +705,14 @@ export class PiRpcClient {
           generation: this.currentGeneration(),
           childPid: child.pid,
           requestId: id,
+          durationMs: Date.now() - startedAt,
+        });
+        this.observeRequest(pending.observe, {
+          requestId: id,
+          requestType: pending.requestType,
+          generation: pending.generation,
+          phase: "failed",
+          outcome: error.outcome,
           durationMs: Date.now() - startedAt,
         });
         reject(error);
@@ -666,12 +744,31 @@ export class PiRpcClient {
             requestId: id,
             durationMs: Date.now() - startedAt,
           });
+          this.observeRequest(pending.observe, {
+            requestId: id,
+            requestType: pending.requestType,
+            generation: pending.generation,
+            phase: "failed",
+            outcome: rejection instanceof RpcRequestTimeoutError
+              ? rejection.outcome
+              : "not-written",
+            durationMs: Date.now() - startedAt,
+          });
           reject(rejection);
         });
         // A non-throwing write transfers the frame to Node's stream buffer. From
         // this point the host cannot prove that a mutation was not accepted.
         writeReturned = true;
+        if (this.pending.get(id) !== pending) return;
         pending.written = true;
+        this.observeRequest(pending.observe, {
+          requestId: id,
+          requestType: pending.requestType,
+          generation: pending.generation,
+          phase: "written",
+          outcome: "written",
+          durationMs: Date.now() - startedAt,
+        });
       } catch (error) {
         clearTimeout(pending.timer);
         this.pending.delete(id);
@@ -685,6 +782,14 @@ export class PiRpcClient {
           generation: this.currentGeneration(),
           childPid: child.pid,
           requestId: id,
+          durationMs: Date.now() - startedAt,
+        });
+        this.observeRequest(options.observe, {
+          requestId: id,
+          requestType: type || "unknown",
+          generation: this.currentGeneration(),
+          phase: "failed",
+          outcome: "not-written",
           durationMs: Date.now() - startedAt,
         });
         reject(normalized);

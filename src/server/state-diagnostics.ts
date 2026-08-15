@@ -10,6 +10,7 @@ export interface StateDiagnosticRecord {
   category: string;
   name: string;
   sessionId?: string;
+  promptId?: string;
   runGeneration?: number;
   rpcGeneration?: number;
   details?: Record<string, unknown>;
@@ -29,6 +30,7 @@ const DEFAULT_WINDOW_MS = 5 * 60 * 1_000;
 const DEFAULT_MAXIMUM_ENTRIES = 2_000;
 const DEFAULT_MAXIMUM_BYTES = 1024 * 1024;
 const SAFE_SESSION_ID = /^[a-f0-9]{20}$/;
+const SAFE_PROMPT_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 
 function safeInteger(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value)
@@ -78,6 +80,9 @@ export class StateDiagnosticsRecorder {
         ...(input.sessionId && SAFE_SESSION_ID.test(input.sessionId)
           ? { sessionId: input.sessionId }
           : null),
+        ...(input.promptId && SAFE_PROMPT_ID.test(input.promptId)
+          ? { promptId: input.promptId.toLowerCase() }
+          : null),
         ...(runGeneration !== undefined ? { runGeneration } : null),
         ...(rpcGeneration !== undefined ? { rpcGeneration } : null),
         details: sanitizeStateDiagnosticDetails(input.details),
@@ -111,7 +116,7 @@ export class StateDiagnosticsRecorder {
     const now = this.now();
     this.prune(now);
     return {
-      schemaVersion: 2,
+      schemaVersion: 3,
       generatedAt: new Date(now).toISOString(),
       runEpoch: this.options.runEpoch,
       buildFingerprint: this.options.buildFingerprint,

@@ -12,6 +12,7 @@ const WINDOW_MS = 5 * 60 * 1_000;
 const MAXIMUM_ENTRIES = 2_000;
 const MAXIMUM_BYTES = 1024 * 1024;
 const SAFE_SESSION_ID = /^[a-f0-9]{20}$/;
+const SAFE_PROMPT_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const pageStartedAt = new Date().toISOString();
 
 interface BrowserStateDiagnosticsRecorderOptions {
@@ -48,6 +49,7 @@ export class BrowserStateDiagnosticsRecorder {
     name: string,
     input: {
       sessionId?: string;
+      promptId?: string;
       runGeneration?: number;
       rpcGeneration?: number;
       details?: Record<string, unknown>;
@@ -65,6 +67,9 @@ export class BrowserStateDiagnosticsRecorder {
         name,
         ...(input.sessionId && SAFE_SESSION_ID.test(input.sessionId)
           ? { sessionId: input.sessionId }
+          : null),
+        ...(input.promptId && SAFE_PROMPT_ID.test(input.promptId)
+          ? { promptId: input.promptId.toLowerCase() }
           : null),
         ...(typeof input.runGeneration === "number" && Number.isFinite(input.runGeneration)
           ? { runGeneration: Math.max(0, Math.floor(input.runGeneration)) }
@@ -141,6 +146,7 @@ export function recordBrowserStateDiagnostic(
   name: string,
   input: {
     sessionId?: string;
+    promptId?: string;
     runGeneration?: number;
     rpcGeneration?: number;
     details?: Record<string, unknown>;
@@ -155,7 +161,7 @@ export function browserStateDiagnosticStatus(): StateDiagnosticStatus {
 
 export function browserStateDiagnosticSnapshot(): BrowserStateDiagnosticSnapshot {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     generatedAt: new Date().toISOString(),
     pageStartedAt,
     status: browserRecorder.status(),
@@ -207,6 +213,7 @@ export function privacySafeStateDiagnosticBundle(
 ): StateDiagnosticExportBundle {
   const generatedAt = safeExportTimestamp(bundle.generatedAt, new Date().toISOString());
   const aliases = new Map<string, string>();
+  const promptAliases = new Map<string, string>();
   const alias = (sessionId: string | undefined): string | undefined => {
     if (!sessionId || !SAFE_SESSION_ID.test(sessionId)) return undefined;
     let value = aliases.get(sessionId);
@@ -216,12 +223,23 @@ export function privacySafeStateDiagnosticBundle(
     }
     return value;
   };
+  const promptAlias = (promptId: string | undefined): string | undefined => {
+    if (!promptId || !SAFE_PROMPT_ID.test(promptId)) return undefined;
+    const normalized = promptId.toLowerCase();
+    let value = promptAliases.get(normalized);
+    if (!value) {
+      value = `p${promptAliases.size + 1}`;
+      promptAliases.set(normalized, value);
+    }
+    return value;
+  };
   const entries = (
     items: StateDiagnosticEntry[],
     source: "server" | "browser",
   ): StateDiagnosticEntry[] => items.flatMap((entry) => {
     if (!isAllowedStateDiagnosticEvent(entry.category, entry.name)) return [];
     const sessionId = alias(entry.sessionId);
+    const promptId = promptAlias(entry.promptId);
     const runGeneration = safeExportInteger(entry.runGeneration);
     const rpcGeneration = safeExportInteger(entry.rpcGeneration);
     return [{
@@ -231,17 +249,18 @@ export function privacySafeStateDiagnosticBundle(
       category: entry.category,
       name: entry.name,
       ...(sessionId ? { sessionId } : null),
+      ...(promptId ? { promptId } : null),
       ...(entry.runGeneration !== undefined ? { runGeneration } : null),
       ...(entry.rpcGeneration !== undefined ? { rpcGeneration } : null),
       details: sanitizeStateDiagnosticDetails(entry.details),
     }];
   });
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     generatedAt,
     warning: EXPORT_WARNING,
     server: {
-      schemaVersion: 2,
+      schemaVersion: 3,
       generatedAt: safeExportTimestamp(bundle.server.generatedAt, generatedAt),
       runEpoch: safeExportMetadata(bundle.server.runEpoch),
       buildFingerprint: safeBuildFingerprint(bundle.server.buildFingerprint),
@@ -249,7 +268,7 @@ export function privacySafeStateDiagnosticBundle(
       entries: entries(bundle.server.entries, "server"),
     },
     browser: {
-      schemaVersion: 2,
+      schemaVersion: 3,
       generatedAt: safeExportTimestamp(bundle.browser.generatedAt, generatedAt),
       pageStartedAt: safeExportTimestamp(bundle.browser.pageStartedAt, generatedAt),
       status: safeExportStatus(bundle.browser.status),

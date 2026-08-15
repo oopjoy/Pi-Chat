@@ -68,6 +68,7 @@ test("a timed-out Primary prompt remains conservatively running because Pi may h
 
 test("a timed-out queued Primary prompt emits an asynchronous uncertainty verdict", async () => {
   const events: Record<string, unknown>[] = [];
+  const traces: Array<{ sessionId: string; promptId: string; name: string }> = [];
   const scheduler = new PromptScheduler({
     isClosed: () => false,
     isLifecycleIdle: () => true,
@@ -84,6 +85,7 @@ test("a timed-out queued Primary prompt emits an asynchronous uncertainty verdic
     touchRuntime: () => {},
     applyPendingTurnSettings: async () => {},
     syncGateMode: async () => {},
+    tracePrompt: (sessionId, promptId, name) => traces.push({ sessionId, promptId, name }),
     broadcast: (event) => events.push(event),
     onPrimaryPromptAccepted: () => {},
     onSecondaryPromptAccepted: () => {},
@@ -95,6 +97,10 @@ test("a timed-out queued Primary prompt emits an asynchronous uncertainty verdic
   assert.equal(scheduler.primaryRunning, true);
   assert.equal(scheduler.primaryDispatching, false);
   assert.equal(scheduler.primaryQueue.length, 0);
+  assert.deepEqual(traces, [
+    { sessionId: "primary", promptId: queued.id, name: "dispatch" },
+    { sessionId: "primary", promptId: queued.id, name: "delivery-uncertain" },
+  ]);
   assert.ok(
     events.some(
       (event) =>
@@ -161,6 +167,7 @@ test("a timed-out queued Secondary prompt is not requeued and remains conservati
 
 test("failed queued dispatch reports the requeued prompt for transcript rollback", async () => {
   const events: Record<string, unknown>[] = [];
+  const traces: Array<{ sessionId: string; promptId: string; name: string }> = [];
   const scheduler = new PromptScheduler({
     isClosed: () => false,
     isLifecycleIdle: () => true,
@@ -173,6 +180,7 @@ test("failed queued dispatch reports the requeued prompt for transcript rollback
     touchRuntime: () => {},
     applyPendingTurnSettings: async () => {},
     syncGateMode: async () => {},
+    tracePrompt: (sessionId, promptId, name) => traces.push({ sessionId, promptId, name }),
     broadcast: (event) => events.push(event),
     onPrimaryPromptAccepted: () => {},
     onSecondaryPromptAccepted: () => {},
@@ -183,6 +191,10 @@ test("failed queued dispatch reports the requeued prompt for transcript rollback
 
   assert.equal(scheduler.primaryQueuePaused, true);
   assert.equal(scheduler.primaryQueue[0]?.id, queued.id);
+  assert.deepEqual(traces, [
+    { sessionId: "primary", promptId: queued.id, name: "dispatch" },
+    { sessionId: "primary", promptId: queued.id, name: "requeued" },
+  ]);
   const dispatchIndex = events.findIndex((event) => event.type === "pi_chat_queue_dispatch");
   const errorIndex = events.findIndex((event) => event.type === "pi_chat_queue_error");
   assert.ok(dispatchIndex >= 0 && errorIndex > dispatchIndex);
@@ -194,6 +206,91 @@ test("failed queued dispatch reports the requeued prompt for transcript rollback
     piChatSessionId: "primary",
     error: "rejected",
   });
+});
+
+test("diagnostic callbacks are fail-open and cannot replace scheduler delivery", async () => {
+  let sends = 0;
+  const rpc = {
+    send: async () => {
+      sends += 1;
+      return { type: "response", success: true };
+    },
+  };
+  const scheduler = new PromptScheduler({
+    isClosed: () => false,
+    isLifecycleIdle: () => true,
+    primaryRpc: () => rpc as never,
+    activeSessionId: () => "primary",
+    ensurePrimaryRuntime: async () => {},
+    recoverRuntime: async () => {},
+    acquirePrimaryOperation: () => () => {},
+    acquireRuntimeOperation: () => () => {},
+    touchRuntime: () => {},
+    applyPendingTurnSettings: async () => {},
+    syncGateMode: async () => {},
+    promptRpcObserver: () => { throw new Error("observer setup failed"); },
+    tracePrompt: () => { throw new Error("trace failed"); },
+    abandonPromptDiagnostic: () => { throw new Error("cleanup failed"); },
+    broadcast: () => {},
+    onPrimaryPromptAccepted: () => {},
+    onSecondaryPromptAccepted: () => {},
+  });
+
+  assert.equal(await scheduler.sendPrimaryPrompt(
+    "delivered once",
+    [],
+    1,
+    undefined,
+    "11111111-1111-4111-8111-111111111111",
+  ), "confirmed");
+  assert.equal(sends, 1);
+});
+
+test("Primary dispatch observation follows settings and Gate preflight immediately before send", async () => {
+  const steps: string[] = [];
+  const rpc = {
+    send: async () => {
+      steps.push("send");
+      return { type: "response", success: true };
+    },
+  };
+  const scheduler = new PromptScheduler({
+    isClosed: () => false,
+    isLifecycleIdle: () => true,
+    primaryRpc: () => rpc as never,
+    activeSessionId: () => "primary",
+    ensurePrimaryRuntime: async () => { steps.push("ready"); },
+    recoverRuntime: async () => {},
+    acquirePrimaryOperation: () => () => {},
+    acquireRuntimeOperation: () => () => {},
+    touchRuntime: () => {},
+    applyPendingTurnSettings: async () => { steps.push("settings"); },
+    syncGateMode: async () => { steps.push("gate"); },
+    promptRpcObserver: () => {
+      steps.push("observer");
+      return () => {};
+    },
+    tracePrompt: (_sessionId, _promptId, name) => steps.push(name),
+    broadcast: () => {},
+    onPrimaryPromptAccepted: () => {},
+    onSecondaryPromptAccepted: () => {},
+  });
+
+  await scheduler.sendPrimaryPrompt(
+    "next",
+    [],
+    1,
+    "strict",
+    "22222222-2222-4222-8222-222222222222",
+  );
+  assert.deepEqual(steps, [
+    "ready",
+    "settings",
+    "gate",
+    "observer",
+    "dispatch",
+    "send",
+  ]);
 });
 
 test("Gate mode is synchronized immediately before the next Primary prompt", async () => {
@@ -300,6 +397,8 @@ test("successful queued Secondary dispatch performs acceptance bookkeeping with 
 
 test("failed queued Secondary dispatch does not perform acceptance bookkeeping", async () => {
   let accepted = 0;
+  const traces: Array<{ promptId: string; name: string }> = [];
+  const abandoned: string[] = [];
   const rpc = { send: async () => { throw new Error("rejected"); }, isRunning: () => true };
   const runtime = {
     id: "secondary",
@@ -324,16 +423,23 @@ test("failed queued Secondary dispatch does not perform acceptance bookkeeping",
     touchRuntime: () => {},
     applyPendingTurnSettings: async () => {},
     syncGateMode: async () => {},
+    tracePrompt: (_sessionId, promptId, name) => traces.push({ promptId, name }),
+    abandonPromptDiagnostic: (_sessionId, promptId) => abandoned.push(promptId),
     broadcast: () => {},
     onPrimaryPromptAccepted: () => {},
     onSecondaryPromptAccepted: () => { accepted += 1; },
   });
-  scheduler.enqueueRuntime(runtime as never, "rejected from queue", [], 1234);
+  const queued = scheduler.enqueueRuntime(runtime as never, "rejected from queue", [], 1234);
 
   await scheduler.dispatchRuntimeNext(runtime as never);
 
   assert.equal(accepted, 0);
   assert.equal((runtime as { queuePaused: boolean }).queuePaused, true);
+  assert.deepEqual(traces, [
+    { promptId: queued.id, name: "dispatch" },
+    { promptId: queued.id, name: "requeued" },
+  ]);
+  assert.deepEqual(abandoned, [queued.id]);
 });
 
 test("publicQueue strips image payloads", () => {

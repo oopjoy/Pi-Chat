@@ -12,6 +12,8 @@ import { installAppDom } from "../helpers/app-dom";
 
 const SESSION_ID = "0123456789abcdefabcd";
 const SECOND_SESSION_ID = "fedcba9876543210abcd";
+const PROMPT_ID = "11111111-1111-4111-8111-111111111111";
+const SECOND_PROMPT_ID = "22222222-2222-4222-8222-222222222222";
 
 function status(entryCount: number) {
   return {
@@ -23,7 +25,12 @@ function status(entryCount: number) {
   };
 }
 
-function entry(source: "server" | "browser", sequence: number, sessionId: string): StateDiagnosticEntry {
+function entry(
+  source: "server" | "browser",
+  sequence: number,
+  sessionId: string,
+  promptId?: string,
+): StateDiagnosticEntry {
   return {
     sequence,
     timestamp: "2026-08-14T12:00:00.000Z",
@@ -31,6 +38,7 @@ function entry(source: "server" | "browser", sequence: number, sessionId: string
     category: "projection",
     name: "ui-state",
     sessionId,
+    ...(promptId ? { promptId } : null),
     details: { stateStreaming: true },
   };
 }
@@ -39,6 +47,7 @@ test("browser state diagnostics is always-on, closed-schema, and fail-open", () 
   const recorder = new BrowserStateDiagnosticsRecorder();
   recorder.record("projection", "ui-state", {
     sessionId: SESSION_ID,
+    promptId: PROMPT_ID,
     runGeneration: 3,
     details: {
       stateStreaming: true,
@@ -57,6 +66,7 @@ test("browser state diagnostics is always-on, closed-schema, and fail-open", () 
   const snapshot = recorder.entriesSnapshot();
   assert.equal(snapshot.length, 1);
   assert.equal(snapshot[0].sessionId, SESSION_ID);
+  assert.equal(snapshot[0].promptId, PROMPT_ID);
   assert.equal(snapshot[0].runGeneration, 3);
   assert.equal(snapshot[0].details.stateStreaming, true);
   assert.equal(snapshot[0].details.eventType, "unknown");
@@ -86,7 +96,7 @@ test("browser singleton records before Settings is opened", () => {
     sessionId: SESSION_ID,
   });
   const after = browserStateDiagnosticSnapshot();
-  assert.equal(after.schemaVersion, 2);
+  assert.equal(after.schemaVersion, 3);
   assert.equal(after.status.entryCount, before + 1);
   assert.equal(after.entries.at(-1)?.name, "export-requested");
 });
@@ -105,23 +115,26 @@ test("diagnostic export aliases raw Session IDs across both lanes", async () => 
   dom.window.HTMLAnchorElement.prototype.click = () => {};
   try {
     const bundle: StateDiagnosticExportBundle = {
-      schemaVersion: 2,
+      schemaVersion: 3,
       generatedAt: "2026-08-14T12:00:00.000Z",
       warning: "redacted",
       server: {
-        schemaVersion: 2,
+        schemaVersion: 3,
         generatedAt: "2026-08-14T12:00:00.000Z",
         runEpoch: "run",
         buildFingerprint: "a".repeat(64),
         status: status(2),
-        entries: [entry("server", 1, SESSION_ID), entry("server", 2, SECOND_SESSION_ID)],
+        entries: [
+          entry("server", 1, SESSION_ID, PROMPT_ID),
+          entry("server", 2, SECOND_SESSION_ID, SECOND_PROMPT_ID),
+        ],
       },
       browser: {
-        schemaVersion: 2,
+        schemaVersion: 3,
         generatedAt: "2026-08-14T12:00:00.000Z",
         pageStartedAt: "2026-08-14T11:59:00.000Z",
         status: status(1),
-        entries: [entry("browser", 1, SESSION_ID)],
+        entries: [entry("browser", 1, SESSION_ID, PROMPT_ID)],
       },
     };
     const filename = downloadStateDiagnosticBundle(bundle);
@@ -129,11 +142,15 @@ test("diagnostic export aliases raw Session IDs across both lanes", async () => 
     assert.ok(exported);
     const text = await exported.text();
     const parsed = JSON.parse(text) as StateDiagnosticExportBundle;
-    assert.equal(parsed.schemaVersion, 2);
+    assert.equal(parsed.schemaVersion, 3);
     assert.equal(parsed.server.buildFingerprint, "a".repeat(64));
     assert.deepEqual(parsed.server.entries.map((item) => item.sessionId), ["s1", "s2"]);
+    assert.deepEqual(parsed.server.entries.map((item) => item.promptId), ["p1", "p2"]);
     assert.equal(parsed.browser.entries[0].sessionId, "s1");
+    assert.equal(parsed.browser.entries[0].promptId, "p1");
     assert.equal(text.includes(SESSION_ID), false);
+    assert.equal(text.includes(PROMPT_ID), false);
+    assert.equal(text.includes(SECOND_PROMPT_ID), false);
     assert.equal(text.includes(SECOND_SESSION_ID), false);
   } finally {
     URL.createObjectURL = originalCreate;
@@ -144,12 +161,12 @@ test("diagnostic export aliases raw Session IDs across both lanes", async () => 
 
 test("final diagnostic export reconstructs the exact privacy schema", () => {
   const unsafe = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     generatedAt: "2026-08-14T12:00:00.000Z",
     warning: "private prompt",
     requestToken: "secret-token",
     server: {
-      schemaVersion: 2,
+      schemaVersion: 3,
       generatedAt: "2026-08-14T12:00:00.000Z",
       runEpoch: "run",
       buildFingerprint: "deadbeefcafebabe",
@@ -162,7 +179,7 @@ test("final diagnostic export reconstructs the exact privacy schema", () => {
       }],
     },
     browser: {
-      schemaVersion: 2,
+      schemaVersion: 3,
       generatedAt: "2026-08-14T12:00:00.000Z",
       pageStartedAt: "2026-08-14T11:59:00.000Z",
       status: status(0),
