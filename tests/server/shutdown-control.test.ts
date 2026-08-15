@@ -13,6 +13,24 @@ import { ModelManager } from "../../src/server/model-manager";
 import type { SessionSummary } from "../../src/shared/types";
 import { FakeRpc } from "../helpers/server-app-fixture";
 
+const LIFECYCLE_CLIENT = "33333333-3333-4333-8333-333333333333";
+const LIFECYCLE_PAGE = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+
+function connectLifecyclePage(app: PiChatApp): Record<string, string> {
+  const internals = app as unknown as {
+    connectedPageClients: Map<string, string>;
+    ssePageByResponse: Map<object, string>;
+    sessionControl: { clientConnected(clientId: string): void };
+  };
+  internals.connectedPageClients.set(LIFECYCLE_PAGE, LIFECYCLE_CLIENT);
+  internals.ssePageByResponse.set({}, LIFECYCLE_PAGE);
+  internals.sessionControl.clientConnected(LIFECYCLE_CLIENT);
+  return {
+    "x-pi-chat-client": LIFECYCLE_CLIENT,
+    "x-pi-chat-page": LIFECYCLE_PAGE,
+  };
+}
+
 test("a final window close never shuts down an actively streaming Pi worker", async () => {
   const path = "C:\\sessions\\active-close.jsonl";
   const primary = new FakeRpc(path, "primary");
@@ -114,13 +132,14 @@ test("global shutdown refuses while any conversation is still busy", async () =>
   const primary = new FakeRpc(path, "primary");
   let shutdowns = 0;
   const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), applicationShutdown: (_reason) => { shutdowns += 1; } });
+  const lifecycleHeaders = connectLifecyclePage(app);
   (app as unknown as { dispatching: boolean }).dispatching = true;
   const server = createServer((request, response) => void app.handle(request, response));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   assert.ok(address && typeof address === "object");
   try {
-    const response = await fetch(`http://127.0.0.1:${address.port}/api/shutdown`, { method: "POST" });
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/shutdown`, { method: "POST", headers: lifecycleHeaders });
     assert.equal(response.status, 409);
     assert.match((await response.json() as { error: string }).error, /仍有 1 个对话/);
     assert.equal(shutdowns, 0);
@@ -170,6 +189,7 @@ test("global shutdown broadcasts to every window before stopping the application
   const shutdownReasons: string[] = [];
   const frames: string[] = [];
   const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), applicationShutdown: (reason) => { shutdownReasons.push(reason); } });
+  const lifecycleHeaders = connectLifecyclePage(app);
   const clients = (app as unknown as { sseClients: Map<{ write: (frame: string) => void }, string> }).sseClients;
   clients.set({ write: (frame) => { frames.push(frame); } }, "11111111-1111-4111-8111-111111111111");
   clients.set({ write: (frame) => { frames.push(frame); } }, "22222222-2222-4222-8222-222222222222");
@@ -178,7 +198,7 @@ test("global shutdown broadcasts to every window before stopping the application
   const address = server.address();
   assert.ok(address && typeof address === "object");
   try {
-    const response = await fetch(`http://127.0.0.1:${address.port}/api/shutdown`, { method: "POST" });
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/shutdown`, { method: "POST", headers: lifecycleHeaders });
     assert.equal(response.status, 202);
     assert.deepEqual(await response.json(), { shuttingDown: true });
     assert.deepEqual(shutdownReasons, ["api-shutdown"]);

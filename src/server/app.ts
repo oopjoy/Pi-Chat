@@ -342,6 +342,8 @@ export class PiChatApp {
   private autoShutdownRunning = false;
   /** Page-instance registry is separate from client identity used for control. */
   private readonly connectedPageClients = new Map<string, string>();
+  /** Exact transport-to-page binding; unlike page leases, it ends on SSE disconnect. */
+  private readonly ssePageByResponse = new Map<ServerResponse, string>();
   /** Handshake pages expire unless their own EventSource promotes them. */
   private readonly pendingWindowPageTimers = new Map<string, NodeJS.Timeout>();
   private readonly requestToken: string;
@@ -634,7 +636,8 @@ export class PiChatApp {
       },
     });
     this.runtimes = this.runtimePool.runtimes;
-    this.sseHub.onDisconnect((_response, clientId, info) => {
+    this.sseHub.onDisconnect((response, clientId, info) => {
+      this.ssePageByResponse.delete(response);
       // SseHub is the one canonical transport departure path. It covers both
       // request-close and server-initiated slow-client/write-error removal, so
       // SessionControl decrements this connection exactly once.
@@ -837,6 +840,7 @@ export class PiChatApp {
     // Closing the hub emits the canonical disconnect callbacks. Clear control
     // state afterwards so those callbacks cannot leave fresh release timers.
     this.sseHub.closeAll();
+    this.ssePageByResponse.clear();
     this.sessionControl.clear();
     for (const timer of this.pendingWindowPageTimers.values()) clearTimeout(timer);
     this.pendingWindowPageTimers.clear();
@@ -1264,6 +1268,25 @@ export class PiChatApp {
 
   private openWindowCount(): number {
     return this.connectedPageClients.size;
+  }
+
+  /**
+   * Lifecycle actions are destructive to every browser transport and Runtime.
+   * A token-bearing handshake proves only that a local caller reached this
+   * process; it must not let a headless poller wait for idle and then surprise
+   * still-open users with a restart. Only an EventSource-backed page may own an
+   * explicit restart or shutdown request.
+   */
+  private isConnectedWindowPage(clientId: string, pageId: string): boolean {
+    return Boolean(
+      clientId &&
+      pageId &&
+      this.connectedPageClients.get(pageId) === clientId &&
+      !this.pendingWindowPageTimers.has(pageId) &&
+      [...this.ssePageByResponse.values()].some(
+        (connectedPageId) => connectedPageId === pageId,
+      ),
+    );
   }
 
   private scheduleLastWindowShutdown(): void {
@@ -4361,6 +4384,7 @@ export class PiChatApp {
       });
       const pageId = requestPageId(request) || clientId;
       this.sseHub.add(response, clientId);
+      this.ssePageByResponse.set(response, pageId);
       this.clientConnected(clientId, pageId);
       this.traceState("sse", "connected", this.activeSessionId, {
         openWindows: this.openWindowCount(),
@@ -4454,6 +4478,28 @@ export class PiChatApp {
           error:
             "当前启动方式不支持应用更新并重启；请在 Pi Chat 项目目录运行 npm run build 后重启服务。",
         });
+      const lifecyclePageId = requestPageId(request);
+      if (!clientId || !lifecyclePageId)
+        return json(response, 400, {
+          error: "重启或关闭必须由当前 Pi Chat 页面显式发起",
+          code: "LIFECYCLE_CLIENT_REQUIRED",
+        });
+      if (!this.isConnectedWindowPage(clientId, lifecyclePageId)) {
+        const error = new Error("生命周期请求页面没有活动事件连接");
+        const incident = this.reportIncident(error, {
+          browserId: clientId,
+          pageId: lifecyclePageId,
+          operation: shuttingDown ? "lifecycle.shutdown" : "lifecycle.restart",
+          controlState: "no-browser-identity",
+          outcome: "rejected",
+          errorCode: "LIFECYCLE_PAGE_NOT_CONNECTED",
+        });
+        return json(response, 409, {
+          error: "当前页面尚未完成连接或已断开，无法安全重启或关闭 Pi Chat",
+          code: "LIFECYCLE_PAGE_NOT_CONNECTED",
+          incidentId: incident.incidentId,
+        });
+      }
       this.beginLifecycle(lifecycle);
       try {
         await this.verifyApplicationQuiescent(
