@@ -220,34 +220,26 @@ export function AskQuestionnaireDialog({
                   onClick={() => question.multiSelect ? toggleMulti(index) : selectSingle(index)}
                 >
                   <span className="ask-questionnaire-option-marker">{question.multiSelect ? (selected ? "✓" : "") : index + 1}</span>
-                  <span><strong>{option.label}</strong><small>{option.description}</small></span>
+                  <span className="ask-questionnaire-option-copy">
+                    <strong>{option.label}</strong>
+                    <small>{option.description}</small>
+                  </span>
                 </button>
               );
             })}
             <div
-              className={`ask-questionnaire-option ask-questionnaire-custom${answer?.kind === "custom" ? " is-selected" : ""}`}
+              className={`ask-questionnaire-custom${answer?.kind === "custom" ? " is-selected" : ""}`}
               onMouseEnter={() => setHoveredOption("custom")}
               onMouseLeave={() => setHoveredOption(null)}
             >
-              <button
-                type="button"
-                className="ask-questionnaire-custom-trigger"
-                aria-pressed={answer?.kind === "custom"}
-                disabled={disabled}
-                onFocus={() => setHoveredOption("custom")}
-                onBlur={() => setHoveredOption(null)}
-                onClick={chooseCustom}
-              >
-                <span className="ask-questionnaire-option-marker">＋</span>
-                <span><strong>自由输入</strong><small>在当前选项行直接填写自己的回答</small></span>
-              </button>
-              {answer?.kind === "custom" && (
+              {answer?.kind === "custom" ? (
                 <input
                   autoFocus
                   aria-label={`${question.header} 自由输入`}
                   value={answer.value}
                   disabled={disabled}
-                  placeholder="输入后按 Enter 继续"
+                  onFocus={() => setHoveredOption("custom")}
+                  onBlur={() => setHoveredOption(null)}
                   onChange={(event) => updateAnswer({ kind: "custom", value: event.target.value })}
                   onKeyDown={(event) => {
                     if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
@@ -255,6 +247,16 @@ export function AskQuestionnaireDialog({
                     advanceCustom();
                   }}
                 />
+              ) : (
+                <button
+                  type="button"
+                  className="ask-questionnaire-custom-trigger"
+                  aria-pressed="false"
+                  disabled={disabled}
+                  onFocus={() => setHoveredOption("custom")}
+                  onBlur={() => setHoveredOption(null)}
+                  onClick={chooseCustom}
+                >输入你的答案</button>
               )}
             </div>
           </div>

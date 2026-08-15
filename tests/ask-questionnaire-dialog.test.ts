@@ -52,7 +52,7 @@ function request(id: string, method: "select" | "input", title: string, options?
   return { type: "extension_ui_request", id, method, title, options };
 }
 
-test("rich Ask dialog navigates questions and keeps custom input inside its option row", async () => {
+test("rich Ask dialog keeps choices compact and replaces the custom prompt in place", async () => {
   const dom = installDom();
   const { createRoot } = await import("react-dom/client");
   const root = createRoot(dom.window.document.querySelector("#root")!);
@@ -75,6 +75,20 @@ test("rich Ask dialog navigates questions and keeps custom input inside its opti
   assert.ok(originalFrame);
   assert.match(dom.window.document.body.textContent || "", /问题 1 \/ 2/);
   assert.equal(dom.window.document.querySelector<HTMLButtonElement>(".extension-dialog-actions .primary")?.disabled, true);
+  const optionCopy = dom.window.document.querySelector(".ask-questionnaire-option-copy");
+  assert.equal(optionCopy?.children[0]?.tagName, "STRONG");
+  assert.equal(optionCopy?.children[1]?.tagName, "SMALL");
+  assert.equal(
+    dom.window.document.querySelector(".ask-questionnaire-custom")?.textContent?.trim(),
+    "输入你的答案",
+  );
+  assert.equal(
+    dom.window.document.querySelector<HTMLButtonElement>(".ask-questionnaire-custom-trigger")?.textContent,
+    "输入你的答案",
+  );
+  assert.equal(dom.window.document.querySelector(".ask-questionnaire-custom-marker"), null);
+  assert.equal(dom.window.document.querySelector(".ask-questionnaire-custom input"), null);
+  assert.doesNotMatch(dom.window.document.body.textContent || "", /自由输入|在当前选项行/);
 
   await act(async () => dom.window.document.querySelector<HTMLButtonElement>(
     ".ask-questionnaire-custom-trigger",
@@ -83,6 +97,10 @@ test("rich Ask dialog navigates questions and keeps custom input inside its opti
     ".ask-questionnaire-custom input",
   )!;
   assert.ok(input);
+  assert.equal(input.value, "");
+  assert.equal(input.placeholder, "");
+  assert.equal(dom.window.document.querySelector(".ask-questionnaire-custom-trigger"), null);
+  assert.equal(dom.window.document.querySelectorAll(".ask-questionnaire-custom").length, 1);
   await act(async () => {
     Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value")
       ?.set?.call(input, "Keep it in the row");

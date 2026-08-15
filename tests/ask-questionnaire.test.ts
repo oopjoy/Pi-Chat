@@ -77,10 +77,15 @@ test("ask questionnaire submission maps the completed wizard back onto scalar RP
   });
 });
 
-test("questionnaire options expose hover and selected-state styling", () => {
+test("questionnaire options use one natural text flow and a stable inline custom row", () => {
   const css = readFileSync(new URL("../src/web/styles.css", import.meta.url), "utf8");
   assert.match(css, /button\.ask-questionnaire-option:hover:not\(:disabled\)/);
   assert.match(css, /\.ask-questionnaire-option\.is-selected/);
+  assert.match(css, /\.ask-questionnaire-option-copy \{[^}]*white-space: normal/);
+  assert.match(css, /\.ask-questionnaire-option-copy small \{ display: inline;/);
+  assert.match(css, /\.ask-questionnaire-custom \{[^}]*height: 42px/);
+  assert.match(css, /\.ask-questionnaire-custom-trigger \{[^}]*height: 30px/);
+  assert.match(css, /\.ask-questionnaire-custom input \{[^}]*height: 30px/);
 });
 
 test("custom answers use the sentinel and then answer the Package follow-up input", () => {
