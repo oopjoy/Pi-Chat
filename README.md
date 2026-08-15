@@ -61,7 +61,7 @@ Pi Chat 会原样承载 Pi RPC 的 `select`、`confirm`、`input` 与 `editor` E
 pi install npm:@juicesharp/rpiv-ask-user-question
 ```
 
-安装后对目标 Runtime 执行 `/reload`，或在没有进行中对话、队列及确认时正常重启 Pi Chat。原生 Pi 终端显示 Package 的完整多题 TUI；Pi Chat 通过其 RPC fallback 在同一个对话框框架内逐题切换选择或输入步骤，回答仍作为同一 Agent Turn 的工具结果返回，不会伪造新的用户 Prompt。多选在当前标量 RPC 协议下使用逗号分隔的选项编号。该 Package 是具有当前用户权限的第三方 Pi 扩展，不属于 Pi Chat 内置 Gate；安装前应审查并固定可信版本。
+安装后对目标 Runtime 执行 `/reload`，或在没有进行中对话、队列及确认时正常重启 Pi Chat。原生 Pi 终端显示 Package 的完整多题 TUI；Pi Chat 会从 `ask_user_question` 工具调用投影出同一份多题问卷：单选后自动进入下一题，多选保留“下一个”，自由输入直接展开在对应选项行并可按 Enter 前进，最后一题完成后才开放“提交”，同时保留“上一个”用于修改答案。提交时 Pi Chat 仍通过 Package 现有的 Session-scoped `select` / `input` RPC 请求逐步回送已确认答案，不会伪造新的用户 Prompt，也不会改变 request ID 或 Session/control authority。若页面在工具开始事件之后才恢复，无法重建完整问卷时会安全退回原生标量 RPC 对话框。该 Package 是具有当前用户权限的第三方 Pi 扩展，不属于 Pi Chat 内置 Gate；安装前应审查并固定可信版本。
 
 ## 开发
 

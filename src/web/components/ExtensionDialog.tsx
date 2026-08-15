@@ -51,7 +51,7 @@ export function describeGateRequest(request: ExtensionUiRequest): GateRequestDet
   return null;
 }
 
-function ExtensionDialogFrame({ gate, title, children, actions }: {
+export function ExtensionDialogFrame({ gate, title, children, actions }: {
   gate: boolean;
   title: string;
   children: ReactNode;

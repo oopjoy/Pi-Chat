@@ -844,11 +844,33 @@ details.conversation-process { display: block; padding: 0; }
 .extension-dialog-continuation > span { width: 22px; height: 22px; border: 2px solid var(--line-strong); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
 .extension-dialog-continuation p { margin: 0; }
 .extension-dialog-continuation-status { color: var(--muted); font-size: 12px; }
+.ask-questionnaire { display: grid; gap: 13px; }
+.ask-questionnaire-progress { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 11px; }
+.ask-questionnaire-progress span { padding: 3px 7px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-weight: 700; }
+.ask-questionnaire-progress strong { font-size: 11px; font-variant-numeric: tabular-nums; }
+.ask-questionnaire-options { display: grid; gap: 8px; }
+.ask-questionnaire-option { display: flex; width: 100%; align-items: flex-start; gap: 10px; padding: 10px 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-soft); color: var(--text); text-align: left; transition: border-color .12s ease, background-color .12s ease, box-shadow .12s ease; }
+button.ask-questionnaire-option { cursor: pointer; }
+.ask-questionnaire-custom:hover, button.ask-questionnaire-option:hover:not(:disabled) { border-color: color-mix(in srgb, var(--accent), var(--line) 58%); background: color-mix(in srgb, var(--surface-hover), var(--accent-soft) 28%); }
+.ask-questionnaire-option.is-selected { border-color: color-mix(in srgb, var(--accent), transparent 28%); background: color-mix(in srgb, var(--accent-soft), var(--surface) 24%); box-shadow: inset 3px 0 0 var(--accent); }
+.ask-questionnaire-option-marker { display: grid; width: 23px; height: 23px; flex: 0 0 23px; place-items: center; border: 1px solid var(--line-strong); border-radius: 7px; color: var(--muted); font-size: 11px; font-weight: 750; }
+.ask-questionnaire-option.is-selected .ask-questionnaire-option-marker { border-color: var(--accent); background: var(--accent); color: white; }
+.ask-questionnaire-option > span:last-child, .ask-questionnaire-custom-trigger > span:last-child { display: grid; min-width: 0; flex: 1; gap: 3px; }
+.ask-questionnaire-option strong { font-size: 12.5px; }
+.ask-questionnaire-option small { color: var(--muted); font-size: 10.5px; line-height: 1.45; }
+.ask-questionnaire-custom { display: grid; }
+.ask-questionnaire-custom-trigger { display: flex; width: 100%; align-items: flex-start; gap: 10px; padding: 0; border: 0; background: transparent; color: inherit; cursor: pointer; text-align: left; }
+.ask-questionnaire-custom input { margin-top: 9px; background: var(--surface); }
+.ask-questionnaire-preview { max-height: 180px; margin: 0; overflow: auto; padding: 10px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-soft); color: var(--text); white-space: pre-wrap; font: 10.5px/1.5 ui-monospace, Consolas, monospace; }
+.ask-questionnaire-error { margin: 0 !important; color: var(--danger) !important; font-size: 11px !important; }
 .dialog footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .dialog footer .primary { border-color: var(--accent); background: var(--accent); color: white; }
 .dialog footer .danger { border-color: var(--danger); background: var(--danger); color: white; }
 .extension-dialog .extension-dialog-actions { margin: 0; padding: 14px 18px 17px; border-top: 1px solid var(--line); }
 .extension-dialog-actions button { min-width: 88px; background: var(--surface); font-weight: 600; }
+.extension-dialog-actions button:not(.primary):hover:not(:disabled) { border-color: var(--line-strong); background: var(--surface-hover); }
+.extension-dialog-actions button.primary:hover:not(:disabled) { border-color: var(--accent-hover); background: var(--accent-hover); }
+.extension-dialog-actions button:disabled { cursor: default; opacity: .45; }
 .extension-dialog-actions .gate-block { border-color: color-mix(in srgb, var(--danger), transparent 45%); color: var(--danger); }
 .extension-dialog-actions .gate-allow { border-color: color-mix(in srgb, var(--accent), transparent 34%); color: var(--accent); }
 .extension-dialog-actions .gate-block:hover { background: color-mix(in srgb, var(--danger), transparent 94%); }
@@ -872,6 +894,7 @@ details.conversation-process { display: block; padding: 0; }
   .sidebar-restore,
   .sidebar-scrim { transition: none !important; animation: none !important; will-change: auto; }
   .extension-dialog-continuation > span { animation: none; }
+  .ask-questionnaire-option { transition: none; }
 }
 
 @media (max-width: 760px) {
@@ -902,6 +925,8 @@ details.conversation-process { display: block; padding: 0; }
 }
 
 @media (max-width: 460px) {
+  .extension-dialog .extension-dialog-actions { flex-wrap: wrap; padding-right: 12px; padding-left: 12px; }
+  .extension-dialog-actions button { min-width: 72px; flex: 1 1 72px; }
   .usage-pill:not(.composer-usage) { display: none; }
   .composer-usage { display: inline-flex; min-width: 66px; }
   .topbar-title { font-size: 12px; }

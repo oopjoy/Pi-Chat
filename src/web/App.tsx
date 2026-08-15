@@ -30,6 +30,7 @@ import type {
 } from "../shared/types";
 import { ApiRequestError, api } from "./api";
 import { AppShell } from "./components/AppShell";
+import { AskQuestionnaireDialog } from "./components/AskQuestionnaireDialog";
 import { ConversationPane } from "./components/ConversationPane";
 import { ComposerControls } from "./components/ComposerControls";
 import { EditDiffSidebar } from "./components/EditToolDiff";
@@ -56,6 +57,10 @@ import {
   activeSessionIdsFromEvent,
   applyActiveSessionIds,
 } from "./lib/active-sessions";
+import {
+  parseAskQuestionnaire,
+  type AskQuestionnairePlan,
+} from "./lib/ask-questionnaire";
 import { recentSessionWorkspaces } from "./lib/session-workspaces";
 import { adjacentUserMessageOffset } from "./lib/conversation-navigation";
 import { extensionExecutionNotice } from "./lib/extension-notice";
@@ -504,6 +509,9 @@ export function App() {
     runtimeStatus,
     control: viewControl,
   } = pane;
+  const [askQuestionnaires, setAskQuestionnaires] = useState<
+    Record<string, AskQuestionnairePlan>
+  >({});
   const localDraft = pane.identity.kind === "draft";
   const [eventSourceGeneration, setEventSourceGeneration] = useState(0);
   const [applicationLifecycle, setApplicationLifecycle] =
@@ -2649,6 +2657,7 @@ export function App() {
         sessionRunningOverridesRef.current.clear();
         setFailedSessionIds([]);
         setConfirmedCommands([]);
+        setAskQuestionnaires({});
         cancelledQueueIdsRef.current.clear();
         queueProjectionRevisionRef.current.clear();
         latestQueueProjectionRef.current.clear();
@@ -3087,7 +3096,16 @@ export function App() {
             });
         }
       } else if (type === "tool_execution_start") {
-        const status = `正在运行工具：${String(event.toolName || "unknown")}`;
+        const toolName = String(event.toolName || "unknown");
+        const status = `正在运行工具：${toolName}`;
+        if (eventSessionId && toolName === "ask_user_question") {
+          const questionnaire = parseAskQuestionnaire(event.toolCallId, event.args);
+          if (questionnaire)
+            setAskQuestionnaires((current) => ({
+              ...current,
+              [eventSessionId]: questionnaire,
+            }));
+        }
         if (eventSessionId) {
           // A tool invocation is authoritative active-turn evidence even when a
           // lagging get_state snapshot or a missed agent_start painted idle.
@@ -3113,6 +3131,14 @@ export function App() {
             toolStatus: status,
           });
       } else if (type === "tool_execution_end") {
+        if (eventSessionId && String(event.toolName || "") === "ask_user_question")
+          setAskQuestionnaires((current) => {
+            const active = current[eventSessionId];
+            if (!active || active.toolCallId !== String(event.toolCallId || "")) return current;
+            const next = { ...current };
+            delete next[eventSessionId];
+            return next;
+          });
         const status = `${String(event.toolName || "工具")} ${event.isError ? "执行失败" : "已完成，Pi 正在继续…"}`;
         // Current servers attach a run generation. If that generation had
         // already settled, the event fence above returned before this branch;
@@ -3193,6 +3219,13 @@ export function App() {
           }
         }
       } else if (type === "agent_settled") {
+        if (eventSessionId)
+          setAskQuestionnaires((current) => {
+            if (!current[eventSessionId]) return current;
+            const next = { ...current };
+            delete next[eventSessionId];
+            return next;
+          });
         if (eventSessionId && clearStoppingForSession(eventSessionId)) {
           setNotice((current) =>
             current === "已发送停止请求，Pi 正在结束当前操作" ? "" : current,
@@ -3911,6 +3944,13 @@ export function App() {
           patchSessionCache(eventSessionId, { sessionActivity: activity });
         }
       } else if (type === "pi_chat_process_error") {
+        if (eventSessionId)
+          setAskQuestionnaires((current) => {
+            if (!current[eventSessionId]) return current;
+            const next = { ...current };
+            delete next[eventSessionId];
+            return next;
+          });
         if (eventSessionId) {
           completedCompactionSessionIdsRef.current.delete(eventSessionId);
           clearStoppingForSession(eventSessionId);
@@ -6547,16 +6587,24 @@ export function App() {
     cancelled?: boolean;
     confirmed?: boolean;
     value?: string;
-  }) => {
-    if (buildIdentityMismatch) return;
+  }): Promise<boolean> => {
+    if (buildIdentityMismatch) return false;
     const submittedRequest = extensionRequest;
-    if (!submittedRequest) return;
+    if (!submittedRequest) return false;
     const sessionId =
       submittedRequest.piChatSessionId || viewedSessionIdRef.current;
     if (!sessionId) {
       setError("确认请求缺少会话标识，已拒绝发送");
-      return;
+      return false;
     }
+    const retryRequest = (candidate: ExtensionUiRequest | null | undefined) => {
+      if (
+        candidate &&
+        (candidate.method === "input" || candidate.method === "editor") &&
+        typeof body.value === "string"
+      ) return { ...candidate, prefill: body.value };
+      return candidate || null;
+    };
     // A response failure can arrive after A → B → A. Keep its recovery bound
     // to the exact pane that submitted the confirmation, not just its ID.
     const extensionAuthority = capturePaneAuthority(sessionId);
@@ -6571,25 +6619,31 @@ export function App() {
         id: submittedRequest.id,
         sessionId,
       });
+      return true;
     } catch (cause) {
+      let acceptedDespiteFailure = false;
       // Re-read the authoritative pending request. This distinguishes a real
       // delivery failure from a lost HTTP response after Pi already accepted it.
       try {
         const view = await api.viewSession(sessionId);
+        acceptedDespiteFailure =
+          !view.pendingExtensionRequest ||
+          view.pendingExtensionRequest.id !== submittedRequest.id;
         commitPaneIfCurrent(extensionAuthority, {
           type: "EXTENSION_REQUEST_CHANGED",
           sessionId,
-          request: view.pendingExtensionRequest || null,
+          request: retryRequest(view.pendingExtensionRequest),
         });
       } catch {
         commitPaneIfCurrent(extensionAuthority, {
           type: "EXTENSION_REQUEST_CHANGED",
           sessionId,
-          request: submittedRequest,
+          request: retryRequest(submittedRequest),
         });
       }
       if (paneAuthorityCanCommit(extensionAuthority))
         setError(cause instanceof Error ? cause.message : String(cause));
+      return acceptedDespiteFailure;
     }
   };
 
@@ -7444,13 +7498,31 @@ export function App() {
         onRename={(name) => void renameSession(name)}
         onDelete={() => void deleteSession()}
       />
-      <ExtensionDialog
-        request={extensionRequest}
-        sessionId={viewedSessionId}
-        continuationPending={toolStatus === "正在运行工具：ask_user_question"}
-        disabled={buildIdentityMismatch}
-        onRespond={(body) => void respondToExtension(body)}
-      />
+      {Object.entries(askQuestionnaires).map(([askSessionId, questionnaire]) => (
+        <AskQuestionnaireDialog
+          key={`${askSessionId}:${questionnaire.toolCallId}`}
+          plan={questionnaire}
+          request={askSessionId === viewedSessionId ? extensionRequest : null}
+          visible={askSessionId === viewedSessionId}
+          disabled={buildIdentityMismatch}
+          onRespond={respondToExtension}
+          onFallback={() => setAskQuestionnaires((current) => {
+            if (current[askSessionId]?.toolCallId !== questionnaire.toolCallId) return current;
+            const next = { ...current };
+            delete next[askSessionId];
+            return next;
+          })}
+        />
+      ))}
+      {!askQuestionnaires[viewedSessionId] && (
+        <ExtensionDialog
+          request={extensionRequest}
+          sessionId={viewedSessionId}
+          continuationPending={toolStatus === "正在运行工具：ask_user_question"}
+          disabled={buildIdentityMismatch}
+          onRespond={(body) => void respondToExtension(body)}
+        />
+      )}
       <EditDiffSidebar
         open={diffSidebarOpen}
         width={diffSidebarWidth}

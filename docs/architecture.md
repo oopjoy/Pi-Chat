@@ -191,6 +191,13 @@ Startup best-effort removes orphaned staging/previous/failed trees (unless a han
 - Idle empty drafts are reused within the same window; other windows never share them
 - A draft with real messages (including Extension commands) is committed into the session list before the next New
 
+### Ask questionnaire projection
+
+- `ask_user_question` remains a Pi Extension tool. Its `tool_execution_start.args.questions` supplies a bounded, validated browser projection of the already-admitted tool call; it does not create a second questionnaire protocol.
+- Pi Chat collects the complete multi-question draft locally, including previous/next navigation, inline custom answers, single-select auto-advance, multi-select review, previews, and final-submit gating.
+- Final submission is translated back onto the Package's existing ordered `select` / `input` requests. Request IDs, Session ownership, control checks, first-response authority, cancellation, and Runtime generation fencing remain with the existing Extension RPC path.
+- If the rich projection is unavailable (for example, a renderer attaches after the tool-start event), Pi Chat fails safely back to the ordinary scalar Extension dialog instead of warming or replacing the Runtime.
+
 ## Security posture
 
 - Loopback listen only

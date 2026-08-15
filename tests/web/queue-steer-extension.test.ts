@@ -1860,32 +1860,19 @@ test("ordinary tool Extension responses close without questionnaire continuity",
   }
 });
 
-test("ask custom answers replace select with input inside one live dialog frame", async () => {
+test("ask questionnaire collects all answers before bridging scalar RPC requests", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../../src/web/api");
   const { App } = await import("../../src/web/App");
   const restoreApi = captureApiSnapshot(api);
-  const options = [
-    "1. Minimal change — Preserve the current architecture.",
-    "2. Broader refactor — Simplify the surrounding ownership.",
-    "3. Type something.",
-  ];
-  const selectRequest = {
-    type: "extension_ui_request",
-    id: "ask-select",
-    method: "select",
-    title: "[Scope] Which implementation style?",
-    options,
-    piChatSessionId: activeId,
-  } as const;
   const responses: Array<Record<string, unknown>> = [];
   Object.assign(api, {
     bootstrap: async () => ({
       ...bootstrap,
       state: { ...bootstrap.state, isStreaming: true },
-      toolStatus: "正在运行工具：ask_user_question",
-      pendingExtensionRequest: selectRequest,
+      toolStatus: "",
+      pendingExtensionRequest: null,
     }),
     eventsUrl: () => "/api/events",
     markSessionViewed: async () => ({ viewing: activeId }),
@@ -1897,60 +1884,193 @@ test("ask custom answers replace select with input inside one live dialog frame"
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {
     await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.emitPi({
+        type: "tool_execution_start",
+        piChatSessionId: activeId,
+        toolCallId: "ask-tool",
+        toolName: "ask_user_question",
+        args: {
+          questions: [
+            {
+              question: "Which scope?",
+              header: "Scope",
+              options: [
+                { label: "Narrow", description: "Only this bug" },
+                { label: "Broad", description: "Related cleanup" },
+              ],
+              multiSelect: false,
+            },
+            {
+              question: "How should it look?",
+              header: "UX",
+              options: [
+                { label: "Compact", description: "Use less space" },
+                { label: "Detailed", description: "Show descriptions" },
+              ],
+              multiSelect: false,
+            },
+          ],
+        },
+      });
+      source.emitPi({
+        type: "extension_ui_request",
+        id: "ask-q1",
+        method: "select",
+        title: "[Scope] Which scope?",
+        options: ["1. Narrow — Only this bug", "2. Broad — Related cleanup", "3. Type something."],
+        piChatSessionId: activeId,
+      });
+    });
+
     const originalFrame = dom.window.document.querySelector("section.extension-dialog");
     assert.ok(originalFrame);
-    const optionButtons = [...dom.window.document.querySelectorAll<HTMLButtonElement>(
-      ".dialog-options button",
-    )];
-    await act(async () => optionButtons[2].click());
-    assert.deepEqual(responses, [{
-      id: selectRequest.id,
-      sessionId: activeId,
-      value: options[2],
-    }]);
-    assert.equal(dom.window.document.querySelector("section.extension-dialog"), originalFrame);
+    assert.match(dom.window.document.body.textContent || "", /问题 1 \/ 2/);
+    await act(async () => dom.window.document.querySelector<HTMLButtonElement>(
+      "button.ask-questionnaire-option",
+    )!.click());
+    assert.match(dom.window.document.body.textContent || "", /问题 2 \/ 2/);
+    assert.deepEqual(responses, [], "the scalar Package request waits for final questionnaire submission");
 
-    const source = FakeEventSource.instances.at(-1)!;
-    await act(async () => source.emitPi({
-      type: "pi_chat_extension_request_resolved",
-      piChatSessionId: activeId,
-      id: selectRequest.id,
-    }));
-    assert.equal(dom.window.document.querySelector("section.extension-dialog"), originalFrame);
-    assert.equal(dom.window.document.querySelectorAll(".dialog-backdrop").length, 1);
+    await act(async () => dom.window.document.querySelector<HTMLButtonElement>(
+      ".ask-questionnaire-custom-trigger",
+    )!.click());
+    const input = dom.window.document.querySelector<HTMLInputElement>(
+      ".ask-questionnaire-custom input",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value")
+        ?.set?.call(input, "Inline answer");
+      input.dispatchEvent(new dom.window.InputEvent("input", {
+        bubbles: true,
+        inputType: "insertText",
+        data: "Inline answer",
+      }));
+      input.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+    const submit = [...dom.window.document.querySelectorAll<HTMLButtonElement>(
+      ".extension-dialog-actions button",
+    )].find((button) => button.textContent === "提交")!;
+    assert.equal(submit.disabled, false);
+    await act(async () => submit.click());
+    assert.deepEqual(responses, [{
+      id: "ask-q1",
+      sessionId: activeId,
+      value: "1. Narrow — Only this bug",
+    }]);
 
     await act(async () => source.emitPi({
       type: "extension_ui_request",
-      id: "ask-input",
-      method: "input",
-      title: "[Scope] Which implementation style?\n\nType your answer:",
+      id: "ask-q2",
+      method: "select",
+      title: "[UX] How should it look?",
+      options: ["1. Compact — Use less space", "2. Detailed — Show descriptions", "3. Type something."],
       piChatSessionId: activeId,
     }));
-    assert.equal(dom.window.document.querySelector("section.extension-dialog"), originalFrame);
-    assert.ok(dom.window.document.querySelector<HTMLInputElement>("input"));
-    await act(async () => dom.window.document.querySelector<HTMLButtonElement>(
-      ".extension-dialog-actions .primary",
-    )!.click());
     assert.deepEqual(responses.at(-1), {
-      id: "ask-input",
+      id: "ask-q2",
       sessionId: activeId,
-      value: "",
+      value: "3. Type something.",
     });
+    await act(async () => source.emitPi({
+      type: "extension_ui_request",
+      id: "ask-q2-input",
+      method: "input",
+      title: "[UX] How should it look?\n\nType your answer:",
+      piChatSessionId: activeId,
+    }));
+    assert.deepEqual(responses.at(-1), {
+      id: "ask-q2-input",
+      sessionId: activeId,
+      value: "Inline answer",
+    });
+    assert.equal(dom.window.document.querySelector("section.extension-dialog"), originalFrame);
 
-    await act(async () => {
-      source.emitPi({
-        type: "pi_chat_extension_request_resolved",
-        piChatSessionId: activeId,
-        id: "ask-input",
-      });
-      source.emitPi({
-        type: "tool_execution_end",
-        piChatSessionId: activeId,
-        toolName: "ask_user_question",
-        isError: false,
-      });
-    });
+    await act(async () => source.emitPi({
+      type: "tool_execution_end",
+      piChatSessionId: activeId,
+      toolCallId: "ask-tool",
+      toolName: "ask_user_question",
+      isError: false,
+    }));
     assert.equal(dom.window.document.querySelector("section.extension-dialog"), null);
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
+test("server replacement clears a rich Ask projection and restores scalar fallback", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const scalarRequest = {
+    type: "extension_ui_request",
+    id: "replacement-select",
+    method: "select",
+    title: "[Scope] Which scope?",
+    options: ["1. Narrow — Only this bug", "2. Broad — Related cleanup", "3. Type something."],
+    piChatSessionId: activeId,
+  } as const;
+  let bootstrapCalls = 0;
+  Object.assign(api, {
+    bootstrap: async () => {
+      bootstrapCalls += 1;
+      return bootstrapCalls === 1
+        ? {
+          ...bootstrap,
+          workspaceEpoch: "epoch-a",
+          state: { ...bootstrap.state, isStreaming: true },
+          pendingExtensionRequest: null,
+        }
+        : {
+          ...bootstrap,
+          workspaceEpoch: "epoch-b",
+          state: { ...bootstrap.state, isStreaming: true },
+          toolStatus: "正在运行工具：ask_user_question",
+          pendingExtensionRequest: scalarRequest,
+        };
+    },
+    eventsUrl: () => "/api/events",
+    invalidateHandshake: () => undefined,
+    markSessionViewed: async () => ({ viewing: activeId }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => source.emitPi({
+      type: "tool_execution_start",
+      piChatSessionId: activeId,
+      toolCallId: "ask-before-replacement",
+      toolName: "ask_user_question",
+      args: {
+        questions: [{
+          question: "Which scope?",
+          header: "Scope",
+          options: [
+            { label: "Narrow", description: "Only this bug" },
+            { label: "Broad", description: "Related cleanup" },
+          ],
+          multiSelect: false,
+        }],
+      },
+    }));
+    assert.ok(dom.window.document.querySelector(".ask-questionnaire"));
+
+    await act(async () => source.dispatchEvent(new dom.window.MessageEvent("ready", {
+      data: JSON.stringify({
+        lifecycle: "idle",
+        piChatRunEpoch: "epoch-b",
+        workspaceEpoch: "epoch-b",
+      }),
+    }) as unknown as Event));
+    assert.ok(bootstrapCalls >= 2);
+    assert.equal(dom.window.document.querySelector(".ask-questionnaire"), null);
+    assert.equal(dom.window.document.querySelectorAll(".dialog-options button").length, 3);
   } finally {
     await act(async () => root.unmount());
     restoreApi();
