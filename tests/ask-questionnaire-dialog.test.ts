@@ -78,27 +78,27 @@ test("rich Ask dialog keeps choices compact and replaces the custom prompt in pl
   const optionCopy = dom.window.document.querySelector(".ask-questionnaire-option-copy");
   assert.equal(optionCopy?.children[0]?.tagName, "STRONG");
   assert.equal(optionCopy?.children[1]?.tagName, "SMALL");
-  assert.equal(
-    dom.window.document.querySelector(".ask-questionnaire-custom .ask-questionnaire-option-marker")?.textContent,
-    "3",
-  );
-  assert.equal(
-    dom.window.document.querySelector<HTMLButtonElement>(".ask-questionnaire-custom-trigger")?.textContent,
-    "输入你的答案",
-  );
+  const customTrigger = dom.window.document.querySelector<HTMLButtonElement>(
+    ".ask-questionnaire-custom-trigger",
+  )!;
+  const customMarker = customTrigger.querySelector<HTMLElement>(
+    ".ask-questionnaire-option-marker",
+  )!;
+  assert.equal(customMarker.textContent, "3");
+  assert.equal(customTrigger.textContent?.replace(/\s/g, ""), "3输入你的答案");
   assert.equal(dom.window.document.querySelector(".ask-questionnaire-custom input"), null);
   assert.doesNotMatch(dom.window.document.body.textContent || "", /自由输入|在当前选项行/);
 
-  await act(async () => dom.window.document.querySelector<HTMLButtonElement>(
-    ".ask-questionnaire-custom-trigger",
-  )!.click());
+  await act(async () => customMarker.click());
   const input = dom.window.document.querySelector<HTMLInputElement>(
     ".ask-questionnaire-custom input",
   )!;
   assert.ok(input);
   assert.equal(input.value, "");
   assert.equal(input.placeholder, "");
+  assert.equal(input.getAttribute("aria-label"), "3. Scope 自由输入");
   assert.equal(dom.window.document.querySelector(".ask-questionnaire-custom-trigger"), null);
+  assert.equal(dom.window.document.querySelector(".ask-questionnaire-custom")?.classList.contains("is-selected"), true);
   assert.equal(
     dom.window.document.querySelector(".ask-questionnaire-custom .ask-questionnaire-option-marker")?.textContent,
     "3",

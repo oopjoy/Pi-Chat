@@ -89,6 +89,7 @@ export function AskQuestionnaireDialog({
   const lastQuestion = activeIndex === plan.questions.length - 1;
   const currentComplete = askAnswerComplete(answer);
   const allComplete = answers.every(askAnswerComplete);
+  const customOptionNumber = question.options.length + 1;
   const selectedPreview = useMemo(() => {
     if (hoveredOption === "custom") return null;
     if (typeof hoveredOption === "number")
@@ -232,22 +233,24 @@ export function AskQuestionnaireDialog({
               onMouseEnter={() => setHoveredOption("custom")}
               onMouseLeave={() => setHoveredOption(null)}
             >
-              <span className="ask-questionnaire-option-marker">{question.options.length + 1}</span>
               {answer?.kind === "custom" ? (
-                <input
-                  autoFocus
-                  aria-label={`${question.header} 自由输入`}
-                  value={answer.value}
-                  disabled={disabled}
-                  onFocus={() => setHoveredOption("custom")}
-                  onBlur={() => setHoveredOption(null)}
-                  onChange={(event) => updateAnswer({ kind: "custom", value: event.target.value })}
-                  onKeyDown={(event) => {
-                    if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
-                    event.preventDefault();
-                    advanceCustom();
-                  }}
-                />
+                <>
+                  <span className="ask-questionnaire-option-marker">{customOptionNumber}</span>
+                  <input
+                    autoFocus
+                    aria-label={`${customOptionNumber}. ${question.header} 自由输入`}
+                    value={answer.value}
+                    disabled={disabled}
+                    onFocus={() => setHoveredOption("custom")}
+                    onBlur={() => setHoveredOption(null)}
+                    onChange={(event) => updateAnswer({ kind: "custom", value: event.target.value })}
+                    onKeyDown={(event) => {
+                      if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+                      event.preventDefault();
+                      advanceCustom();
+                    }}
+                  />
+                </>
               ) : (
                 <button
                   type="button"
@@ -257,7 +260,10 @@ export function AskQuestionnaireDialog({
                   onFocus={() => setHoveredOption("custom")}
                   onBlur={() => setHoveredOption(null)}
                   onClick={chooseCustom}
-                >输入你的答案</button>
+                >
+                  <span className="ask-questionnaire-option-marker">{customOptionNumber}</span>
+                  <span>输入你的答案</span>
+                </button>
               )}
             </div>
           </div>
