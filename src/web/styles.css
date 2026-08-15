@@ -952,3 +952,61 @@ button.ask-questionnaire-option:hover:not(:disabled) { background: var(--surface
   .composer-actions { width: 100%; justify-content: flex-end; }
   .queue-submit-button, .steer-submit-button { min-width: 44px; padding: 0 6px; }
 }
+
+/* Background Subagents are a read-only top-bar projection, never Session navigation. */
+.topbar-context { align-items: center; gap: 10px; overflow: visible; }
+.subagent-status-control { position: relative; flex: 0 0 auto; }
+.subagent-status-trigger { display: inline-flex; min-height: 28px; align-items: center; gap: 5px; padding: 3px 7px; border: 1px solid transparent; border-radius: 7px; outline: 0; background: transparent; color: var(--muted); cursor: pointer; font: inherit; font-size: 11px; white-space: nowrap; }
+.subagent-status-trigger:hover, .subagent-status-trigger:focus-visible, .subagent-status-trigger.is-open { border-color: var(--line); background: var(--surface-hover); color: var(--text); }
+.subagent-status-trigger:focus-visible { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent), transparent 72%); }
+.subagent-status-indicator { position: relative; display: grid; width: 16px; height: 16px; place-items: center; }
+.subagent-status-indicator svg { width: 15px; height: 15px; }
+.subagent-status-trigger.has-active .subagent-status-indicator::after, .subagent-status-trigger.has-attention .subagent-status-indicator::after { position: absolute; right: -1px; bottom: -1px; width: 6px; height: 6px; border: 1.5px solid var(--surface); border-radius: 50%; background: var(--accent); content: ""; }
+.subagent-status-trigger.has-attention .subagent-status-indicator::after { background: #d89318; }
+.subagent-status-chevron { width: 12px; height: 12px; transition: transform .14s ease; }
+.subagent-status-trigger.is-open .subagent-status-chevron { transform: rotate(180deg); }
+.subagent-status-tooltip { position: absolute; z-index: 42; top: calc(100% + 7px); left: 0; width: max-content; max-width: min(320px, calc(100vw - 24px)); padding: 6px 8px; transform: translateY(-2px); border: 1px solid var(--line-strong); border-radius: 7px; background: var(--text); color: var(--surface); box-shadow: var(--shadow); font-size: 10.5px; line-height: 1.45; opacity: 0; pointer-events: none; transition: opacity .12s ease, transform .12s ease; }
+.subagent-status-control:hover .subagent-status-tooltip, .subagent-status-control:focus-within .subagent-status-tooltip { transform: translateY(0); opacity: 1; }
+.subagent-status-popover { position: absolute; z-index: 45; top: calc(100% + 7px); left: 0; display: flex; width: min(390px, calc(100vw - 24px)); max-height: min(560px, calc(100dvh - 92px)); flex-direction: column; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 12px; outline: 0; background: var(--surface); box-shadow: 0 16px 40px rgba(20, 32, 52, .2); color: var(--text); }
+.subagent-status-popover:focus-visible { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent), transparent 72%), 0 16px 40px rgba(20, 32, 52, .2); }
+.subagent-status-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 12px 9px; border-bottom: 1px solid var(--line); }
+.subagent-status-heading strong { font-size: 12px; }
+.subagent-status-heading span { color: var(--muted); font-size: 10px; }
+.subagent-status-list { min-height: 0; overflow: auto; padding: 4px; }
+.subagent-status-row { border-radius: 8px; }
+.subagent-status-row > summary { display: flex; min-height: 52px; align-items: flex-start; gap: 8px; padding: 8px; border-radius: 8px; outline: 0; cursor: pointer; list-style: none; }
+.subagent-status-row > summary::-webkit-details-marker { display: none; }
+.subagent-status-row > summary:hover, .subagent-status-row > summary:focus-visible, .subagent-status-row[open] > summary { background: var(--surface-hover); }
+.subagent-status-row > summary:focus-visible { box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent), transparent 70%); }
+.subagent-status-dot { width: 8px; height: 8px; flex: 0 0 auto; margin-top: 5px; border-radius: 50%; background: var(--muted); }
+.subagent-status-row.is-running .subagent-status-dot { background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent), transparent 82%); animation: session-pulse 1.25s ease-in-out infinite; }
+.subagent-status-row.is-attention .subagent-status-dot { background: #d89318; box-shadow: 0 0 0 3px color-mix(in srgb, #d89318, transparent 82%); }
+.subagent-status-row.is-complete .subagent-status-dot { background: #239c5a; }
+.subagent-status-row.is-failed .subagent-status-dot { background: var(--danger); }
+.subagent-status-main { display: flex; min-width: 0; flex: 1; flex-direction: column; }
+.subagent-status-main strong { overflow: hidden; font-size: 11.5px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.subagent-status-main span, .subagent-status-label { color: var(--muted); font-size: 10px; line-height: 1.55; }
+.subagent-status-label { flex: 0 0 auto; }
+.subagent-status-row.is-running .subagent-status-label { color: var(--accent); }
+.subagent-status-row.is-attention .subagent-status-label { color: #b87505; }
+.subagent-status-row.is-failed .subagent-status-label { color: var(--danger); }
+.subagent-status-detail { display: grid; gap: 4px; margin: 0 8px 7px 24px; padding: 7px 8px; border-left: 2px solid var(--line); color: var(--muted); font-size: 10px; line-height: 1.5; }
+.subagent-status-truncated, .subagent-status-authority { margin: 0; padding: 8px 11px; border-top: 1px solid var(--line); color: var(--muted); font-size: 10px; line-height: 1.5; }
+.subagent-status-authority.is-important { background: color-mix(in srgb, #d89318, transparent 92%); color: color-mix(in srgb, #b87505, var(--text) 25%); font-weight: 650; }
+
+@media (max-width: 640px) {
+  .topbar-context { gap: 5px; }
+  .subagent-status-trigger { padding-inline: 5px; }
+  .subagent-status-popover { position: fixed; top: 52px; right: 8px; left: 8px; width: auto; max-height: calc(100dvh - 64px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .subagent-status-chevron, .subagent-status-tooltip { transition: none; }
+  .subagent-status-row.is-running .subagent-status-dot { animation: none; }
+}
+
+@media (forced-colors: active) {
+  .subagent-status-trigger, .subagent-status-popover, .subagent-status-row > summary { forced-color-adjust: auto; }
+  .subagent-status-dot, .subagent-status-trigger.has-active .subagent-status-indicator::after, .subagent-status-trigger.has-attention .subagent-status-indicator::after { border: 1px solid CanvasText; background: CanvasText; box-shadow: none; }
+  .subagent-status-row.is-attention .subagent-status-dot, .subagent-status-row.is-failed .subagent-status-dot { background: Highlight; }
+}

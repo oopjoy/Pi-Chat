@@ -80,6 +80,7 @@ measure is fewer writable pane authorities and fewer async pane-write paths.
 6. Off-screen Session events update `SessionViewCache` and inventory state, but do not update the visible pane reducer.
 7. Session rename/delete reconciliation, deletion tombstones, and fallback selection remain outside `SessionInventory` presentation until their ownership is migrated as one unit.
 8. Reducer tests assert state transitions and invariants. They must not read implementation source or lock JSX/CSS shape.
+9. Background Subagent status is an independent read-only TopBar projection owned by `use-background-subagents.ts` and `SubagentStatusControl.tsx`. It is keyed by the committed Session ID, aborts on navigation/unmount, and never enters the Conversation reducer, Session inventory, Runtime readiness, Queue, Steer, Gate, or control-owner authorities.
 
 ## Target Domains
 

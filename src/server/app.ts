@@ -11,6 +11,7 @@ import { compareSessionsByLastUserPrompt } from "../shared/session-order.js";
 import { shouldRetainStateDiagnosticEvent } from "../shared/state-diagnostics.js";
 import type {
   ApplicationLifecycle,
+  BackgroundSubagentSnapshot,
   BootstrapData,
   BuildIdentity,
   ExtensionUiRequest,
@@ -133,6 +134,8 @@ import {
 } from "./runtime-event-transition.js";
 import { handleBootstrapRoute } from "./routes/bootstrap.js";
 import { handleSessionsReadRoute } from "./routes/sessions-read.js";
+import { handleSubagentsReadRoute } from "./routes/subagents-read.js";
+import { SubagentStatusProvider } from "./subagent-status-provider.js";
 import { apiRouteAdmission } from "./api-route-admission.js";
 
 export {
@@ -312,6 +315,7 @@ export class PiChatApp {
   private workspaceRevision = 0;
   /** Primary's true process cwd never follows mutable future-draft defaults. */
   private readonly primaryRuntimeCwd: string;
+  private readonly subagentStatuses = new SubagentStatusProvider();
   private activeSessionId = "";
   private activeSessionPath: string | undefined;
   /** A Primary event is usable only after get_state bound this specific child to this Session. */
@@ -4414,7 +4418,8 @@ export class PiChatApp {
     response: ServerResponse,
     url: URL,
   ): Promise<void> {
-    const traceHttpRequest = url.pathname !== "/api/diagnostics/snapshot";
+    const traceHttpRequest = url.pathname !== "/api/diagnostics/snapshot"
+      && !/^\/api\/sessions\/[a-f0-9]{20}\/background-subagents$/.test(url.pathname);
     const diagnosticStartedAt = this.now();
     let diagnosticEnded = false;
     if (traceHttpRequest) {
@@ -4538,6 +4543,15 @@ export class PiChatApp {
     return { ...result, applicationLifecycle: this.applicationLifecycle };
   }
 
+  private async backgroundSubagentsRoute(sessionId: string): Promise<BackgroundSubagentSnapshot | null> {
+    const runtime = this.runtimePool.get(sessionId);
+    const path = (sessionId === this.activeSessionId
+      ? this.activeSessionPath || this.lastPrimaryState.sessionFile
+      : runtime?.sessionPath) || this.options.sessions.pathForId(sessionId);
+    if (!path) return null;
+    return this.subagentStatuses.listForParentSession(path);
+  }
+
   private async sessionViewRoute(input: {
     sessionId: string;
     clientId: string;
@@ -4607,6 +4621,15 @@ export class PiChatApp {
         response,
         url,
         clientId,
+      )
+    )
+      return;
+    if (
+      await handleSubagentsReadRoute(
+        { backgroundSubagents: (sessionId) => this.backgroundSubagentsRoute(sessionId) },
+        request,
+        response,
+        url,
       )
     )
       return;

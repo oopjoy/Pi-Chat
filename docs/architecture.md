@@ -77,6 +77,8 @@ Current ownership still centers on `src/server/app.ts` (`PiChatApp`), with progr
 | `stream-observability.ts` | Bounded aggregate counters for hot SseHub `message_update` transport outcomes, including no-client, oversized-substitute, and write-error evidence; emits only checkpoint/terminal summaries and owns no delivery authority |
 | `routes/bootstrap.ts` | Health, handshake, bootstrap HTTP parsing/serialization through explicit App capabilities |
 | `routes/sessions-read.ts` | Read-only Session list/view HTTP parsing/serialization through explicit App capabilities |
+| `routes/subagents-read.ts` | GET-only background-Subagent projection for one exact Session ID; no control or Runtime capability |
+| `subagent-status-provider.ts` | Fail-closed, bounded parser/provider for the installed package user-temp status contract; exact parent JSONL path scoping and safe process-local aliases only |
 | `api-route-admission.ts` | Pure lifecycle admission classification and prompt body-size policy |
 
 ### Extraction order
@@ -124,6 +126,8 @@ The step 3 ownership boundary and staged migration are defined in [`frontend-sta
 | `App.tsx` | UI state and business mapping of events |
 | `hooks/use-pi-event-source.ts` | EventSource lifecycle |
 | `hooks/use-live-message.ts` | Stream throttle |
+| `hooks/use-background-subagents.ts` | Abortable Session-scoped read-only polling; 2s foreground and slower hidden-page cadence |
+| `components/SubagentStatusControl.tsx` | Accessible top-bar trigger/popover for safe background-step projections; no child navigation or controls |
 | `lib/pi-events.ts` | Event parsing |
 | `lib/session-view-cache.ts` | Client-side view LRU |
 | `lib/active-sessions.ts` | Writable/active session helpers |
@@ -207,4 +211,5 @@ Startup best-effort removes orphaned staging/previous/failed trees (unless a han
 - Strict Host / Origin checks
 - System Gate is installed and self-healed; not a user-removable ordinary extension
 - No public network deployment story in 0.4.x
+- Background Subagent visibility is an observation-only filesystem projection. It resolves the currently viewed Session through exact SessionIndex/owned-Runtime JSONL identity, never cwd; reads only regular non-symlink `status.json` files under the exact current-user package temp root and UUID directories; enforces count, age, and byte bounds; rejects malformed/unknown state; and returns only process-local aliases, allowlisted lifecycle/activity labels, elapsed/update age, and bounded numeric counts. It never warms a Runtime, writes Pi JSONL, creates a lifecycle lease, exposes child transcripts, or supplies spawn/steer/resume/interrupt/stop controls.
 - State diagnostics is always-on, loopback-guarded, memory-only, age/count/byte bounded, and closed-schema redacted. Unknown event pairs and detail keys are dropped, API routes are canonicalized to known static/dynamic templates, and unknown enum-like values become `unknown`, so attacker-, extension-, or model-controlled strings cannot survive under an innocuous key. Any authenticated currently registered Pi Chat page may read the shared process snapshot; export does not start, stop, reset, or own the recorder, and page closure changes no diagnostic lifecycle. The browser combines that process lane with only its own page-local lane and replaces stable Session IDs and Prompt correlations with per-export aliases. Queued prompts reuse the scheduler-owned Queue UUID already exposed by existing queue APIs; immediate ordinary prompts receive a server-generated UUID that stays in memory. Prompt correlation observes admission, Queue/RPC delivery, provenance-validated Runtime lifecycle, and the post-settlement FIFO barrier only; it never enters Pi or Session JSONL and is never consulted for scheduling or UI state. Structural state metadata and selected SSE transport outcomes are retained; request tokens, headers, prompt content, transcript/draft content, images, paths, secrets, raw errors, stacks, and client identities are excluded

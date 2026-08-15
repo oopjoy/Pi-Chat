@@ -68,6 +68,14 @@ export function ChevronRightIcon(props: IconProps) {
   return <LineIcon {...props}><path d="m9 5 7 7-7 7" /></LineIcon>;
 }
 
+export function ChevronDownIcon(props: IconProps) {
+  return <LineIcon {...props}><path d="m5 9 7 7 7-7" /></LineIcon>;
+}
+
+export function SubagentsIcon(props: IconProps) {
+  return <LineIcon {...props}><circle cx="9" cy="8" r="3" /><circle cx="17" cy="10" r="2.25" /><path d="M3.8 19c.55-3.4 2.25-5.1 5.2-5.1s4.65 1.7 5.2 5.1M14.2 14.5c2.95-.55 5 .85 5.8 3.8" /></LineIcon>;
+}
+
 export function ChevronUpIcon(props: IconProps) {
   return <LineIcon {...props}><path d="m5 15 7-7 7 7" /></LineIcon>;
 }

@@ -1,5 +1,5 @@
 import type { ServerStateDiagnosticSnapshot } from "../shared/state-diagnostics";
-import type { BootstrapData, BootstrapHandshakeData, ExtensionResource, GateMode, InitialPromptData, ModelInfo, PackageResource, PromptDelivery, PromptImage, QueuedPrompt, ResourceResponse, SessionDirectorySummary, SessionRuntimeReadyData, SessionSummary, SessionViewData, SkillResource, ThinkingLevel } from "../shared/types";
+import type { BackgroundSubagentSnapshot, BootstrapData, BootstrapHandshakeData, ExtensionResource, GateMode, InitialPromptData, ModelInfo, PackageResource, PromptDelivery, PromptImage, QueuedPrompt, ResourceResponse, SessionDirectorySummary, SessionRuntimeReadyData, SessionSummary, SessionViewData, SkillResource, ThinkingLevel } from "../shared/types";
 import { recordBrowserStateDiagnostic } from "./lib/state-diagnostics";
 
 export type ExtensionResponseInput = {
@@ -120,11 +120,12 @@ async function request<T>(
   options?: RequestInit,
   timeoutMs = API_TIMEOUT_MS,
   acceptResponseToken = true,
+  traceDiagnostic = true,
 ): Promise<T> {
   const requestGeneration = connectionGeneration;
   const diagnosticStartedAt = performance.now();
   const diagnosticRoute = new URL(path, "http://127.0.0.1").pathname;
-  recordBrowserStateDiagnostic("http", "request-start", {
+  if (traceDiagnostic) recordBrowserStateDiagnostic("http", "request-start", {
     details: { method: options?.method || "GET", route: diagnosticRoute },
   });
   let response: Response;
@@ -141,7 +142,7 @@ async function request<T>(
       },
     });
   } catch (cause) {
-    recordBrowserStateDiagnostic("http", "request-error", {
+    if (traceDiagnostic) recordBrowserStateDiagnostic("http", "request-error", {
       details: {
         method: options?.method || "GET",
         route: diagnosticRoute,
@@ -160,7 +161,7 @@ async function request<T>(
   // guarded startup token required to subscribe to lifecycle SSE.
   if (acceptResponseToken && requestGeneration === connectionGeneration)
     storeRequestToken(value.requestToken);
-  recordBrowserStateDiagnostic("http", "request-end", {
+  if (traceDiagnostic) recordBrowserStateDiagnostic("http", "request-end", {
     details: {
       method: options?.method || "GET",
       route: diagnosticRoute,
@@ -283,6 +284,8 @@ export const api = {
     }),
   }, PROMPT_PREPARE_TIMEOUT_MS),
   warmSession: (id: string) => request<SessionRuntimeReadyData>(`/api/sessions/${id}/warm`, { method: "POST" }),
+  backgroundSubagents: (id: string, signal?: AbortSignal) =>
+    request<BackgroundSubagentSnapshot>(`/api/sessions/${id}/background-subagents`, { signal }, API_TIMEOUT_MS, true, false),
   viewSession: (id: string, turns?: number, options: { fast?: boolean; signal?: AbortSignal } = {}) => {
     const query = new URLSearchParams();
     if (turns) query.set("turns", String(turns));

@@ -29,6 +29,7 @@ test("session-body routes parse and validate before acquiring a lifecycle lease"
 
 test("route admission preserves lifecycle and read exclusions", () => {
   assert.deepEqual(route("GET", "/api/sessions"), { bodyBeforeMutationLease: false, validateSessionId: false, ordinaryMutation: false });
+  assert.deepEqual(route("GET", "/api/sessions/0123456789abcdefabcd/background-subagents"), { bodyBeforeMutationLease: false, validateSessionId: false, ordinaryMutation: false });
   assert.deepEqual(route("POST", "/api/restart"), { bodyBeforeMutationLease: false, validateSessionId: false, ordinaryMutation: false });
   assert.deepEqual(route("POST", "/api/workspace/set"), { bodyBeforeMutationLease: false, validateSessionId: false, ordinaryMutation: false });
   assert.deepEqual(route("POST", "/api/resources/browse"), { bodyBeforeMutationLease: false, validateSessionId: false, ordinaryMutation: false });

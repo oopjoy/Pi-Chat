@@ -1,6 +1,8 @@
 import { PanelRightIcon, SettingsIcon } from "./Icons";
+import { SubagentStatusControl } from "./SubagentStatusControl";
 
-export function TopBar({ conversationName, workspacePath, buildIdentity, settingsOpen, onOpenSettings, diffSidebarOpen, onToggleDiffSidebar }: {
+export function TopBar({ sessionId, conversationName, workspacePath, buildIdentity, settingsOpen, onOpenSettings, diffSidebarOpen, onToggleDiffSidebar }: {
+  sessionId: string;
   conversationName: string;
   workspacePath: string;
   /** Compact, non-secret build diagnostic used to identify stale Web bundles. */
@@ -14,6 +16,7 @@ export function TopBar({ conversationName, workspacePath, buildIdentity, setting
     <header className="topbar">
       <div className="topbar-context" title={`当前对话：${conversationName}\n工作路径：${workspacePath}\n${buildIdentity}`}>
         <strong className="topbar-title">{conversationName}</strong>
+        <SubagentStatusControl sessionId={sessionId} />
       </div>
       <div className="topbar-controls">
         <button type="button" className={`diff-sidebar-toggle${diffSidebarOpen ? " is-open" : ""}`} onClick={onToggleDiffSidebar} aria-label={diffSidebarOpen ? "收起 Diff 侧栏" : "展开 Diff 侧栏"} aria-pressed={diffSidebarOpen} title={diffSidebarOpen ? "收起修改对比侧栏" : "展开修改对比侧栏"}>
