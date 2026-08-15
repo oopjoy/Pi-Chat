@@ -157,7 +157,7 @@ test("session message reader follows only the current JSONL branch", async () =>
   }
 });
 
-test("an intercom custom message stays visible as a read-only process boundary", async () => {
+test("an intercom custom message stays visible as a read-only timeline boundary", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-intercom-history-"));
   try {
     const path = join(root, "history.jsonl");

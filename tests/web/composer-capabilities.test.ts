@@ -1516,10 +1516,16 @@ test("an authoritative stopped Steer rejection settles the stale Composer and re
       dom.window.document.querySelector(".message-generated-at"),
       "the authoritative persisted view restores the terminal answer timestamp",
     );
+    const coordination = dom.window.document.querySelector(".coordination-message");
     assert.match(
-      dom.window.document.querySelector(".timeline")?.textContent || "",
-      /intercom delivery persisted after the answer/,
-      "the same reconciliation exposes persisted coordination records without keeping the Composer busy",
+      coordination?.textContent || "",
+      /协调消息.*peer-session.*intercom delivery persisted after the answer/s,
+      "the persisted delivery is a headed read-only timeline boundary rather than hidden assistant process work",
+    );
+    assert.doesNotMatch(
+      dom.window.document.querySelector(".conversation-process")?.textContent || "",
+      /协调/,
+      "coordination input never becomes a collapsed step of an assistant answer",
     );
     assert.match(
       dom.window.document.querySelector(".app-toast.error")?.textContent || "",

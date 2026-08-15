@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { JSDOM } from "jsdom";
 import { LOCAL_COORDINATION_ROLE, type PiMessage } from "../src/shared/types";
+import { CoordinationMessage } from "../src/web/components/CoordinationMessage";
 import { ConversationProcess, toolLabel } from "../src/web/components/ConversationProcess";
 import { EditDiffSidebar } from "../src/web/components/EditToolDiff";
 import { groupConversation } from "../src/web/lib/conversation-process";
@@ -110,33 +111,54 @@ test("does not create a process for ordinary user and assistant messages", () =>
   assert.ok(items.every((item) => item.kind === "message"));
 });
 
-test("a local coordination notice remains in the process layer before following tools", () => {
+test("a local coordination notice is a standalone input boundary before following tools", () => {
+  const coordination: PiMessage = {
+    role: LOCAL_COORDINATION_ROLE,
+    localCoordination: { source: "chat333" },
+    content: "Please review the next change",
+    timestamp: 2,
+  };
   const items = groupConversation([
     { role: "assistant", content: "Earlier result", timestamp: 1 },
-    { role: LOCAL_COORDINATION_ROLE, localCoordination: { source: "subagent-result" }, content: "Run: 35f640a2\nChildren: 4 completed\nOutputs: 4 present", timestamp: 2 },
+    coordination,
     { role: "assistant", content: [{ type: "toolCall", id: "read-after-notice", name: "read", arguments: {} }], timestamp: 3 },
   ]);
-  assert.deepEqual(items.map((item) => item.kind), ["message", "process"]);
-  assert.equal(items[1]?.kind, "process");
-  if (items[1]?.kind === "process") {
-    assert.equal(items[1].entries[0]?.kind, "coordination");
-    assert.deepEqual(items[1].entries[0], { kind: "coordination", source: "subagent-result", summary: "4 个子任务完成 · 有 4 份输出", text: "Run: 35f640a2\nChildren: 4 completed\nOutputs: 4 present" });
-  }
+  assert.deepEqual(items.map((item) => item.kind), ["message", "coordination", "process"]);
+  assert.equal(items[1]?.kind, "coordination");
+  if (items[1]?.kind === "coordination") assert.equal(items[1].message, coordination);
+  if (items[2]?.kind !== "process") throw new Error("Expected following process");
+  assert.equal(items[2].entries.some((entry) => entry.kind === "thinking"), false);
+  assert.equal(items[2].entries.filter((entry) => entry.kind === "tool").length, 1);
 });
 
-test("coordination events are compact and collapsed until their process details open", () => {
-  const html = renderToStaticMarkup(createElement(ConversationProcess, { entries: [{
-    kind: "coordination",
-    source: "subagent-result",
-    summary: "4 个子任务完成 · 有 4 份输出",
-    text: "Output artifact: C:\\Users\\opjoy\\.pi-subagents\\artifacts\\run.md",
-  }] }));
-  assert.match(html, /^<details class="conversation-process"/);
-  assert.doesNotMatch(html, /^<details[^>]*\sopen(?:=|\s|>)/);
-  assert.match(html, /本地协调 · subagent-result/);
-  assert.match(html, /4 个子任务完成 · 有 4 份输出/);
-  assert.match(html, /<details class="process-entry process-coordination"/);
-  assert.match(html, /Output artifact: C:\\Users\\opjoy\\.pi-subagents\\artifacts\\run\.md/);
+test("coordination input is visibly headed instead of hiding inside process details", () => {
+  const html = renderToStaticMarkup(createElement(CoordinationMessage, { message: {
+    role: LOCAL_COORDINATION_ROLE,
+    localCoordination: { source: "chat333" },
+    content: "Please review the next change",
+    timestamp: new Date("2026-08-15T07:12:48Z").getTime(),
+  } }));
+  assert.match(html, /^<article class="coordination-message"/);
+  assert.match(html, /协调消息/);
+  assert.match(html, /chat333/);
+  assert.match(html, /Please review the next change/);
+  assert.doesNotMatch(html, /conversation-process/);
+  assert.doesNotMatch(html, /<details/);
+});
+
+test("coordination splits assistant work so the following answer cannot appear headless", () => {
+  const items = groupConversation([
+    { role: "assistant", provider: "test", model: "model-a", timestamp: 1, content: [
+      { type: "thinking", thinking: "before coordination" },
+      { type: "toolCall", id: "before", name: "read", arguments: {} },
+    ] },
+    { role: LOCAL_COORDINATION_ROLE, localCoordination: { source: "chat333" }, content: "New instruction", timestamp: 2 },
+    { role: "assistant", provider: "test", model: "model-a", content: "Acknowledged", timestamp: 3 },
+  ]);
+  assert.deepEqual(items.map((item) => item.kind), ["process", "coordination", "message"]);
+  if (items[0]?.kind !== "process" || items[2]?.kind !== "message") throw new Error("Expected process, coordination, answer");
+  assert.equal(items[0].assistantHeader?.timestamp, 1);
+  assert.equal(items[2].hideAssistantMetadata, undefined);
 });
 
 test("native system messages do not become visible process boundaries", () => {

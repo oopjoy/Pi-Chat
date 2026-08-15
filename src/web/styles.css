@@ -412,6 +412,15 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .welcome p { max-width: 520px; margin: 0; font-size: 14px; line-height: 1.7; }
 
 .message { margin: 0 0 18px; }
+.coordination-message { margin: 3px 0 18px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--accent), transparent 72%); border-left: 3px solid color-mix(in srgb, var(--accent), transparent 28%); border-radius: 9px; background: color-mix(in srgb, var(--accent-soft), var(--surface) 58%); }
+.coordination-message > header { display: flex; min-height: 20px; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 6px; color: var(--muted); font-family: var(--app-font); font-size: 11px; }
+.coordination-message-title { display: inline-flex; min-width: 0; align-items: center; gap: 6px; }
+.coordination-message-title strong { color: var(--text); font-size: 11.5px; font-weight: 750; }
+.coordination-message-title > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.coordination-message-icon { position: relative; width: 12px; height: 12px; flex: 0 0 auto; border: 1.5px solid var(--accent); border-radius: 50%; }
+.coordination-message-icon::after { position: absolute; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); content: ""; inset: 2.5px; }
+.coordination-message time { flex: 0 0 auto; color: var(--muted); }
+.coordination-message-content { color: var(--text); font-family: var(--reading-font); font-size: calc(var(--reading-font-size) - 1px); line-height: 1.62; white-space: pre-wrap; overflow-wrap: anywhere; }
 .message > header, .message-assistant-header { display: flex; align-items: center; min-height: 22px; gap: 8px; margin-bottom: 2px; }
 .message-assistant-header { justify-content: flex-start; font-family: var(--app-font); }
 .message-role { font-size: 12px; font-weight: 750; letter-spacing: .02em; }
@@ -518,12 +527,6 @@ details.conversation-process { display: block; padding: 0; }
 .process-entry:hover, .process-entry[open] { border-color: var(--line); }
 .process-entry.is-error { color: var(--danger); }
 .process-entry > summary .process-status-icon { width: 13px; height: 13px; }
-.process-coordination { color: var(--muted); }
-.process-coordination-icon { border: 1.5px solid currentColor; border-radius: 50%; opacity: .72; }
-.process-coordination .process-summary-label { gap: 6px; }
-.process-coordination em { min-width: 0; overflow: hidden; color: inherit; font-size: inherit; font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
-.process-coordination-detail { padding: 0 7px 7px; }
-.process-coordination-detail pre { max-height: 340px; margin: 0; overflow: auto; padding: 9px 10px; border-radius: 5px; background: var(--code-bg); color: var(--code-text); white-space: pre-wrap; overflow-wrap: anywhere; font: 12.5px/1.62 ui-monospace, Consolas, monospace; }
 .process-tool-detail { display: grid; gap: 7px; padding: 0 7px 7px; }
 .process-tool-detail section { overflow: hidden; border-radius: 5px; background: var(--code-bg); color: var(--code-text); }
 .process-tool-detail strong { display: block; padding: 4px 7px; border-bottom: 1px solid var(--code-border); background: var(--code-head-bg); color: var(--code-head-text); font-size: 9px; font-weight: 700; }

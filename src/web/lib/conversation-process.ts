@@ -5,11 +5,11 @@ import { editDiffFromToolCall, type ToolEditDiff } from "./tool-edit-diff";
 export type ProcessEntry =
   | { kind: "thinking"; text: string }
   | { kind: "note"; text: string }
-  | { kind: "coordination"; source?: string; summary: string; text: string }
   | { kind: "tool"; id?: string; name: string; arguments?: string; editDiff?: ToolEditDiff; result?: string; completed?: boolean; isError?: boolean };
 
 export type ConversationItem =
   | { kind: "message"; message: PiMessage; key: string; hideAssistantMetadata?: boolean }
+  | { kind: "coordination"; message: PiMessage; key: string }
   | { kind: "process"; entries: ProcessEntry[]; key: string; assistantHeader?: PiMessage };
 
 /**
@@ -144,17 +144,6 @@ function toolResultText(message: PiMessage): string | undefined {
   return detail(text);
 }
 
-function coordinationSummary(text: string): string {
-  const children = /(?:^|\n)Children:\s*(\d+)\s+completed\b/im.exec(text)?.[1];
-  const outputs = /(?:^|\n)Outputs:\s*(\d+)\s+present\b/im.exec(text)?.[1];
-  const parts: string[] = [];
-  if (children) parts.push(`${children} 个子任务完成`);
-  if (outputs) parts.push(`有 ${outputs} 份输出`);
-  if (parts.length) return parts.join(" · ");
-  const status = /(?:^|\n)Process status:\s*([^\r\n]+)/im.exec(text)?.[1]?.trim();
-  return status ? `状态：${status}` : "协调消息";
-}
-
 function processFromMessage(message: PiMessage): { entries: ProcessEntry[]; visibleMessage?: PiMessage } {
   if (message.role === "toolResult") {
     const result = toolResultText(message);
@@ -170,14 +159,6 @@ function processFromMessage(message: PiMessage): { entries: ProcessEntry[]; visi
         isError: message.isError === true,
       }],
     };
-  }
-  if (message.role === LOCAL_COORDINATION_ROLE) {
-    const text = blocks(message)
-      .filter((block): block is PiContentBlock & { text: string } => block.type === "text" && typeof block.text === "string")
-      .map((block) => block.text)
-      .join("\n")
-      .trim();
-    return text ? { entries: [{ kind: "coordination", source: message.localCoordination?.source, summary: coordinationSummary(text), text }] } : { entries: [] };
   }
   // Pi persists metadata/custom records alongside chat messages. They have no
   // chat renderer and may legitimately omit `content`; keep them out of the
@@ -302,6 +283,15 @@ export function groupConversation(messages: PiMessage[], options: { liveMessage?
   const groupedMessages = withLiveAssistantSnapshot(messages, options.liveMessage);
   for (let messageIndex = 0; messageIndex < groupedMessages.length; messageIndex += 1) {
     const message = groupedMessages[messageIndex];
+    if (message.role === LOCAL_COORDINATION_ROLE) {
+      // An Intercom delivery is external input, not assistant work. Keep it as
+      // an explicit read-only timeline boundary so the following answer never
+      // appears "headless" or inherits the delivery inside its process card.
+      flushProcess();
+      items.push({ kind: "coordination", message, key: uniqueMessageKey(message) });
+      precedingProcessAnchor = compactContentKey(message);
+      continue;
+    }
     const { entries, visibleMessage } = processFromMessage(message);
     if (entries.length) {
       if (message.role === "assistant") {

@@ -5,6 +5,7 @@ import { groupConversation } from "../lib/conversation-process";
 import { ChatInput } from "./ChatInput";
 import { AssistantMessageHeader, ChatMessage } from "./ChatMessage";
 import { CompactSelect } from "./CompactSelect";
+import { CoordinationMessage } from "./CoordinationMessage";
 import { ConversationProcess } from "./ConversationProcess";
 import { FolderIcon, PiMarkIcon } from "./Icons";
 import { PromptQueue } from "./PromptQueue";
@@ -91,7 +92,11 @@ export function ConversationPane({
   );
   const paneKey = viewedSessionId || "draft";
   const activeTurnStart = conversationItems.reduce(
-    (latest, item, index) => item.kind === "message" && item.message.role === "user" ? index : latest,
+    (latest, item, index) =>
+      item.kind === "coordination"
+      || (item.kind === "message" && item.message.role === "user")
+        ? index
+        : latest,
     -1,
   );
   const activeAssistantMetadata = {
@@ -176,6 +181,12 @@ export function ConversationPane({
                   fallback={activeAssistantMetadata}
                 />
               : null;
+            if (item.kind === "coordination") {
+              return <CoordinationMessage
+                key={`${paneKey}:${item.key}`}
+                message={item.message}
+              />;
+            }
             if (item.kind === "process") {
               return <Fragment key={`${paneKey}:${item.key}`}>
                 {activeHeader}

@@ -10,12 +10,10 @@ function summarize(entries: ProcessEntry[], streaming = false): string {
   const thinking = entries.some((entry) => entry.kind === "thinking");
   const failed = tools.filter((entry) => entry.isError).length;
   const subagents = tools.filter((entry) => entry.name === "subagent").length;
-  const coordination = entries.filter((entry): entry is Extract<ProcessEntry, { kind: "coordination" }> => entry.kind === "coordination");
   const labels: string[] = [];
   if (thinking) labels.push(streaming ? "思考中" : "思考");
   if (tools.length) labels.push(`${tools.length} 个工具`);
   if (subagents) labels.push(`${subagents} 个子任务`);
-  if (coordination.length) labels.push(`${coordination.length} 条协调`);
   if (!labels.length) labels.push(streaming ? "进行中" : `${entries.length} 个步骤`);
   return `过程 · ${labels.join(" · ")}${failed ? ` · ${failed} 项失败` : ""}`;
 }
@@ -76,13 +74,6 @@ function ThinkingEntry({ text, disclosureKey }: { text: string; disclosureKey: s
   </PersistentDetails>;
 }
 
-function CoordinationEntry({ entry, disclosureKey }: { entry: Extract<ProcessEntry, { kind: "coordination" }>; disclosureKey: string }) {
-  return <PersistentDetails className="process-entry process-coordination" disclosureKey={disclosureKey}>
-    <summary><span className="process-summary-label"><span className="process-status-icon process-coordination-icon" aria-hidden="true" />本地协调{entry.source ? ` · ${entry.source}` : ""}<em>{entry.summary}</em></span></summary>
-    <div className="process-coordination-detail"><pre>{entry.text}</pre></div>
-  </PersistentDetails>;
-}
-
 export function ConversationProcess({ entries, streaming = false, disclosureKey = "process" }: { entries: ProcessEntry[]; streaming?: boolean; disclosureKey?: string }) {
   const summary = useMemo(() => summarize(entries, streaming), [entries, streaming]);
   const hasFailures = entries.some((entry) => entry.kind === "tool" && entry.isError);
@@ -95,7 +86,6 @@ export function ConversationProcess({ entries, streaming = false, disclosureKey 
         if (entry.kind === "thinking") {
           return <ThinkingEntry key={`thinking-${index}`} text={entry.text} disclosureKey={`${disclosureKey}:thinking:${index}`} />;
         }
-        if (entry.kind === "coordination") return <CoordinationEntry key={`coordination-${index}`} entry={entry} disclosureKey={`${disclosureKey}:coordination:${index}`} />;
         if (entry.kind === "note") return <div className="process-entry process-note" key={`note-${index}`}><MarkdownBody>{entry.text}</MarkdownBody></div>;
         if (entry.editDiff) {
           const editDiff = entry.editDiff;
