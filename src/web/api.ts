@@ -1,4 +1,4 @@
-import type { ServerStateDiagnosticSnapshot, StateDiagnosticStatus } from "../shared/state-diagnostics";
+import type { ServerStateDiagnosticSnapshot } from "../shared/state-diagnostics";
 import type { BootstrapData, BootstrapHandshakeData, ExtensionResource, GateMode, InitialPromptData, ModelInfo, PackageResource, PromptDelivery, PromptImage, QueuedPrompt, ResourceResponse, SessionDirectorySummary, SessionRuntimeReadyData, SessionSummary, SessionViewData, SkillResource, ThinkingLevel } from "../shared/types";
 import { recordBrowserStateDiagnostic } from "./lib/state-diagnostics";
 
@@ -241,14 +241,7 @@ export const api = {
     return navigator.sendBeacon(`/api/window/close?${query}`);
   },
   shutdown: () => request<{ shuttingDown: true }>("/api/shutdown", { method: "POST" }),
-  startStateDiagnostics: () => request<StateDiagnosticStatus>("/api/diagnostics/start", { method: "POST" }),
-  stopStateDiagnostics: (captureId: string) => request<StateDiagnosticStatus>("/api/diagnostics/stop", {
-    method: "POST",
-    headers: { "x-pi-chat-diagnostic-capture": captureId },
-  }),
-  stateDiagnosticSnapshot: (captureId: string) => request<ServerStateDiagnosticSnapshot>("/api/diagnostics/snapshot", {
-    headers: { "x-pi-chat-diagnostic-capture": captureId },
-  }),
+  stateDiagnosticSnapshot: () => request<ServerStateDiagnosticSnapshot>("/api/diagnostics/snapshot"),
   prompt: (message: string, images: PromptImage[] = [], sessionId: string, gateMode?: GateMode, delivery: PromptDelivery = "queue") => request<{ accepted: boolean; queued: boolean; steered?: boolean; /** Pi received the JSONL command but its response timed out; final execution remains event-confirmed. */ deliveryUncertain?: boolean; extension?: boolean; command?: string; description?: string; isStreaming?: boolean; id?: string; queue?: QueuedPrompt[] }>("/api/chat/prompt", {
     method: "POST",
     body: JSON.stringify({ message, sessionId, gateMode, delivery, images: images.map(({ type, data, mimeType }) => ({ type, data, mimeType })) }),

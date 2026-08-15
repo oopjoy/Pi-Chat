@@ -925,6 +925,8 @@ test("replacement pane authority rejects late A navigation success and failure w
     const { createRoot } = await import("react-dom/client");
     const { api } = await import("../../src/web/api");
     const { App } = await import("../../src/web/App");
+    const diagnostics = await import("../../src/web/lib/state-diagnostics");
+    const diagnosticStartSequence = diagnostics.browserStateDiagnosticSnapshot().entries.at(-1)?.sequence || 0;
     const restoreApi = captureApiSnapshot(api);
     const oldId = `aaaaaaaaaaaaaaaaaaa${outcome === "success" ? "1" : "2"}`;
     const replacementId = `bbbbbbbbbbbbbbbbbbb${outcome === "success" ? "1" : "2"}`;
@@ -1050,6 +1052,15 @@ test("replacement pane authority rejects late A navigation success and failure w
           dom.window.document.body.textContent || "",
           /A stale success/,
         );
+        const rejection = diagnostics.browserStateDiagnosticSnapshot().entries
+          .filter((entry) =>
+            entry.sequence > diagnosticStartSequence &&
+            entry.category === "projection" &&
+            entry.name === "session-view-rejected" &&
+            entry.sessionId === oldId,
+          )
+          .at(-1);
+        assert.equal(rejection?.details.decisionReason, "stale-pane-authority");
       } else {
         await act(async () => {
           rejectOldView(new Error("A stale navigation failure"));
@@ -1539,6 +1550,8 @@ test("a replacement ready starts a new bootstrap instead of joining an old pendi
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../../src/web/api");
   const { App } = await import("../../src/web/App");
+  const diagnostics = await import("../../src/web/lib/state-diagnostics");
+  const diagnosticStartSequence = diagnostics.browserStateDiagnosticSnapshot().entries.at(-1)?.sequence || 0;
   const restoreApi = captureApiSnapshot(api);
   let bootstrapCalls = 0;
   let resolveOldBootstrap!: (value: BootstrapData) => void;
@@ -1623,6 +1636,14 @@ test("a replacement ready starts a new bootstrap instead of joining an old pendi
       "D:/replacement-default",
       "the old bootstrap cannot overwrite the replacement epoch",
     );
+    const rejection = diagnostics.browserStateDiagnosticSnapshot().entries
+      .filter((entry) =>
+        entry.sequence > diagnosticStartSequence &&
+        entry.category === "projection" &&
+        entry.name === "bootstrap-rejected",
+      )
+      .at(-1);
+    assert.equal(rejection?.details.decisionReason, "stale-refresh-authority");
   } finally {
     await act(async () => root.unmount());
     restoreApi();

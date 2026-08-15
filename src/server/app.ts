@@ -8,6 +8,7 @@ import {
   reconcilePersistedHistory,
 } from "../shared/streaming-assistant.js";
 import { compareSessionsByLastUserPrompt } from "../shared/session-order.js";
+import { shouldRetainStateDiagnosticEvent } from "../shared/state-diagnostics.js";
 import type {
   ApplicationLifecycle,
   BootstrapData,
@@ -162,7 +163,6 @@ const MAX_NATIVE_STEERING_IMAGE_CHARS = 45_000_000;
 // this small bounded visibility window.
 const DRAFT_PERSISTENCE_RETRY_DELAYS_MS = [40, 120, 300, 700];
 const SESSION_ID_PATTERN = /^[a-f0-9]{20}$/;
-const DIAGNOSTIC_CAPTURE_ID_PATTERN = /^[a-f0-9]{24}$/;
 const BUILTIN_COMMANDS: SlashCommand[] = [
   { name: "new", description: "新建会话", source: "builtin" },
   {
@@ -198,13 +198,6 @@ function requiredSessionId(body: Record<string, unknown>): string {
     throw new HttpRequestError(400, "sessionId 必须是有效的会话标识");
   }
   return sessionId;
-}
-
-function requestDiagnosticCaptureId(request: IncomingMessage): string {
-  const value = request.headers["x-pi-chat-diagnostic-capture"];
-  return typeof value === "string" && DIAGNOSTIC_CAPTURE_ID_PATTERN.test(value)
-    ? value
-    : "";
 }
 
 export interface PreparedApplicationRestart {
@@ -467,7 +460,7 @@ export class PiChatApp {
     this.now = options.now || Date.now;
     this.stateDiagnostics = new StateDiagnosticsRecorder({
       runEpoch: this.runEpoch,
-      buildRevision: this.buildIdentity.revision,
+      buildFingerprint: this.buildIdentity.fingerprint,
       now: this.now,
     });
     this.sseHub = new SseHub();
@@ -883,23 +876,27 @@ export class PiChatApp {
     rpcGeneration?: number,
     runGeneration?: number,
   ): void {
-    if (!this.stateDiagnostics.isActive()) return;
-    const runtime = sessionId ? this.runtimePool.get(sessionId) : undefined;
-    this.stateDiagnostics.record({
-      category,
-      name,
-      sessionId,
-      runGeneration: runGeneration ?? (sessionId
-        ? this.runGenerationsBySession.get(sessionId) || 0
-        : undefined),
-      rpcGeneration:
-        rpcGeneration || runtime?.rpcGeneration ||
-        (sessionId === this.activeSessionId ? this.primaryRpcGeneration : undefined),
-      details: {
-        ...(sessionId ? this.diagnosticRuntimeProjection(sessionId) : null),
-        ...details,
-      },
-    });
+    if (!shouldRetainStateDiagnosticEvent(category, name, details)) return;
+    try {
+      const runtime = sessionId ? this.runtimePool.get(sessionId) : undefined;
+      this.stateDiagnostics.record({
+        category,
+        name,
+        sessionId,
+        runGeneration: runGeneration ?? (sessionId
+          ? this.runGenerationsBySession.get(sessionId) || 0
+          : undefined),
+        rpcGeneration:
+          rpcGeneration || runtime?.rpcGeneration ||
+          (sessionId === this.activeSessionId ? this.primaryRpcGeneration : undefined),
+        details: {
+          ...(sessionId ? this.diagnosticRuntimeProjection(sessionId) : null),
+          ...details,
+        },
+      });
+    } catch {
+      // Optional observation must never perturb Runtime, HTTP, SSE, or queue work.
+    }
   }
 
   private traceViewProjection(
@@ -977,8 +974,14 @@ export class PiChatApp {
     // render them; forwarding every snapshot creates quadratic SSE traffic and
     // can freeze Chromium's main thread during long or self-referential output.
     if (event.type === "tool_execution_update") return;
+    const {
+      piChatSessionId: _untrustedSessionId,
+      piChatRunEpoch: _untrustedRunEpoch,
+      piChatRunGeneration: _untrustedRunGeneration,
+      ...runtimeEvent
+    } = event;
     this.broadcast({
-      ...event,
+      ...runtimeEvent,
       piChatSessionId: sessionId,
       piChatRunEpoch: this.runEpoch,
       ...(typeof runGeneration === "number"
@@ -1361,8 +1364,6 @@ export class PiChatApp {
       (owner) => owner === clientId,
     );
     if (clientStillOpen) return "";
-    if (this.stateDiagnostics.isActive() && this.stateDiagnostics.ownedBy(clientId))
-      this.stateDiagnostics.stop();
     return this.sessionControl.closeWindow(clientId);
   }
 
@@ -4123,22 +4124,25 @@ export class PiChatApp {
     response: ServerResponse,
     url: URL,
   ): Promise<void> {
+    const traceHttpRequest = url.pathname !== "/api/diagnostics/snapshot";
     const diagnosticStartedAt = this.now();
     let diagnosticEnded = false;
-    response.once("finish", () => {
-      if (diagnosticEnded) return;
-      diagnosticEnded = true;
-      this.traceState("http", "request-end", this.sessionIdForRequest(request), {
+    if (traceHttpRequest) {
+      response.once("finish", () => {
+        if (diagnosticEnded) return;
+        diagnosticEnded = true;
+        this.traceState("http", "request-end", this.sessionIdForRequest(request), {
+          method: request.method || "GET",
+          route: url.pathname,
+          status: response.statusCode,
+          durationMs: this.now() - diagnosticStartedAt,
+        });
+      });
+      this.traceState("http", "request-start", this.sessionIdForRequest(request), {
         method: request.method || "GET",
         route: url.pathname,
-        status: response.statusCode,
-        durationMs: this.now() - diagnosticStartedAt,
       });
-    });
-    this.traceState("http", "request-start", this.sessionIdForRequest(request), {
-      method: request.method || "GET",
-      route: url.pathname,
-    });
+    }
     try {
       // Parsing/identity validation deliberately precedes the lifecycle lease. A
       // malformed or stale browser request is not an admitted mutation and cannot
@@ -4170,13 +4174,14 @@ export class PiChatApp {
         releaseMutation?.();
       }
     } catch (error) {
-      this.traceState("http", "request-error", this.sessionIdForRequest(request), {
-        method: request.method || "GET",
-        route: url.pathname,
-        status: response.headersSent ? response.statusCode : 0,
-        durationMs: this.now() - diagnosticStartedAt,
-        errorType: error instanceof Error ? error.name : typeof error,
-      });
+      if (traceHttpRequest)
+        this.traceState("http", "request-error", this.sessionIdForRequest(request), {
+          method: request.method || "GET",
+          route: url.pathname,
+          status: response.headersSent ? response.statusCode : 0,
+          durationMs: this.now() - diagnosticStartedAt,
+          errorType: error instanceof Error ? error.name : typeof error,
+        });
       throw error;
     }
   }
@@ -4268,43 +4273,18 @@ export class PiChatApp {
     preparedBody?: Record<string, unknown>,
   ): Promise<void> {
     const clientId = requestClientId(request);
-    if (url.pathname === "/api/diagnostics/start") {
-      if (request.method !== "POST") return methodNotAllowed(response);
+    if (url.pathname === "/api/diagnostics/snapshot") {
+      if (request.method !== "GET") return methodNotAllowed(response);
       const pageId = requestPageId(request);
       if (!clientId || !pageId)
         return json(response, 400, {
-          error: "诊断录制需要浏览器窗口与页面标识",
+          error: "导出诊断需要浏览器窗口与页面标识",
           code: "DIAGNOSTIC_CLIENT_REQUIRED",
         });
       if (this.connectedPageClients.get(pageId) !== clientId)
         return json(response, 409, {
-          error: "当前页面已关闭或尚未完成连接，无法开始诊断录制",
+          error: "当前页面已关闭或尚未完成连接，无法导出诊断",
           code: "DIAGNOSTIC_PAGE_NOT_REGISTERED",
-        });
-      if (this.stateDiagnostics.isActive() && !this.stateDiagnostics.ownedBy(clientId))
-        return json(response, 409, {
-          error: "另一浏览器窗口正在录制诊断；请先在该窗口停止或导出",
-          code: "DIAGNOSTIC_CAPTURE_IN_USE",
-        });
-      return json(response, 200, this.stateDiagnostics.start(clientId));
-    }
-    if (url.pathname === "/api/diagnostics/stop") {
-      if (request.method !== "POST") return methodNotAllowed(response);
-      const captureId = requestDiagnosticCaptureId(request);
-      if (!this.stateDiagnostics.ownedBy(clientId) || !this.stateDiagnostics.captureMatches(captureId))
-        return json(response, 409, {
-          error: "诊断录制已被停止、重置或属于另一浏览器窗口",
-          code: "DIAGNOSTIC_CAPTURE_MISMATCH",
-        });
-      return json(response, 200, this.stateDiagnostics.stop());
-    }
-    if (url.pathname === "/api/diagnostics/snapshot") {
-      if (request.method !== "GET") return methodNotAllowed(response);
-      const captureId = requestDiagnosticCaptureId(request);
-      if (!this.stateDiagnostics.ownedBy(clientId) || !this.stateDiagnostics.captureMatches(captureId))
-        return json(response, 409, {
-          error: "诊断录制已被停止、重置或属于另一浏览器窗口",
-          code: "DIAGNOSTIC_CAPTURE_MISMATCH",
         });
       return json(response, 200, this.stateDiagnostics.snapshot());
     }

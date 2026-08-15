@@ -1100,7 +1100,6 @@ test("tool activity keeps Sidebar and Composer active when a stale state snapsho
   const { api } = await import("../../src/web/api");
   const { App } = await import("../../src/web/App");
   const diagnostics = await import("../../src/web/lib/state-diagnostics");
-  diagnostics.startBrowserStateDiagnostics();
   const backgroundId = "fedcba9876543210abcd";
   const restoreApi = captureApiSnapshot(api);
   Object.assign(api, {
@@ -1252,8 +1251,34 @@ test("tool activity keeps Sidebar and Composer active when a stale state snapsho
     assert.equal(idleProjection?.details.composerStopVisible, false);
     assert.equal(idleProjection?.details.composerSendVisible, true);
     assert.equal(idleProjection?.details.sidebarRunning, false);
+
+    await act(async () =>
+      source.emitPi({
+        type: "agent_start",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 2,
+      }),
+    );
+    const rejectionStart = diagnostics.browserStateDiagnosticSnapshot().entries.at(-1)?.sequence || 0;
+    await act(async () => {
+      for (let index = 0; index < 2; index += 1)
+        source.emitPi({
+          type: "message_update",
+          piChatSessionId: activeId,
+          piChatRunGeneration: 1,
+          message: { role: "assistant", content: [{ type: "text", text: String(index) }] },
+        });
+    });
+    const staleUpdates = diagnostics.browserStateDiagnosticSnapshot().entries.filter((entry) =>
+      entry.sequence > rejectionStart &&
+      entry.category === "sse" &&
+      entry.name === "rejected" &&
+      entry.sessionId === activeId &&
+      entry.details.eventType === "message_update",
+    );
+    assert.equal(staleUpdates.length, 1, "a stale update flood retains one structural rejection fact");
+    assert.equal(staleUpdates[0]?.details.decisionReason, "stale-run-generation");
   } finally {
-    diagnostics.stopBrowserStateDiagnostics();
     await act(async () => root.unmount());
     restoreApi();
   }

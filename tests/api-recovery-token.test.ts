@@ -31,7 +31,6 @@ test("reconnect token acceptance prevents an older response from restoring its t
     resolveOldBootstrap = resolve;
   });
   const authenticatedTokens: string[] = [];
-  const diagnosticCaptureHeaders: string[] = [];
   let handshakeCalls = 0;
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input, init) => {
@@ -53,16 +52,8 @@ test("reconnect token acceptance prevents an older response from restoring its t
     authenticatedTokens.push(headers.get("x-pi-chat-token") || "");
     if (path === "/api/bootstrap") return oldBootstrap;
     if (path === "/api/presence") return response({ present: true });
-    if (path === "/api/diagnostics/start")
-      return response({ active: true, captureId: "0123456789abcdef01234567" });
-    if (path === "/api/diagnostics/stop") {
-      diagnosticCaptureHeaders.push(headers.get("x-pi-chat-diagnostic-capture") || "");
-      return response({ active: false, captureId: "0123456789abcdef01234567" });
-    }
-    if (path === "/api/diagnostics/snapshot") {
-      diagnosticCaptureHeaders.push(headers.get("x-pi-chat-diagnostic-capture") || "");
-      return response({ schemaVersion: 1, entries: [] });
-    }
+    if (path === "/api/diagnostics/snapshot")
+      return response({ schemaVersion: 2, entries: [] });
     throw new Error(`unexpected request: ${path}`);
   };
   try {
@@ -81,14 +72,8 @@ test("reconnect token acceptance prevents an older response from restoring its t
     await api.renewPresence();
     assert.deepEqual(authenticatedTokens, ["token-a", "token-b"]);
 
-    const capture = await api.startStateDiagnostics();
-    assert.equal(capture.captureId, "0123456789abcdef01234567");
-    await api.stateDiagnosticSnapshot(capture.captureId || "");
-    await api.stopStateDiagnostics(capture.captureId || "");
-    assert.deepEqual(diagnosticCaptureHeaders, [
-      "0123456789abcdef01234567",
-      "0123456789abcdef01234567",
-    ]);
+    await api.stateDiagnosticSnapshot();
+    assert.deepEqual(authenticatedTokens, ["token-a", "token-b", "token-b"]);
   } finally {
     globalThis.fetch = originalFetch;
   }

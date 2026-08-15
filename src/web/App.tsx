@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useReducer,
   useRef,
   useState,
@@ -83,14 +84,9 @@ import {
 } from "./lib/preferences";
 import { rememberedSessionId, rememberSessionId } from "./lib/session-location";
 import {
-  bindBrowserStateDiagnosticCaptureId,
   browserStateDiagnosticSnapshot,
-  browserStateDiagnosticStatus,
-  browserStateDiagnosticsActive,
   downloadStateDiagnosticBundle,
   recordBrowserStateDiagnostic,
-  startBrowserStateDiagnostics,
-  stopBrowserStateDiagnostics,
 } from "./lib/state-diagnostics";
 import {
   appendLocalTurnOnce,
@@ -492,10 +488,7 @@ export function App() {
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
   const [managementSection, setManagementSection] =
     useState<ManagementSection | null>(null);
-  const [diagnosticsActive, setDiagnosticsActive] = useState(false);
   const [diagnosticsBusy, setDiagnosticsBusy] = useState(false);
-  const [diagnosticsCaptureId, setDiagnosticsCaptureId] = useState("");
-  const [diagnosticsEntryCount, setDiagnosticsEntryCount] = useState(0);
   const [closeComplete, setCloseComplete] = useState<
     "window" | "application" | null
   >(null);
@@ -667,6 +660,45 @@ export function App() {
     sessionsRef.current = sessions;
   }, [sessions]);
   const diagnosticSidebarRowsRef = useRef(new Map<string, string>());
+  const diagnosticUiSignatureRef = useRef("");
+  const diagnosticSseRejectionAtRef = useRef(new Map<string, number>());
+  const diagnosticCheckpointRef = useRef<() => void>(() => undefined);
+  const recordSseRejectionDiagnostic = useCallback((input: {
+    sessionId?: string;
+    runGeneration?: number;
+    eventType: string;
+    decisionReason: string;
+  }) => {
+    const now = Date.now();
+    const signature = [
+      input.sessionId || "none",
+      input.runGeneration ?? "none",
+      input.eventType,
+      input.decisionReason,
+    ].join(":");
+    const previous = diagnosticSseRejectionAtRef.current.get(signature) || 0;
+    if (now - previous < 30_000) return;
+    diagnosticSseRejectionAtRef.current.set(signature, now);
+    if (diagnosticSseRejectionAtRef.current.size > 128) {
+      for (const [key, recordedAt] of diagnosticSseRejectionAtRef.current) {
+        if (now - recordedAt >= 60_000)
+          diagnosticSseRejectionAtRef.current.delete(key);
+      }
+      while (diagnosticSseRejectionAtRef.current.size > 128) {
+        const oldest = diagnosticSseRejectionAtRef.current.keys().next().value;
+        if (typeof oldest !== "string") break;
+        diagnosticSseRejectionAtRef.current.delete(oldest);
+      }
+    }
+    recordBrowserStateDiagnostic("sse", "rejected", {
+      sessionId: input.sessionId,
+      runGeneration: input.runGeneration,
+      details: {
+        eventType: input.eventType,
+        decisionReason: input.decisionReason,
+      },
+    });
+  }, []);
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const scrollMemoryRef = useRef(new SessionScrollMemory());
@@ -1417,7 +1449,15 @@ export function App() {
       authority?: PaneAuthoritySnapshot,
       queueRequestRevision?: number,
     ) => {
-      if (authority && !paneAuthorityCanCommit(authority)) return;
+      if (authority && !paneAuthorityCanCommit(authority)) {
+        recordBrowserStateDiagnostic("projection", "bootstrap-rejected", {
+          details: {
+            authorityPresent: true,
+            decisionReason: "stale-pane-authority",
+          },
+        });
+        return;
+      }
       const activeViewId =
         data.activeSessionId ||
         data.sessions.find((item) => item.active)?.id ||
@@ -1432,6 +1472,13 @@ export function App() {
           queueLength: data.queue.length,
           sessionRunning:
             data.sessions.find((item) => item.id === activeViewId)?.running === true,
+        },
+      });
+      recordBrowserStateDiagnostic("projection", "bootstrap-accepted", {
+        sessionId: activeViewId,
+        details: {
+          authorityPresent: Boolean(authority),
+          decisionReason: "accepted",
         },
       });
       const bootstrapProjection = activeViewId
@@ -1515,6 +1562,9 @@ export function App() {
           thinkingLevel: data.state.thinkingLevel,
           draftWorkspaceCwd: data.workspaceCwd,
         });
+        recordBrowserStateDiagnostic("projection", "bootstrap-committed", {
+          details: { paneKind: "draft", decisionReason: "committed" },
+        });
         confirmPrimaryCapabilitySnapshot(data, data.state.model);
         return;
       }
@@ -1564,6 +1614,10 @@ export function App() {
             controlledByThisWindow: data.controlledByThisWindow,
           },
         },
+      });
+      recordBrowserStateDiagnostic("projection", "bootstrap-committed", {
+        sessionId: activeViewId,
+        details: { paneKind: "session", decisionReason: "committed" },
       });
       confirmPrimaryCapabilitySnapshot(data, committedModel);
     },
@@ -1659,16 +1713,40 @@ export function App() {
       });
       // A structural deletion is terminal. An already-resolved view continuation
       // must not recreate its cache, sidebar row, or selected pane.
-      if (confirmedDeletedSessionIdsRef.current.has(view.session.id)) return;
+      if (confirmedDeletedSessionIdsRef.current.has(view.session.id)) {
+        recordBrowserStateDiagnostic("projection", "session-view-rejected", {
+          sessionId: view.session.id,
+          details: { decisionReason: "session-deleted" },
+        });
+        return;
+      }
       // The coordinator, not the reducer, proves that this result still belongs
       // to the visible pane. Session ID alone cannot protect A → B → A.
-      if (
-        authority &&
-        ("sessionId" in authority
-          ? !paneAuthorityCanCommit(authority)
-          : !draftAuthorityCanCommit(authority))
-      )
-        return;
+      if (authority) {
+        const paneAuthority = "sessionId" in authority;
+        const allowed = paneAuthority
+          ? paneAuthorityCanCommit(authority)
+          : draftAuthorityCanCommit(authority);
+        if (!allowed) {
+          recordBrowserStateDiagnostic("projection", "session-view-rejected", {
+            sessionId: view.session.id,
+            details: {
+              authorityPresent: true,
+              decisionReason: paneAuthority
+                ? "stale-pane-authority"
+                : "stale-draft-authority",
+            },
+          });
+          return;
+        }
+      }
+      recordBrowserStateDiagnostic("projection", "session-view-accepted", {
+        sessionId: view.session.id,
+        details: {
+          authorityPresent: Boolean(authority),
+          decisionReason: "accepted",
+        },
+      });
       // A compaction_end frame is terminal for this Session. Hot-memory views
       // deliberately avoid a busy RPC probe and may therefore still contain the
       // pre-end `isCompacting: true` snapshot; never let that stale view relock
@@ -1839,6 +1917,7 @@ export function App() {
       recordBrowserStateDiagnostic("projection", "session-view-committed", {
         sessionId: resolvedView.session.id,
         details: {
+          decisionReason: "committed",
           stateStreaming: resolvedView.state.isStreaming,
           viewStreaming: resolvedView.isStreaming,
           sessionRunning: resolvedView.session.running === true,
@@ -2072,7 +2151,15 @@ export function App() {
     // An old process request can resolve after a replacement ready has started
     // a newer refresh. It must not mark that new epoch bootstrapped or cancel
     // its independent history/sidebar fallback timers.
-    if (!refreshAuthorityIsCurrent(refreshAuthority)) return;
+    if (!refreshAuthorityIsCurrent(refreshAuthority)) {
+      recordBrowserStateDiagnostic("projection", "bootstrap-rejected", {
+        details: {
+          authorityPresent: true,
+          decisionReason: "stale-refresh-authority",
+        },
+      });
+      return;
+    }
     bootstrapSucceeded = true;
     bootstrapCompletedRef.current = true;
     if (earlyViewTimer !== null) window.clearTimeout(earlyViewTimer);
@@ -2727,8 +2814,14 @@ export function App() {
         eventRunEpoch &&
         runEpochRef.current &&
         eventRunEpoch !== runEpochRef.current
-      )
+      ) {
+        recordSseRejectionDiagnostic({
+          sessionId: eventSessionId,
+          eventType: type || "unknown",
+          decisionReason: "stale-run-epoch",
+        });
         return;
+      }
       const eventRunGeneration =
         typeof event.piChatRunGeneration === "number" &&
         Number.isFinite(event.piChatRunGeneration)
@@ -2743,11 +2836,24 @@ export function App() {
         // non-terminal frame from it is stale, even if SSE/backpressure makes
         // it arrive after settlement. This prevents a late tool completion or
         // activity snapshot from reviving an already-cleared spinner.
-        if (
-          eventRunGeneration < latest ||
-          (eventRunGeneration <= settled && type !== "agent_settled")
-        )
+        if (eventRunGeneration < latest) {
+          recordSseRejectionDiagnostic({
+            sessionId: eventSessionId,
+            runGeneration: eventRunGeneration,
+            eventType: type || "unknown",
+            decisionReason: "stale-run-generation",
+          });
           return;
+        }
+        if (eventRunGeneration <= settled && type !== "agent_settled") {
+          recordSseRejectionDiagnostic({
+            sessionId: eventSessionId,
+            runGeneration: eventRunGeneration,
+            eventType: type || "unknown",
+            decisionReason: "settled-run-generation",
+          });
+          return;
+        }
         sessionRunGenerationsRef.current.set(
           eventSessionId,
           Math.max(latest, eventRunGeneration),
@@ -2761,7 +2867,13 @@ export function App() {
       // Only explicitly global frames may omit a Session ID. A malformed
       // session-scoped frame must never be interpreted as belonging to whatever
       // pane happens to be visible at that instant.
-      if (isSessionScopedEvent(type) && !eventSessionId) return;
+      if (isSessionScopedEvent(type) && !eventSessionId) {
+        recordSseRejectionDiagnostic({
+          eventType: type || "unknown",
+          decisionReason: "missing-session",
+        });
+        return;
+      }
       // A destination is no longer allowed to paint updates from the source
       // pane while navigation is in flight. Its events still update that pane's
       // cache, ready for an immediate return.
@@ -3879,6 +3991,7 @@ export function App() {
       drainPendingLiveMessage,
       refresh,
       reportBackgroundRefreshError,
+      recordSseRejectionDiagnostic,
       scheduleLiveMessage,
       scheduleSidebarRefresh,
       setRuntimeWarming,
@@ -4223,7 +4336,16 @@ export function App() {
           signal: controller.signal,
         });
       }
-      if (!paneAuthorityCanCommit(authority)) return;
+      if (!paneAuthorityCanCommit(authority)) {
+        recordBrowserStateDiagnostic("projection", "session-view-rejected", {
+          sessionId: id,
+          details: {
+            authorityPresent: true,
+            decisionReason: "stale-pane-authority",
+          },
+        });
+        return;
+      }
       // Events received while a historical page is loading are already held in
       // the pane cache. Do not discard a successful page merely because a live
       // status/tool frame arrived; merge it through the cache below instead.
@@ -5399,11 +5521,23 @@ export function App() {
       void api
         .viewSession(id, rememberedTurns, { signal: controller.signal })
         .then((view) => {
-          if (
-            confirmedDeletedSessionIdsRef.current.has(id) ||
-            !paneAuthorityCanCommit(reconcileAuthority)
-          )
+          if (confirmedDeletedSessionIdsRef.current.has(id)) {
+            recordBrowserStateDiagnostic("projection", "session-view-rejected", {
+              sessionId: id,
+              details: { decisionReason: "session-deleted" },
+            });
             return;
+          }
+          if (!paneAuthorityCanCommit(reconcileAuthority)) {
+            recordBrowserStateDiagnostic("projection", "session-view-rejected", {
+              sessionId: id,
+              details: {
+                authorityPresent: true,
+                decisionReason: "stale-pane-authority",
+              },
+            });
+            return;
+          }
           if (
             (sessionEventVersionRef.current.get(id) || 0) !== requestVersion
           ) {
@@ -5474,11 +5608,23 @@ export function App() {
           signal: controller.signal,
         });
       }
-      if (
-        confirmedDeletedSessionIdsRef.current.has(id) ||
-        !paneAuthorityCanCommit(navigationAuthority)
-      )
+      if (confirmedDeletedSessionIdsRef.current.has(id)) {
+        recordBrowserStateDiagnostic("projection", "session-view-rejected", {
+          sessionId: id,
+          details: { decisionReason: "session-deleted" },
+        });
         return;
+      }
+      if (!paneAuthorityCanCommit(navigationAuthority)) {
+        recordBrowserStateDiagnostic("projection", "session-view-rejected", {
+          sessionId: id,
+          details: {
+            authorityPresent: true,
+            decisionReason: "stale-pane-authority",
+          },
+        });
+        return;
+      }
       pendingScrollRestoreRef.current = id;
       const committed = viewCacheRef.current.mergeNavigation(
         view,
@@ -6129,91 +6275,27 @@ export function App() {
     }
   };
 
-  const startStateDiagnostics = async () => {
+  const exportStateDiagnostics = async () => {
     if (diagnosticsBusy) return;
     setDiagnosticsBusy(true);
     setError("");
-    diagnosticSidebarRowsRef.current.clear();
-    startBrowserStateDiagnostics();
-    setDiagnosticsActive(true);
-    setDiagnosticsCaptureId("");
-    setDiagnosticsEntryCount(browserStateDiagnosticStatus().entryCount);
     try {
-      const status = await api.startStateDiagnostics();
-      if (!status.captureId) throw new Error("服务端未返回诊断录制标识");
-      bindBrowserStateDiagnosticCaptureId(status.captureId);
-      setDiagnosticsCaptureId(status.captureId);
-      recordBrowserStateDiagnostic("capture", "server-started");
-      setDiagnosticsEntryCount(browserStateDiagnosticStatus().entryCount);
-      setNotice("诊断录制已开始；请复现问题后回到设置导出 JSON");
-    } catch (cause) {
-      stopBrowserStateDiagnostics();
-      setDiagnosticsActive(false);
-      setDiagnosticsCaptureId("");
-      setDiagnosticsEntryCount(browserStateDiagnosticStatus().entryCount);
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setDiagnosticsBusy(false);
-    }
-  };
-
-  const stopStateDiagnostics = async () => {
-    if (diagnosticsBusy || !diagnosticsCaptureId) return;
-    setDiagnosticsBusy(true);
-    setError("");
-    try {
-      await api.stopStateDiagnostics(diagnosticsCaptureId);
-      const status = stopBrowserStateDiagnostics();
-      setDiagnosticsActive(false);
-      setDiagnosticsCaptureId("");
-      setDiagnosticsEntryCount(status.entryCount);
-      setNotice("诊断录制已停止；再次开始会清空上一轮内存记录");
-    } catch (cause) {
-      if (
-        cause instanceof ApiRequestError &&
-        cause.code === "DIAGNOSTIC_CAPTURE_MISMATCH"
-      ) {
-        const status = stopBrowserStateDiagnostics();
-        setDiagnosticsActive(false);
-        setDiagnosticsCaptureId("");
-        setDiagnosticsEntryCount(status.entryCount);
-      }
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setDiagnosticsBusy(false);
-    }
-  };
-
-  const exportStateDiagnostics = async () => {
-    if (diagnosticsBusy || !diagnosticsCaptureId) return;
-    setDiagnosticsBusy(true);
-    setError("");
-    try {
-      recordBrowserStateDiagnostic("capture", "export-requested", {
+      recordBrowserStateDiagnostic("diagnostic", "export-requested", {
         sessionId: viewedSessionIdRef.current,
       });
-      const server = await api.stateDiagnosticSnapshot(diagnosticsCaptureId);
+      diagnosticCheckpointRef.current();
+      const server = await api.stateDiagnosticSnapshot();
       const bundle: StateDiagnosticExportBundle = {
-        schemaVersion: 1,
+        schemaVersion: 2,
         generatedAt: new Date().toISOString(),
         warning:
-          "仅含最近五分钟的脱敏状态元数据；服务端与浏览器各自保持本地顺序，不代表跨进程绝对时钟顺序。",
+          "仅含最近五分钟的脱敏结构状态；服务端与当前浏览器页面各自保持本地顺序，时间戳不代表跨进程绝对顺序。",
         server,
         browser: browserStateDiagnosticSnapshot(),
       };
       const filename = downloadStateDiagnosticBundle(bundle);
-      setDiagnosticsEntryCount(bundle.browser.status.entryCount);
       setNotice(`诊断已导出：${filename}`);
     } catch (cause) {
-      if (
-        cause instanceof ApiRequestError &&
-        cause.code === "DIAGNOSTIC_CAPTURE_MISMATCH"
-      ) {
-        const status = stopBrowserStateDiagnostics();
-        setDiagnosticsActive(false);
-        setDiagnosticsCaptureId("");
-        setDiagnosticsEntryCount(status.entryCount);
-      }
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setDiagnosticsBusy(false);
@@ -6868,113 +6950,109 @@ export function App() {
       });
   };
 
-  useEffect(() => {
-    if (!diagnosticsActive) return;
-    const update = () =>
-      setDiagnosticsEntryCount(browserStateDiagnosticStatus().entryCount);
-    update();
-    const timer = window.setInterval(update, 1_000);
-    return () => window.clearInterval(timer);
-  }, [diagnosticsActive]);
-
-  const diagnosticProjectionActive =
-    diagnosticsActive || browserStateDiagnosticsActive();
-  const diagnosticSidebarRows = diagnosticProjectionActive
-    ? sessions.flatMap((session) => {
-        const execution = session.activity?.execution ||
-          (session.running ? "running" : session.queued ? "queued" : "idle");
-        const interesting =
-          session.id === viewedSessionId ||
-          execution !== "idle" ||
-          session.pendingConfirmation === true;
-        if (!interesting) return [];
-        const controlledByThisWindow = session.controlledByThisWindow === true;
-        const foreignOwnerPresent = Boolean(
-          session.controlOwner && !controlledByThisWindow,
-        );
-        return [{
-          sessionId: session.id,
+  const diagnosticSidebarRows = useMemo(
+    () => sessions.flatMap((session) => {
+      const execution = session.activity?.execution ||
+        (session.running ? "running" : session.queued ? "queued" : "idle");
+      const interesting =
+        session.id === viewedSessionId ||
+        execution !== "idle" ||
+        session.pendingConfirmation === true ||
+        Boolean(session.controlOwner);
+      if (!interesting) return [];
+      const controlledByThisWindow = session.controlledByThisWindow === true;
+      const foreignOwnerPresent = Boolean(
+        session.controlOwner && !controlledByThisWindow,
+      );
+      return [{
+        sessionId: session.id,
+        execution,
+        running: session.running === true,
+        queued: session.queued === true,
+        pendingConfirmation: session.pendingConfirmation === true,
+        controlledByThisWindow,
+        foreignOwnerPresent,
+        viewed: session.id === viewedSessionId,
+        signature: [
           execution,
-          running: session.running === true,
-          queued: session.queued === true,
-          pendingConfirmation: session.pendingConfirmation === true,
+          session.running === true,
+          session.queued === true,
+          session.pendingConfirmation === true,
           controlledByThisWindow,
           foreignOwnerPresent,
-          viewed: session.id === viewedSessionId,
-          signature: [
-            execution,
-            session.running === true,
-            session.queued === true,
-            session.pendingConfirmation === true,
-            controlledByThisWindow,
-            foreignOwnerPresent,
-            session.id === viewedSessionId,
-          ].join(":"),
-        }];
-      })
-    : [];
+          session.id === viewedSessionId,
+        ].join(":"),
+      }];
+    }),
+    [sessions, viewedSessionId],
+  );
   const diagnosticSidebarSignature = diagnosticSidebarRows
     .map((row) => `${row.sessionId}:${row.signature}`)
     .join("|");
-
-  useEffect(() => {
-    if (!browserStateDiagnosticsActive()) return;
-    const controlledByThisWindow = effectiveControl.controlledByThisWindow === true;
-    const foreignOwnerPresent = Boolean(
-      effectiveControl.controlOwner && !controlledByThisWindow,
-    );
-    recordBrowserStateDiagnostic("projection", "ui-state", {
-      sessionId: viewedSessionId,
-      details: {
-        paneKind: pane.identity.kind,
-        stateStreaming: state.isStreaming,
-        compacting: state.isCompacting === true,
-        hasLive: Boolean(liveMessage),
-        toolActive: Boolean(toolStatus),
-        promptStarting,
-        runtimeStatus,
-        queuePaused,
-        queueLength: queue.length,
-        transcriptCount: messages.length,
-        sidebarRows: sessions.length,
-        sidebarRunning: viewedSession?.running === true,
-        sidebarQueued: viewedSession?.queued === true,
-        sidebarExecution: viewedSession?.activity?.execution || "none",
-        sidebarRunningCount: sessions.filter((session) => session.running).length,
-        sidebarQueuedCount: sessions.filter((session) => session.queued).length,
-        sidebarFailedCount: sessions.filter((session) => session.activity?.execution === "failed").length,
-        sidebarPausedCount: sessions.filter((session) => session.activity?.execution === "paused").length,
-        sidebarConfirmationCount: sessions.filter((session) => session.pendingConfirmation).length,
-        sidebarForeignOwnerCount: sessions.filter((session) =>
-          Boolean(session.controlOwner && session.controlledByThisWindow !== true),
-        ).length,
-        observing,
-        controlledByThisWindow,
-        foreignOwnerPresent,
-        authorityPresent: Boolean(effectiveControl.controlOwner),
-        composerQueueVisible: composerQueueMode,
-        composerSteerVisible: state.isStreaming,
-        composerStopVisible: state.isStreaming,
-        composerSendVisible: !composerQueueMode,
-        composerDisabled:
-          loading ||
-          currentSessionPreparing ||
-          viewSwitching ||
-          observing ||
-          mutationBlocked ||
-          Boolean(state.isCompacting) ||
-          primarySessionFailed ||
-          primaryRuntimeUnavailable,
-        stopping: stoppingCurrentSession,
-      },
-    });
+  const diagnosticHasLive = Boolean(liveMessage);
+  const diagnosticControlledByThisWindow =
+    effectiveControl.controlledByThisWindow === true;
+  const diagnosticForeignOwnerPresent = Boolean(
+    effectiveControl.controlOwner && !diagnosticControlledByThisWindow,
+  );
+  const diagnosticUiDetails = {
+    paneKind: pane.identity.kind,
+    stateStreaming: state.isStreaming,
+    compacting: state.isCompacting === true,
+    hasLive: diagnosticHasLive,
+    toolActive: Boolean(toolStatus),
+    promptStarting,
+    runtimeStatus,
+    queuePaused,
+    queueLength: queue.length,
+    transcriptCount: messages.length,
+    sidebarRows: sessions.length,
+    sidebarRunning: viewedSession?.running === true,
+    sidebarQueued: viewedSession?.queued === true,
+    sidebarExecution: viewedSession?.activity?.execution || "none",
+    sidebarRunningCount: sessions.filter((session) => session.running).length,
+    sidebarQueuedCount: sessions.filter((session) => session.queued).length,
+    sidebarFailedCount: sessions.filter((session) => session.activity?.execution === "failed").length,
+    sidebarPausedCount: sessions.filter((session) => session.activity?.execution === "paused").length,
+    sidebarConfirmationCount: sessions.filter((session) => session.pendingConfirmation).length,
+    sidebarForeignOwnerCount: sessions.filter((session) =>
+      Boolean(session.controlOwner && session.controlledByThisWindow !== true),
+    ).length,
+    observing,
+    controlledByThisWindow: diagnosticControlledByThisWindow,
+    foreignOwnerPresent: diagnosticForeignOwnerPresent,
+    authorityPresent: Boolean(effectiveControl.controlOwner),
+    composerQueueVisible: composerQueueMode,
+    composerSteerEligible: state.isStreaming,
+    composerStopVisible: state.isStreaming,
+    composerSendVisible: !composerQueueMode,
+    composerDisabled:
+      loading ||
+      currentSessionPreparing ||
+      viewSwitching ||
+      observing ||
+      mutationBlocked ||
+      Boolean(state.isCompacting) ||
+      primarySessionFailed ||
+      primaryRuntimeUnavailable,
+    stopping: stoppingCurrentSession,
+  };
+  const recordDiagnosticProjection = (force: boolean): void => {
+    const uiSignature = JSON.stringify([viewedSessionId, diagnosticUiDetails]);
+    if (force || diagnosticUiSignatureRef.current !== uiSignature) {
+      diagnosticUiSignatureRef.current = uiSignature;
+      recordBrowserStateDiagnostic("projection", "ui-state", {
+        sessionId: viewedSessionId,
+        details: diagnosticUiDetails,
+      });
+    }
 
     const previousRows = diagnosticSidebarRowsRef.current;
     const nextRows = new Map<string, string>();
     const allSessionIds = new Set(sessions.map((session) => session.id));
     for (const row of diagnosticSidebarRows) {
       nextRows.set(row.sessionId, row.signature);
-      if (previousRows.get(row.sessionId) === row.signature) continue;
+      if (!force && previousRows.get(row.sessionId) === row.signature) continue;
       recordBrowserStateDiagnostic("projection", "sidebar-session", {
         sessionId: row.sessionId,
         details: {
@@ -6989,31 +7067,37 @@ export function App() {
         },
       });
     }
-    for (const sessionId of previousRows.keys()) {
-      if (nextRows.has(sessionId)) continue;
-      recordBrowserStateDiagnostic("projection", "sidebar-session", {
-        sessionId,
-        details: {
-          found: allSessionIds.has(sessionId),
-          sidebarExecution: "idle",
-          sidebarRunning: false,
-          sidebarQueued: false,
-          pendingConfirmation: false,
-          controlledByThisWindow: false,
-          foreignOwnerPresent: false,
-          viewed: false,
-        },
-      });
+    if (!force) {
+      for (const sessionId of previousRows.keys()) {
+        if (nextRows.has(sessionId)) continue;
+        recordBrowserStateDiagnostic("projection", "sidebar-session", {
+          sessionId,
+          details: {
+            found: allSessionIds.has(sessionId),
+            sidebarExecution: "idle",
+            sidebarRunning: false,
+            sidebarQueued: false,
+            pendingConfirmation: false,
+            controlledByThisWindow: false,
+            foreignOwnerPresent: false,
+            viewed: false,
+          },
+        });
+      }
     }
     diagnosticSidebarRowsRef.current = nextRows;
+  };
+  diagnosticCheckpointRef.current = () => recordDiagnosticProjection(true);
+
+  useEffect(() => {
+    recordDiagnosticProjection(false);
   }, [
     composerQueueMode,
     currentSessionPreparing,
     diagnosticSidebarSignature,
-    diagnosticsActive,
     effectiveControl.controlOwner,
     effectiveControl.controlledByThisWindow,
-    liveMessage,
+    diagnosticHasLive,
     loading,
     messages.length,
     mutationBlocked,
@@ -7344,15 +7428,11 @@ export function App() {
             ? recoveryActionBlocked
             : globalMutationBlocked)
         }
-        diagnosticsActive={diagnosticsActive}
         diagnosticsBusy={diagnosticsBusy}
-        diagnosticsEntryCount={diagnosticsEntryCount}
         onClose={() => setManagementSection(null)}
         onAppearance={setAppearance}
         onPickWorkspace={() => void pickDefaultWorkspace()}
         onModel={(provider, id) => void changeModel(provider, id)}
-        onStartDiagnostics={startStateDiagnostics}
-        onStopDiagnostics={stopStateDiagnostics}
         onExportDiagnostics={exportStateDiagnostics}
         onShutdown={() => void shutdownPiChat()}
       />

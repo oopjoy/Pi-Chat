@@ -14,9 +14,6 @@ export interface StateDiagnosticEntry {
 }
 
 export interface StateDiagnosticStatus {
-  active: boolean;
-  captureId?: string;
-  startedAt?: string;
   entryCount: number;
   windowMs: number;
   maximumEntries: number;
@@ -25,15 +22,16 @@ export interface StateDiagnosticStatus {
 }
 
 export interface ServerStateDiagnosticSnapshot {
-  schemaVersion: 1;
+  schemaVersion: 2;
   generatedAt: string;
   runEpoch: string;
-  buildRevision: string;
+  buildFingerprint: string;
   status: StateDiagnosticStatus;
   entries: StateDiagnosticEntry[];
 }
 
 export interface BrowserStateDiagnosticSnapshot {
+  schemaVersion: 2;
   generatedAt: string;
   pageStartedAt: string;
   status: StateDiagnosticStatus;
@@ -41,7 +39,7 @@ export interface BrowserStateDiagnosticSnapshot {
 }
 
 export interface StateDiagnosticExportBundle {
-  schemaVersion: 1;
+  schemaVersion: 2;
   generatedAt: string;
   warning: string;
   server: ServerStateDiagnosticSnapshot;
@@ -54,7 +52,7 @@ const BOOLEAN_DETAIL_KEYS = new Set([
   "composerDisabled",
   "composerQueueVisible",
   "composerSendVisible",
-  "composerSteerVisible",
+  "composerSteerEligible",
   "composerStopVisible",
   "controlledByThisWindow",
   "dispatching",
@@ -159,8 +157,6 @@ const STATIC_API_ROUTES = new Set([
   "/api/chat/prompt",
   "/api/chat/queue/resume",
   "/api/diagnostics/snapshot",
-  "/api/diagnostics/start",
-  "/api/diagnostics/stop",
   "/api/events",
   "/api/extension-ui/respond",
   "/api/extension/respond",
@@ -207,6 +203,19 @@ function canonicalApiRoute(value: string): string {
 const ENUM_DETAIL_VALUES: Record<string, ReadonlySet<string>> = {
   activityExecution: EXECUTION_VALUES,
   channel: new Set(["pi", "ready", "unknown"]),
+  decisionReason: new Set([
+    "accepted",
+    "committed",
+    "missing-session",
+    "session-deleted",
+    "settled-run-generation",
+    "stale-draft-authority",
+    "stale-pane-authority",
+    "stale-refresh-authority",
+    "stale-run-epoch",
+    "stale-run-generation",
+    "unknown",
+  ]),
   disconnectReason: new Set([
     "request-close",
     "write-error",
@@ -258,6 +267,74 @@ const ENUM_DETAIL_VALUES: Record<string, ReadonlySet<string>> = {
   sidebarExecution: EXECUTION_VALUES,
   viewSource: new Set(["browser-cache", "cold-jsonl", "hot-memory", "none", "unknown"]),
 };
+
+const STATE_DIAGNOSTIC_EVENT_PAIRS = new Set([
+  "diagnostic:export-requested",
+  "http:request-end",
+  "http:request-error",
+  "http:request-start",
+  "projection:bootstrap",
+  "projection:bootstrap-accepted",
+  "projection:bootstrap-committed",
+  "projection:bootstrap-received",
+  "projection:bootstrap-rejected",
+  "projection:session-view",
+  "projection:session-view-accepted",
+  "projection:session-view-committed",
+  "projection:session-view-fast",
+  "projection:session-view-received",
+  "projection:session-view-rejected",
+  "projection:sidebar-session",
+  "projection:ui-state",
+  "rpc-event:received",
+  "sse:admitted",
+  "sse:broadcast-control",
+  "sse:broadcast-intent",
+  "sse:connected",
+  "sse:error",
+  "sse:ready",
+  "sse:received",
+  "sse:rejected",
+  "sse-transport:disconnected",
+  "sse-transport:no-clients",
+  "sse-transport:oversized-substitute",
+  "sse-transport:queue-replaced",
+  "sse-transport:queued",
+  "sse-transport:scheduled",
+  "sse-transport:scheduled-replaced",
+  "sse-transport:write-error",
+  "sse-transport:written",
+  "sse-transport:written-backpressured",
+]);
+
+const HIGH_FREQUENCY_EVENT_TYPES = new Set([
+  "message_update",
+  "tool_execution_update",
+  "pi_chat_heartbeat",
+]);
+
+/** Diagnostic names are closed metadata, never caller-controlled labels. */
+export function isAllowedStateDiagnosticEvent(category: string, name: string): boolean {
+  return STATE_DIAGNOSTIC_EVENT_PAIRS.has(`${category}:${name}`);
+}
+
+export function isHighFrequencyStateDiagnosticEventType(value: unknown): boolean {
+  return typeof value === "string" && HIGH_FREQUENCY_EVENT_TYPES.has(value);
+}
+
+/** Filter hot cumulative frames before projection building or JSON encoding. */
+export function shouldRetainStateDiagnosticEvent(
+  category: string,
+  name: string,
+  details: Record<string, unknown> | undefined,
+): boolean {
+  const rejectedSse = category === "sse" && name === "rejected";
+  if (isHighFrequencyStateDiagnosticEventType(details?.eventType) && !rejectedSse) return false;
+  if (!isAllowedStateDiagnosticEvent(category, name)) return false;
+  if (category === "sse-transport" && (name === "scheduled" || name === "scheduled-replaced"))
+    return false;
+  return true;
+}
 
 function safeDiagnosticString(key: string, value: string): string | undefined {
   if (key === "route") return canonicalApiRoute(value);

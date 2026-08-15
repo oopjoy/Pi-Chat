@@ -4,31 +4,28 @@ import { StateDiagnosticsRecorder, sanitizeDiagnosticDetails } from "../src/serv
 
 const SESSION_ID = "0123456789abcdefabcd";
 
-test("state diagnostics is explicit, bounded, ordered, and freezes on stop", () => {
+test("state diagnostics is always-on, bounded, ordered, and age-limited", () => {
   let now = Date.parse("2026-08-14T12:00:00.000Z");
   const recorder = new StateDiagnosticsRecorder({
     runEpoch: "run",
-    buildRevision: "revision",
+    buildFingerprint: "a".repeat(64),
     now: () => now,
     windowMs: 10_000,
     maximumEntries: 100,
     maximumBytes: 64 * 1024,
   });
-  recorder.record({ category: "ignored", name: "before-start" });
-  assert.equal(recorder.snapshot().entries.length, 0);
 
-  recorder.start();
   for (let index = 0; index < 180; index += 1) {
     recorder.record({
       category: "projection",
-      name: "state",
+      name: "ui-state",
       sessionId: SESSION_ID,
       runGeneration: index,
-      details: { index, running: index % 2 === 0 },
+      details: { durationMs: index, running: index % 2 === 0 },
     });
   }
   const bounded = recorder.snapshot();
-  assert.equal(bounded.status.active, true);
+  assert.equal(bounded.schemaVersion, 2);
   assert.ok(bounded.entries.length <= 100);
   assert.ok(bounded.status.approximateBytes <= bounded.status.maximumBytes);
   assert.ok(
@@ -38,15 +35,9 @@ test("state diagnostics is explicit, bounded, ordered, and freezes on stop", () 
   );
 
   now += 11_000;
-  recorder.record({ category: "capture", name: "after-window" });
+  recorder.record({ category: "sse", name: "connected" });
   const expired = recorder.snapshot();
-  assert.deepEqual(expired.entries.map((entry) => entry.name), ["after-window"]);
-
-  const stopped = recorder.stop();
-  assert.equal(stopped.active, false);
-  const count = stopped.entryCount;
-  recorder.record({ category: "ignored", name: "after-stop" });
-  assert.equal(recorder.snapshot().entries.length, count);
+  assert.deepEqual(expired.entries.map((entry) => entry.name), ["connected"]);
 });
 
 test("state diagnostics keeps only closed-schema values and rejects adversarial strings", () => {
@@ -80,15 +71,11 @@ test("state diagnostics keeps only closed-schema values and rejects adversarial 
   assert.equal(safe.errorType, "unknown");
   assert.equal(safe.route, "/api/unknown");
   assert.equal(
-    sanitizeDiagnosticDetails({
-      route: "/api/sessions/0123456789abcdefabcd/view",
-    }).route,
+    sanitizeDiagnosticDetails({ route: "/api/sessions/0123456789abcdefabcd/view" }).route,
     "/api/sessions/:sessionId/view",
   );
   assert.equal(
-    sanitizeDiagnosticDetails({
-      route: "/api/chat/queue/01234567-89ab-cdef-0123-456789abcdef",
-    }).route,
+    sanitizeDiagnosticDetails({ route: "/api/chat/queue/01234567-89ab-cdef-0123-456789abcdef" }).route,
     "/api/chat/queue/:queueId",
   );
   for (const route of [
@@ -111,15 +98,14 @@ test("state diagnostics keeps only closed-schema values and rejects adversarial 
 test("state diagnostics applies an approximate byte ceiling independently of count", () => {
   const recorder = new StateDiagnosticsRecorder({
     runEpoch: "run",
-    buildRevision: "revision",
+    buildFingerprint: "a".repeat(64),
     maximumEntries: 1_000,
     maximumBytes: 64 * 1024,
   });
-  recorder.start();
   for (let index = 0; index < 400; index += 1) {
     recorder.record({
-      category: "stress",
-      name: "bounded",
+      category: "projection",
+      name: "ui-state",
       details: {
         durationMs: index,
         queueLength: index,
@@ -149,7 +135,7 @@ test("state diagnostics applies an approximate byte ceiling independently of cou
         foreignOwnerPresent: true,
         composerDisabled: true,
         composerStopVisible: true,
-        eventType: "message_update",
+        eventType: "agent_start",
         execution: "running",
         runtimeStatus: "active",
         route: "/api/bootstrap",
@@ -159,4 +145,44 @@ test("state diagnostics applies an approximate byte ceiling independently of cou
   const snapshot = recorder.snapshot();
   assert.ok(snapshot.entries.length < 400);
   assert.ok(snapshot.status.approximateBytes <= snapshot.status.maximumBytes);
+});
+
+test("state diagnostics drops open event names and cumulative update noise", () => {
+  const recorder = new StateDiagnosticsRecorder({ runEpoch: "run", buildFingerprint: "a".repeat(64) });
+  recorder.record({ category: "private", name: "user-controlled" });
+  for (let index = 0; index < 10_000; index += 1)
+    recorder.record({
+      category: "rpc-event",
+      name: "received",
+      details: { eventType: "message_update", durationMs: index },
+    });
+  recorder.record({
+    category: "sse",
+    name: "rejected",
+    details: { eventType: "message_update", decisionReason: "stale-run-generation" },
+  });
+  recorder.record({
+    category: "rpc-event",
+    name: "received",
+    details: { eventType: "agent_settled" },
+  });
+  const snapshot = recorder.snapshot();
+  assert.deepEqual(snapshot.entries.map((entry) => entry.details.eventType), [
+    "message_update",
+    "agent_settled",
+  ]);
+});
+
+test("state diagnostic recorder failures are fail-open", () => {
+  const recorder = new StateDiagnosticsRecorder({
+    runEpoch: "run",
+    buildFingerprint: "a".repeat(64),
+    encodeBytes: () => { throw new Error("diagnostic encoder failed"); },
+  });
+  assert.doesNotThrow(() => recorder.record({
+    category: "projection",
+    name: "ui-state",
+    details: { running: true },
+  }));
+  assert.equal(recorder.snapshot().entries.length, 0);
 });

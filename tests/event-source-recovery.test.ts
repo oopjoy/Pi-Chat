@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isIgnoredEventSourceFrame, isOversizedEventSourceFrame, shouldReconnectEventSource } from "../src/web/hooks/use-pi-event-source";
+import { diagnosticFrame, isIgnoredEventSourceFrame, isOversizedEventSourceFrame, shouldReconnectEventSource } from "../src/web/hooks/use-pi-event-source";
 
 test("standalone PWA resume replaces a potentially half-open EventSource", () => {
   const now = 100_000;
@@ -23,4 +23,22 @@ test("cumulative tool snapshots are rejected before JSON parsing and huge unknow
   assert.equal(isIgnoredEventSourceFrame(JSON.stringify({ type: "message_update", message: { role: "assistant", content: "mentions tool_execution_update" } })), false);
   assert.equal(isOversizedEventSourceFrame("x".repeat(1_000_001)), true);
   assert.equal(isOversizedEventSourceFrame("x".repeat(1_000_000)), false);
+});
+
+test("large terminal frames retain appended Session diagnostic metadata", () => {
+  const frame = diagnosticFrame(JSON.stringify({
+    type: "message_end",
+    message: {
+      role: "assistant",
+      content: "x".repeat(8_000),
+      piChatSessionId: "fedcba9876543210abcd",
+      piChatRunGeneration: 999,
+    },
+    piChatSessionId: "0123456789abcdefabcd",
+    piChatRunEpoch: "run",
+    piChatRunGeneration: 17,
+  }));
+  assert.equal(frame.eventType, "message_end");
+  assert.equal(frame.sessionId, "0123456789abcdefabcd");
+  assert.equal(frame.runGeneration, 17);
 });

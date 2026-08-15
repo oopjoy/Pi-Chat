@@ -6,7 +6,8 @@ import type { PiRpcClient } from "../../src/server/rpc-client";
 import { idForPath } from "../../src/server/session-index";
 import type { SessionIndex } from "../../src/server/session-index";
 import type { ResourceManager } from "../../src/server/resource-manager";
-import type { ServerStateDiagnosticSnapshot, StateDiagnosticStatus } from "../../src/shared/state-diagnostics";
+import type { ServerStateDiagnosticSnapshot } from "../../src/shared/state-diagnostics";
+import { diagnosticFrame } from "../../src/web/hooks/use-pi-event-source";
 import { FakeRpc } from "../helpers/server-app-fixture";
 
 async function fixture() {
@@ -57,30 +58,29 @@ async function fixture() {
   };
 }
 
-test("diagnostic routes capture redacted API, RPC, SSE, and projection state", async () => {
-  const target = await fixture();
-  const ownerHeaders = {
-    "x-pi-chat-client": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-    "x-pi-chat-page": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-  };
-  try {
-    assert.equal((await fetch(`${target.origin}/api/bootstrap/handshake`, {
-      headers: ownerHeaders,
-    })).status, 200);
-    const start = await fetch(`${target.origin}/api/diagnostics/start`, {
-      method: "POST",
-      headers: ownerHeaders,
-    });
-    assert.equal(start.status, 200);
-    const started = (await start.json()) as StateDiagnosticStatus;
-    assert.equal(started.active, true);
-    assert.match(started.captureId || "", /^[a-f0-9]{24}$/);
-    const captureHeaders = {
-      ...ownerHeaders,
-      "x-pi-chat-diagnostic-capture": started.captureId || "",
-    };
+const ownerA = {
+  "x-pi-chat-client": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "x-pi-chat-page": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+};
+const ownerB = {
+  "x-pi-chat-client": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+  "x-pi-chat-page": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+};
 
-    assert.equal((await fetch(`${target.origin}/api/bootstrap`)).status, 200);
+async function register(origin: string, headers: Record<string, string>): Promise<void> {
+  assert.equal((await fetch(`${origin}/api/bootstrap/handshake`, { headers })).status, 200);
+}
+
+async function snapshot(origin: string, headers: Record<string, string>) {
+  const response = await fetch(`${origin}/api/diagnostics/snapshot`, { headers });
+  return { response, value: response.ok ? await response.json() as ServerStateDiagnosticSnapshot : null };
+}
+
+test("always-on diagnostic snapshot captures redacted API, RPC, SSE, and projections", async () => {
+  const target = await fixture();
+  try {
+    await register(target.origin, ownerA);
+    assert.equal((await fetch(`${target.origin}/api/bootstrap`, { headers: ownerA })).status, 200);
     target.rpc.emit({
       type: "tool_execution_start",
       toolName: "bash",
@@ -90,213 +90,145 @@ test("diagnostic routes capture redacted API, RPC, SSE, and projection state", a
       requestToken: "secret-token",
     });
     target.rpc.emit({ type: "secret-token C:\\private\\key.txt" });
-    assert.equal((await fetch(`${target.origin}/api/sessions/${target.id}/view`)).status, 200);
+    for (let index = 0; index < 2_500; index += 1)
+      target.rpc.emit({
+        type: "message_update",
+        message: { role: "assistant", content: [{ type: "text", text: String(index) }] },
+      });
+    target.rpc.emit({ type: "agent_settled" });
+    assert.equal((await fetch(`${target.origin}/api/sessions/${target.id}/view`, { headers: ownerA })).status, 200);
     const malformed = await fetch(`${target.origin}/api/chat/prompt`, {
       method: "POST",
-      headers: {
-        ...ownerHeaders,
-        "content-type": "application/json",
-      },
+      headers: { ...ownerA, "content-type": "application/json" },
       body: "{",
     });
     assert.equal(malformed.status, 400);
 
-    const response = await fetch(`${target.origin}/api/diagnostics/snapshot`, {
-      headers: captureHeaders,
-    });
-    assert.equal(response.status, 200);
-    const snapshot = (await response.json()) as ServerStateDiagnosticSnapshot;
-    assert.equal(snapshot.schemaVersion, 1);
-    assert.equal(snapshot.runEpoch, "diagnostic-run");
-    assert.equal(snapshot.buildRevision, "diagnostic-revision");
-    assert.equal(snapshot.status.active, true);
-    assert.ok(snapshot.entries.some((entry) =>
-      entry.category === "rpc-event" &&
-      entry.details.eventType === "tool_execution_start",
+    const result = await snapshot(target.origin, ownerA);
+    assert.equal(result.response.status, 200);
+    const value = result.value!;
+    assert.equal(value.schemaVersion, 2);
+    assert.equal(value.runEpoch, "diagnostic-run");
+    assert.equal(value.buildFingerprint, "a".repeat(64));
+    assert.ok(value.entries.some((entry) =>
+      entry.category === "rpc-event" && entry.details.eventType === "tool_execution_start",
     ));
-    assert.ok(snapshot.entries.some((entry) =>
-      entry.category === "sse" && entry.details.eventType === "tool_execution_start",
+    assert.ok(value.entries.some((entry) =>
+      entry.category === "rpc-event" && entry.details.eventType === "agent_settled",
     ));
-    assert.ok(snapshot.entries.some((entry) =>
-      entry.category === "sse-transport" &&
-      entry.name === "no-clients" &&
-      entry.details.eventType === "tool_execution_start",
+    assert.equal(value.entries.some((entry) => entry.details.eventType === "message_update"), false);
+    assert.ok(value.entries.some((entry) =>
+      entry.category === "sse-transport" && entry.details.eventType === "tool_execution_start",
     ));
-    assert.ok(snapshot.entries.some((entry) =>
-      entry.category === "rpc-event" && entry.details.eventType === "unknown",
-    ));
-    assert.ok(snapshot.entries.some((entry) =>
+    assert.ok(value.entries.some((entry) =>
       entry.category === "projection" && entry.name === "bootstrap",
     ));
-    assert.ok(snapshot.entries.some((entry) =>
+    assert.ok(value.entries.some((entry) =>
       entry.category === "projection" && entry.name === "session-view",
     ));
-    const failedRequest = snapshot.entries.filter((entry) =>
+    const failedRequest = value.entries.filter((entry) =>
       entry.category === "http" && entry.details.route === "/api/chat/prompt",
     );
-    assert.deepEqual(
-      failedRequest.map((entry) => entry.name),
-      ["request-start", "request-error", "request-end"],
+    assert.deepEqual(failedRequest.map((entry) => entry.name), [
+      "request-start",
+      "request-error",
+      "request-end",
+    ]);
+    assert.equal(
+      value.entries.some((entry) => entry.details.route === "/api/diagnostics/snapshot"),
+      false,
+      "snapshot reads must not add an incomplete span to their own export",
     );
-    assert.equal(failedRequest.at(-1)?.details.status, 400);
-    const raw = JSON.stringify(snapshot);
+    const raw = JSON.stringify(value);
     for (const forbidden of [
       "private prompt",
       "private answer",
       "C:\\\\private",
       "secret-token",
     ]) assert.equal(raw.includes(forbidden), false, forbidden);
-
-    const stop = await fetch(`${target.origin}/api/diagnostics/stop`, {
-      method: "POST",
-      headers: captureHeaders,
-    });
-    assert.equal(stop.status, 200);
-    assert.equal(((await stop.json()) as StateDiagnosticStatus).active, false);
-    const stoppedCount = ((await (await fetch(`${target.origin}/api/diagnostics/snapshot`, {
-      headers: captureHeaders,
-    })).json()) as ServerStateDiagnosticSnapshot).entries.length;
-    target.rpc.emit({ type: "agent_settled" });
-    const after = (await (await fetch(`${target.origin}/api/diagnostics/snapshot`, {
-      headers: captureHeaders,
-    })).json()) as ServerStateDiagnosticSnapshot;
-    assert.equal(after.entries.length, stoppedCount);
   } finally {
     await target.close();
   }
 });
 
-test("closing the final owning page releases capture without letting a stale page close its replacement", async () => {
+test("registered pages can independently snapshot one process recorder without ownership", async () => {
   const target = await fixture();
-  const clientA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-  const oldPage = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-  const newPage = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
-  const ownerB = {
-    "x-pi-chat-client": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
-    "x-pi-chat-page": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
-  };
-  const pageHeaders = (pageId: string) => ({
-    "x-pi-chat-client": clientA,
-    "x-pi-chat-page": pageId,
-  });
   try {
-    assert.equal((await fetch(`${target.origin}/api/bootstrap/handshake`, {
-      headers: pageHeaders(oldPage),
-    })).status, 200);
-    assert.equal((await fetch(`${target.origin}/api/bootstrap/handshake`, {
-      headers: pageHeaders(newPage),
-    })).status, 200);
-    assert.equal((await fetch(`${target.origin}/api/bootstrap/handshake`, {
-      headers: ownerB,
-    })).status, 200);
-    assert.equal((await fetch(`${target.origin}/api/diagnostics/start`, {
-      method: "POST",
-      headers: pageHeaders(newPage),
-    })).status, 200);
+    await register(target.origin, ownerA);
+    await register(target.origin, ownerB);
+    target.rpc.emit({ type: "agent_start" });
+    const first = await snapshot(target.origin, ownerA);
+    const second = await snapshot(target.origin, ownerB);
+    assert.equal(first.response.status, 200);
+    assert.equal(second.response.status, 200);
+    assert.deepEqual(second.value?.entries, first.value?.entries);
 
     assert.equal((await fetch(`${target.origin}/api/window/close`, {
       method: "POST",
-      headers: pageHeaders(oldPage),
+      headers: ownerA,
     })).status, 200);
-    assert.equal((await fetch(`${target.origin}/api/diagnostics/start`, {
-      method: "POST",
-      headers: ownerB,
-    })).status, 409, "a stale page close must not release its replacement's capture");
-
-    assert.equal((await fetch(`${target.origin}/api/window/close`, {
-      method: "POST",
-      headers: pageHeaders(newPage),
-    })).status, 200);
-    const delayedClosedPageStart = await fetch(`${target.origin}/api/diagnostics/start`, {
-      method: "POST",
-      headers: pageHeaders(newPage),
-    });
-    assert.equal(delayedClosedPageStart.status, 409);
-    assert.equal(
-      ((await delayedClosedPageStart.json()) as { code?: string }).code,
-      "DIAGNOSTIC_PAGE_NOT_REGISTERED",
-    );
-    assert.equal((await fetch(`${target.origin}/api/diagnostics/start`, {
-      method: "POST",
-      headers: ownerB,
-    })).status, 200, "the final owning page close releases capture for another window");
+    const stale = await snapshot(target.origin, ownerA);
+    assert.equal(stale.response.status, 409);
+    assert.equal((await stale.response.json() as { code?: string }).code, "DIAGNOSTIC_PAGE_NOT_REGISTERED");
+    assert.equal((await snapshot(target.origin, ownerB)).response.status, 200);
   } finally {
     await target.close();
   }
 });
 
-test("diagnostic capture IDs prevent one window from resetting or exporting another window's capture", async () => {
+test("server-appended Runtime metadata remains the final diagnostic attribution", async () => {
   const target = await fixture();
-  const ownerA = {
-    "x-pi-chat-client": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-    "x-pi-chat-page": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  const internals = target.app as unknown as {
+    broadcast: (event: Record<string, unknown>) => void;
+    broadcastRpcEvent: (
+      event: Record<string, unknown>,
+      sessionId: string,
+      runGeneration?: number,
+    ) => void;
   };
-  const ownerB = {
-    "x-pi-chat-client": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
-    "x-pi-chat-page": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
-  };
+  const originalBroadcast = internals.broadcast;
+  const captured: Record<string, unknown>[] = [];
+  internals.broadcast = (event) => { captured.push(event); };
   try {
-    assert.equal((await fetch(`${target.origin}/api/bootstrap/handshake`, {
-      headers: ownerA,
-    })).status, 200);
-    assert.equal((await fetch(`${target.origin}/api/bootstrap/handshake`, {
-      headers: ownerB,
-    })).status, 200);
-    const first = await fetch(`${target.origin}/api/diagnostics/start`, {
-      method: "POST",
-      headers: ownerA,
-    });
-    assert.equal(first.status, 200);
-    const firstStatus = (await first.json()) as StateDiagnosticStatus;
-    assert.ok(firstStatus.captureId);
-
-    const conflictingStart = await fetch(`${target.origin}/api/diagnostics/start`, {
-      method: "POST",
-      headers: ownerB,
-    });
-    assert.equal(conflictingStart.status, 409);
-    assert.equal((await conflictingStart.json() as { code?: string }).code, "DIAGNOSTIC_CAPTURE_IN_USE");
-
-    const foreignSnapshot = await fetch(`${target.origin}/api/diagnostics/snapshot`, {
-      headers: {
-        ...ownerB,
-        "x-pi-chat-diagnostic-capture": firstStatus.captureId || "",
+    internals.broadcastRpcEvent({
+      piChatSessionId: "fedcba9876543210abcd",
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: "x".repeat(8_000),
+        piChatSessionId: "11111111111111111111",
+        piChatRunGeneration: 999,
       },
-    });
-    assert.equal(foreignSnapshot.status, 409);
-
-    const restarted = await fetch(`${target.origin}/api/diagnostics/start`, {
-      method: "POST",
-      headers: ownerA,
-    });
-    assert.equal(restarted.status, 200);
-    const restartedStatus = (await restarted.json()) as StateDiagnosticStatus;
-    assert.ok(restartedStatus.captureId);
-    assert.notEqual(restartedStatus.captureId, firstStatus.captureId);
-
-    const staleSnapshot = await fetch(`${target.origin}/api/diagnostics/snapshot`, {
-      headers: {
-        ...ownerA,
-        "x-pi-chat-diagnostic-capture": firstStatus.captureId || "",
-      },
-    });
-    assert.equal(staleSnapshot.status, 409);
-
-    const stopped = await fetch(`${target.origin}/api/diagnostics/stop`, {
-      method: "POST",
-      headers: {
-        ...ownerA,
-        "x-pi-chat-diagnostic-capture": restartedStatus.captureId || "",
-      },
-    });
-    assert.equal(stopped.status, 200);
-
-    const secondWindowStart = await fetch(`${target.origin}/api/diagnostics/start`, {
-      method: "POST",
-      headers: ownerB,
-    });
-    assert.equal(secondWindowStart.status, 200);
+      piChatRunEpoch: "untrusted",
+      piChatRunGeneration: 998,
+    }, target.id, 17);
+    assert.equal(captured.length, 1);
+    assert.deepEqual(Object.keys(captured[0]).slice(-3), [
+      "piChatSessionId",
+      "piChatRunEpoch",
+      "piChatRunGeneration",
+    ]);
+    const frame = diagnosticFrame(JSON.stringify(captured[0]));
+    assert.equal(frame.sessionId, target.id);
+    assert.equal(frame.runGeneration, 17);
   } finally {
+    internals.broadcast = originalBroadcast;
+    await target.close();
+  }
+});
+
+test("server diagnostic failures do not perturb Runtime events or HTTP", async () => {
+  const target = await fixture();
+  const recorder = (target.app as unknown as {
+    stateDiagnostics: { record: (...args: unknown[]) => void };
+  }).stateDiagnostics;
+  const originalRecord = recorder.record;
+  recorder.record = () => { throw new Error("diagnostic failure"); };
+  try {
+    assert.doesNotThrow(() => target.rpc.emit({ type: "agent_start" }));
+    assert.equal((await fetch(`${target.origin}/api/bootstrap`, { headers: ownerA })).status, 200);
+  } finally {
+    recorder.record = originalRecord;
     await target.close();
   }
 });

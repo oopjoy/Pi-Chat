@@ -1,6 +1,6 @@
-import { randomBytes } from "node:crypto";
 import {
   sanitizeStateDiagnosticDetails,
+  shouldRetainStateDiagnosticEvent,
   type ServerStateDiagnosticSnapshot,
   type StateDiagnosticEntry,
   type StateDiagnosticStatus,
@@ -17,17 +17,17 @@ export interface StateDiagnosticRecord {
 
 export interface StateDiagnosticsRecorderOptions {
   runEpoch: string;
-  buildRevision: string;
+  buildFingerprint: string;
   now?: () => number;
   windowMs?: number;
   maximumEntries?: number;
   maximumBytes?: number;
+  encodeBytes?: (value: string) => number;
 }
 
 const DEFAULT_WINDOW_MS = 5 * 60 * 1_000;
 const DEFAULT_MAXIMUM_ENTRIES = 2_000;
 const DEFAULT_MAXIMUM_BYTES = 1024 * 1024;
-const SAFE_NAME = /^[a-z0-9_.:-]{1,80}$/i;
 const SAFE_SESSION_ID = /^[a-f0-9]{20}$/;
 
 function safeInteger(value: unknown): number | undefined {
@@ -38,18 +38,20 @@ function safeInteger(value: unknown): number | undefined {
 
 export const sanitizeDiagnosticDetails = sanitizeStateDiagnosticDetails;
 
+/**
+ * Process-local, always-on flight recorder. It owns no Runtime, Session, HTTP,
+ * or browser authority; any observation failure simply drops that entry.
+ */
 export class StateDiagnosticsRecorder {
   private readonly now: () => number;
   private readonly windowMs: number;
   private readonly maximumEntries: number;
   private readonly maximumBytes: number;
+  private readonly encodeBytes: (value: string) => number;
   private entries: StateDiagnosticEntry[] = [];
   private entryBytes: number[] = [];
+  private head = 0;
   private approximateBytes = 0;
-  private active = false;
-  private captureId = "";
-  private ownerId = "";
-  private startedAtMs = 0;
   private sequence = 0;
 
   constructor(private readonly options: StateDiagnosticsRecorderOptions) {
@@ -57,78 +59,47 @@ export class StateDiagnosticsRecorder {
     this.windowMs = Math.max(10_000, Math.floor(options.windowMs ?? DEFAULT_WINDOW_MS));
     this.maximumEntries = Math.max(100, Math.floor(options.maximumEntries ?? DEFAULT_MAXIMUM_ENTRIES));
     this.maximumBytes = Math.max(64 * 1024, Math.floor(options.maximumBytes ?? DEFAULT_MAXIMUM_BYTES));
-  }
-
-  isActive(): boolean {
-    return this.active;
-  }
-
-  start(ownerId = "test-owner"): StateDiagnosticStatus {
-    this.active = true;
-    this.captureId = randomBytes(12).toString("hex");
-    this.ownerId = ownerId;
-    this.startedAtMs = this.now();
-    this.sequence = 0;
-    this.entries = [];
-    this.entryBytes = [];
-    this.approximateBytes = 0;
-    this.record({ category: "capture", name: "started" });
-    return this.status();
-  }
-
-  stop(): StateDiagnosticStatus {
-    if (this.active) this.record({ category: "capture", name: "stopped" });
-    this.active = false;
-    return this.status();
-  }
-
-  ownedBy(ownerId: string): boolean {
-    return Boolean(ownerId) && ownerId === this.ownerId;
-  }
-
-  captureMatches(captureId: string): boolean {
-    return Boolean(captureId) && captureId === this.captureId;
+    this.encodeBytes = options.encodeBytes || ((value) => Buffer.byteLength(value, "utf8"));
   }
 
   record(input: StateDiagnosticRecord): void {
-    if (!this.active || !SAFE_NAME.test(input.category) || !SAFE_NAME.test(input.name)) return;
-    const now = this.now();
-    this.prune(now);
-    const runGeneration = safeInteger(input.runGeneration);
-    const rpcGeneration = safeInteger(input.rpcGeneration);
-    const entry: StateDiagnosticEntry = {
-      sequence: ++this.sequence,
-      timestamp: new Date(now).toISOString(),
-      source: "server",
-      category: input.category,
-      name: input.name,
-      ...(input.sessionId && SAFE_SESSION_ID.test(input.sessionId)
-        ? { sessionId: input.sessionId }
-        : null),
-      ...(runGeneration !== undefined ? { runGeneration } : null),
-      ...(rpcGeneration !== undefined ? { rpcGeneration } : null),
-      details: sanitizeStateDiagnosticDetails(input.details),
-    };
-    const bytes = Buffer.byteLength(JSON.stringify(entry), "utf8");
-    this.entries.push(entry);
-    this.entryBytes.push(bytes);
-    this.approximateBytes += bytes;
-    while (
-      this.entries.length > this.maximumEntries ||
-      this.approximateBytes > this.maximumBytes
-    ) {
-      this.entries.shift();
-      this.approximateBytes -= this.entryBytes.shift() || 0;
+    try {
+      if (!shouldRetainStateDiagnosticEvent(input.category, input.name, input.details)) return;
+      const now = this.now();
+      this.prune(now);
+      const runGeneration = safeInteger(input.runGeneration);
+      const rpcGeneration = safeInteger(input.rpcGeneration);
+      const entry: StateDiagnosticEntry = {
+        sequence: ++this.sequence,
+        timestamp: new Date(now).toISOString(),
+        source: "server",
+        category: input.category,
+        name: input.name,
+        ...(input.sessionId && SAFE_SESSION_ID.test(input.sessionId)
+          ? { sessionId: input.sessionId }
+          : null),
+        ...(runGeneration !== undefined ? { runGeneration } : null),
+        ...(rpcGeneration !== undefined ? { rpcGeneration } : null),
+        details: sanitizeStateDiagnosticDetails(input.details),
+      };
+      const bytes = this.encodeBytes(JSON.stringify(entry));
+      this.entries.push(entry);
+      this.entryBytes.push(bytes);
+      this.approximateBytes += bytes;
+      while (
+        this.retainedCount() > this.maximumEntries ||
+        this.approximateBytes > this.maximumBytes
+      ) this.evictOne();
+      this.compactStorage();
+    } catch {
+      // Diagnostics are optional metadata and must never perturb authoritative work.
     }
   }
 
   status(): StateDiagnosticStatus {
     this.prune(this.now());
     return {
-      active: this.active,
-      ...(this.captureId ? { captureId: this.captureId } : null),
-      ...(this.startedAtMs ? { startedAt: new Date(this.startedAtMs).toISOString() } : null),
-      entryCount: this.entries.length,
+      entryCount: this.retainedCount(),
       windowMs: this.windowMs,
       maximumEntries: this.maximumEntries,
       approximateBytes: this.approximateBytes,
@@ -140,27 +111,41 @@ export class StateDiagnosticsRecorder {
     const now = this.now();
     this.prune(now);
     return {
-      schemaVersion: 1,
+      schemaVersion: 2,
       generatedAt: new Date(now).toISOString(),
       runEpoch: this.options.runEpoch,
-      buildRevision: this.options.buildRevision,
+      buildFingerprint: this.options.buildFingerprint,
       status: this.status(),
-      entries: this.entries.map((entry) => ({ ...entry, details: { ...entry.details } })),
+      entries: this.entries
+        .slice(this.head)
+        .map((entry) => ({ ...entry, details: { ...entry.details } })),
     };
+  }
+
+  private retainedCount(): number {
+    return this.entries.length - this.head;
+  }
+
+  private evictOne(): void {
+    if (this.head >= this.entries.length) return;
+    this.approximateBytes -= this.entryBytes[this.head] || 0;
+    this.head += 1;
   }
 
   private prune(now: number): void {
     const minimum = now - this.windowMs;
-    let remove = 0;
-    while (remove < this.entries.length) {
-      const timestamp = Date.parse(this.entries[remove].timestamp);
+    while (this.head < this.entries.length) {
+      const timestamp = Date.parse(this.entries[this.head].timestamp);
       if (!Number.isFinite(timestamp) || timestamp >= minimum) break;
-      remove += 1;
+      this.evictOne();
     }
-    if (remove) {
-      this.entries.splice(0, remove);
-      const removedBytes = this.entryBytes.splice(0, remove);
-      this.approximateBytes -= removedBytes.reduce((total, value) => total + value, 0);
-    }
+    this.compactStorage();
+  }
+
+  private compactStorage(): void {
+    if (this.head < 256 || this.head * 2 < this.entries.length) return;
+    this.entries = this.entries.slice(this.head);
+    this.entryBytes = this.entryBytes.slice(this.head);
+    this.head = 0;
   }
 }
