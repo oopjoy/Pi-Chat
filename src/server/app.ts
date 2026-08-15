@@ -241,6 +241,12 @@ export interface PiChatAppOptions {
   presenceTtlMs?: number;
   gateRequestTimeoutMs?: number;
   sseHeartbeatMs?: number;
+  /**
+   * Opt-in legacy behavior that stops the service after the final foreground
+   * window closes. Disabled by default so browser crashes, test windows, and
+   * ordinary window closure cannot take down the local service.
+   */
+  lastWindowAutoShutdownEnabled?: boolean;
   /** Quiescent grace after every browser/PWA window has explicitly left. */
   lastWindowShutdownGraceMs?: number;
   /** Busy-state polling interval while the last-window shutdown waits for work. */
@@ -348,6 +354,7 @@ export class PiChatApp {
   private readonly gateRequestTimeoutMs: number;
   private readonly sseHeartbeatMs: number;
   private readonly secondaryRuntimeSweepTimer: NodeJS.Timeout;
+  private readonly lastWindowAutoShutdownEnabled: boolean;
   private readonly lastWindowShutdownGraceMs: number;
   private readonly lastWindowShutdownPollMs: number;
   private readonly handshakePageTimeoutMs: number;
@@ -539,6 +546,8 @@ export class PiChatApp {
       options.gateRequestTimeoutMs ?? DEFAULT_GATE_REQUEST_TIMEOUT_MS,
     );
     this.sseHeartbeatMs = Math.max(10, options.sseHeartbeatMs ?? 20_000);
+    this.lastWindowAutoShutdownEnabled =
+      options.lastWindowAutoShutdownEnabled ?? false;
     this.lastWindowShutdownGraceMs = Math.max(
       0,
       options.lastWindowShutdownGraceMs ??
@@ -1477,6 +1486,7 @@ export class PiChatApp {
 
   private scheduleLastWindowShutdown(): void {
     if (
+      !this.lastWindowAutoShutdownEnabled ||
       this.closed ||
       !this.options.applicationShutdown ||
       this.openWindowCount() > 0 ||
@@ -1493,6 +1503,7 @@ export class PiChatApp {
 
   private async pollLastWindowShutdown(): Promise<void> {
     if (
+      !this.lastWindowAutoShutdownEnabled ||
       this.closed ||
       !this.options.applicationShutdown ||
       this.openWindowCount() > 0
@@ -4760,6 +4771,7 @@ export class PiChatApp {
         remainingWindows: otherWindowCount,
         ...(otherWindowCount === 0 &&
         foregroundCloseIntent &&
+        this.lastWindowAutoShutdownEnabled &&
         this.options.applicationShutdown
           ? { autoShutdownPending: true }
           : {}),

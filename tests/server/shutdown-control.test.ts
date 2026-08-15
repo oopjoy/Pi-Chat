@@ -31,6 +31,47 @@ function connectLifecyclePage(app: PiChatApp): Record<string, string> {
   };
 }
 
+test("closing the final foreground window keeps Pi Chat running by default", async () => {
+  const primary = new FakeRpc("C:\\sessions\\default-close.jsonl", "primary");
+  const shutdownReasons: string[] = [];
+  const app = new PiChatApp({
+    rpc: primary as unknown as PiRpcClient,
+    sessions: {} as SessionIndex,
+    resources: {} as ResourceManager,
+    cwd: process.cwd(),
+    webRoot: process.cwd(),
+    lastWindowShutdownGraceMs: 10,
+    lastWindowShutdownPollMs: 5,
+    applicationShutdown: (reason) => { shutdownReasons.push(reason); },
+  });
+  const client = "11111111-1111-4111-8111-111111111111";
+  const page = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const internals = app as unknown as {
+    connectedPageClients: Map<string, string>;
+    sessionControl: {
+      clientConnected(clientId: string): void;
+      noteClientPresence(clientId: string): boolean;
+    };
+  };
+  internals.sessionControl.clientConnected(client);
+  internals.sessionControl.noteClientPresence(client);
+  internals.connectedPageClients.set(page, client);
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/window/close?page=${page}&foreground=1`, { method: "POST", headers: { "x-pi-chat-client": client } });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { shuttingDown: false, closeWindow: true, rested: false, remainingWindows: 0 });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(shutdownReasons, []);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
 test("a final window close never shuts down an actively streaming Pi worker", async () => {
   const path = "C:\\sessions\\active-close.jsonl";
   const primary = new FakeRpc(path, "primary");
@@ -42,6 +83,7 @@ test("a final window close never shuts down an actively streaming Pi worker", as
     resources: {} as ResourceManager,
     cwd: process.cwd(),
     webRoot: process.cwd(),
+    lastWindowAutoShutdownEnabled: true,
     lastWindowShutdownGraceMs: 25,
     lastWindowShutdownPollMs: 5,
     applicationShutdown: (reason) => { shutdownReasons.push(reason); },
@@ -92,7 +134,7 @@ test("last-window auto shutdown waits for dispatch to finish before starting its
   const path = "C:\\sessions\\primary.jsonl";
   const primary = new FakeRpc(path, "primary");
   let shutdowns = 0;
-  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), lastWindowShutdownGraceMs: 25, lastWindowShutdownPollMs: 5, applicationShutdown: (_reason) => { shutdowns += 1; } });
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), lastWindowAutoShutdownEnabled: true, lastWindowShutdownGraceMs: 25, lastWindowShutdownPollMs: 5, applicationShutdown: (_reason) => { shutdowns += 1; } });
   const client = "11111111-1111-4111-8111-111111111111";
   const page = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const internals = app as unknown as {

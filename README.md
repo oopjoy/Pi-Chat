@@ -21,7 +21,7 @@ Pi Chat 是一个连接本机 Pi RPC 的 local-first Web/PWA 客户端。它提�
 - Session-first 历史会话列表、切换和新建：服务与界面先打开、读取并缓存 JSONL；Primary 会在后台启动并完成兼容性验证，未 ready 或验证失败时历史仍可浏览且不会探测 Primary RPC。选中、滚动、搜索或切换冷历史只读取 JSONL，不启动 Secondary Runtime；只有发送、Compact、Model/Thinking、接管或显式启动 Pi 等实际操作才会为该 Session 单飞准备专属 Runtime。服务的默认工作目录保持固定；需要不同目录时，在创建该条 New 草稿后使用“新对话工作路径”选择器单独修改，不会影响其他对话。新对话首条消息将 Runtime 创建、Model、Thinking、Gate 与 prompt 合并为一个服务事务。最多 5 个热对话（Primary + 4 个 Secondary），达到容量时优先 LRU 回收空闲 Secondary，正在显示的历史也可退回 view-only
 - 同一 Session 可在多个窗口观察，但同一时刻仅一个浏览器窗口可发送、停止、处理 Gate 或改队列；Model/Thinking 修改不会自动取得控制权，无 Owner 时可设置，存在其他窗口 Owner 时必须先显式接管
 - 文件权限 Gate：作为 Pi Chat 内置安全功能呈现；顶栏可切换“严格 / 放行”。严格模式始终确认 `write` / `edit`，并对可识别的高风险 Bash 做辅助确认；Bash 可运行任意脚本，副作用识别不构成完整 sandbox。随应用自动安装、校验和修复的极小 Pi 工具执行适配器仍在真实工具执行前运行
-- 侧栏提供独立刷新和“完整重启 Pi Chat 并应用更新”：应用级 Lifecycle Barrier 会在构建前同步阻止所有新写操作；新版本先在独立 staging 目录完成并验证，构建失败不会修改当前 `dist`，二次核验全部 Runtime、队列和确认状态通过后才提升产物并执行服务切换。维护期间历史、健康检查和只读 API 保持可用。网页与服务的 build identity 不一致时，普通修改会暂停，但“完整重启”与设置中的“关闭 Pi Chat”仍可请求服务端执行其最终 Busy 检查，避免客户端恢复路径被旧页面状态锁死。SSE/EventSource 是可重连传输，断开不会自动关闭 Pi Chat 服务或托管 RPC；但全部浏览器/PWA 页面都通过非 BFCache 关闭明确离开后，服务会等待生成、队列、确认、恢复、Runtime transition 与 mutation 全部结束，并连续空闲 $10$ 秒后自动退出。设置中的“关闭 Pi Chat”仍可显式立即请求关闭，并同样先执行全局 Busy 检查
+- 侧栏提供独立刷新和“完整重启 Pi Chat 并应用更新”：应用级 Lifecycle Barrier 会在构建前同步阻止所有新写操作；新版本先在独立 staging 目录完成并验证，构建失败不会修改当前 `dist`，二次核验全部 Runtime、队列和确认状态通过后才提升产物并执行服务切换。维护期间历史、健康检查和只读 API 保持可用。网页与服务的 build identity 不一致时，普通修改会暂停，但“完整重启”与设置中的“关闭 Pi Chat”仍可请求服务端执行其最终 Busy 检查，避免客户端恢复路径被旧页面状态锁死。SSE/EventSource 是可重连传输，断开不会自动关闭 Pi Chat 服务或托管 RPC；关闭全部浏览器/PWA 页面也只释放窗口、Presence、Session 控制与可回收 Runtime，不再自动停止本地服务。需要停止服务时，使用设置中的“关闭 Pi Chat”显式请求，并由服务端执行全局 Busy 检查
 - 外观设置：主题、字体、字号、行距和对话宽度
 - 设置中的“诊断”可一键导出最近五分钟的服务端/当前浏览器页面结构状态时间线，用于复现 Runtime、SSE 实际投递、Sidebar、Composer、多窗口控制与队列投影不一致；两条时间线始终在内存中有界保留，不需要预先开始录制，也不拥有窗口或 Session 控制权。普通累计流式更新不会逐帧入库，而只在有界计数器中汇总 SSE 调度、背压、无客户端、超限替代、写错误与浏览器调度结果；可见当前 Pane 的首个 Assistant 提交仅通过双 `requestAnimationFrame` 记录一次绘制机会（不代表物理显示或首 token）。排队 Prompt 只复用既有公开 Queue ID，立即发送 Prompt 的诊断 UUID 仅存在于服务内存，最终文件对 Session 与全部 Prompt 关联统一使用一次性别名，且不包含请求 token、聊天/草稿正文、图片、文件路径、密钥或原始错误堆栈
 - 可用模型列表、Models 面板与模型切换；支持基于 `~/.pi/agent/models.json` 的自定义模型 Add/Remove
@@ -138,7 +138,7 @@ Pi Chat 不提供 Todo 功能，也不会安装或管理 Todo Extension。历史
 
 Pi Chat 保留普通浏览器访问，同时提供适合 Edge / Chrome 的独立窗口安装配置。启动服务后，用 Edge 或 Chrome 打开 `http://127.0.0.1:30170`，在浏览器菜单中选择“应用 / Apps → 将此站点安装为应用（Install this site as an app）”。
 
-安装后会以独立 Pi Chat 窗口启动，不显示地址栏、标签页、书签栏或浏览器导航；普通浏览器访问仍然可用。该模式不使用 Service Worker，避免本地更新后被旧前端缓存遮挡。关闭最后一个浏览器/PWA 窗口会在所有工作完成后开始连续空闲 $10$ 秒的自动退出倒计时；刷新、BFCache、网络/SSE 断线，以及旧页面延迟发送的关闭通知都不会关闭替代页面或误触发服务退出。也可使用设置中的“关闭 Pi Chat”显式关闭，或通过桌面的 **Pi Chat** / **Pi Chat Web** 重新启动。源码工作目录的启动器会先构建本地改动；Windows Release ZIP 已内置干净的编译产物，不需要 npm、源码或构建工具即可启动。
+安装后会以独立 Pi Chat 窗口启动，不显示地址栏、标签页、书签栏或浏览器导航；普通浏览器访问仍然可用。该模式不使用 Service Worker，避免本地更新后被旧前端缓存遮挡。关闭最后一个浏览器/PWA 窗口不会停止本地服务；刷新、BFCache、网络/SSE 断线以及测试或临时浏览器退出都不会让 Pi Chat 离线。需要停止服务时，请使用设置中的“关闭 Pi Chat”显式关闭；可通过桌面的 **Pi Chat** / **Pi Chat Web** 再次打开窗口。源码工作目录的启动器会先构建本地改动；Windows Release ZIP 已内置干净的编译产物，不需要 npm、源码或构建工具即可启动。
 
 ## 构建与运行
 

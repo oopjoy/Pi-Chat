@@ -130,7 +130,7 @@ test("an open background transport still prevents last-window auto shutdown", as
   const path = "C:\\sessions\\presence-close.jsonl";
   const primary = new FakeRpc(path, "primary");
   const shutdownReasons: string[] = [];
-  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), lastWindowShutdownGraceMs: 25, lastWindowShutdownPollMs: 5, applicationShutdown: (reason) => { shutdownReasons.push(reason); } });
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), lastWindowAutoShutdownEnabled: true, lastWindowShutdownGraceMs: 25, lastWindowShutdownPollMs: 5, applicationShutdown: (reason) => { shutdownReasons.push(reason); } });
   const background = "11111111-1111-4111-8111-111111111111";
   const closing = "22222222-2222-4222-8222-222222222222";
   const internals = app as unknown as { connectedClients: Map<string, number>; connectedPageClients: Map<string, string> };
@@ -158,7 +158,7 @@ test("closing the last foreground window waits for a quiescent grace before shut
   const path = "C:\\sessions\\primary.jsonl";
   const primary = new FakeRpc(path, "primary");
   const shutdownReasons: string[] = [];
-  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), lastWindowShutdownGraceMs: 30, lastWindowShutdownPollMs: 5, applicationShutdown: (reason) => { shutdownReasons.push(reason); } });
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), lastWindowAutoShutdownEnabled: true, lastWindowShutdownGraceMs: 30, lastWindowShutdownPollMs: 5, applicationShutdown: (reason) => { shutdownReasons.push(reason); } });
   const client = "11111111-1111-4111-8111-111111111111";
   const internals = app as unknown as {
     connectedPageClients: Map<string, string>;
@@ -193,7 +193,7 @@ test("closing the last foreground window waits for a quiescent grace before shut
 test("a hidden or discarded renderer cannot request last-window auto shutdown", async () => {
   const primary = new FakeRpc("C:\\sessions\\discarded.jsonl", "primary");
   const shutdownReasons: string[] = [];
-  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), lastWindowShutdownGraceMs: 20, lastWindowShutdownPollMs: 5, applicationShutdown: (reason) => { shutdownReasons.push(reason); } });
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), lastWindowAutoShutdownEnabled: true, lastWindowShutdownGraceMs: 20, lastWindowShutdownPollMs: 5, applicationShutdown: (reason) => { shutdownReasons.push(reason); } });
   const client = "11111111-1111-4111-8111-111111111111";
   const page = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const internals = app as unknown as {
@@ -229,7 +229,7 @@ test("a hidden or discarded renderer cannot request last-window auto shutdown", 
 test("a reload handshake during grace cancels last-window auto shutdown", async () => {
   const primary = new FakeRpc("C:\\sessions\\refresh.jsonl", "primary");
   const shutdownReasons: string[] = [];
-  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), handshakePageTimeoutMs: 15, lastWindowShutdownGraceMs: 30, lastWindowShutdownPollMs: 5, applicationShutdown: (reason) => { shutdownReasons.push(reason); } });
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), handshakePageTimeoutMs: 15, lastWindowAutoShutdownEnabled: true, lastWindowShutdownGraceMs: 30, lastWindowShutdownPollMs: 5, applicationShutdown: (reason) => { shutdownReasons.push(reason); } });
   const client = "11111111-1111-4111-8111-111111111111";
   const oldPage = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const newPage = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -288,6 +288,7 @@ test("a same-page recovery handshake cannot downgrade an SSE-confirmed window to
     cwd: process.cwd(),
     webRoot: process.cwd(),
     handshakePageTimeoutMs: 15,
+    lastWindowAutoShutdownEnabled: true,
     lastWindowShutdownGraceMs: 15,
     lastWindowShutdownPollMs: 5,
     applicationShutdown: (reason) => { shutdownReasons.push(reason); },
@@ -333,6 +334,7 @@ test("a handshake-only page expires instead of permanently holding the last-wind
     cwd: process.cwd(),
     webRoot: process.cwd(),
     handshakePageTimeoutMs: 15,
+    lastWindowAutoShutdownEnabled: true,
     lastWindowShutdownGraceMs: 15,
     lastWindowShutdownPollMs: 5,
     applicationShutdown: (reason) => { shutdownReasons.push(reason); },
@@ -373,7 +375,7 @@ test("a handshake-only page expires instead of permanently holding the last-wind
 test("a delayed old-page close beacon cannot close its replacement page", async () => {
   const primary = new FakeRpc("C:\\sessions\\late-beacon.jsonl", "primary");
   const shutdownReasons: string[] = [];
-  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), lastWindowShutdownGraceMs: 25, lastWindowShutdownPollMs: 5, applicationShutdown: (reason) => { shutdownReasons.push(reason); } });
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd(), lastWindowAutoShutdownEnabled: true, lastWindowShutdownGraceMs: 25, lastWindowShutdownPollMs: 5, applicationShutdown: (reason) => { shutdownReasons.push(reason); } });
   const client = "11111111-1111-4111-8111-111111111111";
   const oldPage = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const newPage = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
