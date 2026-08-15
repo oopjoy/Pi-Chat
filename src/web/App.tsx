@@ -251,6 +251,7 @@ const SESSION_VIEW_INVALIDATING_EVENT_TYPES = new Set([
   "pi_chat_queue_error",
   "extension_ui_request",
   "pi_chat_extension_request_resolved",
+  "pi_chat_fast_mode_changed",
   "pi_chat_gate_mode_changed",
   "pi_chat_session_control_changed",
   "pi_chat_session_status",
@@ -3736,6 +3737,18 @@ export function App() {
             incidentId ? `${message}（事件 ID：${incidentId}）` : message,
           );
         }
+      } else if (type === "pi_chat_fast_mode_changed") {
+        const active = event.active === true;
+        if (eventSessionId)
+          patchSessionCache(eventSessionId, {
+            state: { fastModeActive: active },
+          });
+        if (viewingEventSession)
+          dispatchPane({
+            type: "FAST_MODE_CHANGED",
+            sessionId: eventSessionId,
+            active,
+          });
       } else if (type === "extension_ui_request") {
         const request = event as unknown as ExtensionUiRequest;
         if (["select", "confirm", "input", "editor"].includes(request.method)) {

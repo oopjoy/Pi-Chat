@@ -60,6 +60,10 @@ export function LightbulbIcon(props: IconProps) {
   return <LineIcon {...props}><path d="M8.4 15.3c-1.25-1.05-2.1-2.55-2.1-4.35a5.7 5.7 0 1 1 11.4 0c0 1.8-.85 3.3-2.1 4.35-.75.63-1.1 1.15-1.2 1.7H9.6c-.1-.55-.45-1.07-1.2-1.7Z" /><path d="M9.7 20h4.6M9.6 17h4.8" /></LineIcon>;
 }
 
+export function LightningIcon(props: IconProps) {
+  return <LineIcon {...props} strokeWidth="1.9"><path d="m13.7 2.8-8 10.6h5.7l-1.1 7.8 8-10.6h-5.7Z" /></LineIcon>;
+}
+
 export function FolderIcon(props: IconProps) {
   return <LineIcon {...props}><path d="M3.5 7.5A2.5 2.5 0 0 1 6 5h4.1l2 2.2H18A2.5 2.5 0 0 1 20.5 9.7v7.8A2.5 2.5 0 0 1 18 20H6a2.5 2.5 0 0 1-2.5-2.5Z" /><path d="M3.8 9.3h16.4" /></LineIcon>;
 }

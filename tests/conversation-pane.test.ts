@@ -272,6 +272,32 @@ test("targeted synchronous actions match only their current pane identity", () =
   );
 });
 
+test("Fast status updates only the exact visible Session pane", () => {
+  const session = conversationPaneReducer(emptyConversationPane(), {
+    type: "COMMIT_VIEW",
+    pane: commit(sessionA),
+  });
+  const ignored = conversationPaneReducer(session, {
+    type: "FAST_MODE_CHANGED",
+    sessionId: sessionB,
+    active: true,
+  });
+  assert.equal(ignored, session);
+
+  const enabled = conversationPaneReducer(session, {
+    type: "FAST_MODE_CHANGED",
+    sessionId: sessionA,
+    active: true,
+  });
+  assert.equal(enabled.piState.fastModeActive, true);
+  const disabled = conversationPaneReducer(enabled, {
+    type: "FAST_MODE_CHANGED",
+    sessionId: sessionA,
+    active: false,
+  });
+  assert.equal(disabled.piState.fastModeActive, false);
+});
+
 test("draft-only and terminal clear actions cannot leave a second display authority", () => {
   const draft = conversationPaneReducer(emptyConversationPane(), {
     type: "RESET_DRAFT",

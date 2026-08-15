@@ -56,6 +56,32 @@ test("shared Runtime transition preserves terminal, created-event, and owner fai
   assert.deepEqual(secondaryFailure.state.liveMessage, { role: "assistant", content: "partial" });
 });
 
+test("shared Runtime transition derives Fast status without treating it as an interactive request", () => {
+  const enabled = transitionRuntimeEvent("session-a", base(), {
+    type: "extension_ui_request",
+    method: "setStatus",
+    statusKey: "fast",
+    statusText: "⚡",
+  });
+  assert.equal(enabled.state.extensionUiPending, false);
+  assert.deepEqual(enabled.effects, [{ type: "fast-mode", active: true }]);
+
+  const disabled = transitionRuntimeEvent("session-a", base(), {
+    type: "extension_ui_request",
+    method: "setStatus",
+    statusKey: "fast",
+  });
+  assert.deepEqual(disabled.effects, [{ type: "fast-mode", active: false }]);
+
+  const unrelated = transitionRuntimeEvent("session-a", base(), {
+    type: "extension_ui_request",
+    method: "setStatus",
+    statusKey: "footer",
+    statusText: "ready",
+  });
+  assert.deepEqual(unrelated.effects, []);
+});
+
 test("shared Runtime transition derives extension, failure, and settlement effects", () => {
   const pending = transitionRuntimeEvent("session-a", base(), {
     type: "extension_ui_request",

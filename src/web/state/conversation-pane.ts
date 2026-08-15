@@ -95,6 +95,7 @@ export type ConversationPaneAction =
       message: PiMessage;
     }
   | { type: "TOOL_STATUS_UPDATED"; sessionId: string; status: string }
+  | { type: "FAST_MODE_CHANGED"; sessionId: string; active: boolean }
   | {
       type: "EXTENSION_REQUEST_CHANGED";
       sessionId: string;
@@ -319,6 +320,10 @@ export function conversationPaneReducer(
     case "TOOL_STATUS_UPDATED":
       return visibleSession(state, action.sessionId)
         ? { ...state, toolStatus: action.status }
+        : state;
+    case "FAST_MODE_CHANGED":
+      return visibleSession(state, action.sessionId)
+        ? { ...state, piState: { ...state.piState, fastModeActive: action.active } }
         : state;
     case "EXTENSION_REQUEST_CHANGED":
       return visibleSession(state, action.sessionId)

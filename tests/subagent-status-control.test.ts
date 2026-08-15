@@ -217,10 +217,21 @@ test("terminal-only popovers still explain main-Session Queue and Steer authorit
   }
 });
 
-test("attention variables provide explicit light and dark theme colors", async () => {
+test("Subagent indicators reuse the sidebar red, yellow, green, and blue palette", async () => {
   const css = await readFile(new URL("../src/web/styles.css", import.meta.url), "utf8");
   assert.match(css, /:root\s*\{[^}]*--attention:\s*#704200;/s);
   assert.match(css, /:root\[data-theme="dark"\]\s*\{[^}]*--attention:\s*#f2b33d;/s);
+  assert.match(css, /--status-red:\s*var\(--danger\);/);
+  assert.match(css, /--status-yellow:\s*#d89318;/);
+  assert.match(css, /--status-green:\s*#24a36a;/);
+  assert.match(css, /--status-blue:\s*var\(--accent\);/);
+  for (const status of ["unread", "pending", "error", "running"])
+    assert.match(css, new RegExp(`\\.session-status\\.is-${status}[^\\n]*var\\(--status-`));
+  assert.match(css, /\.subagent-status-row\.is-running \.subagent-status-dot \{ background: var\(--status-blue\)/);
+  assert.match(css, /\.subagent-status-row\.is-waiting \.subagent-status-dot \{ background: var\(--status-yellow\)/);
+  assert.match(css, /\.subagent-status-row\.is-attention \.subagent-status-dot \{[^}]*background: var\(--status-yellow\)/);
+  assert.match(css, /\.subagent-status-row\.is-complete \.subagent-status-dot \{ background: var\(--status-green\)/);
+  assert.match(css, /\.subagent-status-row\.is-failed \.subagent-status-dot, \.subagent-status-row\.is-cancelled \.subagent-status-dot \{ background: var\(--status-red\)/);
   assert.match(css, /\.subagent-status-row\.is-attention \.subagent-status-label \{ color: var\(--attention\)/);
   assert.match(css, /\.subagent-status-authority\.is-important \{ border-left: 3px solid var\(--attention\)/);
 

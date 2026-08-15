@@ -129,6 +129,7 @@ import { ServerStreamDiagnosticsAggregator } from "./stream-observability.js";
 import { saveWorkspace } from "./workspace-state.js";
 import { requestGuardError } from "./request-guard.js";
 import {
+  fastModeStatusFromExtensionEvent,
   transitionRuntimeEvent,
   type RuntimeEventState,
 } from "./runtime-event-transition.js";
@@ -407,6 +408,10 @@ export class PiChatApp {
   private readonly runGenerationsBySession = new Map<string, number>();
   /** Session preference survives Runtime reclaim, but never outlives the Pi Chat process. */
   private readonly gateModesBySession = new Map<string, GateMode>();
+  /** Read-only extension footer status; it never participates in Runtime or Pane authority. */
+  private readonly fastModeBySession = new Map<string, boolean>();
+  /** Primary may emit session_start status before get_state binds its exact Session. */
+  private pendingPrimaryFastMode?: { rpcGeneration: number; active: boolean };
   /** Pi-native steering is private to each RPC worker until message_start consumes it. */
   private readonly pendingNativeSteeringBySession = new Map<
     string,
@@ -655,6 +660,7 @@ export class PiChatApp {
       isViewed: (sessionId) => this.sessionControl.isViewed(sessionId),
       onSecondaryEvent: (runtime, event, source) =>
         this.handleSecondaryEvent(runtime, event, source),
+      onReclaimed: (runtime) => this.setFastModeActive(runtime.id, false),
       activeSessionIds: () => this.activeSessionIds(),
       broadcast: (event) => {
         // RuntimePool owns worker restart, while App owns the browser-visible
@@ -1620,6 +1626,8 @@ export class PiChatApp {
       }
       try {
         await this.options.rpc.stop();
+        this.setFastModeActive(sessionId, false);
+        this.pendingPrimaryFastMode = undefined;
         this.primaryFailed = true;
         this.broadcast({
           type: "pi_chat_active_session_changed",
@@ -1656,6 +1664,42 @@ export class PiChatApp {
     return sessionId === this.activeSessionId
       ? this.pendingExtensionRequest
       : this.runtimePool.get(sessionId)?.pendingExtensionRequest;
+  }
+
+  private stateWithFastMode(sessionId: string, state: PiState): PiState {
+    return {
+      ...state,
+      fastModeActive: this.fastModeBySession.get(sessionId) === true,
+    };
+  }
+
+  private setFastModeActive(sessionId: string, active: boolean): void {
+    if (!sessionId) return;
+    const previous = this.fastModeBySession.get(sessionId) === true;
+    if (active) this.fastModeBySession.set(sessionId, true);
+    else this.fastModeBySession.delete(sessionId);
+    if (previous === active) return;
+    this.broadcast({
+      type: "pi_chat_fast_mode_changed",
+      piChatSessionId: sessionId,
+      piChatRunEpoch: this.runEpoch,
+      active,
+    });
+  }
+
+  private adoptSecondaryFastMode(runtime: SecondaryRuntime): void {
+    if (
+      runtime.fastModeGeneration === runtime.rpcGeneration &&
+      !runtime.pendingFastMode
+    )
+      return;
+    const pending = runtime.pendingFastMode;
+    runtime.pendingFastMode = undefined;
+    runtime.fastModeGeneration = runtime.rpcGeneration;
+    this.setFastModeActive(
+      runtime.id,
+      Boolean(pending && pending.rpcGeneration === runtime.rpcGeneration && pending.active),
+    );
   }
 
   private trackPendingRequest(
@@ -1808,6 +1852,10 @@ export class PiChatApp {
         this.completeContextUsageRefreshTurn(sessionId);
       else if (effect.type === "gate-mode")
         this.setGateMode(sessionId, effect.mode);
+      else if (effect.type === "fast-mode") {
+        if (runtime) runtime.fastModeGeneration = runtime.rpcGeneration;
+        this.setFastModeActive(sessionId, effect.active);
+      }
       else if (effect.type === "extension-request") {
         if (primary) this.pendingExtensionRequest = effect.request;
         else runtime.pendingExtensionRequest = effect.request;
@@ -2016,13 +2064,33 @@ export class PiChatApp {
     event: Record<string, unknown>,
     source?: RpcEventSource,
   ): void {
-    if (this.runtimePool.get(runtime.id) !== runtime) return;
-    if (
-      source &&
-      runtime.rpcGeneration &&
-      source.generation !== runtime.rpcGeneration
-    )
+    const currentGeneration = runtime.rpc.currentGeneration?.() || 0;
+    const sourceGeneration = source?.generation || currentGeneration;
+    const fastMode = fastModeStatusFromExtensionEvent(event);
+    const unpublished = this.runtimePool.get(runtime.id) !== runtime;
+    const staleGeneration = Boolean(
+      sourceGeneration &&
+      ((currentGeneration && sourceGeneration !== currentGeneration) ||
+        (runtime.rpcGeneration &&
+          sourceGeneration !== runtime.rpcGeneration)),
+    );
+    if (unpublished || staleGeneration) {
+      if (
+        fastMode !== null &&
+        sourceGeneration &&
+        (!currentGeneration || sourceGeneration === currentGeneration)
+      )
+        runtime.pendingFastMode = {
+          rpcGeneration: sourceGeneration,
+          active: fastMode,
+        };
+      if (
+        event.type === "pi_chat_process_error" &&
+        runtime.pendingFastMode?.rpcGeneration === sourceGeneration
+      )
+        runtime.pendingFastMode = undefined;
       return;
+    }
     const type = String(event.type || "");
     const generation = runtime.rpcGeneration;
     const queuePausedBeforeEvent = runtime.queuePaused;
@@ -2032,6 +2100,7 @@ export class PiChatApp {
     }, generation);
     let droppedNativeSteering = 0;
     if (type === "pi_chat_process_error") {
+      this.setFastModeActive(runtime.id, false);
       this.recordRuntimeFailure(
         runtime.id,
         event.error,
@@ -2347,6 +2416,7 @@ export class PiChatApp {
       await this.recoverRuntime(existing);
       runtime = existing;
     } else runtime = await this.runtimePool.ensure(id);
+    this.adoptSecondaryFastMode(runtime);
     if (!runtime.summarySnapshot)
       runtime.summarySnapshot =
         this.options.sessions.summaryForId?.(id) || undefined;
@@ -2370,6 +2440,7 @@ export class PiChatApp {
     this.clearPromptDiagnostic(runtime.id);
     try {
       await this.runtimePool.recover(runtime);
+      this.adoptSecondaryFastMode(runtime);
     } catch (error) {
       const incident = this.reportIncident(error, {
         sessionId: runtime.id,
@@ -2390,11 +2461,13 @@ export class PiChatApp {
     this.resumeRecoveredRuntimeQueue(runtime);
   }
 
-  private acquireDraftRuntime(
+  private async acquireDraftRuntime(
     clientId = "",
     cwd = this.currentCwd,
   ): Promise<import("./runtime-pool.js").DraftRuntimeLease> {
-    return this.runtimePool.acquireDraft(clientId, cwd);
+    const lease = await this.runtimePool.acquireDraft(clientId, cwd);
+    this.adoptSecondaryFastMode(lease.runtime);
+    return lease;
   }
 
   /** A new draft may warm beside Primary startup, but no mutation is permitted
@@ -2470,10 +2543,10 @@ export class PiChatApp {
   private runtimeReady(runtime: SecondaryRuntime): SessionRuntimeReadyData {
     return {
       sessionId: runtime.id,
-      state: {
+      state: this.stateWithFastMode(runtime.id, {
         ...(runtime.lastState || { model: null, isStreaming: runtime.running }),
         isStreaming: this.runtimeTurnActive(runtime) || runtime.dispatching,
-      },
+      }),
       gateMode: runtime.gateMode,
     };
   }
@@ -2502,14 +2575,14 @@ export class PiChatApp {
     }
     return {
       session: { ...draft, ...this.controlState(runtime.id, clientId) },
-      state: {
+      state: this.stateWithFastMode(runtime.id, {
         model,
         thinkingLevel,
         isStreaming: false,
         sessionFile: runtime.sessionPath,
         sessionId: draft.sessionId,
         messageCount: 0,
-      },
+      }),
       messages: [],
       messageTotal: 0,
       turnTotal: 0,
@@ -2545,11 +2618,31 @@ export class PiChatApp {
       // source-tagged late event from a replaced child cannot fail its successor.
       this.options.primaryRuntime?.markFailed(event);
     }
-    if (
+    const unboundFastMode = fastModeStatusFromExtensionEvent(event);
+    const awaitingPrimaryBinding =
       !this.primaryBoundSessionId ||
-      (sourceGeneration && sourceGeneration !== this.primaryRpcGeneration)
-    )
+      Boolean(
+        sourceGeneration &&
+        ((currentGeneration && sourceGeneration !== currentGeneration) ||
+          sourceGeneration !== this.primaryRpcGeneration),
+      );
+    if (awaitingPrimaryBinding) {
+      if (
+        unboundFastMode !== null &&
+        sourceGeneration &&
+        (!currentGeneration || sourceGeneration === currentGeneration)
+      )
+        this.pendingPrimaryFastMode = {
+          rpcGeneration: sourceGeneration,
+          active: unboundFastMode,
+        };
+      if (
+        event.type === "pi_chat_process_error" &&
+        this.pendingPrimaryFastMode?.rpcGeneration === sourceGeneration
+      )
+        this.pendingPrimaryFastMode = undefined;
       return;
+    }
     const sessionId = this.primaryBoundSessionId;
     const type = String(event.type || "");
     const generation = this.primaryRpcGeneration;
@@ -2560,6 +2653,7 @@ export class PiChatApp {
     }, generation);
     let droppedNativeSteering = 0;
     if (type === "pi_chat_process_error") {
+      this.setFastModeActive(sessionId, false);
       this.recordRuntimeFailure(
         sessionId,
         event.error,
@@ -2870,11 +2964,36 @@ export class PiChatApp {
       ? idForPath(state.sessionFile)
       : state.sessionId || "";
     if (!sessionId) return;
+    const previousSessionId = this.primaryBoundSessionId;
+    const previousRpcGeneration = this.primaryRpcGeneration;
+    const sameRuntimeFastMode = Boolean(
+      previousSessionId &&
+      previousRpcGeneration &&
+      previousRpcGeneration ===
+        (this.options.rpc.currentGeneration?.() || 0) &&
+      this.fastModeBySession.get(previousSessionId) === true,
+    );
     this.activeSessionId = sessionId;
     this.activeSessionPath = state.sessionFile || this.activeSessionPath;
     this.primaryBoundSessionId = sessionId;
     this.options.rpc.setDiagnosticSessionId?.(sessionId);
     this.primaryRpcGeneration = this.options.rpc.currentGeneration?.() || 0;
+    const pendingFastMode = this.pendingPrimaryFastMode;
+    this.pendingPrimaryFastMode = undefined;
+    if (previousSessionId && previousSessionId !== sessionId)
+      this.setFastModeActive(previousSessionId, false);
+    if (
+      pendingFastMode &&
+      pendingFastMode.rpcGeneration === this.primaryRpcGeneration
+    )
+      this.setFastModeActive(sessionId, pendingFastMode.active);
+    else if (previousSessionId !== sessionId)
+      this.setFastModeActive(sessionId, sameRuntimeFastMode);
+    else if (
+      previousRpcGeneration &&
+      previousRpcGeneration !== this.primaryRpcGeneration
+    )
+      this.setFastModeActive(sessionId, false);
   }
 
   /** Bind Primary's Session only after the readiness gate passed. */
@@ -3494,6 +3613,7 @@ export class PiChatApp {
     if (path && existsSync(path)) await unlink(path);
     this.lastUserPromptAtBySession.delete(id);
     this.gateModesBySession.delete(id);
+    this.fastModeBySession.delete(id);
     this.clearRuntimeFailure(id);
     this.clearNativeSteeringState(id, "deleted");
     this.sessionControl.clearSession(id);
@@ -3531,6 +3651,7 @@ export class PiChatApp {
       state: {
         model: this.modelFromSessionSettings(settings),
         thinkingLevel: settings.thinkingLevel,
+        fastModeActive: false,
         isStreaming: false,
         isCompacting: false,
         sessionFile: undefined,
@@ -3612,7 +3733,7 @@ export class PiChatApp {
           ? this.promptQueue.length > 0
           : runtime!.promptQueue.length > 0,
       },
-      state: { ...state, isStreaming: streaming },
+      state: this.stateWithFastMode(id, { ...state, isStreaming: streaming }),
       messages: windowed.messages,
       messageTotal: windowed.total,
       turnTotal: windowed.turns,
@@ -3943,7 +4064,7 @@ export class PiChatApp {
         this.primarySummarySnapshot = session;
       return {
         session,
-        state: liveState,
+        state: this.stateWithFastMode(id, liveState),
         messages: windowed.messages,
         messageTotal: windowed.total,
         turnTotal: windowed.turns,
@@ -4241,7 +4362,7 @@ export class PiChatApp {
     }
     return {
       buildIdentity: this.buildIdentity,
-      state,
+      state: this.stateWithFastMode(this.activeSessionId, state),
       messages: windowedMessages.messages,
       messageTotal: windowedMessages.total,
       turnTotal: windowedMessages.turns,
@@ -5715,10 +5836,10 @@ export class PiChatApp {
         await this.ensurePrimaryRuntime();
         return json(response, 200, {
           sessionId: id,
-          state: {
+          state: this.stateWithFastMode(id, {
             ...this.lastPrimaryState,
             isStreaming: this.primaryTurnActive(),
-          },
+          }),
           gateMode: this.primaryGateMode,
         } satisfies SessionRuntimeReadyData);
       }

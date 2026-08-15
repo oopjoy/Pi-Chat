@@ -22,6 +22,7 @@ export type RuntimeEventEffect =
   | { type: "context-pending" }
   | { type: "context-complete" }
   | { type: "gate-mode"; mode: GateMode }
+  | { type: "fast-mode"; active: boolean }
   | { type: "extension-request"; request: ExtensionUiRequest }
   | { type: "clear-extension-request" }
   | { type: "queue-changed" }
@@ -45,6 +46,12 @@ function interactiveExtension(event: Record<string, unknown>, sessionId: string)
   if (!["select", "confirm", "input", "editor"].includes(String(event.method || ""))) return null;
   if (typeof event.id !== "string") return null;
   return { ...(event as unknown as ExtensionUiRequest), piChatSessionId: sessionId };
+}
+
+/** The installed Fast extension owns one RPC footer status key. */
+export function fastModeStatusFromExtensionEvent(event: Record<string, unknown>): boolean | null {
+  if (event.type !== "extension_ui_request" || event.method !== "setStatus" || event.statusKey !== "fast") return null;
+  return typeof event.statusText === "string" && event.statusText.trim().length > 0;
 }
 
 /**
@@ -94,6 +101,8 @@ export function transitionRuntimeEvent(
   if (type === "extension_ui_request") {
     const mode = String(event.method || "") === "notify" ? gateModeFromNotice(event.message) : null;
     if (mode) effects.push({ type: "gate-mode", mode });
+    const fastMode = fastModeStatusFromExtensionEvent(event);
+    if (fastMode !== null) effects.push({ type: "fast-mode", active: fastMode });
     const request = interactiveExtension(event, sessionId);
     // Secondary previously marked supported interactive methods pending even
     // when malformed. Preserve that owner-visible fact while only arming a

@@ -85,6 +85,10 @@ export interface SecondaryRuntime {
   cwd: string;
   /** Current dedicated child source; stale pre-recovery events are ignored. */
   rpcGeneration: number;
+  /** Startup footer status retained until this exact generation is published. */
+  pendingFastMode?: { rpcGeneration: number; active: boolean };
+  /** Generation whose Fast status has been adopted into the App projection. */
+  fastModeGeneration?: number;
   draftSessionPath?: string;
   /** Coalesces an uncertain empty-draft probe; Pi RPC has no cancellation. */
   draftProbe?: Promise<boolean | null>;
@@ -115,6 +119,8 @@ export interface RuntimePoolOptions {
   /** Live empty drafts have no indexed history fallback and cannot be reclaimed. */
   isViewed?: (sessionId: string) => boolean;
   onSecondaryEvent: (runtime: SecondaryRuntime, event: Record<string, unknown>, source?: RpcEventSource) => void;
+  /** Host clears any Runtime-owned projections after every successful reclaim path. */
+  onReclaimed?: (runtime: SecondaryRuntime, reason: RuntimeReclaimReason) => void;
   /** Host merges primary + secondary IDs for SSE payloads. */
   activeSessionIds: () => string[];
   broadcast: (event: Record<string, unknown>) => void;
@@ -275,6 +281,7 @@ export class RuntimePool {
       this.runtimes.delete(id);
       runtime.unsubscribe();
       await this.cleanupEmptyDraft(runtime);
+      this.options.onReclaimed?.(runtime, reason);
       this.options.broadcast({
         type: "pi_chat_active_session_changed",
         sessionId: id,

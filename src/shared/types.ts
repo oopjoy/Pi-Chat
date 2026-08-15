@@ -149,6 +149,8 @@ export interface SessionStats {
 export interface PiState {
   model: ModelInfo | null;
   thinkingLevel?: string;
+  /** Current Runtime's Fast extension status; observational only. */
+  fastModeActive?: boolean;
   isStreaming: boolean;
   isCompacting?: boolean;
   sessionFile?: string;
@@ -173,6 +175,8 @@ export interface ExtensionUiRequest {
   placeholder?: string;
   prefill?: string;
   notifyType?: string;
+  statusKey?: string;
+  statusText?: string;
   piChatSessionId?: string;
 }
 

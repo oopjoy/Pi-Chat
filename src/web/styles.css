@@ -24,6 +24,10 @@
   --attention: #704200;
   --attention-dot: #8a5200;
   --attention-soft: #d89318;
+  --status-red: var(--danger);
+  --status-yellow: #d89318;
+  --status-green: #24a36a;
+  --status-blue: var(--accent);
   --shadow: 0 10px 32px rgba(24, 38, 61, .1);
   --code-bg: #fafafa;
   --code-head-bg: #eeeeee;
@@ -111,6 +115,8 @@
   --attention: #f2b33d;
   --attention-dot: #f2b33d;
   --attention-soft: #f2b33d;
+  --status-yellow: #f2b33d;
+  --status-green: #65d09a;
   --shadow: 0 10px 32px rgba(0, 0, 0, .28);
   --code-bg: #181818;
   --code-head-bg: #232323;
@@ -264,10 +270,10 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 /* The fixed right slot shows status at rest and its keyboard-reachable menu on interaction. */
 .session-status { display: grid; box-sizing: border-box; width: 11px; height: 11px; place-items: center; pointer-events: none; transition: opacity .12s ease; }
 .session-status.is-unread::before, .session-status.is-pending::before, .session-status.is-error::before { width: 9px; height: 9px; border-radius: 50%; content: ""; }
-.session-status.is-unread::before { background: #24a36a; box-shadow: 0 0 0 3px color-mix(in srgb, #24a36a, transparent 84%); }
-.session-status.is-pending::before { background: #d89318; box-shadow: 0 0 0 3px color-mix(in srgb, #d89318, transparent 84%); }
-.session-status.is-error::before { background: var(--danger); box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger), transparent 84%); }
-.session-status.is-running { border: 1.7px solid color-mix(in srgb, var(--accent), transparent 58%); border-top-color: var(--accent); border-radius: 50%; animation: spin .75s linear infinite; }
+.session-status.is-unread::before { background: var(--status-green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--status-green), transparent 84%); }
+.session-status.is-pending::before { background: var(--status-yellow); box-shadow: 0 0 0 3px color-mix(in srgb, var(--status-yellow), transparent 84%); }
+.session-status.is-error::before { background: var(--status-red); box-shadow: 0 0 0 3px color-mix(in srgb, var(--status-red), transparent 84%); }
+.session-status.is-running { border: 1.7px solid color-mix(in srgb, var(--status-blue), transparent 58%); border-top-color: var(--status-blue); border-radius: 50%; animation: spin .75s linear infinite; }
 
 .session-item-actions {
   position: absolute;
@@ -622,6 +628,8 @@ details.conversation-process { display: block; padding: 0; }
 .composer-controls .compact-select-check { width: 15px; flex-basis: 15px; }
 .composer-usage { width: auto; min-width: 76px; height: 28px; justify-content: center; padding: 2px 8px; border-radius: 7px; }
 .composer-usage > span { min-width: 0; flex: 0 1 auto; }
+.composer-usage .fast-mode-indicator { display: grid; width: 15px; height: 15px; min-width: 15px; flex: 0 0 15px; place-items: center; color: var(--status-yellow); }
+.fast-mode-indicator svg { width: 15px; height: 15px; filter: drop-shadow(0 0 2px color-mix(in srgb, var(--status-yellow), transparent 65%)); }
 .composer-controls .usage-card { top: auto; right: 0; bottom: calc(100% + 8px); }
 .attachment-control { position: relative; flex: 0 0 auto; }
 .attachment-button { display: grid; width: 28px; height: 28px; place-items: center; padding: 0; border: 1px solid var(--line-strong); border-radius: 50%; background: transparent; color: var(--muted); cursor: pointer; line-height: 1; transition: border-color .12s ease, background-color .12s ease, color .12s ease; }
@@ -957,6 +965,7 @@ button.ask-questionnaire-option:hover:not(:disabled) { background: var(--surface
   .composer-controls .gate-control { width: 60px; min-width: 60px; flex: 0 1 60px; }
   .gate-control .compact-select-trigger { gap: 3px; padding-right: 2px; padding-left: 2px; }
   .composer-usage { min-width: 60px; flex: 0 0 60px; padding-right: 6px; padding-left: 6px; }
+  .composer-usage.has-fast-mode { min-width: 78px; flex-basis: 78px; }
   .composer-usage > span { min-width: 0; }
   .composer-actions { width: 100%; justify-content: flex-end; }
   .queue-submit-button, .steer-submit-button { min-width: 44px; padding: 0 6px; }
@@ -970,8 +979,8 @@ button.ask-questionnaire-option:hover:not(:disabled) { background: var(--surface
 .subagent-status-trigger:focus-visible { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent), transparent 72%); }
 .subagent-status-indicator { position: relative; display: grid; width: 16px; height: 16px; place-items: center; }
 .subagent-status-indicator svg { width: 15px; height: 15px; }
-.subagent-status-trigger.has-active .subagent-status-indicator::after, .subagent-status-trigger.has-attention .subagent-status-indicator::after { position: absolute; right: -1px; bottom: -1px; width: 6px; height: 6px; border: 1.5px solid var(--surface); border-radius: 50%; background: var(--accent); content: ""; }
-.subagent-status-trigger.has-attention .subagent-status-indicator::after { border-color: var(--surface); background: var(--attention-dot); }
+.subagent-status-trigger.has-active .subagent-status-indicator::after, .subagent-status-trigger.has-attention .subagent-status-indicator::after { position: absolute; right: -1px; bottom: -1px; width: 6px; height: 6px; border: 1.5px solid var(--surface); border-radius: 50%; background: var(--status-blue); content: ""; }
+.subagent-status-trigger.has-attention .subagent-status-indicator::after { border-color: var(--surface); background: var(--status-yellow); }
 .subagent-status-trigger.is-empty { color: var(--muted); cursor: default; }
 .subagent-status-chevron { width: 12px; height: 12px; transition: transform .14s ease; }
 .subagent-status-trigger.is-open .subagent-status-chevron { transform: rotate(180deg); }
@@ -989,11 +998,11 @@ button.ask-questionnaire-option:hover:not(:disabled) { background: var(--surface
 .subagent-status-row > summary:hover, .subagent-status-row > summary:focus-visible, .subagent-status-row[open] > summary { background: var(--surface-hover); }
 .subagent-status-row > summary:focus-visible { box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent), transparent 70%); }
 .subagent-status-dot { width: 8px; height: 8px; flex: 0 0 auto; margin-top: 5px; border-radius: 50%; background: var(--muted); }
-.subagent-status-row.is-running .subagent-status-dot { background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent), transparent 82%); animation: session-pulse 1.25s ease-in-out infinite; }
-.subagent-status-row.is-waiting .subagent-status-dot { background: var(--muted); box-shadow: 0 0 0 3px color-mix(in srgb, var(--muted), transparent 84%); }
-.subagent-status-row.is-attention .subagent-status-dot { border: 2px solid var(--attention); background: var(--attention-dot); box-shadow: 0 0 0 2px color-mix(in srgb, var(--attention), transparent 80%); }
-.subagent-status-row.is-complete .subagent-status-dot { background: #239c5a; }
-.subagent-status-row.is-failed .subagent-status-dot { background: var(--danger); }
+.subagent-status-row.is-running .subagent-status-dot { background: var(--status-blue); box-shadow: 0 0 0 3px color-mix(in srgb, var(--status-blue), transparent 82%); animation: session-pulse 1.25s ease-in-out infinite; }
+.subagent-status-row.is-waiting .subagent-status-dot { background: var(--status-yellow); box-shadow: 0 0 0 3px color-mix(in srgb, var(--status-yellow), transparent 84%); }
+.subagent-status-row.is-attention .subagent-status-dot { border: 2px solid var(--status-yellow); background: var(--status-yellow); box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-yellow), transparent 80%); }
+.subagent-status-row.is-complete .subagent-status-dot { background: var(--status-green); }
+.subagent-status-row.is-failed .subagent-status-dot, .subagent-status-row.is-cancelled .subagent-status-dot { background: var(--status-red); }
 .subagent-status-main { display: flex; min-width: 0; flex: 1; flex-direction: column; }
 .subagent-status-main strong { overflow: hidden; font-size: 11.5px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .subagent-status-main span, .subagent-status-label { color: var(--muted); font-size: 10px; line-height: 1.55; }
