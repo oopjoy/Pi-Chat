@@ -79,14 +79,13 @@ test("rich Ask dialog keeps choices compact and replaces the custom prompt in pl
   assert.equal(optionCopy?.children[0]?.tagName, "STRONG");
   assert.equal(optionCopy?.children[1]?.tagName, "SMALL");
   assert.equal(
-    dom.window.document.querySelector(".ask-questionnaire-custom")?.textContent?.trim(),
-    "输入你的答案",
+    dom.window.document.querySelector(".ask-questionnaire-custom .ask-questionnaire-option-marker")?.textContent,
+    "3",
   );
   assert.equal(
     dom.window.document.querySelector<HTMLButtonElement>(".ask-questionnaire-custom-trigger")?.textContent,
     "输入你的答案",
   );
-  assert.equal(dom.window.document.querySelector(".ask-questionnaire-custom-marker"), null);
   assert.equal(dom.window.document.querySelector(".ask-questionnaire-custom input"), null);
   assert.doesNotMatch(dom.window.document.body.textContent || "", /自由输入|在当前选项行/);
 
@@ -100,6 +99,10 @@ test("rich Ask dialog keeps choices compact and replaces the custom prompt in pl
   assert.equal(input.value, "");
   assert.equal(input.placeholder, "");
   assert.equal(dom.window.document.querySelector(".ask-questionnaire-custom-trigger"), null);
+  assert.equal(
+    dom.window.document.querySelector(".ask-questionnaire-custom .ask-questionnaire-option-marker")?.textContent,
+    "3",
+  );
   assert.equal(dom.window.document.querySelectorAll(".ask-questionnaire-custom").length, 1);
   await act(async () => {
     Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value")

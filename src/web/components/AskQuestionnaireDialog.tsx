@@ -232,6 +232,7 @@ export function AskQuestionnaireDialog({
               onMouseEnter={() => setHoveredOption("custom")}
               onMouseLeave={() => setHoveredOption(null)}
             >
+              <span className="ask-questionnaire-option-marker">{question.options.length + 1}</span>
               {answer?.kind === "custom" ? (
                 <input
                   autoFocus
