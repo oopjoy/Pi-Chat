@@ -127,6 +127,49 @@ test("state diagnostics accepts only strict prompt UUID correlation", () => {
   );
 });
 
+test("state diagnostics retains only closed aggregate streaming fields", () => {
+  const recorder = new StateDiagnosticsRecorder({
+    runEpoch: "run",
+    buildFingerprint: "a".repeat(64),
+  });
+  recorder.record({
+    category: "sse-transport",
+    name: "snapshot-summary",
+    sessionId: SESSION_ID,
+    runGeneration: 9,
+    details: {
+      snapshotsWritten: 3,
+      snapshotsScheduled: 2,
+      snapshotsReplaced: 1,
+      snapshotsOversized: 1,
+      snapshotsNoClients: 4,
+      snapshotsWriteErrors: 2,
+      content: "private answer",
+      frameBytes: 1234,
+    },
+  });
+  recorder.record({
+    category: "render",
+    name: "first-assistant-paint-opportunity",
+    sessionId: SESSION_ID,
+    runGeneration: 9,
+    details: { paintDelayMs: 17.5, visible: true, domText: "private answer" },
+  });
+  const entries = recorder.snapshot().entries;
+  assert.deepEqual(entries.map((entry) => entry.details), [
+    {
+      snapshotsWritten: 3,
+      snapshotsScheduled: 2,
+      snapshotsReplaced: 1,
+      snapshotsOversized: 1,
+      snapshotsNoClients: 4,
+      snapshotsWriteErrors: 2,
+    },
+    { paintDelayMs: 17.5, visible: true },
+  ]);
+  assert.equal(JSON.stringify(entries).includes("private answer"), false);
+});
+
 test("state diagnostics applies an approximate byte ceiling independently of count", () => {
   const recorder = new StateDiagnosticsRecorder({
     runEpoch: "run",

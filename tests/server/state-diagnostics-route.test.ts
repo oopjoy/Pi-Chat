@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { createServer } from "node:http";
 import test from "node:test";
 import { PiChatApp } from "../../src/server/app";
@@ -118,6 +119,13 @@ test("always-on diagnostic snapshot captures redacted API, RPC, SSE, and project
       entry.category === "rpc-event" && entry.details.eventType === "agent_settled",
     ));
     assert.equal(value.entries.some((entry) => entry.details.eventType === "message_update"), false);
+    assert.equal(
+      value.entries.filter((entry) =>
+        entry.category === "sse-transport" && entry.name === "snapshot-summary"
+      ).length,
+      1,
+      "thousands of cumulative frames retain one aggregate run summary",
+    );
     assert.ok(value.entries.some((entry) =>
       entry.category === "sse-transport" && entry.details.eventType === "tool_execution_start",
     ));
@@ -147,6 +155,100 @@ test("always-on diagnostic snapshot captures redacted API, RPC, SSE, and project
       "C:\\\\private",
       "secret-token",
     ]) assert.equal(raw.includes(forbidden), false, forbidden);
+  } finally {
+    await target.close();
+  }
+});
+
+
+test("server streaming diagnostics aggregate hot frames after terminal transport flush", async () => {
+  const target = await fixture();
+  const frames: string[] = [];
+  const client = new EventEmitter() as EventEmitter & {
+    write(frame: string): boolean;
+    end(): void;
+  };
+  client.write = (frame) => { frames.push(frame); return true; };
+  client.end = () => undefined;
+  const internals = target.app as unknown as {
+    sseClients: Map<unknown, string>;
+    broadcast(event: Record<string, unknown>): void;
+    stateDiagnostics: { snapshot(): ServerStateDiagnosticSnapshot };
+  };
+  internals.sseClients.set(client, "diagnostic-client");
+  try {
+    internals.broadcast({
+      type: "message_update",
+      piChatSessionId: target.id,
+      piChatRunGeneration: 31,
+      message: { role: "assistant", content: "private cumulative one" },
+    });
+    internals.broadcast({
+      type: "message_update",
+      piChatSessionId: target.id,
+      piChatRunGeneration: 31,
+      message: { role: "assistant", content: "private cumulative two" },
+    });
+    internals.broadcast({
+      type: "agent_settled",
+      piChatSessionId: target.id,
+      piChatRunGeneration: 31,
+    });
+    assert.equal(frames.length, 3);
+    assert.match(frames[1], /private cumulative two/);
+    assert.match(frames[2], /agent_settled/);
+    const entries = internals.stateDiagnostics.snapshot().entries;
+    const summaries = entries.filter((entry) =>
+      entry.category === "sse-transport"
+      && entry.name === "snapshot-summary"
+      && entry.sessionId === target.id
+      && entry.runGeneration === 31
+    );
+    assert.equal(summaries.length, 1);
+    assert.equal(summaries[0].details.snapshotsWritten, 2);
+    assert.equal(summaries[0].details.snapshotsScheduled, 1);
+    assert.equal(
+      entries.some((entry) => entry.details.eventType === "message_update"),
+      false,
+      "hot frame diagnostics must remain aggregate-only",
+    );
+    assert.equal(JSON.stringify(entries).includes("private cumulative"), false);
+  } finally {
+    await target.close();
+  }
+});
+
+
+test("explicit diagnostic snapshot checkpoints an active streaming aggregate", async () => {
+  const target = await fixture();
+  const client = new EventEmitter() as EventEmitter & {
+    write(frame: string): boolean;
+    end(): void;
+  };
+  client.write = () => true;
+  client.end = () => undefined;
+  const internals = target.app as unknown as {
+    sseClients: Map<unknown, string>;
+    broadcast(event: Record<string, unknown>): void;
+  };
+  internals.sseClients.set(client, "diagnostic-client");
+  try {
+    await register(target.origin, ownerA);
+    internals.broadcast({
+      type: "message_update",
+      piChatSessionId: target.id,
+      piChatRunGeneration: 32,
+      message: { role: "assistant", content: "private active cumulative" },
+    });
+    const value = (await snapshot(target.origin, ownerA)).value!;
+    const summary = value.entries.find((entry) =>
+      entry.category === "sse-transport"
+      && entry.name === "snapshot-summary"
+      && entry.runGeneration === 32
+    );
+    assert.ok(summary);
+    assert.equal(summary.details.snapshotsWritten, 1);
+    assert.equal(JSON.stringify(value).includes("private active cumulative"), false);
   } finally {
     await target.close();
   }
@@ -349,6 +451,58 @@ test("server diagnostic failures do not perturb Runtime events or HTTP", async (
     assert.equal((await fetch(`${target.origin}/api/bootstrap`, { headers: ownerA })).status, 200);
   } finally {
     recorder.record = originalRecord;
+    await target.close();
+  }
+});
+
+test("oversized cumulative snapshots remain aggregate-only in server diagnostics", async () => {
+  const target = await fixture();
+  const client = new EventEmitter() as EventEmitter & {
+    write(frame: string): boolean;
+    end(): void;
+  };
+  client.write = () => true;
+  client.end = () => undefined;
+  const internals = target.app as unknown as {
+    sseClients: Map<unknown, string>;
+    broadcast(event: Record<string, unknown>): void;
+    stateDiagnostics: { snapshot(): ServerStateDiagnosticSnapshot };
+  };
+  internals.sseClients.set(client, "diagnostic-client");
+  try {
+    internals.broadcast({
+      type: "message_update",
+      piChatSessionId: target.id,
+      piChatRunGeneration: 33,
+      message: {
+        role: "assistant",
+        content: `private oversized cumulative ${"x".repeat(530 * 1024)}`,
+      },
+    });
+    internals.broadcast({
+      type: "agent_settled",
+      piChatSessionId: target.id,
+      piChatRunGeneration: 33,
+    });
+    const entries = internals.stateDiagnostics.snapshot().entries;
+    const summaries = entries.filter((entry) =>
+      entry.category === "sse-transport"
+      && entry.name === "snapshot-summary"
+      && entry.runGeneration === 33
+    );
+    assert.equal(summaries.length, 1);
+    assert.equal(summaries[0].details.snapshotsOversized, 1);
+    assert.equal(summaries[0].details.snapshotsWritten, 1);
+    assert.equal(
+      entries.some((entry) =>
+        entry.category === "sse-transport"
+        && entry.name === "oversized-substitute"
+        && entry.details.originalEventType === "message_update"
+      ),
+      false,
+    );
+    assert.equal(JSON.stringify(entries).includes("private oversized cumulative"), false);
+  } finally {
     await target.close();
   }
 });

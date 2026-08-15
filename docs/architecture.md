@@ -74,6 +74,7 @@ Current ownership still centers on `src/server/app.ts` (`PiChatApp`), with progr
 | `sse-hub.ts` | SSE client map, broadcast / broadcastEach, and payload-free delivery-outcome observation after throttle/backpressure/oversize decisions |
 | `runtime-event-transition.ts` | Pure shared event-derived Runtime projection; no transport, timer, queue, binding, or provenance ownership |
 | `state-diagnostics.ts` | Always-on, bounded five-minute in-memory flight recorder for closed-schema server API/RPC/SSE/projection facts; export is read-only and owns no Runtime, transport, window, or Session authority |
+| `stream-observability.ts` | Bounded aggregate counters for hot SseHub `message_update` transport outcomes, including no-client, oversized-substitute, and write-error evidence; emits only checkpoint/terminal summaries and owns no delivery authority |
 | `routes/bootstrap.ts` | Health, handshake, bootstrap HTTP parsing/serialization through explicit App capabilities |
 | `routes/sessions-read.ts` | Read-only Session list/view HTTP parsing/serialization through explicit App capabilities |
 | `api-route-admission.ts` | Pure lifecycle admission classification and prompt body-size policy |
@@ -127,6 +128,7 @@ The step 3 ownership boundary and staged migration are defined in [`frontend-sta
 | `lib/session-view-cache.ts` | Client-side view LRU |
 | `lib/active-sessions.ts` | Writable/active session helpers |
 | `lib/state-diagnostics.ts` | Always-on page-local bounded diagnostic lane, per-export Session aliasing, and combined JSON download; no persistence or pane authority |
+| `lib/stream-observability.ts` | Bounded per-Session/run streaming counters and idempotent first-visible-assistant paint-opportunity records; no React or Pane authority |
 
 Prefer small hooks and pure libs over growing `App.tsx` further.
 

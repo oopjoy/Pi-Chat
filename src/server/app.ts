@@ -124,6 +124,7 @@ import {
 } from "./primary-runtime-readiness.js";
 import { SseHub } from "./sse-hub.js";
 import { StateDiagnosticsRecorder } from "./state-diagnostics.js";
+import { ServerStreamDiagnosticsAggregator } from "./stream-observability.js";
 import { saveWorkspace } from "./workspace-state.js";
 import { requestGuardError } from "./request-guard.js";
 import {
@@ -299,6 +300,7 @@ class NativeSteeringResetError extends Error {
 export class PiChatApp {
   private readonly sseHub: SseHub;
   private readonly stateDiagnostics: StateDiagnosticsRecorder;
+  private readonly streamDiagnostics: ServerStreamDiagnosticsAggregator;
   /** Same Map as SseHub; dual-session tests seed write stubs here. */
   private readonly sseClients: Map<ServerResponse, string>;
   private readonly scheduler: PromptScheduler;
@@ -473,8 +475,19 @@ export class PiChatApp {
       buildFingerprint: this.buildIdentity.fingerprint,
       now: this.now,
     });
+    this.streamDiagnostics = new ServerStreamDiagnosticsAggregator((summary) => {
+      this.traceState(
+        "sse-transport",
+        "snapshot-summary",
+        summary.sessionId,
+        summary.details,
+        undefined,
+        summary.runGeneration,
+      );
+    });
     this.sseHub = new SseHub();
     this.sseHub.setDiagnosticObserver((event) => {
+      if (this.streamDiagnostics.observe(event)) return;
       this.traceState(
         "sse-transport",
         event.outcome,
@@ -874,6 +887,7 @@ export class PiChatApp {
     this.claimingExtensionRequests.clear();
     this.promptAdmissionTails.clear();
     this.activePromptDiagnostics.clear();
+    this.streamDiagnostics.clear();
     if (runtimeStopFailure) throw runtimeStopFailure;
   }
 
@@ -1114,6 +1128,27 @@ export class PiChatApp {
         : undefined,
     );
     this.sseHub.broadcast(event);
+    const eventType = typeof event.type === "string" ? event.type : "";
+    const runGeneration =
+      typeof event.piChatRunGeneration === "number"
+        ? event.piChatRunGeneration
+        : undefined;
+    const activityExecution =
+      event.activity && typeof event.activity === "object"
+        ? (event.activity as { execution?: unknown }).execution
+        : undefined;
+    const terminalActivity =
+      eventType === "pi_chat_session_status"
+      && (activityExecution === "idle"
+        || activityExecution === "queued"
+        || activityExecution === "failed");
+    if (
+      (eventType === "agent_settled"
+        || eventType === "pi_chat_process_error"
+        || terminalActivity)
+      && sessionId
+      && runGeneration !== undefined
+    ) this.streamDiagnostics.flush(sessionId, runGeneration);
   }
 
   private broadcastRpcEvent(
@@ -4541,6 +4576,7 @@ export class PiChatApp {
           error: "当前页面已关闭或尚未完成连接，无法导出诊断",
           code: "DIAGNOSTIC_PAGE_NOT_REGISTERED",
         });
+      this.streamDiagnostics.checkpoint();
       return json(response, 200, this.stateDiagnostics.snapshot());
     }
     if (

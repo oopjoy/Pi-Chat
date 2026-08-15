@@ -94,6 +94,10 @@ import {
   recordBrowserStateDiagnostic,
 } from "./lib/state-diagnostics";
 import {
+  BrowserStreamDiagnosticsAggregator,
+  type LiveMessageSchedulerOutcome,
+} from "./lib/stream-observability";
+import {
   appendLocalTurnOnce,
   bindQueuedAdmission,
   bindQueuedDispatch,
@@ -214,6 +218,7 @@ type RefreshAuthority = Pick<
 type ScheduledLiveMessage = {
   message: PiMessage;
   authority: PaneAuthoritySnapshot;
+  runGeneration: number;
 };
 
 /** SSE events whose state can make an in-flight SessionViewData snapshot stale. */
@@ -402,6 +407,8 @@ export function App() {
   const [, setLoadingEarlierRevision] = useState(0);
   const { stats } = pane;
   const { liveMessage } = pane;
+  const streamDiagnosticsRef = useRef<BrowserStreamDiagnosticsAggregator | null>(null);
+  streamDiagnosticsRef.current ||= new BrowserStreamDiagnosticsAggregator();
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const sessionsRef = useRef<SessionSummary[]>([]);
   /** A remembered pane may load before bootstrap; it must not become a fake one-row sidebar. */
@@ -1051,11 +1058,19 @@ export function App() {
     return true;
   };
   const commitLiveMessage = useCallback(
-    ({ message, authority }: ScheduledLiveMessage) => {
+    ({ message, authority }: ScheduledLiveMessage) =>
       paneAuthorityDispatchRef.current(authority, {
         type: "LIVE_MESSAGE_UPDATED",
         sessionId: authority.sessionId,
         message,
+      }),
+    [],
+  );
+  const observeLiveMessageSchedule = useCallback(
+    (outcome: LiveMessageSchedulerOutcome, scheduled: ScheduledLiveMessage) => {
+      streamDiagnosticsRef.current?.scheduler(outcome, {
+        sessionId: scheduled.authority.sessionId,
+        runGeneration: scheduled.runGeneration,
       });
     },
     [],
@@ -1064,7 +1079,42 @@ export function App() {
     clearPendingLiveMessage,
     drainPendingLiveMessage,
     scheduleLiveMessage,
-  } = useLiveMessageScheduler(commitLiveMessage);
+  } = useLiveMessageScheduler(commitLiveMessage, 50, observeLiveMessageSchedule);
+
+  useEffect(() => {
+    if (!viewedSessionId || (!liveMessage && !messages.length)) return;
+    const runGeneration = sessionRunGenerationsRef.current.get(viewedSessionId);
+    if (runGeneration === undefined) return;
+    const identity = { sessionId: viewedSessionId, runGeneration };
+    // Restored cached live content has no page-local receive/commit observation
+    // and is intentionally omitted rather than guessed as a first paint.
+    if (!streamDiagnosticsRef.current?.hasPaintCandidate(identity)) return;
+    const runEpochGeneration = runEpochGenerationRef.current;
+    const runEpoch = runEpochRef.current;
+    let secondFrame = 0;
+    const firstFrame = requestAnimationFrame(() => {
+      secondFrame = requestAnimationFrame(() => {
+        if (
+          document.visibilityState !== "visible"
+          || !document.hasFocus()
+          || runEpochGenerationRef.current !== runEpochGeneration
+          || runEpochRef.current !== runEpoch
+          || viewedSessionIdRef.current !== identity.sessionId
+          || desiredSessionIdRef.current !== identity.sessionId
+          || committedPaneIdentityRef.current.kind !== "session"
+          || committedPaneIdentityRef.current.sessionId !== identity.sessionId
+          || sessionRunGenerationsRef.current.get(identity.sessionId) !== identity.runGeneration
+        ) return;
+        streamDiagnosticsRef.current?.paint(identity);
+      });
+    });
+    return () => {
+      cancelAnimationFrame(firstFrame);
+      if (secondFrame) cancelAnimationFrame(secondFrame);
+    };
+  }, [liveMessage, messages, viewedSessionId]);
+
+  useEffect(() => () => streamDiagnosticsRef.current?.clear(), []);
   const reportBackgroundRefreshError = useCallback((cause: unknown) => {
     const message = cause instanceof Error ? cause.message : String(cause);
     // Automatic reconciliation is best-effort. History is already readable from
@@ -2694,6 +2744,7 @@ export function App() {
         warmingRuntimeStartsRef.current.clear();
         warmingSessionIdsRef.current.clear();
         setWarmingSessionIds([]);
+        streamDiagnosticsRef.current?.clear();
         sessionRunGenerationsRef.current.clear();
         settledRunGenerationsRef.current.clear();
         runEpochRef.current = readyRunEpoch;
@@ -3039,6 +3090,14 @@ export function App() {
         if (assistant && eventSessionId) {
           releasePromptBusy(eventSessionId, eventRunGeneration, eventRunEpoch);
           updateLiveSessionCache(eventSessionId, assistant);
+          if (typeof eventRunGeneration === "number")
+            streamDiagnosticsRef.current?.receive(
+              { sessionId: eventSessionId, runGeneration: eventRunGeneration },
+              viewingEventSession,
+              viewingEventSession
+                && document.visibilityState === "visible"
+                && document.hasFocus(),
+            );
         }
         // Only the selected destination is allowed to turn an SSE draft into a
         // React update. Off-screen panes retain their latest draft in cache.
@@ -3046,6 +3105,7 @@ export function App() {
           scheduleLiveMessage({
             message: assistant,
             authority: capturePaneAuthority(eventSessionId),
+            runGeneration: eventRunGeneration ?? -1,
           });
       } else if (type === "message_end") {
         const terminal =
@@ -3070,13 +3130,18 @@ export function App() {
             terminalAssistantSessionIdsRef.current.add(eventSessionId);
             appendTerminalSessionCache(eventSessionId, assistant);
           }
-          if (viewingEventSession && assistant)
+          if (viewingEventSession && assistant) {
             dispatchPane({
               type: "TERMINAL_MESSAGE_COMMITTED",
               sessionId: eventSessionId,
               message: assistant,
             });
-          else if (viewingEventSession)
+            if (typeof eventRunGeneration === "number")
+              streamDiagnosticsRef.current?.terminalAssistantCommitted({
+                sessionId: eventSessionId,
+                runGeneration: eventRunGeneration,
+              });
+          } else if (viewingEventSession)
             dispatchPane({
               type: "LIVE_MESSAGE_UPDATED",
               sessionId: eventSessionId,
@@ -3268,6 +3333,11 @@ export function App() {
             state: { isStreaming: false, isCompacting: false },
           });
         }
+        if (eventSessionId && typeof eventRunGeneration === "number")
+          streamDiagnosticsRef.current?.terminal({
+            sessionId: eventSessionId,
+            runGeneration: eventRunGeneration,
+          });
         if (viewingEventSession) {
           if (promptReconcileTimerRef.current !== null)
             window.clearTimeout(promptReconcileTimerRef.current);
@@ -3841,6 +3911,11 @@ export function App() {
               })
               .catch(() => undefined);
           }
+          if (terminalActivity && typeof eventRunGeneration === "number")
+            streamDiagnosticsRef.current?.terminal({
+              sessionId: eventSessionId,
+              runGeneration: eventRunGeneration,
+            });
         } else if (eventSessionId && typeof event.running === "boolean") {
           // Older servers still publish this partial event during a rolling update.
           const running = event.running === true;
@@ -3905,6 +3980,11 @@ export function App() {
               })
               .catch(() => undefined);
           }
+          if (!running && typeof eventRunGeneration === "number")
+            streamDiagnosticsRef.current?.terminal({
+              sessionId: eventSessionId,
+              runGeneration: eventRunGeneration,
+            });
         }
       } else if (type === "pi_chat_process_recovered") {
         if (eventSessionId) {
@@ -4005,6 +4085,11 @@ export function App() {
             state: { isStreaming: false, isCompacting: false },
           });
         }
+        if (eventSessionId && typeof eventRunGeneration === "number")
+          streamDiagnosticsRef.current?.terminal({
+            sessionId: eventSessionId,
+            runGeneration: eventRunGeneration,
+          });
         if (viewingEventSession) {
           if (promptReconcileTimerRef.current !== null)
             window.clearTimeout(promptReconcileTimerRef.current);
@@ -6323,6 +6408,7 @@ export function App() {
       recordBrowserStateDiagnostic("diagnostic", "export-requested", {
         sessionId: viewedSessionIdRef.current,
       });
+      streamDiagnosticsRef.current?.checkpoint();
       diagnosticCheckpointRef.current();
       const server = await api.stateDiagnosticSnapshot();
       const bundle: StateDiagnosticExportBundle = {
@@ -6473,6 +6559,7 @@ export function App() {
       sessionsTotal,
       wasViewed,
     });
+    streamDiagnosticsRef.current?.deleteSession(deletingId);
     syncMutatingSessionIds();
     if (wasViewed) cancelPendingNavigation();
     setSessionDialog(null);
