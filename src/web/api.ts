@@ -50,6 +50,14 @@ const clientId = (() => {
   return created;
 })();
 const pageId = crypto.randomUUID();
+// One ordering domain per concrete page. Every foreground/background mutation
+// advances the same counter so out-of-order HTTP completion cannot reverse it.
+let presenceRevision = 0;
+
+function nextPresenceRevision(): number {
+  presenceRevision += 1;
+  return presenceRevision;
+}
 
 function storeRequestToken(value: unknown): void {
   if (typeof value === "string" && value) requestToken = value;
@@ -223,8 +231,14 @@ export const api = {
   invalidateHandshake,
   bootstrap,
   eventsUrl: () => `/api/events?token=${encodeURIComponent(requestToken)}&client=${encodeURIComponent(clientId)}&page=${encodeURIComponent(pageId)}`,
-  renewPresence: () => request<{ present: true }>("/api/presence", { method: "POST" }, 10_000),
-  relinquishPresence: () => request<{ present: false }>("/api/presence", { method: "POST", body: JSON.stringify({ foreground: false }) }, 10_000),
+  renewPresence: () => request<{ present: boolean }>("/api/presence", {
+    method: "POST",
+    body: JSON.stringify({ foreground: true, revision: nextPresenceRevision() }),
+  }, 10_000),
+  relinquishPresence: () => request<{ present: boolean }>("/api/presence", {
+    method: "POST",
+    body: JSON.stringify({ foreground: false, revision: nextPresenceRevision() }),
+  }, 10_000),
   takeSessionControl: (sessionId: string) => request<{ controlOwner: string; controlledByThisWindow: boolean }>(`/api/sessions/${sessionId}/control`, { method: "POST" }),
   restart: () => request<{ restarting: true }>("/api/restart", { method: "POST" }, APPLICATION_RESTART_TIMEOUT_MS),
   waitForApplicationHandoff,

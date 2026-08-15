@@ -33,8 +33,14 @@ export class SessionControl {
   readonly connectedClients = new Map<string, number>();
   readonly viewedSessionsByClient = new Map<string, string>();
   private readonly controllerReleaseTimers = new Map<string, NodeJS.Timeout>();
-  private readonly presenceAtByClient = new Map<string, number>();
-  private readonly presenceExpiryTimers = new Map<string, NodeJS.Timeout>();
+  /** Foreground leases are page-scoped; client presence is their aggregate. */
+  private readonly presenceAtByPage = new Map<string, Map<string, number>>();
+  private readonly presenceExpiryTimersByPage = new Map<
+    string,
+    Map<string, NodeJS.Timeout>
+  >();
+  /** Strictly increasing presence revisions, scoped to one concrete browser page. */
+  private readonly presenceRevisionByPage = new Map<string, Map<string, number>>();
   private readonly controllerReleaseMs: number;
   private readonly presenceTtlMs: number;
   private readonly now: () => number;
@@ -58,8 +64,10 @@ export class SessionControl {
   /** Active foreground browser lease, not merely an open transport socket. */
   isClientPresent(clientId: string): boolean {
     if (!this.isClientConnected(clientId)) return false;
-    const at = this.presenceAtByClient.get(clientId);
-    return typeof at === "number" && this.now() - at < this.presenceTtlMs;
+    const leases = this.presenceAtByPage.get(clientId);
+    if (!leases) return false;
+    const now = this.now();
+    return [...leases.values()].some((at) => now - at < this.presenceTtlMs);
   }
 
   /** Connected or still inside disconnect grace (ownership not yet released). */
@@ -130,22 +138,24 @@ export class SessionControl {
 
   clientConnected(clientId: string): void {
     if (!clientId) return;
-    const timer = this.controllerReleaseTimers.get(clientId);
-    if (timer) clearTimeout(timer);
-    this.controllerReleaseTimers.delete(clientId);
+    // Transport recovery alone is not foreground proof. A focused page cancels
+    // any pending ownership release only when its sequenced presence renews.
     this.connectedClients.set(clientId, (this.connectedClients.get(clientId) || 0) + 1);
   }
 
-  /** Renew a foreground browser lease. Calls from a dead/no-SSE client are ignored. */
-  noteClientPresence(clientId: string): boolean {
+  /**
+   * Renew a foreground browser lease. Sequenced browser calls are last-wins per
+   * concrete page; direct/internal callers may omit page identity for compatibility.
+   */
+  noteClientPresence(clientId: string, pageId = "", revision = 0): boolean {
     if (!clientId || !this.isClientConnected(clientId)) return false;
+    const pageKey = pageId || clientId;
+    if (pageId && !this.acceptPresenceRevision(clientId, pageKey, revision)) return true;
     const wasPresent = this.isClientPresent(clientId);
-    this.presenceAtByClient.set(clientId, this.now());
-    const previous = this.presenceExpiryTimers.get(clientId);
-    if (previous) clearTimeout(previous);
-    const timer = setTimeout(() => this.expireClientPresence(clientId), this.presenceTtlMs);
-    timer.unref();
-    this.presenceExpiryTimers.set(clientId, timer);
+    const releaseTimer = this.controllerReleaseTimers.get(clientId);
+    if (releaseTimer) clearTimeout(releaseTimer);
+    this.controllerReleaseTimers.delete(clientId);
+    this.setPagePresence(clientId, pageKey, this.now());
     const viewedSessionId = this.viewedSessionsByClient.get(clientId);
     if (viewedSessionId) this.claimIfSolePresentWindow(viewedSessionId, clientId);
     // A recovered visible PWA may again be a legitimate foreign owner. Push its
@@ -158,15 +168,34 @@ export class SessionControl {
    * A connected EventSource may belong to a hidden or unfocused renderer.
    * It remains a transport/view pin, but cannot retain foreground write control.
    */
-  noteClientBackground(clientId: string): boolean {
+  noteClientBackground(clientId: string, pageId = "", revision = 0): boolean {
     if (!clientId || !this.isClientConnected(clientId)) return false;
-    this.clearClientPresence(clientId);
-    this.clearOwnershipForClient(clientId);
+    const pageKey = pageId || clientId;
+    if (pageId && !this.acceptPresenceRevision(clientId, pageKey, revision)) return true;
+    this.clearPagePresence(clientId, pageKey);
+    // Control is client-scoped, so a sibling foreground page with the same
+    // client identity keeps ownership while this exact page backgrounds.
+    if (!this.isClientPresent(clientId)) this.clearOwnershipForClient(clientId);
     return true;
   }
 
-  clientDisconnected(clientId: string): void {
+  /** Forget page-scoped ordering and presence when an exact page closes. */
+  pageClosed(clientId: string, pageId: string): void {
+    if (!clientId || !pageId) return;
+    const revisions = this.presenceRevisionByPage.get(clientId);
+    revisions?.delete(pageId);
+    if (revisions?.size === 0) this.presenceRevisionByPage.delete(clientId);
+    this.clearPagePresence(clientId, pageId);
+    if (!this.isClientPresent(clientId)) this.clearOwnershipForClient(clientId);
+  }
+
+  clientDisconnected(clientId: string, pageId = ""): void {
     if (!clientId) return;
+    if (pageId) {
+      this.clearPagePresence(clientId, pageId);
+      if (!this.isClientPresent(clientId))
+        this.scheduleControllerRelease(clientId, false);
+    }
     const remaining = Math.max(0, (this.connectedClients.get(clientId) || 1) - 1);
     if (remaining) {
       this.connectedClients.set(clientId, remaining);
@@ -174,14 +203,7 @@ export class SessionControl {
     }
     this.connectedClients.delete(clientId);
     this.clearClientPresence(clientId);
-    const timer = setTimeout(() => {
-      this.controllerReleaseTimers.delete(clientId);
-      if (this.connectedClients.has(clientId)) return;
-      this.viewedSessionsByClient.delete(clientId);
-      this.clearOwnershipForClient(clientId);
-    }, this.controllerReleaseMs);
-    timer.unref();
-    this.controllerReleaseTimers.set(clientId, timer);
+    this.scheduleControllerRelease(clientId, true);
   }
 
   /**
@@ -196,6 +218,7 @@ export class SessionControl {
     if (timer) clearTimeout(timer);
     this.controllerReleaseTimers.delete(clientId);
     this.clearClientPresence(clientId);
+    this.presenceRevisionByPage.delete(clientId);
     this.viewedSessionsByClient.delete(clientId);
     this.clearOwnershipForClient(clientId);
     return viewedSessionId;
@@ -269,38 +292,110 @@ export class SessionControl {
 
   clear(): void {
     for (const timer of this.controllerReleaseTimers.values()) clearTimeout(timer);
-    for (const timer of this.presenceExpiryTimers.values()) clearTimeout(timer);
+    for (const timers of this.presenceExpiryTimersByPage.values()) {
+      for (const timer of timers.values()) clearTimeout(timer);
+    }
     this.controllerReleaseTimers.clear();
-    this.presenceExpiryTimers.clear();
-    this.presenceAtByClient.clear();
+    this.presenceExpiryTimersByPage.clear();
+    this.presenceAtByPage.clear();
+    this.presenceRevisionByPage.clear();
     this.connectedClients.clear();
     this.viewedSessionsByClient.clear();
     this.sessionControllers.clear();
   }
 
-  private expireClientPresence(clientId: string): void {
+  private scheduleControllerRelease(clientId: string, releaseView: boolean): void {
+    const previous = this.controllerReleaseTimers.get(clientId);
+    if (previous) clearTimeout(previous);
+    const timer = setTimeout(() => {
+      this.controllerReleaseTimers.delete(clientId);
+      if (releaseView && !this.connectedClients.has(clientId))
+        this.viewedSessionsByClient.delete(clientId);
+      // A reconnected transport keeps its view pin, but only a sequenced
+      // foreground renewal may keep exclusive write ownership.
+      if (this.isClientPresent(clientId)) return;
+      this.clearOwnershipForClient(clientId);
+    }, this.controllerReleaseMs);
+    timer.unref();
+    this.controllerReleaseTimers.set(clientId, timer);
+  }
+
+  private acceptPresenceRevision(clientId: string, pageId: string, revision: number): boolean {
+    if (!Number.isSafeInteger(revision) || revision < 1) return false;
+    let revisions = this.presenceRevisionByPage.get(clientId);
+    if (!revisions) {
+      revisions = new Map<string, number>();
+      this.presenceRevisionByPage.set(clientId, revisions);
+    }
+    const previous = revisions.get(pageId) || 0;
+    if (revision <= previous) return false;
+    revisions.set(pageId, revision);
+    return true;
+  }
+
+  private setPagePresence(clientId: string, pageId: string, at: number): void {
+    let leases = this.presenceAtByPage.get(clientId);
+    if (!leases) {
+      leases = new Map<string, number>();
+      this.presenceAtByPage.set(clientId, leases);
+    }
+    leases.set(pageId, at);
+
+    let timers = this.presenceExpiryTimersByPage.get(clientId);
+    if (!timers) {
+      timers = new Map<string, NodeJS.Timeout>();
+      this.presenceExpiryTimersByPage.set(clientId, timers);
+    }
+    const previous = timers.get(pageId);
+    if (previous) clearTimeout(previous);
+    const timer = setTimeout(
+      () => this.expirePagePresence(clientId, pageId),
+      this.presenceTtlMs,
+    );
+    timer.unref();
+    timers.set(pageId, timer);
+  }
+
+  private expirePagePresence(clientId: string, pageId: string): void {
     if (!this.isClientConnected(clientId)) return;
-    const at = this.presenceAtByClient.get(clientId);
+    const at = this.presenceAtByPage.get(clientId)?.get(pageId);
     if (typeof at !== "number") return;
     const remaining = this.presenceTtlMs - (this.now() - at);
     if (remaining > 0) {
-      const timer = setTimeout(() => this.expireClientPresence(clientId), remaining);
+      const timer = setTimeout(
+        () => this.expirePagePresence(clientId, pageId),
+        remaining,
+      );
       timer.unref();
-      this.presenceExpiryTimers.set(clientId, timer);
+      this.presenceExpiryTimersByPage.get(clientId)?.set(pageId, timer);
       return;
     }
-    this.clearClientPresence(clientId);
+    this.clearPagePresence(clientId, pageId);
+    if (this.isClientPresent(clientId)) return;
     // Foreground control expiration is not a Runtime/resource policy. Keep the
     // viewed-session pin, but release exclusive write ownership so multiple
     // fresh windows receive an explicit, recoverable control projection.
     this.clearOwnershipForClient(clientId);
   }
 
-  private clearClientPresence(clientId: string): void {
-    this.presenceAtByClient.delete(clientId);
-    const timer = this.presenceExpiryTimers.get(clientId);
+  private clearPagePresence(clientId: string, pageId: string): void {
+    const leases = this.presenceAtByPage.get(clientId);
+    leases?.delete(pageId);
+    if (leases?.size === 0) this.presenceAtByPage.delete(clientId);
+    const timers = this.presenceExpiryTimersByPage.get(clientId);
+    const timer = timers?.get(pageId);
     if (timer) clearTimeout(timer);
-    this.presenceExpiryTimers.delete(clientId);
+    timers?.delete(pageId);
+    if (timers?.size === 0) this.presenceExpiryTimersByPage.delete(clientId);
+  }
+
+  private clearClientPresence(clientId: string): void {
+    this.presenceAtByPage.delete(clientId);
+    const timers = this.presenceExpiryTimersByPage.get(clientId);
+    if (timers) {
+      for (const timer of timers.values()) clearTimeout(timer);
+    }
+    this.presenceExpiryTimersByPage.delete(clientId);
   }
 
   private notifyControlChangedForClient(clientId: string): void {

@@ -46,6 +46,11 @@ test("foreground presence renews on ready, visible lifecycle events, stays quiet
     await act(async () => root.render(createElement(App)));
     assert.ok(renewals >= 1, "visible initial lifecycle renews presence");
     const source = FakeEventSource.instances.at(-1)!;
+    Object.defineProperty(dom.window.document, "hasFocus", {
+      value: () => false,
+      configurable: true,
+    });
+    const beforeUnfocusedReady = renewals;
     await act(async () =>
       source.dispatchEvent(
         new dom.window.MessageEvent("ready", {
@@ -53,7 +58,23 @@ test("foreground presence renews on ready, visible lifecycle events, stays quiet
         }),
       ),
     );
-    assert.ok(renewals >= 2, "ready renews presence");
+    assert.equal(
+      renewals,
+      beforeUnfocusedReady,
+      "ready transport alone cannot renew an unfocused page",
+    );
+    Object.defineProperty(dom.window.document, "hasFocus", {
+      value: () => true,
+      configurable: true,
+    });
+    await act(async () =>
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({ lifecycle: "idle" }),
+        }),
+      ),
+    );
+    assert.ok(renewals > beforeUnfocusedReady, "focused ready renews presence");
     const beforeFocus = renewals;
     await act(async () =>
       dom.window.dispatchEvent(new dom.window.Event("focus")),

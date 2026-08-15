@@ -637,11 +637,19 @@ export class PiChatApp {
     });
     this.runtimes = this.runtimePool.runtimes;
     this.sseHub.onDisconnect((response, clientId, info) => {
+      const pageId = this.ssePageByResponse.get(response) || "";
       this.ssePageByResponse.delete(response);
+      const pageStillConnected = Boolean(
+        pageId &&
+        [...this.ssePageByResponse.values()].some(
+          (connectedPageId) => connectedPageId === pageId,
+        ),
+      );
       // SseHub is the one canonical transport departure path. It covers both
       // request-close and server-initiated slow-client/write-error removal, so
-      // SessionControl decrements this connection exactly once.
-      this.clientDisconnected(clientId);
+      // SessionControl decrements this connection exactly once. Clear page
+      // presence only after its final overlapping EventSource has departed.
+      this.clientDisconnected(clientId, pageStillConnected ? "" : pageId);
       // Transport diagnostics deliberately exclude client/session identity and
       // payloads. A dropped EventSource remains recoverable and must not alter
       // application lifecycle or Runtime ownership.
@@ -1383,6 +1391,7 @@ export class PiChatApp {
       return "";
     this.clearPendingWindowPage(pageId);
     this.connectedPageClients.delete(pageId);
+    this.sessionControl.pageClosed(clientId, pageId);
     const clientStillOpen = [...this.connectedPageClients.values()].some(
       (owner) => owner === clientId,
     );
@@ -1439,11 +1448,11 @@ export class PiChatApp {
     return this.runtimePool.reclaim(sessionId, "idle");
   }
 
-  private clientDisconnected(clientId: string): void {
+  private clientDisconnected(clientId: string, pageId = ""): void {
     // An SSE connection is a re-connectable transport, not a service-lifetime
     // lease. Keep the page instance registered: only its matching pagehide
     // beacon may turn a network failure into an explicit close intent.
-    this.sessionControl.clientDisconnected(clientId);
+    this.sessionControl.clientDisconnected(clientId, pageId);
   }
 
   private markSessionViewed(clientId: string, sessionId: string): void {
@@ -4404,20 +4413,31 @@ export class PiChatApp {
 
     if (url.pathname === "/api/presence") {
       if (request.method !== "POST") return methodNotAllowed(response);
-      if (!clientId)
-        return json(response, 400, { error: "浏览器窗口标识无效" });
+      const pageId = requestPageId(request);
+      if (!clientId || !pageId)
+        return json(response, 400, { error: "浏览器页面标识无效" });
       const body = await bodyJson(request);
-      if (body.foreground === false) {
-        if (!this.sessionControl.noteClientBackground(clientId)) {
-          return json(response, 409, { error: "事件连接已断开，正在重新连接" });
-        }
-        json(response, 200, { present: false });
-        return;
+      const revision = body.revision;
+      if (typeof body.foreground !== "boolean")
+        return json(response, 400, { error: "浏览器前台状态无效" });
+      if (
+        typeof revision !== "number" ||
+        !Number.isSafeInteger(revision) ||
+        revision < 1
+      )
+        return json(response, 400, { error: "浏览器前台状态序号无效" });
+      // Presence is page-scoped, not just client-scoped. A stale renderer or
+      // handshake-only helper must not mutate the foreground lease of a live page.
+      if (!this.isConnectedWindowPage(clientId, pageId)) {
+        return json(response, 409, { error: "当前页面的事件连接已断开，正在重新连接" });
       }
-      if (!this.sessionControl.noteClientPresence(clientId)) {
+      const accepted = body.foreground
+        ? this.sessionControl.noteClientPresence(clientId, pageId, revision)
+        : this.sessionControl.noteClientBackground(clientId, pageId, revision);
+      if (!accepted) {
         return json(response, 409, { error: "事件连接已断开，正在重新连接" });
       }
-      json(response, 200, { present: true });
+      json(response, 200, { present: this.sessionControl.isClientPresent(clientId) });
       return;
     }
 

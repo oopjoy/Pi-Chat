@@ -2598,9 +2598,9 @@ export function App() {
   const handleEventSourceReady = useCallback(
     (rawEvent: Event, source: EventSource) => {
       lastEventFrameAtRef.current = Date.now();
-      // EventSource readiness is a foreground signal when it arrives while the
-      // document is visible. The lifecycle effect below keeps renewing it.
-      if (document.visibilityState !== "hidden")
+      // EventSource readiness proves transport only. Renew foreground presence
+      // under the same visible-and-focused predicate as the lifecycle effect.
+      if (document.visibilityState !== "hidden" && document.hasFocus())
         void api.renewPresence().catch(() => undefined);
       const ready = parseEventData(rawEvent);
       const readyRunEpoch =

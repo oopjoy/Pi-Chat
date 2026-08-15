@@ -31,6 +31,7 @@ test("reconnect token acceptance prevents an older response from restoring its t
     resolveOldBootstrap = resolve;
   });
   const authenticatedTokens: string[] = [];
+  const presenceBodies: Array<{ foreground?: boolean; revision?: number }> = [];
   let handshakeCalls = 0;
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input, init) => {
@@ -51,7 +52,15 @@ test("reconnect token acceptance prevents an older response from restoring its t
     const headers = new Headers(init?.headers);
     authenticatedTokens.push(headers.get("x-pi-chat-token") || "");
     if (path === "/api/bootstrap") return oldBootstrap;
-    if (path === "/api/presence") return response({ present: true });
+    if (path === "/api/presence") {
+      presenceBodies.push(
+        JSON.parse(String(init?.body)) as {
+          foreground?: boolean;
+          revision?: number;
+        },
+      );
+      return response({ present: true });
+    }
     if (path === "/api/diagnostics/snapshot")
       return response({ schemaVersion: 2, entries: [] });
     throw new Error(`unexpected request: ${path}`);
@@ -70,10 +79,17 @@ test("reconnect token acceptance prevents an older response from restoring its t
     assert.match(api.eventsUrl(), /token=token-b/);
 
     await api.renewPresence();
-    assert.deepEqual(authenticatedTokens, ["token-a", "token-b"]);
+    await api.relinquishPresence();
+    await api.renewPresence();
+    assert.deepEqual(authenticatedTokens, ["token-a", "token-b", "token-b", "token-b"]);
+    assert.deepEqual(presenceBodies, [
+      { foreground: true, revision: 1 },
+      { foreground: false, revision: 2 },
+      { foreground: true, revision: 3 },
+    ]);
 
     await api.stateDiagnosticSnapshot();
-    assert.deepEqual(authenticatedTokens, ["token-a", "token-b", "token-b"]);
+    assert.deepEqual(authenticatedTokens, ["token-a", "token-b", "token-b", "token-b", "token-b"]);
   } finally {
     globalThis.fetch = originalFetch;
   }
