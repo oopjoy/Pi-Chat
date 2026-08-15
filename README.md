@@ -29,7 +29,7 @@ Pi Chat 是一个连接本机 Pi RPC 的 local-first Web/PWA 客户端。它提�
 - Skills、Extensions、Packages 按 Pi 原生资源层级分别呈现：资源只在对应能力页显示一次；包内 Extension 标注“由 Package 管理”，Package 页只显示来源与资源摘要。Model 变更和 Skill/Extension/Package 开关使用原子文件写入；Runtime Reload 失败时恢复原配置并尝试恢复旧 Runtime。目录树安装/卸载不执行自动删除式回滚
 - 设置与 Models 使用居中 Windows 式小窗口
 - Thinking 和工具调用折叠显示
-- Pi 扩展的 select / confirm / input / editor 对话框
+- Pi 扩展的 select / confirm / input / editor 对话框；模型可见的澄清类 Extension 可复用同一条 Session 控制、恢复和响应通道
 - 响应式桌面和移动端界面
 
 ## 环境要求
@@ -52,6 +52,16 @@ Pi Chat 是一个连接本机 Pi RPC 的 local-first Web/PWA 客户端。它提�
    - **直接跑 cmd**：浏览器仍可打开本地历史；详细 Runtime 错误在 server 的 stderr 日志。
 
 若要聊天或运行工具，请安装并配置好 Pi。可选环境变量：`PI_CHAT_PI_ENTRY` 指向 Pi 的 `dist/rpc-entry.js`。
+
+### 可选：让模型在歧义处暂停提问
+
+Pi Chat 会原样承载 Pi RPC 的 `select`、`confirm`、`input` 与 `editor` Extension UI。可选安装已验证支持 RPC dialog fallback 的 `ask_user_question` Package：
+
+```bash
+pi install npm:@juicesharp/rpiv-ask-user-question
+```
+
+安装后对目标 Runtime 执行 `/reload`，或在没有进行中对话、队列及确认时正常重启 Pi Chat。原生 Pi 终端显示 Package 的完整多题 TUI；Pi Chat 通过其 RPC fallback 逐题显示选择或输入对话框，回答仍作为同一 Agent Turn 的工具结果返回，不会伪造新的用户 Prompt。多选在当前标量 RPC 协议下使用逗号分隔的选项编号。该 Package 是具有当前用户权限的第三方 Pi 扩展，不属于 Pi Chat 内置 Gate；安装前应审查并固定可信版本。
 
 ## 开发
 
@@ -166,7 +176,7 @@ Skills 可以向模型注入指令，Plugins/Packages 可以用当前用户的�
 
 ## 兼容的 Pi 版本
 
-- **已验证：** Pi `0.83.0`（全局 `@earendil-works/pi-coding-agent`）
+- **已验证：** Pi `0.84.2`（全局 `@earendil-works/pi-coding-agent`；包含 `ask_user_question` RPC dialog fallback 冒烟验证）
 - **探测方式：** Primary 在后台执行一次针对当前本机 Pi entrypoint 的 RPC 能力探测（`get_state` / `get_messages` / `get_available_models` / `get_commands` / `get_session_stats`）。不兼容时 Session 浏览继续可用，而新的或需要恢复的 Runtime 写操作返回明确的不可用状态；已经健康的 Secondary 保持可用。任何 Primary 恢复都会重新探测
 - 升级 Pi 后若启动失败，请先 `pi --version`，再确认 Pi Chat 是否为最新 0.4.x
 

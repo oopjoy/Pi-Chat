@@ -164,7 +164,7 @@ Prefer **RPC capability probe** over a hard Pi version allowlist.
 | Field | Value (0.4.1) |
 |---|---|
 | Required capabilities | `get_state`, `get_messages`, `get_available_models`, `get_commands`, `get_session_stats` |
-| Last verified Pi | 0.83.0 |
+| Last verified Pi | 0.84.2 |
 | Minimum practical | Recent Pi with full RPC surface above |
 
 Missing required capabilities → fail startup clearly.

@@ -827,7 +827,7 @@ details.conversation-process { display: block; padding: 0; }
 .extension-dialog-icon svg { width: 19px; height: 19px; }
 .extension-dialog-header div { display: grid; min-width: 0; gap: 2px; }
 .extension-dialog-header span { color: var(--muted); font-size: 10px; font-weight: 650; letter-spacing: .06em; text-transform: uppercase; }
-.extension-dialog-header h2 { margin: 0; overflow-wrap: anywhere; font-size: 16px; }
+.extension-dialog-header h2 { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; font-size: 16px; }
 .extension-dialog-body { padding: 17px 18px; }
 .extension-dialog-message { margin: 0 0 13px; white-space: pre-wrap; }
 .gate-request-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 0 9px; }
@@ -839,6 +839,7 @@ details.conversation-process { display: block; padding: 0; }
 .dialog input, .dialog textarea { width: 100%; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-soft); color: var(--text); }
 .dialog-options { display: grid; gap: 7px; }
 .dialog-options button, .dialog footer button { padding: 8px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-soft); cursor: pointer; }
+.dialog-options button { text-align: left; white-space: pre-wrap; line-height: 1.45; }
 .dialog footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .dialog footer .primary { border-color: var(--accent); background: var(--accent); color: white; }
 .dialog footer .danger { border-color: var(--danger); background: var(--danger); color: white; }

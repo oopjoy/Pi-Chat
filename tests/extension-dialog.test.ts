@@ -92,3 +92,26 @@ test("ordinary Extension requests use the same frame while retaining Cancel sema
   assert.deepEqual(responses, [{ id: "extension", cancelled: true }]);
   await act(async () => root.unmount());
 });
+
+test("ask_user_question RPC fallback keeps multiline prompts and exact option values", async () => {
+  const dom = installDom();
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  const responses: Array<Record<string, unknown>> = [];
+  const title = "[Scope] Which implementation style?\n\n--- 1. Minimal preview ---\nOnly touch the failing path.";
+  const options = [
+    "1. Minimal change — Preserve the current architecture.",
+    "2. Broader refactor — Simplify the surrounding ownership.",
+    "3. Type something.",
+  ];
+  await act(async () => root.render(createElement(ExtensionDialog, {
+    request: { type: "extension_ui_request", id: "ask-select", method: "select", title, options },
+    onRespond: (body: Record<string, unknown>) => responses.push(body),
+  })));
+
+  assert.equal(dom.window.document.querySelector("#extension-dialog-title")?.textContent, title);
+  const buttons = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")];
+  assert.deepEqual(buttons.map((button) => button.textContent), [...options, "取消"]);
+  await act(async () => buttons[1].click());
+  assert.deepEqual(responses, [{ id: "ask-select", value: options[1] }]);
+  await act(async () => root.unmount());
+});
