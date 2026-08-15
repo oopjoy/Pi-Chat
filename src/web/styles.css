@@ -21,6 +21,9 @@
   --accent-soft: #e9f1ff;
   --user: #edf4ff;
   --danger: #c43b46;
+  --attention: #704200;
+  --attention-dot: #8a5200;
+  --attention-soft: #d89318;
   --shadow: 0 10px 32px rgba(24, 38, 61, .1);
   --code-bg: #fafafa;
   --code-head-bg: #eeeeee;
@@ -75,6 +78,9 @@
     --accent-soft: #1b3454;
     --user: #182b46;
     --danger: #ff858d;
+    --attention: #f2b33d;
+    --attention-dot: #f2b33d;
+    --attention-soft: #f2b33d;
     --shadow: 0 10px 32px rgba(0, 0, 0, .28);
     --code-bg: #181818;
     --code-head-bg: #232323;
@@ -102,6 +108,9 @@
   --accent-soft: #1b3454;
   --user: #182b46;
   --danger: #ff858d;
+  --attention: #f2b33d;
+  --attention-dot: #f2b33d;
+  --attention-soft: #f2b33d;
   --shadow: 0 10px 32px rgba(0, 0, 0, .28);
   --code-bg: #181818;
   --code-head-bg: #232323;
@@ -962,7 +971,7 @@ button.ask-questionnaire-option:hover:not(:disabled) { background: var(--surface
 .subagent-status-indicator { position: relative; display: grid; width: 16px; height: 16px; place-items: center; }
 .subagent-status-indicator svg { width: 15px; height: 15px; }
 .subagent-status-trigger.has-active .subagent-status-indicator::after, .subagent-status-trigger.has-attention .subagent-status-indicator::after { position: absolute; right: -1px; bottom: -1px; width: 6px; height: 6px; border: 1.5px solid var(--surface); border-radius: 50%; background: var(--accent); content: ""; }
-.subagent-status-trigger.has-attention .subagent-status-indicator::after { border-color: var(--surface); background: #8a5200; }
+.subagent-status-trigger.has-attention .subagent-status-indicator::after { border-color: var(--surface); background: var(--attention-dot); }
 .subagent-status-trigger.is-empty { color: var(--muted); cursor: default; }
 .subagent-status-chevron { width: 12px; height: 12px; transition: transform .14s ease; }
 .subagent-status-trigger.is-open .subagent-status-chevron { transform: rotate(180deg); }
@@ -981,7 +990,8 @@ button.ask-questionnaire-option:hover:not(:disabled) { background: var(--surface
 .subagent-status-row > summary:focus-visible { box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent), transparent 70%); }
 .subagent-status-dot { width: 8px; height: 8px; flex: 0 0 auto; margin-top: 5px; border-radius: 50%; background: var(--muted); }
 .subagent-status-row.is-running .subagent-status-dot { background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent), transparent 82%); animation: session-pulse 1.25s ease-in-out infinite; }
-.subagent-status-row.is-attention .subagent-status-dot { border: 2px solid #704200; background: #f2b33d; box-shadow: 0 0 0 2px color-mix(in srgb, #704200, transparent 80%); }
+.subagent-status-row.is-waiting .subagent-status-dot { background: var(--muted); box-shadow: 0 0 0 3px color-mix(in srgb, var(--muted), transparent 84%); }
+.subagent-status-row.is-attention .subagent-status-dot { border: 2px solid var(--attention); background: var(--attention-dot); box-shadow: 0 0 0 2px color-mix(in srgb, var(--attention), transparent 80%); }
 .subagent-status-row.is-complete .subagent-status-dot { background: #239c5a; }
 .subagent-status-row.is-failed .subagent-status-dot { background: var(--danger); }
 .subagent-status-main { display: flex; min-width: 0; flex: 1; flex-direction: column; }
@@ -989,11 +999,11 @@ button.ask-questionnaire-option:hover:not(:disabled) { background: var(--surface
 .subagent-status-main span, .subagent-status-label { color: var(--muted); font-size: 10px; line-height: 1.55; }
 .subagent-status-label { flex: 0 0 auto; }
 .subagent-status-row.is-running .subagent-status-label { color: var(--accent); }
-.subagent-status-row.is-attention .subagent-status-label { color: #704200; font-weight: 750; text-decoration: underline; text-underline-offset: 2px; }
+.subagent-status-row.is-attention .subagent-status-label { color: var(--attention); font-weight: 750; text-decoration: underline; text-underline-offset: 2px; }
 .subagent-status-row.is-failed .subagent-status-label { color: var(--danger); }
 .subagent-status-detail { display: grid; gap: 4px; margin: 0 8px 7px 24px; padding: 7px 8px; border-left: 2px solid var(--line); color: var(--muted); font-size: 10px; line-height: 1.5; }
 .subagent-status-truncated, .subagent-status-authority { margin: 0; padding: 8px 11px; border-top: 1px solid var(--line); color: var(--muted); font-size: 10px; line-height: 1.5; }
-.subagent-status-authority.is-important { border-left: 3px solid #704200; background: color-mix(in srgb, #d89318, transparent 90%); color: var(--text); font-weight: 700; }
+.subagent-status-authority.is-important { border-left: 3px solid var(--attention); background: color-mix(in srgb, var(--attention-soft), transparent 90%); color: var(--text); font-weight: 700; }
 
 @media (max-width: 640px) {
   .topbar-context { gap: 5px; }

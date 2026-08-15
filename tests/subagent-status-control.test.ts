@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFile } from "node:fs/promises";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { JSDOM } from "jsdom";
@@ -25,12 +26,13 @@ function installDom() {
 
 function snapshot(): BackgroundSubagentSnapshot {
   return {
-    total: 5,
+    total: 6,
     activeCount: 1,
     attentionCount: 1,
     truncated: false,
     steps: [
       { key: "subagent-1", label: "实施子代理 1", status: "running", elapsedMs: 65_000, updateAgeMs: 2_000, turnCount: 2, toolCount: 4, activity: "正在运行测试" },
+      { key: "subagent-6", label: "实施子代理 6", status: "waiting", elapsedMs: 1_000, updateAgeMs: 500 },
       { key: "subagent-2", label: "审阅子代理 2", status: "attention", elapsedMs: 5_000, updateAgeMs: 1_000 },
       { key: "subagent-3", label: "子代理 3", status: "complete", elapsedMs: 3_000, updateAgeMs: 8_000 },
       { key: "subagent-4", label: "子代理 4", status: "failed", elapsedMs: 4_000, updateAgeMs: 9_000 },
@@ -70,14 +72,14 @@ test("active, attention, and terminal steps render in an accessible read-only po
     await act(async () => dom.window.document.dispatchEvent(new dom.window.Event("visibilitychange")));
     await act(async () => { await Promise.resolve(); });
     const trigger = dom.window.document.querySelector<HTMLButtonElement>(".subagent-status-trigger")!;
-    assert.equal(trigger.textContent?.replace(/\s+/g, " ").trim(), "5 个子代理");
+    assert.equal(trigger.textContent?.replace(/\s+/g, " ").trim(), "6 个子代理");
     assert.equal(trigger.getAttribute("aria-haspopup"), "dialog");
     assert.ok(dom.window.document.querySelector('[role="tooltip"]')?.textContent?.includes("Queue / Steer"));
 
     await act(async () => trigger.click());
     const popover = dom.window.document.querySelector<HTMLElement>('[role="dialog"][aria-label="后台子代理状态"]')!;
     assert.equal(dom.window.document.activeElement, popover);
-    for (const label of ["运行中", "需要关注", "已完成", "失败", "已取消"])
+    for (const label of ["运行中", "等待中", "需要关注", "已完成", "失败", "已取消"])
       assert.ok(popover.textContent?.includes(label), label);
     assert.ok(popover.textContent?.includes("正在运行测试"));
     assert.ok(popover.textContent?.includes("Queue / Steer 始终只控制主会话"));
@@ -211,6 +213,26 @@ test("terminal-only popovers still explain main-Session Queue and Steer authorit
   } finally {
     api.backgroundSubagents = original;
     await act(async () => root.unmount());
+    dom.window.close();
+  }
+});
+
+test("attention variables provide explicit light and dark theme colors", async () => {
+  const css = await readFile(new URL("../src/web/styles.css", import.meta.url), "utf8");
+  assert.match(css, /:root\s*\{[^}]*--attention:\s*#704200;/s);
+  assert.match(css, /:root\[data-theme="dark"\]\s*\{[^}]*--attention:\s*#f2b33d;/s);
+  assert.match(css, /\.subagent-status-row\.is-attention \.subagent-status-label \{ color: var\(--attention\)/);
+  assert.match(css, /\.subagent-status-authority\.is-important \{ border-left: 3px solid var\(--attention\)/);
+
+  const dom = installDom();
+  try {
+    const style = dom.window.document.createElement("style");
+    style.textContent = ":root { --attention: #704200; } :root[data-theme='dark'] { --attention: #f2b33d; }";
+    dom.window.document.head.append(style);
+    assert.equal(dom.window.getComputedStyle(dom.window.document.documentElement).getPropertyValue("--attention").trim(), "#704200");
+    dom.window.document.documentElement.dataset.theme = "dark";
+    assert.equal(dom.window.getComputedStyle(dom.window.document.documentElement).getPropertyValue("--attention").trim(), "#f2b33d");
+  } finally {
     dom.window.close();
   }
 });

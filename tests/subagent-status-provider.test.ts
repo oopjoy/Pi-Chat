@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { SubagentStatusProvider, resolveSubagentTempScopeId } from "../src/server/subagent-status-provider";
+import { MAX_ROOT_ENTRIES, MAX_STATUS_BYTES, SubagentStatusProvider, collectBoundedDirectoryEntries, currentSubagentTempRoot, readBoundedStatusBytes, resolveSubagentTempScopeId } from "../src/server/subagent-status-provider";
 
 const PARENT = resolve(tmpdir(), "pi-chat-parent-session.jsonl");
 const OTHER_PARENT = resolve(tmpdir(), "pi-chat-other-session.jsonl");
@@ -225,7 +225,7 @@ test("provider rejects unsafe timestamps and keeps serialized durations finite",
   }
 });
 
-test("provider retains active steps, expires old terminal steps, and prunes process aliases", async () => {
+test("provider retains active steps, expires old terminal steps, and bounds process aliases", async () => {
   const target = await fixture();
   const now = Date.now();
   try {
@@ -245,7 +245,7 @@ test("provider retains active steps, expires old terminal steps, and prunes proc
     assert.equal((provider as unknown as { aliases: Map<string, number> }).aliases.size, 1);
     await rm(directory, { recursive: true, force: true });
     await provider.listForParentSession(PARENT);
-    assert.equal((provider as unknown as { aliases: Map<string, number> }).aliases.size, 0);
+    assert.equal((provider as unknown as { aliases: Map<string, unknown> }).aliases.size, 1, "aliases remain stable for bounded TTL retention");
     assert.equal((provider as unknown as { statusCache: Map<string, unknown> }).statusCache.size, 0);
   } finally {
     await target.cleanup();
@@ -295,5 +295,142 @@ test("provider rejects a redirected approved temp root", async (context) => {
     assert.equal((await new SubagentStatusProvider(alias).listForParentSession(PARENT)).total, 0);
   } finally {
     await Promise.all([rm(parent, { recursive: true, force: true }), outside.cleanup()]);
+  }
+});
+
+test("bounded filesystem helpers stop at the configured hard limits", async () => {
+  let yielded = 0;
+  async function* entries() {
+    for (let index = 0; index < MAX_ROOT_ENTRIES + 10; index += 1) {
+      yielded += 1;
+      yield { name: `entry-${index}`, isDirectory: () => false };
+    }
+  }
+  assert.equal(await collectBoundedDirectoryEntries(entries()), null);
+  assert.equal(yielded, MAX_ROOT_ENTRIES + 1);
+
+  const requested: number[] = [];
+  const oversized = await readBoundedStatusBytes({
+    read: async (_buffer, _offset, length) => {
+      requested.push(length);
+      return { bytesRead: length, buffer: Buffer.alloc(0) };
+    },
+  });
+  assert.equal(oversized, null);
+  assert.deepEqual(requested, [MAX_STATUS_BYTES + 1]);
+});
+
+test("shared fallback disables production scans", async () => {
+  const options = { env: {}, getuid: undefined, userInfo: () => ({}), homedir: () => "", tempDir: () => tmpdir() };
+  assert.equal(resolveSubagentTempScopeId(options), "shared");
+  const root = currentSubagentTempRoot(options);
+  assert.equal(root, null);
+  let scans = 0;
+  const snapshot = await new SubagentStatusProvider(root, Date.now, { onFilesystemAccess: () => { scans += 1; } })
+    .listForParentSession(PARENT);
+  assert.equal(snapshot.total, 0);
+  assert.equal(scans, 0);
+});
+
+test("POSIX ownership and writable-mode checks fail closed", { skip: process.getuid === undefined }, async () => {
+  const target = await fixture();
+  try {
+    const runId = "10101010-1010-4010-8010-101010101010";
+    const run = await target.writeStatus(runId, status(runId));
+    const statusPath = join(run, "status.json");
+    const uid = process.getuid!();
+    assert.equal((await new SubagentStatusProvider(target.root, Date.now, { uid: uid + 1 }).listForParentSession(PARENT)).total, 0);
+    for (const [path, restore] of [[target.root, 0o700], [target.runs, 0o755], [run, 0o755], [statusPath, 0o644]] as const) {
+      await chmod(path, 0o777);
+      assert.equal((await new SubagentStatusProvider(target.root, Date.now, { uid }).listForParentSession(PARENT)).total, 0, path);
+      await chmod(path, restore);
+    }
+  } finally {
+    await target.cleanup();
+  }
+});
+
+test("provider accepts producer-shaped empty args and long recent tool history", async () => {
+  const target = await fixture();
+  try {
+    const runId = "20202020-2020-4020-8020-202020202020";
+    const now = Date.now();
+    await target.writeStatus(runId, status(runId, PARENT, {
+      steps: [{
+        agent: "worker", status: "running", startedAt: now - 1_000, lastActivityAt: now - 10,
+        currentTool: "bash", currentToolArgs: "",
+        recentTools: Array.from({ length: 100 }, () => ({ tool: "ls", args: "" })),
+      }],
+    }));
+    const snapshot = await new SubagentStatusProvider(target.root).listForParentSession(PARENT);
+    assert.equal(snapshot.total, 1);
+    assert.equal(snapshot.steps[0]?.status, "running");
+  } finally {
+    await target.cleanup();
+  }
+});
+
+test("provider excludes orchestration placeholders and projects pending children as waiting", async () => {
+  const target = await fixture();
+  try {
+    const runId = "30303030-3030-4030-8030-303030303030";
+    const now = Date.now();
+    await target.writeStatus(runId, status(runId, PARENT, { steps: [
+      { agent: "checkpoint:save", status: "paused", startedAt: now - 500, lastActivityAt: now - 10 },
+      { agent: "expand:fanout", status: "pending", startedAt: now - 500, lastActivityAt: now - 10 },
+      { agent: "worker", status: "pending", startedAt: now - 500, lastActivityAt: now - 10 },
+      { agent: "reviewer", status: "running", startedAt: now - 500, lastActivityAt: now - 10 },
+    ] }));
+    const snapshot = await new SubagentStatusProvider(target.root).listForParentSession(PARENT);
+    assert.equal(snapshot.total, 2);
+    assert.equal(snapshot.activeCount, 1);
+    assert.deepEqual(snapshot.steps.map((step) => step.status), ["running", "waiting"]);
+  } finally {
+    await target.cleanup();
+  }
+});
+
+test("large child aggregates keep truthful counts and a bounded priority projection", async () => {
+  const target = await fixture();
+  try {
+    const now = Date.now();
+    const states = ["paused", "running", "pending", "failed", "stopped", "complete", ...Array(134).fill("complete")];
+    const chunks = [states.slice(0, 50), states.slice(50, 100), states.slice(100)];
+    for (const [runIndex, chunk] of chunks.entries()) {
+      const runId = `${String(runIndex + 4).repeat(8)}-${String(runIndex + 4).repeat(4)}-4${String(runIndex + 4).repeat(3)}-8${String(runIndex + 4).repeat(3)}-${String(runIndex + 4).repeat(12)}`;
+      await target.writeStatus(runId, status(runId, PARENT, { steps: chunk.map((stepStatus, index) => ({
+        agent: index % 2 ? "worker" : "reviewer",
+        status: stepStatus,
+        startedAt: now - 2_000,
+        lastActivityAt: now - 100 - index,
+        ...(["failed", "stopped", "complete"].includes(stepStatus) ? { endedAt: now - 50 } : {}),
+      })) }));
+    }
+    const snapshot = await new SubagentStatusProvider(target.root, () => now).listForParentSession(PARENT);
+    assert.equal(snapshot.total, 140);
+    assert.equal(snapshot.activeCount, 1);
+    assert.equal(snapshot.attentionCount, 1);
+    assert.equal(snapshot.steps.length, 24);
+    assert.equal(snapshot.truncated, true);
+    assert.deepEqual(snapshot.steps.slice(0, 6).map((step) => step.status), ["attention", "running", "waiting", "failed", "cancelled", "complete"]);
+  } finally {
+    await target.cleanup();
+  }
+});
+
+test("aliases remain stable when parent Sessions are polled alternately", async () => {
+  const target = await fixture();
+  try {
+    const a = "77777777-1111-4111-8111-777777777777";
+    const b = "88888888-2222-4222-8222-888888888888";
+    await target.writeStatus(a, status(a, PARENT, { steps: [status(a).steps[0]] }));
+    await target.writeStatus(b, status(b, OTHER_PARENT, { steps: [status(b).steps[0]] }));
+    const provider = new SubagentStatusProvider(target.root);
+    const first = (await provider.listForParentSession(PARENT)).steps[0]?.key;
+    await provider.listForParentSession(OTHER_PARENT);
+    const second = (await provider.listForParentSession(PARENT)).steps[0]?.key;
+    assert.equal(second, first);
+  } finally {
+    await target.cleanup();
   }
 });

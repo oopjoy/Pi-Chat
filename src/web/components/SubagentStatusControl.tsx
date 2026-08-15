@@ -13,6 +13,7 @@ import { ChevronDownIcon, SubagentsIcon } from "./Icons";
 
 const STATUS_LABEL: Record<BackgroundSubagentStatus, string> = {
   running: "运行中",
+  waiting: "等待中",
   attention: "需要关注",
   complete: "已完成",
   failed: "失败",

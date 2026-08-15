@@ -1,5 +1,5 @@
 /** Read-only lifecycle projection for one background Subagent step. */
-export type BackgroundSubagentStatus = "running" | "attention" | "complete" | "failed" | "cancelled";
+export type BackgroundSubagentStatus = "running" | "waiting" | "attention" | "complete" | "failed" | "cancelled";
 
 export interface BackgroundSubagentStep {
   /** Process-local opaque alias; never a package run/tool-call identifier. */
