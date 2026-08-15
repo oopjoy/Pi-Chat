@@ -7446,6 +7446,8 @@ export function App() {
       />
       <ExtensionDialog
         request={extensionRequest}
+        sessionId={viewedSessionId}
+        continuationPending={toolStatus === "正在运行工具：ask_user_question"}
         disabled={buildIdentityMismatch}
         onRespond={(body) => void respondToExtension(body)}
       />

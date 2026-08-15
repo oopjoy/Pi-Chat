@@ -840,6 +840,10 @@ details.conversation-process { display: block; padding: 0; }
 .dialog-options { display: grid; gap: 7px; }
 .dialog-options button, .dialog footer button { padding: 8px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-soft); cursor: pointer; }
 .dialog-options button { text-align: left; white-space: pre-wrap; line-height: 1.45; }
+.extension-dialog-continuation { display: grid; min-height: 96px; place-items: center; align-content: center; gap: 10px; text-align: center; }
+.extension-dialog-continuation > span { width: 22px; height: 22px; border: 2px solid var(--line-strong); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
+.extension-dialog-continuation p { margin: 0; }
+.extension-dialog-continuation-status { color: var(--muted); font-size: 12px; }
 .dialog footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .dialog footer .primary { border-color: var(--accent); background: var(--accent); color: white; }
 .dialog footer .danger { border-color: var(--danger); background: var(--danger); color: white; }
@@ -867,6 +871,7 @@ details.conversation-process { display: block; padding: 0; }
   .sidebar,
   .sidebar-restore,
   .sidebar-scrim { transition: none !important; animation: none !important; will-change: auto; }
+  .extension-dialog-continuation > span { animation: none; }
 }
 
 @media (max-width: 760px) {

@@ -1818,6 +1818,145 @@ test("late tool completion after off-screen idle does not return when the Sessio
   }
 });
 
+test("ordinary tool Extension responses close without questionnaire continuity", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const request = {
+    type: "extension_ui_request",
+    id: "ordinary-confirm",
+    method: "confirm",
+    title: "Continue?",
+    piChatSessionId: activeId,
+  } as const;
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true },
+      toolStatus: "正在运行工具：ordinary_tool",
+      pendingExtensionRequest: request,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    respondToExtension: async () => ({ ok: true }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    assert.ok(dom.window.document.querySelector("section.extension-dialog"));
+    await act(async () => dom.window.document.querySelector<HTMLButtonElement>(
+      ".extension-dialog-actions .primary",
+    )!.click());
+    assert.equal(
+      dom.window.document.querySelector("section.extension-dialog"),
+      null,
+      "non-questionnaire tools must not retain a blocking continuation frame",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
+test("ask custom answers replace select with input inside one live dialog frame", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const options = [
+    "1. Minimal change — Preserve the current architecture.",
+    "2. Broader refactor — Simplify the surrounding ownership.",
+    "3. Type something.",
+  ];
+  const selectRequest = {
+    type: "extension_ui_request",
+    id: "ask-select",
+    method: "select",
+    title: "[Scope] Which implementation style?",
+    options,
+    piChatSessionId: activeId,
+  } as const;
+  const responses: Array<Record<string, unknown>> = [];
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true },
+      toolStatus: "正在运行工具：ask_user_question",
+      pendingExtensionRequest: selectRequest,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    respondToExtension: async (body: Record<string, unknown>) => {
+      responses.push(body);
+      return { ok: true };
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const originalFrame = dom.window.document.querySelector("section.extension-dialog");
+    assert.ok(originalFrame);
+    const optionButtons = [...dom.window.document.querySelectorAll<HTMLButtonElement>(
+      ".dialog-options button",
+    )];
+    await act(async () => optionButtons[2].click());
+    assert.deepEqual(responses, [{
+      id: selectRequest.id,
+      sessionId: activeId,
+      value: options[2],
+    }]);
+    assert.equal(dom.window.document.querySelector("section.extension-dialog"), originalFrame);
+
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => source.emitPi({
+      type: "pi_chat_extension_request_resolved",
+      piChatSessionId: activeId,
+      id: selectRequest.id,
+    }));
+    assert.equal(dom.window.document.querySelector("section.extension-dialog"), originalFrame);
+    assert.equal(dom.window.document.querySelectorAll(".dialog-backdrop").length, 1);
+
+    await act(async () => source.emitPi({
+      type: "extension_ui_request",
+      id: "ask-input",
+      method: "input",
+      title: "[Scope] Which implementation style?\n\nType your answer:",
+      piChatSessionId: activeId,
+    }));
+    assert.equal(dom.window.document.querySelector("section.extension-dialog"), originalFrame);
+    assert.ok(dom.window.document.querySelector<HTMLInputElement>("input"));
+    await act(async () => dom.window.document.querySelector<HTMLButtonElement>(
+      ".extension-dialog-actions .primary",
+    )!.click());
+    assert.deepEqual(responses.at(-1), {
+      id: "ask-input",
+      sessionId: activeId,
+      value: "",
+    });
+
+    await act(async () => {
+      source.emitPi({
+        type: "pi_chat_extension_request_resolved",
+        piChatSessionId: activeId,
+        id: "ask-input",
+      });
+      source.emitPi({
+        type: "tool_execution_end",
+        piChatSessionId: activeId,
+        toolName: "ask_user_question",
+        isError: false,
+      });
+    });
+    assert.equal(dom.window.document.querySelector("section.extension-dialog"), null);
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("extension resolution invalidates an older Session view before it can reopen confirmation", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");

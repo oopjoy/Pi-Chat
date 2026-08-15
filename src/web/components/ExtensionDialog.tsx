@@ -78,35 +78,90 @@ function ExtensionDialogFrame({ gate, title, children, actions }: {
   );
 }
 
-export function ExtensionDialog({ request, disabled = false, onRespond }: {
+export function ExtensionDialog({
+  request,
+  sessionId = null,
+  continuationPending = false,
+  disabled = false,
+  onRespond,
+}: {
   request: ExtensionUiRequest | null;
+  sessionId?: string | null;
+  /** Keep one visual frame while an active Extension tool replaces one scalar RPC dialog with the next. */
+  continuationPending?: boolean;
   disabled?: boolean;
   onRespond: (body: { id?: string; cancelled?: boolean; confirmed?: boolean; value?: string }) => void;
 }) {
   const [value, setValue] = useState("");
-  const gateDetails = useMemo(() => request ? describeGateRequest(request) : null, [request]);
-  const supported = Boolean(request && ["select", "confirm", "input", "editor"].includes(request.method));
+  const [submittedRequestId, setSubmittedRequestId] = useState<string | null>(null);
+  const [continuity, setContinuity] = useState<{
+    sessionId: string;
+    request: ExtensionUiRequest;
+  } | null>(null);
+  const activeRequest = request && ["select", "confirm", "input", "editor"].includes(request.method)
+    ? request
+    : null;
+  const continuitySessionId = sessionId || activeRequest?.piChatSessionId || "";
 
-  useEffect(() => setValue(request?.prefill || ""), [request]);
   useEffect(() => {
-    if (!request || !supported) return;
+    if (activeRequest) {
+      // Gate is a safety decision, not a questionnaire step. It should close as
+      // soon as its one response is accepted rather than linger as a wizard.
+      setContinuity(describeGateRequest(activeRequest)
+        ? null
+        : { sessionId: continuitySessionId, request: activeRequest });
+      setSubmittedRequestId(null);
+      return;
+    }
+    if (!continuationPending) {
+      setContinuity(null);
+      setSubmittedRequestId(null);
+    }
+  }, [activeRequest, continuationPending, continuitySessionId]);
+
+  const continuityRequest = continuity?.sessionId === continuitySessionId
+    ? continuity.request
+    : null;
+  const visibleRequest = activeRequest || (continuationPending ? continuityRequest : null);
+  const gateDetails = useMemo(
+    () => visibleRequest ? describeGateRequest(visibleRequest) : null,
+    [visibleRequest],
+  );
+  const submitted = Boolean(
+    visibleRequest && submittedRequestId === visibleRequest.id,
+  );
+  const continuing = Boolean(
+    !gateDetails && visibleRequest && (submitted || !activeRequest),
+  );
+  const interactionDisabled = disabled || submitted || !activeRequest;
+
+  useEffect(() => setValue(activeRequest?.prefill || ""), [activeRequest]);
+  useEffect(() => {
+    if (!activeRequest) return;
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || disabled) return;
+      if (event.key !== "Escape" || interactionDisabled) return;
       event.preventDefault();
-      if (gateDetails) onRespond({ id: request.id, value: gateDetails.blockValue });
-      else onRespond({ id: request.id, cancelled: true });
+      setSubmittedRequestId(activeRequest.id);
+      if (gateDetails)
+        onRespond({ id: activeRequest.id, value: gateDetails.blockValue });
+      else onRespond({ id: activeRequest.id, cancelled: true });
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [disabled, gateDetails, onRespond, request, supported]);
+  }, [activeRequest, gateDetails, interactionDisabled, onRespond]);
 
-  if (!request || !supported) return null;
+  if (!visibleRequest) return null;
 
-  const cancel = () => { if (!disabled) onRespond({ id: request.id, cancelled: true }); };
+  const respond = (body: { id?: string; cancelled?: boolean; confirmed?: boolean; value?: string }) => {
+    if (interactionDisabled || !activeRequest) return;
+    setSubmittedRequestId(activeRequest.id);
+    onRespond(body);
+  };
+  const cancel = () => respond({ id: visibleRequest.id, cancelled: true });
   const submit = () => {
-    if (disabled) return;
-    if (request.method === "confirm") onRespond({ id: request.id, confirmed: true });
-    else onRespond({ id: request.id, value });
+    if (visibleRequest.method === "confirm")
+      respond({ id: visibleRequest.id, confirmed: true });
+    else respond({ id: visibleRequest.id, value });
   };
 
   if (gateDetails) {
@@ -116,8 +171,8 @@ export function ExtensionDialog({ request, disabled = false, onRespond }: {
         title="权限确认"
         actions={
           <>
-            <button type="button" className="gate-block" autoFocus disabled={disabled} onClick={() => onRespond({ id: request.id, value: gateDetails.blockValue })}>Block</button>
-            <button type="button" className="gate-allow" disabled={disabled} onClick={() => onRespond({ id: request.id, value: gateDetails.allowValue })}>Allow</button>
+            <button type="button" className="gate-block" autoFocus disabled={interactionDisabled} onClick={() => respond({ id: visibleRequest.id, value: gateDetails.blockValue })}>Block</button>
+            <button type="button" className="gate-allow" disabled={interactionDisabled} onClick={() => respond({ id: visibleRequest.id, value: gateDetails.allowValue })}>Allow</button>
           </>
         }
       >
@@ -131,22 +186,33 @@ export function ExtensionDialog({ request, disabled = false, onRespond }: {
   return (
     <ExtensionDialogFrame
       gate={false}
-      title={request.title || "Pi 需要你的输入"}
-      actions={
-        <>
-          <button type="button" disabled={disabled} onClick={cancel}>取消</button>
-          {request.method !== "select" && <button type="button" className="primary" disabled={disabled} onClick={submit}>确定</button>}
-        </>
-      }
+      title={visibleRequest.title || "Pi 需要你的输入"}
+      actions={continuing
+        ? <span className="extension-dialog-continuation-status" role="status">已提交，正在准备下一步…</span>
+        : (
+          <>
+            <button type="button" disabled={interactionDisabled} onClick={cancel}>取消</button>
+            {visibleRequest.method !== "select" && <button type="button" className="primary" disabled={interactionDisabled} onClick={submit}>确定</button>}
+          </>
+        )}
     >
-      {request.message && <p className="extension-dialog-message">{request.message}</p>}
-      {request.method === "select" && (
-        <div className="dialog-options">
-          {(request.options || []).map((option) => <button type="button" key={option} disabled={disabled} onClick={() => onRespond({ id: request.id, value: option })}>{option}</button>)}
+      {continuing ? (
+        <div className="extension-dialog-continuation" aria-live="polite">
+          <span aria-hidden="true" />
+          <p>保持当前对话框，等待 Pi 提供下一步输入。</p>
         </div>
+      ) : (
+        <>
+          {visibleRequest.message && <p className="extension-dialog-message">{visibleRequest.message}</p>}
+          {visibleRequest.method === "select" && (
+            <div className="dialog-options">
+              {(visibleRequest.options || []).map((option) => <button type="button" key={option} disabled={interactionDisabled} onClick={() => respond({ id: visibleRequest.id, value: option })}>{option}</button>)}
+            </div>
+          )}
+          {visibleRequest.method === "input" && <input autoFocus disabled={interactionDisabled} value={value} placeholder={visibleRequest.placeholder} onChange={(event) => setValue(event.target.value)} />}
+          {visibleRequest.method === "editor" && <textarea autoFocus disabled={interactionDisabled} rows={8} value={value} placeholder={visibleRequest.placeholder} onChange={(event) => setValue(event.target.value)} />}
+        </>
       )}
-      {request.method === "input" && <input autoFocus disabled={disabled} value={value} placeholder={request.placeholder} onChange={(event) => setValue(event.target.value)} />}
-      {request.method === "editor" && <textarea autoFocus disabled={disabled} rows={8} value={value} placeholder={request.placeholder} onChange={(event) => setValue(event.target.value)} />}
     </ExtensionDialogFrame>
   );
 }
