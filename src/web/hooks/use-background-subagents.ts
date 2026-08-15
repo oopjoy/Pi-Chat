@@ -10,12 +10,17 @@ const EMPTY: BackgroundSubagentSnapshot = {
   steps: [],
 };
 
+type ScopedSnapshot = {
+  sessionId: string;
+  value: BackgroundSubagentSnapshot;
+};
+
 /** Session-scoped read-only polling; navigation and unmount abort the old request. */
 export function useBackgroundSubagents(sessionId: string): BackgroundSubagentSnapshot {
-  const [snapshot, setSnapshot] = useState<BackgroundSubagentSnapshot>(EMPTY);
+  const [snapshot, setSnapshot] = useState<ScopedSnapshot>({ sessionId: "", value: EMPTY });
 
   useEffect(() => {
-    setSnapshot(EMPTY);
+    setSnapshot({ sessionId, value: EMPTY });
     if (!/^[a-f0-9]{20}$/.test(sessionId)) return;
     let disposed = false;
     let timer: number | null = null;
@@ -37,10 +42,10 @@ export function useBackgroundSubagents(sessionId: string): BackgroundSubagentSna
       controller = current;
       try {
         const next = await api.backgroundSubagents(sessionId, current.signal);
-        if (!disposed) setSnapshot(next);
+        if (!disposed) setSnapshot({ sessionId, value: next });
       } catch (cause) {
         if (!disposed && !(cause instanceof DOMException && cause.name === "AbortError"))
-          setSnapshot(EMPTY);
+          setSnapshot({ sessionId, value: EMPTY });
       } finally {
         if (!disposed && controller === current) schedule();
       }
@@ -53,7 +58,7 @@ export function useBackgroundSubagents(sessionId: string): BackgroundSubagentSna
     };
 
     document.addEventListener("visibilitychange", visibilityChanged);
-    schedule();
+    void poll();
     return () => {
       disposed = true;
       controller?.abort();
@@ -62,5 +67,5 @@ export function useBackgroundSubagents(sessionId: string): BackgroundSubagentSna
     };
   }, [sessionId]);
 
-  return snapshot;
+  return snapshot.sessionId === sessionId ? snapshot.value : EMPTY;
 }

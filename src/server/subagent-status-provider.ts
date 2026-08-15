@@ -1,7 +1,7 @@
 import { constants } from "node:fs";
-import { lstat, open, readdir } from "node:fs/promises";
-import { tmpdir, userInfo } from "node:os";
-import { isAbsolute, join, normalize, resolve } from "node:path";
+import { lstat, open, readdir, realpath } from "node:fs/promises";
+import { homedir, tmpdir, userInfo } from "node:os";
+import { isAbsolute, join, normalize, relative, resolve } from "node:path";
 import type {
   BackgroundSubagentSnapshot,
   BackgroundSubagentStatus,
@@ -16,6 +16,7 @@ const ACTIVITY_STATES = new Set(["active_long_running", "needs_attention"]);
 const MAX_ROOT_ENTRIES = 512;
 const MAX_STATUS_BYTES = 256 * 1024;
 const MAX_STATUS_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
+const TERMINAL_VISIBLE_AGE_MS = 24 * 60 * 60 * 1_000;
 const MAX_FUTURE_SKEW_MS = 5 * 60 * 1_000;
 const MAX_STEPS_PER_RUN = 64;
 const MAX_TOTAL_STEPS = 128;
@@ -61,8 +62,17 @@ function record(value: unknown): JsonRecord | null {
     : null;
 }
 
-function finiteNumber(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+function safeTimestamp(value: unknown, now: number): number | undefined {
+  return Number.isSafeInteger(value)
+    && (value as number) >= 0
+    && (value as number) <= now + MAX_FUTURE_SKEW_MS
+    ? value as number
+    : undefined;
+}
+
+function safeDuration(later: number, earlier: number): number {
+  const value = later - earlier;
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 
 function boundedCount(value: unknown): number | undefined {
@@ -94,21 +104,41 @@ function sanitizeScopeSegment(value: string): string {
   return value.trim().replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "unknown";
 }
 
-/** Mirror only the installed package's documented user-scoped temp-root convention. */
-export function currentSubagentTempRoot(): string | null {
-  try {
-    if (typeof process.getuid === "function")
-      return join(tmpdir(), `pi-subagents-uid-${process.getuid()}`);
-    for (const key of ["USERNAME", "USER", "LOGNAME"] as const) {
-      const value = process.env[key];
-      if (value) return join(tmpdir(), `pi-subagents-user-${sanitizeScopeSegment(value)}`);
-    }
-    const username = userInfo().username;
-    if (username) return join(tmpdir(), `pi-subagents-user-${sanitizeScopeSegment(username)}`);
-  } catch {
-    return null;
+export function resolveSubagentTempScopeId(options: {
+  env?: NodeJS.ProcessEnv;
+  getuid?: (() => number) | undefined;
+  userInfo?: (() => { username?: string | null }) | undefined;
+  homedir?: (() => string) | undefined;
+} = {}): string {
+  const env = options.env ?? process.env;
+  const getuid = Object.hasOwn(options, "getuid") ? options.getuid : process.getuid?.bind(process);
+  if (typeof getuid === "function") return `uid-${getuid()}`;
+  for (const key of ["USERNAME", "USER", "LOGNAME"] as const) {
+    const value = env[key];
+    if (value) return `user-${sanitizeScopeSegment(value)}`;
   }
-  return null;
+  const getUserInfo = Object.hasOwn(options, "userInfo") ? options.userInfo : userInfo;
+  try {
+    const username = getUserInfo?.().username;
+    if (username) return `user-${sanitizeScopeSegment(username)}`;
+  } catch {
+    // Match pi-subagents: continue to the home-directory scopes.
+  }
+  const configuredHome = env.USERPROFILE ?? env.HOME;
+  if (configuredHome) return `home-${sanitizeScopeSegment(configuredHome)}`;
+  const getHome = Object.hasOwn(options, "homedir") ? options.homedir : homedir;
+  try {
+    const fallbackHome = getHome?.();
+    if (fallbackHome) return `home-${sanitizeScopeSegment(fallbackHome)}`;
+  } catch {
+    // Match pi-subagents: use the last-resort shared scope.
+  }
+  return "shared";
+}
+
+/** Mirror the installed package's documented temp-root convention without importing it. */
+export function currentSubagentTempRoot(): string {
+  return join(tmpdir(), `pi-subagents-${resolveSubagentTempScopeId()}`);
 }
 
 function parseRecentTool(value: unknown): { tool?: string; args?: string } | null {
@@ -123,13 +153,13 @@ function parseRecentTool(value: unknown): { tool?: string; args?: string } | nul
   return { tool, args };
 }
 
-function parseStatus(value: unknown, directoryRunId: string): ParsedStatus | null {
+function parseStatus(value: unknown, directoryRunId: string, now: number): ParsedStatus | null {
   const input = record(value);
   if (!input) return null;
   const runId = boundedString(input.runId, 64);
   const state = boundedString(input.state, 24);
   const mode = boundedString(input.mode, 24);
-  const startedAt = finiteNumber(input.startedAt);
+  const startedAt = safeTimestamp(input.startedAt, now);
   const parentSessionPath = parsedSessionPath(input.sessionId);
   if (!runId || runId !== directoryRunId || !UUID.test(runId) || !state || !RUN_STATES.has(state)
     || !mode || !MODES.has(mode) || startedAt === undefined || !parentSessionPath) return null;
@@ -137,9 +167,10 @@ function parseStatus(value: unknown, directoryRunId: string): ParsedStatus | nul
     ? undefined
     : boundedString(input.activityState, 32);
   if (activityState !== undefined && !ACTIVITY_STATES.has(activityState)) return null;
-  const endedAt = input.endedAt === undefined ? undefined : finiteNumber(input.endedAt);
-  const lastUpdate = input.lastUpdate === undefined ? startedAt : finiteNumber(input.lastUpdate);
-  if ((input.endedAt !== undefined && endedAt === undefined) || lastUpdate === undefined) return null;
+  const endedAt = input.endedAt === undefined ? undefined : safeTimestamp(input.endedAt, now);
+  const lastUpdate = input.lastUpdate === undefined ? startedAt : safeTimestamp(input.lastUpdate, now);
+  if ((input.endedAt !== undefined && endedAt === undefined) || lastUpdate === undefined
+    || (endedAt !== undefined && endedAt < startedAt) || lastUpdate < startedAt) return null;
   if (!Array.isArray(input.steps) || input.steps.length < 1 || input.steps.length > MAX_STEPS_PER_RUN)
     return null;
 
@@ -154,13 +185,15 @@ function parseStatus(value: unknown, directoryRunId: string): ParsedStatus | nul
       ? undefined
       : boundedString(step.activityState, 32);
     if (stepActivity !== undefined && !ACTIVITY_STATES.has(stepActivity)) return null;
-    const stepStartedAt = step.startedAt === undefined ? startedAt : finiteNumber(step.startedAt);
-    const stepEndedAt = step.endedAt === undefined ? endedAt : finiteNumber(step.endedAt);
+    const stepStartedAt = step.startedAt === undefined ? startedAt : safeTimestamp(step.startedAt, now);
+    const stepEndedAt = step.endedAt === undefined ? endedAt : safeTimestamp(step.endedAt, now);
     const lastActivityAt = step.lastActivityAt === undefined
       ? lastUpdate
-      : finiteNumber(step.lastActivityAt);
+      : safeTimestamp(step.lastActivityAt, now);
     if (stepStartedAt === undefined || lastActivityAt === undefined
-      || (step.endedAt !== undefined && stepEndedAt === undefined)) return null;
+      || (step.endedAt !== undefined && stepEndedAt === undefined)
+      || (stepEndedAt !== undefined && stepEndedAt < stepStartedAt)
+      || lastActivityAt < stepStartedAt) return null;
     const turnCount = step.turnCount === undefined ? undefined : boundedCount(step.turnCount);
     const toolCount = step.toolCount === undefined ? undefined : boundedCount(step.toolCount);
     if ((step.turnCount !== undefined && turnCount === undefined)
@@ -228,33 +261,102 @@ type StatusCacheEntry = {
   parsed: ParsedStatus | null;
 };
 
-async function safeReadStatus(
+type StablePath = {
+  path: string;
+  real: string;
+  dev: number;
+  ino: number;
+  size: number;
+  mtimeMs: number;
+};
+
+function insideRealRoot(rootReal: string, candidateReal: string): boolean {
+  const child = relative(rootReal, candidateReal);
+  return child.length > 0 && !child.startsWith("..") && !isAbsolute(child);
+}
+
+async function stablePath(
   path: string,
+  kind: "directory" | "file",
+  rootReal?: string,
+  exactReal?: string,
+): Promise<StablePath | null> {
+  try {
+    const stat = await lstat(path);
+    if (stat.isSymbolicLink()) return null;
+    if (kind === "directory" ? !stat.isDirectory() : !stat.isFile()) return null;
+    const resolvedReal = canonicalPath(await realpath(path));
+    if (rootReal && !insideRealRoot(rootReal, resolvedReal)) return null;
+    if (exactReal && resolvedReal !== canonicalPath(exactReal)) return null;
+    return {
+      path,
+      real: resolvedReal,
+      dev: stat.dev,
+      ino: stat.ino,
+      size: stat.size,
+      mtimeMs: stat.mtimeMs,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function sameStablePath(before: StablePath, after: StablePath | null): boolean {
+  return Boolean(after
+    && after.real === before.real
+    && after.dev === before.dev
+    && after.ino === before.ino
+    && after.size === before.size
+    && after.mtimeMs === before.mtimeMs);
+}
+
+async function safeReadStatus(
+  anchors: { root: StablePath; asyncRoot: StablePath; run: StablePath; status: StablePath },
   directoryRunId: string,
   now: number,
   cached: StatusCacheEntry | undefined,
 ): Promise<StatusCacheEntry | null> {
+  const { root, asyncRoot, run, status } = anchors;
   try {
-    const before = await lstat(path);
-    if (!before.isFile() || before.isSymbolicLink() || before.size < 2 || before.size > MAX_STATUS_BYTES)
+    if (status.size < 2 || status.size > MAX_STATUS_BYTES) return null;
+    if (status.mtimeMs < now - MAX_STATUS_AGE_MS || status.mtimeMs > now + MAX_FUTURE_SKEW_MS)
       return null;
-    if (before.mtimeMs < now - MAX_STATUS_AGE_MS || before.mtimeMs > now + MAX_FUTURE_SKEW_MS)
-      return null;
-    if (cached && cached.mtimeMs === before.mtimeMs && cached.size === before.size
-      && cached.dev === before.dev && cached.ino === before.ino) return cached;
-    const handle = await open(path, constants.O_RDONLY);
+    const verifyAnchors = async () => {
+      const nextRoot = await stablePath(root.path, "directory");
+      if (!sameStablePath(root, nextRoot)) return false;
+      const nextAsync = await stablePath(asyncRoot.path, "directory", root.real, join(root.real, "async-subagent-runs"));
+      if (!sameStablePath(asyncRoot, nextAsync)) return false;
+      const nextRun = await stablePath(run.path, "directory", root.real, join(asyncRoot.real, directoryRunId));
+      if (!sameStablePath(run, nextRun)) return false;
+      const nextStatus = await stablePath(status.path, "file", root.real, join(run.real, "status.json"));
+      return sameStablePath(status, nextStatus);
+    };
+    if (cached && cached.mtimeMs === status.mtimeMs && cached.size === status.size
+      && cached.dev === status.dev && cached.ino === status.ino)
+      return await verifyAnchors() ? cached : null;
+
+    const handle = await open(status.path, constants.O_RDONLY);
     try {
       const opened = await handle.stat();
-      if (!opened.isFile() || opened.size !== before.size || opened.dev !== before.dev || opened.ino !== before.ino)
+      if (!opened.isFile() || opened.size !== status.size || opened.dev !== status.dev || opened.ino !== status.ino
+        || opened.mtimeMs !== status.mtimeMs)
         return null;
       const text = await handle.readFile({ encoding: "utf8" });
-      const after = await lstat(path);
-      if (!after.isFile() || after.isSymbolicLink() || after.dev !== opened.dev || after.ino !== opened.ino
-        || after.size !== opened.size || Buffer.byteLength(text, "utf8") > MAX_STATUS_BYTES) return null;
+      // Node has no portable openat/O_NOFOLLOW capability on Windows. Holding the
+      // file handle plus exact realpath/dev/ino revalidation is the strongest
+      // fail-closed check available here; hostile same-user namespace mutation is
+      // not treated as a durable capability boundary.
+      if (!await verifyAnchors() || Buffer.byteLength(text, "utf8") > MAX_STATUS_BYTES) return null;
       let parsed: ParsedStatus | null = null;
-      try { parsed = parseStatus(JSON.parse(text) as unknown, directoryRunId); }
+      try { parsed = parseStatus(JSON.parse(text) as unknown, directoryRunId, now); }
       catch { parsed = null; }
-      return { mtimeMs: after.mtimeMs, size: after.size, dev: after.dev, ino: after.ino, parsed };
+      return {
+        mtimeMs: status.mtimeMs,
+        size: status.size,
+        dev: status.dev,
+        ino: status.ino,
+        parsed,
+      };
     } finally {
       await handle.close();
     }
@@ -284,56 +386,93 @@ export class SubagentStatusProvider {
 
   async listForParentSession(parentSessionPath: string): Promise<BackgroundSubagentSnapshot> {
     if (!this.tempRoot || !isAbsolute(parentSessionPath)) return EMPTY;
-    const root = resolve(this.tempRoot);
-    const asyncRoot = join(root, "async-subagent-runs");
     const now = this.now();
+    if (!Number.isSafeInteger(now) || now < 0) return EMPTY;
+    const rootPath = resolve(this.tempRoot);
+    const asyncPath = join(rootPath, "async-subagent-runs");
     try {
-      const [rootStat, asyncStat] = await Promise.all([lstat(root), lstat(asyncRoot)]);
-      if (!rootStat.isDirectory() || rootStat.isSymbolicLink()
-        || !asyncStat.isDirectory() || asyncStat.isSymbolicLink()) return EMPTY;
-      const entries = await readdir(asyncRoot, { withFileTypes: true });
-      if (entries.length > MAX_ROOT_ENTRIES) return EMPTY;
+      const root = await stablePath(rootPath, "directory");
+      if (!root) return EMPTY;
+      const asyncRoot = await stablePath(
+        asyncPath,
+        "directory",
+        root.real,
+        join(root.real, "async-subagent-runs"),
+      );
+      if (!asyncRoot) return EMPTY;
+      const entries = await readdir(asyncPath, { withFileTypes: true });
+      if (entries.length > MAX_ROOT_ENTRIES) {
+        this.statusCache.clear();
+        this.aliases.clear();
+        return EMPTY;
+      }
       const runDirectories = entries.filter((entry) => entry.isDirectory() && UUID.test(entry.name));
       const expectedSessionPath = canonicalPath(parentSessionPath);
       const projected: Array<BackgroundSubagentStep & { order: number }> = [];
       const observedStatusPaths = new Set<string>();
+      const observedAliasKeys = new Set<string>();
       for (const entry of runDirectories) {
-        const runDirectory = join(asyncRoot, entry.name);
-        const runStat = await lstat(runDirectory).catch(() => null);
-        if (!runStat?.isDirectory() || runStat.isSymbolicLink()) continue;
-        const statusPath = join(runDirectory, "status.json");
+        const runPath = join(asyncPath, entry.name);
+        const run = await stablePath(runPath, "directory", root.real, join(asyncRoot.real, entry.name));
+        if (!run) continue;
+        const statusPath = join(runPath, "status.json");
+        const status = await stablePath(statusPath, "file", root.real, join(run.real, "status.json"));
+        if (!status) continue;
         observedStatusPaths.add(statusPath);
-        const cacheEntry = await safeReadStatus(statusPath, entry.name, now, this.statusCache.get(statusPath));
-        const runAfter = await lstat(runDirectory).catch(() => null);
-        const stableRunDirectory = runAfter?.isDirectory() && !runAfter.isSymbolicLink()
-          && runAfter.dev === runStat.dev && runAfter.ino === runStat.ino;
-        if (cacheEntry && stableRunDirectory) this.statusCache.set(statusPath, cacheEntry);
+        const cacheEntry = await safeReadStatus(
+          { root, asyncRoot, run, status },
+          entry.name,
+          now,
+          this.statusCache.get(statusPath),
+        );
+        if (cacheEntry) this.statusCache.set(statusPath, cacheEntry);
         else this.statusCache.delete(statusPath);
-        const parsed = stableRunDirectory ? cacheEntry?.parsed : null;
+        const parsed = cacheEntry?.parsed;
         if (!parsed || parsed.parentSessionPath !== expectedSessionPath) continue;
         for (const [index, step] of parsed.steps.entries()) {
-          if (projected.length >= MAX_TOTAL_STEPS) return EMPTY;
-          const alias = this.aliasFor(`${parsed.runId}:${index}`);
-          const status = projectedStatus(step, parsed);
-          const end = step.endedAt ?? parsed.endedAt ?? now;
+          const statusValue = projectedStatus(step, parsed);
+          const terminal = statusValue === "complete" || statusValue === "failed" || statusValue === "cancelled";
+          const terminalAt = step.endedAt ?? parsed.endedAt ?? Math.max(step.lastActivityAt, parsed.lastUpdate);
+          if (terminal && safeDuration(now, terminalAt) > TERMINAL_VISIBLE_AGE_MS) continue;
+          if (projected.length >= MAX_TOTAL_STEPS) {
+            this.statusCache.clear();
+            this.aliases.clear();
+            return EMPTY;
+          }
+          const aliasKey = `${parsed.runId}:${index}`;
+          observedAliasKeys.add(aliasKey);
+          const alias = this.aliasFor(aliasKey);
+          const end = step.endedAt ?? parsed.endedAt ?? (terminal ? terminalAt : now);
           projected.push({
             key: `subagent-${alias}`,
             label: `${roleLabel(step.agent)} ${alias}`,
-            status,
-            elapsedMs: Math.max(0, end - step.startedAt),
-            updateAgeMs: Math.max(0, now - step.lastActivityAt),
+            status: statusValue,
+            elapsedMs: safeDuration(end, step.startedAt),
+            updateAgeMs: safeDuration(now, step.lastActivityAt),
             turnCount: step.turnCount,
             toolCount: step.toolCount,
-            activity: status === "running" || status === "attention"
+            activity: statusValue === "running" || statusValue === "attention"
               ? genericActivity(step.tool, step.toolArgs)
               : undefined,
             order: alias,
           });
         }
       }
-      for (const path of this.statusCache.keys()) {
+      // Aliases and parsed cache entries are process-local conveniences only;
+      // prune them with the observed artifact set so long-lived servers stay bounded.
+      for (const path of this.statusCache.keys())
         if (!observedStatusPaths.has(path)) this.statusCache.delete(path);
-      }
+      for (const key of this.aliases.keys())
+        if (!observedAliasKeys.has(key)) this.aliases.delete(key);
+      if (this.aliases.size === 0) this.nextAlias = 1;
+
+      // Revalidate the approved ancestors after enumeration too. A concurrent
+      // junction replacement invalidates the whole projection rather than
+      // accepting a mixture from two namespaces.
+      const rootAfter = await stablePath(root.path, "directory");
+      const asyncAfter = await stablePath(asyncRoot.path, "directory", root.real, join(root.real, "async-subagent-runs"));
+      if (!sameStablePath(root, rootAfter) || !sameStablePath(asyncRoot, asyncAfter)) return EMPTY;
+
       projected.sort((a, b) => {
         const priority = (status: BackgroundSubagentStatus) => status === "attention" ? 0 : status === "running" ? 1 : 2;
         return priority(a.status) - priority(b.status) || a.updateAgeMs - b.updateAgeMs || a.order - b.order;
@@ -351,4 +490,5 @@ export class SubagentStatusProvider {
       return EMPTY;
     }
   }
+
 }

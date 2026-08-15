@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, rm, symlink, utimes, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { SubagentStatusProvider } from "../src/server/subagent-status-provider";
+import { SubagentStatusProvider, resolveSubagentTempScopeId } from "../src/server/subagent-status-provider";
 
 const PARENT = resolve(tmpdir(), "pi-chat-parent-session.jsonl");
 const OTHER_PARENT = resolve(tmpdir(), "pi-chat-other-session.jsonl");
@@ -190,5 +190,110 @@ test("provider enforces status age and root entry count bounds", async () => {
     assert.equal((await new SubagentStatusProvider(crowded.root).listForParentSession(PARENT)).total, 0);
   } finally {
     await crowded.cleanup();
+  }
+});
+
+
+test("temp scope resolution mirrors pi-subagents fallbacks", () => {
+  assert.equal(resolveSubagentTempScopeId({ env: {}, getuid: () => 42 }), "uid-42");
+  assert.equal(resolveSubagentTempScopeId({ env: { USERNAME: "A User" }, getuid: undefined }), "user-A-User");
+  assert.equal(resolveSubagentTempScopeId({ env: {}, getuid: undefined, userInfo: () => ({ username: "fallback" }) }), "user-fallback");
+  assert.equal(resolveSubagentTempScopeId({ env: { USERPROFILE: String.raw`C:\Users\A B` }, getuid: undefined, userInfo: () => { throw new Error("no user"); } }), "home-C-Users-A-B");
+  assert.equal(resolveSubagentTempScopeId({ env: {}, getuid: undefined, userInfo: () => ({}), homedir: () => "/home/fallback" }), "home-home-fallback");
+  assert.equal(resolveSubagentTempScopeId({ env: {}, getuid: undefined, userInfo: () => ({}), homedir: () => "" }), "shared");
+});
+
+test("provider rejects unsafe timestamps and keeps serialized durations finite", async () => {
+  const target = await fixture();
+  const now = Date.now();
+  try {
+    const bad = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const good = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    await target.writeStatus(bad, status(bad, PARENT, { startedAt: Number.MAX_VALUE }));
+    await target.writeStatus(good, status(good, PARENT, {
+      startedAt: now - 10_000,
+      lastUpdate: now - 100,
+      steps: [{ agent: "worker", status: "running", startedAt: now - 9_000, lastActivityAt: now - 50 }],
+    }));
+    const snapshot = await new SubagentStatusProvider(target.root, () => now).listForParentSession(PARENT);
+    assert.equal(snapshot.total, 1);
+    assert.ok(snapshot.steps.every((step) => Number.isSafeInteger(step.elapsedMs) && step.elapsedMs >= 0));
+    assert.ok(snapshot.steps.every((step) => Number.isSafeInteger(step.updateAgeMs) && step.updateAgeMs >= 0));
+    assert.equal(JSON.stringify(snapshot).includes("null"), false);
+  } finally {
+    await target.cleanup();
+  }
+});
+
+test("provider retains active steps, expires old terminal steps, and prunes process aliases", async () => {
+  const target = await fixture();
+  const now = Date.now();
+  try {
+    const runId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const directory = await target.writeStatus(runId, status(runId, PARENT, {
+      startedAt: now - 26 * 60 * 60 * 1_000,
+      lastUpdate: now - 1_000,
+      steps: [
+        { agent: "worker", status: "running", startedAt: now - 26 * 60 * 60 * 1_000, lastActivityAt: now - 25 * 60 * 60 * 1_000 },
+        { agent: "reviewer", status: "complete", startedAt: now - 26 * 60 * 60 * 1_000, endedAt: now - 25 * 60 * 60 * 1_000, lastActivityAt: now - 25 * 60 * 60 * 1_000 },
+      ],
+    }));
+    const provider = new SubagentStatusProvider(target.root, () => now);
+    const snapshot = await provider.listForParentSession(PARENT);
+    assert.equal(snapshot.total, 1);
+    assert.equal(snapshot.steps[0]?.status, "running");
+    assert.equal((provider as unknown as { aliases: Map<string, number> }).aliases.size, 1);
+    await rm(directory, { recursive: true, force: true });
+    await provider.listForParentSession(PARENT);
+    assert.equal((provider as unknown as { aliases: Map<string, number> }).aliases.size, 0);
+    assert.equal((provider as unknown as { statusCache: Map<string, unknown> }).statusCache.size, 0);
+  } finally {
+    await target.cleanup();
+  }
+});
+
+test("provider rejects a redirected async root", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-subagent-root-link-"));
+  const outside = await mkdtemp(join(tmpdir(), "pi-chat-subagent-root-outside-"));
+  try {
+    const runId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    await mkdir(join(outside, runId));
+    await writeFile(join(outside, runId, "status.json"), JSON.stringify(status(runId)));
+    try {
+      await symlink(outside, join(root, "async-subagent-runs"), process.platform === "win32" ? "junction" : "dir");
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (["EPERM", "EACCES", "ENOTSUP"].includes(code || "")) {
+        context.skip(`directory symlink creation unavailable: ${code}`);
+        return;
+      }
+      throw error;
+    }
+    assert.equal((await new SubagentStatusProvider(root).listForParentSession(PARENT)).total, 0);
+  } finally {
+    await Promise.all([rm(root, { recursive: true, force: true }), rm(outside, { recursive: true, force: true })]);
+  }
+});
+
+test("provider rejects a redirected approved temp root", async (context) => {
+  const parent = await mkdtemp(join(tmpdir(), "pi-chat-subagent-root-parent-"));
+  const outside = await fixture();
+  const alias = join(parent, "root-alias");
+  try {
+    const runId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    await outside.writeStatus(runId, status(runId));
+    try {
+      await symlink(outside.root, alias, process.platform === "win32" ? "junction" : "dir");
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (["EPERM", "EACCES", "ENOTSUP"].includes(code || "")) {
+        context.skip(`directory symlink creation unavailable: ${code}`);
+        return;
+      }
+      throw error;
+    }
+    assert.equal((await new SubagentStatusProvider(alias).listForParentSession(PARENT)).total, 0);
+  } finally {
+    await Promise.all([rm(parent, { recursive: true, force: true }), outside.cleanup()]);
   }
 });

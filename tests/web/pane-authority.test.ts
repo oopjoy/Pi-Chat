@@ -15,6 +15,55 @@ beforeEach(() => {
 });
 
 
+test("slow A to B navigation binds TopBar Subagents to B before its view resolves", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const secondId = "bbbbbbbbbbbbbbbbbbbb";
+  const summaryB = { ...bootstrap.sessions[0], id: secondId, name: "Session B", active: false };
+  const pendingView = new Promise<SessionViewData>(() => {});
+  const subagentCalls: string[] = [];
+  Object.assign(api, {
+    bootstrap: async () => ({ ...bootstrap, sessions: [bootstrap.sessions[0], summaryB], sessionsTotal: 2 }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async (id: string) => ({ viewing: id }),
+    viewSession: async (id: string) => id === secondId ? pendingView : draftView,
+    backgroundSubagents: async (id: string) => {
+      subagentCalls.push(id);
+      if (id !== activeId) return new Promise(() => {});
+      return {
+        total: 1,
+        activeCount: 1,
+        attentionCount: 0,
+        truncated: false,
+        steps: [{ key: "subagent-1", label: "实施子代理 1", status: "running", elapsedMs: 1_000, updateAgeMs: 0 }],
+      };
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    const initialTrigger = dom.window.document.querySelector<HTMLButtonElement>(".subagent-status-trigger")!;
+    assert.ok(initialTrigger);
+    await act(async () => initialTrigger.click());
+    assert.match(dom.window.document.body.textContent || "", /实施子代理 1/);
+    const buttonB = [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
+      .find((button) => button.textContent?.includes("Session B"))!;
+    await act(async () => { buttonB.click(); await Promise.resolve(); });
+    assert.equal(dom.window.document.querySelector(".topbar-title")?.textContent, "Session B");
+    assert.equal(dom.window.document.body.textContent?.includes("实施子代理 1"), false);
+    assert.equal(dom.window.document.querySelector(".subagent-status-popover"), null);
+    assert.equal(subagentCalls.at(-1), secondId);
+  } finally {
+    restoreApi();
+    await act(async () => root.unmount());
+  }
+});
+
+
 test("a late cold activation from A cannot overwrite the Session B composer", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");

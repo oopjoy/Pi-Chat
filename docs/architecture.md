@@ -78,7 +78,7 @@ Current ownership still centers on `src/server/app.ts` (`PiChatApp`), with progr
 | `routes/bootstrap.ts` | Health, handshake, bootstrap HTTP parsing/serialization through explicit App capabilities |
 | `routes/sessions-read.ts` | Read-only Session list/view HTTP parsing/serialization through explicit App capabilities |
 | `routes/subagents-read.ts` | GET-only background-Subagent projection for one exact Session ID; no control or Runtime capability |
-| `subagent-status-provider.ts` | Fail-closed, bounded parser/provider for the installed package user-temp status contract; exact parent JSONL path scoping and safe process-local aliases only |
+| `subagent-status-provider.ts` | Fail-closed, bounded parser/provider for the installed package user-temp status contract; exact parent JSONL path scoping, canonical realpath/dev/ino revalidation, and safe process-local aliases only. Active steps remain visible; terminal-only steps expire from this projection after 24 hours. |
 | `api-route-admission.ts` | Pure lifecycle admission classification and prompt body-size policy |
 
 ### Extraction order

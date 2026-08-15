@@ -7447,7 +7447,7 @@ export function App() {
       )}
       <ConversationPane
         topBar={{
-          sessionId: viewedSessionId,
+          sessionId: paneLoading?.sessionId || viewedSessionId,
           conversationName: displayedConversationName,
           workspacePath: conversationWorkspace,
           buildIdentity: buildIdentityMismatch
