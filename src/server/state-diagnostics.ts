@@ -1,3 +1,4 @@
+import type { PromptEvidenceSnapshot } from "../shared/prompt-evidence.js";
 import {
   sanitizeStateDiagnosticDetails,
   shouldRetainStateDiagnosticEvent,
@@ -24,6 +25,7 @@ export interface StateDiagnosticsRecorderOptions {
   maximumEntries?: number;
   maximumBytes?: number;
   encodeBytes?: (value: string) => number;
+  promptEvidence?: () => PromptEvidenceSnapshot;
 }
 
 const DEFAULT_WINDOW_MS = 5 * 60 * 1_000;
@@ -115,15 +117,45 @@ export class StateDiagnosticsRecorder {
   snapshot(): ServerStateDiagnosticSnapshot {
     const now = this.now();
     this.prune(now);
+    const generatedAt = new Date(now).toISOString();
+    let promptEvidence: PromptEvidenceSnapshot;
+    try {
+      promptEvidence = this.options.promptEvidence?.() || {
+        schemaVersion: 1,
+        generatedAt,
+        status: {
+          recordCount: 0,
+          windowMs: this.windowMs,
+          maximumRecords: 0,
+          approximateBytes: 0,
+          maximumBytes: 0,
+        },
+        records: [],
+      };
+    } catch {
+      promptEvidence = {
+        schemaVersion: 1,
+        generatedAt,
+        status: {
+          recordCount: 0,
+          windowMs: this.windowMs,
+          maximumRecords: 0,
+          approximateBytes: 0,
+          maximumBytes: 0,
+        },
+        records: [],
+      };
+    }
     return {
-      schemaVersion: 3,
-      generatedAt: new Date(now).toISOString(),
+      schemaVersion: 4,
+      generatedAt,
       runEpoch: this.options.runEpoch,
       buildFingerprint: this.options.buildFingerprint,
       status: this.status(),
       entries: this.entries
         .slice(this.head)
         .map((entry) => ({ ...entry, details: { ...entry.details } })),
+      promptEvidence,
     };
   }
 

@@ -1,4 +1,10 @@
 import {
+  isPromptDeliveryCertainty,
+  isPromptEvidenceFactKind,
+  isPromptExecutionStatus,
+  type PromptEvidenceSnapshot,
+} from "../../shared/prompt-evidence";
+import {
   isAllowedStateDiagnosticEvent,
   sanitizeStateDiagnosticDetails,
   shouldRetainStateDiagnosticEvent,
@@ -161,7 +167,7 @@ export function browserStateDiagnosticStatus(): StateDiagnosticStatus {
 
 export function browserStateDiagnosticSnapshot(): BrowserStateDiagnosticSnapshot {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     generatedAt: new Date().toISOString(),
     pageStartedAt,
     status: browserRecorder.status(),
@@ -255,20 +261,62 @@ export function privacySafeStateDiagnosticBundle(
       details: sanitizeStateDiagnosticDetails(entry.details),
     }];
   });
+  const promptEvidence = (): PromptEvidenceSnapshot => {
+    const input = bundle.server.promptEvidence;
+    const fallbackGeneratedAt = safeExportTimestamp(input?.generatedAt, generatedAt);
+    const records = Array.isArray(input?.records) ? input.records.flatMap((record) => {
+      if (!record || typeof record !== "object") return [];
+      if (!SAFE_SESSION_ID.test(record.sessionId) || !SAFE_PROMPT_ID.test(record.promptId)) return [];
+      if (!isPromptDeliveryCertainty(record.delivery) || !isPromptExecutionStatus(record.execution)) return [];
+      if (!Array.isArray(record.facts) || !record.facts.every(isPromptEvidenceFactKind)) return [];
+      const sessionId = alias(record.sessionId);
+      const promptId = promptAlias(record.promptId);
+      if (!sessionId || !promptId) return [];
+      return [{
+        promptId,
+        sessionId,
+        firstObservedAt: safeExportTimestamp(record.firstObservedAt, fallbackGeneratedAt),
+        lastObservedAt: safeExportTimestamp(record.lastObservedAt, fallbackGeneratedAt),
+        delivery: record.delivery,
+        execution: record.execution,
+        ...(record.rpcGeneration !== undefined
+          ? { rpcGeneration: safeExportInteger(record.rpcGeneration) }
+          : null),
+        ...(record.runGeneration !== undefined
+          ? { runGeneration: safeExportInteger(record.runGeneration) }
+          : null),
+        facts: record.facts.slice(0, 64),
+        ...(record.conflicted === true ? { conflicted: true } : null),
+      }];
+    }) : [];
+    return {
+      schemaVersion: 1,
+      generatedAt: fallbackGeneratedAt,
+      status: {
+        recordCount: records.length,
+        windowMs: safeExportInteger(input?.status?.windowMs),
+        maximumRecords: safeExportInteger(input?.status?.maximumRecords),
+        approximateBytes: safeExportInteger(input?.status?.approximateBytes),
+        maximumBytes: safeExportInteger(input?.status?.maximumBytes),
+      },
+      records,
+    };
+  };
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     generatedAt,
     warning: EXPORT_WARNING,
     server: {
-      schemaVersion: 3,
+      schemaVersion: 4,
       generatedAt: safeExportTimestamp(bundle.server.generatedAt, generatedAt),
       runEpoch: safeExportMetadata(bundle.server.runEpoch),
       buildFingerprint: safeBuildFingerprint(bundle.server.buildFingerprint),
       status: safeExportStatus(bundle.server.status),
       entries: entries(bundle.server.entries, "server"),
+      promptEvidence: promptEvidence(),
     },
     browser: {
-      schemaVersion: 3,
+      schemaVersion: 4,
       generatedAt: safeExportTimestamp(bundle.browser.generatedAt, generatedAt),
       pageStartedAt: safeExportTimestamp(bundle.browser.pageStartedAt, generatedAt),
       status: safeExportStatus(bundle.browser.status),

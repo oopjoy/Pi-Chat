@@ -109,7 +109,7 @@ test("always-on diagnostic snapshot captures redacted API, RPC, SSE, and project
     const result = await snapshot(target.origin, ownerA);
     assert.equal(result.response.status, 200);
     const value = result.value!;
-    assert.equal(value.schemaVersion, 3);
+    assert.equal(value.schemaVersion, 4);
     assert.equal(value.runEpoch, "diagnostic-run");
     assert.equal(value.buildFingerprint, "a".repeat(64));
     assert.ok(value.entries.some((entry) =>
@@ -292,11 +292,60 @@ test("ordinary Primary prompt diagnostics correlate synchronous start through se
       ],
     );
     assert.equal(JSON.stringify(value).includes("private prompt text"), false);
+    assert.equal(value.promptEvidence.records.length, 1);
+    assert.equal(value.promptEvidence.records[0].promptId, promptIds[0]);
+    assert.equal(value.promptEvidence.records[0].sessionId, target.id);
+    assert.equal(value.promptEvidence.records[0].delivery, "confirmed");
+    assert.equal(value.promptEvidence.records[0].execution, "settled");
+    assert.deepEqual(value.promptEvidence.records[0].facts, [
+      "admitted",
+      "dispatch",
+      "rpc-allocated",
+      "rpc-written",
+      "agent-start",
+      "rpc-response-success",
+      "settled",
+      "settlement-barrier",
+    ]);
     assert.equal(
       (target.app as unknown as { activePromptDiagnostics: Map<string, unknown> })
         .activePromptDiagnostics.size,
       0,
     );
+  } finally {
+    await target.close();
+  }
+});
+
+test("settlement barrier failure does not invent prompt execution failure", async () => {
+  const target = await fixture();
+  try {
+    await register(target.origin, ownerA);
+    await fetch(`${target.origin}/api/bootstrap`, { headers: ownerA });
+    const response = await fetch(`${target.origin}/api/chat/prompt`, {
+      method: "POST",
+      headers: { ...ownerA, "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: target.id, message: "private barrier prompt" }),
+    });
+    assert.equal(response.status, 202);
+    const originalSend = target.rpc.send.bind(target.rpc);
+    target.rpc.send = (async (command: Record<string, unknown>, timeoutMs?: number, options?: { independentRead?: boolean }) => {
+      if (command.type === "get_state" && options?.independentRead)
+        throw new Error("simulated settlement barrier failure");
+      return originalSend(command, timeoutMs, options);
+    }) as typeof target.rpc.send;
+    target.rpc.streaming = false;
+    target.rpc.emit({ type: "agent_settled" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const value = (await snapshot(target.origin, ownerA)).value!;
+    const evidence = value.promptEvidence.records[0];
+    assert.equal(evidence.delivery, "confirmed");
+    assert.equal(evidence.execution, "settled");
+    assert.equal(evidence.facts.includes("process-failed"), false);
+    assert.ok(value.entries.some((entry) =>
+      entry.category === "prompt" && entry.name === "process-failed"
+    ), "the legacy raw trace remains available without upgrading the ledger");
   } finally {
     await target.close();
   }
@@ -319,6 +368,10 @@ test("current process failure settles and clears active prompt diagnostics", asy
     );
     assert.ok(entries.some((entry) => entry.name === "process-failed"));
     assert.equal(JSON.stringify(entries).includes("private crash prompt"), false);
+    const evidence = (await snapshot(target.origin, ownerA)).value!.promptEvidence.records[0];
+    assert.equal(evidence.delivery, "confirmed");
+    assert.equal(evidence.execution, "failed");
+    assert.ok(evidence.facts.includes("process-failed"));
     assert.equal(
       (target.app as unknown as { activePromptDiagnostics: Map<string, unknown> })
         .activePromptDiagnostics.size,

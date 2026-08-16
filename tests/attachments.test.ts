@@ -126,6 +126,9 @@ test("extension slash commands execute immediately and Gate mode survives browse
     assert.equal(response.status, 202);
     assert.deepEqual(await response.json(), { accepted: true, queued: false, extension: true, command: "gate", description: "Control file permission gate: /gate status|open|strict", isStreaming: false });
     assert.deepEqual(commands.filter((command) => command.type === "prompt"), [{ type: "prompt", message: "/gate open" }]);
+    assert.equal((app as unknown as {
+      stateDiagnostics: { snapshot(): { promptEvidence: { records: unknown[] } } };
+    }).stateDiagnostics.snapshot().promptEvidence.records.length, 0);
 
     const bootstrap = await (await fetch(`http://127.0.0.1:${address.port}/api/bootstrap`)).json() as { gateMode?: string };
     assert.equal(bootstrap.gateMode, "open", "browser refresh must show the Runtime's actual open mode");

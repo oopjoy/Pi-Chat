@@ -8,6 +8,7 @@ import {
   reconcilePersistedHistory,
 } from "../shared/streaming-assistant.js";
 import { compareSessionsByLastUserPrompt } from "../shared/session-order.js";
+import type { PromptEvidenceFactKind } from "../shared/prompt-evidence.js";
 import { shouldRetainStateDiagnosticEvent } from "../shared/state-diagnostics.js";
 import type {
   ApplicationLifecycle,
@@ -124,6 +125,7 @@ import {
   type PrimaryRuntimeReadinessBridge,
 } from "./primary-runtime-readiness.js";
 import { SseHub } from "./sse-hub.js";
+import { PromptEvidenceLedger } from "./prompt-evidence-ledger.js";
 import { StateDiagnosticsRecorder } from "./state-diagnostics.js";
 import { ServerStreamDiagnosticsAggregator } from "./stream-observability.js";
 import { saveWorkspace } from "./workspace-state.js";
@@ -169,6 +171,27 @@ const MAX_NATIVE_STEERING_IMAGE_CHARS = 45_000_000;
 // this small bounded visibility window.
 const DRAFT_PERSISTENCE_RETRY_DELAYS_MS = [40, 120, 300, 700];
 const SESSION_ID_PATTERN = /^[a-f0-9]{20}$/;
+const PROMPT_TRACE_EVIDENCE: Readonly<Partial<Record<string, PromptEvidenceFactKind>>> = {
+  admitted: "admitted",
+  queued: "queued",
+  cancelled: "cancelled",
+  dispatch: "dispatch",
+  requeued: "requeued",
+  "delivery-uncertain": "delivery-uncertain",
+  "agent-start": "agent-start",
+  settled: "settled",
+  "settlement-barrier": "settlement-barrier",
+  "process-failed": "process-failed",
+};
+const PROMPT_RPC_EVIDENCE: Readonly<Record<RpcRequestObservation["outcome"], PromptEvidenceFactKind>> = {
+  allocated: "rpc-allocated",
+  written: "rpc-written",
+  "response-success": "rpc-response-success",
+  "response-error": "rpc-response-error",
+  "not-written": "rpc-not-written",
+  "written-outcome-unknown": "rpc-written-outcome-unknown",
+  "process-rejected": "rpc-process-rejected",
+};
 const BUILTIN_COMMANDS: SlashCommand[] = [
   { name: "new", description: "新建会话", source: "builtin" },
   {
@@ -311,6 +334,7 @@ class NativeSteeringResetError extends Error {
 
 export class PiChatApp {
   private readonly sseHub: SseHub;
+  private readonly promptEvidence: PromptEvidenceLedger;
   private readonly stateDiagnostics: StateDiagnosticsRecorder;
   private readonly streamDiagnostics: ServerStreamDiagnosticsAggregator;
   /** Same Map as SseHub; dual-session tests seed write stubs here. */
@@ -488,10 +512,12 @@ export class PiChatApp {
       builtAt: "unknown",
     };
     this.now = options.now || Date.now;
+    this.promptEvidence = new PromptEvidenceLedger({ now: this.now });
     this.stateDiagnostics = new StateDiagnosticsRecorder({
       runEpoch: this.runEpoch,
       buildFingerprint: this.buildIdentity.fingerprint,
       now: this.now,
+      promptEvidence: () => this.promptEvidence.snapshot(),
     });
     this.streamDiagnostics = new ServerStreamDiagnosticsAggregator((summary) => {
       this.traceState(
@@ -908,6 +934,7 @@ export class PiChatApp {
     this.claimingExtensionRequests.clear();
     this.promptAdmissionTails.clear();
     this.activePromptDiagnostics.clear();
+    this.promptEvidence.clear();
     this.streamDiagnostics.clear();
     if (runtimeStopFailure) throw runtimeStopFailure;
   }
@@ -963,7 +990,7 @@ export class PiChatApp {
     }
   }
 
-  private tracePrompt(
+  private tracePromptDiagnosticOnly(
     name: string,
     sessionId: string,
     promptId: string,
@@ -980,6 +1007,37 @@ export class PiChatApp {
       runGeneration,
       promptId,
     );
+  }
+
+  private tracePrompt(
+    name: string,
+    sessionId: string,
+    promptId: string,
+    rpcGeneration?: number,
+    runGeneration?: number,
+    details?: Record<string, unknown>,
+  ): void {
+    this.tracePromptDiagnosticOnly(
+      name,
+      sessionId,
+      promptId,
+      rpcGeneration,
+      runGeneration,
+      details,
+    );
+    const kind = PROMPT_TRACE_EVIDENCE[name];
+    if (!kind) return;
+    try {
+      this.promptEvidence.record({
+        sessionId,
+        promptId,
+        kind,
+        rpcGeneration,
+        runGeneration,
+      });
+    } catch {
+      // Prompt evidence remains observation-only and fail-open.
+    }
   }
 
   private activePromptDiagnostic(
@@ -1022,6 +1080,16 @@ export class PiChatApp {
     promptId: string,
     observation: RpcRequestObservation,
   ): void {
+    try {
+      this.promptEvidence.record({
+        sessionId,
+        promptId,
+        kind: PROMPT_RPC_EVIDENCE[observation.outcome],
+        rpcGeneration: observation.generation,
+      });
+    } catch {
+      // Exact delivery evidence cannot affect the authoritative RPC observer.
+    }
     const name = observation.phase === "allocated"
       ? "rpc-allocated"
       : observation.phase === "written"
@@ -2284,7 +2352,7 @@ export class PiChatApp {
       )
         return;
       if (promptId && this.activePromptDiagnostic(runtime.id, sourceGeneration)?.promptId === promptId) {
-        this.tracePrompt("process-failed", runtime.id, promptId, sourceGeneration);
+        this.tracePromptDiagnosticOnly("process-failed", runtime.id, promptId, sourceGeneration);
         this.clearPromptDiagnostic(runtime.id, promptId);
       }
       runtime.dispatching = false;
@@ -2374,7 +2442,7 @@ export class PiChatApp {
       )
         return;
       if (promptId && this.activePromptDiagnostic(sessionId, sourceGeneration)?.promptId === promptId) {
-        this.tracePrompt("process-failed", sessionId, promptId, sourceGeneration);
+        this.tracePromptDiagnosticOnly("process-failed", sessionId, promptId, sourceGeneration);
         this.clearPromptDiagnostic(sessionId, promptId);
       }
       this.dispatching = false;

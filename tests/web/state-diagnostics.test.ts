@@ -25,6 +25,21 @@ function status(entryCount: number) {
   };
 }
 
+function promptEvidence(records: StateDiagnosticExportBundle["server"]["promptEvidence"]["records"] = []) {
+  return {
+    schemaVersion: 1 as const,
+    generatedAt: "2026-08-14T12:00:00.000Z",
+    status: {
+      recordCount: records.length,
+      windowMs: 300_000,
+      maximumRecords: 500,
+      approximateBytes: 0,
+      maximumBytes: 512 * 1_024,
+    },
+    records,
+  };
+}
+
 function entry(
   source: "server" | "browser",
   sequence: number,
@@ -96,7 +111,7 @@ test("browser singleton records before Settings is opened", () => {
     sessionId: SESSION_ID,
   });
   const after = browserStateDiagnosticSnapshot();
-  assert.equal(after.schemaVersion, 3);
+  assert.equal(after.schemaVersion, 4);
   assert.equal(after.status.entryCount, before + 1);
   assert.equal(after.entries.at(-1)?.name, "export-requested");
 });
@@ -115,11 +130,11 @@ test("diagnostic export aliases raw Session IDs across both lanes", async () => 
   dom.window.HTMLAnchorElement.prototype.click = () => {};
   try {
     const bundle: StateDiagnosticExportBundle = {
-      schemaVersion: 3,
+      schemaVersion: 4,
       generatedAt: "2026-08-14T12:00:00.000Z",
       warning: "redacted",
       server: {
-        schemaVersion: 3,
+        schemaVersion: 4,
         generatedAt: "2026-08-14T12:00:00.000Z",
         runEpoch: "run",
         buildFingerprint: "a".repeat(64),
@@ -128,9 +143,20 @@ test("diagnostic export aliases raw Session IDs across both lanes", async () => 
           entry("server", 1, SESSION_ID, PROMPT_ID),
           entry("server", 2, SECOND_SESSION_ID, SECOND_PROMPT_ID),
         ],
+        promptEvidence: promptEvidence([{
+          promptId: PROMPT_ID,
+          sessionId: SESSION_ID,
+          firstObservedAt: "2026-08-14T12:00:00.000Z",
+          lastObservedAt: "2026-08-14T12:00:01.000Z",
+          delivery: "confirmed",
+          execution: "settled",
+          rpcGeneration: 7,
+          runGeneration: 3,
+          facts: ["admitted", "dispatch", "rpc-written", "agent-start", "settled"],
+        }]),
       },
       browser: {
-        schemaVersion: 3,
+        schemaVersion: 4,
         generatedAt: "2026-08-14T12:00:00.000Z",
         pageStartedAt: "2026-08-14T11:59:00.000Z",
         status: status(1),
@@ -142,12 +168,14 @@ test("diagnostic export aliases raw Session IDs across both lanes", async () => 
     assert.ok(exported);
     const text = await exported.text();
     const parsed = JSON.parse(text) as StateDiagnosticExportBundle;
-    assert.equal(parsed.schemaVersion, 3);
+    assert.equal(parsed.schemaVersion, 4);
     assert.equal(parsed.server.buildFingerprint, "a".repeat(64));
     assert.deepEqual(parsed.server.entries.map((item) => item.sessionId), ["s1", "s2"]);
     assert.deepEqual(parsed.server.entries.map((item) => item.promptId), ["p1", "p2"]);
     assert.equal(parsed.browser.entries[0].sessionId, "s1");
     assert.equal(parsed.browser.entries[0].promptId, "p1");
+    assert.equal(parsed.server.promptEvidence.records[0]?.sessionId, "s1");
+    assert.equal(parsed.server.promptEvidence.records[0]?.promptId, "p1");
     assert.equal(text.includes(SESSION_ID), false);
     assert.equal(text.includes(PROMPT_ID), false);
     assert.equal(text.includes(SECOND_PROMPT_ID), false);
@@ -161,12 +189,12 @@ test("diagnostic export aliases raw Session IDs across both lanes", async () => 
 
 test("final diagnostic export reconstructs the exact privacy schema", () => {
   const unsafe = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     generatedAt: "2026-08-14T12:00:00.000Z",
     warning: "private prompt",
     requestToken: "secret-token",
     server: {
-      schemaVersion: 3,
+      schemaVersion: 4,
       generatedAt: "2026-08-14T12:00:00.000Z",
       runEpoch: "run",
       buildFingerprint: "deadbeefcafebabe",
@@ -177,9 +205,23 @@ test("final diagnostic export reconstructs the exact privacy schema", () => {
         path: "C:\\private\\file.txt",
         details: { stateStreaming: true, content: "private answer" },
       }],
+      promptEvidence: {
+        ...promptEvidence(),
+        secret: "private prompt",
+        records: [{
+          promptId: PROMPT_ID,
+          sessionId: SESSION_ID,
+          firstObservedAt: "2026-08-14T12:00:00.000Z",
+          lastObservedAt: "2026-08-14T12:00:01.000Z",
+          delivery: "confirmed",
+          execution: "settled",
+          facts: ["admitted", "settled"],
+          content: "private answer",
+        }],
+      },
     },
     browser: {
-      schemaVersion: 3,
+      schemaVersion: 4,
       generatedAt: "2026-08-14T12:00:00.000Z",
       pageStartedAt: "2026-08-14T11:59:00.000Z",
       status: status(0),
@@ -189,6 +231,17 @@ test("final diagnostic export reconstructs the exact privacy schema", () => {
   const safe = privacySafeStateDiagnosticBundle(unsafe);
   assert.equal(safe.server.buildFingerprint, "unknown");
   assert.equal(safe.server.entries[0]?.sessionId, "s1");
+  assert.equal(safe.server.promptEvidence.records[0]?.sessionId, "s1");
+  assert.equal(safe.server.promptEvidence.records[0]?.promptId, "p1");
+  assert.deepEqual(Object.keys(safe.server.promptEvidence.records[0] || {}).sort(), [
+    "delivery",
+    "execution",
+    "facts",
+    "firstObservedAt",
+    "lastObservedAt",
+    "promptId",
+    "sessionId",
+  ]);
   const raw = JSON.stringify(safe);
   for (const forbidden of ["secret-token", "deadbeefcafebabe", "private prompt", "private answer", "C:\\\\private"])
     assert.equal(raw.includes(forbidden), false, forbidden);

@@ -391,6 +391,9 @@ test("a pending extension confirmation belongs to one Session and only its first
   try {
     assert.equal((await fetch(`${origin}/api/bootstrap`)).status, 200);
     primary.emit({ type: "extension_ui_request", id: "gate-1", method: "select", title: "Write file?", options: ["Allow", "Block"] });
+    assert.equal((app as unknown as {
+      stateDiagnostics: { snapshot(): { promptEvidence: { records: unknown[] } } };
+    }).stateDiagnostics.snapshot().promptEvidence.records.length, 0);
     const view = await (await fetch(`${origin}/api/sessions/${id}/view`)).json() as { pendingExtensionRequest?: { id: string }; session: { pendingConfirmation?: boolean } };
     assert.equal(view.pendingExtensionRequest?.id, "gate-1");
     assert.equal(view.session.pendingConfirmation, true);

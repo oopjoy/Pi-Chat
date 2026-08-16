@@ -482,7 +482,7 @@ test("diagnostic export checkpoints an active browser stream only once per count
     markSessionViewed: async (sessionId: string) => ({ viewing: sessionId }),
     viewSession: async () => createSessionViewFixture(),
     stateDiagnosticSnapshot: async () => ({
-      schemaVersion: 3 as const,
+      schemaVersion: 4 as const,
       generatedAt: new Date().toISOString(),
       runEpoch: "run",
       buildFingerprint: "a".repeat(64),
@@ -494,6 +494,18 @@ test("diagnostic export checkpoints an active browser stream only once per count
         maximumBytes: 1024 * 1024,
       },
       entries: [],
+      promptEvidence: {
+        schemaVersion: 1 as const,
+        generatedAt: new Date().toISOString(),
+        status: {
+          recordCount: 0,
+          windowMs: 300_000,
+          maximumRecords: 500,
+          approximateBytes: 0,
+          maximumBytes: 512 * 1_024,
+        },
+        records: [],
+      },
     }),
   });
   const root = createRoot(dom.window.document.querySelector("#root")!);

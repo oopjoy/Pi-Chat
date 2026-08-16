@@ -27,9 +27,10 @@ test("state diagnostics is always-on, bounded, ordered, and age-limited", () => 
     });
   }
   const bounded = recorder.snapshot();
-  assert.equal(bounded.schemaVersion, 3);
+  assert.equal(bounded.schemaVersion, 4);
   assert.ok(bounded.entries.length <= 100);
   assert.ok(bounded.status.approximateBytes <= bounded.status.maximumBytes);
+  assert.deepEqual(bounded.promptEvidence.records, []);
   assert.ok(
     bounded.entries.every((entry, index, entries) =>
       index === 0 || entry.sequence > entries[index - 1].sequence,
@@ -246,6 +247,27 @@ test("state diagnostics drops open event names and cumulative update noise", () 
     "message_update",
     "agent_settled",
   ]);
+});
+
+test("state diagnostic snapshot falls back to empty Prompt evidence", () => {
+  const recorder = new StateDiagnosticsRecorder({
+    runEpoch: "run",
+    buildFingerprint: "a".repeat(64),
+    promptEvidence: () => { throw new Error("ledger unavailable"); },
+  });
+  const snapshot = recorder.snapshot();
+  assert.deepEqual(snapshot.promptEvidence, {
+    schemaVersion: 1,
+    generatedAt: snapshot.generatedAt,
+    status: {
+      recordCount: 0,
+      windowMs: 300_000,
+      maximumRecords: 0,
+      approximateBytes: 0,
+      maximumBytes: 0,
+    },
+    records: [],
+  });
 });
 
 test("state diagnostic recorder failures are fail-open", () => {

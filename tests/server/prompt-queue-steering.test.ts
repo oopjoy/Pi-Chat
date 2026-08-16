@@ -74,10 +74,14 @@ test("Primary and Secondary settlement dispatch every queued follow-up", async (
       assert.deepEqual(rpc.commands.filter((command) => command.type === "prompt").map((command) => command.message), [`${prefix}-A`, `${prefix}-B`, `${prefix}-C`]);
       await settle(rpc);
 
-      const diagnosticEntries = (app as unknown as {
-        stateDiagnostics: { snapshot(): { entries: Array<{ category: string; name: string; sessionId?: string; promptId?: string }> } };
+      const diagnosticSnapshot = (app as unknown as {
+        stateDiagnostics: { snapshot(): {
+          entries: Array<{ category: string; name: string; sessionId?: string; promptId?: string }>;
+          promptEvidence: { records: Array<{ promptId: string; delivery: string; execution: string; facts: string[] }> };
+        } };
         activePromptDiagnostics: Map<string, unknown>;
-      }).stateDiagnostics.snapshot().entries.filter((entry) =>
+      }).stateDiagnostics.snapshot();
+      const diagnosticEntries = diagnosticSnapshot.entries.filter((entry) =>
         entry.category === "prompt" && entry.sessionId === id
       );
       const admittedIds = diagnosticEntries
@@ -101,6 +105,10 @@ test("Primary and Secondary settlement dispatch every queued follow-up", async (
           "settled",
           "settlement-barrier",
         ]) assert.ok(names.includes(expected), `${prefix} ${queuedId} missing ${expected}`);
+        const evidence = diagnosticSnapshot.promptEvidence.records.find((record) => record.promptId === queuedId);
+        assert.equal(evidence?.delivery, "confirmed");
+        assert.equal(evidence?.execution, "settled");
+        assert.ok(evidence?.facts.includes("queued"));
       }
       assert.equal(
         (app as unknown as { activePromptDiagnostics: Map<string, unknown> })
@@ -276,6 +284,9 @@ test("steering bypasses local queues for running Primary and Secondary only", as
       (app as unknown as { runtimePool: { get(id: string): { promptQueue: unknown[] } | undefined } }).runtimePool.get(secondaryId)?.promptQueue,
       [],
     );
+    assert.equal((app as unknown as {
+      stateDiagnostics: { snapshot(): { promptEvidence: { records: unknown[] } } };
+    }).stateDiagnostics.snapshot().promptEvidence.records.length, 0);
 
     const abortSecondary = await fetch(`${origin}/api/chat/abort`, {
       method: "POST",
@@ -1198,6 +1209,12 @@ test("all opened sessions route prompts, events and aborts to independent RPC wo
     const cancelled = await fetch(`${origin}/api/chat/queue/${queuedB2Data.id}`, { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ sessionId: idB }) });
     assert.equal(cancelled.status, 200);
     assert.deepEqual((await cancelled.json() as { queue: Array<{ message: string }> }).queue.map((item) => item.message), ["B queued then dispatched"]);
+    const cancelledEvidence = (app as unknown as {
+      stateDiagnostics: { snapshot(): { promptEvidence: { records: Array<{ promptId: string; delivery: string; execution: string; facts: string[] }> } } };
+    }).stateDiagnostics.snapshot().promptEvidence.records.find((record) => record.promptId === queuedB2Data.id);
+    assert.equal(cancelledEvidence?.delivery, "unknown");
+    assert.equal(cancelledEvidence?.execution, "cancelled");
+    assert.deepEqual(cancelledEvidence?.facts, ["admitted", "queued", "cancelled"]);
 
     const abortedB = await post("/api/chat/abort", { sessionId: idB });
     assert.equal(abortedB.status, 200);

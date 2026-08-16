@@ -1,3 +1,5 @@
+import type { PromptEvidenceSnapshot } from "./prompt-evidence.js";
+
 export type StateDiagnosticSource = "server" | "browser";
 export type StateDiagnosticValue = string | number | boolean | null;
 
@@ -24,16 +26,17 @@ export interface StateDiagnosticStatus {
 }
 
 export interface ServerStateDiagnosticSnapshot {
-  schemaVersion: 3;
+  schemaVersion: 4;
   generatedAt: string;
   runEpoch: string;
   buildFingerprint: string;
   status: StateDiagnosticStatus;
   entries: StateDiagnosticEntry[];
+  promptEvidence: PromptEvidenceSnapshot;
 }
 
 export interface BrowserStateDiagnosticSnapshot {
-  schemaVersion: 3;
+  schemaVersion: 4;
   generatedAt: string;
   pageStartedAt: string;
   status: StateDiagnosticStatus;
@@ -41,7 +44,7 @@ export interface BrowserStateDiagnosticSnapshot {
 }
 
 export interface StateDiagnosticExportBundle {
-  schemaVersion: 3;
+  schemaVersion: 4;
   generatedAt: string;
   warning: string;
   server: ServerStateDiagnosticSnapshot;
