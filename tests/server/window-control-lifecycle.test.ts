@@ -13,7 +13,7 @@ import { ModelManager } from "../../src/server/model-manager";
 import type { SessionSummary } from "../../src/shared/types";
 import { FakeRpc, waitForCondition } from "../helpers/server-app-fixture";
 
-test("one browser window controls a Session until another explicitly takes over", async () => {
+test("multiple windows submit prompts to one Session through the shared queue", async () => {
   const path = "C:\\sessions\\primary.jsonl";
   const id = idForPath(path);
   const primary = new FakeRpc(path, "primary");
@@ -33,16 +33,27 @@ test("one browser window controls a Session until another explicitly takes over"
   const second = "22222222-2222-4222-8222-222222222222";
   try {
     await fetch(`${origin}/api/bootstrap`, { headers: headers(first) });
-    assert.equal((await fetch(`${origin}/api/chat/prompt`, { method: "POST", headers: headers(first), body: JSON.stringify({ message: "owned by first", sessionId: id }) })).status, 202);
-    const blocked = await fetch(`${origin}/api/chat/prompt`, { method: "POST", headers: headers(second), body: JSON.stringify({ message: "blocked second", sessionId: id }) });
-    assert.equal(blocked.status, 409);
-    assert.match((await blocked.json() as { error: string }).error, /另一窗口/);
+    await fetch(`${origin}/api/bootstrap`, { headers: headers(second) });
+    const firstPrompt = await fetch(`${origin}/api/chat/prompt`, { method: "POST", headers: headers(first), body: JSON.stringify({ message: "owned by first", sessionId: id }) });
+    const secondPrompt = await fetch(`${origin}/api/chat/prompt`, { method: "POST", headers: headers(second), body: JSON.stringify({ message: "owned by second", sessionId: id }) });
+    assert.equal(firstPrompt.status, 202, "the first window submits without a control lock");
+    assert.equal(secondPrompt.status, 202, "a second window submits through the shared queue without 409");
+    // The single live Agent consumes the FIFO queue. First settles, then the
+    // second dispatch begins; both windows remain free to submit at any time.
     primary.streaming = false;
     primary.emit({ type: "agent_settled" });
-    const takeover = await fetch(`${origin}/api/sessions/${id}/control`, { method: "POST", headers: headers(second) });
-    assert.deepEqual(await takeover.json(), { controlOwner: second, controlledByThisWindow: true });
-    assert.equal((await fetch(`${origin}/api/chat/prompt`, { method: "POST", headers: headers(second), body: JSON.stringify({ message: "owned by second", sessionId: id }) })).status, 202);
-    assert.deepEqual(primary.commands.filter((command) => command.type === "prompt").map((command) => command.message), ["owned by first", "owned by second"]);
+    await waitForCondition(
+      () => primary.commands.filter((command) => command.type === "prompt").length >= 2,
+      1000,
+      "both prompts reach the single live Agent in FIFO order",
+    );
+    primary.streaming = false;
+    primary.emit({ type: "agent_settled" });
+    assert.deepEqual(
+      primary.commands.filter((command) => command.type === "prompt").map((command) => command.message),
+      ["owned by first", "owned by second"],
+      "both prompts reach the single live Agent in FIFO order",
+    );
   } finally {
     server.close();
     await app.close();

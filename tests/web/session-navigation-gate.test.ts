@@ -1701,10 +1701,6 @@ test("an explicit active Gate choice supersedes an older cold staged mode", asyn
       state: coldView.state,
       gateMode: "strict" as const,
     }),
-    takeSessionControl: async () => ({
-      controlOwner: "this-window",
-      controlledByThisWindow: true as const,
-    }),
     respondToExtension: async (body: unknown) => {
       autoAllowResponses.push(body);
     },
@@ -1763,19 +1759,10 @@ test("an explicit active Gate choice supersedes an older cold staged mode", asyn
     await act(
       async () => new Promise((resolve) => dom.window.setTimeout(resolve, 450)),
     );
-    const takeover = dom.window.document.querySelector<HTMLButtonElement>(
-      ".session-control-banner button",
-    );
-    assert.ok(takeover);
-    await act(async () => {
-      takeover.click();
-      await Promise.resolve();
-      await Promise.resolve();
-    });
     assert.equal(
       trigger().textContent?.trim(),
       "放行",
-      "cold staging survives a pure activation",
+      "cold staging survives an active foreign viewer",
     );
     await chooseGate("严格");
     assert.equal(
@@ -1783,7 +1770,6 @@ test("an explicit active Gate choice supersedes an older cold staged mode", asyn
       "严格",
       "the explicit active choice drops the stale cold preference",
     );
-    assert.deepEqual(promptCalls, [["/gate strict", [], coldId, "strict"]]);
     await act(async () =>
       source.emitPi({
         type: "extension_ui_request",

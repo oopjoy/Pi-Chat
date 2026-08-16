@@ -252,7 +252,7 @@ test("global shutdown broadcasts to every window before stopping the application
   }
 });
 
-test("control-change SSE marks only the owning browser window as writable", async () => {
+test("every window receives the shared queue projection for one Session", async () => {
   const path = "C:\\sessions\\primary.jsonl";
   const id = idForPath(path);
   const primary = new FakeRpc(path, "primary");
@@ -283,9 +283,9 @@ test("control-change SSE marks only the owning browser window as writable", asyn
   try {
     assert.equal((await fetch(`${origin}/api/bootstrap`, { headers: { "x-pi-chat-client": owner } })).status, 200);
     assert.equal((await fetch(`${origin}/api/chat/prompt`, { method: "POST", headers: { "content-type": "application/json", "x-pi-chat-client": owner }, body: JSON.stringify({ message: "owner", sessionId: id }) })).status, 202);
-    const controlEvent = (frames: string[]) => JSON.parse(frames.find((frame) => frame.includes("pi_chat_session_control_changed"))?.split("data: ")[1] || "{}") as { controlOwner?: string; controlledByThisWindow?: boolean };
-    assert.deepEqual(controlEvent(ownerFrames), { type: "pi_chat_session_control_changed", sessionId: id, controlOwner: owner, controlledByThisWindow: true });
-    assert.deepEqual(controlEvent(observerFrames), { type: "pi_chat_session_control_changed", sessionId: id, controlOwner: owner, controlledByThisWindow: false });
+    const activityEvent = (frames: string[]) => JSON.parse(frames.find((frame) => frame.includes("pi_chat_session_status"))?.split("data: ")[1] || "{}") as { type?: string; piChatSessionId?: string };
+    assert.equal(activityEvent(ownerFrames).piChatSessionId, id, "the owner window sees the Session-scoped activity projection");
+    assert.equal(activityEvent(observerFrames).piChatSessionId, id, "a second window sees the same shared activity projection");
   } finally {
     server.close();
     clients.clear();
@@ -318,11 +318,13 @@ test("a closed browser window releases Session control after its SSE lease expir
     assert.equal((await fetch(`${origin}/api/chat/prompt`, { method: "POST", headers: { "content-type": "application/json", "x-pi-chat-client": owner }, body: JSON.stringify({ message: "owner", sessionId: id }) })).status, 202);
     primary.streaming = false;
     primary.emit({ type: "agent_settled" });
-    assert.equal((await fetch(`${origin}/api/chat/prompt`, { method: "POST", headers: { "content-type": "application/json", "x-pi-chat-client": observer }, body: JSON.stringify({ message: "blocked", sessionId: id }) })).status, 409);
+    // Shared-write model: a second window submits without a control lock; the
+    // single live Agent serializes both prompts through the FIFO queue.
+    assert.equal((await fetch(`${origin}/api/chat/prompt`, { method: "POST", headers: { "content-type": "application/json", "x-pi-chat-client": observer }, body: JSON.stringify({ message: "second", sessionId: id }) })).status, 202);
     controller.abort();
     await events;
     await new Promise((resolve) => setTimeout(resolve, 30));
-    const released = await fetch(`${origin}/api/chat/prompt`, { method: "POST", headers: { "content-type": "application/json", "x-pi-chat-client": observer }, body: JSON.stringify({ message: "released", sessionId: id }) });
+    const released = await fetch(`${origin}/api/chat/prompt`, { method: "POST", headers: { "content-type": "application/json", "x-pi-chat-client": observer }, body: JSON.stringify({ message: "after close", sessionId: id }) });
     const releasedText = await released.text();
     assert.equal(released.status, 202, releasedText);
   } finally {

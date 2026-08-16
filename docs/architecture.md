@@ -154,15 +154,18 @@ Prefer small hooks and pure libs over growing `App.tsx` further.
 - At capacity, the least-recently-used reclaimable idle Secondary is rested first
 - If every Secondary is busy or protects a live empty draft, the next activation is rejected with HTTP `409`
 - Viewed idle runtimes may be reclaimed (not permanent pins)
-- Model/Thinking changes do not auto-claim control; foreign owners are rejected
+- Model/Thinking changes are shared-write and never claim control
 
 ## Session control (0.4)
 
+- Multi-window **shared write**: every live browser window submits prompts, Steer, Compact, queue operations, and settings into one Session-scoped FIFO; the single live Agent serializes them (Harness-aligned)
 - Observing banner only when a **live** foreign SSE owner exists
 - Sole live window auto-claims; never stuck behind a ghost owner
 - Disconnect grace defaults to 1.5s (reconnect safety without long takeover flash)
 - Frontend banner debounced (~400ms) to suppress reconnect flaps
-- Multi-window exclusive write control remains enforced
+- Presence/viewing leases remain observation-only projections; they never gate writes
+- Rename and Delete retain the exclusive control lock as destructive operations
+- Prompt/Steer/admission never claim Session control; there is no takeover API
 
 ## Compatibility
 

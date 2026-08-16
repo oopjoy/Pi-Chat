@@ -1484,14 +1484,6 @@ export class PiChatApp {
     return this.sessionControl.controlState(sessionId, clientId);
   }
 
-  private setController(sessionId: string, clientId: string): void {
-    this.sessionControl.setController(sessionId, clientId);
-  }
-
-  private assertNoForeignController(sessionId: string, clientId: string): void {
-    this.sessionControl.assertNoForeignController(sessionId, clientId);
-  }
-
   private requireSessionControl(sessionId: string, clientId: string): void {
     this.sessionControl.requireControl(sessionId, clientId);
   }
@@ -5160,7 +5152,6 @@ export class PiChatApp {
         await this.beginPromptAdmission(admittedSessionId);
       let releaseRuntimeAdmission: (() => void) | null = null;
       try {
-        this.requireSessionControl(requestedSessionId, clientId);
         // Before creating a *new* Secondary, bind Primary identity through the
         // readiness gate. An already-owned Secondary remains usable even if the
         // independent Primary startup subsequently fails.
@@ -5562,7 +5553,6 @@ export class PiChatApp {
       if (request.method !== "DELETE") return methodNotAllowed(response);
       const body = preparedBody || (await bodyJson(request));
       const sessionId = requiredSessionId(body);
-      this.requireSessionControl(sessionId, clientId);
       const runtime = this.runtimePool.get(sessionId);
       if (!runtime && sessionId !== this.activeSessionId)
         return json(response, 409, {
@@ -5590,7 +5580,6 @@ export class PiChatApp {
       if (request.method !== "POST") return methodNotAllowed(response);
       const body = preparedBody || (await bodyJson(request));
       const sessionId = requiredSessionId(body);
-      this.requireSessionControl(sessionId, clientId);
       const runtime = this.runtimePool.get(sessionId);
       if (!runtime && sessionId !== this.activeSessionId)
         return json(response, 409, {
@@ -5684,7 +5673,6 @@ export class PiChatApp {
       if (request.method !== "POST") return methodNotAllowed(response);
       const body = preparedBody || (await bodyJson(request));
       const sessionId = requiredSessionId(body);
-      this.requireSessionControl(sessionId, clientId);
       const secondaryRuntime = this.runtimePool.get(sessionId) || null;
       let releaseRuntimeOperation: (() => void) | null = null;
       try {
@@ -5731,7 +5719,6 @@ export class PiChatApp {
       if (request.method !== "POST") return methodNotAllowed(response);
       const body = preparedBody || (await bodyJson(request));
       const sessionId = requiredSessionId(body);
-      this.requireSessionControl(sessionId, clientId);
       const runtime = this.runtimePool.get(sessionId);
       if (runtime) {
         const releaseRuntimeOperation =
@@ -5957,27 +5944,6 @@ export class PiChatApp {
       this.markSessionViewed(clientId, id);
       if (runtime) this.runtimePool.touch(runtime);
       json(response, 200, { viewing: id });
-      return;
-    }
-
-    const controlMatch = /^\/api\/sessions\/([a-f0-9]{20})\/control$/.exec(
-      url.pathname,
-    );
-    if (controlMatch) {
-      if (request.method !== "POST") return methodNotAllowed(response);
-      if (!clientId)
-        return json(response, 400, { error: "浏览器窗口标识无效" });
-      const summaries = await this.options.sessions.list(
-        undefined,
-        this.currentCwd,
-      );
-      if (
-        !summaries.some((session) => session.id === controlMatch[1]) &&
-        !this.runtimePool.has(controlMatch[1])
-      )
-        return json(response, 404, { error: "会话不存在" });
-      this.setController(controlMatch[1], clientId);
-      json(response, 200, this.controlState(controlMatch[1], clientId));
       return;
     }
 
@@ -6360,9 +6326,6 @@ export class PiChatApp {
       const provider = typeof body.provider === "string" ? body.provider : "";
       const modelId = typeof body.modelId === "string" ? body.modelId : "";
       const sessionId = requiredSessionId(body);
-      // Model selection does not claim control, but an observing window must not
-      // silently overwrite settings owned by another active controller.
-      this.assertNoForeignController(sessionId, clientId);
       const secondaryRuntime = this.runtimePool.get(sessionId) || null;
       if (!provider || !modelId)
         return json(response, 400, { error: "provider 和 modelId 必填" });
@@ -6431,9 +6394,6 @@ export class PiChatApp {
           ? (body.level as ThinkingLevel)
           : null;
       const sessionId = requiredSessionId(body);
-      // Thinking level does not claim control, but an observing window must not
-      // silently overwrite settings owned by another active controller.
-      this.assertNoForeignController(sessionId, clientId);
       const secondaryRuntime = this.runtimePool.get(sessionId) || null;
       if (!level) return json(response, 400, { error: "无效的 Thinking 强度" });
       if (!secondaryRuntime && sessionId !== this.activeSessionId)
@@ -6550,7 +6510,6 @@ export class PiChatApp {
       if (typeof body.id !== "string")
         return json(response, 400, { error: "id 必填" });
       const sessionId = requiredSessionId(body);
-      this.requireSessionControl(sessionId, clientId);
       const runtime = this.runtimePool.get(sessionId);
       const targetRpc =
         runtime?.rpc ||

@@ -478,11 +478,6 @@ export function App() {
   const [busySessionIds, setBusySessionIds] = useState<string[]>([]);
   /** Editor-owned snapshots waiting to enter App's existing single-flight send path. */
   const [composerPendingByScope, setComposerPendingByScope] = useState<Record<string, number>>({});
-  /** A prompt raced a foreign controller after its last SSE projection. */
-  const [deferredComposerScopes, setDeferredComposerScopes] = useState<Record<string, {
-    targetSessionId: string;
-    controlVersion: number;
-  }>>({});
   const updateComposerPending = useCallback((scope: string, count: number) => {
     setComposerPendingByScope((current) => {
       if ((current[scope] || 0) === count) return current;
@@ -6087,14 +6082,6 @@ export function App() {
     [refreshSessionCache, setRuntimeWarming, updateGateMode],
   );
 
-  const ensureRuntimeActive = async () => {
-    const sessionId = viewedSessionIdRef.current;
-    if (!sessionId || runtimeStatus === "active") return false;
-    const authority = capturePaneAuthority(sessionId);
-    const ready = await warmSessionRuntime(sessionId);
-    return applyWarmReadiness(sessionId, ready, authority);
-  };
-
   const composerTargetForViewedSession = () => {
     // Background-child records are never normal Runtime targets. Follow only
     // server-derived direct-parent edges until reaching the verified ordinary
@@ -6130,16 +6117,10 @@ export function App() {
     const viewed = viewedSessionIdRef.current;
     const targetSessionId = composerTargetForViewedSession();
     const childOriginated = Boolean(viewed && targetSessionId && viewed !== targetSessionId);
-    const targetControl = targetSessionId === viewed
-      ? viewControl
-      : sessions.find((session) => session.id === targetSessionId);
-    const targetObserving = Boolean(
-      targetControl?.controlOwner && targetControl.controlledByThisWindow !== true,
-    );
-    // Cold history, child views, foreign controllers, and a superseded setting
-    // request only stage a per-target preference. The eventual prompt path owns
-    // application to Pi, so a setting click never preempts another window.
-    if (localDraftRef.current || runtimeStatus !== "active" || childOriginated || targetObserving || settingsBusy || state.isCompacting) {
+    // Cold history, child views, and a superseded setting request only stage a
+    // per-target preference. The eventual prompt path owns application to Pi,
+    // so a setting click never preempts a concurrent prompt.
+    if (localDraftRef.current || runtimeStatus !== "active" || childOriginated || settingsBusy || state.isCompacting) {
       if (model) {
         stageSessionPref({ model });
         dispatchPane({
@@ -6202,13 +6183,7 @@ export function App() {
     const viewed = viewedSessionIdRef.current;
     const targetSessionId = composerTargetForViewedSession();
     const childOriginated = Boolean(viewed && targetSessionId && viewed !== targetSessionId);
-    const targetControl = targetSessionId === viewed
-      ? viewControl
-      : sessions.find((session) => session.id === targetSessionId);
-    const targetObserving = Boolean(
-      targetControl?.controlOwner && targetControl.controlledByThisWindow !== true,
-    );
-    if (localDraftRef.current || runtimeStatus !== "active" || childOriginated || targetObserving || settingsBusy || state.isCompacting) {
+    if (localDraftRef.current || runtimeStatus !== "active" || childOriginated || settingsBusy || state.isCompacting) {
       stageSessionPref({ thinkingLevel: level });
       dispatchPane({
         type: "PREFERENCES_STAGED",
@@ -6856,16 +6831,10 @@ export function App() {
     const sessionId = composerTargetForViewedSession();
     if (buildIdentityMismatch || !sessionId) return;
     const childOriginated = Boolean(viewed && viewed !== sessionId);
-    const targetControl = sessionId === viewed
-      ? viewControl
-      : sessions.find((session) => session.id === sessionId);
-    const targetObserving = Boolean(
-      targetControl?.controlOwner && targetControl.controlledByThisWindow !== true,
-    );
-    // A cold history pane, a child transcript, a foreign controller, and local
-    // preparation stage Gate for the target prompt instead of issuing an
-    // unauthorized command against a Runtime the pane does not own.
-    if (runtimeStatus !== "active" || childOriginated || targetObserving || settingsBusy || state.isCompacting) {
+    // A cold history pane, a child transcript, and local preparation stage Gate
+    // for the target prompt instead of issuing an unauthorized command against
+    // a Runtime the pane does not own.
+    if (runtimeStatus !== "active" || childOriginated || settingsBusy || state.isCompacting) {
       stageGateMode(sessionId, mode);
       setNotice(`已选择 ${mode === "open" ? "放行" : "严格"}，发送时生效`);
       return;
@@ -6981,13 +6950,6 @@ export function App() {
   const viewingSubagentSession = Boolean(subagentComposerAddress);
   /** A child transcript is read-only; normal messages use its verified ordinary ancestor. */
   const composerTargetSessionId = composerTargetForViewedSession();
-  const composerTargetControl = composerTargetSessionId === viewedSessionId
-    ? viewControl
-    : sessions.find((session) => session.id === composerTargetSessionId);
-  const composerTargetObserving = Boolean(
-    composerTargetControl?.controlOwner &&
-    composerTargetControl.controlledByThisWindow !== true,
-  );
   const currentSessionBusy = busySessionIds.includes(
     viewedSessionId || (localDraft ? LOCAL_DRAFT_BUSY_ID : ""),
   );
@@ -6998,56 +6960,14 @@ export function App() {
     ? `draft:${draftGenerationRef.current}`
     : `session:${composerTargetSessionId || "none"}`;
   const composerSubmissionPending = composerPendingByScope[composerSubmissionScope] || 0;
-  const composerSubmissionDeferred = deferredComposerScopes[composerSubmissionScope];
-  const deferredTargetSessionId = composerSubmissionDeferred?.targetSessionId || "";
-  const deferredTargetControl = deferredTargetSessionId === viewedSessionId
-    ? viewControl
-    : sessions.find((session) => session.id === deferredTargetSessionId);
-  const deferredTargetObserving = Boolean(
-    deferredTargetControl?.controlOwner &&
-    deferredTargetControl.controlledByThisWindow !== true,
-  );
-  useEffect(() => {
-    if (!composerSubmissionDeferred || !deferredTargetSessionId) return;
-    // A conflict itself proves that a foreign owner existed, even if this page
-    // missed the corresponding "foreign" SSE. Resume only after a later
-    // authoritative control frame clears that owner (or confirms this page),
-    // never from the stale pre-conflict projection or a later pane's version.
-    const controlVersion =
-      sessionEventVersionRef.current.get(deferredTargetSessionId) || 0;
-    if (
-      deferredTargetControl?.controlledByThisWindow === true ||
-      (!deferredTargetObserving &&
-        controlVersion > composerSubmissionDeferred.controlVersion)
-    ) {
-      setDeferredComposerScopes((current) => {
-        if (!current[composerSubmissionScope]) return current;
-        const next = { ...current };
-        delete next[composerSubmissionScope];
-        return next;
-      });
-    }
-  }, [
-    composerSubmissionDeferred,
-    composerSubmissionScope,
-    deferredTargetObserving,
-    deferredTargetControl?.controlledByThisWindow,
-    deferredTargetSessionId,
-  ]);
   const composerSubmissionPaused =
     !mutationBlocked &&
     (viewSwitching ||
       currentSessionPreparing ||
       Boolean(state.isCompacting) ||
-      composerTargetObserving ||
-      Boolean(composerSubmissionDeferred) ||
       (viewingSubagentSession && !composerTargetSessionId));
   const composerSubmissionPausedMessage = viewingSubagentSession && !composerTargetSessionId
     ? "子代理父对话地址不可用；消息已保留，等待验证恢复"
-    : composerSubmissionDeferred || composerTargetObserving
-      ? viewingSubagentSession
-        ? "父对话正在另一窗口中控制；消息已保留，控制权可用后将发送"
-        : "另一窗口正在控制此对话；消息已保留，控制权可用后将发送"
     : state.isCompacting
       ? "消息已保存，等待压缩完成后发送"
       : currentSessionPreparing
@@ -7159,47 +7079,6 @@ export function App() {
   const observing = Boolean(
     effectiveControl.controlOwner && !effectiveControl.controlledByThisWindow,
   );
-  const takeControl = async () => {
-    if (mutationBlocked || viewingSubagentSession) return;
-    const sessionId = viewedSessionIdRef.current;
-    if (!sessionId) return;
-    const authority = capturePaneAuthority(sessionId);
-    // A newer control SSE for the same committed pane is authoritative over an
-    // older HTTP takeover response. Pane identity/revision alone does not see
-    // that race because no navigation need occur.
-    const eventVersion = sessionEventVersionRef.current.get(sessionId) || 0;
-    const takeoverIsCurrent = () =>
-      paneAuthorityCanCommit(authority) &&
-      (sessionEventVersionRef.current.get(sessionId) || 0) === eventVersion;
-    const finishSessionBusy = beginSessionBusy(sessionId);
-    try {
-      const activatedHere =
-        runtimeStatus === "active" || (await ensureRuntimeActive());
-      if (!activatedHere || !takeoverIsCurrent()) return;
-      const result = await api.takeSessionControl(sessionId);
-      if (
-        !takeoverIsCurrent() ||
-        !commitPaneIfCurrent(authority, {
-          type: "CONTROL_UPDATED",
-          sessionId,
-          control: result,
-        })
-      )
-        return;
-      setSessions((current) =>
-        current.map((session) =>
-          session.id === sessionId ? { ...session, ...result } : session,
-        ),
-      );
-      setNotice("已接管此对话控制权");
-    } catch (cause) {
-      if (takeoverIsCurrent())
-        setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      finishSessionBusy();
-    }
-  };
-
   const cancelQueuedPrompt = (item: QueuedPrompt) => {
     const operation = captureViewOperation();
     queueCancellationSequenceRef.current += 1;
@@ -7770,8 +7649,6 @@ export function App() {
         onNavigate={navigateConversation}
         sessionControl={{
           observing: viewingSubagentSession ? false : observing,
-          disabled: mutationBlocked || viewingSubagentSession,
-          onTakeOver: () => void takeControl(),
         }}
         promptQueue={{
           queue,
@@ -7779,7 +7656,6 @@ export function App() {
           busy:
             currentSessionPreparing ||
             viewSwitching ||
-            observing ||
             mutationBlocked ||
             viewingSubagentSession,
           onCancel: cancelQueuedPrompt,
@@ -7811,28 +7687,10 @@ export function App() {
           },
           submissionScope: composerSubmissionScope,
           submissionTargetSessionId: composerTargetSessionId || undefined,
-          submissionControlVersion:
-            sessionEventVersionRef.current.get(composerTargetSessionId) || 0,
           allowFollowupSubmissions: true,
           submissionPaused: composerSubmissionPaused,
           submissionPausedMessage: composerSubmissionPausedMessage,
           onSubmissionPendingChange: updateComposerPending,
-          onSubmissionDeferred: (error, submission) => {
-            if (!(error instanceof ApiRequestError) || error.code !== "SESSION_CONTROL_CONFLICT")
-              return false;
-            setError("");
-            const targetSessionId = submission.targetSessionId;
-            const controlVersion = submission.controlVersion;
-            if (!targetSessionId || typeof controlVersion !== "number")
-              return false;
-            setDeferredComposerScopes((current) => current[submission.scope]
-              ? current
-              : {
-                  ...current,
-                  [submission.scope]: { targetSessionId, controlVersion },
-                });
-            return true;
-          },
           commands: composerCommands,
           controls: composerControls,
           notices: composerNotices,

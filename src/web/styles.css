@@ -409,8 +409,6 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .conversation-nav svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; }
 .message-window-notice { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 8px 12px; margin: 0 0 20px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-soft); color: var(--muted); font-size: 11.5px; line-height: 1.5; text-align: center; }
 .session-control-banner { display: flex; box-sizing: border-box; width: min(calc(100% - var(--chat-column-gutter)), var(--reading-width), var(--chat-column-max)); align-items: center; justify-content: center; flex-wrap: wrap; gap: 9px; margin: 10px auto 0; padding: 7px 11px; border: 1px solid color-mix(in srgb, #d89318, transparent 52%); border-radius: 8px; background: color-mix(in srgb, #d89318, transparent 90%); color: var(--text); font-size: 11px; line-height: 1.4; text-align: center; }
-.session-control-banner button { padding: 3px 9px; border: 1px solid color-mix(in srgb, #d89318, transparent 35%); border-radius: 6px; background: var(--surface); color: #9a6500; font: inherit; font-weight: 700; cursor: pointer; }
-.session-control-banner button:hover { background: color-mix(in srgb, #d89318, transparent 87%); }
 .message-window-notice button { padding: 3px 9px; border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line)); border-radius: 6px; background: var(--surface); color: var(--accent); font: inherit; font-weight: 700; cursor: pointer; }
 .message-window-notice button:hover:not(:disabled) { background: var(--accent-soft); }
 .message-window-notice button:disabled { cursor: wait; opacity: .65; }

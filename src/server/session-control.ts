@@ -122,11 +122,11 @@ export class SessionControl {
     if (!current || current === clientId) return;
 
     // The only actively present browser window may displace any foreign owner
-    // (ghost, grace, or frozen PWA). A single visible PWA must never need
-    // “接管控制”. API-only clients retain their explicit exclusive ownership.
+    // (ghost, grace, or frozen PWA). A single visible PWA must never sit behind
+    // a stale owner. API-only clients retain their explicit exclusive ownership.
     if (this.isClientPresent(clientId) && this.otherPresentWindowCount(clientId) === 0) return;
 
-    throw new SessionControlConflictError("此对话正在另一窗口中控制；请先接管控制权");
+    throw new SessionControlConflictError("此对话正在另一窗口中控制");
   }
 
   requireControl(sessionId: string, clientId: string): void {

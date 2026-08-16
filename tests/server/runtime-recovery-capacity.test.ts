@@ -385,7 +385,7 @@ test("process errors preserve an abort-owned pause for Primary and Secondary que
   }
 });
 
-test("model and thinking changes do not claim or transfer Session control", async () => {
+test("model, thinking, and prompt changes never claim or block by Session control", async () => {
   const path = "C:\\sessions\\primary.jsonl";
   const id = idForPath(path);
   const primary = new FakeRpc(path, "primary");
@@ -410,14 +410,12 @@ test("model and thinking changes do not claim or transfer Session control", asyn
     assert.equal((await post("/api/models/set", first, { provider: "test", modelId: "next", sessionId: id })).status, 200);
     assert.equal((await post("/api/thinking/set", first, { level: "high", sessionId: id })).status, 200);
     assert.equal(controllers.has(id), false);
+    // A second window may also set settings and submit prompts: no control lock.
     assert.equal((await post("/api/thinking/set", second, { level: "low", sessionId: id })).status, 200);
     assert.equal(controllers.has(id), false);
-    assert.equal((await post("/api/chat/prompt", second, { message: "claim by sending", sessionId: id })).status, 202);
-    assert.equal(controllers.get(id), second);
-    const foreignThinking = await post("/api/thinking/set", first, { level: "max", sessionId: id });
-    assert.equal(foreignThinking.status, 409);
-    assert.match((await foreignThinking.json() as { error: string }).error, /另一窗口/);
-    assert.equal(controllers.get(id), second);
+    assert.equal((await post("/api/chat/prompt", second, { message: "shared write", sessionId: id })).status, 202);
+    assert.equal(controllers.has(id), false, "prompt submission never claims Session control");
+    assert.equal((await post("/api/thinking/set", first, { level: "max", sessionId: id })).status, 200);
   } finally {
     server.close();
     await app.close();

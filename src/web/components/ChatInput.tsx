@@ -13,8 +13,6 @@ type PendingSubmission = {
   scope: string;
   /** Immutable normal-session target captured when the editor accepts this snapshot. */
   targetSessionId?: string;
-  /** Last observed control-event version for that immutable target. */
-  controlVersion?: number;
   message: string;
   images: PromptImage[];
   delivery: PromptDelivery;
@@ -107,7 +105,7 @@ export function commandMatches(value: string, commands: SlashCommand[]): SlashCo
   }).sort((a, b) => a.rank - b.rank || a.score - b.score || a.command.name.localeCompare(b.command.name)).slice(0, 9).map(({ command }) => command);
 }
 
-export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, placeholder, acceptsImages, imageInputPending = false, imageInputPendingMessage = "模型图片能力尚未确认", resolveImageCapabilityOnSend = false, restoredDraft, onDraftRevisionChange, submissionScope, submissionTargetSessionId, submissionControlVersion, allowFollowupSubmissions = true, submissionPaused = false, submissionPausedMessage = "消息已保存，等待发送条件恢复", onSubmissionPendingChange, onSubmissionDeferred, commands, controls, notices, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles, onError }: {
+export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, placeholder, acceptsImages, imageInputPending = false, imageInputPendingMessage = "模型图片能力尚未确认", resolveImageCapabilityOnSend = false, restoredDraft, onDraftRevisionChange, submissionScope, submissionTargetSessionId, allowFollowupSubmissions = true, submissionPaused = false, submissionPausedMessage = "消息已保存，等待发送条件恢复", onSubmissionPendingChange, commands, controls, notices, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles, onError }: {
   /** True when a submission will enter the local queue. */
   streaming: boolean;
   /** True only while Pi is actively generating and can be stopped. */
@@ -130,8 +128,6 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   submissionScope: string;
   /** Immutable normal-session prompt target, never inferred again after navigation. */
   submissionTargetSessionId?: string;
-  /** Control-event version captured with the immutable target. */
-  submissionControlVersion?: number;
   /** A materialized Session can accept another editor snapshot while one is pending. */
   allowFollowupSubmissions?: boolean;
   /** Keeps accepted editor snapshots local until their target may be submitted. */
@@ -139,8 +135,6 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   /** Explains why an accepted snapshot is waiting without disabling editing. */
   submissionPausedMessage?: string;
   onSubmissionPendingChange?: (scope: string, count: number) => void;
-  /** A retryable admission conflict keeps its snapshot queued without retrying in a loop. */
-  onSubmissionDeferred?: (error: unknown, submission: Readonly<PendingSubmission>) => boolean;
   commands: SlashCommand[];
   controls?: ReactNode;
   /** System status sits immediately above the actual Composer, never over its input. */
@@ -167,7 +161,6 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   const mutationDisabledRef = useRef(disabled);
   const submissionPausedRef = useRef(submissionPaused);
   const onSendRef = useRef(onSend);
-  const onSubmissionDeferredRef = useRef(onSubmissionDeferred);
   const pendingByScopeRef = useRef(new Map<string, number>());
   const submissionQueueRef = useRef<PendingSubmission[]>([]);
   const drainingRef = useRef(false);
@@ -184,7 +177,6 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   mutationDisabledRef.current = disabled;
   submissionPausedRef.current = submissionPaused;
   onSendRef.current = onSend;
-  onSubmissionDeferredRef.current = onSubmissionDeferred;
   const advanceUserDraftRevision = () => {
     draftRevisionRef.current += 1;
     onDraftRevisionChange?.(draftRevisionRef.current);
@@ -348,28 +340,16 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     }
     const [submission] = submissionQueueRef.current.splice(index, 1);
     drainingRef.current = true;
-    let deferred = false;
     void onSendRef.current(submission.message, submission.images, submission.delivery)
       .catch((error) => {
-        deferred = onSubmissionDeferredRef.current?.(error, submission) === true;
-        if (deferred) {
-          submissionQueueRef.current.unshift(submission);
-          return;
-        }
         failedSubmissionsRef.current.set(submission.scope, submission);
         blockedScopesRef.current.add(submission.scope);
         restoreFailedSubmission(submission.scope);
       })
       .finally(() => {
-        if (!deferred) updatePendingScope(submission.scope, -1);
+        updatePendingScope(submission.scope, -1);
         drainingRef.current = false;
         if (!mountedRef.current) return;
-        // The defer callback schedules an App-owned pause. Do not immediately
-        // retry into the same foreign-controller race before that prop arrives.
-        if (deferred) {
-          requestAnimationFrame(() => textareaRef.current?.focus());
-          return;
-        }
         if (!blockedScopesRef.current.has(currentScopeRef.current))
           drainSubmissions();
         else restoreFailedSubmission(currentScopeRef.current);
@@ -415,9 +395,6 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
       scope,
       ...(submissionTargetSessionId
         ? { targetSessionId: submissionTargetSessionId }
-        : null),
-      ...(typeof submissionControlVersion === "number"
-        ? { controlVersion: submissionControlVersion }
         : null),
       message,
       images: currentImages,

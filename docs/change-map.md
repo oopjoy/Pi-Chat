@@ -27,7 +27,7 @@
 | Session 切换与旧响应隔离 | `App.tsx` authority helpers | App coordinator | `web/pane-authority.test.ts`、`web/session-navigation-gate.test.ts`、`refresh-navigation-guards.test.ts` |
 | Runtime 启动、容量和回收 | `runtime-pool.ts`、`app.ts` integration | `RuntimePool` 持有 Secondary worker/capacity；`PiChatApp` 持有跨域 finalization | `runtime-pool-admission.test.ts`、`server/runtime-recovery-capacity.test.ts` |
 | Primary readiness / recovery | `primary-runtime-readiness.ts`、`app.ts` adoption | `PrimaryRuntimeReadinessController` 与 `PiChatApp` binding | `primary-readiness.test.ts`、`server/runtime-recovery-capacity.test.ts`、`rpc-client.test.ts` |
-| 多窗口观察与控制权 | `session-control.ts`、`app.ts` SSE projection | `SessionControl` | `session-control.test.ts`、`server/window-control-lifecycle.test.ts`、`server/shutdown-control.test.ts` |
+| 多窗口观察与共享写 | `session-control.ts`、`app.ts` SSE projection | `SessionControl` presence/viewing 仅作观察投影；所有写操作（prompt/steer/compact/queue/settings）经 Session-scoped FIFO 共享提交，由单个 live Agent 串行；rename/delete 保留独占锁 | `session-control.test.ts`、`server/window-control-lifecycle.test.ts`、`server/shutdown-control.test.ts` |
 | Gate / Extension UI / 模型澄清问卷 | `runtime-event-transition.ts`、`app.ts` pending request/response、`ExtensionDialog.tsx`、`AskQuestionnaireDialog.tsx`、`lib/ask-questionnaire.ts` | Pi Extension 工具与 RPC request ID 保持执行权；服务端持有 Session/control/first-response 路由；Ask 组件只投影已进入工具调用的 bounded questions，并在最终提交后将完整草稿映射回 Package 现有的有序标量请求 | `ask-questionnaire.test.ts`、`ask-questionnaire-dialog.test.ts`、`extension-dialog.test.ts`、`server/session-read-sse-extension.test.ts`、`web/queue-steer-extension.test.ts`、`web/pane-authority.test.ts` |
 | SSE 节流、顺序和背压 | `sse-hub.ts` | `SseHub` 只持有 transport client/pending frame | `sse-hub.test.ts`、`sse-transport-recovery.test.ts` |
 | Workspace 默认值与 draft picker | `App.tsx`、`workspace-state.ts`、`app.ts` | 服务端 workspace snapshot；浏览器各 picker token | `draft-workspace.test.ts`、`workspace-state.test.ts`、`web/app-replacement-recovery.test.ts`、`server/workspace-resource-lifecycle.test.ts` |
@@ -94,7 +94,7 @@
 |---|---|---|
 | 服务只监听 loopback，并执行精确 Host、Origin、token 校验 | README 安全说明、Architecture security posture | `request-guard`、`api-recovery-token` |
 | 冷历史 browsing/search/pagination 不激活 Runtime | Architecture runtime/session policy | `server/runtime-bootstrap-drafts.test.ts`、`session-navigation`、`web/session-navigation-gate.test.ts` |
-| 一个 live writer，多窗口可观察 | Architecture Session control | `session-control`、`server/window-control-lifecycle.test.ts` |
+| 多窗口共享写（窗口仅提交者） | Architecture Session control | `session-control`、`server/window-control-lifecycle.test.ts` |
 | Primary 加最多六个 Secondary | Architecture runtime/session policy | `runtime-pool-admission`、`server/runtime-recovery-capacity.test.ts` |
 | Runtime identity 与 cwd 在其生命周期内不可重绑 | Architecture workspace/runtime policy | `runtime-pool-admission`、`workspace-state`、`server/workspace-resource-lifecycle.test.ts` |
 | Lifecycle barrier 必须 drain 已准入 mutation | Architecture、lifecycle module | `application-lifecycle`、`operation-admission`、`server/application-restart-admission.test.ts` |
