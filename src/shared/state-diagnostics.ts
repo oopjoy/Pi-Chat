@@ -229,6 +229,8 @@ const ENUM_DETAIL_VALUES: Record<string, ReadonlySet<string>> = {
   decisionReason: new Set([
     "accepted",
     "committed",
+    "malformed-critical-event",
+    "malformed-json",
     "missing-session",
     "session-deleted",
     "settled-run-generation",
@@ -326,6 +328,7 @@ const STATE_DIAGNOSTIC_EVENT_PAIRS = new Set([
   "render:first-assistant-paint-opportunity",
   "render:stream-summary",
   "rpc-event:received",
+  "rpc-event:rejected",
   "sse:admitted",
   "sse:broadcast-control",
   "sse:broadcast-intent",

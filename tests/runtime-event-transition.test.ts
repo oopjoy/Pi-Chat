@@ -33,9 +33,52 @@ test("shared Runtime transition derives lifecycle and streaming facts without mu
     type: "message_end",
     message: { role: "assistant", content: "" },
   });
-  assert.deepEqual(terminal.broadcastEvent.message, { role: "assistant", content: "partial" });
+  assert.deepEqual(terminal.broadcastEvent, {
+    type: "message_end",
+    piChatEventSchema: 1,
+    terminalKind: "assistant",
+    message: { role: "assistant", content: "partial" },
+  });
   assert.equal(terminal.state.liveMessage, undefined);
   assert.equal(terminal.state.pendingTerminalMessages.length, 1);
+});
+
+test("shared Runtime transition rejects malformed terminals without state mutation", () => {
+  const previous = {
+    ...base(),
+    liveMessage: { role: "assistant", content: "pending" },
+  };
+  const malformed = transitionRuntimeEvent("session-a", previous, {
+    type: "message_end",
+    message: { content: "missing role", secret: "drop me" },
+  });
+  assert.equal(malformed.broadcastEvent, null);
+  assert.deepEqual(malformed.effects, []);
+  assert.deepEqual(malformed.state.liveMessage, previous.liveMessage);
+  assert.deepEqual(malformed.state.pendingTerminalMessages, []);
+
+  const exact = transitionRuntimeEvent("session-a", base(), {
+    type: "message_end",
+    message: {
+      role: "toolResult",
+      content: "done",
+      toolCallId: "call-1",
+      isError: false,
+      secret: "drop me",
+    },
+    requestToken: "drop me",
+  });
+  assert.deepEqual(exact.broadcastEvent, {
+    type: "message_end",
+    piChatEventSchema: 1,
+    terminalKind: "tool-result",
+    message: {
+      role: "toolResult",
+      content: "done",
+      toolCallId: "call-1",
+      isError: false,
+    },
+  });
 });
 
 test("shared Runtime transition preserves terminal, created-event, and owner failure differences", () => {

@@ -198,6 +198,76 @@ test("App records one double-rAF visible paint and omits offscreen or stale pain
   }
 });
 
+test("canonical terminal clears but never substitutes a browser-pending draft", async () => {
+  const { dom, FakeEventSource } = installAppDom();
+  const originalNow = globalThis.performance.now;
+  Object.defineProperty(globalThis.performance, "now", {
+    value: () => 0,
+    configurable: true,
+  });
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const { browserStateDiagnosticSnapshot } = await import("../../src/web/lib/state-diagnostics");
+  const restoreApi = captureApiSnapshot(api);
+  Object.assign(api, {
+    bootstrap: async () => createBootstrapFixture(),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async (sessionId: string) => ({ viewing: sessionId }),
+    viewSession: async () => createSessionViewFixture(),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const before = browserStateDiagnosticSnapshot().entries.at(-1)?.sequence || 0;
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.emitPi({
+        type: "agent_start",
+        piChatSessionId: activeSessionId,
+        piChatRunGeneration: 55,
+      });
+      source.emitPi({
+        type: "message_update",
+        piChatSessionId: activeSessionId,
+        piChatRunGeneration: 55,
+        message: { role: "assistant", content: "browser pending must not win" },
+      });
+      source.emitPi({
+        type: "message_end",
+        piChatEventSchema: 1,
+        terminalKind: "assistant",
+        piChatSessionId: activeSessionId,
+        piChatRunGeneration: 55,
+        message: { role: "assistant", content: "" },
+      });
+      source.emitPi({
+        type: "agent_settled",
+        piChatSessionId: activeSessionId,
+        piChatRunGeneration: 55,
+      });
+      await Promise.resolve();
+    });
+    assert.equal(dom.window.document.body.textContent?.includes("browser pending must not win"), false);
+    const summary = browserStateDiagnosticSnapshot().entries.find((entry) =>
+      entry.sequence > before
+      && entry.category === "render"
+      && entry.name === "stream-summary"
+      && entry.runGeneration === 55
+    );
+    assert.ok(summary);
+    assert.equal(summary.details.snapshotsCleared, 1);
+    assert.equal(summary.details.snapshotsDrained, 0);
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+    Object.defineProperty(globalThis.performance, "now", {
+      value: originalNow,
+      configurable: true,
+    });
+  }
+});
+
 test("terminal session-status summaries include visible scheduler clearing", async () => {
   const { dom, FakeEventSource } = installAppDom();
   const originalNow = globalThis.performance.now;

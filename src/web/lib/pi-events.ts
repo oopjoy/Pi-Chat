@@ -1,9 +1,26 @@
+import {
+  decodeCanonicalMessageEndEvent,
+  type CanonicalMessageEndEvent,
+} from "../../shared/runtime-events";
 import { normalizeStreamingAssistantMessage } from "../../shared/streaming-assistant";
 import type { ApplicationLifecycle, PiMessage, PromptImage } from "../../shared/types";
 
-export function parseEventData(rawEvent: Event): Record<string, unknown> {
-  const data = (rawEvent as MessageEvent<string>).data || "{}";
-  return JSON.parse(data) as Record<string, unknown>;
+export function parseEventData(rawEvent: Event): Record<string, unknown> | null {
+  try {
+    const data = (rawEvent as MessageEvent<string>).data || "{}";
+    const value = JSON.parse(data) as unknown;
+    return value && typeof value === "object" && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export function canonicalMessageEndFromEvent(
+  event: Record<string, unknown>,
+): CanonicalMessageEndEvent | null {
+  return decodeCanonicalMessageEndEvent(event);
 }
 
 export function lifecycleFromEvent(event: Record<string, unknown>): ApplicationLifecycle {

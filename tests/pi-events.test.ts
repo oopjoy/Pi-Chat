@@ -1,14 +1,66 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { appendTerminalMessage, mergeMessageHistory, reconcilePersistedHistory } from "../src/shared/streaming-assistant";
-import { assistantMessage, lifecycleFromEvent, parseEventData, userMessage } from "../src/web/lib/pi-events";
+import { assistantMessage, canonicalMessageEndFromEvent, lifecycleFromEvent, parseEventData, userMessage } from "../src/web/lib/pi-events";
 
 test("Pi event helpers normalize lifecycle and message payloads", () => {
   assert.equal(lifecycleFromEvent({ lifecycle: "resources-reloading" }), "resources-reloading");
   assert.equal(lifecycleFromEvent({ lifecycle: "unknown" }), "idle");
   assert.deepEqual(parseEventData({ data: '{"type":"ready"}' } as MessageEvent<string>), { type: "ready" });
+  assert.equal(parseEventData({ data: '{' } as MessageEvent<string>), null);
+  assert.equal(parseEventData({ data: '[]' } as MessageEvent<string>), null);
   assert.equal(assistantMessage({ message: { role: "user", content: "no" } }), null);
   assert.deepEqual(assistantMessage({ message: { role: "assistant", content: "yes" } }), { role: "assistant", content: "yes" });
+});
+
+test("canonical terminal decoder reconstructs exact message_end fields", () => {
+  assert.deepEqual(canonicalMessageEndFromEvent({
+    type: "message_end",
+    piChatEventSchema: 1,
+    terminalKind: "assistant",
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "answer", secret: "drop me" }],
+      timestamp: 10,
+      secret: "drop me",
+    },
+    requestToken: "drop me",
+  }), {
+    type: "message_end",
+    piChatEventSchema: 1,
+    terminalKind: "assistant",
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "answer" }],
+      timestamp: 10,
+    },
+  });
+  assert.deepEqual(canonicalMessageEndFromEvent({
+    type: "message_end",
+    message: { role: "toolResult", content: "legacy", toolCallId: "call-1" },
+    secret: "drop me",
+  }), {
+    type: "message_end",
+    piChatEventSchema: 1,
+    terminalKind: "tool-result",
+    message: { role: "toolResult", content: "legacy", toolCallId: "call-1" },
+  });
+  assert.equal(canonicalMessageEndFromEvent({
+    type: "message_end",
+    piChatEventSchema: 1,
+    terminalKind: "user-echo",
+    message: { role: "assistant", content: "mismatch" },
+  }), null);
+  assert.equal(canonicalMessageEndFromEvent({ type: "message_end" }), null);
+  assert.equal(canonicalMessageEndFromEvent({
+    type: "message_end",
+    message: { role: "toolResult", content: "bad", isError: "false" },
+  }), null);
+  assert.equal(canonicalMessageEndFromEvent({
+    type: "message_end",
+    piChatEventSchema: 99,
+    message: { role: "assistant", content: "future" },
+  }), null);
 });
 
 test("thinking stream events immediately classify a transient text snapshot as private thinking", () => {

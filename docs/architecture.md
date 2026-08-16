@@ -72,7 +72,7 @@ Current ownership still centers on `src/server/app.ts` (`PiChatApp`), with progr
 | `session-control.ts` | Multi-window presence, exclusive control owner, delayed release timers |
 | `prompt-scheduler.ts` | Primary queue/dispatch, secondary queue dispatch, enqueue limits |
 | `sse-hub.ts` | SSE client map, broadcast / broadcastEach, and payload-free delivery-outcome observation after throttle/backpressure/oversize decisions |
-| `runtime-event-transition.ts` | Pure shared event-derived Runtime projection; no transport, timer, queue, binding, or provenance ownership |
+| `runtime-event-transition.ts` | Pure shared event-derived Runtime projection; no transport, timer, queue, binding, or provenance ownership. `message_end` is the first closed critical wire event: the server repairs and reconstructs its exact terminal payload before SSE, while malformed claimed terminals fail closed. |
 | `state-diagnostics.ts` | Always-on, bounded five-minute in-memory flight recorder for closed-schema server API/RPC/SSE/projection facts; export is read-only and owns no Runtime, transport, window, or Session authority |
 | `prompt-evidence-ledger.ts` | Observation-only, whole-record-bounded Prompt evidence ledger. It folds exact scheduler, RPC, and correlated Runtime facts into independent delivery-certainty and execution-status axes; it is never consulted for scheduling, Queue, recovery, HTTP, or UI authority. |
 | `stream-observability.ts` | Bounded aggregate counters for hot SseHub `message_update` transport outcomes, including no-client, oversized-substitute, and write-error evidence; emits only checkpoint/terminal summaries and owns no delivery authority |
@@ -129,7 +129,7 @@ The step 3 ownership boundary and staged migration are defined in [`frontend-sta
 | `hooks/use-live-message.ts` | Stream throttle |
 | `hooks/use-background-subagents.ts` | Abortable Session-scoped read-only polling; 2s foreground and slower hidden-page cadence |
 | `components/SubagentStatusControl.tsx` | Accessible top-bar trigger/popover for safe background-step projections; no child navigation or controls |
-| `lib/pi-events.ts` | Event parsing |
+| `lib/pi-events.ts` | Total EventSource JSON parsing plus the closed `message_end` decoder. Other Runtime events remain on their existing compatibility path until server normalization can delete an equivalent browser derivation. |
 | `lib/session-view-cache.ts` | Client-side view LRU |
 | `lib/active-sessions.ts` | Writable/active session helpers |
 | `lib/state-diagnostics.ts` | Always-on page-local bounded diagnostic lane, per-export Session aliasing, and combined JSON download; no persistence or pane authority |

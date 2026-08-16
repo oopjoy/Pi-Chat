@@ -251,18 +251,108 @@ test("empty terminal assistant SSE events retain the cumulative answer payload",
     await (app as unknown as { ensurePrimaryIdentity(): Promise<void> }).ensurePrimaryIdentity();
     primary.emit({ type: "agent_start" });
     primary.emit({ type: "message_update", message: { role: "assistant", content: "cumulative answer", timestamp: 1 } });
-    primary.emit({ type: "message_end", message: { role: "assistant", content: [], timestamp: 2 } });
+    primary.emit({
+      type: "message_end",
+      message: { role: "assistant", content: [], timestamp: 2, secret: "drop me" },
+      requestToken: "drop me",
+    });
     primary.emit({ type: "agent_settled" });
     primary.emit({ type: "agent_start" });
     primary.emit({ type: "message_end", message: { role: "assistant", content: "second answer", timestamp: 3 } });
+    const ownerBeforeMalformed = app as unknown as {
+      primaryPendingTerminalMessages: unknown[];
+      liveMessage?: unknown;
+      runGenerationsBySession: Map<string, number>;
+    };
+    const pendingBeforeMalformed = ownerBeforeMalformed.primaryPendingTerminalMessages;
+    const liveBeforeMalformed = ownerBeforeMalformed.liveMessage;
+    const generationBeforeMalformed = ownerBeforeMalformed.runGenerationsBySession.values().next().value;
+    primary.emit({ type: "message_end", message: { content: "malformed" } });
+    assert.strictEqual(ownerBeforeMalformed.primaryPendingTerminalMessages, pendingBeforeMalformed);
+    assert.strictEqual(ownerBeforeMalformed.liveMessage, liveBeforeMalformed);
+    assert.equal(ownerBeforeMalformed.runGenerationsBySession.values().next().value, generationBeforeMalformed);
     const terminals = frames.filter((frame) => frame.includes('"type":"message_end"'));
     assert.match(terminals[0] || "", /"content":"cumulative answer"/);
     assert.match(terminals[0] || "", /"piChatSessionId"/);
     assert.match(terminals[0] || "", /"piChatRunEpoch":"[A-Za-z0-9_-]+"/);
     assert.match(terminals[0] || "", /"piChatRunGeneration":1/);
     assert.match(terminals[1] || "", /"piChatRunGeneration":2/);
+    assert.equal(terminals.length, 2, "malformed known terminal events fail closed");
+    const firstPayload = JSON.parse((terminals[0].split("data: ")[1] || "{}").trim()) as Record<string, unknown>;
+    assert.equal(firstPayload.piChatEventSchema, 1);
+    assert.equal(firstPayload.terminalKind, "assistant");
+    assert.equal(JSON.stringify(firstPayload).includes("drop me"), false);
+    assert.ok((app as unknown as {
+      stateDiagnostics: { snapshot(): { entries: Array<{ category: string; name: string; details: Record<string, unknown> }> } };
+    }).stateDiagnostics.snapshot().entries.some((entry) =>
+      entry.category === "rpc-event"
+      && entry.name === "rejected"
+      && entry.details.decisionReason === "malformed-critical-event"
+    ));
   } finally {
     clients.clear();
+    await app.close();
+  }
+});
+
+test("malformed Secondary terminals do not mutate owner state or LRU recency", async () => {
+  const primaryPath = "C:\\sessions\\primary-terminal-owner.jsonl";
+  const secondaryPath = "C:\\sessions\\secondary-terminal-owner.jsonl";
+  const primaryId = idForPath(primaryPath);
+  const secondaryId = idForPath(secondaryPath);
+  const primary = new FakeRpc(primaryPath, "primary-terminal-owner");
+  const secondary = new FakeRpc(secondaryPath, "secondary-terminal-owner");
+  let now = 1_000;
+  const summaries = [
+    { id: primaryId, sessionId: "primary-terminal-owner", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 2, messageCount: 1, active: true },
+    { id: secondaryId, sessionId: "secondary-terminal-owner", name: "Secondary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: false },
+  ];
+  const sessions = {
+    list: async () => summaries,
+    pathForId: (candidate: string) => candidate === primaryId ? primaryPath : candidate === secondaryId ? secondaryPath : null,
+    summaryForId: (candidate: string) => summaries.find((summary) => summary.id === candidate) || null,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({
+    rpc: primary as unknown as PiRpcClient,
+    createRpc: () => secondary as unknown as PiRpcClient,
+    sessions,
+    resources: {} as ResourceManager,
+    cwd: process.cwd(),
+    webRoot: process.cwd(),
+    now: () => now,
+  });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    await fetch(`http://127.0.0.1:${address.port}/api/bootstrap`);
+    assert.equal((await fetch(`http://127.0.0.1:${address.port}/api/sessions/${secondaryId}/warm`, { method: "POST" })).status, 200);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const internals = app as unknown as {
+      runtimePool: { get(id: string): {
+        lastUsedAt: number;
+        liveMessage?: unknown;
+        pendingTerminalMessages: unknown[];
+      } | undefined };
+      runGenerationsBySession: Map<string, number>;
+    };
+    const runtime = internals.runtimePool.get(secondaryId)!;
+    runtime.liveMessage = { role: "assistant", content: "pending" };
+    runtime.pendingTerminalMessages = [{ role: "assistant", content: "existing" }];
+    internals.runGenerationsBySession.set(secondaryId, 4);
+    const pendingBefore = runtime.pendingTerminalMessages;
+    const liveBefore = runtime.liveMessage;
+    const lastUsedBefore = runtime.lastUsedAt;
+    now = 2_000;
+    secondary.emit({ type: "message_end", message: { content: "missing role" } });
+    assert.strictEqual(runtime.pendingTerminalMessages, pendingBefore);
+    assert.strictEqual(runtime.liveMessage, liveBefore);
+    assert.equal(runtime.lastUsedAt, lastUsedBefore);
+    assert.equal(internals.runGenerationsBySession.get(secondaryId), 4);
+  } finally {
+    server.close();
     await app.close();
   }
 });

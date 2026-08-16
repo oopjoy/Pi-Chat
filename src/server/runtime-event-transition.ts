@@ -1,3 +1,4 @@
+import { canonicalMessageEndEvent } from "../shared/runtime-events.js";
 import { appendTerminalMessage, normalizeStreamingAssistantMessage } from "../shared/streaming-assistant.js";
 import type { ExtensionUiRequest, GateMode, PiMessage } from "../shared/types.js";
 
@@ -32,7 +33,7 @@ export type RuntimeEventEffect =
 
 export type RuntimeEventTransition = {
   state: RuntimeEventState;
-  broadcastEvent: Record<string, unknown>;
+  broadcastEvent: Record<string, unknown> | null;
   effects: RuntimeEventEffect[];
 };
 
@@ -79,21 +80,26 @@ export function transitionRuntimeEvent(
   if (type === "compaction_end" && event.aborted === false) effects.push({ type: "context-pending" });
   if ((type === "message_start" || type === "message_update") && event.message && typeof event.message === "object" && (event.message as PiMessage).role === "assistant")
     state = { ...state, liveMessage: normalizeStreamingAssistantMessage(event.message as PiMessage, event.assistantMessageEvent) };
-  if (type === "message_end" && event.message && typeof event.message === "object") {
+  if (type === "message_end") {
+    if (!event.message || typeof event.message !== "object")
+      return { state, broadcastEvent: null, effects: [] };
     const raw = event.message as PiMessage;
     const hasPayload = typeof raw.content === "string" ? raw.content.length > 0 : Array.isArray(raw.content) && raw.content.length > 0;
     const message = raw.role === "assistant" && !hasPayload && state.liveMessage
       ? { ...state.liveMessage, ...raw, content: state.liveMessage.content }
       : raw;
-    broadcastEvent = { ...event, message };
+    const canonical = canonicalMessageEndEvent(message);
+    if (!canonical) return { state, broadcastEvent: null, effects: [] };
+    broadcastEvent = canonical;
+    const terminal = canonical.message;
     const pending = state.pendingTerminalSessionId && state.pendingTerminalSessionId !== sessionId
       ? []
       : state.pendingTerminalMessages;
     state = {
       ...state,
       pendingTerminalSessionId: sessionId,
-      pendingTerminalMessages: message.role === "user" ? pending : appendTerminalMessage(pending, message),
-      ...(message.role === "assistant" ? { liveMessage: undefined } : null),
+      pendingTerminalMessages: terminal.role === "user" ? pending : appendTerminalMessage(pending, terminal),
+      ...(terminal.role === "assistant" ? { liveMessage: undefined } : null),
     };
   }
   if (type === "tool_execution_start") state = { ...state, toolStatus: `正在运行工具：${String(event.toolName || "unknown")}` };

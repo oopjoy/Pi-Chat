@@ -9,6 +9,7 @@ import {
 } from "../shared/streaming-assistant.js";
 import { compareSessionsByLastUserPrompt } from "../shared/session-order.js";
 import type { PromptEvidenceFactKind } from "../shared/prompt-evidence.js";
+import { decodeCanonicalMessageEndEvent } from "../shared/runtime-events.js";
 import { shouldRetainStateDiagnosticEvent } from "../shared/state-diagnostics.js";
 import type {
   ApplicationLifecycle,
@@ -1249,12 +1250,22 @@ export class PiChatApp {
     // render them; forwarding every snapshot creates quadratic SSE traffic and
     // can freeze Chromium's main thread during long or self-referential output.
     if (event.type === "tool_execution_update") return;
+    const allowedEvent = event.type === "message_end"
+      ? decodeCanonicalMessageEndEvent(event)
+      : event;
+    if (!allowedEvent) {
+      this.traceState("rpc-event", "rejected", sessionId, {
+        eventType: "message_end",
+        decisionReason: "malformed-critical-event",
+      }, undefined, runGeneration);
+      return;
+    }
     const {
       piChatSessionId: _untrustedSessionId,
       piChatRunEpoch: _untrustedRunEpoch,
       piChatRunGeneration: _untrustedRunGeneration,
       ...runtimeEvent
-    } = event;
+    } = allowedEvent;
     this.broadcast({
       ...runtimeEvent,
       piChatSessionId: sessionId,
@@ -1888,6 +1899,7 @@ export class PiChatApp {
       this.runtimeEventState(sessionId, runtime),
       event,
     );
+    if (!transition.broadcastEvent) return transition;
     const state = transition.state;
     const primary = !runtime;
     this.runGenerationsBySession.set(sessionId, state.runGeneration);
@@ -2193,12 +2205,19 @@ export class PiChatApp {
       event,
       generation,
     );
-    this.runtimePool.touch(runtime);
     const transition = this.applyRuntimeEventTransition(
       runtime.id,
       runtime,
       event,
     );
+    if (!transition.broadcastEvent) {
+      this.traceState("rpc-event", "rejected", runtime.id, {
+        eventType: type || "unknown",
+        decisionReason: "malformed-critical-event",
+      }, generation);
+      return;
+    }
+    this.runtimePool.touch(runtime);
     if (type === "agent_start")
       this.traceActivePrompt(
         "agent-start",
@@ -2750,6 +2769,13 @@ export class PiChatApp {
       undefined,
       event,
     );
+    if (!transition.broadcastEvent) {
+      this.traceState("rpc-event", "rejected", sessionId, {
+        eventType: type || "unknown",
+        decisionReason: "malformed-critical-event",
+      }, generation);
+      return;
+    }
     if (type === "agent_start")
       this.traceActivePrompt(
         "agent-start",

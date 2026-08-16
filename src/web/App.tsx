@@ -72,6 +72,7 @@ import {
 } from "./lib/gate-mode";
 import {
   assistantMessage,
+  canonicalMessageEndFromEvent,
   lifecycleFromEvent,
   parseEventData,
   userMessage,
@@ -355,13 +356,6 @@ function newerPrimaryReadiness(
 function modelCapabilityKey(model: ModelInfo | null | undefined): string {
   if (!model) return "";
   return [model.provider, model.id, ...(model.input || [])].join("\u0000");
-}
-
-function hasAssistantPayload(message: PiMessage | null): message is PiMessage {
-  if (!message) return false;
-  return typeof message.content === "string"
-    ? message.content.length > 0
-    : Array.isArray(message.content) && message.content.length > 0;
 }
 
 export function App() {
@@ -2659,6 +2653,13 @@ export function App() {
       if (document.visibilityState !== "hidden" && document.hasFocus())
         void api.renewPresence().catch(() => undefined);
       const ready = parseEventData(rawEvent);
+      if (!ready) {
+        recordSseRejectionDiagnostic({
+          eventType: "unknown",
+          decisionReason: "malformed-json",
+        });
+        return;
+      }
       const readyRunEpoch =
         typeof ready.piChatRunEpoch === "string" ? ready.piChatRunEpoch : "";
       const serverEpochChanged = Boolean(
@@ -2853,13 +2854,25 @@ export function App() {
       // the server reuses its adopted state and does not issue another get_state.
       startIdleRecovery(serverEpochChanged, readyNeedsMetadataRefresh);
     },
-    [cancelPendingNavigation, clearStoppingForSession, startIdleRecovery],
+    [
+      cancelPendingNavigation,
+      clearStoppingForSession,
+      recordSseRejectionDiagnostic,
+      startIdleRecovery,
+    ],
   );
 
   const handlePiEvent = useCallback(
     (rawEvent: Event, source: EventSource) => {
       lastEventFrameAtRef.current = Date.now();
       const event = parseEventData(rawEvent);
+      if (!event) {
+        recordSseRejectionDiagnostic({
+          eventType: "unknown",
+          decisionReason: "malformed-json",
+        });
+        return;
+      }
       const type = String(event.type || "");
       sseFloodCountRef.current = 0;
       if (type === "pi_chat_heartbeat") return;
@@ -2893,6 +2906,18 @@ export function App() {
         Number.isFinite(event.piChatRunGeneration)
           ? event.piChatRunGeneration
           : undefined;
+      const terminalEvent = type === "message_end"
+        ? canonicalMessageEndFromEvent(event)
+        : null;
+      if (type === "message_end" && !terminalEvent) {
+        recordSseRejectionDiagnostic({
+          sessionId: eventSessionId,
+          runGeneration: eventRunGeneration,
+          eventType: type,
+          decisionReason: "malformed-critical-event",
+        });
+        return;
+      }
       if (eventSessionId && typeof eventRunGeneration === "number") {
         const latest =
           sessionRunGenerationsRef.current.get(eventSessionId) || 0;
@@ -3113,53 +3138,41 @@ export function App() {
             authority: capturePaneAuthority(eventSessionId),
             runGeneration: eventRunGeneration ?? -1,
           });
-      } else if (type === "message_end") {
-        const terminal =
-          event.message && typeof event.message === "object"
-            ? (event.message as PiMessage)
-            : null;
-        if (terminal?.role === "assistant") {
+      } else if (type === "message_end" && terminalEvent) {
+        const terminal = terminalEvent.message;
+        if (terminalEvent.terminalKind === "assistant") {
           if (eventSessionId)
             releasePromptBusy(
               eventSessionId,
               eventRunGeneration,
               eventRunEpoch,
             );
-          const pendingAssistant = viewingEventSession
-            ? drainPendingLiveMessage()?.message || null
-            : null;
-          const terminalAssistant = assistantMessage(event);
-          const assistant = hasAssistantPayload(terminalAssistant)
-            ? terminalAssistant
-            : pendingAssistant || terminalAssistant;
-          if (assistant && eventSessionId) {
+          // The server owns terminal repair. Cancel a pending browser throttle,
+          // but never substitute its local draft for the canonical terminal.
+          if (viewingEventSession) clearPendingLiveMessage();
+          if (eventSessionId) {
             terminalAssistantSessionIdsRef.current.add(eventSessionId);
-            appendTerminalSessionCache(eventSessionId, assistant);
+            appendTerminalSessionCache(eventSessionId, terminal);
           }
-          if (viewingEventSession && assistant) {
+          if (viewingEventSession) {
             dispatchPane({
               type: "TERMINAL_MESSAGE_COMMITTED",
               sessionId: eventSessionId,
-              message: assistant,
+              message: terminal,
             });
             if (typeof eventRunGeneration === "number")
               streamDiagnosticsRef.current?.terminalAssistantCommitted({
                 sessionId: eventSessionId,
                 runGeneration: eventRunGeneration,
               });
-          } else if (viewingEventSession)
-            dispatchPane({
-              type: "LIVE_MESSAGE_UPDATED",
-              sessionId: eventSessionId,
-              message: null,
-            });
+          }
         } else {
           // User message_end is a transport echo of the prompt. The sender's
           // LocalUserTurn and the later JSONL view already own that row; caching
           // this echo can duplicate it when Pi assigns a nearby timestamp.
-          if (terminal && terminal.role !== "user" && eventSessionId)
+          if (terminalEvent.terminalKind !== "user-echo" && eventSessionId)
             appendTerminalSessionCache(eventSessionId, terminal);
-          if (viewingEventSession && terminal?.role === "toolResult")
+          if (viewingEventSession && terminalEvent.terminalKind === "tool-result")
             dispatchPane({
               type: "TOOL_RESULT_COMMITTED",
               sessionId: eventSessionId,
