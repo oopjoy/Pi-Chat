@@ -61,7 +61,7 @@ export function LightbulbIcon(props: IconProps) {
 }
 
 export function LightningIcon(props: IconProps) {
-  return <LineIcon {...props} strokeWidth="1.9"><path d="m13.7 2.8-8 10.6h5.7l-1.1 7.8 8-10.6h-5.7Z" /></LineIcon>;
+  return <LineIcon {...props}><path d="m13.7 2.8-8 10.6h5.7l-1.1 7.8 8-10.6h-5.7Z" /></LineIcon>;
 }
 
 export function FolderIcon(props: IconProps) {

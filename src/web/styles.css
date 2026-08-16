@@ -612,7 +612,7 @@ details.conversation-process { display: block; padding: 0; }
 .composer-model-select .compact-select-trigger { padding-left: 4px; }
 .thinking-control { width: 64px; min-width: 64px; flex: 0 1 64px; }
 .thinking-icon { width: 15px; height: 15px; flex: 0 0 auto; color: var(--muted); }
-.thinking-icon.is-active { color: #c99110; }
+.thinking-icon.is-active, .composer-usage .fast-mode-indicator { color: #c99110; }
 .composer-controls .compact-select { border: 0; background: transparent; }
 .composer-controls .compact-select-trigger { height: 28px; justify-content: center; padding-right: 4px; }
 .composer-controls .compact-select-trigger > span { flex: 0 1 auto; text-align: center; }
@@ -628,8 +628,8 @@ details.conversation-process { display: block; padding: 0; }
 .composer-controls .compact-select-check { width: 15px; flex-basis: 15px; }
 .composer-usage { width: auto; min-width: 76px; height: 28px; justify-content: center; padding: 2px 8px; border-radius: 7px; }
 .composer-usage > span { min-width: 0; flex: 0 1 auto; }
-.composer-usage .fast-mode-indicator { display: grid; width: 15px; height: 15px; min-width: 15px; flex: 0 0 15px; place-items: center; color: var(--status-yellow); }
-.fast-mode-indicator svg { width: 15px; height: 15px; filter: drop-shadow(0 0 2px color-mix(in srgb, var(--status-yellow), transparent 65%)); }
+.composer-usage .fast-mode-indicator { display: grid; width: 15px; height: 15px; min-width: 15px; flex: 0 0 15px; place-items: center; }
+.fast-mode-indicator svg { width: 15px; height: 15px; }
 .composer-controls .usage-card { top: auto; right: 0; bottom: calc(100% + 8px); }
 .attachment-control { position: relative; flex: 0 0 auto; }
 .attachment-button { display: grid; width: 28px; height: 28px; place-items: center; padding: 0; border: 1px solid var(--line-strong); border-radius: 50%; background: transparent; color: var(--muted); cursor: pointer; line-height: 1; transition: border-color .12s ease, background-color .12s ease, color .12s ease; }
