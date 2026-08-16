@@ -6125,8 +6125,9 @@ export function App() {
     const childOriginated = Boolean(viewed && targetSessionId && viewed !== targetSessionId);
     // Cold history, child views, and a superseded setting request only stage a
     // per-target preference. The eventual prompt path owns application to Pi,
-    // so a setting click never preempts a concurrent prompt.
-    if (localDraftRef.current || runtimeStatus !== "active" || childOriginated || settingsBusy || state.isCompacting) {
+    // so a setting click never preempts a concurrent prompt. Staging is local
+    // and never blocked by an in-flight settings request.
+    if (localDraftRef.current || runtimeStatus !== "active" || childOriginated || state.isCompacting) {
       if (model) {
         stageSessionPref({ model });
         dispatchPane({
@@ -6189,7 +6190,7 @@ export function App() {
     const viewed = viewedSessionIdRef.current;
     const targetSessionId = composerTargetForViewedSession();
     const childOriginated = Boolean(viewed && targetSessionId && viewed !== targetSessionId);
-    if (localDraftRef.current || runtimeStatus !== "active" || childOriginated || settingsBusy || state.isCompacting) {
+    if (localDraftRef.current || runtimeStatus !== "active" || childOriginated || state.isCompacting) {
       stageSessionPref({ thinkingLevel: level });
       dispatchPane({
         type: "PREFERENCES_STAGED",
@@ -6839,8 +6840,9 @@ export function App() {
     const childOriginated = Boolean(viewed && viewed !== sessionId);
     // A cold history pane, a child transcript, and local preparation stage Gate
     // for the target prompt instead of issuing an unauthorized command against
-    // a Runtime the pane does not own.
-    if (runtimeStatus !== "active" || childOriginated || settingsBusy || state.isCompacting) {
+    // a Runtime the pane does not own. Staging is local and never blocked by an
+    // in-flight settings request.
+    if (runtimeStatus !== "active" || childOriginated || state.isCompacting) {
       stageGateMode(sessionId, mode);
       setNotice(`已选择 ${mode === "open" ? "放行" : "严格"}，发送时生效`);
       return;
