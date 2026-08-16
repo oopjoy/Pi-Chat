@@ -2,6 +2,10 @@ import type { PiContentBlock, PiMessage } from "../../shared/types";
 
 const REPEATED_ANALYSIS_CHANNEL = /code\*\*\/analysis(?:\s*code\*\*\/analysis){2,}/;
 const LEAKED_THINKING_TITLE = /^\s*\*\*(?:analyzing|planning|designing|checking|reviewing|inspecting|examining|looking|reading|searching|considering|evaluating|investigating|identifying|locating|confirming|preparing|writing|implementing|fixing|optimizing|debugging|testing)\b[^*\r\n]{0,160}(?:\*\*)?\s*$/i;
+// Some providers can emit an internal task-restatement as visible assistant
+// text. Keep the match deliberately narrow: a normal quoted sentence lacks
+// the private-process continuation ("Let me" or "I need to").
+const LEAKED_PRIVATE_PROCESS_PREAMBLE = /^\s*The user wants me to\b(?=[\s\S]*\b(?:let me|i need to)\b)[\s\S]*$/i;
 
 /**
  * Remove a provider's private-progress-title dump without touching ordinary
@@ -50,6 +54,7 @@ function stripLeakedThinkingTitleRun(value: string): string {
  */
 export function sanitizeAssistantText(value: string): string {
   const titleCleaned = stripLeakedThinkingTitleRun(value);
+  if (LEAKED_PRIVATE_PROCESS_PREAMBLE.test(titleCleaned)) return "";
   const match = REPEATED_ANALYSIS_CHANNEL.exec(titleCleaned);
   if (!match || match.index === undefined) return titleCleaned;
 

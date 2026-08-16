@@ -41,6 +41,16 @@ test("removes repeated private thinking-title dumps, including a clipped final t
   assert.equal(sanitizeAssistantText(`visible before\n${leaked}\nvisible after`), "visible before\nvisible after");
 });
 
+test("removes a leaked private process restatement", () => {
+  const leaked = "The user wants me to review the completed Composer work and compare it with DeepSeek harness. Let me thoroughly review the implementation first.";
+  assert.equal(sanitizeAssistantText(leaked), "");
+});
+
+test("preserves a non-process sentence with the same opening words", () => {
+  const ordinary = "The user wants me to choose a blue theme.";
+  assert.equal(sanitizeAssistantText(ordinary), ordinary);
+});
+
 test("preserves a short ordinary Markdown outline", () => {
   const outline = [
     "**Planning the release**",
