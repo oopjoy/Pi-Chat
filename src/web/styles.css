@@ -337,6 +337,13 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 }
 .topbar-context { display: flex; min-width: 0; flex: 1 1 auto; align-items: baseline; overflow: hidden; }
 .topbar-title { min-width: 0; overflow: hidden; color: var(--text); font-size: 13px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.topbar-breadcrumb { display: flex; min-width: 0; align-items: center; gap: 6px; overflow: hidden; color: var(--muted); font-size: 13px; line-height: 1.4; white-space: nowrap; }
+.topbar-breadcrumb-link, .topbar-breadcrumb-current { min-width: 0; overflow: hidden; font: inherit; text-overflow: ellipsis; white-space: nowrap; }
+.topbar-breadcrumb-link { max-width: 180px; padding: 0; border: 0; background: transparent; color: var(--muted); cursor: pointer; text-decoration: none; }
+.topbar-breadcrumb-link:hover { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
+.topbar-breadcrumb-link:focus-visible { border-radius: 3px; outline: 2px solid color-mix(in srgb, var(--accent), transparent 35%); outline-offset: 2px; color: var(--text); }
+.topbar-breadcrumb-current { max-width: 260px; flex: 0 1 auto; color: var(--text); font-weight: 650; }
+.topbar-breadcrumb-separator { flex: 0 0 auto; color: var(--text-faint); }
 .topbar-controls { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; }
 .usage-pill { position: relative; display: inline-flex; width: 104px; height: 30px; align-items: center; gap: 6px; padding: 3px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; outline: 0; }
 .usage-pill > span { flex: 1; text-align: center; }
@@ -949,7 +956,9 @@ button.ask-questionnaire-option:hover:not(:disabled) { background: var(--surface
   .extension-dialog-actions button { min-width: 72px; flex: 1 1 72px; }
   .usage-pill:not(.composer-usage) { display: none; }
   .composer-usage { display: inline-flex; min-width: 66px; }
-  .topbar-title { font-size: 12px; }
+  .topbar-title, .topbar-breadcrumb { font-size: 12px; }
+  .topbar-breadcrumb-link { max-width: 92px; }
+  .topbar-breadcrumb-current { max-width: 136px; }
   .edit-diff-sidebar { position: absolute; z-index: 70; top: 0; right: 0; bottom: 0; width: min(var(--edit-diff-width, 460px), calc(100vw - 56px)); min-width: min(320px, calc(100vw - 56px)); max-width: calc(100vw - 56px); flex-basis: auto; margin-right: 0; box-shadow: -12px 0 28px rgba(8, 16, 30, .18); transition: transform .22s ease, visibility 0s linear .22s; }
   .edit-diff-sidebar.is-open { width: min(var(--edit-diff-width, 460px), calc(100vw - 56px)); min-width: min(320px, calc(100vw - 56px)); flex-basis: auto; transition-delay: 0s; }
   :root { --chat-column-gutter: 20px; }

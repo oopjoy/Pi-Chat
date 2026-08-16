@@ -111,6 +111,16 @@ test("clicking a verified Subagent row opens its read-only transcript without wa
     title: "Child confirmation",
     piChatSessionId: childId,
   };
+  const parentView: SessionViewData = {
+    ...draftView,
+    session: { ...bootstrap.sessions[0] },
+    state: { ...bootstrap.state },
+    messages: [{ role: "assistant", content: "parent history" }],
+    messageTotal: 1,
+    turnTotal: 0,
+    runtimeStatus: "active",
+    isActive: true,
+  };
   const childReads: Array<[string, string]> = [];
   const warmed: string[] = [];
   const promptTargets: string[] = [];
@@ -139,6 +149,10 @@ test("clicking a verified Subagent row opens its read-only transcript without wa
     viewBackgroundSubagent: async (parentId: string, targetId: string) => {
       childReads.push([parentId, targetId]);
       return childView;
+    },
+    viewSession: async (id: string) => {
+      assert.equal(id, activeId);
+      return parentView;
     },
     warmSession: async (id: string) => {
       warmed.push(id);
@@ -175,7 +189,13 @@ test("clicking a verified Subagent row opens its read-only transcript without wa
     const row = dom.window.document.querySelector<HTMLButtonElement>('.subagent-status-row[role="treeitem"]')!;
     await act(async () => { row.click(); await Promise.resolve(); await Promise.resolve(); });
     assert.deepEqual(childReads, [[activeId, childId]]);
-    assert.equal(dom.window.document.querySelector(".topbar-title")?.textContent, "review child");
+    assert.deepEqual(
+      [...dom.window.document.querySelectorAll(".topbar-breadcrumb-link, .topbar-breadcrumb-current")]
+        .map((item) => item.textContent),
+      ["Active", "review child"],
+      "a child transcript replaces the ordinary title with its verified parent trail",
+    );
+    assert.equal(dom.window.document.querySelector(".topbar-breadcrumb-current")?.textContent, "review child");
     assert.match(dom.window.document.body.textContent || "", /child findings/);
     assert.equal([...dom.window.document.querySelectorAll(".session-item")].some((item) => item.textContent?.includes("review child")), false);
     assert.equal(warmed.length, 0);
@@ -207,6 +227,19 @@ test("clicking a verified Subagent row opens its read-only transcript without wa
     assert.equal([...dom.window.document.querySelectorAll(".session-item")].some((item) => item.textContent?.includes("review child")), false);
     assert.equal(dom.window.document.querySelector('[aria-label*="重命名 review child"], [aria-label*="删除 review child"]'), null);
     assert.equal(textarea.disabled, false, "the child transcript remains read-only while its parent-targeted composer stays editable");
+    const parentBreadcrumb = dom.window.document.querySelector<HTMLButtonElement>(
+      '.topbar-breadcrumb-link[aria-label="返回父对话：Active"]',
+    );
+    assert.ok(parentBreadcrumb, "the verified ordinary parent is navigable from the child trail");
+    const childReadsBeforeParentNavigation = childReads.length;
+    await act(async () => {
+      parentBreadcrumb.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(dom.window.document.querySelector(".topbar-title")?.textContent, "Active");
+    assert.equal(dom.window.document.querySelector(".topbar-breadcrumb"), null);
+    assert.equal(childReads.length, childReadsBeforeParentNavigation, "returning to a normal parent never rereads or activates the child");
   } finally {
     restoreApi();
     await act(async () => root.unmount());
@@ -288,12 +321,21 @@ test("nested Subagent addresses rehydrate in order after a child read miss and l
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     await act(async () => dom.window.document.querySelector<HTMLButtonElement>(".subagent-status-trigger")!.click());
     await act(async () => { dom.window.document.querySelector<HTMLButtonElement>('.subagent-status-row[role="treeitem"]')!.click(); await Promise.resolve(); await Promise.resolve(); });
-    assert.equal(dom.window.document.querySelector(".topbar-title")?.textContent, "child");
+    assert.deepEqual(
+      [...dom.window.document.querySelectorAll(".topbar-breadcrumb-link, .topbar-breadcrumb-current")]
+        .map((item) => item.textContent),
+      ["Active", "child"],
+    );
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     await act(async () => dom.window.document.querySelector<HTMLButtonElement>(".subagent-status-trigger")!.click());
     const catalogsBeforeGrandchild = catalogCalls.length;
     await act(async () => { dom.window.document.querySelector<HTMLButtonElement>('.subagent-status-row[role="treeitem"]')!.click(); await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); });
-    assert.equal(dom.window.document.querySelector(".topbar-title")?.textContent, "grandchild");
+    assert.deepEqual(
+      [...dom.window.document.querySelectorAll(".topbar-breadcrumb-link, .topbar-breadcrumb-current")]
+        .map((item) => item.textContent),
+      ["Active", "child", "grandchild"],
+      "nested child navigation keeps every verified parent in order",
+    );
     assert.match(dom.window.document.body.textContent || "", /grandchild answer/);
     assert.equal(childReads.filter((edge) => edge === `${childId}/${grandchildId}`).length, 2, "404 retries only after ordered catalog hydration");
     const grandchildHydration = catalogCalls.slice(catalogsBeforeGrandchild);
@@ -329,6 +371,23 @@ test("nested Subagent addresses rehydrate in order after a child read miss and l
     assert.equal(mappings.has(`${activeId}/${childId}`), true);
     assert.equal(mappings.has(`${childId}/${grandchildId}`), true);
     assert.equal([...dom.window.document.querySelectorAll(".session-item")].some((item) => /child|grandchild/.test(item.textContent || "")), false);
+    const childBreadcrumb = dom.window.document.querySelector<HTMLButtonElement>(
+      '.topbar-breadcrumb-link[aria-label="返回父对话：child"]',
+    );
+    assert.ok(childBreadcrumb, "a nested trail exposes its intermediate verified parent");
+    await act(async () => {
+      childBreadcrumb.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.deepEqual(
+      [...dom.window.document.querySelectorAll(".topbar-breadcrumb-link, .topbar-breadcrumb-current")]
+        .map((item) => item.textContent),
+      ["Active", "child"],
+      "an intermediate breadcrumb returns to that read-only parent transcript",
+    );
+    assert.match(dom.window.document.body.textContent || "", /child answer/);
+    assert.deepEqual(warmed, [activeId], "breadcrumb return never warms an intermediate child Runtime");
   } finally {
     restoreApi();
     await act(async () => root.unmount());

@@ -5931,6 +5931,12 @@ export function App() {
     void viewSession(childSessionId, label);
   };
 
+  /** Breadcrumbs only contain server-verified parent edges retained above. */
+  const navigateSubagentAncestor = (sessionId: string, label: string) => {
+    if (!/^[a-f0-9]{20}$/.test(sessionId)) return;
+    void viewSession(sessionId, label);
+  };
+
   const createSession = () => {
     if (buildIdentityMismatch) return;
     cancelPendingNavigation();
@@ -7013,6 +7019,32 @@ export function App() {
     ...sessions,
   ]);
   const displayedConversationName = paneLoading?.name || conversationName;
+  const topBarSessionId = paneLoading?.sessionId || viewedSessionId;
+  /** Build a bounded root-to-leaf child path exclusively from verified parent edges. */
+  const subagentBreadcrumb = (() => {
+    if (!topBarSessionId || !subagentAddressesRef.current.has(topBarSessionId))
+      return undefined;
+    const trail: Array<{ sessionId: string; label: string }> = [];
+    const visited = new Set<string>();
+    let cursor = topBarSessionId;
+    while (cursor) {
+      if (visited.has(cursor) || trail.length >= 64) return undefined;
+      visited.add(cursor);
+      const address = subagentAddressesRef.current.get(cursor);
+      if (address) {
+        trail.push({ sessionId: cursor, label: address.label || "子代理" });
+        cursor = address.parentSessionId;
+        continue;
+      }
+      const parent = sessions.find((session) => session.id === cursor);
+      trail.push({
+        sessionId: cursor,
+        label: parent?.name || (cursor === viewedSessionId ? conversationName : "父对话"),
+      });
+      break;
+    }
+    return trail.length > 1 ? trail.reverse() : undefined;
+  })();
   // Gate is a verified Pi Chat system component, not an optional entry in
   // Pi's transient command inventory. A cold/starting Runtime may legitimately
   // return commands: [], which must disable controls when necessary—not make
@@ -7607,7 +7639,7 @@ export function App() {
       )}
       <ConversationPane
         topBar={{
-          sessionId: paneLoading?.sessionId || viewedSessionId,
+          sessionId: topBarSessionId,
           conversationName: displayedConversationName,
           workspacePath: conversationWorkspace,
           buildIdentity: buildIdentityMismatch
@@ -7619,6 +7651,8 @@ export function App() {
           diffSidebarOpen,
           onToggleDiffSidebar: () => setDiffSidebarOpen((open) => !open),
           onOpenSubagentSession: openSubagentSession,
+          subagentBreadcrumb,
+          onNavigateSubagentAncestor: navigateSubagentAncestor,
         }}
         timelineRef={scrollRef}
         onScroll={onScroll}
