@@ -478,6 +478,8 @@ export function App() {
   const [busySessionIds, setBusySessionIds] = useState<string[]>([]);
   /** Editor-owned snapshots waiting to enter App's existing single-flight send path. */
   const [composerPendingByScope, setComposerPendingByScope] = useState<Record<string, number>>({});
+  /** A prompt raced a foreign controller after its last SSE projection. */
+  const [deferredComposerScopes, setDeferredComposerScopes] = useState<Record<string, { sawForeign: boolean }>>({});
   const updateComposerPending = useCallback((scope: string, count: number) => {
     setComposerPendingByScope((current) => {
       if ((current[scope] || 0) === count) return current;
@@ -4740,14 +4742,18 @@ export function App() {
     message: string,
     images: PromptImage[],
     delivery: PromptDelivery = "queue",
+    requestedTargetSessionId = "",
   ) => {
     if (buildIdentityMismatch) return;
     const steering = delivery === "steer";
+    if (requestedTargetSessionId && steering)
+      throw new Error("子代理视图不能向父对话发送 Steer 消息");
     if (steering && !state.isStreaming)
       throw new Error("当前对话已不再运行，无法发送 Steer 消息");
     setError("");
     stickToBottomRef.current = true;
     const initialSessionId =
+      requestedTargetSessionId ||
       viewedSessionIdRef.current ||
       (localDraftRef.current ? LOCAL_DRAFT_BUSY_ID : "");
     let busySessionId = initialSessionId;
@@ -4767,7 +4773,7 @@ export function App() {
         ? null
         : userMessage(message, images);
     const localTurn = optimisticMessage || userMessage(message, images);
-    let targetSessionId = viewedSessionIdRef.current;
+    let targetSessionId = requestedTargetSessionId || viewedSessionIdRef.current;
     let promptQueueProjectionRevision = targetSessionId
       ? queueProjectionRevisionRef.current.get(targetSessionId) || 0
       : 0;
@@ -4775,7 +4781,9 @@ export function App() {
     const promptOperationIsInCurrentRun = () =>
       runEpochGenerationRef.current === promptRunEpochGeneration;
     let promptAuthority: ReturnType<typeof capturePaneAuthority> | null =
-      targetSessionId ? capturePaneAuthority(targetSessionId) : null;
+      targetSessionId && targetSessionId === viewedSessionIdRef.current
+        ? capturePaneAuthority(targetSessionId)
+        : null;
     let promptDraftAuthority: DraftPaneAuthority | null = targetSessionId
       ? null
       : captureDraftPaneAuthority();
@@ -4796,7 +4804,15 @@ export function App() {
     let promptTerminalByEvent = false;
     let promptSubmitted = false;
     const protectLocalPrompt = (turn: PiMessage | null = localTurn) => {
-      if (!turn || !targetSessionId || protectedLocalTurn)
+      // A child transcript never receives optimistic parent turns, queue rows,
+      // or Runtime projections. The server remains the sole parent authority
+      // until that parent is explicitly viewed.
+      if (
+        !turn ||
+        !targetSessionId ||
+        targetSessionId !== viewedSessionIdRef.current ||
+        protectedLocalTurn
+      )
         return protectedLocalTurn;
       const pending = localUserTurnsRef.current.get(targetSessionId) || [];
       protectedLocalTurn = {
@@ -5550,6 +5566,10 @@ export function App() {
 
   const stopGeneration = async () => {
     if (buildIdentityMismatch) return;
+    // Child transcript identity is read-only. This guard is deliberately in
+    // the mutation path as well as the renderer so a stale button/event cannot
+    // abort a child Runtime or claim child control.
+    if (subagentAddressesRef.current.has(viewedSessionIdRef.current)) return;
     const operation = captureViewOperation();
     if (stoppingOperationTokensRef.current.has(operation.sessionId)) return;
     const operationToken = Symbol("stop-generation");
@@ -6061,31 +6081,47 @@ export function App() {
     return applyWarmReadiness(sessionId, ready, authority);
   };
 
+  const composerTargetForViewedSession = () => {
+    const viewed = viewedSessionIdRef.current;
+    return subagentAddressesRef.current.get(viewed)?.parentSessionId || viewed;
+  };
+
   const stageSessionPref = (patch: {
     model?: ModelInfo | null;
     thinkingLevel?: ThinkingLevel;
   }) => {
-    const key = localDraftRef.current ? DRAFT_PREFS_KEY : viewedSessionId;
+    const key = localDraftRef.current ? DRAFT_PREFS_KEY : composerTargetForViewedSession();
     if (!key) return;
     const current = pendingSessionPrefsRef.current.get(key) || {};
     pendingSessionPrefsRef.current.set(key, { ...current, ...patch });
   };
 
   const changeModel = async (provider: string, modelId: string) => {
-    if (buildIdentityMismatch || !provider || !modelId || settingsBusy) return;
+    if (buildIdentityMismatch || !provider || !modelId) return;
     const model = models.find(
       (candidate) =>
         candidate.provider === provider && candidate.id === modelId,
     );
-    // Cold history and local New drafts only stage preferences until the first send.
-    if (localDraftRef.current || runtimeStatus !== "active") {
+    const viewed = viewedSessionIdRef.current;
+    const targetSessionId = composerTargetForViewedSession();
+    const childOriginated = Boolean(viewed && targetSessionId && viewed !== targetSessionId);
+    const targetControl = targetSessionId === viewed
+      ? viewControl
+      : sessions.find((session) => session.id === targetSessionId);
+    const targetObserving = Boolean(
+      targetControl?.controlOwner && targetControl.controlledByThisWindow !== true,
+    );
+    // Cold history, child views, foreign controllers, and a superseded setting
+    // request only stage a per-target preference. The eventual prompt path owns
+    // application to Pi, so a setting click never preempts another window.
+    if (localDraftRef.current || runtimeStatus !== "active" || childOriginated || targetObserving || settingsBusy || state.isCompacting) {
       if (model) {
         stageSessionPref({ model });
         dispatchPane({
           type: "PREFERENCES_STAGED",
           target: localDraftRef.current
             ? { kind: "draft" }
-            : { kind: "session", sessionId: viewedSessionIdRef.current },
+            : { kind: "session", sessionId: viewed },
           model,
         });
       }
@@ -6100,6 +6136,12 @@ export function App() {
     try {
       const result = await api.setModel(provider, modelId, operation.sessionId);
       if (!viewOperationIsInCurrentRun(operation)) return;
+      const stagedModel = pendingSessionPrefsRef.current.get(operation.sessionId)?.model;
+      const superseded = Boolean(
+        stagedModel &&
+        (stagedModel.provider !== result.model?.provider || stagedModel.id !== result.model?.id),
+      );
+      if (superseded) return;
       patchSessionCache(operation.sessionId, {
         state: { model: result.model },
       });
@@ -6131,14 +6173,23 @@ export function App() {
   };
 
   const changeThinking = async (level: ThinkingLevel) => {
-    if (buildIdentityMismatch || settingsBusy) return;
-    if (localDraftRef.current || runtimeStatus !== "active") {
+    if (buildIdentityMismatch) return;
+    const viewed = viewedSessionIdRef.current;
+    const targetSessionId = composerTargetForViewedSession();
+    const childOriginated = Boolean(viewed && targetSessionId && viewed !== targetSessionId);
+    const targetControl = targetSessionId === viewed
+      ? viewControl
+      : sessions.find((session) => session.id === targetSessionId);
+    const targetObserving = Boolean(
+      targetControl?.controlOwner && targetControl.controlledByThisWindow !== true,
+    );
+    if (localDraftRef.current || runtimeStatus !== "active" || childOriginated || targetObserving || settingsBusy || state.isCompacting) {
       stageSessionPref({ thinkingLevel: level });
       dispatchPane({
         type: "PREFERENCES_STAGED",
         target: localDraftRef.current
           ? { kind: "draft" }
-          : { kind: "session", sessionId: viewedSessionIdRef.current },
+          : { kind: "session", sessionId: viewed },
         thinkingLevel: level,
       });
       setNotice(`已选择 ${level} 思考强度，发送时生效`);
@@ -6152,6 +6203,8 @@ export function App() {
     try {
       const result = await api.setThinking(level, operation.sessionId);
       if (!viewOperationIsInCurrentRun(operation)) return;
+      const stagedThinking = pendingSessionPrefsRef.current.get(operation.sessionId)?.thinkingLevel;
+      if (stagedThinking && stagedThinking !== result.level) return;
       patchSessionCache(operation.sessionId, {
         state: { thinkingLevel: result.level },
       });
@@ -6774,12 +6827,20 @@ export function App() {
   };
 
   const changeGate = async (mode: GateMode) => {
-    const sessionId = viewedSessionIdRef.current;
+    const viewed = viewedSessionIdRef.current;
+    const sessionId = composerTargetForViewedSession();
     if (buildIdentityMismatch || !sessionId) return;
-    // A cold history pane has no Runtime to mutate. Keep its intended Gate mode
-    // locally and let the next real prompt synchronize it immediately before Pi
-    // executes; selecting the control must not activate a conversation by itself.
-    if (runtimeStatus !== "active") {
+    const childOriginated = Boolean(viewed && viewed !== sessionId);
+    const targetControl = sessionId === viewed
+      ? viewControl
+      : sessions.find((session) => session.id === sessionId);
+    const targetObserving = Boolean(
+      targetControl?.controlOwner && targetControl.controlledByThisWindow !== true,
+    );
+    // A cold history pane, a child transcript, a foreign controller, and local
+    // preparation stage Gate for the target prompt instead of issuing an
+    // unauthorized command against a Runtime the pane does not own.
+    if (runtimeStatus !== "active" || childOriginated || targetObserving || settingsBusy || state.isCompacting) {
       stageGateMode(sessionId, mode);
       setNotice(`已选择 ${mode === "open" ? "放行" : "严格"}，发送时生效`);
       return;
@@ -6806,6 +6867,10 @@ export function App() {
       submittedRequest.piChatSessionId || viewedSessionIdRef.current;
     if (!sessionId) {
       setError("确认请求缺少会话标识，已拒绝发送");
+      return false;
+    }
+    if (subagentAddressesRef.current.has(sessionId)) {
+      setError("子代理对话为只读，不能提交扩展或问卷确认");
       return false;
     }
     const retryRequest = (candidate: ExtensionUiRequest | null | undefined) => {
@@ -6887,7 +6952,17 @@ export function App() {
   const viewedSession = sessions.find(
     (session) => session.id === viewedSessionId,
   );
-  const viewingSubagentSession = subagentAddressesRef.current.has(viewedSessionId);
+  const subagentComposerAddress = subagentAddressesRef.current.get(viewedSessionId);
+  const viewingSubagentSession = Boolean(subagentComposerAddress);
+  /** A child transcript is read-only; normal new prompts are addressed to its verified parent. */
+  const composerTargetSessionId = subagentComposerAddress?.parentSessionId || viewedSessionId;
+  const composerTargetControl = composerTargetSessionId === viewedSessionId
+    ? viewControl
+    : sessions.find((session) => session.id === composerTargetSessionId);
+  const composerTargetObserving = Boolean(
+    composerTargetControl?.controlOwner &&
+    composerTargetControl.controlledByThisWindow !== true,
+  );
   const currentSessionBusy = busySessionIds.includes(
     viewedSessionId || (localDraft ? LOCAL_DRAFT_BUSY_ID : ""),
   );
@@ -6896,8 +6971,52 @@ export function App() {
   const currentSessionPreparing = currentSessionBusy && !state.isStreaming;
   const composerSubmissionScope = localDraft
     ? `draft:${draftGenerationRef.current}`
-    : `session:${viewedSessionId || "none"}`;
+    : `session:${composerTargetSessionId || "none"}`;
   const composerSubmissionPending = composerPendingByScope[composerSubmissionScope] || 0;
+  const composerSubmissionDeferred = deferredComposerScopes[composerSubmissionScope];
+  useEffect(() => {
+    if (!composerSubmissionDeferred) return;
+    if (composerTargetControl?.controlledByThisWindow === true) {
+      setDeferredComposerScopes((current) => {
+        if (!current[composerSubmissionScope]) return current;
+        const next = { ...current };
+        delete next[composerSubmissionScope];
+        return next;
+      });
+      return;
+    }
+    if (composerTargetObserving && !composerSubmissionDeferred.sawForeign) {
+      setDeferredComposerScopes((current) => ({
+        ...current,
+        [composerSubmissionScope]: { sawForeign: true },
+      }));
+      return;
+    }
+    if (!composerTargetObserving && composerSubmissionDeferred.sawForeign) {
+      setDeferredComposerScopes((current) => {
+        if (!current[composerSubmissionScope]) return current;
+        const next = { ...current };
+        delete next[composerSubmissionScope];
+        return next;
+      });
+    }
+  }, [composerSubmissionDeferred, composerSubmissionScope, composerTargetObserving]);
+  const composerSubmissionPaused =
+    !mutationBlocked &&
+    (viewSwitching ||
+      currentSessionPreparing ||
+      Boolean(state.isCompacting) ||
+      composerTargetObserving ||
+      Boolean(composerSubmissionDeferred));
+  const composerSubmissionPausedMessage = composerSubmissionDeferred || composerTargetObserving
+    ? viewingSubagentSession
+      ? "父对话正在另一窗口中控制；消息已保留，控制权可用后将发送"
+      : "另一窗口正在控制此对话；消息已保留，控制权可用后将发送"
+    : state.isCompacting
+      ? "消息已保存，等待压缩完成后发送"
+      : currentSessionPreparing
+        ? "消息已保存，正在准备 Runtime 后发送"
+        : "消息已保存，等待会话切换完成后发送";
   const waitingForPi =
     !state.isStreaming &&
     (currentSessionPreparing || composerSubmissionPending > 0);
@@ -6944,9 +7063,9 @@ export function App() {
   // the permission-mode selector disappear.
   const primaryRuntimeMessage =
     primaryRuntime.status === "starting"
-      ? "Pi 正在准备；已保存的对话仍可阅读和切换。Runtime ready 后才能输入。"
+      ? "Pi 正在准备；可继续编辑消息和设置，发送会在 Runtime ready 后继续。"
       : primaryRuntime.status === "failed"
-        ? `Pi 当前不可用；仍可阅读历史。发送和 Primary 设置将在恢复前不可用。${primaryRuntime.error ? ` ${primaryRuntime.error}` : ""}${primaryRuntime.incidentId ? `（事件 ID：${primaryRuntime.incidentId}）` : ""}`
+        ? `Pi 当前不可用；仍可阅读历史并继续编辑消息和设置，发送会在恢复后继续。${primaryRuntime.error ? ` ${primaryRuntime.error}` : ""}${primaryRuntime.incidentId ? `（事件 ID：${primaryRuntime.incidentId}）` : ""}`
         : "";
   // Existing dedicated Secondary Runtimes remain independently configurable if
   // Primary later fails. For the selected Primary, a failed Runtime is still
@@ -6999,7 +7118,7 @@ export function App() {
   // A staged value can describe the next prompt in a cold history pane, but
   // never alters gateModesRef, which is the only authority for auto-allow.
   const gateMode =
-    pendingGateModes[viewedSessionId] ?? gateModes[viewedSessionId];
+    pendingGateModes[composerTargetSessionId] ?? gateModes[composerTargetSessionId];
   const effectiveControl = { ...viewedSession, ...viewControl };
   const observing = Boolean(
     effectiveControl.controlOwner && !effectiveControl.controlledByThisWindow,
@@ -7315,15 +7434,7 @@ export function App() {
     composerSteerEligible: state.isStreaming,
     composerStopVisible: state.isStreaming,
     composerSendVisible: !composerQueueMode,
-    composerDisabled:
-      loading ||
-      viewSwitching ||
-      observing ||
-      mutationBlocked ||
-      viewingSubagentSession ||
-      Boolean(state.isCompacting) ||
-      primarySessionFailed ||
-      primaryRuntimeUnavailable,
+    composerDisabled: mutationBlocked,
     stopping: stoppingCurrentSession,
   };
   const recordDiagnosticProjection = (force: boolean): void => {
@@ -7415,19 +7526,12 @@ export function App() {
       state={state}
       models={models}
       stats={stats}
-      disabled={
-        currentSessionPreparing ||
-        viewSwitching ||
-        observing ||
-        mutationBlocked ||
-        viewingSubagentSession ||
-        Boolean(state.isCompacting)
-      }
+      disabled={mutationBlocked}
       settingsBusy={settingsBusy}
       streaming={state.isStreaming}
       gateAvailable={gateAvailable}
       gateMode={gateMode}
-      primaryUnavailable={primarySettingsUnavailable}
+      primaryUnavailable={false}
       onGate={(mode) => void changeGate(mode)}
       onModel={(provider, id) => void changeModel(provider, id)}
       onThinking={(level) => void changeThinking(level)}
@@ -7646,35 +7750,17 @@ export function App() {
           onResume: resumeQueuedPrompt,
         }}
         chatInput={{
-          streaming: composerQueueMode,
-          activelyStreaming: state.isStreaming,
-          stopping: stoppingCurrentSession,
-          disabled:
-            loading ||
-            viewSwitching ||
-            observing ||
-            mutationBlocked ||
-            viewingSubagentSession ||
-            Boolean(state.isCompacting) ||
-            primarySessionFailed ||
-            primaryRuntimeUnavailable,
+          streaming: viewingSubagentSession ? false : composerQueueMode,
+          activelyStreaming: viewingSubagentSession ? false : state.isStreaming,
+          stopping: viewingSubagentSession ? false : stoppingCurrentSession,
+          // Editing is independent from runtime preparation, compaction, and
+          // foreign control. Those conditions pause only the accepted snapshot.
+          disabled: mutationBlocked,
           disabledPlaceholder: buildIdentityMismatch
             ? "网页与服务构建不一致；请刷新页面后再提交操作"
             : lifecycleBlocked
               ? "Pi Chat 正在执行全局维护，暂时不能提交新操作"
-              : viewingSubagentSession
-                ? "子代理对话为只读；返回主对话继续操作"
-                : observing
-                ? "此对话正在另一窗口中控制；点击“接管控制”后可操作"
-                : primarySessionFailed
-                  ? "Pi Runtime 当前不可用；历史仍可阅读"
-                  : primaryRuntimeUnavailable
-                    ? primaryRuntimeDisabledPlaceholder
-                    : state.isCompacting
-                    ? "正在压缩上下文，完成后可继续发送…"
-                    : runtimeStatus === "view-only"
-                      ? "当前为历史查看；发送时会自动准备 Pi"
-                      : undefined,
+              : undefined,
           acceptsImages: state.model?.input?.includes("image") === true,
           imageInputPending: primaryCapabilityPending,
           imageInputPendingMessage,
@@ -7687,12 +7773,27 @@ export function App() {
             composerDraftRevisionRef.current = revision;
           },
           submissionScope: composerSubmissionScope,
-          allowFollowupSubmissions: !localDraft && !viewingSubagentSession,
+          allowFollowupSubmissions: true,
+          submissionPaused: composerSubmissionPaused,
+          submissionPausedMessage: composerSubmissionPausedMessage,
           onSubmissionPendingChange: updateComposerPending,
+          onSubmissionDeferred: (error, submission) => {
+            if (!(error instanceof ApiRequestError) || error.code !== "SESSION_CONTROL_CONFLICT")
+              return false;
+            setError("");
+            setDeferredComposerScopes((current) => current[submission.scope]
+              ? current
+              : { ...current, [submission.scope]: { sawForeign: composerTargetObserving } });
+            return true;
+          },
           commands: composerCommands,
           controls: composerControls,
           notices: composerNotices,
-          onSend: send,
+          onSend: async (message, images, delivery) => {
+            if (viewingSubagentSession && (delivery !== "queue" || message.startsWith("/")))
+              throw new Error("子代理视图仅支持向父对话发送普通消息");
+            return send(message, images, delivery, viewingSubagentSession ? composerTargetSessionId : "");
+          },
           onPickLocalFiles: async () => (await api.pickLocalFiles()).paths,
           onReadClipboardFiles: async () =>
             (await api.clipboardLocalFiles()).paths,
@@ -7731,7 +7832,7 @@ export function App() {
         onRename={(name) => void renameSession(name)}
         onDelete={() => void deleteSession()}
       />
-      {Object.entries(askQuestionnaires).map(([askSessionId, questionnaire]) => (
+      {!viewingSubagentSession && Object.entries(askQuestionnaires).map(([askSessionId, questionnaire]) => (
         <AskQuestionnaireDialog
           key={`${askSessionId}:${questionnaire.toolCallId}`}
           plan={questionnaire}
@@ -7747,7 +7848,7 @@ export function App() {
           })}
         />
       ))}
-      {!askQuestionnaires[viewedSessionId] && (
+      {!viewingSubagentSession && !askQuestionnaires[viewedSessionId] && (
         <ExtensionDialog
           request={extensionRequest}
           sessionId={viewedSessionId}

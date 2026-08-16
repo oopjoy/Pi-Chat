@@ -178,7 +178,7 @@ test("slash suggestions return after a starting bootstrap refreshes to ready", a
     const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
       "textarea[aria-label='消息输入']",
     )!;
-    assert.equal(textarea.disabled, true, "starting Primary blocks input");
+    assert.equal(textarea.disabled, false, "starting Primary keeps the editor available");
     const source = FakeEventSource.instances.at(-1)!;
     await act(async () =>
       source.dispatchEvent(
@@ -392,7 +392,7 @@ test("the initial ready frame releases controls when Primary became ready after 
       dom.window.document.querySelector<HTMLButtonElement>(
         ".composer-model-select .compact-select-trigger",
       )!;
-    assert.equal(model().disabled, true, "bootstrap starting blocks settings");
+    assert.equal(model().disabled, false, "bootstrap starting keeps cached settings selectable");
     const source = FakeEventSource.instances.at(-1)!;
     await act(async () =>
       source.dispatchEvent(
@@ -621,7 +621,7 @@ test("Primary ready preserves a staged draft model and keeps its capability unco
   }
 });
 
-test("Primary startup disables cached model choices until Runtime readiness", async () => {
+test("Primary startup keeps cached model choices selectable", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../../src/web/api");
@@ -650,8 +650,8 @@ test("Primary startup disables cached model choices until Runtime readiness", as
     )!;
     assert.equal(
       model.disabled,
-      true,
-      "Primary settings wait for readiness even with a cached catalogue",
+      false,
+      "cached model choices stage the next prompt while Primary prepares",
     );
   } finally {
     await act(async () => root.unmount());
@@ -659,7 +659,7 @@ test("Primary startup disables cached model choices until Runtime readiness", as
   }
 });
 
-test("Primary startup marks composer capability and image input as pending", async () => {
+test("Primary startup keeps editor and attachments available while capability is pending", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../../src/web/api");
@@ -679,12 +679,12 @@ test("Primary startup marks composer capability and image input as pending", asy
     const input = dom.window.document.querySelector<HTMLTextAreaElement>(
       ".composer textarea",
     )!;
-    assert.equal(input.disabled, true, "text waits until the Runtime is ready");
-    assert.match(input.placeholder, /Runtime ready 后才能输入/);
+    assert.equal(input.disabled, false, "text remains editable while Runtime prepares");
+    assert.doesNotMatch(input.placeholder, /Runtime ready 后才能输入/);
     const attachment = dom.window.document.querySelector<HTMLButtonElement>(
       ".attachment-button",
     )!;
-    assert.equal(attachment.disabled, true, "attachments wait for the same ready boundary");
+    assert.equal(attachment.disabled, false, "attachments remain editable while Runtime prepares");
   } finally {
     await act(async () => root.unmount());
     restoreApi();
@@ -949,7 +949,7 @@ test("a new Primary generation keeps prior image capability pending until its re
   }
 });
 
-test("Primary failure keeps cached image capability unconfirmed", async () => {
+test("Primary failure keeps cached image capability unconfirmed without locking the draft", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../../src/web/api");
@@ -982,11 +982,11 @@ test("Primary failure keeps cached image capability unconfirmed", async () => {
     const input = dom.window.document.querySelector<HTMLTextAreaElement>(
       ".composer textarea",
     )!;
-    assert.equal(input.disabled, true);
-    assert.match(input.placeholder, /Pi Runtime 当前不可用；恢复 ready 后才能输入/);
+    assert.equal(input.disabled, false);
+    assert.doesNotMatch(input.placeholder, /Pi Runtime 当前不可用；恢复 ready 后才能输入/);
     assert.equal(
       dom.window.document.querySelector<HTMLButtonElement>(".attachment-button")!.disabled,
-      true,
+      false,
     );
   } finally {
     await act(async () => root.unmount());
@@ -1182,6 +1182,101 @@ test("ChatInput does not drain a queued snapshot while mutation authority is dis
       resolvers.shift()?.();
       await Promise.resolve();
     });
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+test("ChatInput keeps a send snapshot while local control is unavailable and drains it on recovery", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { ChatInput } = await import("../../src/web/components/ChatInput");
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  const calls: string[] = [];
+  const render = (submissionPaused: boolean) => createElement(ChatInput, {
+    streaming: false,
+    stopping: false,
+    disabled: false,
+    submissionPaused,
+    submissionPausedMessage: "另一窗口正在控制此对话；消息已保留，控制权可用后将发送",
+    submissionScope: "session:foreign-control",
+    acceptsImages: true,
+    commands: [],
+    onSend: async (message: string) => { calls.push(message); },
+    onAbort: async () => undefined,
+    onPickLocalFiles: async () => [],
+    onReadClipboardFiles: async () => [],
+    onError: () => undefined,
+  });
+  try {
+    await act(async () => root.render(render(true)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "wait for control");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "wait for control" }));
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+    });
+    assert.deepEqual(calls, []);
+    assert.equal(textarea.disabled, false, "a paused send does not lock later editing");
+    assert.match(dom.window.document.querySelector(".composer-submission-status")?.textContent || "", /控制权可用后将发送/);
+    await act(async () => {
+      root.render(render(false));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.deepEqual(calls, ["wait for control"]);
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+test("ChatInput defers a raced control conflict without retrying until the control pause clears", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { ChatInput } = await import("../../src/web/components/ChatInput");
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  let attempts = 0;
+  const conflict = Object.assign(new Error("foreign"), { code: "SESSION_CONTROL_CONFLICT" });
+  const render = (submissionPaused: boolean) => createElement(ChatInput, {
+    streaming: false,
+    stopping: false,
+    disabled: false,
+    submissionPaused,
+    submissionScope: "session:control-race",
+    acceptsImages: true,
+    commands: [],
+    onSend: async () => {
+      attempts += 1;
+      if (attempts === 1) throw conflict;
+    },
+    onSubmissionDeferred: (error: unknown) => (error as { code?: string }).code === "SESSION_CONTROL_CONFLICT",
+    onAbort: async () => undefined,
+    onPickLocalFiles: async () => [],
+    onReadClipboardFiles: async () => [],
+    onError: () => undefined,
+  });
+  try {
+    await act(async () => root.render(render(false)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "race safe");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "race safe" }));
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(attempts, 1, "a conflict leaves the snapshot queued instead of spinning a retry loop");
+    await act(async () => {
+      root.render(render(true));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      root.render(render(false));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(attempts, 2, "a later control projection resumes the deferred snapshot");
   } finally {
     await act(async () => root.unmount());
   }

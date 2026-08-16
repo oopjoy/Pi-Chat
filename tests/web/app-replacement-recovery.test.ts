@@ -372,8 +372,8 @@ test("a replacement clears the old Primary readiness generation before accepting
     assert.equal(bootstrapCalls, 2);
     assert.equal(
       model().disabled,
-      true,
-      "B starts with no inherited ready capability",
+      false,
+      "B starts with no inherited ready capability but retains an editable staged selection",
     );
     assert.equal(
       dom.window.document
@@ -391,8 +391,8 @@ test("a replacement clears the old Primary readiness generation before accepting
     });
     assert.equal(
       model().disabled,
-      true,
-      "B starting generation 1 remains blocked",
+      false,
+      "B starting generation 1 keeps settings editable while capability remains pending",
     );
     await act(async () =>
       source.emitPi({

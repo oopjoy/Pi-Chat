@@ -74,7 +74,9 @@ export function ComposerControls({ state, models, stats, disabled, settingsBusy 
   onThinking: (level: ThinkingLevel) => void;
 }) {
   const current = state.model ? modelValue(state.model) : "";
-  const controlsDisabled = disabled || settingsBusy || primaryUnavailable;
+  // A setting request may still be in flight, but the next choice is a new
+  // local preference snapshot rather than a reason to freeze the controls.
+  const controlsDisabled = disabled || primaryUnavailable;
   const modelOptions = models.map((model) => ({
     value: modelValue(model),
     label: model.name || model.id,

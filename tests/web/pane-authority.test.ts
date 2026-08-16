@@ -96,8 +96,19 @@ test("clicking a verified Subagent row opens its read-only transcript without wa
   childView.turnTotal = 1;
   childView.runtimeStatus = "view-only";
   childView.isActive = false;
+  childView.state = { ...childView.state, isStreaming: true };
+  childView.isStreaming = true;
+  childView.pendingExtensionRequest = {
+    id: "child-confirmation",
+    method: "confirm",
+    title: "Child confirmation",
+    piChatSessionId: childId,
+  };
   const childReads: Array<[string, string]> = [];
   const warmed: string[] = [];
+  const promptTargets: string[] = [];
+  const abortedTargets: string[] = [];
+  const extensionResponses: string[] = [];
   const viewed: string[] = [];
   Object.assign(api, {
     bootstrap: async () => bootstrap,
@@ -121,7 +132,23 @@ test("clicking a verified Subagent row opens its read-only transcript without wa
       childReads.push([parentId, targetId]);
       return childView;
     },
-    warmSession: async (id: string) => { warmed.push(id); throw new Error("must not warm child"); },
+    warmSession: async (id: string) => {
+      warmed.push(id);
+      if (id !== activeId) throw new Error("must not warm child");
+      return { sessionId: id, state: bootstrap.state, gateMode: "strict" as const };
+    },
+    prompt: async (_message: string, _images: unknown[], id: string) => {
+      promptTargets.push(id);
+      return { accepted: true, queued: false };
+    },
+    abort: async (id: string) => {
+      abortedTargets.push(id);
+      return { ok: true, isStreaming: false, queuePaused: false };
+    },
+    respondToExtension: async ({ sessionId }: { sessionId: string }) => {
+      extensionResponses.push(sessionId);
+      return {};
+    },
   });
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {
@@ -137,6 +164,20 @@ test("clicking a verified Subagent row opens its read-only transcript without wa
     assert.equal([...dom.window.document.querySelectorAll(".session-item")].some((item) => item.textContent?.includes("review child")), false);
     assert.equal(warmed.length, 0);
     assert.equal(viewed.includes(childId), false, "read-only child navigation never claims SessionControl presence");
+    assert.equal(dom.window.document.querySelector(".stop-button"), null, "a streaming child never exposes a child abort action");
+    assert.equal(dom.window.document.querySelector(".extension-dialog"), null, "a child confirmation stays read-only");
+    assert.deepEqual(abortedTargets, []);
+    assert.deepEqual(extensionResponses, []);
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "report to parent");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "report to parent" }));
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.deepEqual(warmed, [activeId], "a child send may prepare only its verified parent");
+    assert.deepEqual(promptTargets, [activeId], "a child send never targets the child JSONL identity");
     const source = FakeEventSource.instances.at(-1)!;
     await act(async () => {
       source.dispatchEvent(new dom.window.MessageEvent("ready", {
@@ -148,9 +189,7 @@ test("clicking a verified Subagent row opens its read-only transcript without wa
     assert.equal(viewed.includes(childId), false, "lifecycle recovery also skips child presence");
     assert.equal([...dom.window.document.querySelectorAll(".session-item")].some((item) => item.textContent?.includes("review child")), false);
     assert.equal(dom.window.document.querySelector('[aria-label*="重命名 review child"], [aria-label*="删除 review child"]'), null);
-    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea");
-    assert.equal(textarea?.disabled, true);
-    assert.match(textarea?.placeholder || "", /子代理对话为只读/);
+    assert.equal(textarea.disabled, false, "the child transcript remains read-only while its parent-targeted composer stays editable");
   } finally {
     restoreApi();
     await act(async () => root.unmount());

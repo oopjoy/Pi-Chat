@@ -524,8 +524,8 @@ test("remembered cold history paints before global bootstrap finishes while muta
       dom.window.document.querySelector<HTMLTextAreaElement>(
         "textarea[aria-label='消息输入']",
       )?.disabled,
-      true,
-      "history may paint early but mutations wait for bootstrap identity/readiness",
+      false,
+      "history may paint early and its draft stays editable while bootstrap identity/readiness recover",
     );
     assert.equal(
       dom.window.document.querySelector(".topbar-title")?.textContent,
@@ -1503,7 +1503,7 @@ test("a stale sidebar snapshot cannot restore the running spinner after settleme
   }
 });
 
-test("failed Primary keeps historical navigation while disabling the composer", async () => {
+test("failed Primary keeps historical navigation and an editable recoverable draft", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../../src/web/api");
@@ -1537,8 +1537,8 @@ test("failed Primary keeps historical navigation while disabling the composer", 
     const input = dom.window.document.querySelector<HTMLTextAreaElement>(
       "textarea[aria-label='消息输入']",
     )!;
-    assert.equal(input.disabled, true);
-    assert.match(input.placeholder, /Pi Runtime 当前不可用；恢复 ready 后才能输入/);
+    assert.equal(input.disabled, false);
+    assert.doesNotMatch(input.placeholder, /Pi Runtime 当前不可用；恢复 ready 后才能输入/);
     // The server's ready SSE triggers a guarded background metadata refresh;
     // the status transition itself is covered by server contract tests. Keep
     // this JSDOM test focused on the failed-readiness capability boundary.

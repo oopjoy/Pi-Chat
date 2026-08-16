@@ -516,7 +516,7 @@ test("a stale hot view cannot restore the composer compaction lock after compact
     await act(async () =>
       source.emitPi({ type: "compaction_start", piChatSessionId: activeId }),
     );
-    assert.equal(input.disabled, true, "compaction owns the composer while active");
+    assert.equal(input.disabled, false, "compaction pauses sends without locking the composer draft");
 
     await act(async () => {
       source.emitPi({

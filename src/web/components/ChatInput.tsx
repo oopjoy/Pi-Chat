@@ -103,7 +103,7 @@ export function commandMatches(value: string, commands: SlashCommand[]): SlashCo
   }).sort((a, b) => a.rank - b.rank || a.score - b.score || a.command.name.localeCompare(b.command.name)).slice(0, 9).map(({ command }) => command);
 }
 
-export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, placeholder, acceptsImages, imageInputPending = false, imageInputPendingMessage = "模型图片能力尚未确认", resolveImageCapabilityOnSend = false, restoredDraft, onDraftRevisionChange, submissionScope, allowFollowupSubmissions = true, onSubmissionPendingChange, commands, controls, notices, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles, onError }: {
+export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, placeholder, acceptsImages, imageInputPending = false, imageInputPendingMessage = "模型图片能力尚未确认", resolveImageCapabilityOnSend = false, restoredDraft, onDraftRevisionChange, submissionScope, allowFollowupSubmissions = true, submissionPaused = false, submissionPausedMessage = "消息已保存，等待发送条件恢复", onSubmissionPendingChange, onSubmissionDeferred, commands, controls, notices, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles, onError }: {
   /** True when a submission will enter the local queue. */
   streaming: boolean;
   /** True only while Pi is actively generating and can be stopped. */
@@ -126,7 +126,13 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   submissionScope: string;
   /** A materialized Session can accept another editor snapshot while one is pending. */
   allowFollowupSubmissions?: boolean;
+  /** Keeps accepted editor snapshots local until their target may be submitted. */
+  submissionPaused?: boolean;
+  /** Explains why an accepted snapshot is waiting without disabling editing. */
+  submissionPausedMessage?: string;
   onSubmissionPendingChange?: (scope: string, count: number) => void;
+  /** A retryable admission conflict keeps its snapshot queued without retrying in a loop. */
+  onSubmissionDeferred?: (error: unknown, submission: Readonly<PendingSubmission>) => boolean;
   commands: SlashCommand[];
   controls?: ReactNode;
   /** System status sits immediately above the actual Composer, never over its input. */
@@ -151,7 +157,9 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   const imagesRef = useRef<PromptImage[]>([]);
   const currentScopeRef = useRef(submissionScope);
   const mutationDisabledRef = useRef(disabled);
+  const submissionPausedRef = useRef(submissionPaused);
   const onSendRef = useRef(onSend);
+  const onSubmissionDeferredRef = useRef(onSubmissionDeferred);
   const pendingByScopeRef = useRef(new Map<string, number>());
   const submissionQueueRef = useRef<PendingSubmission[]>([]);
   const drainingRef = useRef(false);
@@ -166,7 +174,9 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   const draftRevisionRef = useRef(0);
   currentScopeRef.current = submissionScope;
   mutationDisabledRef.current = disabled;
+  submissionPausedRef.current = submissionPaused;
   onSendRef.current = onSend;
+  onSubmissionDeferredRef.current = onSubmissionDeferred;
   const advanceUserDraftRevision = () => {
     draftRevisionRef.current += 1;
     onDraftRevisionChange?.(draftRevisionRef.current);
@@ -203,10 +213,10 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
 
   useEffect(() => {
     // Navigation pauses undrained editor snapshots for the old pane. Returning
-    // to that pane, or regaining mutation authority, resumes them with the
-    // newest App callback and committed scope.
+    // to that pane, regaining mutation authority, or losing a local send pause
+    // resumes them with the newest App callback and committed scope.
     void drainSubmissions();
-  }, [submissionScope, disabled]);
+  }, [submissionScope, disabled, submissionPaused]);
 
   const currentPendingSubmissions = pendingByScopeRef.current.get(submissionScope) || 0;
   const submissionLocked = !allowFollowupSubmissions && currentPendingSubmissions > 0;
@@ -315,7 +325,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   };
 
   function drainSubmissions() {
-    if (drainingRef.current || mutationDisabledRef.current) return;
+    if (drainingRef.current || mutationDisabledRef.current || submissionPausedRef.current) return;
     const scope = currentScopeRef.current;
     if (blockedScopesRef.current.has(scope)) {
       restoreFailedSubmission(scope);
@@ -330,16 +340,28 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     }
     const [submission] = submissionQueueRef.current.splice(index, 1);
     drainingRef.current = true;
+    let deferred = false;
     void onSendRef.current(submission.message, submission.images, submission.delivery)
-      .catch(() => {
+      .catch((error) => {
+        deferred = onSubmissionDeferredRef.current?.(error, submission) === true;
+        if (deferred) {
+          submissionQueueRef.current.unshift(submission);
+          return;
+        }
         failedSubmissionsRef.current.set(submission.scope, submission);
         blockedScopesRef.current.add(submission.scope);
         restoreFailedSubmission(submission.scope);
       })
       .finally(() => {
-        updatePendingScope(submission.scope, -1);
+        if (!deferred) updatePendingScope(submission.scope, -1);
         drainingRef.current = false;
         if (!mountedRef.current) return;
+        // The defer callback schedules an App-owned pause. Do not immediately
+        // retry into the same foreign-controller race before that prop arrives.
+        if (deferred) {
+          requestAnimationFrame(() => textareaRef.current?.focus());
+          return;
+        }
         if (!blockedScopesRef.current.has(currentScopeRef.current))
           drainSubmissions();
         else restoreFailedSubmission(currentScopeRef.current);
@@ -481,6 +503,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   return (
     <div className="composer-wrap">
       {notices && <div className="system-notice-stack" aria-live="polite">{notices}</div>}
+      {currentPendingSubmissions > 0 && submissionPaused && <div className="composer-submission-status" role="status">{submissionPausedMessage}</div>}
       <div className={`composer ${dragging ? "is-dragging" : ""}`} onDragOver={(event) => { event.preventDefault(); if (!editorDisabled) setDragging(true); }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }} onDrop={drop}>
         {!editorDisabled && suggestions.length > 0 && <div className="command-suggestions" role="listbox" aria-label="Pi 指令联想">{suggestions.map((command, index) => <button type="button" role="option" aria-selected={index === suggestionIndex} className={index === suggestionIndex ? "is-active" : ""} key={`${command.source}-${command.name}`} onMouseDown={(event) => event.preventDefault()} onClick={() => completeCommand(command)}><strong>/{command.name}</strong><span>{command.description || "Pi 指令"}</span><small>{command.source}</small></button>)}</div>}
         {images.length > 0 && <div className="image-previews">{images.map((image, index) => <div className="image-preview" key={`${image.fileName}-${index}`}><img src={`data:${image.mimeType};base64,${image.data}`} alt={image.fileName || `图片 ${index + 1}`} /><button type="button" disabled={editorDisabled} onClick={() => { const next = imagesRef.current.filter((_, itemIndex) => itemIndex !== index); imagesRef.current = next; setImages(next); advanceUserDraftRevision(); }} aria-label={`移除 ${image.fileName || "图片"}`}><CloseIcon /></button><small>{image.fileName || "粘贴的图片"}</small></div>)}</div>}
