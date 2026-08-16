@@ -26,6 +26,32 @@ test("removes a leaked thinking prefix with repeated channel markers", () => {
   );
 });
 
+test("removes repeated private thinking-title dumps, including a clipped final title", () => {
+  const leaked = [
+    "**Planning send flow and model lock redesign**",
+    "",
+    "**Analyzing composer controls disabled state**",
+    "",
+    "**Designing send intent and local queue handling**",
+    "",
+    "**Analyzing composer controls disabled state**",
+    "",
+    "**Analyzing ChatInput disabled state",
+  ].join("\n");
+  assert.equal(sanitizeAssistantText(`visible before\n${leaked}\nvisible after`), "visible before\nvisible after");
+});
+
+test("preserves a short ordinary Markdown outline", () => {
+  const outline = [
+    "**Planning the release**",
+    "",
+    "**Reviewing tests**",
+    "",
+    "**Testing the fix**",
+  ].join("\n");
+  assert.equal(sanitizeAssistantText(outline), outline);
+});
+
 test("preserves ordinary single references to the analysis marker", () => {
   const source = "The literal code**/analysis marker appeared once.";
   assert.equal(sanitizeAssistantText(source), source);

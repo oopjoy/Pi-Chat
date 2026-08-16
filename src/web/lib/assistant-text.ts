@@ -1,6 +1,46 @@
 import type { PiContentBlock, PiMessage } from "../../shared/types";
 
 const REPEATED_ANALYSIS_CHANNEL = /code\*\*\/analysis(?:\s*code\*\*\/analysis){2,}/;
+const LEAKED_THINKING_TITLE = /^\s*\*\*(?:analyzing|planning|designing|checking|reviewing|inspecting|examining|looking|reading|searching|considering|evaluating|investigating|identifying|locating|confirming|preparing|writing|implementing|fixing|optimizing|debugging|testing)\b[^*\r\n]{0,160}(?:\*\*)?\s*$/i;
+
+/**
+ * Remove a provider's private-progress-title dump without touching ordinary
+ * Markdown. A run must contain at least three title-only lines and either a
+ * duplicate title or five titles, so a normal short outline remains visible.
+ */
+function stripLeakedThinkingTitleRun(value: string): string {
+  const lines = value.split(/(\r?\n)/);
+  const output: string[] = [];
+  let run: string[] = [];
+  let titleCount = 0;
+  const titles = new Map<string, number>();
+
+  const flush = () => {
+    const repeated = [...titles.values()].some((count) => count > 1);
+    if (titleCount < 3 || (!repeated && titleCount < 5)) output.push(...run);
+    run = [];
+    titleCount = 0;
+    titles.clear();
+  };
+
+  for (let index = 0; index < lines.length; index += 2) {
+    const line = lines[index];
+    const newline = lines[index + 1] || "";
+    if (LEAKED_THINKING_TITLE.test(line)) {
+      run.push(line, newline);
+      titleCount += 1;
+      const title = line.trim().replace(/^\*\*|\*\*$/g, "").trim().toLowerCase();
+      titles.set(title, (titles.get(title) || 0) + 1);
+    } else if (run.length && !line.trim()) {
+      run.push(line, newline);
+    } else {
+      flush();
+      output.push(line, newline);
+    }
+  }
+  flush();
+  return output.join("");
+}
 
 /**
  * Hide a malformed provider/protocol artifact that can occasionally be
@@ -9,15 +49,16 @@ const REPEATED_ANALYSIS_CHANNEL = /code\*\*\/analysis(?:\s*code\*\*\/analysis){2
  * or code samples that mention the word "analysis".
  */
 export function sanitizeAssistantText(value: string): string {
-  const match = REPEATED_ANALYSIS_CHANNEL.exec(value);
-  if (!match || match.index === undefined) return value;
+  const titleCleaned = stripLeakedThinkingTitleRun(value);
+  const match = REPEATED_ANALYSIS_CHANNEL.exec(titleCleaned);
+  if (!match || match.index === undefined) return titleCleaned;
 
   let start = match.index;
-  const thinkingStart = value.lastIndexOf("<thinking>", start);
-  if (thinkingStart >= 0 && value.slice(thinkingStart, start).includes("**/analysis")) start = thinkingStart;
+  const thinkingStart = titleCleaned.lastIndexOf("<thinking>", start);
+  if (thinkingStart >= 0 && titleCleaned.slice(thinkingStart, start).includes("**/analysis")) start = thinkingStart;
 
-  let before = value.slice(0, start);
-  let after = value.slice(match.index + match[0].length);
+  let before = titleCleaned.slice(0, start);
+  let after = titleCleaned.slice(match.index + match[0].length);
 
   // Remove only one separator created by joining around the leaked run. Never
   // trim the complete Markdown block: leading indentation, hard-break spaces,
