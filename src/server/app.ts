@@ -100,8 +100,11 @@ import {
 } from "./pi-data.js";
 import {
   idForPath,
+  parseSessionContent,
   readSessionMessages,
+  readSessionSnapshotContent,
   SessionIndex,
+  type SessionFileSnapshot,
   type SessionSettingsSnapshot,
   type SessionUsageSnapshot,
 } from "./session-index.js";
@@ -3728,11 +3731,28 @@ export class PiChatApp {
     clientId: string,
   ): Promise<SessionViewData | null> {
     const snapshot = await this.options.sessions.snapshotForId?.(id);
-    const messages =
-      snapshot?.messages ?? (await this.options.sessions.messagesForId(id));
+    if (snapshot)
+      return this.coldSessionViewFromSnapshot(id, session, snapshot, turnLimit, clientId);
+    const messages = await this.options.sessions.messagesForId(id);
     if (!messages) return null;
-    const windowed = messageWindow(messages, turnLimit);
-    const settings = snapshot?.settings || {};
+    return this.coldSessionViewFromSnapshot(
+      id,
+      session,
+      { messages, settings: {} },
+      turnLimit,
+      clientId,
+    );
+  }
+
+  private coldSessionViewFromSnapshot(
+    id: string,
+    session: SessionSummary,
+    snapshot: Pick<SessionFileSnapshot, "messages" | "settings"> & { usage?: SessionUsageSnapshot },
+    turnLimit: number,
+    clientId: string,
+  ): SessionViewData {
+    const windowed = messageWindow(snapshot.messages, turnLimit);
+    const settings = snapshot.settings || {};
     return {
       session: {
         ...session,
@@ -3764,7 +3784,7 @@ export class PiChatApp {
       isStreaming: false,
       // The target JSONL snapshot already includes usage. Cold first paint must
       // never wait on another index read or resource/settings disk probe.
-      stats: snapshot?.usage
+      stats: snapshot.usage
         ? this.offlineStatsFromUsage(id, snapshot.usage)
         : undefined,
       // Gate is a fixed Pi Chat system control. Startup self-heals its adapter;
@@ -4772,13 +4792,53 @@ export class PiChatApp {
     return { ...result, applicationLifecycle: this.applicationLifecycle };
   }
 
-  private async backgroundSubagentsRoute(sessionId: string): Promise<BackgroundSubagentSnapshot | null> {
+  private async readOnlySessionPath(sessionId: string): Promise<string | null> {
     const runtime = this.runtimePool.get(sessionId);
-    const path = (sessionId === this.activeSessionId
+    const regular = (sessionId === this.activeSessionId
       ? this.activeSessionPath || this.lastPrimaryState.sessionFile
-      : runtime?.sessionPath) || this.options.sessions.pathForId(sessionId);
+      : runtime?.sessionPath)
+      || this.options.sessions.pathForId(sessionId);
+    return regular || await this.subagentStatuses.knownChildSessionPath(sessionId);
+  }
+
+  private async backgroundSubagentsRoute(sessionId: string): Promise<BackgroundSubagentSnapshot | null> {
+    const path = await this.readOnlySessionPath(sessionId);
     if (!path) return null;
     return this.subagentStatuses.listForParentSession(path);
+  }
+
+  private async backgroundSubagentViewRoute(input: {
+    parentSessionId: string;
+    childSessionId: string;
+    clientId: string;
+    turns: number;
+  }): Promise<SessionViewData | null> {
+    const parentPath = await this.readOnlySessionPath(input.parentSessionId);
+    if (!parentPath) return null;
+    const target = await this.subagentStatuses.navigationTargetForParentSession(
+      parentPath,
+      input.childSessionId,
+    );
+    if (!target) return null;
+    const summary = parseSessionContent(target.path, target.content, target.modifiedAt, {
+      includeSubagents: true,
+      displayName: target.label,
+    });
+    if (!summary || summary.id !== input.childSessionId) return null;
+    const snapshot = readSessionSnapshotContent(target.content);
+    const view = this.coldSessionViewFromSnapshot(
+      input.childSessionId,
+      { ...summary, active: false },
+      snapshot,
+      input.turns,
+      input.clientId,
+    );
+    this.traceViewProjection(
+      "subagent-session-view",
+      input.childSessionId,
+      view,
+    );
+    return view;
   }
 
   private async sessionViewRoute(input: {
@@ -4855,10 +4915,19 @@ export class PiChatApp {
       return;
     if (
       await handleSubagentsReadRoute(
-        { backgroundSubagents: (sessionId) => this.backgroundSubagentsRoute(sessionId) },
+        {
+          backgroundSubagents: (sessionId) => this.backgroundSubagentsRoute(sessionId),
+          backgroundSubagentView: (input) => this.backgroundSubagentViewRoute(input),
+        },
         request,
         response,
         url,
+        clientId,
+        {
+          recentTurns: RECENT_TURN_WINDOW_SIZE,
+          maxTurns: MAX_TURN_WINDOW_SIZE,
+          turnIncrement: TURN_WINDOW_INCREMENT,
+        },
       )
     )
       return;

@@ -31,12 +31,12 @@ function snapshot(): BackgroundSubagentSnapshot {
     attentionCount: 1,
     truncated: false,
     steps: [
-      { key: "subagent-1", label: "实施子代理 1", status: "running", elapsedMs: 65_000, updateAgeMs: 2_000, turnCount: 2, toolCount: 4, activity: "正在运行测试" },
-      { key: "subagent-6", label: "实施子代理 6", status: "waiting", elapsedMs: 1_000, updateAgeMs: 500 },
-      { key: "subagent-2", label: "审阅子代理 2", status: "attention", elapsedMs: 5_000, updateAgeMs: 1_000 },
-      { key: "subagent-3", label: "子代理 3", status: "complete", elapsedMs: 3_000, updateAgeMs: 8_000 },
-      { key: "subagent-4", label: "子代理 4", status: "failed", elapsedMs: 4_000, updateAgeMs: 9_000 },
-      { key: "subagent-5", label: "子代理 5", status: "cancelled", elapsedMs: 2_000, updateAgeMs: 10_000 },
+      { key: "subagent-1", label: "运行测试", status: "running", elapsedMs: 65_000, updateAgeMs: 2_000, activity: "正在运行测试", childSessionId: "11111111111111111111" },
+      { key: "subagent-6", label: "等待实施", status: "waiting", elapsedMs: 1_000, updateAgeMs: 500, childSessionId: "66666666666666666666" },
+      { key: "subagent-2", label: "检查边界", status: "attention", elapsedMs: 5_000, updateAgeMs: 1_000, childSessionId: "22222222222222222222" },
+      { key: "subagent-3", label: "完成审阅", status: "complete", elapsedMs: 3_000, updateAgeMs: 8_000, childSessionId: "33333333333333333333" },
+      { key: "subagent-4", label: "失败任务", status: "failed", elapsedMs: 4_000, updateAgeMs: 9_000, childSessionId: "44444444444444444444" },
+      { key: "subagent-5", label: "取消任务", status: "cancelled", elapsedMs: 2_000, updateAgeMs: 10_000 },
     ],
   };
 }
@@ -60,38 +60,120 @@ test("zero background Subagents keep the top-bar control hidden", async () => {
   }
 });
 
-test("active, attention, and terminal steps render in an accessible read-only popover", async () => {
+test("empty discovery retries quickly and active rows survive a transient failure", async () => {
   const dom = installDom();
+  const nativeSetTimeout = dom.window.setTimeout.bind(dom.window);
+  const delays: number[] = [];
+  dom.window.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+    delays.push(Number(timeout || 0));
+    return nativeSetTimeout(handler, timeout, ...args);
+  }) as typeof dom.window.setTimeout;
   const { api } = await import("../src/web/api");
   const original = api.backgroundSubagents;
-  api.backgroundSubagents = async () => snapshot();
+  let current: BackgroundSubagentSnapshot | Error = EMPTY;
+  api.backgroundSubagents = async () => {
+    if (current instanceof Error) throw current;
+    return current;
+  };
   const { SubagentStatusControl } = await import("../src/web/components/SubagentStatusControl");
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {
     await act(async () => root.render(createElement(SubagentStatusControl, { sessionId: SESSION_A })));
+    await act(async () => { await Promise.resolve(); });
+    assert.ok(delays.includes(500), `expected fast discovery retry, saw ${delays.join(",")}`);
+
+    current = snapshot();
     await act(async () => dom.window.document.dispatchEvent(new dom.window.Event("visibilitychange")));
+    await act(async () => { await Promise.resolve(); });
+    assert.ok(dom.window.document.querySelector(".subagent-status-trigger"));
+    assert.ok(delays.includes(750), `expected active cadence, saw ${delays.join(",")}`);
+
+    current = new Error("temporary read failure");
+    await act(async () => dom.window.document.dispatchEvent(new dom.window.Event("visibilitychange")));
+    await act(async () => { await Promise.resolve(); });
+    assert.ok(dom.window.document.querySelector(".subagent-status-trigger"), "last rows remain visible through failure");
+  } finally {
+    api.backgroundSubagents = original;
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
+});
+
+test("Subagent rows stay compact, navigable, and free of low-value status copy", async () => {
+  const dom = installDom();
+  const { api } = await import("../src/web/api");
+  const original = api.backgroundSubagents;
+  api.backgroundSubagents = async () => snapshot();
+  const opened: string[][] = [];
+  const { SubagentStatusControl } = await import("../src/web/components/SubagentStatusControl");
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(SubagentStatusControl, {
+      sessionId: SESSION_A,
+      onOpenSession: (parent, child, label) => opened.push([parent, child, label]),
+    })));
     await act(async () => { await Promise.resolve(); });
     const trigger = dom.window.document.querySelector<HTMLButtonElement>(".subagent-status-trigger")!;
     assert.equal(trigger.textContent?.replace(/\s+/g, " ").trim(), "6 个子代理");
     assert.equal(trigger.getAttribute("aria-haspopup"), "dialog");
-    assert.ok(dom.window.document.querySelector('[role="tooltip"]')?.textContent?.includes("Queue / Steer"));
+    assert.equal(dom.window.document.querySelector('[role="tooltip"]')?.textContent, "查看后台子代理对话");
 
     await act(async () => trigger.click());
-    const popover = dom.window.document.querySelector<HTMLElement>('[role="dialog"][aria-label="后台子代理状态"]')!;
-    assert.equal(dom.window.document.activeElement, popover);
-    for (const label of ["运行中", "等待中", "需要关注", "已完成", "失败", "已取消"])
-      assert.ok(popover.textContent?.includes(label), label);
+    const popover = dom.window.document.querySelector<HTMLElement>('[role="dialog"][aria-label="后台子代理"]')!;
+    const rows = [...popover.querySelectorAll<HTMLElement>('[role="treeitem"]')];
+    assert.equal(rows.length, 6);
+    assert.equal(dom.window.document.activeElement, rows[0]);
     assert.ok(popover.textContent?.includes("正在运行测试"));
-    assert.ok(popover.textContent?.includes("Queue / Steer 始终只控制主会话"));
-    assert.equal(popover.querySelectorAll("button").length, 0, "the projection exposes no child controls");
+    for (const removed of ["需要关注", "只读状态", "Queue / Steer", "次工具", "轮"])
+      assert.equal(popover.textContent?.includes(removed), false, removed);
+    assert.equal(popover.querySelector(".subagent-status-authority"), null);
 
-    await act(async () => popover.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    await act(async () => rows[0]?.click());
+    assert.deepEqual(opened, [[SESSION_A, "11111111111111111111", "运行测试"]]);
+    assert.equal(dom.window.document.querySelector(".subagent-status-popover"), null);
+
+    await act(async () => trigger.click());
+    const first = dom.window.document.querySelector<HTMLElement>('[role="treeitem"]:not([aria-disabled="true"])')!;
+    await act(async () => first.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
     assert.equal(dom.window.document.querySelector(".subagent-status-popover"), null);
     assert.equal(dom.window.document.activeElement, trigger);
 
     await act(async () => trigger.click());
     await act(async () => dom.window.document.querySelector("#outside")!.dispatchEvent(new dom.window.MouseEvent("pointerdown", { bubbles: true })));
     assert.equal(dom.window.document.querySelector(".subagent-status-popover"), null);
+  } finally {
+    api.backgroundSubagents = original;
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
+});
+
+test("an unhydrated child row receives focus and Escape restores the trigger", async () => {
+  const dom = installDom();
+  const { api } = await import("../src/web/api");
+  const original = api.backgroundSubagents;
+  api.backgroundSubagents = async () => ({
+    total: 1,
+    activeCount: 1,
+    attentionCount: 0,
+    truncated: false,
+    steps: [{ key: "subagent-pending", label: "starting child", status: "running", elapsedMs: 100, updateAgeMs: 0, activity: "正在读取文件" }],
+  });
+  const { SubagentStatusControl } = await import("../src/web/components/SubagentStatusControl");
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(SubagentStatusControl, { sessionId: SESSION_A })));
+    await act(async () => { await Promise.resolve(); });
+    const trigger = dom.window.document.querySelector<HTMLButtonElement>(".subagent-status-trigger")!;
+    await act(async () => trigger.click());
+    const row = dom.window.document.querySelector<HTMLElement>('[role="treeitem"][aria-disabled="true"]')!;
+    assert.equal(dom.window.document.activeElement, row);
+    assert.match(row.textContent || "", /对话准备中/);
+    assert.match(row.textContent || "", /正在读取文件/);
+    assert.match(row.getAttribute("aria-label") || "", /对话准备中.*正在读取文件/);
+    await act(async () => row.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    assert.equal(dom.window.document.querySelector(".subagent-status-popover"), null);
+    assert.equal(dom.window.document.activeElement, trigger);
   } finally {
     api.backgroundSubagents = original;
     await act(async () => root.unmount());
@@ -125,6 +207,29 @@ test("polling aborts the old Session on navigation and cleans up on unmount", as
     assert.equal(lastSignal?.aborted, true);
   } finally {
     api.backgroundSubagents = original;
+    dom.window.close();
+  }
+});
+
+test("an obsolete poll cannot overwrite a newer Subagent snapshot", async () => {
+  const dom = installDom();
+  const { api } = await import("../src/web/api");
+  const original = api.backgroundSubagents;
+  const resolvers: Array<(value: BackgroundSubagentSnapshot) => void> = [];
+  api.backgroundSubagents = () => new Promise((resolve) => resolvers.push(resolve));
+  const { SubagentStatusControl } = await import("../src/web/components/SubagentStatusControl");
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(SubagentStatusControl, { sessionId: SESSION_A })));
+    await act(async () => dom.window.document.dispatchEvent(new dom.window.Event("visibilitychange")));
+    assert.equal(resolvers.length, 2);
+    await act(async () => { resolvers[1]?.(snapshot()); await Promise.resolve(); });
+    assert.ok(dom.window.document.querySelector(".subagent-status-trigger"));
+    await act(async () => { resolvers[0]?.(EMPTY); await Promise.resolve(); });
+    assert.ok(dom.window.document.querySelector(".subagent-status-trigger"), "aborted older response stays fenced");
+  } finally {
+    api.backgroundSubagents = original;
+    await act(async () => root.unmount());
     dom.window.close();
   }
 });
@@ -187,7 +292,7 @@ test("an open control retains stable focus when polling returns zero", async () 
   }
 });
 
-test("terminal-only popovers still explain main-Session Queue and Steer authority", async () => {
+test("terminal-only popovers retain truncation without an authority warning row", async () => {
   const dom = installDom();
   const { api } = await import("../src/web/api");
   const original = api.backgroundSubagents;
@@ -204,10 +309,10 @@ test("terminal-only popovers still explain main-Session Queue and Steer authorit
     await act(async () => root.render(createElement(SubagentStatusControl, { sessionId: SESSION_A })));
     await act(async () => { await Promise.resolve(); });
     const trigger = dom.window.document.querySelector<HTMLButtonElement>(".subagent-status-trigger")!;
-    assert.match(trigger.getAttribute("aria-label") || "", /0 个需要关注/);
+    assert.doesNotMatch(trigger.getAttribute("aria-label") || "", /需要关注/);
     await act(async () => trigger.click());
     const text = dom.window.document.querySelector(".subagent-status-popover")?.textContent || "";
-    assert.match(text, /Queue \/ Steer 始终只控制主会话/);
+    assert.doesNotMatch(text, /Queue \/ Steer|只读投影|需要关注/);
     assert.match(text, /优先级最高的 24 个步骤/);
     assert.doesNotMatch(text, /最近的 24/);
   } finally {
@@ -228,12 +333,14 @@ test("Subagent indicators reuse the sidebar red, yellow, green, and blue palette
   for (const status of ["unread", "pending", "error", "running"])
     assert.match(css, new RegExp(`\\.session-status\\.is-${status}[^\\n]*var\\(--status-`));
   assert.match(css, /\.subagent-status-row\.is-running \.subagent-status-dot \{ background: var\(--status-blue\)/);
-  assert.match(css, /\.subagent-status-row\.is-waiting \.subagent-status-dot \{ background: var\(--status-yellow\)/);
-  assert.match(css, /\.subagent-status-row\.is-attention \.subagent-status-dot \{[^}]*background: var\(--status-yellow\)/);
+  assert.match(css, /\.subagent-status-row\.is-waiting \.subagent-status-dot, \.subagent-status-row\.is-attention \.subagent-status-dot \{ background: var\(--status-yellow\)/);
   assert.match(css, /\.subagent-status-row\.is-complete \.subagent-status-dot \{ background: var\(--status-green\)/);
   assert.match(css, /\.subagent-status-row\.is-failed \.subagent-status-dot, \.subagent-status-row\.is-cancelled \.subagent-status-dot \{ background: var\(--status-red\)/);
-  assert.match(css, /\.subagent-status-row\.is-attention \.subagent-status-label \{ color: var\(--attention\)/);
-  assert.match(css, /\.subagent-status-authority\.is-important \{ border-left: 3px solid var\(--attention\)/);
+  assert.doesNotMatch(css, /subagent-status-authority|subagent-status-label/);
+  assert.match(css, /@media \(forced-colors: active\)[\s\S]*\.subagent-status-row\.is-running \.subagent-status-dot \{[^}]*border: 2px solid Highlight/);
+  assert.match(css, /@media \(forced-colors: active\)[\s\S]*\.subagent-status-row\.is-waiting \.subagent-status-dot \{[^}]*border: 2px dashed CanvasText/);
+  assert.match(css, /@media \(forced-colors: active\)[\s\S]*\.subagent-status-row\.is-attention \.subagent-status-dot \{[^}]*transform: rotate\(45deg\)/);
+  assert.match(css, /@media \(forced-colors: active\)[\s\S]*\.subagent-status-row\.is-cancelled \.subagent-status-dot \{[^}]*height: 3px/);
 
   const dom = installDom();
   try {

@@ -118,6 +118,16 @@ async function scanSessionEntries(path: string, retain: (entry: SessionEntry) =>
   return entries;
 }
 
+function sessionEntriesFromContent(content: string): SessionEntry[] {
+  const entries: SessionEntry[] = [];
+  for (const line of content.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try { entries.push(JSON.parse(line) as SessionEntry); }
+    catch { /* Ignore an incomplete trailing line while Pi is writing. */ }
+  }
+  return entries;
+}
+
 async function readSessionEntries(path: string): Promise<SessionEntry[]> {
   return scanSessionEntries(path);
 }
@@ -195,9 +205,8 @@ export interface SessionFileSnapshot {
   settings: SessionSettingsSnapshot;
 }
 
-/** Parse the active JSONL branch once for messages, usage, and last-used settings. */
-export async function readSessionSnapshot(path: string): Promise<SessionFileSnapshot> {
-  const branch = await readSessionBranch(path);
+/** Parse one already-selected active branch into messages, usage, and settings. */
+function sessionSnapshotFromBranch(branch: SessionEntry[]): SessionFileSnapshot {
   const messages: PiMessage[] = [];
   const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
   let context: SessionUsageSnapshot["context"] = null;
@@ -267,6 +276,15 @@ export async function readSessionSnapshot(path: string): Promise<SessionFileSnap
   return { messages, usage: { tokens, context }, settings };
 }
 
+/** Parse the active JSONL branch once for messages, usage, and last-used settings. */
+export async function readSessionSnapshot(path: string): Promise<SessionFileSnapshot> {
+  return sessionSnapshotFromBranch(await readSessionBranch(path));
+}
+
+export function readSessionSnapshotContent(content: string): SessionFileSnapshot {
+  return sessionSnapshotFromBranch(activeSessionBranch(sessionEntriesFromContent(content)));
+}
+
 export async function readSessionMessages(path: string): Promise<PiMessage[]> {
   return (await readSessionSnapshot(path)).messages;
 }
@@ -284,8 +302,12 @@ function isSubagentSession(path: string, name: string): boolean {
   return nestedChild || generatedSubagentName;
 }
 
-async function parseSession(path: string, modifiedAt: number): Promise<Omit<SessionSummary, "active"> | null> {
-  const entries = await readSessionOutline(path);
+function sessionSummaryFromEntries(
+  path: string,
+  modifiedAt: number,
+  entries: SessionEntry[],
+  options: { includeSubagents?: boolean; displayName?: string } = {},
+): Omit<SessionSummary, "active"> | null {
   const header = entries.find((entry): entry is SessionEntry & SessionHeader => entry.type === "session" && typeof entry.id === "string");
   // Session naming is file-global metadata. Conversation summary facts below
   // deliberately use only the active parent chain, matching rendered history.
@@ -315,8 +337,8 @@ async function parseSession(path: string, modifiedAt: number): Promise<Omit<Sess
   // A Pi process creates an empty JSONL before the user actually starts a conversation.
   // Those draft files belong to the composer, not to the persisted sidebar history.
   if (messageCount === 0) return null;
-  const displayName = name || preview || "新会话";
-  if (isSubagentSession(path, displayName)) return null;
+  const displayName = cleanPreview(options.displayName || name || preview || "新会话", 120);
+  if (!options.includeSubagents && isSubagentSession(path, displayName)) return null;
   return {
     id: idForPath(path),
     sessionId: header.id,
@@ -328,6 +350,23 @@ async function parseSession(path: string, modifiedAt: number): Promise<Omit<Sess
     messageCount,
     turnCount,
   };
+}
+
+async function parseSession(
+  path: string,
+  modifiedAt: number,
+  options: { includeSubagents?: boolean; displayName?: string } = {},
+): Promise<Omit<SessionSummary, "active"> | null> {
+  return sessionSummaryFromEntries(path, modifiedAt, await readSessionOutline(path), options);
+}
+
+export function parseSessionContent(
+  path: string,
+  content: string,
+  modifiedAt: number,
+  options: { includeSubagents?: boolean; displayName?: string } = {},
+): Omit<SessionSummary, "active"> | null {
+  return sessionSummaryFromEntries(path, modifiedAt, sessionEntriesFromContent(content), options);
 }
 
 export class SessionIndex {

@@ -10,6 +10,12 @@ const EMPTY: BackgroundSubagentSnapshot = {
   steps: [],
 };
 
+export const SUBAGENT_DISCOVERY_POLL_MS = 500;
+export const SUBAGENT_ACTIVE_POLL_MS = 750;
+export const SUBAGENT_IDLE_POLL_MS = 2_000;
+export const SUBAGENT_HIDDEN_POLL_MS = 10_000;
+const FAST_EMPTY_POLLS = 10;
+
 type ScopedSnapshot = {
   sessionId: string;
   value: BackgroundSubagentSnapshot;
@@ -25,15 +31,25 @@ export function useBackgroundSubagents(sessionId: string): BackgroundSubagentSna
     let disposed = false;
     let timer: number | null = null;
     let controller: AbortController | null = null;
+    let emptyPolls = 0;
+    let latest = EMPTY;
 
+    const delay = () => {
+      if (document.visibilityState === "hidden") return SUBAGENT_HIDDEN_POLL_MS;
+      if (latest.activeCount > 0 || latest.attentionCount > 0)
+        return SUBAGENT_ACTIVE_POLL_MS;
+      if (latest.total > 0) return SUBAGENT_IDLE_POLL_MS;
+      return emptyPolls < FAST_EMPTY_POLLS
+        ? SUBAGENT_DISCOVERY_POLL_MS
+        : SUBAGENT_IDLE_POLL_MS;
+    };
     const schedule = () => {
       if (disposed) return;
       if (timer !== null) window.clearTimeout(timer);
-      const delay = document.visibilityState === "hidden" ? 10_000 : 2_000;
       timer = window.setTimeout(() => {
         timer = null;
         void poll();
-      }, delay);
+      }, delay());
     };
     const poll = async () => {
       if (disposed) return;
@@ -42,10 +58,16 @@ export function useBackgroundSubagents(sessionId: string): BackgroundSubagentSna
       controller = current;
       try {
         const next = await api.backgroundSubagents(sessionId, current.signal);
-        if (!disposed) setSnapshot({ sessionId, value: next });
+        if (!disposed && controller === current && !current.signal.aborted) {
+          latest = next;
+          emptyPolls = next.total > 0 ? 0 : emptyPolls + 1;
+          setSnapshot({ sessionId, value: next });
+        }
       } catch (cause) {
-        if (!disposed && !(cause instanceof DOMException && cause.name === "AbortError"))
-          setSnapshot({ sessionId, value: EMPTY });
+        // Preserve the last authoritative rows through transient transport or
+        // filesystem failures; disappearance requires a successful empty pull.
+        if (!disposed && cause instanceof DOMException && cause.name === "AbortError")
+          return;
       } finally {
         if (!disposed && controller === current) schedule();
       }

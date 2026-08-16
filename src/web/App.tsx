@@ -745,6 +745,60 @@ export function App() {
   const loadAllSessionsGenerationRef = useRef<number | null>(null);
   const directoryLoadGenerationsRef = useRef(new Map<string, number>());
   const desiredSessionIdRef = useRef("");
+  /** DSH-style verified direct-parent address; identity never grants child mutation authority. */
+  const subagentAddressesRef = useRef(
+    new Map<string, { parentSessionId: string; label: string }>(),
+  );
+  const rehydrateSubagentAddressChain = useCallback(
+    async (sessionId: string, signal?: AbortSignal): Promise<void> => {
+      const edges: Array<{ parentSessionId: string; childSessionId: string }> = [];
+      const visited = new Set<string>();
+      let childSessionId = sessionId;
+      while (true) {
+        if (visited.has(childSessionId) || edges.length >= 64)
+          throw new Error("子代理地址链无效");
+        visited.add(childSessionId);
+        const address = subagentAddressesRef.current.get(childSessionId);
+        if (!address) break;
+        edges.push({ parentSessionId: address.parentSessionId, childSessionId });
+        childSessionId = address.parentSessionId;
+      }
+      for (const edge of edges.reverse()) {
+        const snapshot = await api.backgroundSubagents(edge.parentSessionId, signal);
+        if (!snapshot.steps.some((step) => step.childSessionId === edge.childSessionId))
+          throw new ApiRequestError("子代理对话不存在或尚未准备好", 404, "SUBAGENT_VIEW_UNAVAILABLE");
+      }
+    },
+    [],
+  );
+  const fetchSessionView = useCallback(
+    async (
+      sessionId: string,
+      turns?: number,
+      options: { fast?: boolean; signal?: AbortSignal } = {},
+    ): Promise<SessionViewData> => {
+      const address = subagentAddressesRef.current.get(sessionId);
+      if (!address) return api.viewSession(sessionId, turns, options);
+      try {
+        return await api.viewBackgroundSubagent(
+          address.parentSessionId,
+          sessionId,
+          turns,
+          options.signal,
+        );
+      } catch (error) {
+        if (!(error instanceof ApiRequestError) || error.status !== 404) throw error;
+        await rehydrateSubagentAddressChain(sessionId, options.signal);
+        return api.viewBackgroundSubagent(
+          address.parentSessionId,
+          sessionId,
+          turns,
+          options.signal,
+        );
+      }
+    },
+    [rehydrateSubagentAddressChain],
+  );
   const navigationEpochRef = useRef(0);
   const navigationAbortRef = useRef<AbortController | null>(null);
   const navigationStartedAtRef = useRef(new Map<number, number>());
@@ -1264,7 +1318,7 @@ export function App() {
       viewedSessionIdRef.current = id;
       desiredSessionIdRef.current = id;
       localDraftRef.current = identity.kind === "draft";
-      rememberSessionId(id);
+      if (!id || !subagentAddressesRef.current.has(id)) rememberSessionId(id);
       dispatchPane(action);
     },
     [clearPendingLiveMessage, rememberConfirmedCommands],
@@ -2001,8 +2055,10 @@ export function App() {
       // A blank New draft has no persisted user message and intentionally stays
       // out of sidebar history until its first successful prompt. A remembered
       // Session may restore before bootstrap; update an existing row, but do not
-      // turn that one restored pane into a fake one-item sidebar.
-      if (view.session.messageCount > 0) {
+      // turn that one restored pane into a fake one-item sidebar. Addressed
+      // Subagent transcripts are never ordinary inventory, even when non-empty.
+      const isSubagentView = subagentAddressesRef.current.has(view.session.id);
+      if (!isSubagentView && view.session.messageCount > 0) {
         const summary = applyLocalTurnCount(
           normalizeSessionRunning(view.session),
         );
@@ -2020,7 +2076,7 @@ export function App() {
           );
         });
       }
-      if (view.isActive)
+      if (!isSubagentView && view.isActive)
         setActiveSessionIds((current) => [
           ...new Set([...current, view.session.id]),
         ]);
@@ -2150,7 +2206,7 @@ export function App() {
       const request = ensureHandshake(refreshEpoch, runEpochGeneration)
         .then((accepted) => {
           if (!accepted) throw new Error("stale handshake");
-          return api.viewSession(wantedId);
+          return fetchSessionView(wantedId);
         })
         .finally(() => {
           if (initialHistoryRef.current?.request === request)
@@ -2313,7 +2369,7 @@ export function App() {
         const viewVersion = sessionEventVersionRef.current.get(wantedId) || 0;
         const viewAuthority =
           earlyViewAuthority || capturePaneAuthority(wantedId);
-        const view = await (earlyViewRequest || api.viewSession(wantedId));
+        const view = await (earlyViewRequest || fetchSessionView(wantedId));
         if (
           !refreshAuthorityIsCurrent(refreshAuthority) ||
           desiredSessionIdRef.current !== wantedId ||
@@ -2417,13 +2473,18 @@ export function App() {
       )
         initialReadyRecoveryRequestedRef.current = true;
       void refresh()
-        .then(() => {
+        .then(async () => {
           const id = viewedSessionIdRef.current;
-          if (id) void api.markSessionViewed(id).catch(() => undefined);
+          if (!id) return;
+          if (subagentAddressesRef.current.has(id)) {
+            await rehydrateSubagentAddressChain(id).catch(() => undefined);
+            return;
+          }
+          void api.markSessionViewed(id).catch(() => undefined);
         })
         .catch(reportBackgroundRefreshError);
     },
-    [refresh, reportBackgroundRefreshError],
+    [refresh, rehydrateSubagentAddressChain, reportBackgroundRefreshError],
   );
 
   const refreshSidebarSessions = useCallback(async () => {
@@ -3084,8 +3145,7 @@ export function App() {
             const queueRequestRevision =
               queueProjectionRevisionRef.current.get(eventSessionId) || 0;
             const authority = capturePaneAuthority(eventSessionId);
-            void api
-              .viewSession(eventSessionId)
+            void fetchSessionView(eventSessionId)
               .then((view) => {
                 if (
                   paneAuthorityCanCommit(authority) &&
@@ -3387,8 +3447,7 @@ export function App() {
           const queueRequestRevision =
             queueProjectionRevisionRef.current.get(eventSessionId) || 0;
           const authority = capturePaneAuthority(eventSessionId);
-          void api
-            .viewSession(eventSessionId)
+          void fetchSessionView(eventSessionId)
             .then((view) => {
               if (
                 paneAuthorityCanCommit(authority) &&
@@ -3948,8 +4007,7 @@ export function App() {
             const queueRequestRevision =
               queueProjectionRevisionRef.current.get(eventSessionId) || 0;
             const authority = capturePaneAuthority(eventSessionId);
-            void api
-              .viewSession(eventSessionId)
+            void fetchSessionView(eventSessionId)
               .then((view) => {
                 const versionUnchanged =
                   (sessionEventVersionRef.current.get(eventSessionId) || 0) ===
@@ -4017,8 +4075,7 @@ export function App() {
             const queueRequestRevision =
               queueProjectionRevisionRef.current.get(eventSessionId) || 0;
             const authority = capturePaneAuthority(eventSessionId);
-            void api
-              .viewSession(eventSessionId)
+            void fetchSessionView(eventSessionId)
               .then((view) => {
                 const versionUnchanged =
                   (sessionEventVersionRef.current.get(eventSessionId) || 0) ===
@@ -4399,7 +4456,8 @@ export function App() {
 
   useEffect(() => {
     if (loading || !viewedSessionId) return;
-    void api.markSessionViewed(viewedSessionId).catch(() => undefined);
+    if (!subagentAddressesRef.current.has(viewedSessionId))
+      void api.markSessionViewed(viewedSessionId).catch(() => undefined);
     const steeringDrop =
       unreadSteeringDropMessagesRef.current.get(viewedSessionId);
     if (steeringDrop) {
@@ -4486,7 +4544,7 @@ export function App() {
         // permanently busy although the parsed in-memory history is already ready.
         // Prefer the RPC-free hot-memory snapshot, then use the JSONL-only view for
         // cold/reclaimed Sessions or an incomplete hot history.
-        view = await api.viewSession(id, requestedTurns, {
+        view = await fetchSessionView(id, requestedTurns, {
           fast: true,
           signal: controller.signal,
         });
@@ -4507,7 +4565,7 @@ export function App() {
           cause.code !== "HOT_VIEW_UNAVAILABLE"
         )
           throw cause;
-        view = await api.viewSession(id, requestedTurns, {
+        view = await fetchSessionView(id, requestedTurns, {
           signal: controller.signal,
         });
       }
@@ -4646,8 +4704,7 @@ export function App() {
       const authority = capturePaneAuthority(sessionId);
       const queueRequestRevision =
         queueProjectionRevisionRef.current.get(sessionId) || 0;
-      void api
-        .viewSession(sessionId)
+      void fetchSessionView(sessionId)
         .then((view) => {
           if (!paneAuthorityCanCommit(authority)) return;
           const completedVersion =
@@ -5320,7 +5377,7 @@ export function App() {
               sessionEventVersionRef.current.get(targetSessionId) || 0;
             const queueRequestRevision =
               queueProjectionRevisionRef.current.get(targetSessionId) || 0;
-            const view = await api.viewSession(targetSessionId);
+            const view = await fetchSessionView(targetSessionId);
             if (
               promptAuthority &&
               paneAuthorityCanCommit(promptAuthority) &&
@@ -5462,8 +5519,7 @@ export function App() {
         const queueRequestRevision =
           queueProjectionRevisionRef.current.get(targetSessionId) || 0;
         const authority = capturePaneAuthority(targetSessionId);
-        void api
-          .viewSession(targetSessionId)
+        void fetchSessionView(targetSessionId)
           .then((view) => {
             if (
               (sessionEventVersionRef.current.get(targetSessionId) || 0) !==
@@ -5555,8 +5611,7 @@ export function App() {
           sessionEventVersionRef.current.get(operation.sessionId) || 0;
         const queueRequestRevision =
           queueProjectionRevisionRef.current.get(operation.sessionId) || 0;
-        void api
-          .viewSession(operation.sessionId)
+        void fetchSessionView(operation.sessionId)
           .then((view) => {
             if (
               viewOperationIsCurrent(operation) &&
@@ -5595,7 +5650,7 @@ export function App() {
     }
   };
 
-  const viewSession = async (id: string) => {
+  const viewSession = async (id: string, navigationName?: string) => {
     if (confirmedDeletedSessionIdsRef.current.has(id)) return;
     if (id === viewedSessionIdRef.current && desiredSessionIdRef.current === id)
       return;
@@ -5696,8 +5751,7 @@ export function App() {
       const requestVersion = sessionEventVersionRef.current.get(id) || 0;
       const queueRequestRevision =
         queueProjectionRevisionRef.current.get(id) || 0;
-      void api
-        .viewSession(id, rememberedTurns, { signal: controller.signal })
+      void fetchSessionView(id, rememberedTurns, { signal: controller.signal })
         .then((view) => {
           if (confirmedDeletedSessionIdsRef.current.has(id)) {
             recordBrowserStateDiagnostic("projection", "session-view-rejected", {
@@ -5758,7 +5812,7 @@ export function App() {
     // conversation cannot masquerade as the target and no empty-state reflow occurs.
     setPaneLoading({
       sessionId: id,
-      name: sessions.find((session) => session.id === id)?.name || "对话",
+      name: navigationName || sessions.find((session) => session.id === id)?.name || "对话",
     });
     // The source pane remains committed while this target view loads. Its
     // Runtime projection must not be overwritten with the target's status.
@@ -5769,7 +5823,7 @@ export function App() {
       const hot = activeSessionIds.includes(id);
       let view: SessionViewData;
       try {
-        view = await api.viewSession(id, rememberedTurns, {
+        view = await fetchSessionView(id, rememberedTurns, {
           fast: hot,
           signal: controller.signal,
         });
@@ -5782,7 +5836,7 @@ export function App() {
           cause.code !== "HOT_VIEW_UNAVAILABLE"
         )
           throw cause;
-        view = await api.viewSession(id, rememberedTurns, {
+        view = await fetchSessionView(id, rememberedTurns, {
           signal: controller.signal,
         });
       }
@@ -5832,6 +5886,22 @@ export function App() {
     }
   };
 
+  const openSubagentSession = (
+    parentSessionId: string,
+    childSessionId: string,
+    label: string,
+  ) => {
+    subagentAddressesRef.current.delete(childSessionId);
+    subagentAddressesRef.current.set(childSessionId, { parentSessionId, label });
+    while (subagentAddressesRef.current.size > 64) {
+      const oldest = subagentAddressesRef.current.keys().next().value;
+      if (typeof oldest !== "string") break;
+      subagentAddressesRef.current.delete(oldest);
+    }
+    viewCacheRef.current.forget(childSessionId);
+    void viewSession(childSessionId, label);
+  };
+
   const createSession = () => {
     if (buildIdentityMismatch) return;
     cancelPendingNavigation();
@@ -5870,6 +5940,7 @@ export function App() {
     // Keep the request asynchronous so New remains instant, but retain its
     // promise: first Send must not let a delayed clear unpin the new Runtime.
     clearViewedPromiseRef.current = previousViewedSessionId
+      && !subagentAddressesRef.current.has(previousViewedSessionId)
       ? api.clearSessionViewed(previousViewedSessionId).catch(() => undefined)
       : null;
   };
@@ -6765,7 +6836,7 @@ export function App() {
       // Re-read the authoritative pending request. This distinguishes a real
       // delivery failure from a lost HTTP response after Pi already accepted it.
       try {
-        const view = await api.viewSession(sessionId);
+        const view = await fetchSessionView(sessionId);
         acceptedDespiteFailure =
           !view.pendingExtensionRequest ||
           view.pendingExtensionRequest.id !== submittedRequest.id;
@@ -6816,6 +6887,7 @@ export function App() {
   const viewedSession = sessions.find(
     (session) => session.id === viewedSessionId,
   );
+  const viewingSubagentSession = subagentAddressesRef.current.has(viewedSessionId);
   const currentSessionBusy = busySessionIds.includes(
     viewedSessionId || (localDraft ? LOCAL_DRAFT_BUSY_ID : ""),
   );
@@ -6933,7 +7005,7 @@ export function App() {
     effectiveControl.controlOwner && !effectiveControl.controlledByThisWindow,
   );
   const takeControl = async () => {
-    if (mutationBlocked) return;
+    if (mutationBlocked || viewingSubagentSession) return;
     const sessionId = viewedSessionIdRef.current;
     if (!sessionId) return;
     const authority = capturePaneAuthority(sessionId);
@@ -7248,6 +7320,7 @@ export function App() {
       viewSwitching ||
       observing ||
       mutationBlocked ||
+      viewingSubagentSession ||
       Boolean(state.isCompacting) ||
       primarySessionFailed ||
       primaryRuntimeUnavailable,
@@ -7318,6 +7391,7 @@ export function App() {
     messages.length,
     mutationBlocked,
     observing,
+    viewingSubagentSession,
     pane.identity.kind,
     primaryRuntimeUnavailable,
     promptStarting,
@@ -7346,6 +7420,7 @@ export function App() {
         viewSwitching ||
         observing ||
         mutationBlocked ||
+        viewingSubagentSession ||
         Boolean(state.isCompacting)
       }
       settingsBusy={settingsBusy}
@@ -7524,6 +7599,7 @@ export function App() {
             setManagementSection((current) => (current ? null : "settings")),
           diffSidebarOpen,
           onToggleDiffSidebar: () => setDiffSidebarOpen((open) => !open),
+          onOpenSubagentSession: openSubagentSession,
         }}
         timelineRef={scrollRef}
         onScroll={onScroll}
@@ -7553,8 +7629,8 @@ export function App() {
         toolStatus={toolStatus}
         onNavigate={navigateConversation}
         sessionControl={{
-          observing,
-          disabled: mutationBlocked,
+          observing: viewingSubagentSession ? false : observing,
+          disabled: mutationBlocked || viewingSubagentSession,
           onTakeOver: () => void takeControl(),
         }}
         promptQueue={{
@@ -7564,7 +7640,8 @@ export function App() {
             currentSessionPreparing ||
             viewSwitching ||
             observing ||
-            mutationBlocked,
+            mutationBlocked ||
+            viewingSubagentSession,
           onCancel: cancelQueuedPrompt,
           onResume: resumeQueuedPrompt,
         }}
@@ -7577,6 +7654,7 @@ export function App() {
             viewSwitching ||
             observing ||
             mutationBlocked ||
+            viewingSubagentSession ||
             Boolean(state.isCompacting) ||
             primarySessionFailed ||
             primaryRuntimeUnavailable,
@@ -7584,7 +7662,9 @@ export function App() {
             ? "网页与服务构建不一致；请刷新页面后再提交操作"
             : lifecycleBlocked
               ? "Pi Chat 正在执行全局维护，暂时不能提交新操作"
-              : observing
+              : viewingSubagentSession
+                ? "子代理对话为只读；返回主对话继续操作"
+                : observing
                 ? "此对话正在另一窗口中控制；点击“接管控制”后可操作"
                 : primarySessionFailed
                   ? "Pi Runtime 当前不可用；历史仍可阅读"
@@ -7607,7 +7687,7 @@ export function App() {
             composerDraftRevisionRef.current = revision;
           },
           submissionScope: composerSubmissionScope,
-          allowFollowupSubmissions: !localDraft,
+          allowFollowupSubmissions: !localDraft && !viewingSubagentSession,
           onSubmissionPendingChange: updateComposerPending,
           commands: composerCommands,
           controls: composerControls,

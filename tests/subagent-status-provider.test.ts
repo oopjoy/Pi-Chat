@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, mkdir, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, rename, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { MAX_ROOT_ENTRIES, MAX_STATUS_BYTES, SubagentStatusProvider, collectBoundedDirectoryEntries, currentSubagentTempRoot, readBoundedStatusBytes, resolveSubagentTempScopeId } from "../src/server/subagent-status-provider";
+import { MAX_ROOT_ENTRIES, MAX_STATUS_BYTES, SubagentStatusProvider, SubagentStatusUnavailableError, collectBoundedDirectoryEntries, currentSubagentTempRoot, readBoundedStatusBytes, resolveSubagentTempScopeId } from "../src/server/subagent-status-provider";
+import { idForPath } from "../src/server/session-index";
 
 const PARENT = resolve(tmpdir(), "pi-chat-parent-session.jsonl");
 const OTHER_PARENT = resolve(tmpdir(), "pi-chat-other-session.jsonl");
@@ -87,6 +88,179 @@ test("provider scopes by exact parent Session path and exposes only closed safe 
     ]) assert.equal(serialized.includes(forbidden), false, forbidden);
   } finally {
     await target.cleanup();
+  }
+});
+
+test("provider exposes only a verified opaque child transcript address", async () => {
+  const target = await fixture();
+  const sessionRoot = await mkdtemp(join(tmpdir(), "pi-chat-subagent-parent-"));
+  try {
+    const parent = join(sessionRoot, "parent.jsonl");
+    const childRoot = join(sessionRoot, "parent", "abc12345", "run-0");
+    const child = join(childRoot, "session.jsonl");
+    await mkdir(childRoot, { recursive: true });
+    await writeFile(parent, JSON.stringify({ type: "session", id: "parent" }));
+    await writeFile(child, `${JSON.stringify({ type: "session", id: "child", cwd: sessionRoot })}\n${JSON.stringify({ type: "message", message: { role: "user", content: "inspect" } })}\n`);
+    const runId = "abababab-abab-4bab-8bab-abababababab";
+    await target.writeStatus(runId, status(runId, parent, {
+      steps: [{
+        agent: "reviewer",
+        workflowKey: "review-child",
+        status: "running",
+        startedAt: Date.now() - 1_000,
+        lastActivityAt: Date.now() - 100,
+        sessionFile: child,
+      }],
+    }));
+    const outside = join(sessionRoot, "outside.jsonl");
+    await writeFile(outside, `${JSON.stringify({ type: "session", id: "outside" })}\n`);
+    const outsideRunId = "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd";
+    await target.writeStatus(outsideRunId, status(outsideRunId, parent, {
+      steps: [{
+        agent: "reviewer",
+        workflowKey: "outside-child",
+        status: "running",
+        startedAt: Date.now() - 1_000,
+        lastActivityAt: Date.now() - 100,
+        sessionFile: outside,
+      }],
+    }));
+
+    const provider = new SubagentStatusProvider(target.root);
+    const snapshot = await provider.listForParentSession(parent);
+    const verified = snapshot.steps.find((step) => step.label === "review child");
+    const rejected = snapshot.steps.find((step) => step.label === "outside child");
+    assert.equal(verified?.childSessionId, idForPath(child));
+    assert.equal(rejected?.childSessionId, undefined);
+    assert.equal(verified?.label, "review child");
+    assert.equal(JSON.stringify(snapshot).includes(child), false);
+    const navigation = await provider.navigationTargetForParentSession(parent, idForPath(child));
+    assert.equal(navigation?.path, process.platform === "win32" ? resolve(child).toLowerCase() : resolve(child));
+    assert.equal(navigation?.label, "review child");
+    assert.match(navigation?.content || "", /inspect/);
+    assert.equal(await provider.navigationTargetForParentSession(OTHER_PARENT, idForPath(child)), null);
+  } finally {
+    await Promise.all([
+      target.cleanup(),
+      rm(sessionRoot, { recursive: true, force: true }),
+    ]);
+  }
+});
+
+test("provider revokes a child address when the producer removes it or it expires", async () => {
+  const target = await fixture();
+  const sessionRoot = await mkdtemp(join(tmpdir(), "pi-chat-subagent-revoke-"));
+  let now = Date.now();
+  try {
+    const parent = join(sessionRoot, "parent.jsonl");
+    const child = join(sessionRoot, "parent", "child", "run-0", "session.jsonl");
+    await mkdir(resolve(child, ".."), { recursive: true });
+    await writeFile(parent, `${JSON.stringify({ type: "session", id: "parent" })}\n`);
+    await writeFile(child, `${JSON.stringify({ type: "session", id: "child", cwd: sessionRoot })}\n`);
+    const runId = "adadadad-adad-4dad-8dad-adadadadadad";
+    const directory = await target.writeStatus(runId, status(runId, parent, {
+      startedAt: now - 1_000,
+      lastUpdate: now,
+      steps: [{
+        agent: "reviewer",
+        workflowKey: "revocable-child",
+        status: "complete",
+        startedAt: now - 1_000,
+        endedAt: now,
+        lastActivityAt: now,
+        sessionFile: child,
+      }],
+    }));
+    const provider = new SubagentStatusProvider(target.root, () => now);
+    const childId = idForPath(child);
+    assert.equal((await provider.listForParentSession(parent)).steps[0]?.childSessionId, childId);
+    assert.ok(await provider.navigationTargetForParentSession(parent, childId));
+
+    await writeFile(join(directory, "status.json"), JSON.stringify(status(runId, parent, {
+      startedAt: now - 1_000,
+      lastUpdate: now,
+      steps: [{ agent: "reviewer", workflowKey: "revocable-child", status: "running", startedAt: now - 1_000, lastActivityAt: now }],
+    })));
+    await utimes(join(directory, "status.json"), new Date(now + 1_000), new Date(now + 1_000));
+    assert.equal(await provider.navigationTargetForParentSession(parent, childId), null);
+    assert.equal(await provider.knownChildSessionPath(childId), null);
+
+    await writeFile(join(directory, "status.json"), JSON.stringify(status(runId, parent, {
+      startedAt: now - 1_000,
+      lastUpdate: now,
+      steps: [{ agent: "reviewer", workflowKey: "revocable-child", status: "complete", startedAt: now - 1_000, endedAt: now, lastActivityAt: now, sessionFile: child }],
+    })));
+    await utimes(join(directory, "status.json"), new Date(now + 2_000), new Date(now + 2_000));
+    assert.ok((await provider.listForParentSession(parent)).steps[0]?.childSessionId);
+    now += 25 * 60 * 60 * 1_000;
+    assert.equal(await provider.navigationTargetForParentSession(parent, childId), null);
+  } finally {
+    await Promise.all([target.cleanup(), rm(sessionRoot, { recursive: true, force: true })]);
+  }
+});
+
+test("provider reads a verified child through one stable handle and rejects a swap", async () => {
+  const target = await fixture();
+  const sessionRoot = await mkdtemp(join(tmpdir(), "pi-chat-subagent-swap-"));
+  try {
+    const parent = join(sessionRoot, "parent.jsonl");
+    const child = join(sessionRoot, "parent", "child", "run-0", "session.jsonl");
+    const outside = join(sessionRoot, "outside.jsonl");
+    await mkdir(resolve(child, ".."), { recursive: true });
+    await writeFile(parent, `${JSON.stringify({ type: "session", id: "parent" })}\n`);
+    await writeFile(child, `${JSON.stringify({ type: "session", id: "safe-child", cwd: sessionRoot })}\n`);
+    await writeFile(outside, `${JSON.stringify({ type: "session", id: "outside", cwd: sessionRoot })}\n${JSON.stringify({ type: "message", message: { role: "user", content: "private replacement" } })}\n`);
+    const runId = "aeaeaeae-aeae-4eae-8eae-aeaeaeaeaeae";
+    await target.writeStatus(runId, status(runId, parent, {
+      steps: [{ agent: "reviewer", workflowKey: "swap-child", status: "running", startedAt: Date.now() - 1_000, lastActivityAt: Date.now(), sessionFile: child }],
+    }));
+    let swapped = false;
+    const provider = new SubagentStatusProvider(target.root, Date.now, {
+      beforeChildSessionOpen: async () => {
+        if (swapped) return;
+        swapped = true;
+        await rename(child, `${child}.verified`);
+        await rename(outside, child);
+      },
+    });
+    const childId = (await provider.listForParentSession(parent)).steps[0]?.childSessionId;
+    assert.ok(childId);
+    assert.equal(await provider.navigationTargetForParentSession(parent, childId!), null);
+    assert.equal(swapped, true);
+  } finally {
+    await Promise.all([target.cleanup(), rm(sessionRoot, { recursive: true, force: true })]);
+  }
+});
+
+test("provider validates child paths only for the bounded visible projection", async () => {
+  const target = await fixture();
+  const sessionRoot = await mkdtemp(join(tmpdir(), "pi-chat-subagent-cap-"));
+  try {
+    const parent = join(sessionRoot, "parent.jsonl");
+    const child = join(sessionRoot, "parent", "child", "run-0", "session.jsonl");
+    await mkdir(resolve(child, ".."), { recursive: true });
+    await writeFile(parent, `${JSON.stringify({ type: "session", id: "parent" })}\n`);
+    await writeFile(child, `${JSON.stringify({ type: "session", id: "child", cwd: sessionRoot })}\n`);
+    const runId = "afafafaf-afaf-4faf-8faf-afafafafafaf";
+    await target.writeStatus(runId, status(runId, parent, {
+      steps: Array.from({ length: 40 }, (_, index) => ({
+        agent: "reviewer",
+        workflowKey: `child-${index}`,
+        status: "running",
+        startedAt: Date.now() - 1_000,
+        lastActivityAt: Date.now() - index,
+        sessionFile: child,
+      })),
+    }));
+    let validations = 0;
+    const snapshot = await new SubagentStatusProvider(target.root, Date.now, {
+      onChildSessionValidation: () => { validations += 1; },
+    }).listForParentSession(parent);
+    assert.equal(snapshot.total, 40);
+    assert.equal(snapshot.steps.length, 24);
+    assert.equal(validations, 24);
+  } finally {
+    await Promise.all([target.cleanup(), rm(sessionRoot, { recursive: true, force: true })]);
   }
 });
 
@@ -187,7 +361,10 @@ test("provider enforces status age and root entry count bounds", async () => {
     await crowded.writeStatus(runId, status(runId));
     await Promise.all(Array.from({ length: 512 }, (_, index) =>
       writeFile(join(crowded.runs, `ignored-${index}`), "x")));
-    assert.equal((await new SubagentStatusProvider(crowded.root).listForParentSession(PARENT)).total, 0);
+    await assert.rejects(
+      new SubagentStatusProvider(crowded.root).listForParentSession(PARENT),
+      SubagentStatusUnavailableError,
+    );
   } finally {
     await crowded.cleanup();
   }
@@ -269,7 +446,10 @@ test("provider rejects a redirected async root", async (context) => {
       }
       throw error;
     }
-    assert.equal((await new SubagentStatusProvider(root).listForParentSession(PARENT)).total, 0);
+    await assert.rejects(
+      new SubagentStatusProvider(root).listForParentSession(PARENT),
+      SubagentStatusUnavailableError,
+    );
   } finally {
     await Promise.all([rm(root, { recursive: true, force: true }), rm(outside, { recursive: true, force: true })]);
   }
@@ -292,7 +472,10 @@ test("provider rejects a redirected approved temp root", async (context) => {
       }
       throw error;
     }
-    assert.equal((await new SubagentStatusProvider(alias).listForParentSession(PARENT)).total, 0);
+    await assert.rejects(
+      new SubagentStatusProvider(alias).listForParentSession(PARENT),
+      SubagentStatusUnavailableError,
+    );
   } finally {
     await Promise.all([rm(parent, { recursive: true, force: true }), outside.cleanup()]);
   }
@@ -339,10 +522,20 @@ test("POSIX ownership and writable-mode checks fail closed", { skip: process.get
     const run = await target.writeStatus(runId, status(runId));
     const statusPath = join(run, "status.json");
     const uid = process.getuid!();
-    assert.equal((await new SubagentStatusProvider(target.root, Date.now, { uid: uid + 1 }).listForParentSession(PARENT)).total, 0);
-    for (const [path, restore] of [[target.root, 0o700], [target.runs, 0o755], [run, 0o755], [statusPath, 0o644]] as const) {
+    await assert.rejects(
+      new SubagentStatusProvider(target.root, Date.now, { uid: uid + 1 }).listForParentSession(PARENT),
+      SubagentStatusUnavailableError,
+    );
+    for (const [path, restore, rootAuthority] of [
+      [target.root, 0o700, true],
+      [target.runs, 0o755, true],
+      [run, 0o755, false],
+      [statusPath, 0o644, false],
+    ] as const) {
       await chmod(path, 0o777);
-      assert.equal((await new SubagentStatusProvider(target.root, Date.now, { uid }).listForParentSession(PARENT)).total, 0, path);
+      const request = new SubagentStatusProvider(target.root, Date.now, { uid }).listForParentSession(PARENT);
+      if (rootAuthority) await assert.rejects(request, SubagentStatusUnavailableError);
+      else assert.equal((await request).total, 0, path);
       await chmod(path, restore);
     }
   } finally {

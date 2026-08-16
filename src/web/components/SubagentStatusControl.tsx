@@ -9,12 +9,12 @@ import {
 } from "react";
 import type { BackgroundSubagentSnapshot, BackgroundSubagentStatus, BackgroundSubagentStep } from "../../shared/types";
 import { useBackgroundSubagents } from "../hooks/use-background-subagents";
-import { ChevronDownIcon, SubagentsIcon } from "./Icons";
+import { ChevronDownIcon, ChevronRightIcon, SubagentsIcon } from "./Icons";
 
-const STATUS_LABEL: Record<BackgroundSubagentStatus, string> = {
+const STATUS_ACCESSIBLE: Record<BackgroundSubagentStatus, string> = {
   running: "运行中",
   waiting: "等待中",
-  attention: "需要关注",
+  attention: "等待处理",
   complete: "已完成",
   failed: "失败",
   cancelled: "已取消",
@@ -57,33 +57,60 @@ function age(ms: number): string {
   return hours < 24 ? `${hours} 小时前更新` : `${Math.floor(hours / 24)} 天前更新`;
 }
 
-function StepRow({ step }: { step: BackgroundSubagentStep }) {
-  const metrics = [
-    `已用 ${duration(step.elapsedMs)}`,
+function StepRow({
+  step,
+  onOpenSession,
+}: {
+  step: BackgroundSubagentStep;
+  onOpenSession: (childSessionId: string, label: string) => void;
+}) {
+  const secondary = [
+    !step.childSessionId ? "对话准备中" : undefined,
+    step.activity,
+    duration(step.elapsedMs),
     age(step.updateAgeMs),
-    step.turnCount === undefined ? "" : `${step.turnCount} 轮`,
-    step.toolCount === undefined ? "" : `${step.toolCount} 次工具`,
-  ].filter(Boolean);
-  return (
-    <details className={`subagent-status-row is-${step.status}`}>
-      <summary>
-        <span className="subagent-status-dot" aria-hidden="true" />
-        <span className="subagent-status-main">
-          <strong>{step.label}</strong>
-          <span>{metrics.slice(0, 2).join(" · ")}</span>
-        </span>
-        <span className="subagent-status-label">{STATUS_LABEL[step.status]}</span>
-      </summary>
-      <div className="subagent-status-detail">
-        {step.activity && <span>{step.activity}</span>}
-        <span>{metrics.join(" · ")}</span>
-        <span>只读状态，不会打开子会话记录。</span>
-      </div>
-    </details>
+  ].filter(Boolean).join(" · ");
+  const content = (
+    <>
+      <span className="subagent-status-dot" aria-hidden="true" />
+      <span className="subagent-status-main">
+        <strong>{step.label}</strong>
+        <span>{secondary}</span>
+      </span>
+      {step.childSessionId && <ChevronRightIcon className="subagent-status-open-icon" aria-hidden="true" />}
+    </>
+  );
+  const ariaLabel = `${step.label}，${STATUS_ACCESSIBLE[step.status]}，${secondary}${step.childSessionId ? "，打开对话" : ""}`;
+  return step.childSessionId ? (
+    <button
+      type="button"
+      role="treeitem"
+      className={`subagent-status-row is-${step.status}`}
+      aria-label={ariaLabel}
+      onClick={() => onOpenSession(step.childSessionId as string, step.label)}
+    >
+      {content}
+    </button>
+  ) : (
+    <div
+      role="treeitem"
+      aria-disabled="true"
+      tabIndex={-1}
+      className={`subagent-status-row is-${step.status} is-disabled`}
+      aria-label={ariaLabel}
+    >
+      {content}
+    </div>
   );
 }
 
-export function SubagentStatusControl({ sessionId }: { sessionId: string }) {
+export function SubagentStatusControl({
+  sessionId,
+  onOpenSession = () => undefined,
+}: {
+  sessionId: string;
+  onOpenSession?: (parentSessionId: string, childSessionId: string, label: string) => void;
+}) {
   const snapshot = useBackgroundSubagents(sessionId);
   const [open, setOpen] = useState(false);
   const [placement, setPlacement] = useState<Placement | null>(null);
@@ -106,7 +133,7 @@ export function SubagentStatusControl({ sessionId }: { sessionId: string }) {
     const viewportHeight = Math.max(1, window.innerHeight || document.documentElement.clientHeight);
     const margin = 12;
     const popoverWidth = Math.min(390, Math.max(240, viewportWidth - margin * 2));
-    const tooltipWidth = Math.min(320, Math.max(180, viewportWidth - margin * 2));
+    const tooltipWidth = Math.min(260, Math.max(180, viewportWidth - margin * 2));
     const clampLeft = (wanted: number, width: number) =>
       Math.min(Math.max(margin, wanted), Math.max(margin, viewportWidth - width - margin));
     const top = Math.max(margin, rect.bottom + 7);
@@ -159,21 +186,41 @@ export function SubagentStatusControl({ sessionId }: { sessionId: string }) {
 
   if (!appearedRef.current) return null;
 
+  const focusItem = (index: number) => {
+    const items = [...(popoverRef.current?.querySelectorAll<HTMLElement>('[role="treeitem"]') || [])];
+    if (!items.length) return;
+    items[(index + items.length) % items.length]?.focus();
+  };
   const openAndFocus = () => {
     updatePlacement();
     setOpen(true);
-    queueMicrotask(() => popoverRef.current?.focus());
+    queueMicrotask(() => focusItem(0));
   };
   const onPopoverKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key !== "Escape") return;
-    event.preventDefault();
-    setOpen(false);
-    queueMicrotask(() => triggerRef.current?.focus());
+    const items = [...(popoverRef.current?.querySelectorAll<HTMLElement>('[role="treeitem"]') || [])];
+    const index = items.indexOf(document.activeElement as HTMLElement);
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setOpen(false);
+      queueMicrotask(() => triggerRef.current?.focus());
+    } else if (event.key === "ArrowDown" && items.length) {
+      event.preventDefault();
+      focusItem(index + 1);
+    } else if (event.key === "ArrowUp" && items.length) {
+      event.preventDefault();
+      focusItem(index < 0 ? items.length - 1 : index - 1);
+    } else if (event.key === "Home" && items.length) {
+      event.preventDefault();
+      focusItem(0);
+    } else if (event.key === "End" && items.length) {
+      event.preventDefault();
+      focusItem(items.length - 1);
+    }
   };
-  const tooltip = "后台子代理仅供查看；Queue / Steer 始终只控制主会话";
+  const tooltip = "查看后台子代理对话";
   const ariaLabel = shown.total === 0
-    ? "后台子代理状态暂不可用或已结束"
-    : `${shown.total} 个后台子代理，${shown.attentionCount} 个需要关注，${shown.activeCount} 个运行中`;
+    ? "后台子代理已结束"
+    : `${shown.total} 个后台子代理，${shown.activeCount} 个运行中`;
   const tooltipStyle: CSSProperties | undefined = placement ? {
     top: placement.top,
     left: placement.tooltipLeft,
@@ -214,7 +261,7 @@ export function SubagentStatusControl({ sessionId }: { sessionId: string }) {
           ref={popoverRef}
           id="background-subagent-popover"
           role="dialog"
-          aria-label="后台子代理状态"
+          aria-label="后台子代理"
           className="subagent-status-popover"
           style={popoverStyle}
           tabIndex={-1}
@@ -222,15 +269,21 @@ export function SubagentStatusControl({ sessionId }: { sessionId: string }) {
         >
           <div className="subagent-status-heading">
             <strong>后台子代理</strong>
-            <span>只读投影</span>
+            <span>{shown.activeCount > 0 ? `${shown.activeCount} 个运行中` : `${shown.total} 个对话`}</span>
           </div>
-          <div className="subagent-status-list">
-            {shown.steps.map((step) => <StepRow key={step.key} step={step} />)}
+          <div className="subagent-status-list" role="tree" aria-label="后台子代理对话">
+            {shown.steps.map((step) => (
+              <StepRow
+                key={step.key}
+                step={step}
+                onOpenSession={(childSessionId, label) => {
+                  setOpen(false);
+                  onOpenSession(sessionId, childSessionId, label);
+                }}
+              />
+            ))}
           </div>
           {shown.truncated && <p className="subagent-status-truncated">仅显示优先级最高的 24 个步骤。</p>}
-          <p className={`subagent-status-authority${hasLive ? " is-important" : ""}`}>
-            Queue / Steer 始终只控制主会话；这些后台子代理仅供查看，不会加入左侧会话列表。
-          </p>
         </div>
       )}
     </div>

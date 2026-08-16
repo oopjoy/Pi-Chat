@@ -286,6 +286,20 @@ export const api = {
   warmSession: (id: string) => request<SessionRuntimeReadyData>(`/api/sessions/${id}/warm`, { method: "POST" }),
   backgroundSubagents: (id: string, signal?: AbortSignal) =>
     request<BackgroundSubagentSnapshot>(`/api/sessions/${id}/background-subagents`, { signal }, API_TIMEOUT_MS, true, false),
+  viewBackgroundSubagent: (
+    parentId: string,
+    childId: string,
+    turns?: number,
+    signal?: AbortSignal,
+  ) => {
+    const query = new URLSearchParams();
+    if (turns) query.set("turns", String(turns));
+    const suffix = query.size ? `?${query}` : "";
+    return request<SessionViewData>(
+      `/api/sessions/${parentId}/background-subagents/${childId}/view${suffix}`,
+      { signal },
+    );
+  },
   viewSession: (id: string, turns?: number, options: { fast?: boolean; signal?: AbortSignal } = {}) => {
     const query = new URLSearchParams();
     if (turns) query.set("turns", String(turns));

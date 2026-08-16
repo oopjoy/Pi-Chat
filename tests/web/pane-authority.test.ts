@@ -64,6 +64,200 @@ test("slow A to B navigation binds TopBar Subagents to B before its view resolve
 });
 
 
+test("clicking a verified Subagent row opens its read-only transcript without warming or sidebar insertion", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const childId = "cccccccccccccccccccc";
+  const childView = createSessionViewFixture();
+  childView.session = {
+    ...childView.session,
+    id: childId,
+    sessionId: "child-session",
+    name: "review child",
+    active: false,
+    writable: false,
+    messageCount: 2,
+  };
+  childView.state = {
+    ...childView.state,
+    sessionId: "child-session",
+    sessionName: "review child",
+    isStreaming: false,
+    messageCount: 2,
+  };
+  childView.messages = [
+    { role: "user", content: "inspect the boundary" },
+    { role: "assistant", content: "child findings" },
+  ];
+  childView.messageTotal = 2;
+  childView.turnTotal = 1;
+  childView.runtimeStatus = "view-only";
+  childView.isActive = false;
+  const childReads: Array<[string, string]> = [];
+  const warmed: string[] = [];
+  const viewed: string[] = [];
+  Object.assign(api, {
+    bootstrap: async () => bootstrap,
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async (id: string) => { viewed.push(id); return { viewing: id }; },
+    backgroundSubagents: async (id: string) => id === activeId ? {
+      total: 1,
+      activeCount: 1,
+      attentionCount: 0,
+      truncated: false,
+      steps: [{
+        key: "subagent-1",
+        label: "review child",
+        status: "running",
+        elapsedMs: 1_000,
+        updateAgeMs: 0,
+        childSessionId: childId,
+      }],
+    } : { total: 0, activeCount: 0, attentionCount: 0, truncated: false, steps: [] },
+    viewBackgroundSubagent: async (parentId: string, targetId: string) => {
+      childReads.push([parentId, targetId]);
+      return childView;
+    },
+    warmSession: async (id: string) => { warmed.push(id); throw new Error("must not warm child"); },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    const trigger = dom.window.document.querySelector<HTMLButtonElement>(".subagent-status-trigger")!;
+    await act(async () => trigger.click());
+    const row = dom.window.document.querySelector<HTMLButtonElement>('.subagent-status-row[role="treeitem"]')!;
+    await act(async () => { row.click(); await Promise.resolve(); await Promise.resolve(); });
+    assert.deepEqual(childReads, [[activeId, childId]]);
+    assert.equal(dom.window.document.querySelector(".topbar-title")?.textContent, "review child");
+    assert.match(dom.window.document.body.textContent || "", /child findings/);
+    assert.equal([...dom.window.document.querySelectorAll(".session-item")].some((item) => item.textContent?.includes("review child")), false);
+    assert.equal(warmed.length, 0);
+    assert.equal(viewed.includes(childId), false, "read-only child navigation never claims SessionControl presence");
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.dispatchEvent(new dom.window.MessageEvent("ready", {
+        data: JSON.stringify({ lifecycle: "idle", piChatRunEpoch: "replacement-epoch" }),
+      }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(viewed.includes(childId), false, "lifecycle recovery also skips child presence");
+    assert.equal([...dom.window.document.querySelectorAll(".session-item")].some((item) => item.textContent?.includes("review child")), false);
+    assert.equal(dom.window.document.querySelector('[aria-label*="重命名 review child"], [aria-label*="删除 review child"]'), null);
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea");
+    assert.equal(textarea?.disabled, true);
+    assert.match(textarea?.placeholder || "", /子代理对话为只读/);
+  } finally {
+    restoreApi();
+    await act(async () => root.unmount());
+  }
+});
+
+
+test("nested Subagent addresses rehydrate in order after a child read miss and lifecycle replacement", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api, ApiRequestError } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const childId = "cccccccccccccccccccc";
+  const grandchildId = "dddddddddddddddddddd";
+  const makeView = (id: string, name: string, answer: string): SessionViewData => {
+    const view = createSessionViewFixture();
+    view.session = { ...view.session, id, sessionId: `${id}-session`, name, active: false, writable: false, messageCount: 2 };
+    view.state = { ...view.state, sessionId: `${id}-session`, sessionName: name, isStreaming: false, messageCount: 2 };
+    view.messages = [{ role: "user", content: "inspect" }, { role: "assistant", content: answer }];
+    view.messageTotal = 2;
+    view.turnTotal = 1;
+    view.runtimeStatus = "view-only";
+    view.isActive = false;
+    return view;
+  };
+  const childView = makeView(childId, "child", "child answer");
+  const grandchildView = makeView(grandchildId, "grandchild", "grandchild answer");
+  const mappings = new Set<string>();
+  const catalogCalls: string[] = [];
+  const childReads: string[] = [];
+  let missGrandchildOnce = true;
+  const unavailable = () => new ApiRequestError("子代理对话不存在或尚未准备好", 404, "SUBAGENT_VIEW_UNAVAILABLE");
+  Object.assign(api, {
+    bootstrap: async () => bootstrap,
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async (id: string) => ({ viewing: id }),
+    backgroundSubagents: async (id: string) => {
+      catalogCalls.push(id);
+      if (id === activeId) {
+        mappings.add(`${activeId}/${childId}`);
+        return { total: 1, activeCount: 1, attentionCount: 0, truncated: false, steps: [{ key: "child", label: "child", status: "running", elapsedMs: 1, updateAgeMs: 0, childSessionId: childId }] };
+      }
+      if (id === childId) {
+        if (!mappings.has(`${activeId}/${childId}`)) throw unavailable();
+        mappings.add(`${childId}/${grandchildId}`);
+        return { total: 1, activeCount: 1, attentionCount: 0, truncated: false, steps: [{ key: "grandchild", label: "grandchild", status: "running", elapsedMs: 1, updateAgeMs: 0, childSessionId: grandchildId }] };
+      }
+      if (id === grandchildId && mappings.has(`${childId}/${grandchildId}`))
+        return { total: 0, activeCount: 0, attentionCount: 0, truncated: false, steps: [] };
+      throw unavailable();
+    },
+    viewBackgroundSubagent: async (parentId: string, targetId: string) => {
+      const edge = `${parentId}/${targetId}`;
+      childReads.push(edge);
+      if (!mappings.has(edge)) throw unavailable();
+      if (edge === `${childId}/${grandchildId}` && missGrandchildOnce) {
+        missGrandchildOnce = false;
+        mappings.delete(edge);
+        throw unavailable();
+      }
+      return targetId === childId ? childView : grandchildView;
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await act(async () => dom.window.document.querySelector<HTMLButtonElement>(".subagent-status-trigger")!.click());
+    await act(async () => { dom.window.document.querySelector<HTMLButtonElement>('.subagent-status-row[role="treeitem"]')!.click(); await Promise.resolve(); await Promise.resolve(); });
+    assert.equal(dom.window.document.querySelector(".topbar-title")?.textContent, "child");
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await act(async () => dom.window.document.querySelector<HTMLButtonElement>(".subagent-status-trigger")!.click());
+    const catalogsBeforeGrandchild = catalogCalls.length;
+    await act(async () => { dom.window.document.querySelector<HTMLButtonElement>('.subagent-status-row[role="treeitem"]')!.click(); await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); });
+    assert.equal(dom.window.document.querySelector(".topbar-title")?.textContent, "grandchild");
+    assert.match(dom.window.document.body.textContent || "", /grandchild answer/);
+    assert.equal(childReads.filter((edge) => edge === `${childId}/${grandchildId}`).length, 2, "404 retries only after ordered catalog hydration");
+    const grandchildHydration = catalogCalls.slice(catalogsBeforeGrandchild);
+    const parentHydrationIndex = grandchildHydration.indexOf(activeId);
+    assert.ok(parentHydrationIndex >= 0);
+    assert.equal(grandchildHydration.indexOf(childId, parentHydrationIndex + 1) > parentHydrationIndex, true);
+
+    mappings.clear();
+    const callsBeforeReplacement = catalogCalls.length;
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.dispatchEvent(new dom.window.MessageEvent("ready", {
+        data: JSON.stringify({ lifecycle: "idle", piChatRunEpoch: "replacement-nested" }),
+      }));
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const replacementHydration = catalogCalls.slice(callsBeforeReplacement);
+    const replacementParentIndex = replacementHydration.indexOf(activeId);
+    assert.ok(replacementParentIndex >= 0);
+    assert.equal(replacementHydration.indexOf(childId, replacementParentIndex + 1) > replacementParentIndex, true);
+    assert.equal(mappings.has(`${activeId}/${childId}`), true);
+    assert.equal(mappings.has(`${childId}/${grandchildId}`), true);
+    assert.equal([...dom.window.document.querySelectorAll(".session-item")].some((item) => /child|grandchild/.test(item.textContent || "")), false);
+  } finally {
+    restoreApi();
+    await act(async () => root.unmount());
+  }
+});
+
 test("a late cold activation from A cannot overwrite the Session B composer", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");

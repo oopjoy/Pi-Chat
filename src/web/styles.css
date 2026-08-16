@@ -991,27 +991,22 @@ button.ask-questionnaire-option:hover:not(:disabled) { background: var(--surface
 .subagent-status-heading strong { font-size: 12px; }
 .subagent-status-heading span { color: var(--muted); font-size: 10px; }
 .subagent-status-list { min-height: 0; overflow: auto; padding: 4px; }
-.subagent-status-row { border-radius: 8px; }
-.subagent-status-row > summary { display: flex; min-height: 52px; align-items: flex-start; gap: 8px; padding: 8px; border-radius: 8px; outline: 0; cursor: pointer; list-style: none; }
-.subagent-status-row > summary::-webkit-details-marker { display: none; }
-.subagent-status-row > summary:hover, .subagent-status-row > summary:focus-visible, .subagent-status-row[open] > summary { background: var(--surface-hover); }
-.subagent-status-row > summary:focus-visible { box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent), transparent 70%); }
+.subagent-status-row { display: flex; width: 100%; min-height: 52px; align-items: flex-start; gap: 8px; padding: 8px; border: 0; border-radius: 8px; outline: 0; background: transparent; color: inherit; cursor: pointer; font: inherit; text-align: left; }
+.subagent-status-row:hover, .subagent-status-row:focus-visible { background: var(--surface-hover); }
+.subagent-status-row:focus-visible { box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent), transparent 70%); }
+.subagent-status-row.is-disabled { cursor: default; opacity: .72; }
+.subagent-status-row.is-disabled:hover { background: transparent; }
 .subagent-status-dot { width: 8px; height: 8px; flex: 0 0 auto; margin-top: 5px; border-radius: 50%; background: var(--muted); }
 .subagent-status-row.is-running .subagent-status-dot { background: var(--status-blue); box-shadow: 0 0 0 3px color-mix(in srgb, var(--status-blue), transparent 82%); animation: session-pulse 1.25s ease-in-out infinite; }
-.subagent-status-row.is-waiting .subagent-status-dot { background: var(--status-yellow); box-shadow: 0 0 0 3px color-mix(in srgb, var(--status-yellow), transparent 84%); }
-.subagent-status-row.is-attention .subagent-status-dot { border: 2px solid var(--status-yellow); background: var(--status-yellow); box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-yellow), transparent 80%); }
+.subagent-status-row.is-waiting .subagent-status-dot, .subagent-status-row.is-attention .subagent-status-dot { background: var(--status-yellow); box-shadow: 0 0 0 3px color-mix(in srgb, var(--status-yellow), transparent 84%); }
 .subagent-status-row.is-complete .subagent-status-dot { background: var(--status-green); }
 .subagent-status-row.is-failed .subagent-status-dot, .subagent-status-row.is-cancelled .subagent-status-dot { background: var(--status-red); }
 .subagent-status-main { display: flex; min-width: 0; flex: 1; flex-direction: column; }
 .subagent-status-main strong { overflow: hidden; font-size: 11.5px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
-.subagent-status-main span, .subagent-status-label { color: var(--muted); font-size: 10px; line-height: 1.55; }
-.subagent-status-label { flex: 0 0 auto; }
-.subagent-status-row.is-running .subagent-status-label { color: var(--accent); }
-.subagent-status-row.is-attention .subagent-status-label { color: var(--attention); font-weight: 750; text-decoration: underline; text-underline-offset: 2px; }
-.subagent-status-row.is-failed .subagent-status-label { color: var(--danger); }
-.subagent-status-detail { display: grid; gap: 4px; margin: 0 8px 7px 24px; padding: 7px 8px; border-left: 2px solid var(--line); color: var(--muted); font-size: 10px; line-height: 1.5; }
-.subagent-status-truncated, .subagent-status-authority { margin: 0; padding: 8px 11px; border-top: 1px solid var(--line); color: var(--muted); font-size: 10px; line-height: 1.5; }
-.subagent-status-authority.is-important { border-left: 3px solid var(--attention); background: color-mix(in srgb, var(--attention-soft), transparent 90%); color: var(--text); font-weight: 700; }
+.subagent-status-main span { overflow: hidden; color: var(--muted); font-size: 10px; line-height: 1.55; text-overflow: ellipsis; white-space: nowrap; }
+.subagent-status-open-icon { width: 13px; height: 13px; flex: 0 0 auto; margin-top: 3px; color: var(--muted); }
+.subagent-status-row:hover .subagent-status-open-icon, .subagent-status-row:focus-visible .subagent-status-open-icon { color: var(--text); transform: translateX(1px); }
+.subagent-status-truncated { margin: 0; padding: 8px 11px; border-top: 1px solid var(--line); color: var(--muted); font-size: 10px; line-height: 1.5; }
 
 @media (max-width: 640px) {
   .topbar-context { gap: 5px; }
@@ -1020,12 +1015,17 @@ button.ask-questionnaire-option:hover:not(:disabled) { background: var(--surface
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .subagent-status-chevron, .subagent-status-tooltip { transition: none; }
+  .subagent-status-chevron, .subagent-status-tooltip, .subagent-status-open-icon { transition: none; }
   .subagent-status-row.is-running .subagent-status-dot { animation: none; }
 }
 
 @media (forced-colors: active) {
-  .subagent-status-trigger, .subagent-status-popover, .subagent-status-row > summary { forced-color-adjust: auto; }
+  .subagent-status-trigger, .subagent-status-popover, .subagent-status-row { forced-color-adjust: auto; }
   .subagent-status-dot, .subagent-status-trigger.has-active .subagent-status-indicator::after, .subagent-status-trigger.has-attention .subagent-status-indicator::after { border: 1px solid CanvasText; background: CanvasText; box-shadow: none; }
-  .subagent-status-row.is-attention .subagent-status-dot, .subagent-status-row.is-failed .subagent-status-dot { background: Highlight; }
+  .subagent-status-row.is-running .subagent-status-dot { border: 2px solid Highlight; border-radius: 50%; background: Canvas; }
+  .subagent-status-row.is-waiting .subagent-status-dot { border: 2px dashed CanvasText; border-radius: 50%; background: Canvas; }
+  .subagent-status-row.is-attention .subagent-status-dot { border-radius: 1px; background: Highlight; transform: rotate(45deg); }
+  .subagent-status-row.is-complete .subagent-status-dot { border-radius: 1px; background: CanvasText; }
+  .subagent-status-row.is-failed .subagent-status-dot { border: 3px double Highlight; background: Canvas; }
+  .subagent-status-row.is-cancelled .subagent-status-dot { height: 3px; margin-top: 7px; border-radius: 0; background: CanvasText; }
 }

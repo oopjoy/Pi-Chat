@@ -23,7 +23,7 @@
 | Prompt acknowledgement / delivery uncertain | `App.tsx`、`prompt-scheduler.ts`、`rpc-client.ts` | 服务端调度与 RPC outcome；浏览器 local-turn reconciliation | `web/prompt-consistency.test.ts`、`server/prompt-queue-steering.test.ts`、`prompt-scheduler.test.ts` |
 | Native Steer | `app.ts`、`App.tsx` | `PiChatApp` 的 generation-scoped admission/snapshot；Pi queue 是消费证据 | `server/prompt-queue-steering.test.ts`、`web/composer-capabilities.test.ts` |
 | 冷历史浏览与分页 | `session-index.ts`、`app.ts` Session view、`session-view-cache.ts` | `SessionIndex` 的 JSONL snapshot；App coordinator 决定可见提交 | `session-index.test.ts`、`session-navigation.test.ts`、`web/session-navigation-gate.test.ts` |
-| 后台 Subagent 顶栏状态 | `subagent-status-provider.ts`、`routes/subagents-read.ts`、`use-background-subagents.ts`、`SubagentStatusControl.tsx` | 服务端 provider 独占安全解析与父 JSONL 精确归属；Hook 只拥有当前 Session 的可丢弃轮询快照；主 Session Queue/Steer/Runtime authority 不变 | `subagent-status-provider.test.ts`、`subagents-read-route.test.ts`、`subagent-status-control.test.ts` |
+| 后台 Subagent 顶栏与只读子对话 | `subagent-status-provider.ts`、`routes/subagents-read.ts`、`use-background-subagents.ts`、`SubagentStatusControl.tsx`、`App.tsx` | 服务端 provider 独占安全解析与父子 JSONL 地址验证；Hook 只拥有当前 Session 的可丢弃轮询快照；App 仅保留 parent+child 只读地址，主 Session Queue/Steer/Runtime/SessionControl authority 不变 | `subagent-status-provider.test.ts`、`subagents-read-route.test.ts`、`subagent-status-control.test.ts`、`web/pane-authority.test.ts` |
 | Session 切换与旧响应隔离 | `App.tsx` authority helpers | App coordinator | `web/pane-authority.test.ts`、`web/session-navigation-gate.test.ts`、`refresh-navigation-guards.test.ts` |
 | Runtime 启动、容量和回收 | `runtime-pool.ts`、`app.ts` integration | `RuntimePool` 持有 Secondary worker/capacity；`PiChatApp` 持有跨域 finalization | `runtime-pool-admission.test.ts`、`server/runtime-recovery-capacity.test.ts` |
 | Primary readiness / recovery | `primary-runtime-readiness.ts`、`app.ts` adoption | `PrimaryRuntimeReadinessController` 与 `PiChatApp` binding | `primary-readiness.test.ts`、`server/runtime-recovery-capacity.test.ts`、`rpc-client.test.ts` |
@@ -53,7 +53,7 @@
 | SSE sockets、throttle、pending frames | `SseHub` | disconnect callback | `SessionControl` / lifecycle |
 | Cold JSONL path、index、snapshot | `SessionIndex` | read route 与 Runtime lookup | Runtime creation |
 | 当前可见 Conversation projection | `conversationPaneReducer` | App coordinator normalized action | API、cache、EventSource |
-| 当前 Session 的后台 Subagent 观察快照 | `useBackgroundSubagents`（浏览器可丢弃快照）与 `SubagentStatusProvider`（安全解析） | GET-only route；Session ID 切换即 abort/清空 | Session inventory、Conversation reducer、RuntimePool、PromptScheduler、SessionControl |
+| 当前 Session 的后台 Subagent 观察快照与 child address | `useBackgroundSubagents`（浏览器可丢弃快照）、`SubagentStatusProvider`（安全解析）与 App 的有界 parent+child 地址表 | GET-only catalog/child-history routes；Session ID 切换即 abort/清空；child transcript 永远只读 | Session inventory、RuntimePool、PromptScheduler、SessionControl、Queue/Steer |
 | 异步结果能否写当前 Pane | App coordinator authority helpers | reducer dispatch | `ConversationPane` component |
 | Session view LRU 与 transient overlay | `SessionViewCache` | App coordinator | reducer/component |
 

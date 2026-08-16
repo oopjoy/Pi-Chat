@@ -1,12 +1,13 @@
 import { constants, type Dirent } from "node:fs";
 import { lstat, open, opendir, realpath, type FileHandle } from "node:fs/promises";
 import { homedir, tmpdir, userInfo } from "node:os";
-import { isAbsolute, join, normalize, relative, resolve } from "node:path";
+import { extname, isAbsolute, join, normalize, relative, resolve } from "node:path";
 import type {
   BackgroundSubagentSnapshot,
   BackgroundSubagentStatus,
   BackgroundSubagentStep,
 } from "../shared/types.js";
+import { idForPath } from "./session-index.js";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const RUN_STATES = new Set(["queued", "running", "complete", "failed", "paused", "stopped", "rejected"]);
@@ -22,6 +23,17 @@ const MAX_FUTURE_SKEW_MS = 5 * 60 * 1_000;
 const MAX_STEPS_PER_RUN = 512;
 const MAX_VISIBLE_STEPS = 24;
 const MAX_ALIAS_ENTRIES = 4_096;
+const MAX_NAVIGATION_TARGETS = 4_096;
+const STATUS_SCAN_CONCURRENCY = 24;
+const CHILD_SESSION_SCAN_CONCURRENCY = 8;
+const MAX_CHILD_SESSION_BYTES = 128 * 1024 * 1024;
+
+export class SubagentStatusUnavailableError extends Error {
+  constructor() {
+    super("后台子代理状态暂时不可用");
+    this.name = "SubagentStatusUnavailableError";
+  }
+}
 
 const EMPTY: BackgroundSubagentSnapshot = {
   total: 0,
@@ -34,6 +46,7 @@ const EMPTY: BackgroundSubagentSnapshot = {
 type JsonRecord = Record<string, unknown>;
 type ParsedStep = {
   agent: string;
+  label?: string;
   status: string;
   activityState?: string;
   startedAt: number;
@@ -43,6 +56,7 @@ type ParsedStep = {
   toolCount?: number;
   tool?: string;
   toolArgs?: string;
+  sessionFile?: string;
 };
 type ParsedStatus = {
   runId: string;
@@ -90,6 +104,14 @@ function optionalString(value: unknown, maximum: number): { ok: boolean; value?:
   return typeof value === "string" && value.length <= maximum
     ? { ok: true, value }
     : { ok: false };
+}
+
+function safeStepLabel(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const label = value.trim();
+  return label.length > 0 && label.length <= 80 && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(label)
+    ? label.replace(/[._:-]+/g, " ")
+    : undefined;
 }
 
 function canonicalPath(path: string): string {
@@ -183,6 +205,7 @@ function parseStatus(value: unknown, directoryRunId: string, now: number): Parse
     const step = record(raw);
     if (!step) return null;
     const agent = boundedString(step.agent, 80);
+    const label = safeStepLabel(step.workflowKey) || safeStepLabel(step.label);
     const status = boundedString(step.status, 24);
     if (!agent || !status || !STEP_STATES.has(status)) return null;
     if (reservedAgent(agent)) continue;
@@ -204,8 +227,12 @@ function parseStatus(value: unknown, directoryRunId: string, now: number): Parse
     const currentTool = optionalString(step.currentTool, 64);
     const currentToolArgs = optionalString(step.currentToolArgs, 20_000);
     if (!currentTool.ok || !currentToolArgs.ok) return null;
+    const sessionFile = step.sessionFile === undefined
+      ? undefined
+      : parsedSessionPath(step.sessionFile) || undefined;
     steps.push({
       agent,
+      label,
       status,
       activityState: stepActivity,
       startedAt: stepStartedAt,
@@ -215,6 +242,7 @@ function parseStatus(value: unknown, directoryRunId: string, now: number): Parse
       toolCount,
       tool: currentTool.value || recent.tool,
       toolArgs: currentToolArgs.value || recent.args,
+      sessionFile,
     });
   }
   return { runId, parentSessionPath, state, activityState, startedAt, endedAt, lastUpdate, steps };
@@ -278,6 +306,7 @@ type StablePath = {
   real: string;
   dev: number;
   ino: number;
+  nlink: number;
   size: number;
   mtimeMs: number;
   uid: number;
@@ -300,20 +329,109 @@ async function stablePath(
     const stat = await lstat(path);
     if (stat.isSymbolicLink()) return null;
     if (kind === "directory" ? !stat.isDirectory() : !stat.isFile()) return null;
+    if (kind === "file" && stat.nlink !== 1) return null;
     if (expectedUid !== null && expectedUid !== undefined
       && (stat.uid !== expectedUid || (stat.mode & 0o022) !== 0)) return null;
     const resolvedReal = canonicalPath(await realpath(path));
     if (rootReal && !insideRealRoot(rootReal, resolvedReal)) return null;
     if (exactReal && resolvedReal !== canonicalPath(exactReal)) return null;
-    return { path, real: resolvedReal, dev: stat.dev, ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs, uid: stat.uid, mode: stat.mode };
+    return { path, real: resolvedReal, dev: stat.dev, ino: stat.ino, nlink: stat.nlink, size: stat.size, mtimeMs: stat.mtimeMs, uid: stat.uid, mode: stat.mode };
   } catch {
     return null;
   }
 }
 
+async function pathMissing(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return false;
+  } catch (error) {
+    return ["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code || "");
+  }
+}
+
 function sameStablePath(before: StablePath, after: StablePath | null): boolean {
   return Boolean(after && after.real === before.real && after.dev === before.dev && after.ino === before.ino
-    && after.size === before.size && after.mtimeMs === before.mtimeMs && after.uid === before.uid && after.mode === before.mode);
+    && after.nlink === before.nlink && after.size === before.size && after.mtimeMs === before.mtimeMs
+    && after.uid === before.uid && after.mode === before.mode);
+}
+
+type ChildSessionAnchors = { root: StablePath; child: StablePath };
+
+async function childSessionAnchors(
+  parentSessionPath: string,
+  candidatePath: string,
+  expectedUid: number | null,
+): Promise<ChildSessionAnchors | null> {
+  if (extname(parentSessionPath).toLowerCase() !== ".jsonl"
+    || extname(candidatePath).toLowerCase() !== ".jsonl") return null;
+  const childRootPath = parentSessionPath.slice(0, -extname(parentSessionPath).length);
+  const childRelative = relative(childRootPath, candidatePath);
+  if (!childRelative || childRelative.startsWith("..") || isAbsolute(childRelative)) return null;
+  const segments = childRelative.split(/[\\/]+/);
+  if (segments.length !== 3
+    || !/^[A-Za-z0-9._-]{1,128}$/.test(segments[0] || "")
+    || !/^run-\d+$/.test(segments[1] || "")
+    || segments[2]?.toLowerCase() !== "session.jsonl") return null;
+  const root = await stablePath(childRootPath, "directory", undefined, undefined, expectedUid);
+  if (!root) return null;
+  const child = await stablePath(candidatePath, "file", root.real, undefined, expectedUid);
+  return child ? { root, child } : null;
+}
+
+async function readChildSessionBytes(
+  anchors: ChildSessionAnchors,
+  expectedUid: number | null,
+): Promise<{ path: string; modifiedAt: number; content: string } | null> {
+  const { root, child } = anchors;
+  if (child.size > MAX_CHILD_SESSION_BYTES) return null;
+  try {
+    const handle = await open(child.path, constants.O_RDONLY);
+    try {
+      const opened = await handle.stat();
+      if (!opened.isFile()
+        || opened.dev !== child.dev
+        || opened.ino !== child.ino
+        || opened.nlink !== 1
+        || opened.nlink !== child.nlink
+        || opened.size !== child.size
+        || opened.mtimeMs !== child.mtimeMs
+        || (expectedUid !== null
+          && (opened.uid !== expectedUid || (opened.mode & 0o022) !== 0))) return null;
+      const bytes = Buffer.allocUnsafe(opened.size);
+      let offset = 0;
+      while (offset < bytes.length) {
+        const read = await handle.read(bytes, offset, bytes.length - offset, offset);
+        if (read.bytesRead <= 0) return null;
+        offset += read.bytesRead;
+      }
+      const openedAfter = await handle.stat();
+      if (openedAfter.dev !== opened.dev
+        || openedAfter.ino !== opened.ino
+        || openedAfter.nlink !== opened.nlink
+        || openedAfter.size !== opened.size
+        || openedAfter.mtimeMs !== opened.mtimeMs) return null;
+      const rootAfter = await stablePath(root.path, "directory", undefined, undefined, expectedUid);
+      const childAfter = await stablePath(child.path, "file", root.real, child.real, expectedUid);
+      if (!sameStablePath(root, rootAfter) || !sameStablePath(child, childAfter)) return null;
+      return { path: child.path, modifiedAt: child.mtimeMs, content: bytes.toString("utf8") };
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return null;
+  }
+}
+
+async function batches<T, R>(
+  values: T[],
+  concurrency: number,
+  read: (value: T) => Promise<R>,
+): Promise<R[]> {
+  const output: R[] = [];
+  for (let offset = 0; offset < values.length; offset += concurrency)
+    output.push(...await Promise.all(values.slice(offset, offset + concurrency).map(read)));
+  return output;
 }
 
 export async function collectBoundedDirectoryEntries(
@@ -385,14 +503,21 @@ async function safeReadStatus(
 type Candidate = {
   aliasKey: string;
   role: string;
+  label?: string;
   status: BackgroundSubagentStatus;
   elapsedMs: number;
   updateAgeMs: number;
-  turnCount?: number;
-  toolCount?: number;
   activity?: string;
+  childSessionId?: string;
+  childSessionPath?: string;
 };
 type AliasEntry = { alias: number; lastSeenAt: number };
+type NavigationTarget = {
+  parentSessionPath: string;
+  childSessionPath: string;
+  label: string;
+  lastSeenAt: number;
+};
 
 function compareCandidate(a: Candidate, b: Candidate): number {
   return statusPriority(a.status) - statusPriority(b.status)
@@ -403,12 +528,16 @@ function compareCandidate(a: Candidate, b: Candidate): number {
 export type SubagentStatusProviderOptions = {
   uid?: number | null;
   onFilesystemAccess?: () => void;
+  onChildSessionValidation?: () => void;
+  beforeChildSessionOpen?: () => Promise<void> | void;
 };
 
 /** Fail-closed provider for the package-owned, user-scoped async status directory. */
 export class SubagentStatusProvider {
   private readonly aliases = new Map<string, AliasEntry>();
   private readonly statusCache = new Map<string, StatusCacheEntry>();
+  private readonly navigationTargets = new Map<string, NavigationTarget>();
+  private readonly scans = new Map<string, Promise<BackgroundSubagentSnapshot>>();
   private nextAlias = 1;
   private readonly expectedUid: number | null;
 
@@ -444,46 +573,151 @@ export class SubagentStatusProvider {
     if (this.aliases.size === 0) this.nextAlias = 1;
   }
 
+  private clearNavigationTargetsForParent(parentSessionPath: string): void {
+    const prefix = `${canonicalPath(parentSessionPath)}\0`;
+    for (const key of this.navigationTargets.keys())
+      if (key.startsWith(prefix)) this.navigationTargets.delete(key);
+  }
+
+  private pruneNavigationTargets(now: number): void {
+    for (const [key, target] of this.navigationTargets)
+      if (safeDuration(now, target.lastSeenAt) > ALIAS_RETENTION_MS)
+        this.navigationTargets.delete(key);
+    if (this.navigationTargets.size <= MAX_NAVIGATION_TARGETS) return;
+    const oldest = [...this.navigationTargets.entries()]
+      .sort((a, b) => a[1].lastSeenAt - b[1].lastSeenAt);
+    for (let index = 0; index < oldest.length - MAX_NAVIGATION_TARGETS; index += 1)
+      this.navigationTargets.delete(oldest[index]![0]);
+  }
+
   async listForParentSession(parentSessionPath: string): Promise<BackgroundSubagentSnapshot> {
+    const key = canonicalPath(parentSessionPath);
+    const existing = this.scans.get(key);
+    if (existing) return existing;
+    const scan = this.scanForParentSession(parentSessionPath);
+    this.scans.set(key, scan);
+    try { return await scan; }
+    finally { if (this.scans.get(key) === scan) this.scans.delete(key); }
+  }
+
+  async navigationTargetForParentSession(
+    parentSessionPath: string,
+    childSessionId: string,
+  ): Promise<{ path: string; label: string; modifiedAt: number; content: string } | null> {
+    if (!/^[a-f0-9]{20}$/.test(childSessionId)) return null;
+    await this.listForParentSession(parentSessionPath);
+    const key = `${canonicalPath(parentSessionPath)}\0${childSessionId}`;
+    const target = this.navigationTargets.get(key);
+    if (!target) return null;
+    const anchors = await childSessionAnchors(
+      target.parentSessionPath,
+      target.childSessionPath,
+      this.expectedUid,
+    );
+    if (anchors) await this.providerOptions.beforeChildSessionOpen?.();
+    const read = anchors ? await readChildSessionBytes(anchors, this.expectedUid) : null;
+    if (!read || idForPath(read.path) !== childSessionId) {
+      this.navigationTargets.delete(key);
+      return null;
+    }
+    return { ...read, label: target.label };
+  }
+
+  async knownChildSessionPath(childSessionId: string): Promise<string | null> {
+    if (!/^[a-f0-9]{20}$/.test(childSessionId)) return null;
+    let latest: NavigationTarget | undefined;
+    for (const [key, target] of this.navigationTargets) {
+      if (!key.endsWith(`\0${childSessionId}`)) continue;
+      if (!latest || target.lastSeenAt > latest.lastSeenAt) latest = target;
+    }
+    if (!latest) return null;
+    await this.listForParentSession(latest.parentSessionPath);
+    const current = this.navigationTargets.get(
+      `${canonicalPath(latest.parentSessionPath)}\0${childSessionId}`,
+    );
+    if (!current) return null;
+    const anchors = await childSessionAnchors(
+      current.parentSessionPath,
+      current.childSessionPath,
+      this.expectedUid,
+    );
+    return anchors?.child.path || null;
+  }
+
+  private async scanForParentSession(parentSessionPath: string): Promise<BackgroundSubagentSnapshot> {
     if (!this.tempRoot || !isAbsolute(parentSessionPath)) return EMPTY;
     const now = this.now();
     if (!Number.isSafeInteger(now) || now < 0) return EMPTY;
     this.providerOptions.onFilesystemAccess?.();
     const rootPath = resolve(this.tempRoot);
     const asyncPath = join(rootPath, "async-subagent-runs");
+    const expectedSessionPath = canonicalPath(parentSessionPath);
     try {
       const root = await stablePath(rootPath, "directory", undefined, undefined, this.expectedUid);
-      if (!root) return EMPTY;
+      if (!root) {
+        if (await pathMissing(rootPath)) {
+          this.clearNavigationTargetsForParent(expectedSessionPath);
+          return EMPTY;
+        }
+        throw new SubagentStatusUnavailableError();
+      }
       const asyncRoot = await stablePath(asyncPath, "directory", root.real, join(root.real, "async-subagent-runs"), this.expectedUid);
-      if (!asyncRoot) return EMPTY;
+      if (!asyncRoot) {
+        if (await pathMissing(asyncPath)) {
+          this.clearNavigationTargetsForParent(expectedSessionPath);
+          return EMPTY;
+        }
+        throw new SubagentStatusUnavailableError();
+      }
       const directory = await opendir(asyncPath);
       const entries = await collectBoundedDirectoryEntries(directory);
       if (!entries) {
         this.statusCache.clear();
-        return EMPTY;
+        throw new SubagentStatusUnavailableError();
       }
-      const expectedSessionPath = canonicalPath(parentSessionPath);
       const best: Candidate[] = [];
       const observedStatusPaths = new Set<string>();
       let total = 0;
       let activeCount = 0;
       let attentionCount = 0;
 
-      for (const entry of entries) {
-        if (!entry.isDirectory() || !UUID.test(entry.name)) continue;
+      const runEntries = entries.filter((entry) => entry.isDirectory() && UUID.test(entry.name));
+      const inspected = await batches(runEntries, STATUS_SCAN_CONCURRENCY, async (entry) => {
         const runPath = join(asyncPath, entry.name);
-        const run = await stablePath(runPath, "directory", root.real, join(asyncRoot.real, entry.name), this.expectedUid);
-        if (!run) continue;
-        const statusPath = join(runPath, "status.json");
-        const status = await stablePath(statusPath, "file", root.real, join(run.real, "status.json"), this.expectedUid);
-        if (!status) continue;
-        observedStatusPaths.add(statusPath);
-        const cacheEntry = await safeReadStatus(
-          { root, asyncRoot, run, status }, entry.name, now, this.statusCache.get(statusPath), this.expectedUid,
+        const run = await stablePath(
+          runPath,
+          "directory",
+          root.real,
+          join(asyncRoot.real, entry.name),
+          this.expectedUid,
         );
-        if (cacheEntry) this.statusCache.set(statusPath, cacheEntry);
-        else this.statusCache.delete(statusPath);
-        const parsed = cacheEntry?.parsed;
+        if (!run) return null;
+        const statusPath = join(runPath, "status.json");
+        const status = await stablePath(
+          statusPath,
+          "file",
+          root.real,
+          join(run.real, "status.json"),
+          this.expectedUid,
+        );
+        if (!status) return null;
+        const cacheEntry = await safeReadStatus(
+          { root, asyncRoot, run, status },
+          entry.name,
+          now,
+          this.statusCache.get(statusPath),
+          this.expectedUid,
+        );
+        return { statusPath, cacheEntry };
+      });
+
+      for (const inspectedRun of inspected) {
+        if (!inspectedRun) continue;
+        observedStatusPaths.add(inspectedRun.statusPath);
+        if (inspectedRun.cacheEntry)
+          this.statusCache.set(inspectedRun.statusPath, inspectedRun.cacheEntry);
+        else this.statusCache.delete(inspectedRun.statusPath);
+        const parsed = inspectedRun.cacheEntry?.parsed;
         if (!parsed || parsed.parentSessionPath !== expectedSessionPath) continue;
 
         for (const [index, step] of parsed.steps.entries()) {
@@ -498,14 +732,14 @@ export class SubagentStatusProvider {
           const candidate: Candidate = {
             aliasKey: `${expectedSessionPath}\0${parsed.runId}:${index}`,
             role: roleLabel(step.agent),
+            label: step.label,
             status: statusValue,
             elapsedMs: safeDuration(end, step.startedAt),
             updateAgeMs: safeDuration(now, step.lastActivityAt),
-            turnCount: step.turnCount,
-            toolCount: step.toolCount,
             activity: statusValue === "running" || statusValue === "attention"
               ? genericActivity(step.tool, step.toolArgs)
               : undefined,
+            childSessionPath: step.sessionFile,
           };
           best.push(candidate);
           best.sort(compareCandidate);
@@ -517,25 +751,67 @@ export class SubagentStatusProvider {
         if (!observedStatusPaths.has(path)) this.statusCache.delete(path);
       const rootAfter = await stablePath(root.path, "directory", undefined, undefined, this.expectedUid);
       const asyncAfter = await stablePath(asyncRoot.path, "directory", root.real, join(root.real, "async-subagent-runs"), this.expectedUid);
-      if (!sameStablePath(root, rootAfter) || !sameStablePath(asyncRoot, asyncAfter)) return EMPTY;
+      if (!sameStablePath(root, rootAfter) || !sameStablePath(asyncRoot, asyncAfter))
+        throw new SubagentStatusUnavailableError();
 
-      const steps: BackgroundSubagentStep[] = best.map((candidate) => {
+      const verifiedCandidates = await batches(
+        best,
+        CHILD_SESSION_SCAN_CONCURRENCY,
+        async (candidate): Promise<Candidate> => {
+          if (!candidate.childSessionPath) return candidate;
+          this.providerOptions.onChildSessionValidation?.();
+          const anchors = await childSessionAnchors(
+            parentSessionPath,
+            candidate.childSessionPath,
+            this.expectedUid,
+          );
+          return anchors
+            ? {
+                ...candidate,
+                childSessionPath: anchors.child.path,
+                childSessionId: idForPath(anchors.child.path),
+              }
+            : { ...candidate, childSessionPath: undefined, childSessionId: undefined };
+        },
+      );
+      const observedNavigationKeys = new Set<string>();
+      const steps: BackgroundSubagentStep[] = verifiedCandidates.map((candidate) => {
         const alias = this.aliasFor(candidate.aliasKey, now);
+        const label = candidate.label || `${candidate.role} ${alias}`;
+        if (candidate.childSessionId && candidate.childSessionPath) {
+          const navigationKey = `${expectedSessionPath}\0${candidate.childSessionId}`;
+          observedNavigationKeys.add(navigationKey);
+          this.navigationTargets.set(navigationKey, {
+            parentSessionPath: expectedSessionPath,
+            childSessionPath: candidate.childSessionPath,
+            label,
+            lastSeenAt: now,
+          });
+        }
         return {
           key: `subagent-${alias}`,
-          label: `${candidate.role} ${alias}`,
+          label,
           status: candidate.status,
           elapsedMs: candidate.elapsedMs,
           updateAgeMs: candidate.updateAgeMs,
-          turnCount: candidate.turnCount,
-          toolCount: candidate.toolCount,
           activity: candidate.activity,
+          childSessionId: candidate.childSessionId,
         };
       });
+      const navigationPrefix = `${expectedSessionPath}\0`;
+      for (const key of this.navigationTargets.keys())
+        if (key.startsWith(navigationPrefix) && !observedNavigationKeys.has(key))
+          this.navigationTargets.delete(key);
       this.pruneAliases(now);
+      this.pruneNavigationTargets(now);
       return { total, activeCount, attentionCount, truncated: total > steps.length, steps };
-    } catch {
-      return EMPTY;
+    } catch (error) {
+      if (error instanceof SubagentStatusUnavailableError) throw error;
+      if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code || "")) {
+        this.clearNavigationTargetsForParent(expectedSessionPath);
+        return EMPTY;
+      }
+      throw new SubagentStatusUnavailableError();
     }
   }
 }

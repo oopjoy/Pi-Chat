@@ -8,9 +8,9 @@ export interface BackgroundSubagentStep {
   status: BackgroundSubagentStatus;
   elapsedMs: number;
   updateAgeMs: number;
-  turnCount?: number;
-  toolCount?: number;
   activity?: string;
+  /** Opaque verified child transcript identity; the parent-child edge remains required for reads. */
+  childSessionId?: string;
 }
 
 export interface BackgroundSubagentSnapshot {
