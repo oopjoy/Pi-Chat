@@ -104,6 +104,54 @@ test("prompt evidence permits an explicit requeue before a successful retry", ()
   assert.equal(record?.conflicted, undefined);
 });
 
+test("prompt evidence rebinds a requeued retry to a replacement RPC generation", () => {
+  const record = replayPromptEvidence([
+    ...facts(["admitted", "queued", "dispatch"], { rpcGeneration: 1 }),
+    {
+      sequence: 4,
+      observedAt: new Date(1_004).toISOString(),
+      promptId: PROMPT_ID,
+      sessionId: SESSION_ID,
+      kind: "rpc-not-written",
+      rpcGeneration: 1,
+    },
+    {
+      sequence: 5,
+      observedAt: new Date(1_005).toISOString(),
+      promptId: PROMPT_ID,
+      sessionId: SESSION_ID,
+      kind: "requeued",
+      rpcGeneration: 1,
+    },
+    ...facts([
+      "dispatch",
+      "rpc-allocated",
+      "rpc-written",
+      "rpc-response-success",
+      "agent-start",
+      "settled",
+    ], { rpcGeneration: 2, runGeneration: 9 }).map((fact, index) => ({
+      ...fact,
+      sequence: index + 6,
+      observedAt: new Date(1_006 + index).toISOString(),
+    })),
+    {
+      sequence: 20,
+      observedAt: new Date(1_020).toISOString(),
+      promptId: PROMPT_ID,
+      sessionId: SESSION_ID,
+      kind: "settled",
+      rpcGeneration: 1,
+      runGeneration: 8,
+    },
+  ]);
+  assert.equal(record?.delivery, "confirmed");
+  assert.equal(record?.execution, "settled");
+  assert.equal(record?.rpcGeneration, 2);
+  assert.equal(record?.runGeneration, 9);
+  assert.equal(record?.facts.filter((kind) => kind === "settled").length, 1);
+});
+
 test("prompt evidence rejects stale lifecycle generations and exposes contradictions", () => {
   const base = facts([
     "admitted",

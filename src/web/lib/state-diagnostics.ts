@@ -272,6 +272,10 @@ export function privacySafeStateDiagnosticBundle(
       const sessionId = alias(record.sessionId);
       const promptId = promptAlias(record.promptId);
       if (!sessionId || !promptId) return [];
+      const factCount = record.facts.length;
+      const facts = factCount <= 64
+        ? [...record.facts]
+        : [...record.facts.slice(0, 16), ...record.facts.slice(-48)];
       return [{
         promptId,
         sessionId,
@@ -285,7 +289,9 @@ export function privacySafeStateDiagnosticBundle(
         ...(record.runGeneration !== undefined
           ? { runGeneration: safeExportInteger(record.runGeneration) }
           : null),
-        facts: record.facts.slice(0, 64),
+        facts,
+        factCount,
+        ...(factCount > facts.length ? { factsTruncated: true } : null),
         ...(record.conflicted === true ? { conflicted: true } : null),
       }];
     }) : [];

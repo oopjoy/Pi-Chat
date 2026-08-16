@@ -236,6 +236,7 @@ test("final diagnostic export reconstructs the exact privacy schema", () => {
   assert.deepEqual(Object.keys(safe.server.promptEvidence.records[0] || {}).sort(), [
     "delivery",
     "execution",
+    "factCount",
     "facts",
     "firstObservedAt",
     "lastObservedAt",
@@ -245,6 +246,49 @@ test("final diagnostic export reconstructs the exact privacy schema", () => {
   const raw = JSON.stringify(safe);
   for (const forbidden of ["secret-token", "deadbeefcafebabe", "private prompt", "private answer", "C:\\\\private"])
     assert.equal(raw.includes(forbidden), false, forbidden);
+});
+
+test("diagnostic export keeps the beginning and terminal evidence of long fact histories", () => {
+  const longFacts = [
+    "admitted" as const,
+    ...Array.from({ length: 68 }, (_, index) => index % 2 ? "requeued" as const : "dispatch" as const),
+    "settled" as const,
+  ];
+  const bundle: StateDiagnosticExportBundle = {
+    schemaVersion: 4,
+    generatedAt: "2026-08-14T12:00:00.000Z",
+    warning: "redacted",
+    server: {
+      schemaVersion: 4,
+      generatedAt: "2026-08-14T12:00:00.000Z",
+      runEpoch: "run",
+      buildFingerprint: "a".repeat(64),
+      status: status(0),
+      entries: [],
+      promptEvidence: promptEvidence([{
+        promptId: PROMPT_ID,
+        sessionId: SESSION_ID,
+        firstObservedAt: "2026-08-14T12:00:00.000Z",
+        lastObservedAt: "2026-08-14T12:00:01.000Z",
+        delivery: "confirmed",
+        execution: "settled",
+        facts: longFacts,
+      }]),
+    },
+    browser: {
+      schemaVersion: 4,
+      generatedAt: "2026-08-14T12:00:00.000Z",
+      pageStartedAt: "2026-08-14T11:59:00.000Z",
+      status: status(0),
+      entries: [],
+    },
+  };
+  const record = privacySafeStateDiagnosticBundle(bundle).server.promptEvidence.records[0];
+  assert.equal(record.factCount, 70);
+  assert.equal(record.factsTruncated, true);
+  assert.equal(record.facts.length, 64);
+  assert.equal(record.facts[0], "admitted");
+  assert.equal(record.facts.at(-1), "settled");
 });
 
 test("browser diagnostics drops cumulative streaming noise before bounded storage", () => {

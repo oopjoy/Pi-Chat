@@ -42,6 +42,9 @@ export interface PromptEvidenceRecord {
   rpcGeneration?: number;
   runGeneration?: number;
   facts: PromptEvidenceFactKind[];
+  /** Privacy export may retain a bounded head/tail view of a longer fact history. */
+  factCount?: number;
+  factsTruncated?: boolean;
   conflicted?: boolean;
 }
 
@@ -240,6 +243,14 @@ export function reducePromptEvidenceRecord(
   };
   next = applyDelivery(next, fact.kind);
   next = applyExecution(next, fact.kind);
+  if (fact.kind === "requeued") {
+    const {
+      rpcGeneration: _completedAttemptRpcGeneration,
+      runGeneration: _completedAttemptRunGeneration,
+      ...unboundRetry
+    } = next;
+    next = unboundRetry;
+  }
   return next;
 }
 
