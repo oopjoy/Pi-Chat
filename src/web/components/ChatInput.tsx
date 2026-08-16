@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent, type ReactNode } from "react";
+import {
+  MAX_PROMPT_IMAGE_BYTES,
+  MAX_PROMPT_IMAGES,
+  MAX_PROMPT_IMAGES_TOTAL_BYTES,
+} from "../../shared/rpc-contracts";
 import type { PromptDelivery, PromptImage, SlashCommand } from "../../shared/types";
 import { CloseIcon, FileSearchIcon, ImageIcon, PaperclipIcon, SendIcon } from "./Icons";
 
 const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
-const MAX_IMAGES = 4;
-const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 
 type PendingSubmission = {
   scope: string;
@@ -15,9 +18,39 @@ type PendingSubmission = {
 
 type SuspendedDraft = { message: string; images: PromptImage[] };
 
+export function promptImageByteLength(image: Pick<PromptImage, "data" | "size">): number {
+  const padding = image.data.endsWith("==") ? 2 : image.data.endsWith("=") ? 1 : 0;
+  const encodedBytes = Math.max(0, Math.floor(image.data.length * 3 / 4) - padding);
+  const declaredBytes = typeof image.size === "number" && Number.isFinite(image.size)
+    ? Math.max(0, Math.floor(image.size))
+    : 0;
+  return Math.max(encodedBytes, declaredBytes);
+}
+
+export function promptImagesByteLength(images: Array<Pick<PromptImage, "data" | "size">>): number {
+  return images.reduce((total, image) => total + promptImageByteLength(image), 0);
+}
+
+export function promptImageAdditionError(
+  images: Array<Pick<PromptImage, "data" | "size">>,
+  candidates: Array<{ name?: string; size: number }>,
+): string | null {
+  if (images.length + candidates.length > MAX_PROMPT_IMAGES)
+    return `一次最多添加 ${MAX_PROMPT_IMAGES} 张图片`;
+  const oversized = candidates.find((file) => file.size > MAX_PROMPT_IMAGE_BYTES);
+  if (oversized) return `图片 ${oversized.name || "未命名图片"} 超过 8 MB`;
+  const candidateBytes = candidates.reduce(
+    (total, file) => total + Math.max(0, Math.floor(file.size)),
+    0,
+  );
+  if (promptImagesByteLength(images) + candidateBytes > MAX_PROMPT_IMAGES_TOTAL_BYTES)
+    return "图片总大小不能超过 40 MB";
+  return null;
+}
+
 function imageFromFile(file: File): Promise<PromptImage> {
   if (!IMAGE_TYPES.has(file.type)) return Promise.reject(new Error(`不支持图片格式：${file.name}`));
-  if (file.size > MAX_IMAGE_BYTES) return Promise.reject(new Error(`图片 ${file.name} 超过 8 MB`));
+  if (file.size > MAX_PROMPT_IMAGE_BYTES) return Promise.reject(new Error(`图片 ${file.name} 超过 8 MB`));
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onerror = () => reject(new Error(`无法读取图片：${file.name}`));
@@ -178,6 +211,9 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   const currentPendingSubmissions = pendingByScopeRef.current.get(submissionScope) || 0;
   const submissionLocked = !allowFollowupSubmissions && currentPendingSubmissions > 0;
   const editorDisabled = disabled || submissionLocked;
+  const imageAttachmentLimitReached =
+    images.length >= MAX_PROMPT_IMAGES ||
+    promptImagesByteLength(images) >= MAX_PROMPT_IMAGES_TOTAL_BYTES;
 
   useEffect(() => {
     if (editorDisabled) {
@@ -197,13 +233,25 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     if (editorDisabled) return;
     const candidates = files.filter((file) => file.type.startsWith("image/"));
     if (!candidates.length) return;
-    if (imagesRef.current.length + candidates.length > MAX_IMAGES) return onError(`一次最多添加 ${MAX_IMAGES} 张图片`);
-    advanceUserDraftRevision();
+    const preflightError = promptImageAdditionError(imagesRef.current, candidates);
+    if (preflightError) return onError(preflightError);
     try {
       const added = await Promise.all(candidates.map(imageFromFile));
+      // FileReader completions may overlap across paste/drop/picker events. Recheck
+      // against the latest committed attachment set so count and byte caps remain
+      // atomic without introducing a second draft or upload authority.
+      const commitError = promptImageAdditionError(
+        imagesRef.current,
+        added.map((image) => ({
+          name: image.fileName,
+          size: promptImageByteLength(image),
+        })),
+      );
+      if (commitError) return onError(commitError);
       const next = [...imagesRef.current, ...added];
       imagesRef.current = next;
       setImages(next);
+      advanceUserDraftRevision();
     } catch (error) {
       onError(error instanceof Error ? error.message : String(error));
     }
@@ -445,7 +493,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
             <div className="attachment-control" ref={attachmentRef}>
               <button type="button" className={`attachment-button ${attachmentOpen ? "is-open" : ""}`} disabled={editorDisabled || pickingFiles} onClick={() => setAttachmentOpen((open) => !open)} title="添加附件" aria-label="添加附件" aria-haspopup="menu" aria-expanded={attachmentOpen}><PaperclipIcon /></button>
               {attachmentOpen && <div className="attachment-menu" role="menu">
-                <button type="button" role="menuitem" disabled={images.length >= MAX_IMAGES} onClick={() => { setAttachmentOpen(false); advanceUserDraftRevision(); imageInputRef.current?.click(); }}><ImageIcon className="attachment-menu-icon" /><strong>图片</strong><small>{resolveImageCapabilityOnSend ? "可添加；发送时准备 Runtime 并检查支持" : imageInputPending ? "可添加；发送前等待模型能力同步" : acceptsImages ? "直接解析，可粘贴或拖入" : "可添加；发送时检查模型支持"}</small></button>
+                <button type="button" role="menuitem" disabled={imageAttachmentLimitReached} onClick={() => { setAttachmentOpen(false); advanceUserDraftRevision(); imageInputRef.current?.click(); }}><ImageIcon className="attachment-menu-icon" /><strong>图片</strong><small>{resolveImageCapabilityOnSend ? "最多 10 张，单张 8 MB / 总计 40 MB；发送时准备 Runtime 并检查支持" : imageInputPending ? "最多 10 张，单张 8 MB / 总计 40 MB；发送前等待模型能力同步" : acceptsImages ? "最多 10 张，单张 8 MB / 总计 40 MB；直接解析，可粘贴或拖入" : "最多 10 张，单张 8 MB / 总计 40 MB；发送时检查模型支持"}</small></button>
                 <button type="button" role="menuitem" disabled={pickingFiles} onClick={() => void pickFiles()}><FileSearchIcon className="attachment-menu-icon" /><strong>{pickingFiles ? "选择中…" : "本地文件"}</strong><small>引用 Windows 绝对路径</small></button>
               </div>}
               <input ref={imageInputRef} className="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple onChange={(event) => { void addImages([...event.target.files || []]); event.target.value = ""; }} />

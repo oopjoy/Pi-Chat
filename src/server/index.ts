@@ -10,6 +10,10 @@ import { PrimaryRuntimeReadinessController } from "./primary-runtime-readiness.j
 import { ModelManager } from "./model-manager.js";
 import { ResourceManager } from "./resource-manager.js";
 import { PiRpcClient } from "./rpc-client.js";
+import {
+  DEFAULT_MAX_IDLE_SECONDARY_RUNTIMES,
+  DEFAULT_MAX_SECONDARY_RUNTIMES,
+} from "./runtime-pool.js";
 import { SessionIndex } from "./session-index.js";
 import { loadWorkspace } from "./workspace-state.js";
 import { ensurePiChatSystemGate } from "./system-gate-installer.js";
@@ -198,10 +202,10 @@ async function prepareApplicationRestart() {
 const app = new PiChatApp({
   rpc,
   // A Secondary Runtime owns its Pi process for its full lifetime. The pool
-  // retains at most four idle/active Session runtimes and never rebinds one
+  // retains at most six idle/active Session runtimes and never rebinds one
   // Session's process to another Session.
-  maxSecondaryRuntimes: 4,
-  maxIdleSecondaryRuntimes: 4,
+  maxSecondaryRuntimes: DEFAULT_MAX_SECONDARY_RUNTIMES,
+  maxIdleSecondaryRuntimes: DEFAULT_MAX_IDLE_SECONDARY_RUNTIMES,
   createRpc: (cwd) => new PiRpcClient({
     cwd,
     diagnostics,

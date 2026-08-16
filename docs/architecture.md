@@ -35,7 +35,7 @@ The status of each current capability is tracked in [`feature-surface.md`](featu
 
 - Chat UI, streaming, markdown, attachments
 - Session-first list and cold JSONL history view; on-demand Runtime activation
-- At most 5 hot conversations total: Primary + at most 4 Secondary Runtimes
+- At most 7 hot conversations total: Primary + at most 6 Secondary Runtimes
 - Multi-window observation with single-writer control
 - Gate confirmation UX
 - Models list / custom models
@@ -149,7 +149,7 @@ Prefer small hooks and pure libs over growing `App.tsx` further.
 - A new draft's first user turn performs Runtime creation, Model, Thinking, conditional Gate synchronization, and prompt admission under one draft lease and one Session prompt-admission FIFO; it avoids browser-side sequential setup requests.
 - A late warm/activation response may update only its own pane cache; it must not repaint a newer selected Session. Runtime startup's successful `get_state` response is retained as `lastState`, and cached Session identity/path/cwd avoids a global SessionIndex scan; unknown IDs refresh once then fail closed.
 - Gate synchronization is conditional: an authoritative Runtime already in the requested mode receives no redundant `/gate` command.
-- Hard cap: at most 5 hot conversations total (Primary + at most 4 Secondary Runtimes)
+- Hard cap: at most 7 hot conversations total (Primary + at most 6 Secondary Runtimes)
 - Cold JSONL history views do not count toward the hot limit
 - At capacity, the least-recently-used reclaimable idle Secondary is rested first
 - If every Secondary is busy or protects a live empty draft, the next activation is rejected with HTTP `409`

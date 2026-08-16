@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { MAX_PROMPT_IMAGES_ENCODED_BYTES } from "../src/shared/rpc-contracts.ts";
 import { PromptScheduler } from "../src/server/prompt-scheduler.ts";
 import { RpcRequestTimeoutError } from "../src/server/rpc-client.ts";
 
@@ -30,9 +31,9 @@ test("enqueue limits protect queue length and image payload size", () => {
   assert.match(scheduler.assertCanEnqueue(scheduler.primaryQueue, []) || "", /队列已满/);
   const lastQueuedId = scheduler.primaryQueue.at(-1)?.id;
 
-  const huge = [{ type: "image", data: "x".repeat(45_000_001), mimeType: "image/png" }];
+  const huge = [{ type: "image", data: "x".repeat(MAX_PROMPT_IMAGES_ENCODED_BYTES + 1), mimeType: "image/png" }];
   scheduler.primaryQueue.length = 0;
-  assert.match(scheduler.assertCanEnqueue(scheduler.primaryQueue, huge as never) || "", /32 MB/);
+  assert.match(scheduler.assertCanEnqueue(scheduler.primaryQueue, huge as never) || "", /40 MB/);
   assert.ok(events.some((event) => event.type === "pi_chat_queue_update"));
   const lastAdmission = [...events].reverse().find((event) => event.type === "pi_chat_queue_update");
   assert.equal(lastAdmission?.admittedId, lastQueuedId);

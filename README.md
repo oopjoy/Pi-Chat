@@ -7,7 +7,7 @@ Pi Chat 是一个连接本机 Pi RPC 的 local-first Web/PWA 客户端。它提�
 - 用户输入、可靠停止生成，以及生成中的可撤销 Follow-up 队列
 - Pi 模型流式输出
 - 发送按钮旁统一 `＋` 附件入口：图片与本地文件
-- 图片支持选择、粘贴、拖入、预览和视觉模型输入
+- 图片支持选择、粘贴、拖入、预览和视觉模型输入；每次最多 10 张、单张不超过 8 MB、原始图片总大小不超过 40 MB
 - 普通文件通过 Windows 原生选择器或资源管理器复制粘贴获取绝对路径，只引用路径并由 Pi 工具按需读取
 - Pi 扩展命令、Prompt Templates、Skills 与常用内置命令的 `/` 指令联想
 - Extension 状态命令立即执行并仅显示通知，不写入对话或 Follow-up 队列
@@ -18,7 +18,7 @@ Pi Chat 是一个连接本机 Pi RPC 的 local-first Web/PWA 客户端。它提�
 - 长会话初始仅渲染最近 20 个用户发起的完整对话轮次（包含该轮后续回复与工具过程）；滚到顶部可点击“加载更早 10 轮”逐步展开历史；侧栏会话元数据使用持久化索引缓存，变更时增量更新
 - 对话右侧提供首条、上一条、下一条、最新的四格导航
 - 固定铺满动态视口，兼容窗口最大化/还原、Windows DPI、页面缩放和窄窗口
-- Session-first 历史会话列表、切换和新建：服务与界面先打开、读取并缓存 JSONL；Primary 会在后台启动并完成兼容性验证，未 ready 或验证失败时历史仍可浏览且不会探测 Primary RPC。选中、滚动、搜索或切换冷历史只读取 JSONL，不启动 Secondary Runtime；只有发送、Compact、Model/Thinking、接管或显式启动 Pi 等实际操作才会为该 Session 单飞准备专属 Runtime。服务的默认工作目录保持固定；需要不同目录时，在创建该条 New 草稿后使用“新对话工作路径”选择器单独修改，不会影响其他对话。新对话首条消息将 Runtime 创建、Model、Thinking、Gate 与 prompt 合并为一个服务事务。最多 5 个热对话（Primary + 4 个 Secondary），达到容量时优先 LRU 回收空闲 Secondary，正在显示的历史也可退回 view-only
+- Session-first 历史会话列表、切换和新建：服务与界面先打开、读取并缓存 JSONL；Primary 会在后台启动并完成兼容性验证，未 ready 或验证失败时历史仍可浏览且不会探测 Primary RPC。选中、滚动、搜索或切换冷历史只读取 JSONL，不启动 Secondary Runtime；只有发送、Compact、Model/Thinking、接管或显式启动 Pi 等实际操作才会为该 Session 单飞准备专属 Runtime。服务的默认工作目录保持固定；需要不同目录时，在创建该条 New 草稿后使用“新对话工作路径”选择器单独修改，不会影响其他对话。新对话首条消息将 Runtime 创建、Model、Thinking、Gate 与 prompt 合并为一个服务事务。最多 7 个热对话（Primary + 6 个 Secondary），达到容量时优先 LRU 回收最久未使用的空闲 Secondary；若没有可回收的空闲对话则拒绝新的 Runtime 启动，正在显示的持久历史也可退回 view-only
 - 同一 Session 可在多个窗口观察，但同一时刻仅一个浏览器窗口可发送、停止、处理 Gate 或改队列；Model/Thinking 修改不会自动取得控制权，无 Owner 时可设置，存在其他窗口 Owner 时必须先显式接管
 - 文件权限 Gate：作为 Pi Chat 内置安全功能呈现；顶栏可切换“严格 / 放行”。严格模式始终确认 `write` / `edit`，并对可识别的高风险 Bash 做辅助确认；Bash 可运行任意脚本，副作用识别不构成完整 sandbox。随应用自动安装、校验和修复的极小 Pi 工具执行适配器仍在真实工具执行前运行
 - 侧栏提供独立刷新和“完整重启 Pi Chat 并应用更新”：应用级 Lifecycle Barrier 会在构建前同步阻止所有新写操作；新版本先在独立 staging 目录完成并验证，构建失败不会修改当前 `dist`，二次核验全部 Runtime、队列和确认状态通过后才提升产物并执行服务切换。维护期间历史、健康检查和只读 API 保持可用。网页与服务的 build identity 不一致时，普通修改会暂停，但“完整重启”与设置中的“关闭 Pi Chat”仍可请求服务端执行其最终 Busy 检查，避免客户端恢复路径被旧页面状态锁死。SSE/EventSource 是可重连传输，断开不会自动关闭 Pi Chat 服务或托管 RPC；关闭全部浏览器/PWA 页面也只释放窗口、Presence、Session 控制与可回收 Runtime，不再自动停止本地服务。需要停止服务时，使用设置中的“关闭 Pi Chat”显式请求，并由服务端执行全局 Busy 检查

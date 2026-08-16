@@ -8,6 +8,7 @@ import {
   reconcilePersistedHistory,
 } from "../shared/streaming-assistant.js";
 import { compareSessionsByLastUserPrompt } from "../shared/session-order.js";
+import { MAX_PROMPT_IMAGES_ENCODED_BYTES } from "../shared/rpc-contracts.js";
 import type { PromptEvidenceFactKind } from "../shared/prompt-evidence.js";
 import { decodeCanonicalMessageEndPayload } from "../shared/runtime-events.js";
 import { shouldRetainStateDiagnosticEvent } from "../shared/state-diagnostics.js";
@@ -140,7 +141,7 @@ import { handleBootstrapRoute } from "./routes/bootstrap.js";
 import { handleSessionsReadRoute } from "./routes/sessions-read.js";
 import { handleSubagentsReadRoute } from "./routes/subagents-read.js";
 import { SubagentStatusProvider } from "./subagent-status-provider.js";
-import { apiRouteAdmission } from "./api-route-admission.js";
+import { apiRouteAdmission, PROMPT_BODY_LIMIT } from "./api-route-admission.js";
 
 export {
   messageWindow,
@@ -166,7 +167,7 @@ const DEFAULT_HANDSHAKE_PAGE_TIMEOUT_MS = 30_000;
 const SETTLEMENT_STATE_TIMEOUT_MS = 60_000;
 /** Bounded native steering backlog: Pi's queue, admissions, snapshots, and hidden local turns all grow with every accepted Steer. */
 const MAX_NATIVE_STEERING = 20;
-const MAX_NATIVE_STEERING_IMAGE_CHARS = 45_000_000;
+const MAX_NATIVE_STEERING_IMAGE_CHARS = MAX_PROMPT_IMAGES_ENCODED_BYTES;
 // Pi may emit agent_settled before the new JSONL user record is visible to a
 // concurrent reader. Keep the draft's provisional sidebar summary only across
 // this small bounded visibility window.
@@ -257,7 +258,7 @@ export interface PiChatAppOptions {
     next: () => void,
   ) => void;
   secondaryRuntimeIdleMs?: number;
-  /** Primary counts separately; default 4 Secondary Runtimes means 5 hot conversations total. */
+  /** Primary counts separately; default 6 Secondary Runtimes means 7 hot conversations total. */
   maxSecondaryRuntimes?: number;
   maxIdleSecondaryRuntimes?: number;
   secondaryRuntimeSweepMs?: number;
@@ -5065,7 +5066,7 @@ export class PiChatApp {
 
     if (url.pathname === "/api/chat/prompt") {
       if (request.method !== "POST") return methodNotAllowed(response);
-      const body = preparedBody || (await bodyJson(request, 45_000_000));
+      const body = preparedBody || (await bodyJson(request, PROMPT_BODY_LIMIT));
       const message =
         typeof body.message === "string" ? body.message.trim() : "";
       const requestedSessionId = requiredSessionId(body);
@@ -5967,7 +5968,7 @@ export class PiChatApp {
 
     if (url.pathname === "/api/sessions/new") {
       if (request.method !== "POST") return methodNotAllowed(response);
-      const body = preparedBody || (await bodyJson(request));
+      const body = preparedBody || (await bodyJson(request, PROMPT_BODY_LIMIT));
       const requestedCwd =
         typeof body.cwd === "string" && body.cwd.trim()
           ? resolve(body.cwd)

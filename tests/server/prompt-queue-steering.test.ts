@@ -941,11 +941,12 @@ test("native steering image payload is bounded", async () => {
   try {
     await fetch(`${origin}/api/bootstrap`);
     primary.emit({ type: "agent_start" });
-    // ~33 MB chars of queued images stay under the 45 MB bound.
-    const accepted = await steerWithImages("look", ["a".repeat(11_000_000), "a".repeat(11_000_000), "a".repeat(11_000_000)]);
+    // 50 MB of Base64 characters represents 37.5 MB of original images and
+    // stays within the single-maximum-prompt steering budget.
+    const accepted = await steerWithImages("look", Array.from({ length: 5 }, () => "a".repeat(10_000_000)));
     assert.equal(accepted.status, 202);
-    // The next payload pushes the queued total over the bound.
-    const overflow = await steerWithImages("look again", ["b".repeat(6_100_000), "b".repeat(6_100_000)]);
+    // The next payload pushes the retained encoded total beyond the 40 MB raw-image bound.
+    const overflow = await steerWithImages("look again", ["b".repeat(6_000_000)]);
     assert.equal(overflow.status, 409);
     assert.match((await overflow.json() as { error: string }).error, /图片总量/);
   } finally {

@@ -617,7 +617,7 @@ test("four viewed idle Sessions still obey a configured cap of three idle Second
   }
 });
 
-test("concurrent activation never exceeds four Secondary workers or five hot conversations total", async () => {
+test("concurrent activation never exceeds six Secondary workers or seven hot conversations total", async () => {
   const paths = [
     "C:\\sessions\\primary-cap.jsonl",
     "C:\\sessions\\hot-one.jsonl",
@@ -625,9 +625,12 @@ test("concurrent activation never exceeds four Secondary workers or five hot con
     "C:\\sessions\\hot-three.jsonl",
     "C:\\sessions\\hot-four.jsonl",
     "C:\\sessions\\hot-five.jsonl",
+    "C:\\sessions\\hot-six.jsonl",
+    "C:\\sessions\\hot-seven.jsonl",
   ];
   const ids = paths.map(idForPath);
   const primary = new FakeRpc(paths[0], "primary-cap");
+  primary.streaming = true;
   const workers = paths.slice(1).map((path, index) => {
     const worker = new FakeRpc(path, `hot-${index + 1}`);
     worker.streaming = true;
@@ -658,15 +661,17 @@ test("concurrent activation never exceeds four Secondary workers or five hot con
   const origin = `http://127.0.0.1:${address.port}`;
   try {
     const responses = await Promise.all(ids.slice(1).map((id) => fetch(`${origin}/api/sessions/${id}/activate`, { method: "POST" })));
-    assert.equal(responses.filter((response) => response.status === 200).length, 4);
+    assert.equal(responses.filter((response) => response.status === 200).length, 6);
     assert.equal(responses.filter((response) => response.status === 409).length, 1);
     const rejectedIndex = responses.findIndex((response) => response.status === 409);
     const rejected = responses[rejectedIndex];
     assert.ok(rejected);
-    assert.match((await rejected.json() as { error: string }).error, /5 个热对话上限/);
-    assert.equal(internals.runtimes.size, 4);
-    assert.equal(created, 4);
-    assert.equal(workers.slice(0, 4).every((worker) => worker.stopCount === 0), true);
+    const rejection = await rejected.json() as { error: string; code: string };
+    assert.match(rejection.error, /7 个执行对话上限/);
+    assert.equal(rejection.code, "RUNTIME_CAPACITY_EXHAUSTED");
+    assert.equal(internals.runtimes.size, 6);
+    assert.equal(created, 6);
+    assert.equal(workers.slice(0, 6).every((worker) => worker.stopCount === 0), true);
 
     const releasedIndex = responses.findIndex((response) => response.status === 200);
     const releasedWorker = internals.runtimes.get(ids[releasedIndex + 1])?.rpc;
@@ -676,8 +681,8 @@ test("concurrent activation never exceeds four Secondary workers or five hot con
     const admitted = await fetch(`${origin}/api/sessions/${ids[rejectedIndex + 1]}/activate`, { method: "POST" });
     assert.equal(admitted.status, 200);
     assert.equal(releasedWorker.stopCount, 1);
-    assert.equal(internals.runtimes.size, 4);
-    assert.equal(created, 5);
+    assert.equal(internals.runtimes.size, 6);
+    assert.equal(created, 7);
   } finally {
     server.close();
     await app.close();

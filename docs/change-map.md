@@ -95,7 +95,7 @@
 | 服务只监听 loopback，并执行精确 Host、Origin、token 校验 | README 安全说明、Architecture security posture | `request-guard`、`api-recovery-token` |
 | 冷历史 browsing/search/pagination 不激活 Runtime | Architecture runtime/session policy | `server/runtime-bootstrap-drafts.test.ts`、`session-navigation`、`web/session-navigation-gate.test.ts` |
 | 一个 live writer，多窗口可观察 | Architecture Session control | `session-control`、`server/window-control-lifecycle.test.ts` |
-| Primary 加最多四个 Secondary | Architecture runtime/session policy | `runtime-pool-admission`、`server/runtime-recovery-capacity.test.ts` |
+| Primary 加最多六个 Secondary | Architecture runtime/session policy | `runtime-pool-admission`、`server/runtime-recovery-capacity.test.ts` |
 | Runtime identity 与 cwd 在其生命周期内不可重绑 | Architecture workspace/runtime policy | `runtime-pool-admission`、`workspace-state`、`server/workspace-resource-lifecycle.test.ts` |
 | Lifecycle barrier 必须 drain 已准入 mutation | Architecture、lifecycle module | `application-lifecycle`、`operation-admission`、`server/application-restart-admission.test.ts` |
 | SSE 有内存/帧上限，且终态顺序不得被累积快照越过 | `SseHub` contract | `sse-hub`、`sse-transport-recovery` |

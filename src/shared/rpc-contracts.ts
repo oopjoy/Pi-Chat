@@ -1,15 +1,16 @@
 /** Shared transport budgets enforced at the HTTP/image and RPC boundaries. */
-export const MAX_PROMPT_IMAGES = 4;
+export const MAX_PROMPT_IMAGES = 10;
 export const MAX_PROMPT_IMAGE_BYTES = 8 * 1024 * 1024;
+export const MAX_PROMPT_IMAGES_TOTAL_BYTES = 40 * 1024 * 1024;
 
-/** Worst-case separately padded Base64 payload at the raw-image cap. */
+/** Worst-case separately padded Base64 payloads at the aggregate raw-image cap. */
 export const MAX_PROMPT_IMAGE_ENCODED_BYTES =
   Math.ceil(MAX_PROMPT_IMAGE_BYTES / 3) * 4;
 export const MAX_PROMPT_IMAGES_ENCODED_BYTES =
-  MAX_PROMPT_IMAGES * MAX_PROMPT_IMAGE_ENCODED_BYTES;
+  Math.ceil(MAX_PROMPT_IMAGES_TOTAL_BYTES / 3) * 4 + MAX_PROMPT_IMAGES * 4;
 
-/** Keep the largest valid prompt plus its JSON envelope below a hard line cap. */
-export const MAX_RPC_OUTBOUND_LINE_BYTES = 45 * 1024 * 1024;
+/** A 40 MiB image set expands to about 53.4 MiB before its JSON envelope. */
+export const MAX_RPC_OUTBOUND_LINE_BYTES = 64 * 1024 * 1024;
 /** Pi may echo a prompt inside an event/response with a modestly larger envelope. */
 export const MAX_RPC_INBOUND_LINE_BYTES = MAX_RPC_OUTBOUND_LINE_BYTES + 1024 * 1024;
 

@@ -6,9 +6,9 @@ import { OperationAdmission } from "./operation-admission.js";
 import type { PiRpcClient, RpcEventSource } from "./rpc-client.js";
 
 const DEFAULT_SECONDARY_RUNTIME_IDLE_MS = 40 * 60 * 1_000;
-/** Primary + four Secondary workers = five hot conversations total. */
-const DEFAULT_MAX_SECONDARY_RUNTIMES = 4;
-const DEFAULT_MAX_IDLE_SECONDARY_RUNTIMES = 4;
+/** Primary + six Secondary workers = seven hot conversations total. */
+export const DEFAULT_MAX_SECONDARY_RUNTIMES = 6;
+export const DEFAULT_MAX_IDLE_SECONDARY_RUNTIMES = 6;
 
 export interface PendingTurnSettings {
   model?: { provider: string; modelId: string };
@@ -326,7 +326,7 @@ export class RuntimePool {
   }
 
   private capacityError(): RuntimeCapacityError {
-    return new RuntimeCapacityError(`已达到 ${this.maxSecondaryRuntimes + 1} 个热对话上限。请等待一个对话结束运行，或关闭受保护的空白新对话后重试`);
+    return new RuntimeCapacityError(`已达到 ${this.maxSecondaryRuntimes + 1} 个执行对话上限（含受保护的新对话），当前没有可关闭的空闲热对话。请等待任一对话完成后重试`);
   }
 
   private async reclaimOldestAvailable(): Promise<boolean> {

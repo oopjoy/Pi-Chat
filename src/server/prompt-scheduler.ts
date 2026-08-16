@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { MAX_PROMPT_IMAGES_ENCODED_BYTES } from "../shared/rpc-contracts.js";
 import type { GateMode, PromptImage, QueuedPrompt } from "../shared/types.js";
 import type { PendingTurnSettings, RuntimeQueuedPrompt, SecondaryRuntime } from "./runtime-pool.js";
 import {
@@ -13,7 +14,7 @@ export const PROMPT_PREPARE_TIMEOUT_MS = 200_000;
 /** A write timeout means Pi may still process the already-written JSONL RPC command. */
 export type PromptAcceptance = "confirmed" | "unknown";
 const MAX_QUEUE_LENGTH = 20;
-const MAX_QUEUED_IMAGE_CHARS = 45_000_000;
+const MAX_QUEUED_IMAGE_CHARS = MAX_PROMPT_IMAGES_ENCODED_BYTES;
 
 export interface InternalQueuedPrompt extends QueuedPrompt {
   images: PromptImage[];
@@ -125,7 +126,7 @@ export class PromptScheduler {
     if (queue.length >= MAX_QUEUE_LENGTH) return "队列已满，最多保留 20 条";
     const incoming = images.reduce((total, image) => total + image.data.length, 0);
     if (this.queuedImageChars(queue) + incoming > MAX_QUEUED_IMAGE_CHARS) {
-      return "队列中的图片总量超过约 32 MB，请先等待或撤销部分消息";
+      return "队列中的图片总量超过 40 MB，请先等待或撤销部分消息";
     }
     return null;
   }

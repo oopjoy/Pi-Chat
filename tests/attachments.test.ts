@@ -1,24 +1,79 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import test from "node:test";
-import { MAX_PROMPT_IMAGE_BYTES } from "../src/shared/rpc-contracts";
+import {
+  MAX_PROMPT_HTTP_BODY_BYTES,
+  MAX_PROMPT_IMAGE_BYTES,
+  MAX_PROMPT_IMAGES,
+  MAX_PROMPT_IMAGES_TOTAL_BYTES,
+  MAX_RPC_OUTBOUND_LINE_BYTES,
+} from "../src/shared/rpc-contracts";
 import { PiChatApp, promptImages } from "../src/server/app";
 import { parsePickerOutput } from "../src/server/file-picker";
 import type { PiRpcClient } from "../src/server/rpc-client";
 import { idForPath, type SessionIndex } from "../src/server/session-index";
 import type { ResourceManager } from "../src/server/resource-manager";
-import { commandMatches, fileReferences, windowsPathsFromText } from "../src/web/components/ChatInput";
+import {
+  commandMatches,
+  fileReferences,
+  promptImageAdditionError,
+  promptImagesByteLength,
+  windowsPathsFromText,
+} from "../src/web/components/ChatInput";
 
 test("prompt image validation accepts Pi image content and rejects unsafe payloads", () => {
   assert.deepEqual(promptImages([{ type: "image", data: "aGVsbG8=", mimeType: "image/png", fileName: "ignored.png" }]), [
     { type: "image", data: "aGVsbG8=", mimeType: "image/png" },
   ]);
   assert.throws(() => promptImages([{ data: "aGVsbG8=", mimeType: "image/svg+xml" }]), /仅支持/);
-  assert.throws(() => promptImages(Array.from({ length: 5 }, () => ({ data: "YQ==", mimeType: "image/png" }))), /最多/);
+  assert.throws(() => promptImages(Array.from({ length: MAX_PROMPT_IMAGES + 1 }, () => ({ data: "YQ==", mimeType: "image/png" }))), /最多/);
   assert.throws(() => promptImages([{ data: "not base64!", mimeType: "image/png" }]), /Base64/);
   assert.throws(() => promptImages([{ data: "YQ=", mimeType: "image/png" }]), /Base64/);
   const oversized = Buffer.alloc(MAX_PROMPT_IMAGE_BYTES + 1).toString("base64");
   assert.throws(() => promptImages([{ data: oversized, mimeType: "image/png" }]), /8 MB/);
+});
+
+test("ten prompt images may total exactly 40 MB across HTTP and RPC framing", () => {
+  const chunkBytes = MAX_PROMPT_IMAGES_TOTAL_BYTES / MAX_PROMPT_IMAGES;
+  assert.equal(Number.isInteger(chunkBytes), true);
+  const chunk = Buffer.alloc(chunkBytes).toString("base64");
+  const images = Array.from({ length: MAX_PROMPT_IMAGES }, () => ({
+    data: chunk,
+    mimeType: "image/png",
+  }));
+  assert.equal(promptImages(images).length, MAX_PROMPT_IMAGES);
+  assert.ok(Buffer.byteLength(JSON.stringify({ sessionId: "a".repeat(20), images })) <= MAX_PROMPT_HTTP_BODY_BYTES);
+  assert.ok(Buffer.byteLength(`${JSON.stringify({ type: "prompt", message: "请查看这些图片。", images })}\n`) <= MAX_RPC_OUTBOUND_LINE_BYTES);
+
+  const oversizedChunk = Buffer.alloc(chunkBytes + 1).toString("base64");
+  assert.throws(
+    () => promptImages([...images.slice(0, -1), { data: oversizedChunk, mimeType: "image/png" }]),
+    /40 MB/,
+  );
+});
+
+test("browser attachment preflight shares the ten-image and 40 MB budgets", () => {
+  const eightMbImage = { data: "", size: MAX_PROMPT_IMAGE_BYTES };
+  const firstFour = Array.from({ length: 4 }, () => eightMbImage);
+  const finalEightMb = [{ name: "fifth.png", size: MAX_PROMPT_IMAGE_BYTES }];
+  assert.equal(promptImageAdditionError(firstFour, finalEightMb), null);
+  assert.match(
+    promptImageAdditionError([...firstFour, eightMbImage], [{ name: "overflow.png", size: 1 }]) || "",
+    /40 MB/,
+  );
+  assert.equal(
+    promptImageAdditionError([], Array.from({ length: MAX_PROMPT_IMAGES }, (_, index) => ({ name: `${index}.png`, size: 1 }))),
+    null,
+  );
+  assert.match(
+    promptImageAdditionError([], Array.from({ length: MAX_PROMPT_IMAGES + 1 }, (_, index) => ({ name: `${index}.png`, size: 1 }))) || "",
+    /10 张/,
+  );
+  assert.match(
+    promptImageAdditionError([], [{ name: "large.png", size: MAX_PROMPT_IMAGE_BYTES + 1 }]) || "",
+    /8 MB/,
+  );
+  assert.equal(promptImagesByteLength([{ data: "YQ==" }, { data: "", size: 7 }]), 8);
 });
 
 test("Windows file picker output keeps only absolute drive paths", () => {

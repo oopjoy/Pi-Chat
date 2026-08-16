@@ -2,6 +2,7 @@ import {
   MAX_PROMPT_IMAGE_BYTES,
   MAX_PROMPT_IMAGES,
   MAX_PROMPT_IMAGES_ENCODED_BYTES,
+  MAX_PROMPT_IMAGES_TOTAL_BYTES,
 } from "../shared/rpc-contracts.js";
 import type { ModelInfo, PiMessage, PiState, PromptImage, SessionStats, SlashCommand } from "../shared/types.js";
 import { rpcData } from "./rpc-client.js";
@@ -12,6 +13,7 @@ export function promptImages(value: unknown): PromptImage[] {
   if (value === undefined) return [];
   if (!Array.isArray(value) || value.length > MAX_PROMPT_IMAGES)
     throw new Error(`一次最多发送 ${MAX_PROMPT_IMAGES} 张图片`);
+  let decodedBytes = 0;
   let encodedBytes = 0;
   const images = value.map((entry) => {
     if (!entry || typeof entry !== "object") throw new Error("图片数据无效");
@@ -21,9 +23,12 @@ export function promptImages(value: unknown): PromptImage[] {
     if (!["image/png", "image/jpeg", "image/webp", "image/gif"].includes(mimeType)) throw new Error("仅支持 PNG、JPEG、WebP 和 GIF 图片");
     if (!/^[A-Za-z0-9+/]*={0,2}$/.test(data) || data.length % 4 !== 0)
       throw new Error("图片 Base64 数据无效");
-    const approximateBytes = Math.floor(data.length * 3 / 4) - (data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0);
-    if (approximateBytes <= 0 || approximateBytes > MAX_PROMPT_IMAGE_BYTES)
-      throw new Error("单张图片必须小于 8 MB");
+    const imageBytes = Math.floor(data.length * 3 / 4) - (data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0);
+    if (imageBytes <= 0 || imageBytes > MAX_PROMPT_IMAGE_BYTES)
+      throw new Error("单张图片不能超过 8 MB");
+    decodedBytes += imageBytes;
+    if (decodedBytes > MAX_PROMPT_IMAGES_TOTAL_BYTES)
+      throw new Error("图片总大小不能超过 40 MB");
     encodedBytes += Buffer.byteLength(data, "ascii");
     return { type: "image" as const, data, mimeType };
   });

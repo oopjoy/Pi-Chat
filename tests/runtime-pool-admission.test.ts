@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { OperationAdmission } from "../src/server/operation-admission";
-import { RuntimePool, type SecondaryRuntime } from "../src/server/runtime-pool";
+import {
+  DEFAULT_MAX_IDLE_SECONDARY_RUNTIMES,
+  DEFAULT_MAX_SECONDARY_RUNTIMES,
+  RuntimePool,
+  type SecondaryRuntime,
+} from "../src/server/runtime-pool";
 import { idForPath } from "../src/server/session-index";
 
 function runtime(stop: () => Promise<void>): SecondaryRuntime {
@@ -24,6 +29,11 @@ function runtime(stop: () => Promise<void>): SecondaryRuntime {
     pendingTurnSettings: {},
   };
 }
+
+test("production capacity defaults to Primary plus six Secondary Runtimes", () => {
+  assert.equal(DEFAULT_MAX_SECONDARY_RUNTIMES, 6);
+  assert.equal(DEFAULT_MAX_IDLE_SECONDARY_RUNTIMES, 6);
+});
 
 function deferred<T = void>() {
   let resolve!: (value: T) => void;
@@ -171,7 +181,7 @@ test("four reserved cold starts run concurrently without exceeding the Secondary
   const firstFour = paths.slice(0, 4).map((path) => targetPool.ensure(idForPath(path)));
   for (let turn = 0; turn < 20 && started < 4; turn += 1) await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(started, 4, "every free slot starts before any slow readiness resolves");
-  await assert.rejects(() => targetPool.ensure(idForPath(paths[4])), /热对话上限/);
+  await assert.rejects(() => targetPool.ensure(idForPath(paths[4])), /执行对话上限/);
   assert.equal(started, 4, "the fifth Session never spawns without a reservation");
   for (const start of starts.slice(0, 4)) start.resolve();
   await Promise.all(firstFour);
