@@ -11,6 +11,10 @@ const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif
 
 type PendingSubmission = {
   scope: string;
+  /** Immutable normal-session target captured when the editor accepts this snapshot. */
+  targetSessionId?: string;
+  /** Last observed control-event version for that immutable target. */
+  controlVersion?: number;
   message: string;
   images: PromptImage[];
   delivery: PromptDelivery;
@@ -103,7 +107,7 @@ export function commandMatches(value: string, commands: SlashCommand[]): SlashCo
   }).sort((a, b) => a.rank - b.rank || a.score - b.score || a.command.name.localeCompare(b.command.name)).slice(0, 9).map(({ command }) => command);
 }
 
-export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, placeholder, acceptsImages, imageInputPending = false, imageInputPendingMessage = "模型图片能力尚未确认", resolveImageCapabilityOnSend = false, restoredDraft, onDraftRevisionChange, submissionScope, allowFollowupSubmissions = true, submissionPaused = false, submissionPausedMessage = "消息已保存，等待发送条件恢复", onSubmissionPendingChange, onSubmissionDeferred, commands, controls, notices, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles, onError }: {
+export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, placeholder, acceptsImages, imageInputPending = false, imageInputPendingMessage = "模型图片能力尚未确认", resolveImageCapabilityOnSend = false, restoredDraft, onDraftRevisionChange, submissionScope, submissionTargetSessionId, submissionControlVersion, allowFollowupSubmissions = true, submissionPaused = false, submissionPausedMessage = "消息已保存，等待发送条件恢复", onSubmissionPendingChange, onSubmissionDeferred, commands, controls, notices, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles, onError }: {
   /** True when a submission will enter the local queue. */
   streaming: boolean;
   /** True only while Pi is actively generating and can be stopped. */
@@ -124,6 +128,10 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   onDraftRevisionChange?: (revision: number) => void;
   /** Stable pane identity used only to pause editor-owned submissions during navigation. */
   submissionScope: string;
+  /** Immutable normal-session prompt target, never inferred again after navigation. */
+  submissionTargetSessionId?: string;
+  /** Control-event version captured with the immutable target. */
+  submissionControlVersion?: number;
   /** A materialized Session can accept another editor snapshot while one is pending. */
   allowFollowupSubmissions?: boolean;
   /** Keeps accepted editor snapshots local until their target may be submitted. */
@@ -405,6 +413,12 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     }
     const submission: PendingSubmission = {
       scope,
+      ...(submissionTargetSessionId
+        ? { targetSessionId: submissionTargetSessionId }
+        : null),
+      ...(typeof submissionControlVersion === "number"
+        ? { controlVersion: submissionControlVersion }
+        : null),
       message,
       images: currentImages,
       delivery,

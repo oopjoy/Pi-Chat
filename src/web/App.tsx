@@ -479,7 +479,10 @@ export function App() {
   /** Editor-owned snapshots waiting to enter App's existing single-flight send path. */
   const [composerPendingByScope, setComposerPendingByScope] = useState<Record<string, number>>({});
   /** A prompt raced a foreign controller after its last SSE projection. */
-  const [deferredComposerScopes, setDeferredComposerScopes] = useState<Record<string, { sawForeign: boolean }>>({});
+  const [deferredComposerScopes, setDeferredComposerScopes] = useState<Record<string, {
+    targetSessionId: string;
+    controlVersion: number;
+  }>>({});
   const updateComposerPending = useCallback((scope: string, count: number) => {
     setComposerPendingByScope((current) => {
       if ((current[scope] || 0) === count) return current;
@@ -4905,12 +4908,23 @@ export function App() {
         ? DRAFT_PREFS_KEY
         : targetSessionId;
       const staged = pendingSessionPrefsRef.current.get(prefsKey);
+      // A child JSONL's historical settings describe the child only. They must
+      // never silently reconfigure its parent merely because this composer
+      // routes an ordinary message to that verified parent.
+      const sendingFromChildView =
+        Boolean(targetSessionId) && targetSessionId !== viewedSessionIdRef.current;
       let preferredModel =
-        staged?.model !== undefined ? staged.model : state.model;
+        staged?.model !== undefined
+          ? staged.model
+          : sendingFromChildView
+            ? undefined
+            : state.model;
       let preferredThinking =
         staged?.thinkingLevel !== undefined
           ? staged.thinkingLevel
-          : (state.thinkingLevel as ThinkingLevel | undefined);
+          : sendingFromChildView
+            ? undefined
+            : (state.thinkingLevel as ThinkingLevel | undefined);
       let confirmedPromptModel = state.model;
       let initialPromptResult: Awaited<ReturnType<typeof api.prompt>> | null =
         null;
@@ -6082,8 +6096,19 @@ export function App() {
   };
 
   const composerTargetForViewedSession = () => {
-    const viewed = viewedSessionIdRef.current;
-    return subagentAddressesRef.current.get(viewed)?.parentSessionId || viewed;
+    // Background-child records are never normal Runtime targets. Follow only
+    // server-derived direct-parent edges until reaching the verified ordinary
+    // ancestor; malformed/cyclic retained addresses fail closed.
+    let target = viewedSessionIdRef.current;
+    const visited = new Set<string>();
+    while (target && subagentAddressesRef.current.has(target)) {
+      if (visited.has(target)) return "";
+      visited.add(target);
+      const parentSessionId = subagentAddressesRef.current.get(target)?.parentSessionId;
+      if (!parentSessionId || visited.has(parentSessionId)) return "";
+      target = parentSessionId;
+    }
+    return target;
   };
 
   const stageSessionPref = (patch: {
@@ -6954,8 +6979,8 @@ export function App() {
   );
   const subagentComposerAddress = subagentAddressesRef.current.get(viewedSessionId);
   const viewingSubagentSession = Boolean(subagentComposerAddress);
-  /** A child transcript is read-only; normal new prompts are addressed to its verified parent. */
-  const composerTargetSessionId = subagentComposerAddress?.parentSessionId || viewedSessionId;
+  /** A child transcript is read-only; normal messages use its verified ordinary ancestor. */
+  const composerTargetSessionId = composerTargetForViewedSession();
   const composerTargetControl = composerTargetSessionId === viewedSessionId
     ? viewControl
     : sessions.find((session) => session.id === composerTargetSessionId);
@@ -6974,44 +6999,55 @@ export function App() {
     : `session:${composerTargetSessionId || "none"}`;
   const composerSubmissionPending = composerPendingByScope[composerSubmissionScope] || 0;
   const composerSubmissionDeferred = deferredComposerScopes[composerSubmissionScope];
+  const deferredTargetSessionId = composerSubmissionDeferred?.targetSessionId || "";
+  const deferredTargetControl = deferredTargetSessionId === viewedSessionId
+    ? viewControl
+    : sessions.find((session) => session.id === deferredTargetSessionId);
+  const deferredTargetObserving = Boolean(
+    deferredTargetControl?.controlOwner &&
+    deferredTargetControl.controlledByThisWindow !== true,
+  );
   useEffect(() => {
-    if (!composerSubmissionDeferred) return;
-    if (composerTargetControl?.controlledByThisWindow === true) {
+    if (!composerSubmissionDeferred || !deferredTargetSessionId) return;
+    // A conflict itself proves that a foreign owner existed, even if this page
+    // missed the corresponding "foreign" SSE. Resume only after a later
+    // authoritative control frame clears that owner (or confirms this page),
+    // never from the stale pre-conflict projection or a later pane's version.
+    const controlVersion =
+      sessionEventVersionRef.current.get(deferredTargetSessionId) || 0;
+    if (
+      deferredTargetControl?.controlledByThisWindow === true ||
+      (!deferredTargetObserving &&
+        controlVersion > composerSubmissionDeferred.controlVersion)
+    ) {
       setDeferredComposerScopes((current) => {
         if (!current[composerSubmissionScope]) return current;
         const next = { ...current };
         delete next[composerSubmissionScope];
         return next;
       });
-      return;
     }
-    if (composerTargetObserving && !composerSubmissionDeferred.sawForeign) {
-      setDeferredComposerScopes((current) => ({
-        ...current,
-        [composerSubmissionScope]: { sawForeign: true },
-      }));
-      return;
-    }
-    if (!composerTargetObserving && composerSubmissionDeferred.sawForeign) {
-      setDeferredComposerScopes((current) => {
-        if (!current[composerSubmissionScope]) return current;
-        const next = { ...current };
-        delete next[composerSubmissionScope];
-        return next;
-      });
-    }
-  }, [composerSubmissionDeferred, composerSubmissionScope, composerTargetObserving]);
+  }, [
+    composerSubmissionDeferred,
+    composerSubmissionScope,
+    deferredTargetObserving,
+    deferredTargetControl?.controlledByThisWindow,
+    deferredTargetSessionId,
+  ]);
   const composerSubmissionPaused =
     !mutationBlocked &&
     (viewSwitching ||
       currentSessionPreparing ||
       Boolean(state.isCompacting) ||
       composerTargetObserving ||
-      Boolean(composerSubmissionDeferred));
-  const composerSubmissionPausedMessage = composerSubmissionDeferred || composerTargetObserving
-    ? viewingSubagentSession
-      ? "父对话正在另一窗口中控制；消息已保留，控制权可用后将发送"
-      : "另一窗口正在控制此对话；消息已保留，控制权可用后将发送"
+      Boolean(composerSubmissionDeferred) ||
+      (viewingSubagentSession && !composerTargetSessionId));
+  const composerSubmissionPausedMessage = viewingSubagentSession && !composerTargetSessionId
+    ? "子代理父对话地址不可用；消息已保留，等待验证恢复"
+    : composerSubmissionDeferred || composerTargetObserving
+      ? viewingSubagentSession
+        ? "父对话正在另一窗口中控制；消息已保留，控制权可用后将发送"
+        : "另一窗口正在控制此对话；消息已保留，控制权可用后将发送"
     : state.isCompacting
       ? "消息已保存，等待压缩完成后发送"
       : currentSessionPreparing
@@ -7765,14 +7801,18 @@ export function App() {
           imageInputPending: primaryCapabilityPending,
           imageInputPendingMessage,
           resolveImageCapabilityOnSend:
-            primaryRuntime.status === "ready" &&
-            !localDraft &&
-            runtimeStatus !== "active",
+            viewingSubagentSession ||
+            (primaryRuntime.status === "ready" &&
+              !localDraft &&
+              runtimeStatus !== "active"),
           restoredDraft: cancelledDraft,
           onDraftRevisionChange: (revision) => {
             composerDraftRevisionRef.current = revision;
           },
           submissionScope: composerSubmissionScope,
+          submissionTargetSessionId: composerTargetSessionId || undefined,
+          submissionControlVersion:
+            sessionEventVersionRef.current.get(composerTargetSessionId) || 0,
           allowFollowupSubmissions: true,
           submissionPaused: composerSubmissionPaused,
           submissionPausedMessage: composerSubmissionPausedMessage,
@@ -7781,17 +7821,29 @@ export function App() {
             if (!(error instanceof ApiRequestError) || error.code !== "SESSION_CONTROL_CONFLICT")
               return false;
             setError("");
+            const targetSessionId = submission.targetSessionId;
+            const controlVersion = submission.controlVersion;
+            if (!targetSessionId || typeof controlVersion !== "number")
+              return false;
             setDeferredComposerScopes((current) => current[submission.scope]
               ? current
-              : { ...current, [submission.scope]: { sawForeign: composerTargetObserving } });
+              : {
+                  ...current,
+                  [submission.scope]: { targetSessionId, controlVersion },
+                });
             return true;
           },
           commands: composerCommands,
           controls: composerControls,
           notices: composerNotices,
           onSend: async (message, images, delivery) => {
-            if (viewingSubagentSession && (delivery !== "queue" || message.startsWith("/")))
-              throw new Error("子代理视图仅支持向父对话发送普通消息");
+            if (
+              viewingSubagentSession &&
+              (!composerTargetSessionId ||
+                delivery !== "queue" ||
+                message.startsWith("/"))
+            )
+              throw new Error("子代理视图仅支持向已验证父对话发送普通消息");
             return send(message, images, delivery, viewingSubagentSession ? composerTargetSessionId : "");
           },
           onPickLocalFiles: async () => (await api.pickLocalFiles()).paths,

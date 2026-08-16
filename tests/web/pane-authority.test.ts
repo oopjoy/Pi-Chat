@@ -85,6 +85,13 @@ test("clicking a verified Subagent row opens its read-only transcript without wa
     ...childView.state,
     sessionId: "child-session",
     sessionName: "review child",
+    model: {
+      id: "child-model",
+      name: "Child model",
+      provider: "child-provider",
+      input: ["image"],
+    },
+    thinkingLevel: "high",
     isStreaming: false,
     messageCount: 2,
   };
@@ -109,6 +116,7 @@ test("clicking a verified Subagent row opens its read-only transcript without wa
   const promptTargets: string[] = [];
   const abortedTargets: string[] = [];
   const extensionResponses: string[] = [];
+  const parentSettingChanges: string[] = [];
   const viewed: string[] = [];
   Object.assign(api, {
     bootstrap: async () => bootstrap,
@@ -140,6 +148,14 @@ test("clicking a verified Subagent row opens its read-only transcript without wa
     prompt: async (_message: string, _images: unknown[], id: string) => {
       promptTargets.push(id);
       return { accepted: true, queued: false };
+    },
+    setModel: async (_provider: string, _modelId: string, id: string) => {
+      parentSettingChanges.push(`model:${id}`);
+      return { model: bootstrap.state.model, pending: false };
+    },
+    setThinking: async (_level: string, id: string) => {
+      parentSettingChanges.push(`thinking:${id}`);
+      return { level: "medium", pending: false };
     },
     abort: async (id: string) => {
       abortedTargets.push(id);
@@ -178,6 +194,7 @@ test("clicking a verified Subagent row opens its read-only transcript without wa
     });
     assert.deepEqual(warmed, [activeId], "a child send may prepare only its verified parent");
     assert.deepEqual(promptTargets, [activeId], "a child send never targets the child JSONL identity");
+    assert.deepEqual(parentSettingChanges, [], "a child transcript's historical settings never reconfigure its parent");
     const source = FakeEventSource.instances.at(-1)!;
     await act(async () => {
       source.dispatchEvent(new dom.window.MessageEvent("ready", {
@@ -221,6 +238,8 @@ test("nested Subagent addresses rehydrate in order after a child read miss and l
   const mappings = new Set<string>();
   const catalogCalls: string[] = [];
   const childReads: string[] = [];
+  const warmed: string[] = [];
+  const promptTargets: string[] = [];
   let missGrandchildOnce = true;
   const unavailable = () => new ApiRequestError("子代理对话不存在或尚未准备好", 404, "SUBAGENT_VIEW_UNAVAILABLE");
   Object.assign(api, {
@@ -253,6 +272,15 @@ test("nested Subagent addresses rehydrate in order after a child read miss and l
       }
       return targetId === childId ? childView : grandchildView;
     },
+    warmSession: async (id: string) => {
+      warmed.push(id);
+      if (id !== activeId) throw new Error("a nested child must never be warmed");
+      return { sessionId: id, state: bootstrap.state, gateMode: "strict" as const };
+    },
+    prompt: async (_message: string, _images: unknown[], id: string) => {
+      promptTargets.push(id);
+      return { accepted: true, queued: false };
+    },
   });
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {
@@ -272,6 +300,16 @@ test("nested Subagent addresses rehydrate in order after a child read miss and l
     const parentHydrationIndex = grandchildHydration.indexOf(activeId);
     assert.ok(parentHydrationIndex >= 0);
     assert.equal(grandchildHydration.indexOf(childId, parentHydrationIndex + 1) > parentHydrationIndex, true);
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "report through ordinary parent");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "report through ordinary parent" }));
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.deepEqual(warmed, [activeId], "nested sends warm only the verified ordinary ancestor");
+    assert.deepEqual(promptTargets, [activeId], "nested sends never target an intermediate child JSONL");
 
     mappings.clear();
     const callsBeforeReplacement = catalogCalls.length;

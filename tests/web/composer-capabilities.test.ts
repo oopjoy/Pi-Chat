@@ -1351,6 +1351,136 @@ test("App does not hand a buffered follow-up to the API while another window own
   }
 });
 
+test("App resumes an unseen control conflict only after a newer control frame", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api, ApiRequestError } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  let attempts = 0;
+  Object.assign(api, {
+    bootstrap: async () => bootstrap,
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    prompt: async () => {
+      attempts += 1;
+      if (attempts === 1)
+        throw new ApiRequestError("另一窗口正在控制", 409, "SESSION_CONTROL_CONFLICT");
+      return { accepted: true, queued: false };
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "wait for authoritative clear");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "wait for authoritative clear" }));
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(attempts, 1);
+    assert.match(dom.window.document.querySelector(".composer-submission-status")?.textContent || "", /消息已保留/);
+    await act(async () => {
+      FakeEventSource.instances.at(-1)!.emitPi({
+        type: "pi_chat_session_control_changed",
+        sessionId: activeId,
+        piChatSessionId: activeId,
+        controlledByThisWindow: false,
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(attempts, 2, "the conflict alone cannot cause an immediate retry");
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
+test("a deferred A conflict retains A's control fence across navigation to B", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api, ApiRequestError } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const secondId = "bbbbbbbbbbbbbbbbbbbb";
+  const summaryB = { ...bootstrap.sessions[0], id: secondId, sessionId: "session-b", name: "Session B", active: false };
+  const viewA = {
+    ...draftView,
+    session: bootstrap.sessions[0],
+    state: { ...bootstrap.state, sessionName: "Active" },
+  };
+  const viewB = {
+    ...draftView,
+    session: summaryB,
+    state: { ...draftView.state, sessionId: "session-b", sessionName: "Session B" },
+  };
+  let rejectFirst!: (reason: Error) => void;
+  const first = new Promise<never>((_resolve, reject) => { rejectFirst = reject; });
+  const targets: string[] = [];
+  Object.assign(api, {
+    bootstrap: async () => ({ ...bootstrap, sessions: [bootstrap.sessions[0], summaryB], sessionsTotal: 2 }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async (id: string) => ({ viewing: id }),
+    viewSession: async (id: string) => id === secondId ? viewB : viewA,
+    prompt: async (_message: string, _images: unknown[], id: string) => {
+      targets.push(id);
+      if (targets.length === 1) return first;
+      return { accepted: true, queued: false };
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "A waits for control");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "A waits for control" }));
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+    });
+    assert.deepEqual(targets, [activeId]);
+    const buttonB = [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
+      .find((button) => button.textContent?.includes("Session B"))!;
+    await act(async () => { buttonB.click(); await Promise.resolve(); await Promise.resolve(); });
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.emitPi({
+        type: "pi_chat_session_control_changed",
+        sessionId: secondId,
+        piChatSessionId: secondId,
+        controlOwner: "foreign-b",
+        controlledByThisWindow: false,
+      });
+      rejectFirst(new ApiRequestError("另一窗口正在控制", 409, "SESSION_CONTROL_CONFLICT"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.deepEqual(targets, [activeId], "B's newer control event cannot resume A's snapshot");
+    const buttonA = [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
+      .find((button) => button.textContent?.includes("Active"))!;
+    await act(async () => { buttonA.click(); await Promise.resolve(); await Promise.resolve(); });
+    await act(async () => {
+      source.emitPi({
+        type: "pi_chat_session_control_changed",
+        sessionId: activeId,
+        piChatSessionId: activeId,
+        controlledByThisWindow: false,
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.deepEqual(targets, [activeId, activeId], "only A's later control frame releases A's retained snapshot");
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("ChatInput pauses undrained snapshots when navigation changes submission scope", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");
