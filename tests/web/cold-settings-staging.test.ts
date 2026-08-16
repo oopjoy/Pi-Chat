@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test, { beforeEach } from "node:test";
-import { act, createElement, StrictMode } from "react";
+import { act, createElement } from "react";
 import type { BootstrapData, SessionViewData } from "../../src/shared/types";
 import { activeSessionId as activeId, createBootstrapFixture, createSessionViewFixture } from "../fixtures/app-bootstrap";
 import { captureApiSnapshot } from "../helpers/api-stub";
@@ -152,10 +152,12 @@ test("an in-flight model request does not block staging a thinking choice", asyn
       .find((candidate) => candidate.textContent?.trim() === "high");
     assert.ok(thinkingOption);
     await act(async () => { thinkingOption.click(); await Promise.resolve(); await Promise.resolve(); });
+    // In the hot path the choice issues its own RPC; the guarantee under test
+    // is that an in-flight model request never blocks a thinking choice.
     assert.match(
       dom.window.document.querySelector<HTMLButtonElement>(".thinking-control .compact-select-trigger")!.textContent || "",
       /high/,
-      "thinking choice is staged and painted while model request is in flight",
+      "thinking choice is applied while model request is in flight",
     );
     resolveModel({ model: bootstrap.state.model, pending: false });
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });

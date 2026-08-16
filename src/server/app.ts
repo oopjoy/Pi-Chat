@@ -3782,9 +3782,10 @@ export class PiChatApp {
       // Gate is a fixed Pi Chat system control. Startup self-heals its adapter;
       // a cold history read does not need to rediscover that resource on disk.
       gateAvailable: true,
-      // A cold Session has no live Runtime to report its Gate; strict is the
-      // safe default until activation, matching the server's own fallback.
-      gateMode: "strict",
+      // A cold Session has no live Runtime to report its Gate; report the
+      // process-remembered mode (or the safe strict default) until activation
+      // replaces it with the Runtime-confirmed value.
+      gateMode: this.currentGateMode(id),
       commands: [],
       viewSource: "cold-jsonl",
       pendingExtensionRequest: this.pendingRequestForSession(id),
