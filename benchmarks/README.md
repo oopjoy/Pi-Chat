@@ -37,6 +37,18 @@ Run the real Chromium fluency lane against an already-built staging dist:
 node --import tsx benchmarks/run-browser-fluency-bench.mts --dist C:/path/to/staging-dist --iterations 3 --output ./tmp/browser-fluency.json
 ```
 
+Run the isolated streaming-cadence matrix. This command builds two private variants under a fresh OS-temporary root and never writes repository `dist`:
+
+```sh
+npm run benchmark:streaming-cadence -- --iterations 3 --output ./tmp/streaming-cadence.json
+```
+
+The streaming lane compares exactly three package policies: server `50 ms` plus browser timeout `50 ms`, server `33 ms` plus frame-aligned latest-snapshot commits, and server `25 ms` plus frame-aligned latest-snapshot commits. Each policy runs with one or four concurrent Sessions and plain or Markdown/KaTeX-heavy cumulative content. The four-Session case has one visible pane plus three offscreen cache streams; it is not four simultaneously painted panes. A deterministic `20 ms` fake-RPC source emits 60 cumulative snapshots from a shared future barrier. The runner records and gates actual source duration, interval distribution, lateness, and cross-process start skew rather than treating the requested source interval as observed truth.
+
+Each sample attests the staged browser policy and entry-asset SHA-256, the effective server interval, exact per-Session source completion, worst-case timing/lateness across the selected sources, terminal browser receipt, offscreen-cache terminal availability, and healthy transport outcomes. The result also hashes the benchmark runner and matrix library so a retained artifact identifies the measurement harness that produced it. Markdown/KaTeX samples wait for fonts and require headings, tables, fenced code, KaTeX nodes, and no KaTeX errors. Browser metrics are explicitly frame-coalesced DOM observations and double-`requestAnimationFrame` opportunities; they are not physical-display telemetry or exact React commit timestamps. Frame gaps and Long Tasks begin at the visible `agent_start` window. Three default iterations rotate policy order with a deterministic Latin-square strategy. Comparison readiness requires at least one complete three-iteration cycle; one, four, or five iterations remain non-comparison-ready.
+
+Results remain descriptive only with no thresholds. Successful JSON is emitted only after Chromium, owned process trees, and the temporary benchmark root have confirmed cleanup. Output paths inside live `dist`, including filesystem-link aliases, are rejected. Signal handling attempts the same owned cleanup and reports a retained root rather than claiming success if exit cannot be confirmed. The runner does not change the production default cadence.
+
 The browser lane measures:
 
 - `cold-first-pane`: generated natural 1000-turn JSONL to matching `cold-jsonl` pane commit plus two animation frames;

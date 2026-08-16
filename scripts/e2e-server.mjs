@@ -1,7 +1,9 @@
 import { spawn } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { e2eSessionIdForPath, importE2eSessionFixtures } from "./e2e-fixture-import.mjs";
+import { readStreamingBenchmarkConfig } from "./e2e-streaming-benchmark.mjs";
 import { observeOwnedProcess, terminateOwnedProcessTree } from "./e2e-process-tree.mjs";
 import { e2eRuntimeDist } from "./e2e-runtime-dist.mjs";
 import { validateE2eRoot } from "./e2e-root.mjs";
@@ -21,6 +23,8 @@ if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error("E2E �
 if (fixtureDirectory && !fixtureManifestPath) throw new Error("显式 E2E fixture 导入需要 manifest 输出路径");
 if (!fixtureDirectory && fixtureManifestPath) throw new Error("E2E fixture manifest 只能与 fixture 目录一起使用");
 if (!requestedRoot) throw new Error("E2E server 需要调用方提供 OS 临时目录中的 --root");
+const streamBenchmarkConfigPath = process.env.PI_CHAT_E2E_STREAM_BENCHMARK_CONFIG || "";
+const streamBenchmarkConfig = await readStreamingBenchmarkConfig(streamBenchmarkConfigPath);
 const root = validateE2eRoot({ projectRoot, requested: requestedRoot });
 const sessions = join(root, "sessions");
 const agentDir = join(root, "agent");
@@ -36,6 +40,21 @@ const session = (path, id, name, prompt, answer, model = "gpt-test") => writeFil
 ].map(JSON.stringify).join("\n") + "\n", "utf8");
 
 await session(join(sessions, "first.jsonl"), "first", "First session", "Open first", "First answer");
+const streamBenchmarkSessions = [];
+if (streamBenchmarkConfig) {
+  for (let index = 1; index <= 4; index += 1) {
+    const name = `stream-${index}.jsonl`;
+    const path = join(sessions, name);
+    await session(
+      path,
+      `stream-${index}`,
+      `Streaming Benchmark ${index}`,
+      "Deterministic benchmark seed",
+      "Ready for deterministic streaming",
+    );
+    streamBenchmarkSessions.push({ name, id: e2eSessionIdForPath(path) });
+  }
+}
 await writeFile(join(sessions, "second.jsonl"), [
   { type: "session", version: 3, id: "second", timestamp: "2026-01-02T00:00:00Z", cwd: root },
   { type: "session_info", id: "second-name", parentId: null, name: "Second session" },
@@ -56,24 +75,33 @@ if (fixtureManifestPath) {
   await writeFile(
     resolve(fixtureManifestPath),
     `${JSON.stringify({
-      sessions: importedFixtures.map((name) => ({
-        name,
-        id: e2eSessionIdForPath(join(sessions, name)),
-      })),
+      sessions: [
+        ...importedFixtures.map((name) => ({
+          name,
+          id: e2eSessionIdForPath(join(sessions, name)),
+        })),
+        ...streamBenchmarkSessions,
+      ],
     }, null, 2)}\n`,
     "utf8",
   );
 }
 
+const streamBenchmarkHelperUrl = pathToFileURL(
+  join(projectRoot, "scripts", "e2e-streaming-benchmark.mjs"),
+).href;
 await writeFile(rpcEntry, String.raw`
 import { createInterface } from "node:readline";
-import { basename, extname } from "node:path";
+import { writeFile as writeBenchmarkReport } from "node:fs/promises";
+import { basename, dirname, extname, join } from "node:path";
+import { readStreamingBenchmarkConfig, streamingBenchmarkDelay, streamingBenchmarkSnapshots } from ${JSON.stringify(streamBenchmarkHelperUrl)};
 const sessionIndex = process.argv.indexOf("--session");
 const sessionFile = sessionIndex >= 0 ? process.argv[sessionIndex + 1] : process.env.PI_CHAT_E2E_ACTIVE;
 const sessionId = basename(sessionFile, extname(sessionFile));
 let isStreaming = false;
 const write = (value) => process.stdout.write(JSON.stringify(value) + "\n");
 const reply = (id, data) => write({ type: "response", id, success: true, data });
+const sleep = (milliseconds) => new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
 const handlers = {
   get_state: () => ({ model: { provider: "test", id: "gpt-e2e", name: "E2E Model", input: ["text"] }, isStreaming, sessionId, sessionFile }),
   get_messages: () => ({ messages: [] }),
@@ -88,6 +116,41 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   const command = JSON.parse(line);
   if (command.type === "prompt") {
     isStreaming = true;
+    const benchmarkPath = process.env.PI_CHAT_E2E_STREAM_BENCHMARK_CONFIG || "";
+    if (benchmarkPath) {
+      reply(command.id, {});
+      void (async () => {
+        const config = await readStreamingBenchmarkConfig(benchmarkPath);
+        if (!config || config.startAt === null) throw new Error("Streaming benchmark start barrier is unavailable");
+        const snapshots = streamingBenchmarkSnapshots(config);
+        const sourceTimes = [];
+        const barrierDelay = config.startAt - Date.now();
+        if (barrierDelay > 0) await sleep(barrierDelay);
+        write({ type: "agent_start" });
+        write({ type: "message_start", message: { role: "assistant", provider: "test", model: "gpt-e2e", content: "" } });
+        for (let index = 0; index < snapshots.length; index += 1) {
+          const target = config.startAt + index * config.sourceIntervalMs;
+          const delay = streamingBenchmarkDelay(target, Date.now());
+          if (delay !== null) await sleep(delay);
+          sourceTimes.push(Date.now());
+          write({ type: "message_update", message: { role: "assistant", provider: "test", model: "gpt-e2e", content: snapshots[index] } });
+        }
+        await writeBenchmarkReport(
+          join(dirname(benchmarkPath), "source-" + sessionId + ".json"),
+          JSON.stringify({ sourceTimes }) + "\n",
+          "utf8",
+        );
+        const finalMessage = { role: "assistant", provider: "test", model: "gpt-e2e", content: snapshots.at(-1) || "" };
+        write({ type: "message_end", message: finalMessage });
+        isStreaming = false;
+        write({ type: "agent_settled" });
+      })().catch((error) => {
+        isStreaming = false;
+        process.stderr.write("Streaming benchmark RPC failed: " + (error?.stack || error) + "\n");
+        write({ type: "agent_settled" });
+      });
+      return;
+    }
     write({ type: "agent_start" });
     reply(command.id, {});
     setTimeout(() => {

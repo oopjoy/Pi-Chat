@@ -21,6 +21,10 @@ import {
 } from "./application-restart.js";
 import { loadBuildIdentity } from "./build-identity.js";
 import {
+  isIsolatedStreamingBenchmarkRuntime,
+  parseBenchmarkSseSnapshotInterval,
+} from "./benchmark-streaming-config.js";
+import {
   createIncidentDiagnostics,
   recordIncident,
 } from "./incident-diagnostics.js";
@@ -76,7 +80,22 @@ if (!loopbackHosts.has(options.host)) {
 options.cwd = await loadWorkspace(options.cwd);
 const projectRoot = findProjectRoot(dirname(fileURLToPath(import.meta.url)));
 const runtimeDist = process.env.PI_CHAT_RUNTIME_DIST ? resolve(process.env.PI_CHAT_RUNTIME_DIST) : resolve(projectRoot, "dist");
+const isolatedStreamingBenchmark = isIsolatedStreamingBenchmarkRuntime({
+  configPath: process.env.PI_CHAT_E2E_STREAM_BENCHMARK_CONFIG,
+  declaredRuntimeDist: process.env.PI_CHAT_E2E_SERVER_DIST,
+  runtimeDist,
+  liveDist: resolve(projectRoot, "dist"),
+  port: options.port,
+});
 delete process.env.PI_CHAT_RUNTIME_DIST;
+const benchmarkSseSnapshotIntervalMs = parseBenchmarkSseSnapshotInterval(
+  process.env.PI_CHAT_BENCHMARK_SSE_INTERVAL_MS,
+  isolatedStreamingBenchmark,
+);
+delete process.env.PI_CHAT_BENCHMARK_SSE_INTERVAL_MS;
+if (benchmarkSseSnapshotIntervalMs !== undefined) {
+  console.log(`[Pi Chat] benchmark SSE snapshot interval=${benchmarkSseSnapshotIntervalMs}ms`);
+}
 const protectRollbackBackup = process.env.PI_CHAT_SKIP_STALE_DIST_CLEANUP === "1";
 delete process.env.PI_CHAT_SKIP_STALE_DIST_CLEANUP;
 const cleaned = protectRollbackBackup ? 0 : await cleanupStaleDistArtifacts(projectRoot);
@@ -210,6 +229,7 @@ const app = new PiChatApp({
   buildIdentity,
   runEpoch,
   diagnostics,
+  sseSnapshotIntervalMs: benchmarkSseSnapshotIntervalMs,
 });
 console.log("[Pi Chat] 正在准备 Pi Runtime…");
 const primaryStartup = primaryRuntime.start();

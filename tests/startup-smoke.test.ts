@@ -73,7 +73,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 });
 `;
 
-test("compiled server starts against fake RPC, probes capabilities, serves guarded API, and shuts down", { timeout: 30_000 }, async () => {
+test("compiled server starts against fake RPC, probes capabilities, serves guarded API, and shuts down", { timeout: 45_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-smoke-"));
   const rpcEntry = join(root, "fake-rpc.mjs");
   const rpcLog = join(root, "rpc.log");

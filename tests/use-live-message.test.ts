@@ -76,6 +76,71 @@ test("live message scheduler reports fixed outcomes without changing latest-payl
   }
 });
 
+test("frame-aligned live message scheduler commits only the latest payload and cancels safely", async () => {
+  const { dom } = installAppDom();
+  const callbacks = new Map<number, FrameRequestCallback>();
+  let frameId = 0;
+  const originalRequestAnimationFrame = dom.window.requestAnimationFrame;
+  const originalCancelAnimationFrame = dom.window.cancelAnimationFrame;
+  dom.window.requestAnimationFrame = ((callback: FrameRequestCallback) => {
+    const id = ++frameId;
+    callbacks.set(id, callback);
+    return id;
+  }) as typeof dom.window.requestAnimationFrame;
+  dom.window.cancelAnimationFrame = ((id: number) => {
+    callbacks.delete(id);
+  }) as typeof dom.window.cancelAnimationFrame;
+  const commits: string[] = [];
+  const outcomes: Array<[LiveMessageSchedulerOutcome, string]> = [];
+  let scheduler!: ReturnType<typeof useLiveMessageScheduler<string>>;
+  function Harness() {
+    scheduler = useLiveMessageScheduler(
+      (message) => commits.push(message),
+      { mode: "animation-frame" },
+      (outcome, message) => outcomes.push([outcome, message]),
+    );
+    return null;
+  }
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(Harness)));
+    await act(async () => {
+      scheduler.scheduleLiveMessage("a");
+      scheduler.scheduleLiveMessage("b");
+    });
+    assert.deepEqual(outcomes, [["scheduled", "a"], ["replaced", "b"]]);
+    assert.equal(callbacks.size, 1);
+    await act(async () => {
+      const callback = [...callbacks.values()][0];
+      callbacks.clear();
+      callback(16);
+    });
+    assert.deepEqual(commits, ["b"]);
+    assert.deepEqual(outcomes.at(-1), ["committed", "b"]);
+
+    await act(async () => scheduler.scheduleLiveMessage("drain"));
+    assert.equal(scheduler.drainPendingLiveMessage(), "drain");
+    assert.equal(callbacks.size, 0);
+    assert.deepEqual(outcomes.at(-1), ["drained", "drain"]);
+
+    await act(async () => scheduler.scheduleLiveMessage("clear"));
+    scheduler.clearPendingLiveMessage();
+    assert.equal(callbacks.size, 0);
+    assert.deepEqual(outcomes.at(-1), ["cleared", "clear"]);
+
+    await act(async () => scheduler.scheduleLiveMessage("unmount"));
+    assert.equal(callbacks.size, 1);
+    await act(async () => root.unmount());
+    assert.equal(callbacks.size, 0);
+    assert.deepEqual(outcomes.at(-1), ["cleared", "unmount"]);
+  } finally {
+    if (dom.window.document.querySelector("#root")?.hasChildNodes())
+      await act(async () => root.unmount());
+    dom.window.requestAnimationFrame = originalRequestAnimationFrame;
+    dom.window.cancelAnimationFrame = originalCancelAnimationFrame;
+  }
+});
+
 test("live message scheduler observer failures are fail-open", async () => {
   const { dom } = installAppDom();
   const commits: string[] = [];

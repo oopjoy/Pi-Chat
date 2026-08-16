@@ -49,6 +49,7 @@ import {
 } from "./components/SessionDialog";
 import { SessionInventory } from "./components/SessionInventory";
 import { useLiveMessageScheduler } from "./hooks/use-live-message";
+import { liveMessageSchedulePolicy } from "./lib/live-message-policy";
 import {
   shouldReconnectEventSource,
   usePiEventSource,
@@ -1079,7 +1080,11 @@ export function App() {
     clearPendingLiveMessage,
     drainPendingLiveMessage,
     scheduleLiveMessage,
-  } = useLiveMessageScheduler(commitLiveMessage, 50, observeLiveMessageSchedule);
+  } = useLiveMessageScheduler(
+    commitLiveMessage,
+    liveMessageSchedulePolicy,
+    observeLiveMessageSchedule,
+  );
 
   useEffect(() => {
     if (!viewedSessionId || (!liveMessage && !messages.length)) return;

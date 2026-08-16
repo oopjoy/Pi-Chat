@@ -52,6 +52,7 @@
     "verify:e2e": "node scripts/run-staged-verification.mjs e2e",
     "verify": "node scripts/run-staged-verification.mjs all",
     "measure:first-token": "node --import tsx scripts/measure-first-token.mts",
+    "benchmark:streaming-cadence": "node --import tsx benchmarks/run-streaming-cadence-bench.mts",
     "test:e2e": "npm run build && playwright test",
     "test:e2e:ui": "npm run build && playwright test --ui",
     "install:shortcuts": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-shortcuts.ps1"

@@ -241,6 +241,8 @@ export interface PiChatAppOptions {
   presenceTtlMs?: number;
   gateRequestTimeoutMs?: number;
   sseHeartbeatMs?: number;
+  /** Private benchmark seam; ordinary production leaves the SseHub default intact. */
+  sseSnapshotIntervalMs?: number;
   /**
    * Opt-in legacy behavior that stops the service after the final foreground
    * window closes. Disabled by default so browser crashes, test windows, and
@@ -496,7 +498,7 @@ export class PiChatApp {
         summary.runGeneration,
       );
     });
-    this.sseHub = new SseHub();
+    this.sseHub = new SseHub(options.sseSnapshotIntervalMs);
     this.sseHub.setDiagnosticObserver((event) => {
       if (this.streamDiagnostics.observe(event)) return;
       this.traceState(
