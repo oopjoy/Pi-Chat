@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { PiChatApp } from "../src/server/app";
+import { ModelManager } from "../src/server/model-manager";
 import type { PiRpcClient } from "../src/server/rpc-client";
 import type { ResourceManager } from "../src/server/resource-manager";
 import { SessionIndex, idForPath } from "../src/server/session-index";
@@ -412,6 +413,58 @@ test("session rename uses Pi RPC and delete stops the worker before removing JSO
       assert.equal(deleted.status, 200);
       assert.equal(worker.stopped, true);
       assert.equal(existsSync(historyPath), false);
+    } finally {
+      server.close();
+      await app.close();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("cold view keeps reasoning/input for a configured catalogue model", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-cold-catalog-"));
+  try {
+    const primaryPath = join(root, "primary.jsonl");
+    const coldPath = join(root, "cold.jsonl");
+    const primary = new SessionWorker(primaryPath) as unknown as PiRpcClient;
+    await writeFile(join(root, "models.json"), JSON.stringify({
+      providers: {
+        "cpa-proxy": {
+          models: [
+            { id: "gpt-5.6-sol", name: "gpt-5.6-sol", reasoning: true, input: ["text", "image"] },
+          ],
+        },
+      },
+    }));
+    await writeFile(primaryPath, [
+      { type: "session", id: "primary", cwd: process.cwd() },
+      { type: "message", id: "p1", message: { role: "user", content: "primary" } },
+    ].map(JSON.stringify).join("\n"));
+    await writeFile(coldPath, [
+      { type: "session", id: "cold", cwd: process.cwd() },
+      { type: "model_change", id: "m1", parentId: null, provider: "cpa-proxy", modelId: "gpt-5.6-sol" },
+      { type: "message", id: "u1", parentId: "m1", message: { role: "user", content: "cold" } },
+    ].map(JSON.stringify).join("\n"));
+    const sessions = new SessionIndex(root, join(root, "cache.json"));
+    const modelManager = new ModelManager(root);
+    const app = new PiChatApp({ rpc: primary, sessions, resources: {} as ResourceManager, modelManager, cwd: process.cwd(), webRoot: process.cwd() });
+    const server = createServer((request, response) => void app.handle(request, response));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const origin = `http://127.0.0.1:${address.port}`;
+    try {
+      await fetch(`${origin}/api/bootstrap`);
+      const coldId = idForPath(coldPath);
+      const response = await fetch(`${origin}/api/sessions/${coldId}/view`);
+      assert.equal(response.status, 200);
+      const view = await response.json() as { runtimeStatus: string; state: { model: { provider: string; id: string; reasoning?: boolean; input?: string[] } | null } };
+      assert.equal(view.runtimeStatus, "view-only");
+      assert.equal(view.state.model?.provider, "cpa-proxy");
+      assert.equal(view.state.model?.id, "gpt-5.6-sol");
+      assert.equal(view.state.model?.reasoning, true, "catalogue model keeps its reasoning capability in the cold view");
+      assert.deepEqual(view.state.model?.input, ["text", "image"]);
     } finally {
       server.close();
       await app.close();

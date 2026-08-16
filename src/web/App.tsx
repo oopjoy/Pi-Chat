@@ -6123,11 +6123,17 @@ export function App() {
     const viewed = viewedSessionIdRef.current;
     const targetSessionId = composerTargetForViewedSession();
     const childOriginated = Boolean(viewed && targetSessionId && viewed !== targetSessionId);
-    // Cold history, child views, and a superseded setting request only stage a
-    // per-target preference. The eventual prompt path owns application to Pi,
-    // so a setting click never preempts a concurrent prompt. Staging is local
-    // and never blocked by an in-flight settings request.
-    if (localDraftRef.current || runtimeStatus !== "active" || childOriginated || state.isCompacting) {
+    // A child transcript is read-only. A child-originated model choice must
+    // never be staged as a parent preference; reject it explicitly instead.
+    if (childOriginated) {
+      setNotice("子代理对话为只读，不能修改模型设置");
+      return;
+    }
+    // Cold history and a superseded setting request only stage a per-target
+    // preference. The eventual prompt path owns application to Pi, so a
+    // setting click never preempts a concurrent prompt. Staging is local and
+    // never blocked by an in-flight settings request.
+    if (localDraftRef.current || runtimeStatus !== "active" || state.isCompacting) {
       if (model) {
         stageSessionPref({ model });
         dispatchPane({
@@ -6190,7 +6196,13 @@ export function App() {
     const viewed = viewedSessionIdRef.current;
     const targetSessionId = composerTargetForViewedSession();
     const childOriginated = Boolean(viewed && targetSessionId && viewed !== targetSessionId);
-    if (localDraftRef.current || runtimeStatus !== "active" || childOriginated || state.isCompacting) {
+    // A child transcript is read-only. A child-originated thinking choice must
+    // never be staged as a parent preference; reject it explicitly instead.
+    if (childOriginated) {
+      setNotice("子代理对话为只读，不能修改思考强度");
+      return;
+    }
+    if (localDraftRef.current || runtimeStatus !== "active" || state.isCompacting) {
       stageSessionPref({ thinkingLevel: level });
       dispatchPane({
         type: "PREFERENCES_STAGED",
@@ -6838,11 +6850,17 @@ export function App() {
     const sessionId = composerTargetForViewedSession();
     if (buildIdentityMismatch || !sessionId) return;
     const childOriginated = Boolean(viewed && viewed !== sessionId);
-    // A cold history pane, a child transcript, and local preparation stage Gate
-    // for the target prompt instead of issuing an unauthorized command against
-    // a Runtime the pane does not own. Staging is local and never blocked by an
-    // in-flight settings request.
-    if (runtimeStatus !== "active" || childOriginated || state.isCompacting) {
+    // A child transcript is read-only. A child-originated Gate choice must
+    // never be staged as a parent preference; reject it explicitly instead.
+    if (childOriginated) {
+      setNotice("子代理对话为只读，不能修改文件权限模式");
+      return;
+    }
+    // A cold history pane and local preparation stage Gate for the target
+    // prompt instead of issuing an unauthorized command against a Runtime the
+    // pane does not own. Staging is local and never blocked by an in-flight
+    // settings request.
+    if (runtimeStatus !== "active" || state.isCompacting) {
       stageGateMode(sessionId, mode);
       setNotice(`已选择 ${mode === "open" ? "放行" : "严格"}，发送时生效`);
       return;
@@ -7475,7 +7493,7 @@ export function App() {
       state={state}
       models={models}
       stats={stats}
-      disabled={mutationBlocked}
+      disabled={mutationBlocked || viewingSubagentSession}
       settingsBusy={settingsBusy}
       streaming={state.isStreaming}
       gateAvailable={gateAvailable}

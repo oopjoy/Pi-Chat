@@ -89,7 +89,7 @@ export function ComposerControls({ state, models, stats, disabled, settingsBusy 
       const model = models.find((candidate) => modelValue(candidate) === value);
       if (model) onModel(model.provider, model.id);
     }} />
-    <CompactSelect value={(state.thinkingLevel || "off") as ThinkingLevel} options={THINKING_LEVELS} disabled={controlsDisabled || !state.model?.reasoning} ariaLabel="思考强度" title="思考强度" align="left" icon={<LightbulbIcon className={`thinking-icon${state.thinkingLevel && state.thinkingLevel !== "off" ? " is-active" : ""}`} />} checkPosition="start" className="thinking-control thinking-select" onChange={onThinking} />
+    <CompactSelect value={(state.thinkingLevel || "off") as ThinkingLevel} options={THINKING_LEVELS} disabled={controlsDisabled || !state.model || state.model.reasoning === false} ariaLabel="思考强度" title="思考强度" align="left" icon={<LightbulbIcon className={`thinking-icon${state.thinkingLevel && state.thinkingLevel !== "off" ? " is-active" : ""}`} />} checkPosition="start" className="thinking-control thinking-select" onChange={onThinking} />
     {gateAvailable && <GateControl mode={gateMode} disabled={controlsDisabled} onChange={onGate} />}
     <UsageStats stats={stats} isCompacting={state.isCompacting} fastModeActive={state.fastModeActive} />
   </div>;

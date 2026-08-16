@@ -507,6 +507,10 @@ export class PiChatApp {
     this.currentCwd = resolve(options.cwd);
     this.primaryRuntimeCwd = this.currentCwd;
     this.startupModels = this.readStartupModels();
+    // Cold JSONL views resolve persisted model metadata through knownModels.
+    // Seed it from the configured catalogue so models.json models keep their
+    // reasoning/input/contextWindow instead of degrading to a bare-name fallback.
+    this.rememberModelContextWindows(this.startupModels);
     this.requestToken =
       options.requestToken || randomBytes(32).toString("base64url");
     this.buildIdentity = options.buildIdentity || {

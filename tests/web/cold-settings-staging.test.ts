@@ -166,3 +166,150 @@ test("an in-flight model request does not block staging a thinking choice", asyn
     restoreApi();
   }
 });
+
+test("an unknown-capability cold model keeps thinking staggable until first send", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const coldId = "dddddddddddddddddddd";
+  // Fallback persisted model: known only by name, reasoning unknown (undefined).
+  const coldModel = {
+    provider: "removed-provider",
+    id: "old-history-model",
+    name: "old-history-model",
+  };
+  const cold: SessionViewData = {
+    ...draftView,
+    session: {
+      ...draftView.session,
+      id: coldId,
+      sessionId: "cold-unknown",
+      name: "Cold unknown",
+      messageCount: 1,
+      active: false,
+      writable: true,
+    },
+    state: { ...draftView.state, sessionId: "cold-unknown", model: coldModel },
+    isActive: false,
+    runtimeStatus: "view-only",
+    gateMode: "strict" as const,
+    gateAvailable: true,
+  };
+  let warmCalls = 0;
+  const thinkingCalls: unknown[][] = [];
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      sessions: [...bootstrap.sessions, cold.session],
+      sessionsTotal: 2,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    viewSession: async (id: string) => (id === coldId ? cold : draftView),
+    warmSession: async () => { warmCalls += 1; return { sessionId: coldId, state: cold.state, gateMode: "strict" as const }; },
+    setThinking: async (level: unknown, sessionId: unknown) => { thinkingCalls.push([level, sessionId]); return { level: "high" as const, pending: false }; },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    await act(async () => {
+      [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
+        .find((button) => button.textContent?.includes("Cold unknown"))!
+        .click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const thinkingTrigger = dom.window.document.querySelector<HTMLButtonElement>(".thinking-control .compact-select-trigger")!;
+    assert.equal(thinkingTrigger.disabled, false, "unknown reasoning must not lock the thinking control");
+    await act(async () => { thinkingTrigger.click(); await Promise.resolve(); });
+    const option = [...dom.window.document.querySelectorAll<HTMLElement>(".compact-select-option")]
+      .find((candidate) => candidate.textContent?.trim() === "high");
+    assert.ok(option, "thinking option is listed for an unknown-capability model");
+    await act(async () => { option.click(); await Promise.resolve(); await Promise.resolve(); });
+    assert.match(
+      dom.window.document.querySelector<HTMLButtonElement>(".thinking-control .compact-select-trigger")!.textContent || "",
+      /high/,
+      "the staged thinking choice paints immediately",
+    );
+    assert.equal(warmCalls, 0, "staging a cold thinking choice must not warm the Runtime");
+    assert.deepEqual(thinkingCalls, [], "staging is local: setThinking is not called before the first send");
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "first send");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "first send" }));
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(warmCalls, 1, "the first ordinary send warms the target Runtime exactly once");
+    assert.deepEqual(
+      thinkingCalls,
+      [["high", coldId]],
+      "the first send applies the staged high thinking to exactly this cold Session",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
+test("a reasoning:false model keeps the thinking control locked", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const coldId = "eeeeeeeeeeeeeeeeeeee";
+  const noReasoning = {
+    provider: "test",
+    id: "no-thinking-model",
+    name: "no-thinking-model",
+    reasoning: false,
+    input: ["text"],
+  };
+  const cold: SessionViewData = {
+    ...draftView,
+    session: {
+      ...draftView.session,
+      id: coldId,
+      sessionId: "cold-no-reasoning",
+      name: "Cold no reasoning",
+      messageCount: 1,
+      active: false,
+      writable: true,
+    },
+    state: { ...draftView.state, sessionId: "cold-no-reasoning", model: noReasoning },
+    isActive: false,
+    runtimeStatus: "view-only",
+    gateMode: "strict" as const,
+    gateAvailable: true,
+  };
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      sessions: [...bootstrap.sessions, cold.session],
+      sessionsTotal: 2,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    viewSession: async (id: string) => (id === coldId ? cold : draftView),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    await act(async () => {
+      [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
+        .find((button) => button.textContent?.includes("Cold no reasoning"))!
+        .click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const thinkingTrigger = dom.window.document.querySelector<HTMLButtonElement>(".thinking-control .compact-select-trigger")!;
+    assert.equal(thinkingTrigger.disabled, true, "an explicitly non-reasoning model keeps thinking locked");
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
