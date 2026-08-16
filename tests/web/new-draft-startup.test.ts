@@ -15,6 +15,66 @@ beforeEach(() => {
 });
 
 
+test("an empty unindexed Primary uses New presentation while keeping its real Session target", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const emptyPrimary: BootstrapData = {
+    ...bootstrap,
+    state: {
+      ...bootstrap.state,
+      messageCount: 0,
+      sessionName: undefined,
+      isStreaming: false,
+    },
+    messages: [],
+    messageTotal: 0,
+    turnTotal: 0,
+    visibleTurnCount: 0,
+    sessions: [],
+    activeSessionId: activeId,
+    activeSessionIds: [activeId],
+  };
+  let promptSessionId = "";
+  let submitNewCalls = 0;
+  Object.assign(api, {
+    bootstrap: async () => emptyPrimary,
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    prompt: async (_message: string, _images: unknown[], sessionId: string) => {
+      promptSessionId = sessionId;
+      return { accepted: true, queued: false };
+    },
+    submitNewSession: async () => {
+      submitNewCalls += 1;
+      throw new Error("must keep the existing Primary target");
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    assert.equal(dom.window.document.querySelector(".topbar-title")?.textContent, "新对话");
+    assert.match(dom.window.document.querySelector(".welcome")?.textContent || "", /新对话工作路径/);
+    assert.match(dom.window.document.querySelector(".draft-workspace")?.textContent || "", /当前新对话已准备就绪/);
+
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "use existing primary");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "use existing primary" }));
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(promptSessionId, activeId);
+    assert.equal(submitNewCalls, 0);
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("New is instant and the first send shows Pi startup before materializing a Runtime", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");
@@ -122,8 +182,13 @@ test("New is instant and the first send shows Pi startup before materializing a 
       /hello from a cold draft/,
     );
     assert.match(
-      dom.window.document.body.textContent || "",
-      /正在准备 Pi，消息会自动发送/,
+      dom.window.document.querySelector(".timeline-inner")?.textContent || "",
+      /正在等待 Pi 处理/,
+    );
+    assert.equal(
+      dom.window.document.querySelector(".composer-preparing-status"),
+      null,
+      "submission waiting belongs to the conversation body, not above the composer",
     );
     assert.equal(dom.window.document.querySelector(".stop-button"), null);
 
@@ -354,9 +419,9 @@ test("draft startup races keep the composer usable, preserve newer control, and 
       await Promise.resolve();
     });
     assert.equal(
-      dom.window.document.querySelector(".composer-preparing-status"),
+      dom.window.document.querySelector(".agent-status.is-waiting"),
       null,
-      "a completed answer clears preparation even while prompt HTTP is pending",
+      "a completed answer clears waiting status even while prompt HTTP is pending",
     );
     assert.equal(
       textarea.disabled,
@@ -391,8 +456,8 @@ test("draft startup races keep the composer usable, preserve newer control, and 
     );
     assert.equal(
       textarea.disabled,
-      true,
-      "the combined first-submit acknowledgement retains its own prompt lease until Pi confirms the next generation",
+      false,
+      "a pending admission no longer locks the editor or its next submission",
     );
     await act(async () => {
       source.emitPi({
@@ -405,8 +470,8 @@ test("draft startup races keep the composer usable, preserve newer control, and 
     });
     assert.equal(
       textarea.disabled,
-      true,
-      "a delayed first-turn event cannot release the active combined-submit lease",
+      false,
+      "a delayed first-turn event cannot re-lock an already usable editor",
     );
     await act(async () => {
       resolvePrompt({ accepted: true, queued: false });
@@ -433,9 +498,9 @@ test("draft startup races keep the composer usable, preserve newer control, and 
       "the matching later run generation releases the active prompt lease",
     );
     assert.equal(
-      dom.window.document.querySelector(".composer-preparing-status"),
+      dom.window.document.querySelector(".agent-status.is-waiting"),
       null,
-      "the late first acknowledgement cannot restore the stale preparation bubble",
+      "the late first acknowledgement cannot restore stale waiting status",
     );
     await act(async () => {
       resolveSecondPrompt({ accepted: true, queued: false });

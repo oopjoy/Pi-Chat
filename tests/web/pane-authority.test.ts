@@ -232,9 +232,10 @@ test("a late cold activation from A cannot overwrite the Session B composer", as
       )?.textContent || "",
       /low/,
     );
-    assert.doesNotMatch(
-      dom.window.document.body.textContent || "",
-      /Pi 已就绪，正在发送消息/,
+    assert.equal(
+      dom.window.document.querySelector(".agent-status.is-waiting"),
+      null,
+      "A's waiting projection cannot appear in B's conversation body",
     );
     assert.equal(
       textarea.disabled,
@@ -682,10 +683,10 @@ test("a stale A prompt acknowledgement cannot modify a newer A revisit", async (
   }
 });
 
-test("a stale A prompt failure cannot modify a newer A revisit", async () => {
+test("a definite A prompt failure stays scoped across navigation and restores on return", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");
-  const { api } = await import("../../src/web/api");
+  const { api, ApiRequestError } = await import("../../src/web/api");
   const { App } = await import("../../src/web/App");
   const restoreApi = captureApiSnapshot(api);
   const secondId = "prompt-failure-b-12345";
@@ -756,20 +757,30 @@ test("a stale A prompt failure cannot modify a newer A revisit", async () => {
         ),
       ].find((button) => button.textContent?.includes(name))!;
     await act(async () => sessionButton("Prompt failure B").click());
-    await act(async () => sessionButton("Active").click());
     await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-    await act(async () => {
-      rejectPrompt(new Error("old prompt failed"));
+      rejectPrompt(new ApiRequestError("old prompt rejected", 409, "PROMPT_REJECTED"));
       await Promise.resolve();
       await Promise.resolve();
     });
     assert.doesNotMatch(
       dom.window.document.querySelector(".app-toast")?.textContent || "",
-      /old prompt failed/,
-      "an old A failure cannot show an error on a newer A pane",
+      /old prompt rejected/,
+      "A's rejection cannot paint an error into B",
+    );
+    assert.notEqual(
+      dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")?.value,
+      "old failed prompt",
+      "A's rejected draft cannot overwrite B's composer",
+    );
+    await act(async () => {
+      sessionButton("Active").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(
+      dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")?.value,
+      "old failed prompt",
+      "returning to A restores the exact rejected submission for retry",
     );
     assert.equal(dom.window.document.querySelector(".prompt-queue"), null);
   } finally {

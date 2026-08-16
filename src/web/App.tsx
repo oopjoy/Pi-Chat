@@ -138,6 +138,7 @@ import {
 } from "./state/conversation-pane";
 
 const LOCAL_DRAFT_BUSY_ID = "__local_draft_busy__";
+const WAITING_FOR_PI_STATUS = "正在等待 Pi 处理…";
 /** Let the lightweight bootstrap establish the active Session before racing a cold JSONL view. */
 const EARLY_HISTORY_VIEW_DELAY_MS = 100;
 const MAX_DIRECTORY_PREFIX_SIZE = 5_000;
@@ -475,6 +476,17 @@ export function App() {
   const [busy, setBusy] = useState(false);
   /** Prompt/Runtime preparation is owned by a Session, so another pane stays usable. */
   const [busySessionIds, setBusySessionIds] = useState<string[]>([]);
+  /** Editor-owned snapshots waiting to enter App's existing single-flight send path. */
+  const [composerPendingByScope, setComposerPendingByScope] = useState<Record<string, number>>({});
+  const updateComposerPending = useCallback((scope: string, count: number) => {
+    setComposerPendingByScope((current) => {
+      if ((current[scope] || 0) === count) return current;
+      const next = { ...current };
+      if (count > 0) next[scope] = count;
+      else delete next[scope];
+      return next;
+    });
+  }, []);
   const [viewSwitching, setViewSwitching] = useState(false);
   const [paneLoading, setPaneLoading] = useState<{
     sessionId: string;
@@ -3009,7 +3021,7 @@ export function App() {
           );
           patchSessionCache(eventSessionId, {
             isStreaming: true,
-            toolStatus: "Pi 正在思考…",
+            toolStatus: WAITING_FOR_PI_STATUS,
             state: { isStreaming: true },
           });
         }
@@ -3018,7 +3030,7 @@ export function App() {
           dispatchPane({
             type: "AGENT_STARTED",
             sessionId: eventSessionId,
-            toolStatus: "Pi 正在思考…",
+            toolStatus: WAITING_FOR_PI_STATUS,
           });
         }
       } else if (type === "compaction_start") {
@@ -4828,7 +4840,7 @@ export function App() {
         dispatchPane({
           type: "PROMPT_PREPARING",
           target: { kind: "draft" },
-          status: "正在准备 Pi，消息会自动发送…",
+          status: WAITING_FOR_PI_STATUS,
         });
         // Once the combined mutation is written its outcome may be unknown;
         // retain the protected local bubble until SSE/JSONL proves otherwise.
@@ -4905,7 +4917,7 @@ export function App() {
           commitPaneIfCurrent(promptAuthority, {
             type: "PROMPT_PREPARING",
             target: { kind: "session", sessionId: targetSessionId },
-            status: "Pi 正在思考…",
+            status: WAITING_FOR_PI_STATUS,
             clearPending: true,
           });
         } else rememberSessionView(initialView);
@@ -4920,7 +4932,7 @@ export function App() {
         dispatchPane({
           type: "PROMPT_PREPARING",
           target: { kind: "session", sessionId: targetSessionId },
-          status: "正在准备 Pi，消息会自动发送…",
+          status: WAITING_FOR_PI_STATUS,
           runtimeStatus: "restoring",
         });
         protectLocalPrompt();
@@ -4953,7 +4965,7 @@ export function App() {
           commitPaneIfCurrent(activationAuthority, {
             type: "PROMPT_PREPARING",
             target: { kind: "session", sessionId: targetSessionId },
-            status: "Pi 已就绪，正在发送消息…",
+            status: WAITING_FOR_PI_STATUS,
             clearPending: true,
           });
         // Re-apply staged cold preferences only when they differ from the
@@ -4999,7 +5011,7 @@ export function App() {
           commitPaneIfCurrent(promptAuthority, {
             type: "PROMPT_PREPARING",
             target: { kind: "session", sessionId: targetSessionId },
-            status: "正在向 Pi 提交消息…",
+            status: WAITING_FOR_PI_STATUS,
           });
         // A staged cold preference can survive a prior explicit activation
         // (for example, Take control). Apply it here too; otherwise this active
@@ -5328,7 +5340,7 @@ export function App() {
             messages: (current) =>
               appendLocalTurnOnce(current, localTurnEntry()),
             isStreaming: true,
-            toolStatus: "Pi 正在思考…",
+            toolStatus: WAITING_FOR_PI_STATUS,
           });
           schedulePromptReconcile(targetSessionId);
         }
@@ -5458,7 +5470,10 @@ export function App() {
           .catch(() => undefined);
         scheduleSidebarRefresh();
       }
-      if (visibleFailure && !outcomeUnknown) throw cause;
+      // Rendering remains pane-authority guarded, but the editor-owned pump
+      // must learn every definite rejection so it can retain the originating
+      // scoped snapshot even when the user has navigated elsewhere.
+      if (!outcomeUnknown) throw cause;
     } finally {
       if (
         promptBusyRelease &&
@@ -6800,11 +6815,34 @@ export function App() {
   // Once Pi has authoritatively started generating, the composer may accept a
   // follow-up into the queue even if the first HTTP acknowledgement is late.
   const currentSessionPreparing = currentSessionBusy && !state.isStreaming;
+  const composerSubmissionScope = localDraft
+    ? `draft:${draftGenerationRef.current}`
+    : `session:${viewedSessionId || "none"}`;
+  const composerSubmissionPending = composerPendingByScope[composerSubmissionScope] || 0;
+  const waitingForPi =
+    !state.isStreaming &&
+    (currentSessionPreparing || composerSubmissionPending > 0);
+  // The server intentionally keeps an empty active Primary out of the indexed
+  // sidebar until its first user turn. Preserve its real Session authority, but
+  // present the same New-conversation shell instead of the legacy saved fallback.
+  const emptyPrimaryDraftPresentation = Boolean(
+    viewedSessionId &&
+      viewedSessionId === activeSessionId &&
+      sidebarInventoryReady &&
+      !viewedSession &&
+      messages.length === 0 &&
+      messageTotal === 0 &&
+      turnTotal === 0 &&
+      (state.messageCount || 0) === 0 &&
+      !state.isStreaming,
+  );
+  const newConversationPresentation =
+    localDraft || emptyPrimaryDraftPresentation;
   const sidebarViewBlocked = sidebarNavigationBlocked(
     loading,
     lifecycleBlocked,
   );
-  const conversationName = localDraft
+  const conversationName = newConversationPresentation
     ? "新对话"
     : viewedSession?.name || state.sessionName || "已保存对话";
   const loadingSession = paneLoading
@@ -7200,7 +7238,6 @@ export function App() {
     composerSendVisible: !composerQueueMode,
     composerDisabled:
       loading ||
-      currentSessionPreparing ||
       viewSwitching ||
       observing ||
       mutationBlocked ||
@@ -7331,15 +7368,6 @@ export function App() {
           {primaryRuntimeMessage}
         </div>
       )}
-      {promptStarting &&
-        currentSessionPreparing &&
-        !state.isStreaming &&
-        toolStatus && (
-          <div className="composer-preparing-status" role="status">
-            <span className="loader small" />
-            {toolStatus}
-          </div>
-        )}
       {(error || notice) && (
         <div className={`app-toast ${error ? "error" : ""}`} role="status">
           {error || notice}
@@ -7500,8 +7528,10 @@ export function App() {
         pendingUserMessage={pendingUserMessage}
         liveMessage={liveMessage}
         localDraft={localDraft}
+        newConversationPresentation={newConversationPresentation}
+        waitingForPi={waitingForPi}
         draftWorkspaceCwd={draftWorkspaceCwd}
-        workspaceCwd={workspaceCwd}
+        workspaceCwd={conversationWorkspace}
         workspacePicking={workspacePicking}
         draftWorkspaceOptions={draftWorkspaceOptions}
         onSelectDraftWorkspace={selectDraftWorkspace}
@@ -7537,7 +7567,6 @@ export function App() {
           stopping: stoppingCurrentSession,
           disabled:
             loading ||
-            currentSessionPreparing ||
             viewSwitching ||
             observing ||
             mutationBlocked ||
@@ -7556,14 +7585,9 @@ export function App() {
                     ? primaryRuntimeDisabledPlaceholder
                     : state.isCompacting
                     ? "正在压缩上下文，完成后可继续发送…"
-                    : currentSessionPreparing
-                      ? runtimeStatus === "restoring" ||
-                        runtimeStatus === "draft"
-                        ? "正在准备 Pi；可随时切换到其他对话"
-                        : "正在提交消息…"
-                      : runtimeStatus === "view-only"
-                        ? "当前为历史查看；发送时会自动准备 Pi"
-                        : undefined,
+                    : runtimeStatus === "view-only"
+                      ? "当前为历史查看；发送时会自动准备 Pi"
+                      : undefined,
           acceptsImages: state.model?.input?.includes("image") === true,
           imageInputPending: primaryCapabilityPending,
           imageInputPendingMessage,
@@ -7575,6 +7599,9 @@ export function App() {
           onDraftRevisionChange: (revision) => {
             composerDraftRevisionRef.current = revision;
           },
+          submissionScope: composerSubmissionScope,
+          allowFollowupSubmissions: !localDraft,
+          onSubmissionPendingChange: updateComposerPending,
           commands: composerCommands,
           controls: composerControls,
           notices: composerNotices,

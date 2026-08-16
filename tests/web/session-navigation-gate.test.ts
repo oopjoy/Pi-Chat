@@ -1026,8 +1026,8 @@ test("opening a cold conversation paints JSONL without starting a dedicated Runt
       /first cold message/,
     );
     assert.match(
-      dom.window.document.body.textContent || "",
-      /正在准备 Pi，消息会自动发送/,
+      dom.window.document.querySelector(".timeline-inner")?.textContent || "",
+      /正在等待 Pi 处理/,
     );
     assert.equal(
       coldRow

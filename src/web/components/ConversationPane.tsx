@@ -27,6 +27,8 @@ export interface ConversationPaneProps {
   pendingUserMessage: PiMessage | null;
   liveMessage: PiMessage | null;
   localDraft: boolean;
+  newConversationPresentation: boolean;
+  waitingForPi: boolean;
   draftWorkspaceCwd: string;
   workspaceCwd: string;
   workspacePicking: boolean;
@@ -64,6 +66,8 @@ export function ConversationPane({
   pendingUserMessage,
   liveMessage,
   localDraft,
+  newConversationPresentation,
+  waitingForPi,
   draftWorkspaceCwd,
   workspaceCwd,
   workspacePicking,
@@ -150,22 +154,22 @@ export function ConversationPane({
             <span className="welcome-mark"><PiMarkIcon /></span>
             <h1>开始与 Pi 对话</h1>
             <p>支持流式输出、Markdown、KaTeX，以及复制原始 LaTeX 源码。</p>
-            {localDraft && <div className="draft-workspace">
+            {newConversationPresentation && <div className="draft-workspace">
               <span>新对话工作路径</span>
               <CompactSelect
                 value={draftWorkspaceCwd || workspaceCwd || ""}
                 options={draftWorkspaceOptions.map((cwd) => ({ value: cwd, label: cwd, title: cwd }))}
-                disabled={workspacePicking || draftWorkspaceOptions.length === 0}
+                disabled={!localDraft || workspacePicking || draftWorkspaceOptions.length === 0}
                 ariaLabel="选择常用新对话工作路径"
-                title={draftWorkspaceOptions.length ? "点击选择历史 Session 使用过的工作路径" : "暂无历史 Session 工作路径，请使用右侧浏览按钮"}
+                title={!localDraft ? "当前新对话的工作路径已经由 Pi Runtime 确定" : draftWorkspaceOptions.length ? "点击选择历史 Session 使用过的工作路径" : "暂无历史 Session 工作路径，请使用右侧浏览按钮"}
                 align="left"
                 checkPosition="start"
                 className="draft-workspace-select"
                 fallbackLabel={draftWorkspaceCwd || workspaceCwd || "未设置工作路径"}
                 onChange={onSelectDraftWorkspace}
               />
-              <button className="draft-workspace-picker" type="button" disabled={workspacePicking} onClick={onPickDraftWorkspace} title="浏览新对话工作路径" aria-label="浏览新对话工作路径"><FolderIcon /></button>
-              <small>点击路径可快速选择历史 Session 使用过的目录；浏览按钮可选择新目录。首次发送时才创建 Session。</small>
+              <button className="draft-workspace-picker" type="button" disabled={!localDraft || workspacePicking} onClick={onPickDraftWorkspace} title={localDraft ? "浏览新对话工作路径" : "当前新对话的工作路径已经确定"} aria-label="浏览新对话工作路径"><FolderIcon /></button>
+              <small>{localDraft ? "点击路径可快速选择历史 Session 使用过的目录；浏览按钮可选择新目录。首次发送时才创建 Session。" : "当前新对话已准备就绪；发送第一条消息后会出现在历史对话中。"}</small>
             </div>}
           </section>
         ) : <>
@@ -216,6 +220,10 @@ export function ConversationPane({
             fallback={activeAssistantMetadata}
           />}
         </>}
+        {waitingForPi && <div className="agent-status is-waiting" role="status" aria-live="polite">
+          <span className="loader small" />
+          正在等待 Pi 处理…
+        </div>}
         {state.isCompacting && <div className="agent-status is-compacting" role="status">
           <span className="loader small" />
           {toolStatus || "正在压缩上下文，当前消息会在完成后继续发送…"}

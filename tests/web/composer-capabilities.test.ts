@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test, { beforeEach } from "node:test";
-import { act, createElement } from "react";
+import { act, createElement, StrictMode } from "react";
 import { LOCAL_COORDINATION_ROLE, type BootstrapData, type SessionViewData } from "../../src/shared/types";
 import { activeSessionId as activeId, createBootstrapFixture, createSessionViewFixture } from "../fixtures/app-bootstrap";
 import { captureApiSnapshot } from "../helpers/api-stub";
@@ -1007,6 +1007,7 @@ test("ChatInput accepts an image draft and checks model support only at submit t
       streaming: false,
       stopping: false,
       disabled: false,
+      submissionScope: "session:image-capability",
       acceptsImages,
       commands: [],
       onSend: async (message: string, images: unknown[]) => { sent.push([message, images]); },
@@ -1057,6 +1058,351 @@ test("ChatInput accepts an image draft and checks model support only at submit t
   }
 });
 
+test("ChatInput accepts follow-up snapshots while one send is pending and drains them serially", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { ChatInput } = await import("../../src/web/components/ChatInput");
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  const calls: string[] = [];
+  const resolvers: Array<() => void> = [];
+  const pendingCounts: number[] = [];
+  let active = 0;
+  let maxActive = 0;
+  const onSend = async (message: string) => {
+    calls.push(message);
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    await new Promise<void>((resolve) => resolvers.push(resolve));
+    active -= 1;
+  };
+  const render = () => createElement(ChatInput, {
+    streaming: false,
+    stopping: false,
+    disabled: false,
+    submissionScope: "session:serial",
+    allowFollowupSubmissions: true,
+    acceptsImages: true,
+    commands: [{ name: "fast", source: "extension", description: "Toggle Fast mode" }],
+    onSubmissionPendingChange: (_scope: string, count: number) => pendingCounts.push(count),
+    onSend,
+    onAbort: async () => undefined,
+    onPickLocalFiles: async () => [],
+    onReadClipboardFiles: async () => [],
+    onError: () => undefined,
+  });
+  const typeAndSend = async (message: string) => {
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, message);
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: message }));
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+    });
+  };
+  try {
+    await act(async () => root.render(createElement(StrictMode, null, render())));
+    await typeAndSend("first");
+    assert.deepEqual(calls, ["first"]);
+    await typeAndSend("/fast");
+    assert.deepEqual(calls, ["first"], "the editor accepts the snapshot without invoking App.send concurrently");
+    assert.equal(dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!.disabled, false);
+    assert.equal(maxActive, 1);
+    assert.ok(pendingCounts.includes(2));
+
+    await act(async () => {
+      resolvers.shift()?.();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.deepEqual(calls, ["first", "/fast"]);
+    assert.equal(maxActive, 1);
+    await act(async () => {
+      resolvers.shift()?.();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(pendingCounts.at(-1), 0);
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+test("ChatInput does not drain a queued snapshot while mutation authority is disabled", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { ChatInput } = await import("../../src/web/components/ChatInput");
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  const calls: string[] = [];
+  const resolvers: Array<() => void> = [];
+  const onSend = async (message: string) => {
+    calls.push(message);
+    await new Promise<void>((resolve) => resolvers.push(resolve));
+  };
+  const render = (disabled: boolean) => createElement(ChatInput, {
+    streaming: false,
+    stopping: false,
+    disabled,
+    submissionScope: "session:authority",
+    allowFollowupSubmissions: true,
+    acceptsImages: true,
+    commands: [],
+    onSend,
+    onAbort: async () => undefined,
+    onPickLocalFiles: async () => [],
+    onReadClipboardFiles: async () => [],
+    onError: () => undefined,
+  });
+  const typeAndSend = async (message: string) => {
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, message);
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: message }));
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+    });
+  };
+  try {
+    await act(async () => root.render(render(false)));
+    await typeAndSend("first");
+    await typeAndSend("second");
+    await act(async () => root.render(render(true)));
+    await act(async () => {
+      resolvers.shift()?.();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.deepEqual(calls, ["first"], "the queued snapshot remains local while mutations are disabled");
+    await act(async () => {
+      root.render(render(false));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.deepEqual(calls, ["first", "second"]);
+    await act(async () => {
+      resolvers.shift()?.();
+      await Promise.resolve();
+    });
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+test("App does not hand a buffered follow-up to the API while another window owns the Session", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  let resolveFirst!: (value: { accepted: true; queued: false }) => void;
+  const first = new Promise<{ accepted: true; queued: false }>((resolve) => {
+    resolveFirst = resolve;
+  });
+  const promptMessages: string[] = [];
+  Object.assign(api, {
+    bootstrap: async () => bootstrap,
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    prompt: async (message: string) => {
+      promptMessages.push(message);
+      return promptMessages.length === 1
+        ? first
+        : { accepted: true, queued: true, id: "queued-second", queue: [{ id: "queued-second", message, imageCount: 0, createdAt: 2 }] };
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  const typeAndSend = async (message: string) => {
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, message);
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: message }));
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+    });
+  };
+  try {
+    await act(async () => root.render(createElement(App)));
+    await typeAndSend("first");
+    await typeAndSend("second");
+    assert.deepEqual(promptMessages, ["first"]);
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => source.emitPi({
+      type: "pi_chat_session_control_changed",
+      sessionId: activeId,
+      piChatSessionId: activeId,
+      controlOwner: "foreign-window",
+      controlledByThisWindow: false,
+    }));
+    await act(async () => {
+      resolveFirst({ accepted: true, queued: false });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.deepEqual(promptMessages, ["first"], "foreign control keeps the follow-up inside the editor pump");
+    await act(async () => source.emitPi({
+      type: "pi_chat_session_control_changed",
+      sessionId: activeId,
+      piChatSessionId: activeId,
+      controlOwner: "this-window",
+      controlledByThisWindow: true,
+    }));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.deepEqual(promptMessages, ["first", "second"]);
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
+test("ChatInput pauses undrained snapshots when navigation changes submission scope", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { ChatInput } = await import("../../src/web/components/ChatInput");
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  const calls: string[] = [];
+  const resolvers = new Map<string, () => void>();
+  const senders = {
+    a: async (message: string) => {
+      calls.push(`a:${message}`);
+      await new Promise<void>((resolve) => resolvers.set(`a:${message}`, resolve));
+    },
+    b: async (message: string) => {
+      calls.push(`b:${message}`);
+      await new Promise<void>((resolve) => resolvers.set(`b:${message}`, resolve));
+    },
+  };
+  const render = (scope: "a" | "b") => createElement(ChatInput, {
+    streaming: false,
+    stopping: false,
+    disabled: false,
+    submissionScope: `session:${scope}`,
+    allowFollowupSubmissions: true,
+    acceptsImages: true,
+    commands: [],
+    onSend: senders[scope],
+    onAbort: async () => undefined,
+    onPickLocalFiles: async () => [],
+    onReadClipboardFiles: async () => [],
+    onError: () => undefined,
+  });
+  const typeAndSend = async (message: string) => {
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, message);
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: message }));
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+    });
+  };
+  try {
+    await act(async () => root.render(render("a")));
+    await typeAndSend("one");
+    await typeAndSend("two");
+    assert.deepEqual(calls, ["a:one"]);
+
+    await act(async () => root.render(render("b")));
+    await typeAndSend("three");
+    await act(async () => {
+      resolvers.get("a:one")?.();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.deepEqual(calls, ["a:one", "b:three"], "the old pane's second snapshot remains paused");
+    await act(async () => {
+      resolvers.get("b:three")?.();
+      await Promise.resolve();
+      await Promise.resolve();
+      root.render(render("a"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.deepEqual(calls, ["a:one", "b:three", "a:two"]);
+    await act(async () => {
+      resolvers.get("a:two")?.();
+      await Promise.resolve();
+    });
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+test("ChatInput restores a definite failure without overwriting a newer draft", async () => {
+  const { dom } = installDom();
+  Object.assign(globalThis, { FileReader: dom.window.FileReader });
+  const { createRoot } = await import("react-dom/client");
+  const { ChatInput } = await import("../../src/web/components/ChatInput");
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  let rejectFirst!: () => void;
+  let attempts = 0;
+  const first = new Promise<void>((_resolve, reject) => {
+    rejectFirst = () => reject(new Error("rejected"));
+  });
+  const render = () => createElement(ChatInput, {
+    streaming: false,
+    stopping: false,
+    disabled: false,
+    submissionScope: "session:restore",
+    allowFollowupSubmissions: true,
+    acceptsImages: true,
+    commands: [],
+    onSend: async () => {
+      attempts += 1;
+      if (attempts === 1) await first;
+    },
+    onAbort: async () => undefined,
+    onPickLocalFiles: async () => [],
+    onReadClipboardFiles: async () => [],
+    onError: () => undefined,
+  });
+  const type = async (message: string) => {
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, message);
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: message }));
+    });
+  };
+  try {
+    await act(async () => root.render(render()));
+    const fileInput = dom.window.document.querySelector<HTMLInputElement>("input[type='file']")!;
+    Object.defineProperty(fileInput, "files", {
+      configurable: true,
+      value: [new dom.window.File(["image"], "failed.png", { type: "image/png" })],
+    });
+    await act(async () => {
+      fileInput.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+      const deadline = Date.now() + 250;
+      while (!dom.window.document.querySelector(".image-preview") && Date.now() < deadline)
+        await new Promise((resolve) => dom.window.setTimeout(resolve, 5));
+    });
+    await type("failed message");
+    await act(async () => {
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+    });
+    await type("newer unsent draft");
+    await act(async () => {
+      rejectFirst();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    assert.equal(textarea.value, "failed message");
+    assert.ok(dom.window.document.querySelector(".image-preview"), "the failed image is restored with its text");
+    await act(async () => {
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(attempts, 2);
+    assert.equal(textarea.value, "newer unsent draft");
+    assert.equal(dom.window.document.querySelector(".image-preview"), null);
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
 test("ChatInput never shows Stop from a stale stopping flag after streaming ended", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");
@@ -1070,6 +1416,7 @@ test("ChatInput never shows Stop from a stale stopping flag after streaming ende
           activelyStreaming: false,
           stopping: true,
           disabled: false,
+          submissionScope: "session:stopping",
           acceptsImages: true,
           commands: [],
           onSend: async () => undefined,
@@ -1298,6 +1645,7 @@ test("ChatInput places Steer beside Queue and sends explicit steering delivery",
           activelyStreaming: true,
           stopping: false,
           disabled: false,
+          submissionScope: "session:steer",
           acceptsImages: true,
           commands: [],
           onSend: async (message: string, _images: unknown[], delivery?: string) => {

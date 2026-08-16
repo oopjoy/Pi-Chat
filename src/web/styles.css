@@ -703,7 +703,6 @@ details.conversation-process { display: block; padding: 0; }
 .app-toast { padding: 9px 13px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); box-shadow: var(--shadow); color: var(--text); font-size: 12px; line-height: 1.45; text-align: center; }
 .app-toast.error { border-color: color-mix(in srgb, var(--danger), transparent 50%); color: var(--danger); }
 .primary-runtime-status { padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; color: var(--muted); font-size: 12px; line-height: 1.45; text-align: center; background: color-mix(in srgb, var(--surface), transparent 20%); }
-.composer-preparing-status { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border: 1px solid color-mix(in srgb, var(--accent), transparent 68%); border-radius: 8px; background: color-mix(in srgb, var(--surface), var(--accent-soft) 18%); color: var(--muted); font-size: 12px; line-height: 1.45; }
 .primary-runtime-status.is-starting { border-color: color-mix(in srgb, var(--accent), transparent 72%); }
 .primary-runtime-status.is-failed { border-color: color-mix(in srgb, var(--danger), transparent 55%); color: var(--danger); }
 .shutdown-screen { display: grid; width: 100%; min-height: 100dvh; place-content: center; justify-items: center; padding: 32px; background: var(--surface); color: var(--text); text-align: center; }
