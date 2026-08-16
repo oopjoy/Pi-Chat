@@ -13,11 +13,17 @@ test("Pi event helpers normalize lifecycle and message payloads", () => {
   assert.deepEqual(assistantMessage({ message: { role: "assistant", content: "yes" } }), { role: "assistant", content: "yes" });
 });
 
-test("canonical terminal decoder reconstructs exact message_end fields", () => {
+test("canonical terminal decoder reconstructs a closed payload and provenance envelope", () => {
+  const provenance = {
+    piChatSessionId: "0123456789abcdefabcd",
+    piChatRunEpoch: "run_epoch-1",
+    piChatRunGeneration: 7,
+  };
   assert.deepEqual(canonicalMessageEndFromEvent({
     type: "message_end",
     piChatEventSchema: 1,
     terminalKind: "assistant",
+    ...provenance,
     message: {
       role: "assistant",
       content: [{ type: "text", text: "answer", secret: "drop me" }],
@@ -34,33 +40,85 @@ test("canonical terminal decoder reconstructs exact message_end fields", () => {
       content: [{ type: "text", text: "answer" }],
       timestamp: 10,
     },
+    ...provenance,
   });
   assert.deepEqual(canonicalMessageEndFromEvent({
     type: "message_end",
-    message: { role: "toolResult", content: "legacy", toolCallId: "call-1" },
+    ...provenance,
+    message: {
+      role: "toolResult",
+      content: "legacy",
+      toolCallId: "call-1",
+      toolName: "read",
+    },
     secret: "drop me",
   }), {
     type: "message_end",
     piChatEventSchema: 1,
     terminalKind: "tool-result",
-    message: { role: "toolResult", content: "legacy", toolCallId: "call-1" },
+    message: {
+      role: "toolResult",
+      content: "legacy",
+      toolCallId: "call-1",
+      toolName: "read",
+    },
+    ...provenance,
   });
-  assert.equal(canonicalMessageEndFromEvent({
-    type: "message_end",
-    piChatEventSchema: 1,
-    terminalKind: "user-echo",
-    message: { role: "assistant", content: "mismatch" },
-  }), null);
-  assert.equal(canonicalMessageEndFromEvent({ type: "message_end" }), null);
-  assert.equal(canonicalMessageEndFromEvent({
-    type: "message_end",
-    message: { role: "toolResult", content: "bad", isError: "false" },
-  }), null);
-  assert.equal(canonicalMessageEndFromEvent({
-    type: "message_end",
-    piChatEventSchema: 99,
-    message: { role: "assistant", content: "future" },
-  }), null);
+  for (const malformed of [
+    {
+      type: "message_end",
+      piChatEventSchema: 1,
+      terminalKind: "user-echo",
+      ...provenance,
+      message: { role: "assistant", content: "mismatch" },
+    },
+    { type: "message_end", ...provenance },
+    {
+      type: "message_end",
+      ...provenance,
+      message: { role: "toolResult", content: "bad", toolCallId: "call-1", toolName: "read", isError: "false" },
+    },
+    {
+      type: "message_end",
+      piChatEventSchema: 99,
+      ...provenance,
+      message: { role: "assistant", content: "future" },
+    },
+    {
+      type: "message_end",
+      ...provenance,
+      message: { role: "evil", content: "unknown role" },
+    },
+    {
+      type: "message_end",
+      ...provenance,
+      message: { role: "assistant", content: [{ type: "image", data: "x", mimeType: "image/png" }] },
+    },
+    {
+      type: "message_end",
+      ...provenance,
+      piChatSessionId: "not-a-session",
+      message: { role: "assistant", content: "bad session" },
+    },
+    {
+      type: "message_end",
+      ...provenance,
+      piChatRunEpoch: "",
+      message: { role: "assistant", content: "bad epoch" },
+    },
+    {
+      type: "message_end",
+      ...provenance,
+      piChatRunGeneration: 7.5,
+      message: { role: "assistant", content: "fractional generation" },
+    },
+    {
+      type: "message_end",
+      piChatSessionId: provenance.piChatSessionId,
+      piChatRunEpoch: provenance.piChatRunEpoch,
+      message: { role: "assistant", content: "missing generation" },
+    },
+  ]) assert.equal(canonicalMessageEndFromEvent(malformed), null);
 });
 
 test("thinking stream events immediately classify a transient text snapshot as private thinking", () => {

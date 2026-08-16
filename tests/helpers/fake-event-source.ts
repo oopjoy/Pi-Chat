@@ -39,8 +39,15 @@ export function createFakeEventSource(dom: JSDOM) {
     }
 
     emitPi(payload: Record<string, unknown>) {
+      const wirePayload = payload.type === "message_end"
+        ? {
+            piChatRunEpoch: "epoch-a",
+            piChatRunGeneration: 1,
+            ...payload,
+          }
+        : payload;
       this.dispatchEvent(
-        new dom.window.MessageEvent("pi", { data: JSON.stringify(payload) }) as unknown as Event,
+        new dom.window.MessageEvent("pi", { data: JSON.stringify(wirePayload) }) as unknown as Event,
       );
     }
   };

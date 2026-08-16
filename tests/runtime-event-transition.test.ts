@@ -48,14 +48,21 @@ test("shared Runtime transition rejects malformed terminals without state mutati
     ...base(),
     liveMessage: { role: "assistant", content: "pending" },
   };
-  const malformed = transitionRuntimeEvent("session-a", previous, {
-    type: "message_end",
-    message: { content: "missing role", secret: "drop me" },
-  });
-  assert.equal(malformed.broadcastEvent, null);
-  assert.deepEqual(malformed.effects, []);
-  assert.deepEqual(malformed.state.liveMessage, previous.liveMessage);
-  assert.deepEqual(malformed.state.pendingTerminalMessages, []);
+  for (const message of [
+    { content: "missing role", secret: "drop me" },
+    { role: "evil", content: "unknown role" },
+    { role: "assistant", content: [{ type: "image", data: "x", mimeType: "image/png" }] },
+    { role: "toolResult", content: "missing tool identity" },
+  ]) {
+    const rejected = transitionRuntimeEvent("session-a", previous, {
+      type: "message_end",
+      message,
+    });
+    assert.equal(rejected.broadcastEvent, null);
+    assert.deepEqual(rejected.effects, []);
+    assert.deepEqual(rejected.state.liveMessage, previous.liveMessage);
+    assert.deepEqual(rejected.state.pendingTerminalMessages, []);
+  }
 
   const exact = transitionRuntimeEvent("session-a", base(), {
     type: "message_end",
@@ -63,6 +70,7 @@ test("shared Runtime transition rejects malformed terminals without state mutati
       role: "toolResult",
       content: "done",
       toolCallId: "call-1",
+      toolName: "read",
       isError: false,
       secret: "drop me",
     },
@@ -76,6 +84,7 @@ test("shared Runtime transition rejects malformed terminals without state mutati
       role: "toolResult",
       content: "done",
       toolCallId: "call-1",
+      toolName: "read",
       isError: false,
     },
   });

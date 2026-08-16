@@ -1,4 +1,4 @@
-import { canonicalMessageEndEvent } from "../shared/runtime-events.js";
+import { canonicalMessageEndPayload } from "../shared/runtime-events.js";
 import { appendTerminalMessage, normalizeStreamingAssistantMessage } from "../shared/streaming-assistant.js";
 import type { ExtensionUiRequest, GateMode, PiMessage } from "../shared/types.js";
 
@@ -88,7 +88,7 @@ export function transitionRuntimeEvent(
     const message = raw.role === "assistant" && !hasPayload && state.liveMessage
       ? { ...state.liveMessage, ...raw, content: state.liveMessage.content }
       : raw;
-    const canonical = canonicalMessageEndEvent(message);
+    const canonical = canonicalMessageEndPayload(message);
     if (!canonical) return { state, broadcastEvent: null, effects: [] };
     broadcastEvent = canonical;
     const terminal = canonical.message;

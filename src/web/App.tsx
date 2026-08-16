@@ -2892,15 +2892,34 @@ export function App() {
         void refresh().catch(reportBackgroundRefreshError);
         return;
       }
-      const eventSessionId =
+      const rawEventSessionId =
         typeof event.piChatSessionId === "string"
           ? event.piChatSessionId
           : type === "pi_chat_session_control_changed" &&
               typeof event.sessionId === "string"
             ? event.sessionId
             : "";
-      const eventRunEpoch =
-        typeof event.piChatRunEpoch === "string" ? event.piChatRunEpoch : "";
+      const rawEventRunGeneration =
+        typeof event.piChatRunGeneration === "number" &&
+        Number.isSafeInteger(event.piChatRunGeneration) &&
+        event.piChatRunGeneration >= 0
+          ? event.piChatRunGeneration
+          : undefined;
+      const terminalEvent = type === "message_end"
+        ? canonicalMessageEndFromEvent(event)
+        : null;
+      if (type === "message_end" && !terminalEvent) {
+        recordSseRejectionDiagnostic({
+          sessionId: rawEventSessionId,
+          runGeneration: rawEventRunGeneration,
+          eventType: type,
+          decisionReason: "malformed-critical-event",
+        });
+        return;
+      }
+      const eventSessionId = terminalEvent?.piChatSessionId || rawEventSessionId;
+      const eventRunEpoch = terminalEvent?.piChatRunEpoch ||
+        (typeof event.piChatRunEpoch === "string" ? event.piChatRunEpoch : "");
       if (
         eventRunEpoch &&
         runEpochRef.current &&
@@ -2913,23 +2932,11 @@ export function App() {
         });
         return;
       }
-      const eventRunGeneration =
-        typeof event.piChatRunGeneration === "number" &&
+      const eventRunGeneration = terminalEvent?.piChatRunGeneration ??
+        (typeof event.piChatRunGeneration === "number" &&
         Number.isFinite(event.piChatRunGeneration)
           ? event.piChatRunGeneration
-          : undefined;
-      const terminalEvent = type === "message_end"
-        ? canonicalMessageEndFromEvent(event)
-        : null;
-      if (type === "message_end" && !terminalEvent) {
-        recordSseRejectionDiagnostic({
-          sessionId: eventSessionId,
-          runGeneration: eventRunGeneration,
-          eventType: type,
-          decisionReason: "malformed-critical-event",
-        });
-        return;
-      }
+          : undefined);
       if (eventSessionId && typeof eventRunGeneration === "number") {
         const latest =
           sessionRunGenerationsRef.current.get(eventSessionId) || 0;

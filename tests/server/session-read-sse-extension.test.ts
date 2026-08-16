@@ -268,6 +268,7 @@ test("empty terminal assistant SSE events retain the cumulative answer payload",
     const liveBeforeMalformed = ownerBeforeMalformed.liveMessage;
     const generationBeforeMalformed = ownerBeforeMalformed.runGenerationsBySession.values().next().value;
     primary.emit({ type: "message_end", message: { content: "malformed" } });
+    primary.emit({ type: "message_end", message: { role: "evil", content: "unknown role" } });
     assert.strictEqual(ownerBeforeMalformed.primaryPendingTerminalMessages, pendingBeforeMalformed);
     assert.strictEqual(ownerBeforeMalformed.liveMessage, liveBeforeMalformed);
     assert.equal(ownerBeforeMalformed.runGenerationsBySession.values().next().value, generationBeforeMalformed);

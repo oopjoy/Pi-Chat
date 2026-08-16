@@ -228,6 +228,18 @@ test("canonical terminal clears but never substitutes a browser-pending draft", 
         piChatRunGeneration: 55,
       });
       source.emitPi({
+        type: "message_end",
+        piChatSessionId: activeSessionId,
+        piChatRunGeneration: 55.5,
+        message: { role: "assistant", content: "fractional generation must not win" },
+      });
+      source.emitPi({
+        type: "message_end",
+        piChatSessionId: "invalid-session",
+        piChatRunGeneration: 999,
+        message: { role: "assistant", content: "invalid Session must not enter a cache" },
+      });
+      source.emitPi({
         type: "message_update",
         piChatSessionId: activeSessionId,
         piChatRunGeneration: 55,
@@ -249,6 +261,16 @@ test("canonical terminal clears but never substitutes a browser-pending draft", 
       await Promise.resolve();
     });
     assert.equal(dom.window.document.body.textContent?.includes("browser pending must not win"), false);
+    assert.equal(dom.window.document.body.textContent?.includes("fractional generation must not win"), false);
+    assert.equal(dom.window.document.body.textContent?.includes("invalid Session must not enter a cache"), false);
+    const malformedTerminals = browserStateDiagnosticSnapshot().entries.filter((entry) =>
+      entry.sequence > before
+      && entry.category === "sse"
+      && entry.name === "rejected"
+      && entry.details.eventType === "message_end"
+      && entry.details.decisionReason === "malformed-critical-event"
+    );
+    assert.equal(malformedTerminals.length, 2);
     const summary = browserStateDiagnosticSnapshot().entries.find((entry) =>
       entry.sequence > before
       && entry.category === "render"

@@ -9,7 +9,7 @@ import {
 } from "../shared/streaming-assistant.js";
 import { compareSessionsByLastUserPrompt } from "../shared/session-order.js";
 import type { PromptEvidenceFactKind } from "../shared/prompt-evidence.js";
-import { decodeCanonicalMessageEndEvent } from "../shared/runtime-events.js";
+import { decodeCanonicalMessageEndPayload } from "../shared/runtime-events.js";
 import { shouldRetainStateDiagnosticEvent } from "../shared/state-diagnostics.js";
 import type {
   ApplicationLifecycle,
@@ -1251,7 +1251,7 @@ export class PiChatApp {
     // can freeze Chromium's main thread during long or self-referential output.
     if (event.type === "tool_execution_update") return;
     const allowedEvent = event.type === "message_end"
-      ? decodeCanonicalMessageEndEvent(event)
+      ? decodeCanonicalMessageEndPayload(event)
       : event;
     if (!allowedEvent) {
       this.traceState("rpc-event", "rejected", sessionId, {
