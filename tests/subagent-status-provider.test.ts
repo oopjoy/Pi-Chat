@@ -91,6 +91,44 @@ test("provider scopes by exact parent Session path and exposes only closed safe 
   }
 });
 
+test("provider gives terminal steps precedence over stale attention activity", async () => {
+  const target = await fixture();
+  try {
+    const runId = "12121212-1212-4121-8121-121212121212";
+    const now = Date.now();
+    await target.writeStatus(runId, status(runId, PARENT, {
+      state: "complete",
+      endedAt: now - 100,
+      steps: [
+        {
+          agent: "reviewer",
+          workflowKey: "completed-attention",
+          status: "completed",
+          activityState: "needs_attention",
+          startedAt: now - 2_000,
+          lastActivityAt: now - 200,
+        },
+        {
+          agent: "worker",
+          workflowKey: "waiting-attention",
+          status: "running",
+          activityState: "needs_attention",
+          startedAt: now - 1_000,
+          lastActivityAt: now - 100,
+        },
+      ],
+    }));
+
+    const snapshot = await new SubagentStatusProvider(target.root).listForParentSession(PARENT);
+    assert.equal(snapshot.total, 2);
+    assert.equal(snapshot.activeCount, 0);
+    assert.equal(snapshot.attentionCount, 0);
+    assert.deepEqual(snapshot.steps.map((step) => step.status), ["complete", "complete"]);
+  } finally {
+    await target.cleanup();
+  }
+});
+
 test("provider exposes only a verified opaque child transcript address", async () => {
   const target = await fixture();
   const sessionRoot = await mkdtemp(join(tmpdir(), "pi-chat-subagent-parent-"));

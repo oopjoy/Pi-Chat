@@ -249,15 +249,17 @@ function parseStatus(value: unknown, directoryRunId: string, now: number): Parse
 }
 
 function projectedStatus(step: ParsedStep, parent: ParsedStatus): BackgroundSubagentStatus {
-  if (step.status === "pending") return "waiting";
-  if (step.status === "paused" || step.activityState === "needs_attention") return "attention";
+  // Activity is advisory and may remain in a persisted status record after a
+  // step exits. A terminal step must never look live or require attention.
   if (step.status === "failed" || step.status === "rejected") return "failed";
   if (step.status === "stopped") return "cancelled";
   if (step.status === "complete" || step.status === "completed") return "complete";
-  if (parent.state === "paused" || parent.activityState === "needs_attention") return "attention";
   if (parent.state === "failed" || parent.state === "rejected") return "failed";
   if (parent.state === "stopped") return "cancelled";
   if (parent.state === "complete") return "complete";
+  if (step.status === "pending") return "waiting";
+  if (step.status === "paused" || step.activityState === "needs_attention") return "attention";
+  if (parent.state === "paused" || parent.activityState === "needs_attention") return "attention";
   return "running";
 }
 
