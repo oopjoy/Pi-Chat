@@ -97,7 +97,30 @@ function cumulativeAssistantMessage(earlier: PiMessage, later: PiMessage): boole
 /** Reconcile only App's explicit cumulative live snapshot with persisted history. */
 function withLiveAssistantSnapshot(messages: PiMessage[], liveMessage?: PiMessage): PiMessage[] {
   if (!liveMessage) return messages;
-  if (liveMessage.role !== "assistant" || typeof liveMessage.timestamp !== "number" || !Number.isFinite(liveMessage.timestamp)) {
+  if (liveMessage.role !== "assistant") return [...messages, liveMessage];
+
+  // A provider can finish and persist a reply before the browser receives its
+  // final live snapshot. Some adapters omit or rewrite the snapshot timestamp,
+  // so timestamp-only reconciliation paints the one active-turn reply twice.
+  // This is deliberately *not* a transcript-wide duplicate rule: it considers
+  // only App's explicit live snapshot and only an exact persisted assistant
+  // payload after the latest user boundary. Two ordinary persisted assistant
+  // turns, including intentionally identical ones, remain distinct.
+  let lastUserIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === "user") {
+      lastUserIndex = index;
+      break;
+    }
+  }
+  for (let index = messages.length - 1; index > lastUserIndex; index -= 1) {
+    const candidate = messages[index];
+    if (candidate?.role !== "assistant") continue;
+    if (sameValue(blocks(candidate), blocks(liveMessage))) return messages;
+    break;
+  }
+
+  if (typeof liveMessage.timestamp !== "number" || !Number.isFinite(liveMessage.timestamp)) {
     return [...messages, liveMessage];
   }
   let target = liveMessage;

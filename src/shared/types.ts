@@ -187,6 +187,14 @@ export interface QueuedPrompt {
   createdAt: number;
 }
 
+/** Browser-local projection of an accepted native Pi Steer before consumption. */
+export interface PendingSteer {
+  id: string;
+  message: string;
+  imageCount: number;
+  createdAt: number;
+}
+
 /** Strict confirms write/edit plus best-effort recognized high-risk Bash; open skips Gate prompts. */
 export type GateMode = "strict" | "open";
 

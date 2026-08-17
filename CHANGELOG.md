@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.4
+
+### Conversation reliability
+
+- Prevented a final live assistant snapshot from rendering a second copy when its complete reply has already reached the persisted active turn, including provider frames that omit or rewrite the terminal timestamp. The reconciliation is limited to that explicit live-versus-persisted handoff; separate persisted assistant turns are never collapsed merely because their text matches.
+- Sanitized the distinct provider failure mode where one assistant text payload contains two byte-for-byte copies of a substantial complete response, without rewriting Session JSONL.
+- Local intercom coordination messages now fold after $10$ source lines and provide accessible expand/collapse controls.
+
+### Composer and native Steer presentation
+
+- Model and Thinking controls retain the last confirmed model catalogue during transient empty Runtime metadata refreshes instead of becoming temporarily unavailable.
+- Accepted native Steer messages now appear immediately in a separate waiting section, remain out of the ordinary prompt queue and transcript until Pi confirms consumption, and clear through the existing authoritative consumption or lifecycle paths.
+
+### Package scope
+
+- `pi-chat-windows-0.4.4.zip` is the runnable Windows package. GitHub-generated source archives are source-only development inputs.
+- Pi Chat remains loopback-only and local-first; this release does not add remote hosting, a desktop shell, or a replacement Pi agent loop.
+
 ## 0.4.3
 
 ### Runtime, RPC, and settlement recovery

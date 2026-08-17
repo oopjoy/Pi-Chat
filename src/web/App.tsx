@@ -19,6 +19,7 @@ import type {
   PrimaryRuntimeReadiness,
   PromptDelivery,
   PromptImage,
+  PendingSteer,
   QueuedPrompt,
   SessionActivityState,
   SessionDirectorySummary,
@@ -624,6 +625,15 @@ export function App() {
     confirmedDeletedSessionIdsRef.current.has(id)
       ? undefined
       : viewCacheRef.current.appendTerminal(id, message);
+  const [pendingSteersBySession, setPendingSteersBySession] = useState<
+    Record<string, PendingSteer[]>
+  >({});
+  const pendingSteersRef = useRef(new Map<string, PendingSteer[]>());
+  const syncPendingSteers = (sessionId: string, items: PendingSteer[]) => {
+    if (items.length) pendingSteersRef.current.set(sessionId, items);
+    else pendingSteersRef.current.delete(sessionId);
+    setPendingSteersBySession(Object.fromEntries(pendingSteersRef.current));
+  };
   const [gateModes, setGateModes] = useState<Record<string, GateMode>>({});
   const gateModesRef = useRef<Record<string, GateMode>>({});
   const updateGateMode = useCallback(
@@ -1528,9 +1538,9 @@ export function App() {
       viewCacheRef.current.setPinned(hotIds);
       // A recovering Runtime can briefly return an empty model inventory while
       // its selected Session model is already known. Retain the last usable
-      // choices through that transient snapshot; ComposerControls also renders a
-      // readable current-model fallback until the inventory catches up.
-      if (data.models.length || !data.state.model) setModels(data.models);
+      // choices through that transient snapshot. A selected model alone is not
+      // an inventory, so do not discard a previously selectable catalogue.
+      if (data.models.length) setModels(data.models);
       const workspaceEpoch =
         typeof data.workspaceEpoch === "string" ? data.workspaceEpoch : "";
       const workspaceRevision =
@@ -3161,6 +3171,14 @@ export function App() {
               ),
             );
           }
+          if (consumed) {
+            syncPendingSteers(
+              eventSessionId,
+              (pendingSteersRef.current.get(eventSessionId) || []).filter(
+                (item) => item.id !== consumed.queueId,
+              ),
+            );
+          }
           if (consumed && viewingEventSession) {
             consumed.renderedInTranscript = true;
             dispatchPane({
@@ -3323,6 +3341,7 @@ export function App() {
         if (eventSessionId) {
           const pending = localUserTurnsRef.current.get(eventSessionId) || [];
           const remaining = removePendingSteeringTurns(pending);
+          syncPendingSteers(eventSessionId, []);
           if (remaining.length)
             localUserTurnsRef.current.set(eventSessionId, remaining);
           else localUserTurnsRef.current.delete(eventSessionId);
@@ -4789,7 +4808,9 @@ export function App() {
           (willQueueLocally || steering) && !message.startsWith("/")
             ? "waiting"
             : undefined,
-        ...(steering ? { revealOnMessageStart: true } : null),
+        ...(steering
+          ? { revealOnMessageStart: true, queueId: crypto.randomUUID() }
+          : null),
         confirmByPosition: images.length > 0,
       };
       localUserTurnsRef.current.set(targetSessionId, [
@@ -5173,7 +5194,21 @@ export function App() {
           })()
         : undefined;
       const acknowledgedQueue = acknowledgedProjection?.queue;
-      if (result.queued && acceptedLocalTurn && typeof result.id === "string") {
+      if (
+        result.steered &&
+        acceptedLocalTurn?.queueState === "waiting" &&
+        acceptedLocalTurn.queueId
+      ) {
+        syncPendingSteers(targetSessionId, [
+          ...(pendingSteersRef.current.get(targetSessionId) || []),
+          {
+            id: acceptedLocalTurn.queueId,
+            message: message || "请查看这些图片。",
+            imageCount: images.length,
+            createdAt: Date.now(),
+          },
+        ]);
+      } else if (result.queued && acceptedLocalTurn && typeof result.id === "string") {
         // Dispatch SSE may beat this acknowledgement. Never demote a turn that
         // the scheduler has already started into the waiting-only queue UI.
         markLocalTurnQueued(acceptedLocalTurn, result.id);
@@ -6245,6 +6280,7 @@ export function App() {
     scrollMemoryRef.current.forget(sessionId);
     viewCacheRef.current.forget(sessionId);
     localUserTurnsRef.current.delete(sessionId);
+    syncPendingSteers(sessionId, []);
     sourceTurnTotalsRef.current.delete(sessionId);
     cancelledQueueIdsRef.current.delete(sessionId);
     queueProjectionRevisionRef.current.delete(sessionId);
@@ -7555,6 +7591,7 @@ export function App() {
           onCancel: cancelQueuedPrompt,
           onResume: resumeQueuedPrompt,
         }}
+        pendingSteers={pendingSteersBySession[viewedSessionId] || []}
         chatInput={{
           streaming: viewingSubagentSession ? false : composerQueueMode,
           activelyStreaming: viewingSubagentSession ? false : state.isStreaming,

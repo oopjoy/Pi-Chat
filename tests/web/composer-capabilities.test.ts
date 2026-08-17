@@ -57,6 +57,62 @@ test("a transient empty model inventory never leaks the Composer's internal mode
   }
 });
 
+test("a selected model without a new inventory retains the last selectable catalogue", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const selected = {
+    provider: "xwill",
+    id: "gpt-5.6-sol",
+    name: "gpt-5.6-sol",
+    input: ["text"],
+    reasoning: true,
+  };
+  const alternative = {
+    provider: "xwill",
+    id: "gpt-5.6-terra",
+    name: "gpt-5.6-terra",
+    input: ["text"],
+    reasoning: true,
+  };
+  let requests = 0;
+  Object.assign(api, {
+    bootstrap: async () => {
+      requests += 1;
+      return requests === 1
+        ? { ...bootstrap, state: { ...bootstrap.state, model: selected }, models: [selected, alternative] }
+        : { ...bootstrap, state: { ...bootstrap.state, model: selected }, models: [] };
+    },
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const trigger = () => dom.window.document.querySelector<HTMLButtonElement>(
+      ".composer-model-select .compact-select-trigger",
+    )!;
+    assert.equal(trigger().disabled, false);
+    await act(async () => {
+      dom.window.dispatchEvent(new dom.window.Event("focus"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(trigger().disabled, false, "an empty refresh does not grey out Model");
+    await act(async () => { trigger().click(); await Promise.resolve(); });
+    assert.ok(
+      [...dom.window.document.querySelectorAll<HTMLElement>(".composer-model-select .compact-select-option")]
+        .some((option) => option.textContent?.includes("gpt-5.6-terra")),
+      "the prior catalogue remains selectable until a real replacement arrives",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("slash suggestions survive an empty command inventory refresh", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");
@@ -1714,6 +1770,8 @@ test("App reveals a Steer turn only when Pi consumes it", async () => {
         .click();
     });
     assert.equal(promptCalls[0]?.[4], "steer");
+    const pendingSteer = () => dom.window.document.querySelector(".pending-steers");
+    assert.match(pendingSteer()?.textContent || "", /Steer.*redirect consumed later.*等待 Pi 接收/s);
     assert.equal(
       dom.window.document.querySelectorAll(".message-user").length,
       0,
@@ -1732,6 +1790,7 @@ test("App reveals a Steer turn only when Pi consumes it", async () => {
       0,
       "an unverified user message_start must not reveal a hidden Steer",
     );
+    assert.ok(pendingSteer(), "the Steer remains in its own waiting section before verified consumption");
     await act(async () =>
       source.emitPi({
         type: "message_start",
@@ -1745,6 +1804,7 @@ test("App reveals a Steer turn only when Pi consumes it", async () => {
       1,
       "a server-verified native steer consumption reveals the local Steer turn",
     );
+    assert.equal(pendingSteer(), null, "verified consumption moves the Steer out of its waiting section");
   } finally {
     await act(async () => root.unmount());
     restoreApi();

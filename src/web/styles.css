@@ -440,7 +440,13 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .coordination-message-icon { position: relative; width: 12px; height: 12px; flex: 0 0 auto; border: 1.5px solid var(--accent); border-radius: 50%; }
 .coordination-message-icon::after { position: absolute; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); content: ""; inset: 2.5px; }
 .coordination-message time { flex: 0 0 auto; color: var(--muted); }
-.coordination-message-content { color: var(--text); font-family: var(--reading-font); font-size: calc(var(--reading-font-size) - 1px); line-height: 1.62; white-space: pre-wrap; overflow-wrap: anywhere; }
+.coordination-message-content { color: var(--text); font-family: var(--reading-font); font-size: calc(var(--reading-font-size) - 1px); line-height: 1.62; overflow-wrap: anywhere; }
+.coordination-message-content > div { white-space: pre-wrap; }
+.coordination-message-content > .is-collapsed { position: relative; display: -webkit-box; max-height: calc(1.62em * 10); overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 10; }
+.coordination-message-content > .is-collapsed::after { position: absolute; right: 0; bottom: 0; left: 0; height: calc(1.62em * 2); background: linear-gradient(transparent, color-mix(in srgb, var(--accent-soft), var(--surface) 58%)); content: ""; pointer-events: none; }
+.coordination-message-fold-toggle { display: block; margin: 5px 0 0 auto; padding: 3px 6px; border: 0; border-radius: 5px; background: transparent; color: var(--accent); cursor: pointer; font: inherit; font-size: 12px; font-weight: 650; }
+.coordination-message-fold-toggle:hover { background: color-mix(in srgb, var(--accent), transparent 88%); color: var(--accent-hover); }
+.coordination-message-fold-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
 .message > header, .message-assistant-header { display: flex; align-items: center; min-height: 22px; gap: 8px; margin-bottom: 2px; }
 .message-assistant-header { justify-content: flex-start; font-family: var(--app-font); }
 .message-role { font-size: 12px; font-weight: 750; letter-spacing: .02em; }
@@ -600,6 +606,16 @@ details.conversation-process { display: block; padding: 0; }
 .prompt-queue article .prompt-queue-cancel { height: 28px; min-width: 46px; padding: 0 8px; border: 1px solid color-mix(in srgb, var(--danger), transparent 45%); border-radius: 8px; background: color-mix(in srgb, var(--danger), transparent 88%); color: var(--danger); cursor: pointer; font-size: 12px; font-weight: 650; transition: border-color .12s ease, background-color .12s ease, color .12s ease; }
 .prompt-queue article .prompt-queue-cancel:hover:not(:disabled) { border-color: color-mix(in srgb, var(--danger), transparent 20%); background: color-mix(in srgb, var(--danger), transparent 78%); }
 .prompt-queue.is-paused { border-color: color-mix(in srgb, var(--danger), transparent 65%); }
+.pending-steers { box-sizing: border-box; width: min(calc(100% - var(--chat-column-gutter)), var(--reading-width), var(--chat-column-max)); max-height: 134px; margin: 0 auto 4px; overflow: hidden; border: 1px solid color-mix(in srgb, var(--accent), transparent 62%); border-radius: 10px; background: color-mix(in srgb, var(--accent-soft), var(--surface) 60%); box-shadow: 0 4px 16px rgba(27, 44, 70, .05); }
+.pending-steers > header { display: flex; min-height: 29px; align-items: center; gap: 7px; padding: 4px 9px; border-bottom: 1px solid color-mix(in srgb, var(--accent), transparent 76%); color: var(--muted); font-size: 10px; }
+.pending-steers > header strong { display: grid; width: 18px; height: 18px; place-items: center; border-radius: 50%; background: var(--accent-soft); color: var(--accent); font-size: 9px; }
+.pending-steers > div { max-height: 102px; overflow-y: auto; }
+.pending-steers article { display: flex; align-items: center; gap: 8px; padding: 6px 9px; border-bottom: 1px solid color-mix(in srgb, var(--accent), transparent 84%); }
+.pending-steers article:last-child { border-bottom: 0; }
+.pending-steers article > b { padding: 2px 5px; border: 1px solid color-mix(in srgb, var(--accent), transparent 60%); border-radius: 4px; color: var(--accent); font-family: var(--app-font); font-size: 9px; }
+.pending-steers article p { min-width: 0; margin: 0; flex: 1; overflow: hidden; font-family: var(--reading-font); font-size: calc(var(--reading-font-size) - .5px); line-height: 1.45; text-overflow: ellipsis; white-space: nowrap; }
+.pending-steers article small { margin-left: 7px; color: var(--muted); font-family: var(--app-font); font-size: 10px; }
+.pending-steers article > span { flex: 0 0 auto; color: var(--muted); font-size: 10px; }
 /* In flow, the notice stack reserves space instead of covering queue controls above it. */
 .composer-wrap { display: flex; flex: 0 0 auto; flex-direction: column; align-items: center; gap: 4px; padding: 7px 0 15px; background: linear-gradient(transparent, var(--page) 34%); }
 .system-notice-stack { display: flex; width: max-content; max-width: 80%; max-height: calc(100dvh - 96px); flex-direction: column; align-items: center; gap: 4px; overflow-y: auto; pointer-events: none; }

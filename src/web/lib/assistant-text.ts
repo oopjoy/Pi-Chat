@@ -12,6 +12,25 @@ const LEAKED_PRIVATE_PROCESS_PREAMBLE = /^\s*The user wants me to\b(?=[\s\S]*\b(
  * Markdown. A run must contain at least three title-only lines and either a
  * duplicate title or five titles, so a normal short outline remains visible.
  */
+/**
+ * A malformed provider frame can occasionally concatenate the complete final
+ * answer to itself. This is deliberately narrower than message deduplication:
+ * it only removes a second, byte-for-byte copy when the entire assistant text
+ * consists of two copies of the same substantial response.
+ */
+function collapseRepeatedWholeResponse(value: string): string {
+  if (value.length < 800) return value;
+  const probe = value.slice(0, 96);
+  for (let duplicateStart = value.indexOf(probe, probe.length);
+    duplicateStart >= 0;
+    duplicateStart = value.indexOf(probe, duplicateStart + probe.length)) {
+    const first = value.slice(0, duplicateStart).trimEnd();
+    const second = value.slice(duplicateStart).trimEnd();
+    if (first.length >= 400 && first === second) return first;
+  }
+  return value;
+}
+
 function stripLeakedThinkingTitleRun(value: string): string {
   const lines = value.split(/(\r?\n)/);
   const output: string[] = [];
@@ -53,7 +72,9 @@ function stripLeakedThinkingTitleRun(value: string): string {
  * or code samples that mention the word "analysis".
  */
 export function sanitizeAssistantText(value: string): string {
-  const titleCleaned = stripLeakedThinkingTitleRun(value);
+  const titleCleaned = stripLeakedThinkingTitleRun(
+    collapseRepeatedWholeResponse(value),
+  );
   if (LEAKED_PRIVATE_PROCESS_PREAMBLE.test(titleCleaned)) return "";
   const match = REPEATED_ANALYSIS_CHANNEL.exec(titleCleaned);
   if (!match || match.index === undefined) return titleCleaned;

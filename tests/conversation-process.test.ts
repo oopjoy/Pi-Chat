@@ -5,7 +5,11 @@ import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { JSDOM } from "jsdom";
 import { LOCAL_COORDINATION_ROLE, type PiMessage } from "../src/shared/types";
-import { CoordinationMessage } from "../src/web/components/CoordinationMessage";
+import {
+  COORDINATION_MESSAGE_FOLD_LINE_LIMIT,
+  CoordinationMessage,
+  shouldFoldCoordinationText,
+} from "../src/web/components/CoordinationMessage";
 import { ConversationProcess, toolLabel } from "../src/web/components/ConversationProcess";
 import { EditDiffSidebar } from "../src/web/components/EditToolDiff";
 import { groupConversation } from "../src/web/lib/conversation-process";
@@ -146,6 +150,54 @@ test("coordination input is visibly headed instead of hiding inside process deta
   assert.doesNotMatch(html, /<details/);
 });
 
+test("long coordination messages fold by source line count", () => {
+  const content = Array.from(
+    { length: COORDINATION_MESSAGE_FOLD_LINE_LIMIT + 1 },
+    (_, index) => `coordination line ${index + 1}`,
+  ).join("\n");
+  assert.equal(shouldFoldCoordinationText(content), true);
+  const html = renderToStaticMarkup(createElement(CoordinationMessage, {
+    message: { role: LOCAL_COORDINATION_ROLE, content },
+  }));
+  assert.match(html, /coordination-message-content"><div class="is-collapsed"/);
+  assert.match(html, /class="coordination-message-fold-toggle"[^>]*aria-expanded="false"[^>]*>展开全部/);
+});
+
+test("short coordination messages do not show a fold toggle", () => {
+  const content = "brief coordination";
+  assert.equal(shouldFoldCoordinationText(content), false);
+  const html = renderToStaticMarkup(createElement(CoordinationMessage, {
+    message: { role: LOCAL_COORDINATION_ROLE, content },
+  }));
+  assert.doesNotMatch(html, /coordination-message-fold-toggle/);
+});
+
+test("coordination fold toggle expands and collapses the full message", async () => {
+  const dom = new JSDOM("<div id=\"root\"></div>", { pretendToBeVisual: true });
+  const previousWindow = globalThis.window;
+  const previousDocument = globalThis.document;
+  Object.assign(globalThis, { window: dom.window, document: dom.window.document });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  const content = Array.from(
+    { length: COORDINATION_MESSAGE_FOLD_LINE_LIMIT + 1 },
+    (_, index) => `coordination line ${index + 1}`,
+  ).join("\n");
+  try {
+    await act(async () => root.render(createElement(CoordinationMessage, {
+      message: { role: LOCAL_COORDINATION_ROLE, content },
+    })));
+    const body = dom.window.document.querySelector(".coordination-message-content > div")!;
+    const toggle = dom.window.document.querySelector<HTMLButtonElement>(".coordination-message-fold-toggle")!;
+    assert.equal(body.classList.contains("is-collapsed"), true);
+    await act(async () => toggle.click());
+    assert.equal(body.classList.contains("is-collapsed"), false);
+    assert.equal(toggle.textContent, "收起");
+  } finally {
+    await act(async () => root.unmount());
+    Object.assign(globalThis, { window: previousWindow, document: previousDocument });
+  }
+});
+
 test("coordination splits assistant work so the following answer cannot appear headless", () => {
   const items = groupConversation([
     { role: "assistant", provider: "test", model: "model-a", timestamp: 1, content: [
@@ -273,6 +325,26 @@ test("a cumulative live assistant snapshot replaces its persisted prefix", () =>
   assert.equal(items[0].entries.filter((entry) => entry.kind === "thinking").length, 1);
   const tools = items[0].entries.filter((entry) => entry.kind === "tool");
   assert.deepEqual(tools.map((entry) => entry.kind === "tool" ? entry.id : ""), ["one", "two"]);
+});
+
+test("a final live reply does not duplicate an already persisted active-turn answer without a timestamp", () => {
+  const answer = "你的担心是对的，而且是关键问题。\n\n这是完整的长回答。";
+  const items = groupConversation([
+    { role: "user", content: "question", timestamp: 10 },
+    { role: "assistant", content: answer, timestamp: 20 },
+  ], { liveMessage: { role: "assistant", content: answer } });
+  assert.equal(items.length, 2);
+  assert.equal(items.filter((item) => item.kind === "message").length, 2);
+});
+
+test("an intentionally repeated persisted assistant turn remains visible", () => {
+  const answer = "same response intentionally sent twice";
+  const items = groupConversation([
+    { role: "user", content: "question", timestamp: 10 },
+    { role: "assistant", content: answer, timestamp: 20 },
+    { role: "assistant", content: answer, timestamp: 30 },
+  ]);
+  assert.equal(items.filter((item) => item.kind === "message").length, 3);
 });
 
 test("only the explicit live snapshot is coalesced among same-timestamp messages", () => {

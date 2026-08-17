@@ -1,5 +1,5 @@
 import { Fragment, type ComponentProps, type RefObject } from "react";
-import type { PiMessage, PiState } from "../../shared/types";
+import type { PendingSteer, PiMessage, PiState } from "../../shared/types";
 import { appendPendingUserMessage } from "../lib/local-user-turn";
 import { groupConversation } from "../lib/conversation-process";
 import { ChatInput } from "./ChatInput";
@@ -8,6 +8,7 @@ import { CompactSelect } from "./CompactSelect";
 import { CoordinationMessage } from "./CoordinationMessage";
 import { ConversationProcess } from "./ConversationProcess";
 import { FolderIcon, PiMarkIcon } from "./Icons";
+import { PendingSteers } from "./PendingSteers";
 import { PromptQueue } from "./PromptQueue";
 import { SessionControlBanner } from "./SessionControlBanner";
 import { TopBar } from "./TopBar";
@@ -46,6 +47,7 @@ export interface ConversationPaneProps {
   onNavigate: (direction: NavigationDirection) => void;
   sessionControl: ComponentProps<typeof SessionControlBanner>;
   promptQueue: ComponentProps<typeof PromptQueue>;
+  pendingSteers: PendingSteer[];
   chatInput: ComponentProps<typeof ChatInput>;
 }
 
@@ -85,6 +87,7 @@ export function ConversationPane({
   onNavigate,
   sessionControl,
   promptQueue,
+  pendingSteers,
   chatInput,
 }: ConversationPaneProps) {
   const conversationItems = groupConversation(
@@ -250,6 +253,7 @@ export function ConversationPane({
     </nav>
     <SessionControlBanner {...sessionControl} />
     <PromptQueue {...promptQueue} />
+    <PendingSteers items={pendingSteers} />
     <ChatInput {...chatInput} />
   </main>;
 }

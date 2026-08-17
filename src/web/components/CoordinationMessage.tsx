@@ -1,4 +1,12 @@
+import { useState } from "react";
 import type { PiContentBlock, PiMessage } from "../../shared/types";
+
+/** Fold only explicit source lines; visual wrapping is device-dependent. */
+export const COORDINATION_MESSAGE_FOLD_LINE_LIMIT = 10;
+
+export function shouldFoldCoordinationText(text: string): boolean {
+  return text.split(/\r?\n/).length > COORDINATION_MESSAGE_FOLD_LINE_LIMIT;
+}
 
 const coordinationTimeFormatter = new Intl.DateTimeFormat("zh-CN", {
   hour: "2-digit",
@@ -30,7 +38,9 @@ function coordinationText(message: PiMessage): string {
 
 export function CoordinationMessage({ message }: { message: PiMessage }) {
   const text = coordinationText(message);
+  const [expanded, setExpanded] = useState(false);
   if (!text) return null;
+  const foldable = shouldFoldCoordinationText(text);
   const source = message.localCoordination?.source?.trim();
   const timestamp = typeof message.timestamp === "number" && Number.isFinite(message.timestamp)
     ? new Date(message.timestamp)
@@ -52,6 +62,14 @@ export function CoordinationMessage({ message }: { message: PiMessage }) {
         title={`协调消息时间：${coordinationFullTimeFormatter.format(validTimestamp)}`}
       >{coordinationTimeFormatter.format(validTimestamp)}</time>}
     </header>
-    <div className="coordination-message-content">{text}</div>
+    <div className="coordination-message-content">
+      <div className={foldable && !expanded ? "is-collapsed" : undefined}>{text}</div>
+      {foldable && <button
+        type="button"
+        className="coordination-message-fold-toggle"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((current) => !current)}
+      >{expanded ? "收起" : "展开全部"}</button>}
+    </div>
   </article>;
 }
