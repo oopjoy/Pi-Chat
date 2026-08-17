@@ -614,9 +614,10 @@ details.conversation-process { display: block; padding: 0; }
 .composer-controls { display: flex; min-width: 0; align-items: center; gap: 2px; color: var(--muted); font-size: 12px; white-space: nowrap; }
 .composer-controls > * + * { position: relative; margin-left: 7px; }
 .composer-controls > * + *::before { position: absolute; top: 50%; left: -5px; width: 1px; height: 14px; transform: translateY(-50%); background: color-mix(in srgb, var(--line-strong), transparent 28%); content: ""; pointer-events: none; }
-.composer-model-select { width: min(112px, 16vw); flex: 0 1 112px; }
+.composer-model-select { width: 168px; min-width: 168px; flex: 0 0 168px; }
 .composer-model-select .compact-select-trigger { padding-left: 4px; }
-.thinking-control { width: 64px; min-width: 64px; flex: 0 1 64px; }
+/* Reserve room for the visible chevron as well as the longest Thinking label. */
+.thinking-control { width: 80px; min-width: 80px; flex: 0 0 80px; }
 .thinking-icon { width: 15px; height: 15px; flex: 0 0 auto; color: var(--muted); }
 .thinking-icon.is-active, .composer-usage .fast-mode-indicator { color: #c99110; }
 .composer-controls .compact-select { border: 0; background: transparent; }
@@ -926,6 +927,20 @@ button.ask-questionnaire-option:hover:not(:disabled) { background: var(--surface
   .ask-questionnaire-option { transition: none; }
 }
 
+@media (min-width: 761px) and (max-width: 860px) {
+  /* The desktop sidebar still consumes space here, so compact controls and
+     actions must occupy separate toolbar rows before the mobile sidebar takes
+     over at 760px. */
+  .composer-toolbar { align-items: stretch; flex-wrap: wrap; }
+  .composer-toolbar-controls { width: 100%; flex-basis: 100%; }
+  .composer-controls { width: 100%; min-width: 0; }
+  .composer-model-select { width: 148px; min-width: 148px; flex: 0 0 148px; }
+  .thinking-control { width: 76px; min-width: 76px; flex: 0 0 76px; }
+  .composer-controls .gate-control { width: 64px; min-width: 64px; flex: 0 0 64px; }
+  .composer-usage { min-width: 68px; flex: 0 0 68px; }
+  .composer-actions { margin-left: auto; }
+}
+
 @media (max-width: 760px) {
   .sidebar { position: fixed; inset: 0 auto 0 0; width: min(86vw, 300px); margin-left: 0 !important; transform: translateX(-102%); transition: transform .22s ease; will-change: transform; box-shadow: var(--shadow); }
   .sidebar-resize-handle { display: none; }
@@ -941,8 +956,8 @@ button.ask-questionnaire-option:hover:not(:disabled) { background: var(--surface
   .composer-toolbar { align-items: stretch; flex-wrap: wrap; }
   .composer-toolbar-controls { width: 100%; flex-basis: 100%; }
   .composer-controls { width: 100%; min-width: 0; }
-  .composer-model-select { width: min(104px, 20vw); flex-basis: min(104px, 20vw); }
-  .thinking-control { width: 62px; min-width: 62px; flex: 0 1 62px; }
+  .composer-model-select { width: 148px; min-width: 148px; flex: 0 0 148px; }
+  .thinking-control { width: 76px; min-width: 76px; flex: 0 0 76px; }
   .composer-controls .gate-control { width: 64px; min-width: 64px; flex: 0 1 64px; }
   .composer-usage { min-width: 68px; flex: 0 0 auto; }
   .composer-actions { margin-left: auto; }
@@ -967,9 +982,9 @@ button.ask-questionnaire-option:hover:not(:disabled) { background: var(--surface
   .message-content { font-size: 14px; }
   .composer { padding: 8px 8px 5px; }
   .composer-controls { width: 100%; min-width: 0; gap: 1px; }
-  .composer-model-select { width: 88px; flex: 0 1 88px; }
+  .composer-model-select { width: 112px; min-width: 0; flex: 1 1 112px; }
   .composer-model-select .compact-select-trigger { gap: 4px; padding-right: 2px; padding-left: 2px; }
-  .thinking-control { width: 58px; min-width: 58px; flex: 0 1 58px; }
+  .thinking-control { width: 72px; min-width: 72px; flex: 0 0 72px; }
   .thinking-select .compact-select-trigger { gap: 3px; padding-right: 2px; padding-left: 2px; }
   .composer-controls .gate-control { width: 60px; min-width: 60px; flex: 0 1 60px; }
   .gate-control .compact-select-trigger { gap: 3px; padding-right: 2px; padding-left: 2px; }
@@ -978,6 +993,17 @@ button.ask-questionnaire-option:hover:not(:disabled) { background: var(--surface
   .composer-usage > span { min-width: 0; }
   .composer-actions { width: 100%; justify-content: flex-end; }
   .queue-submit-button, .steer-submit-button { min-width: 44px; padding: 0 6px; }
+}
+
+@media (max-width: 360px) {
+  /* On narrow phones, Model may yield label space while the remaining controls
+     keep readable widths. Usage moves to a second compact row when necessary,
+     including when Fast adds its lightning indicator. */
+  .composer-controls { flex-wrap: wrap; row-gap: 2px; }
+  .composer-model-select { min-width: 60px; }
+  .composer-controls .composer-usage { margin-left: 0; }
+  .composer-controls .composer-usage::before { display: none; }
+  .composer-usage.has-fast-mode { min-width: 78px; flex-basis: 78px; }
 }
 
 /* Background Subagents are a read-only top-bar projection, never Session navigation. */

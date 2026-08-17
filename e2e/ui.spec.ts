@@ -16,6 +16,96 @@ test("desktop session navigation keeps the left sidebar open", { tag: "@desktop-
   await expect(sidebar).toHaveClass(/is-open/);
 });
 
+test("desktop composer keeps Model and Thinking labels clear of their dropdown affordances", { tag: "@desktop-only" }, async ({ page }) => {
+  await page.goto("/");
+  for (const selector of [".composer-model-select", ".thinking-control"]) {
+    const control = page.locator(selector);
+    const trigger = control.locator(".compact-select-trigger");
+    const chevron = trigger.locator(".compact-select-chevron");
+    await expect(control).toBeVisible();
+    await expect(chevron).toBeVisible();
+    const metrics = await trigger.evaluate((element) => {
+      const labelElement = element.querySelector<HTMLElement>("span")!;
+      const chevronElement = element.querySelector<HTMLElement>(".compact-select-chevron")!;
+      const triggerBox = element.getBoundingClientRect();
+      const labelBox = labelElement.getBoundingClientRect();
+      const chevronBox = chevronElement.getBoundingClientRect();
+      return {
+        labelFits: labelElement.scrollWidth <= labelElement.clientWidth,
+        chevronInsideTrigger: chevronBox.left >= triggerBox.left && chevronBox.right <= triggerBox.right,
+        labelEndsBeforeChevron: labelBox.right <= chevronBox.left + 0.5,
+      };
+    });
+    expect(metrics.labelFits).toBe(true);
+    expect(metrics.chevronInsideTrigger).toBe(true);
+    expect(metrics.labelEndsBeforeChevron).toBe(true);
+  }
+});
+
+test("sidebar-width desktop Composer keeps its controls and actions inside the pane", { tag: "@desktop-only" }, async ({ page }) => {
+  await page.setViewportSize({ width: 761, height: 720 });
+  await page.goto("/");
+  await expect(page.locator(".sidebar")).toHaveClass(/is-open/);
+  const [controls, composer, attachment, send] = [
+    page.locator(".composer-controls"),
+    page.locator(".composer"),
+    page.locator(".composer .attachment-button:visible"),
+    page.locator(".composer .send-button:visible"),
+  ];
+  await expect(controls).toBeVisible();
+  await expect(attachment).toBeVisible();
+  await expect(send).toBeVisible();
+  const [controlMetrics, composerBox, attachmentBox, sendBox] = await Promise.all([
+    controls.evaluate((element) => ({ clientWidth: element.clientWidth, scrollWidth: element.scrollWidth })),
+    composer.boundingBox(),
+    attachment.boundingBox(),
+    send.boundingBox(),
+  ]);
+  expect(controlMetrics.scrollWidth).toBeLessThanOrEqual(controlMetrics.clientWidth);
+  for (const actionBox of [attachmentBox, sendBox]) {
+    expect(actionBox!.x).toBeGreaterThanOrEqual(composerBox!.x - 0.5);
+    expect(actionBox!.x + actionBox!.width).toBeLessThanOrEqual(composerBox!.x + composerBox!.width + 0.5);
+  }
+});
+
+test("narrow Composer keeps visible Fast-mode contents within its viewport", { tag: "@desktop-only" }, async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 720 });
+  await page.goto("/");
+  const controls = page.locator(".composer-controls");
+  const usage = page.locator(".composer-usage");
+  await expect(controls).toBeVisible();
+  await usage.evaluate((element) => {
+    element.classList.add("has-fast-mode");
+    const indicator = document.createElement("span");
+    indicator.className = "fast-mode-indicator";
+    indicator.setAttribute("aria-hidden", "true");
+    indicator.innerHTML = '<svg viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 9-13h-7z" /></svg>';
+    element.append(indicator);
+  });
+  const [controlMetrics, usageMetrics] = await Promise.all([
+    controls.evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      const childrenFit = [...element.children].every((child) => {
+        const childBox = child.getBoundingClientRect();
+        return childBox.left >= box.left - 0.5 && childBox.right <= box.right + 0.5;
+      });
+      return { childrenFit, clientWidth: element.clientWidth, scrollWidth: element.scrollWidth };
+    }),
+    usage.evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      const contentsFit = [...element.querySelectorAll(":scope > .context-donut, :scope > span")].every((child) => {
+        const childBox = child.getBoundingClientRect();
+        return childBox.left >= box.left - 0.5 && childBox.right <= box.right + 0.5;
+      });
+      return { contentsFit, clientWidth: element.clientWidth, scrollWidth: element.scrollWidth };
+    }),
+  ]);
+  expect(controlMetrics.childrenFit).toBe(true);
+  expect(controlMetrics.scrollWidth).toBeLessThanOrEqual(controlMetrics.clientWidth);
+  expect(usageMetrics.contentsFit).toBe(true);
+  expect(usageMetrics.scrollWidth).toBeLessThanOrEqual(usageMetrics.clientWidth);
+});
+
 test("sidebar search clear stays at the field edge and restores input focus", { tag: "@desktop-only" }, async ({ page }) => {
   await page.goto("/");
   const search = page.getByRole("searchbox", { name: "搜索对话" });
