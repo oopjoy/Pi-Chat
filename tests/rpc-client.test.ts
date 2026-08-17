@@ -475,6 +475,33 @@ test("stop fails closed and retains ownership when neither termination is observ
   }
 });
 
+test("sendRaw retains the event loop until its delivery timeout settles", async () => {
+  const { child } = fakeChild();
+  child.stdin.write = () => true;
+  const client = new PiRpcClient({ cwd: process.cwd() });
+  Object.assign(client, { child });
+  const originalSetTimeout = globalThis.setTimeout;
+  let unrefCalled = false;
+  globalThis.setTimeout = ((callback: (...args: unknown[]) => void, _delay?: number, ...args: unknown[]) => {
+    const timer = originalSetTimeout(callback, 0, ...args);
+    const originalUnref = timer.unref;
+    timer.unref = () => {
+      unrefCalled = true;
+      return originalUnref.call(timer);
+    };
+    return timer;
+  }) as typeof setTimeout;
+  try {
+    await assert.rejects(
+      client.sendRaw({ type: "extension_ui_response", id: "gate" }, 5),
+      (error) => error instanceof RpcRequestTimeoutError && error.outcomeUnknown,
+    );
+    assert.equal(unrefCalled, false, "sendRaw must retain its delivery timeout");
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
 test("sendRaw has a bounded unknown outcome when stdin never acknowledges", async () => {
   const { child } = fakeChild();
   child.stdin.write = () => true;

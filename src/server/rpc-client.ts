@@ -586,8 +586,10 @@ export class PiRpcClient {
       };
       const onExit = () => finish(uncertain());
       const onStdinError = () => finish(uncertain());
+      // A sendRaw caller awaits a delivery outcome before it may release its
+      // admission. Keep this bounded timeout referenced so Node cannot exit
+      // with an unresolved mutation promise on an otherwise-idle process.
       const timer = setTimeout(() => finish(uncertain()), timeoutMs);
-      timer.unref?.();
       child.once("exit", onExit);
       child.once("close", onExit);
       child.stdin.once("error", onStdinError);
