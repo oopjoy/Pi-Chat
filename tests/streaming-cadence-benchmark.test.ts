@@ -219,8 +219,44 @@ test("streaming cadence output cannot target live dist", async (context) => {
       }
       throw error;
     }
-    await assert.rejects(() => validateStreamingCadenceOutputPath(join(linked, "result.json")));
+    await assert.rejects(
+      () => validateStreamingCadenceOutputPath(join(linked, "result.json")),
+      /filesystem link/,
+    );
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("streaming cadence output cannot target the active staged dist through chained links", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-stream-active-output-test-"));
+  const previousDist = process.env.PI_CHAT_DIST_DIR;
+  const stagedDist = join(root, "staged-dist");
+  const inner = join(root, "inner");
+  const outer = join(root, "outer");
+  try {
+    process.env.PI_CHAT_DIST_DIR = stagedDist;
+    await assert.rejects(
+      () => validateStreamingCadenceOutputPath(join(stagedDist, "result.json")),
+      /live dist tree/,
+    );
+    try {
+      await symlink(stagedDist, inner, process.platform === "win32" ? "junction" : "dir");
+      await symlink(inner, outer, process.platform === "win32" ? "junction" : "dir");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EPERM") {
+        context.skip("filesystem link creation unavailable");
+        return;
+      }
+      throw error;
+    }
+    await assert.rejects(
+      () => validateStreamingCadenceOutputPath(join(outer, "result.json")),
+      /filesystem link/,
+    );
+  } finally {
+    if (previousDist === undefined) delete process.env.PI_CHAT_DIST_DIR;
+    else process.env.PI_CHAT_DIST_DIR = previousDist;
     await rm(root, { recursive: true, force: true });
   }
 });

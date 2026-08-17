@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readlink, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -1073,8 +1073,18 @@ function installSignalCleanup(): () => void {
 }
 
 function pathKey(value: string): string {
-  const resolved = resolve(value);
-  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+  let resolved = resolve(value);
+  if (process.platform !== "win32") return resolved;
+  const extendedPrefix = "\\\\" + "?\\";
+  const extendedUncPrefix = extendedPrefix + "UNC\\";
+  const ntObjectPrefix = "\\" + "??\\";
+  if (resolved.toLowerCase().startsWith(extendedUncPrefix.toLowerCase()))
+    resolved = "\\\\" + resolved.slice(extendedUncPrefix.length);
+  else if (resolved.startsWith(extendedPrefix))
+    resolved = resolved.slice(extendedPrefix.length);
+  else if (resolved.startsWith(ntObjectPrefix))
+    resolved = resolved.slice(ntObjectPrefix.length);
+  return resolved.toLowerCase();
 }
 
 function isWithinOrSame(base: string, target: string): boolean {
@@ -1096,15 +1106,71 @@ async function canonicalExistingAncestor(value: string): Promise<string> {
   }
 }
 
+/**
+ * Resolve every symlink/junction ancestor in a target path without requiring
+ * its destination to exist. Unit staging deliberately leaves the normal live
+ * `dist` absent, so follow chained dangling links before a later write can
+ * recreate and reach that protected destination.
+ */
+async function linkedAncestorDestinations(value: string): Promise<string[]> {
+  let current = resolve(value);
+  const destinations: string[] = [];
+  const seen = new Set<string>();
+  for (let hops = 0; hops < 40; hops += 1) {
+    const suffix: string[] = [];
+    let candidate = current;
+    while (true) {
+      try {
+        const destination = resolve(dirname(candidate), await readlink(candidate), ...suffix);
+        const key = pathKey(destination);
+        if (seen.has(key)) throw new Error("Streaming cadence output link path contains a cycle");
+        seen.add(key);
+        destinations.push(destination);
+        current = destination;
+        break;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "EINVAL" || code === "UNKNOWN") return destinations;
+        if (code !== "ENOENT") throw error;
+        const parent = dirname(candidate);
+        if (parent === candidate) return destinations;
+        suffix.unshift(candidate.slice(parent.length).replace(/^[\\/]+/, ""));
+        candidate = parent;
+      }
+    }
+  }
+  throw new Error("Streaming cadence output link path exceeds the maximum link depth");
+}
+
 export async function validateStreamingCadenceOutputPath(value: string): Promise<string> {
   const target = resolve(value);
-  const liveDist = resolve(projectRoot, "dist");
-  if (isWithinOrSame(liveDist, target))
+  // A test/build stage may replace the live dist with PI_CHAT_DIST_DIR. Keep
+  // protecting the source-tree dist too: the benchmark is never allowed to
+  // write production artifacts, even while validation emits elsewhere.
+  const liveDists = [...new Set([
+    resolve(projectRoot, "dist"),
+    resolve(process.cwd(), "dist"),
+    process.env.PI_CHAT_DIST_DIR,
+  ].filter((path): path is string => Boolean(path)).map(pathKey))];
+  if (liveDists.some((liveDist) => isWithinOrSame(liveDist, target)))
     throw new Error("Streaming cadence output cannot target the live dist tree");
-  const canonicalLiveDist = await canonicalExistingAncestor(liveDist);
-  const canonicalTargetAncestor = await canonicalExistingAncestor(target);
-  if (isWithinOrSame(canonicalLiveDist, canonicalTargetAncestor))
+  const linkedTargets = await linkedAncestorDestinations(target);
+  if (linkedTargets.some((linkedTarget) => liveDists.some((liveDist) => isWithinOrSame(liveDist, linkedTarget))))
     throw new Error("Streaming cadence output cannot reach live dist through a filesystem link");
+  const canonicalTargetAncestor = await canonicalExistingAncestor(target);
+  for (const liveDist of liveDists) {
+    const canonicalLiveDist = await canonicalExistingAncestor(liveDist);
+    if (isWithinOrSame(canonicalLiveDist, canonicalTargetAncestor))
+      throw new Error("Streaming cadence output cannot reach live dist through a filesystem link");
+    // Windows can preserve a junction spelling through realpath(), so compare
+    // filesystem identity as the final fail-closed check.
+    const [liveIdentity, targetIdentity] = await Promise.all([
+      stat(canonicalLiveDist),
+      stat(canonicalTargetAncestor),
+    ]);
+    if (liveIdentity.dev === targetIdentity.dev && liveIdentity.ino === targetIdentity.ino)
+      throw new Error("Streaming cadence output cannot reach live dist through a filesystem link");
+  }
   return target;
 }
 
