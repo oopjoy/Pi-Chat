@@ -36,6 +36,21 @@ async function waitFor(url: string, child: ReturnType<typeof spawn>): Promise<Re
   throw new Error("Pi Chat 启动冒烟测试超时");
 }
 
+async function removeWithWindowsRetry(path: string): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    try {
+      await rm(path, { recursive: true, force: true, maxRetries: 0 });
+      return;
+    } catch (error) {
+      lastError = error;
+      if ((error as NodeJS.ErrnoException).code !== "EBUSY" || attempt === 7) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+    }
+  }
+  throw lastError;
+}
+
 async function waitForCapabilityProbe(rpcLog: string, child: ReturnType<typeof spawn>): Promise<string> {
   const expected = ["get_state", "get_messages", "get_available_models", "get_commands", "get_session_stats"];
   const deadline = Date.now() + 12_000;
@@ -109,6 +124,6 @@ test("compiled server starts against fake RPC, probes capabilities, serves guard
     if (child.exitCode === null) child.kill("SIGTERM");
     await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 5_000))]);
     assert.ok(child.exitCode !== null || child.signalCode !== null, "SIGTERM should terminate the compiled Pi Chat server");
-    await rm(root, { recursive: true, force: true });
+    await removeWithWindowsRetry(root);
   }
 });
