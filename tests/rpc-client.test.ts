@@ -396,6 +396,20 @@ test("exit-unconfirmed stop and duplicate-writer diagnostics retain generation a
   }
 });
 
+test("stop observes a synchronous exit emitted by kill", async () => {
+  const { child } = fakeChild();
+  child.kill = () => {
+    child.killed = true;
+    child.exitCode = 0;
+    child.emit("exit", 0, null);
+    return true;
+  };
+  const client = new PiRpcClient({ cwd: process.cwd() });
+  Object.assign(client, { child });
+  await client.stop();
+  assert.equal((client as unknown as { unconfirmedChild: unknown }).unconfirmedChild, null);
+});
+
 test("stop fails closed and retains ownership when neither termination is observed", async () => {
   const { child } = fakeChild();
   child.kill = () => {

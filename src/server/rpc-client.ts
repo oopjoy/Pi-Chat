@@ -857,10 +857,11 @@ export class PiRpcClient {
           return;
         }
         let settled = false;
+        let timer: ReturnType<typeof setTimeout> | undefined;
         const finish = (exited: boolean) => {
           if (settled) return;
           settled = true;
-          clearTimeout(timer);
+          if (timer) clearTimeout(timer);
           child.off("exit", onExit);
           child.off("close", onExit);
           if (exited && this.unconfirmedChild === child) {
@@ -870,10 +871,14 @@ export class PiRpcClient {
           resolve(exited);
         };
         const onExit = () => finish(true);
-        const timer = setTimeout(() => finish(false), timeoutMs);
-        timer.unref?.();
+        // Subscribe before creating the timeout: synchronous test doubles and
+        // Windows process shims can emit exit from kill() immediately after
+        // this helper returns. Registering first keeps the proof observable.
         child.once("exit", onExit);
         child.once("close", onExit);
+        timer = setTimeout(() => finish(false), timeoutMs);
+        timer.unref?.();
+        if (child.exitCode !== null || (child.signalCode !== null && child.signalCode !== undefined)) finish(true);
       });
       child.kill("SIGTERM");
       if (await waitForExit(1_500)) return;
