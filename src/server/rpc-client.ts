@@ -877,7 +877,10 @@ export class PiRpcClient {
         child.once("exit", onExit);
         child.once("close", onExit);
         timer = setTimeout(() => finish(false), timeoutMs);
-        timer.unref?.();
+        // stop() awaits this proof before it can release the Runtime's writer
+        // ownership. Keep the timer referenced: unref() can let Node's test
+        // runner (and an otherwise-idle shutdown) end before the fail-closed
+        // timeout settles the pending stop operation.
         if (child.exitCode !== null || (child.signalCode !== null && child.signalCode !== undefined)) finish(true);
       });
       child.kill("SIGTERM");

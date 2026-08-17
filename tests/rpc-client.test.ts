@@ -396,6 +396,33 @@ test("exit-unconfirmed stop and duplicate-writer diagnostics retain generation a
   }
 });
 
+test("stop retains the event loop until an unconfirmed-exit timeout settles", async () => {
+  const { child } = fakeChild();
+  child.kill = () => {
+    child.killed = true;
+    return true;
+  };
+  const client = new PiRpcClient({ cwd: process.cwd() });
+  Object.assign(client, { child });
+  const originalSetTimeout = globalThis.setTimeout;
+  let unrefCalled = false;
+  globalThis.setTimeout = ((callback: (...args: unknown[]) => void, _delay?: number, ...args: unknown[]) => {
+    const timer = originalSetTimeout(callback, 0, ...args);
+    const originalUnref = timer.unref;
+    timer.unref = () => {
+      unrefCalled = true;
+      return originalUnref.call(timer);
+    };
+    return timer;
+  }) as typeof setTimeout;
+  try {
+    await assert.rejects(client.stop(), RpcProcessExitUnconfirmedError);
+    assert.equal(unrefCalled, false, "stop must retain its fail-closed exit timer");
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
 test("stop observes a synchronous exit emitted by kill", async () => {
   const { child } = fakeChild();
   child.kill = () => {
