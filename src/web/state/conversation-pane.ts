@@ -78,6 +78,12 @@ export type ConversationPaneAction =
       model?: PiState["model"];
       thinkingLevel?: PiState["thinkingLevel"];
     }
+  /** Runtime/SSE fact, distinct from a local desired Composer selection. */
+  | {
+      type: "RUNTIME_SETTINGS_ADOPTED";
+      target: ConversationPaneTarget;
+      state: Partial<Pick<PiState, "model" | "thinkingLevel">>;
+    }
   | {
       type: "COMPACTION_STARTED";
       sessionId: string;
@@ -286,6 +292,10 @@ export function conversationPaneReducer(
                 : null),
             },
           }
+        : state;
+    case "RUNTIME_SETTINGS_ADOPTED":
+      return matchesTarget(state, action.target)
+        ? { ...state, piState: { ...state.piState, ...action.state } }
         : state;
     case "COMPACTION_STARTED":
       return visibleSession(state, action.sessionId)

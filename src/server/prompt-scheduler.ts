@@ -1,7 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { MAX_PROMPT_IMAGES_ENCODED_BYTES } from "../shared/rpc-contracts.js";
-import type { GateMode, PromptImage, QueuedPrompt } from "../shared/types.js";
-import type { PendingTurnSettings, RuntimeQueuedPrompt, SecondaryRuntime } from "./runtime-pool.js";
+import type { GateMode, PromptImage, PromptSettingsSnapshot, QueuedPrompt } from "../shared/types.js";
+import {
+  PartialTurnSettingsError,
+  type AppliedTurnSettings,
+  type PendingTurnSettings,
+  type RuntimeQueuedPrompt,
+  type SecondaryRuntime,
+} from "./runtime-pool.js";
 import {
   RpcRequestTimeoutError,
   type PiRpcClient,
@@ -20,6 +26,8 @@ export interface InternalQueuedPrompt extends QueuedPrompt {
   images: PromptImage[];
   /** Gate mode selected for this turn; replayed immediately before dispatch. */
   gateMode?: GateMode;
+  /** Exact Model/Thinking selection captured at this prompt's admission. */
+  settings?: PromptSettingsSnapshot;
 }
 
 export interface PromptSchedulerHost {
@@ -33,6 +41,18 @@ export interface PromptSchedulerHost {
   acquireRuntimeOperation(runtime: SecondaryRuntime): () => void;
   touchRuntime(runtime: SecondaryRuntime): void;
   applyPendingTurnSettings(rpc: PiRpcClient, pending: PendingTurnSettings): Promise<void>;
+  /** Apply one queued prompt's immutable settings without leaking them to another queue row. */
+  applyPromptSettings?(
+    rpc: PiRpcClient,
+    pending: PendingTurnSettings,
+    settings?: PromptSettingsSnapshot,
+    consumeSupersededLegacy?: boolean,
+  ): Promise<AppliedTurnSettings>;
+  onPrimaryPromptSettingsApplied?(settings: AppliedTurnSettings): void;
+  onRuntimePromptSettingsApplied?(
+    runtime: SecondaryRuntime,
+    settings: AppliedTurnSettings,
+  ): void;
   syncGateMode(rpc: PiRpcClient, sessionId: string, mode?: GateMode): Promise<void>;
   /** Optional observation seam; it may observe but never proxy prompt delivery. */
   promptRpcObserver?(
@@ -136,6 +156,7 @@ export class PromptScheduler {
     images: PromptImage[],
     createdAt = Date.now(),
     gateMode?: GateMode,
+    settings?: PromptSettingsSnapshot,
   ): InternalQueuedPrompt {
     const queued: InternalQueuedPrompt = {
       id: randomUUID(),
@@ -144,6 +165,7 @@ export class PromptScheduler {
       imageCount: images.length,
       createdAt,
       ...(gateMode ? { gateMode } : null),
+      ...(settings ? { settings } : null),
     };
     this.primaryQueue.push(queued);
     this.broadcastPrimaryQueue(queued.id);
@@ -156,6 +178,7 @@ export class PromptScheduler {
     images: PromptImage[],
     createdAt = Date.now(),
     gateMode?: GateMode,
+    settings?: PromptSettingsSnapshot,
   ): RuntimeQueuedPrompt {
     const queued: RuntimeQueuedPrompt = {
       id: randomUUID(),
@@ -164,6 +187,7 @@ export class PromptScheduler {
       imageCount: images.length,
       createdAt,
       ...(gateMode ? { gateMode } : null),
+      ...(settings ? { settings } : null),
     };
     runtime.promptQueue.push(queued);
     this.broadcastRuntimeQueue(runtime, queued.id);
@@ -191,12 +215,32 @@ export class PromptScheduler {
     promptAt = Date.now(),
     gateMode?: GateMode,
     promptId: string = randomUUID(),
+    settings?: PromptSettingsSnapshot,
+    consumeSupersededLegacy = false,
   ): Promise<PromptAcceptance> {
     const releaseOperation = this.host.acquirePrimaryOperation();
     try {
       await this.host.ensurePrimaryRuntime();
       const generation = this.primaryAbortGeneration;
-      await this.host.applyPendingTurnSettings(this.host.primaryRpc(), this.primaryPendingTurnSettings);
+      let appliedSettings: AppliedTurnSettings;
+      try {
+        appliedSettings = this.host.applyPromptSettings
+          ? await this.host.applyPromptSettings(
+              this.host.primaryRpc(),
+              this.primaryPendingTurnSettings,
+              settings,
+              consumeSupersededLegacy,
+            )
+          : (await this.host.applyPendingTurnSettings(
+              this.host.primaryRpc(),
+              this.primaryPendingTurnSettings,
+            ), {});
+      } catch (error) {
+        if (error instanceof PartialTurnSettingsError)
+          this.host.onPrimaryPromptSettingsApplied?.(error.applied);
+        throw error;
+      }
+      this.host.onPrimaryPromptSettingsApplied?.(appliedSettings);
       if (generation !== this.primaryAbortGeneration || this.host.isClosed() || !this.host.isLifecycleIdle()) throw new Error("消息发送已取消");
       const rpc = this.host.primaryRpc();
       const sessionId = this.host.activeSessionId();
@@ -269,6 +313,7 @@ export class PromptScheduler {
         next.createdAt,
         next.gateMode,
         next.id,
+        next.settings,
       );
       if (acceptance === "unknown") {
         // Normal prompt acceptance is released by Pi's ordered agent_start
@@ -363,7 +408,24 @@ export class PromptScheduler {
       piChatSessionId: runtime.id,
     });
     try {
-      await this.host.applyPendingTurnSettings(runtime.rpc, runtime.pendingTurnSettings);
+      let appliedSettings: AppliedTurnSettings;
+      try {
+        appliedSettings = this.host.applyPromptSettings
+          ? await this.host.applyPromptSettings(
+              runtime.rpc,
+              runtime.pendingTurnSettings,
+              next.settings,
+            )
+          : (await this.host.applyPendingTurnSettings(
+              runtime.rpc,
+              runtime.pendingTurnSettings,
+            ), {});
+      } catch (error) {
+        if (error instanceof PartialTurnSettingsError)
+          this.host.onRuntimePromptSettingsApplied?.(runtime, error.applied);
+        throw error;
+      }
+      this.host.onRuntimePromptSettingsApplied?.(runtime, appliedSettings);
       if (generation !== runtime.abortGeneration || this.host.isClosed() || !this.host.isLifecycleIdle()) throw new Error("消息发送已取消");
       await this.host.syncGateMode(runtime.rpc, runtime.id, next.gateMode);
       runtime.running = true;

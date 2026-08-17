@@ -623,7 +623,9 @@ details.conversation-process { display: block; padding: 0; }
 .composer-controls .compact-select-trigger { height: 28px; justify-content: center; padding-right: 4px; }
 .composer-controls .compact-select-trigger > span { flex: 0 1 auto; text-align: center; }
 .composer-controls .compact-select-trigger:hover:not(:disabled) { background: color-mix(in srgb, var(--surface-hover), var(--text) 5%); color: var(--text); }
-.composer-controls .compact-select-chevron { display: none; }
+.composer-controls .compact-select-chevron { display: block; opacity: .72; }
+.composer-controls .compact-select-trigger:hover:not(:disabled) .compact-select-chevron,
+.composer-controls .compact-select-trigger:focus-visible .compact-select-chevron { opacity: 1; }
 .composer-controls .usage-pill { border: 0; background: transparent; box-shadow: none; }
 .composer-controls .usage-pill:hover, .composer-controls .usage-pill:focus-visible { border-color: transparent; background: color-mix(in srgb, var(--surface-hover), var(--text) 5%); box-shadow: none; }
 .composer-controls .gate-control { width: 68px; min-width: 68px; flex: 0 1 68px; }

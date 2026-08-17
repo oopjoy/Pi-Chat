@@ -28,6 +28,7 @@ import type {
   PrimaryRuntimeReadiness,
   PromptDelivery,
   PromptImage,
+  PromptSettingsSnapshot,
   QueuedPrompt,
   SessionActivityState,
   SessionDirectorySummary,
@@ -109,8 +110,10 @@ import {
   type SessionUsageSnapshot,
 } from "./session-index.js";
 import {
+  PartialTurnSettingsError,
   RuntimeCapacityError,
   RuntimePool,
+  type AppliedTurnSettings,
   type PendingTurnSettings,
   type SecondaryRuntime,
 } from "./runtime-pool.js";
@@ -232,6 +235,56 @@ function requiredSessionId(body: Record<string, unknown>): string {
     throw new HttpRequestError(400, "sessionId 必须是有效的会话标识");
   }
   return sessionId;
+}
+
+const THINKING_LEVELS: ThinkingLevel[] = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
+
+/** Parse the immutable next-turn selection attached to one ordinary prompt. */
+function promptSettingsSnapshot(body: Record<string, unknown>): PromptSettingsSnapshot | undefined {
+  if (body.settings === undefined) return undefined;
+  if (!body.settings || typeof body.settings !== "object" || Array.isArray(body.settings))
+    throw new HttpRequestError(400, "消息设置格式无效");
+  const raw = body.settings as Record<string, unknown>;
+  const rawModel = raw.model;
+  let model: PromptSettingsSnapshot["model"];
+  if (rawModel !== undefined) {
+    if (!rawModel || typeof rawModel !== "object" || Array.isArray(rawModel))
+      throw new HttpRequestError(400, "模型设置格式无效");
+    const candidate = rawModel as Record<string, unknown>;
+    const provider = typeof candidate.provider === "string" ? candidate.provider.trim() : "";
+    const modelId = typeof candidate.modelId === "string" ? candidate.modelId.trim() : "";
+    if (
+      !provider ||
+      !modelId ||
+      provider.length > 80 ||
+      modelId.length > 200 ||
+      /[\u0000-\u001f]/.test(provider) ||
+      /[\u0000-\u001f]/.test(modelId)
+    )
+      throw new HttpRequestError(400, "模型设置无效");
+    model = { provider, modelId };
+  }
+  const thinkingLevel =
+    typeof raw.thinkingLevel === "string" &&
+    THINKING_LEVELS.includes(raw.thinkingLevel as ThinkingLevel)
+      ? (raw.thinkingLevel as ThinkingLevel)
+      : undefined;
+  if (raw.thinkingLevel !== undefined && !thinkingLevel)
+    throw new HttpRequestError(400, "无效的 Thinking 强度");
+  if (!model && !thinkingLevel)
+    throw new HttpRequestError(400, "消息设置不能为空");
+  return {
+    ...(model ? { model } : null),
+    ...(thinkingLevel ? { thinkingLevel } : null),
+  };
 }
 
 export interface PreparedApplicationRestart {
@@ -626,6 +679,17 @@ export class PiChatApp {
       touchRuntime: (runtime) => this.runtimePool.touch(runtime),
       applyPendingTurnSettings: (rpc, pending) =>
         this.applyPendingTurnSettings(rpc, pending),
+      applyPromptSettings: (rpc, pending, settings, consumeSupersededLegacy) =>
+        this.applyPromptSettings(
+          rpc,
+          pending,
+          settings,
+          consumeSupersededLegacy,
+        ),
+      onPrimaryPromptSettingsApplied: (settings) =>
+        this.rememberPrimaryAppliedTurnSettings(settings),
+      onRuntimePromptSettingsApplied: (runtime, settings) =>
+        this.rememberRuntimeAppliedTurnSettings(runtime, settings),
       syncGateMode: (rpc, sessionId, mode) =>
         this.syncGateMode(rpc, sessionId, mode),
       promptRpcObserver: (rpc, sessionId, promptId) =>
@@ -3114,23 +3178,101 @@ export class PiChatApp {
     return command?.source === "extension" ? command : null;
   }
 
+  /**
+   * Validate a captured Model against the exact Runtime that is about to run
+   * it. Browser catalogues are advisory and may be stale; a valid-looking ID
+   * must never bypass this target-Runtime check.
+   */
+  private async applyTurnSettings(
+    rpc: PiRpcClient,
+    settings: PendingTurnSettings,
+  ): Promise<AppliedTurnSettings> {
+    const applied: AppliedTurnSettings = {};
+    if (settings.model) {
+      const model = asModels(
+        await rpc.send({ type: "get_available_models" }),
+      ).find(
+        (candidate) =>
+          candidate.provider === settings.model!.provider &&
+          candidate.id === settings.model!.modelId,
+      );
+      if (!model) throw new HttpRequestError(400, "所选模型不可用");
+      await rpc.send({
+        type: "set_model",
+        provider: model.provider,
+        modelId: model.id,
+      });
+      this.rememberModelContextWindows([model]);
+      applied.model = model;
+    }
+    if (settings.thinkingLevel) {
+      try {
+        await rpc.send({
+          type: "set_thinking_level",
+          level: settings.thinkingLevel,
+        });
+      } catch (error) {
+        if (applied.model)
+          throw new PartialTurnSettingsError(applied, error);
+        throw error;
+      }
+      applied.thinkingLevel = settings.thinkingLevel;
+    }
+    return applied;
+  }
+
+  /** Apply and consume the legacy Runtime-wide next-turn setting holder. */
   private async applyPendingTurnSettings(
     rpc: PiRpcClient,
     pending: PendingTurnSettings,
   ): Promise<void> {
-    if (pending.model)
-      await rpc.send({
-        type: "set_model",
-        provider: pending.model.provider,
-        modelId: pending.model.modelId,
-      });
-    if (pending.thinkingLevel)
-      await rpc.send({
-        type: "set_thinking_level",
-        level: pending.thinkingLevel,
-      });
+    await this.applyTurnSettings(rpc, pending);
     delete pending.model;
     delete pending.thinkingLevel;
+  }
+
+  /**
+   * A later prompt snapshot supersedes only legacy pending fields that existed
+   * before this prompt's admission. Legacy mutations accepted after queueing
+   * remain in the holder and belong to the following prompt.
+   */
+  private supersedePendingTurnSettings(
+    pending: PendingTurnSettings,
+    snapshot?: PromptSettingsSnapshot,
+  ): void {
+    if (snapshot?.model) delete pending.model;
+    if (snapshot?.thinkingLevel) delete pending.thinkingLevel;
+  }
+
+  /**
+   * A queued Composer submission owns settings captured at its own admission.
+   * Its snapshot wins for this row, but must not consume a legacy setting that
+   * arrived later while the row waited behind a running turn.
+   */
+  private async applyPromptSettings(
+    rpc: PiRpcClient,
+    pending: PendingTurnSettings,
+    snapshot?: PromptSettingsSnapshot,
+    consumeSupersededLegacy = false,
+  ): Promise<AppliedTurnSettings> {
+    const usePendingModel = !snapshot?.model;
+    const usePendingThinking = !snapshot?.thinkingLevel;
+    const settings: PendingTurnSettings = {
+      ...(usePendingModel && pending.model ? { model: pending.model } : null),
+      ...(usePendingThinking && pending.thinkingLevel
+        ? { thinkingLevel: pending.thinkingLevel }
+        : null),
+      ...(snapshot?.model ? { model: snapshot.model } : null),
+      ...(snapshot?.thinkingLevel
+        ? { thinkingLevel: snapshot.thinkingLevel }
+        : null),
+    };
+    const applied = await this.applyTurnSettings(rpc, settings);
+    if (usePendingModel) delete pending.model;
+    if (usePendingThinking) delete pending.thinkingLevel;
+    if (consumeSupersededLegacy)
+      this.supersedePendingTurnSettings(pending, snapshot);
+    return applied;
   }
 
   /**
@@ -3162,6 +3304,31 @@ export class PiChatApp {
         runtime.lastState?.isStreaming ||
         false,
     };
+  }
+
+  /** Keep hot/busy reads truthful after a prompt snapshot changed settings. */
+  private rememberPrimaryAppliedTurnSettings(
+    settings: AppliedTurnSettings,
+  ): void {
+    this.rememberPrimaryDisplaySettings({
+      ...(settings.model ? { model: settings.model } : null),
+      ...(settings.thinkingLevel
+        ? { thinkingLevel: settings.thinkingLevel }
+        : null),
+    });
+  }
+
+  /** Keep a Secondary's hot-memory view aligned before its prompt starts. */
+  private rememberRuntimeAppliedTurnSettings(
+    runtime: SecondaryRuntime,
+    settings: AppliedTurnSettings,
+  ): void {
+    this.rememberRuntimeDisplaySettings(runtime, {
+      ...(settings.model ? { model: settings.model } : null),
+      ...(settings.thinkingLevel
+        ? { thinkingLevel: settings.thinkingLevel }
+        : null),
+    });
   }
 
   private currentGateMode(sessionId: string): GateMode {
@@ -3242,6 +3409,7 @@ export class PiChatApp {
     promptAt = this.now(),
     gateMode?: GateMode,
     promptId: string = randomUUID(),
+    settings?: PromptSettingsSnapshot,
   ): Promise<PromptAcceptance> {
     return this.scheduler.sendPrimaryPrompt(
       message,
@@ -3249,6 +3417,8 @@ export class PiChatApp {
       promptAt,
       gateMode,
       promptId,
+      settings,
+      true,
     );
   }
 
@@ -5143,6 +5313,7 @@ export class PiChatApp {
         body.gateMode === "strict" || body.gateMode === "open"
           ? body.gateMode
           : undefined;
+      const requestedSettings = promptSettingsSnapshot(body);
       if (
         body.delivery !== undefined &&
         body.delivery !== "queue" &&
@@ -5199,6 +5370,10 @@ export class PiChatApp {
           if (message.startsWith("/"))
             return json(response, 400, {
               error: "Slash 指令不能作为 Steer 消息发送",
+            });
+          if (requestedSettings)
+            return json(response, 400, {
+              error: "Steer 消息不能修改下一轮模型设置",
             });
           // Bounded native steering backlog: Pi's own queue, this admission
           // bookkeeping, the text snapshot, and the browser's hidden local
@@ -5437,6 +5612,13 @@ export class PiChatApp {
               images,
               promptAt,
               requestedGateMode,
+              requestedSettings,
+            );
+            // This snapshot is now durably admitted into the private FIFO, so
+            // it supersedes only legacy settings that predated its admission.
+            this.supersedePendingTurnSettings(
+              secondaryRuntime.pendingTurnSettings,
+              requestedSettings,
             );
             this.tracePrompt("admitted", secondaryRuntime.id, queued.id);
             this.tracePrompt("queued", secondaryRuntime.id, queued.id);
@@ -5451,9 +5633,25 @@ export class PiChatApp {
           const promptId = randomUUID();
           const generation = secondaryRuntime.abortGeneration;
           try {
-            await this.applyPendingTurnSettings(
-              secondaryRuntime.rpc,
-              secondaryRuntime.pendingTurnSettings,
+            let appliedSettings: AppliedTurnSettings;
+            try {
+              appliedSettings = await this.applyPromptSettings(
+                secondaryRuntime.rpc,
+                secondaryRuntime.pendingTurnSettings,
+                requestedSettings,
+                true,
+              );
+            } catch (error) {
+              if (error instanceof PartialTurnSettingsError)
+                this.rememberRuntimeAppliedTurnSettings(
+                  secondaryRuntime,
+                  error.applied,
+                );
+              throw error;
+            }
+            this.rememberRuntimeAppliedTurnSettings(
+              secondaryRuntime,
+              appliedSettings,
             );
             if (
               generation !== secondaryRuntime.abortGeneration ||
@@ -5519,6 +5717,13 @@ export class PiChatApp {
             images,
             promptAt,
             requestedGateMode,
+            requestedSettings,
+          );
+          // The queue owns the admitted immutable snapshot. A later legacy
+          // mutation remains pending for a following row.
+          this.supersedePendingTurnSettings(
+            this.pendingTurnSettings,
+            requestedSettings,
           );
           this.tracePrompt("admitted", this.activeSessionId, queued.id);
           this.tracePrompt("queued", this.activeSessionId, queued.id);
@@ -5539,6 +5744,7 @@ export class PiChatApp {
           promptAt,
           requestedGateMode,
           promptId,
+          requestedSettings,
         );
         if (acceptance === "unknown")
           this.tracePrompt("delivery-uncertain", this.activeSessionId, promptId);
@@ -6037,9 +6243,7 @@ export class PiChatApp {
         return json(response, 400, { error: "无效的 Gate 模式" });
       if (
         initial?.thinkingLevel !== undefined &&
-        !["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(
-          initial.thinkingLevel,
-        )
+        !THINKING_LEVELS.includes(initial.thinkingLevel)
       )
         return json(response, 400, { error: "无效的 Thinking 强度" });
       if (
@@ -6087,43 +6291,31 @@ export class PiChatApp {
         try {
           this.requireSessionControl(runtime.id, clientId);
           const promptAt = this.nextUserPromptAt();
-          if (
-            initial.model &&
-            typeof initial.model.provider === "string" &&
-            typeof initial.model.modelId === "string"
-          ) {
-            const model = rpcData<ModelInfo>(
-              await runtime.rpc.send({
-                type: "set_model",
-                provider: initial.model.provider,
-                modelId: initial.model.modelId,
-              }),
-            );
-            runtime.lastState = {
-              ...(runtime.lastState || { model: null, isStreaming: false }),
-              model,
-            };
-          }
-          if (
-            initial.thinkingLevel &&
-            [
-              "off",
-              "minimal",
-              "low",
-              "medium",
-              "high",
-              "xhigh",
-              "max",
-            ].includes(initial.thinkingLevel)
-          ) {
-            await runtime.rpc.send({
-              type: "set_thinking_level",
-              level: initial.thinkingLevel,
-            });
-            runtime.lastState = {
-              ...(runtime.lastState || { model: null, isStreaming: false }),
-              thinkingLevel: initial.thinkingLevel,
-            };
+          const initialSettings: PendingTurnSettings = {
+            ...(initial.model
+              ? {
+                  model: {
+                    provider: initial.model.provider,
+                    modelId: initial.model.modelId,
+                  },
+                }
+              : null),
+            ...(initial.thinkingLevel
+              ? { thinkingLevel: initial.thinkingLevel }
+              : null),
+          };
+          if (initialSettings.model || initialSettings.thinkingLevel) {
+            try {
+              const appliedSettings = await this.applyTurnSettings(
+                runtime.rpc,
+                initialSettings,
+              );
+              this.rememberRuntimeAppliedTurnSettings(runtime, appliedSettings);
+            } catch (error) {
+              if (error instanceof PartialTurnSettingsError)
+                this.rememberRuntimeAppliedTurnSettings(runtime, error.applied);
+              throw error;
+            }
           }
           const extensionCommand = initialMessage
             ? await this.extensionCommand(initialMessage, runtime.rpc)
@@ -6339,6 +6531,11 @@ export class PiChatApp {
         return json(response, 400, { error: "provider 和 modelId 必填" });
       if (!secondaryRuntime && sessionId !== this.activeSessionId)
         return json(response, 409, { error: "该会话尚未启用" });
+      // Legacy direct setting calls may come from an older window. Serialize
+      // them with prompt admission so they cannot interleave a newer prompt's
+      // captured set_model → set_thinking_level → prompt transaction.
+      const releaseSettingAdmission = await this.beginPromptAdmission(sessionId);
+      try {
       if (secondaryRuntime) {
         return this.runtimePool.withOperation(secondaryRuntime, async () => {
           if (this.secondaryNeedsRecovery(secondaryRuntime))
@@ -6382,23 +6579,18 @@ export class PiChatApp {
       } finally {
         releasePrimaryOperation();
       }
+      } finally {
+        releaseSettingAdmission();
+      }
+      return;
     }
 
     if (url.pathname === "/api/thinking/set") {
       if (request.method !== "POST") return methodNotAllowed(response);
       const body = preparedBody || (await bodyJson(request));
-      const allowed: ThinkingLevel[] = [
-        "off",
-        "minimal",
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-        "max",
-      ];
       const level =
         typeof body.level === "string" &&
-        allowed.includes(body.level as ThinkingLevel)
+        THINKING_LEVELS.includes(body.level as ThinkingLevel)
           ? (body.level as ThinkingLevel)
           : null;
       const sessionId = requiredSessionId(body);
@@ -6406,6 +6598,9 @@ export class PiChatApp {
       if (!level) return json(response, 400, { error: "无效的 Thinking 强度" });
       if (!secondaryRuntime && sessionId !== this.activeSessionId)
         return json(response, 409, { error: "该会话尚未启用" });
+      // See /api/models/set: direct legacy mutations share the prompt FIFO.
+      const releaseSettingAdmission = await this.beginPromptAdmission(sessionId);
+      try {
       if (secondaryRuntime) {
         return this.runtimePool.withOperation(secondaryRuntime, async () => {
           if (this.secondaryNeedsRecovery(secondaryRuntime))
@@ -6454,6 +6649,10 @@ export class PiChatApp {
       } finally {
         releasePrimaryOperation();
       }
+      } finally {
+        releaseSettingAdmission();
+      }
+      return;
     }
 
     if (url.pathname === "/api/resources/browse") {

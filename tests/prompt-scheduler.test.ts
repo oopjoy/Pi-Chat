@@ -468,3 +468,63 @@ test("publicQueue strips image payloads", () => {
     createdAt: item.createdAt,
   });
 });
+
+test("queued prompts retain their own immutable Model and Thinking snapshot", async () => {
+  const dispatched: string[] = [];
+  const applied: unknown[] = [];
+  const rpc = {
+    send: async (command: { type: string; message?: string }) => {
+      if (command.type === "prompt") dispatched.push(command.message || "");
+      return { type: "response", success: true };
+    },
+  };
+  const scheduler = new PromptScheduler({
+    isClosed: () => false,
+    isLifecycleIdle: () => true,
+    primaryRpc: () => rpc as never,
+    activeSessionId: () => "primary",
+    ensurePrimaryRuntime: async () => {},
+    recoverRuntime: async () => {},
+    acquirePrimaryOperation: () => () => {},
+    acquireRuntimeOperation: () => () => {},
+    touchRuntime: () => {},
+    applyPendingTurnSettings: async () => {},
+    applyPromptSettings: async (_rpc, pending, settings) => {
+      applied.push(settings);
+      delete pending.model;
+      delete pending.thinkingLevel;
+      return {};
+    },
+    syncGateMode: async () => {},
+    broadcast: () => {},
+    onPrimaryPromptAccepted: () => {},
+    onSecondaryPromptAccepted: () => {},
+  });
+  scheduler.enqueuePrimary("first", [], 1, undefined, {
+    model: { provider: "provider-a", modelId: "model-a" },
+    thinkingLevel: "high",
+  });
+  scheduler.enqueuePrimary("second", [], 2, undefined, {
+    model: { provider: "provider-b", modelId: "model-b" },
+    thinkingLevel: "low",
+  });
+
+  await scheduler.dispatchPrimaryNext();
+  // Pi's agent_start/settled event normally clears this preparation marker.
+  scheduler.primaryRunning = false;
+  scheduler.primaryDispatching = false;
+  await scheduler.dispatchPrimaryNext();
+
+  assert.deepEqual(dispatched, ["first", "second"]);
+  assert.deepEqual(applied, [
+    {
+      model: { provider: "provider-a", modelId: "model-a" },
+      thinkingLevel: "high",
+    },
+    {
+      model: { provider: "provider-b", modelId: "model-b" },
+      thinkingLevel: "low",
+    },
+  ]);
+  assert.equal((scheduler.publicQueue()[0] as Record<string, unknown>)?.settings, undefined);
+});

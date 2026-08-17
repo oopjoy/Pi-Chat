@@ -47,6 +47,7 @@ test("cold history settings stage immediately and survive until send", async () 
   };
   let warmCalls = 0;
   const promptCalls: unknown[][] = [];
+  const directSettingCalls: string[] = [];
   Object.assign(api, {
     bootstrap: async () => ({
       ...bootstrap,
@@ -58,8 +59,8 @@ test("cold history settings stage immediately and survive until send", async () 
     markSessionViewed: async () => ({ viewing: activeId }),
     viewSession: async (id: string) => (id === coldId ? cold : draftView),
     warmSession: async () => { warmCalls += 1; return { sessionId: coldId, state: cold.state, gateMode: "strict" as const }; },
-    setModel: async () => ({ model: targetModel, pending: false }),
-    setThinking: async () => ({ level: "high" as const, pending: false }),
+    setModel: async () => { directSettingCalls.push("model"); return { model: targetModel, pending: false }; },
+    setThinking: async () => { directSettingCalls.push("thinking"); return { level: "high" as const, pending: false }; },
     prompt: async (...args: unknown[]) => { promptCalls.push(args); return { accepted: true, queued: false }; },
   });
   const root = createRoot(dom.window.document.querySelector("#root")!);
@@ -99,22 +100,27 @@ test("cold history settings stage immediately and survive until send", async () 
     });
     assert.ok(promptCalls.length >= 1, "cold send reaches the API");
     assert.equal(warmCalls, 1, "cold send warms its Runtime exactly once");
+    assert.deepEqual(directSettingCalls, [], "the Composer does not split a next-turn selection into pre-prompt Runtime mutations");
+    assert.deepEqual(
+      promptCalls[0]?.[5],
+      { model: { provider: "xwill", modelId: "gpt-5.6-terra" } },
+      "the cold prompt receives the exact Model snapshot captured at Send",
+    );
   } finally {
     await act(async () => root.unmount());
     restoreApi();
   }
 });
 
-test("an in-flight model request does not block staging a thinking choice", async () => {
+test("one active-session Composer selection stays local until its prompt captures Model and Thinking together", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../../src/web/api");
   const { App } = await import("../../src/web/App");
   const restoreApi = captureApiSnapshot(api);
   const hotId = activeId;
-  let resolveModel!: (value: { model: BootstrapData["state"]["model"]; pending: boolean }) => void;
-  const modelPending = new Promise<{ model: BootstrapData["state"]["model"]; pending: boolean }>((resolve) => { resolveModel = resolve; });
-  const setModelCalls: string[][] = [];
+  const directSettingCalls: string[][] = [];
+  const promptCalls: unknown[][] = [];
   Object.assign(api, {
     bootstrap: async () => ({
       ...bootstrap,
@@ -129,38 +135,54 @@ test("an in-flight model request does not block staging a thinking choice", asyn
     markSessionViewed: async () => ({ viewing: hotId }),
     viewSession: async () => draftView,
     setModel: async (provider: string, modelId: string) => {
-      setModelCalls.push([provider, modelId]);
-      return modelPending;
+      directSettingCalls.push([provider, modelId]);
+      return { model: bootstrap.state.model, pending: false };
     },
-    setThinking: async () => ({ level: "high" as const, pending: false }),
+    setThinking: async (level: string) => {
+      directSettingCalls.push(["thinking", level]);
+      return { level: "high" as const, pending: false };
+    },
+    prompt: async (...args: unknown[]) => { promptCalls.push(args); return { accepted: true, queued: false }; },
   });
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {
     await act(async () => root.render(createElement(App)));
-    // Choose a model; its request stays in flight.
+    // Choosing Model/Thinking only changes this session's next-prompt intent.
     const modelTrigger = dom.window.document.querySelector<HTMLButtonElement>(".composer-model-select .compact-select-trigger")!;
     await act(async () => { modelTrigger.click(); await Promise.resolve(); });
     const modelOption = [...dom.window.document.querySelectorAll<HTMLElement>(".compact-select-option")]
       .find((candidate) => candidate.textContent?.includes("gpt-5.6-sol"));
     assert.ok(modelOption);
     await act(async () => { modelOption.click(); await Promise.resolve(); });
-    // While the model request is pending, choosing a thinking level must still
-    // stage (never silently return), and the control reflects the choice.
+    // A second choice augments the same complete next-prompt intent.
     const thinkingTrigger = dom.window.document.querySelector<HTMLButtonElement>(".thinking-control .compact-select-trigger")!;
     await act(async () => { thinkingTrigger.click(); await Promise.resolve(); });
     const thinkingOption = [...dom.window.document.querySelectorAll<HTMLElement>(".compact-select-option")]
       .find((candidate) => candidate.textContent?.trim() === "high");
     assert.ok(thinkingOption);
     await act(async () => { thinkingOption.click(); await Promise.resolve(); await Promise.resolve(); });
-    // In the hot path the choice issues its own RPC; the guarantee under test
-    // is that an in-flight model request never blocks a thinking choice.
     assert.match(
       dom.window.document.querySelector<HTMLButtonElement>(".thinking-control .compact-select-trigger")!.textContent || "",
       /high/,
-      "thinking choice is applied while model request is in flight",
+      "thinking choice is displayed as this Composer's next selection",
     );
-    resolveModel({ model: bootstrap.state.model, pending: false });
-    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    assert.deepEqual(directSettingCalls, [], "selecting controls never mutates the active Runtime before Send");
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "capture complete selection");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "capture complete selection" }));
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.deepEqual(
+      promptCalls[0]?.[5],
+      {
+        model: { provider: "xwill", modelId: "gpt-5.6-sol" },
+        thinkingLevel: "high",
+      },
+      "one prompt carries one immutable complete selection rather than split setting requests",
+    );
   } finally {
     await act(async () => root.unmount());
     restoreApi();
@@ -199,6 +221,7 @@ test("an unknown-capability cold model keeps thinking staggable until first send
   };
   let warmCalls = 0;
   const thinkingCalls: unknown[][] = [];
+  const promptCalls: unknown[][] = [];
   Object.assign(api, {
     bootstrap: async () => ({
       ...bootstrap,
@@ -210,6 +233,7 @@ test("an unknown-capability cold model keeps thinking staggable until first send
     viewSession: async (id: string) => (id === coldId ? cold : draftView),
     warmSession: async () => { warmCalls += 1; return { sessionId: coldId, state: cold.state, gateMode: "strict" as const }; },
     setThinking: async (level: unknown, sessionId: unknown) => { thinkingCalls.push([level, sessionId]); return { level: "high" as const, pending: false }; },
+    prompt: async (...args: unknown[]) => { promptCalls.push(args); return { accepted: true, queued: false }; },
   });
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {
@@ -246,8 +270,13 @@ test("an unknown-capability cold model keeps thinking staggable until first send
     assert.equal(warmCalls, 1, "the first ordinary send warms the target Runtime exactly once");
     assert.deepEqual(
       thinkingCalls,
-      [["high", coldId]],
-      "the first send applies the staged high thinking to exactly this cold Session",
+      [],
+      "the Composer no longer mutates a cold Runtime through a separate setting request",
+    );
+    assert.deepEqual(
+      promptCalls[0]?.[5],
+      { thinkingLevel: "high" },
+      "the first send carries its immutable staged thinking snapshot to exactly this cold Session",
     );
   } finally {
     await act(async () => root.unmount());

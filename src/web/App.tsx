@@ -119,6 +119,12 @@ import {
 import { SessionScrollMemory } from "./lib/session-scroll-memory";
 import { SessionViewCache } from "./lib/session-view-cache";
 import {
+  composerStateForSelection,
+  promptSettingsForSelection,
+  stageSessionComposerSelection,
+  type SessionComposerSelection,
+} from "./lib/session-composer-selection";
+import {
   normalizeCwdKey,
   togglePinnedDirectory,
   togglePinnedSession,
@@ -494,9 +500,6 @@ export function App() {
   } | null>(null);
   const [diffSidebarOpen, setDiffSidebarOpen] = useState(false);
   const [diffSidebarWidth, setDiffSidebarWidth] = useState(460);
-  /** Model / thinking only — must not freeze composer, sidebar, or the whole shell. */
-  const [settingsBusy, setSettingsBusy] = useState(false);
-  const settingsOperationTokenRef = useRef<symbol | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const refreshOperationTokenRef = useRef<symbol | null>(null);
   const [workspacePicking, setWorkspacePicking] = useState(false);
@@ -827,13 +830,15 @@ export function App() {
   const unreadSteeringDropMessagesRef = useRef(new Map<string, string>());
   /** Last authoritative turn count from sidebar/view data, safe inside long-lived SSE callbacks. */
   const sourceTurnTotalsRef = useRef(new Map<string, number>());
-  /** Model/thinking chosen on a cold session or local draft before Runtime starts. */
+  /**
+   * Desired next-turn Model/Thinking, scoped to one ordinary Composer target.
+   * This is intentionally separate from pane.piState, which remains the
+   * JSONL/Runtime fact used to label already-generated conversation content.
+   */
   const pendingSessionPrefsRef = useRef(
-    new Map<
-      string,
-      { model?: ModelInfo | null; thinkingLevel?: ThinkingLevel }
-    >(),
+    new Map<string, SessionComposerSelection>(),
   );
+  const [composerSelectionRevision, setComposerSelectionRevision] = useState(0);
   /** A cold Session's Gate preference is staged until its next real prompt. */
   const pendingGateModesRef = useRef(new Map<string, GateMode>());
   const [pendingGateModes, setPendingGateModes] = useState<
@@ -1675,11 +1680,8 @@ export function App() {
       if (!activeViewId) {
         // A boot with no restored Session is the same user intent as pressing
         // New: keep history in the sidebar, but make the writable default cwd
-        // explicit before the first prompt. This remains browser-local until send.
-        pendingSessionPrefsRef.current.set(DRAFT_PREFS_KEY, {
-          model: data.state.model,
-          thinkingLevel: data.state.thinkingLevel as ThinkingLevel | undefined,
-        });
+        // explicit before the first prompt. The Runtime state supplies the
+        // default display; only an explicit control click creates a selection.
         commitPane({
           type: "RESET_DRAFT",
           model: data.state.model,
@@ -1700,13 +1702,10 @@ export function App() {
         pane: {
           ...emptyConversationPane(),
           identity: { kind: "session", sessionId: activeViewId },
-          piState: {
-            ...data.state,
-            ...(staged?.model !== undefined ? { model: staged.model } : null),
-            ...(staged?.thinkingLevel !== undefined
-              ? { thinkingLevel: staged.thinkingLevel }
-              : null),
-          },
+          // Keep Runtime/JSONL facts separate from the Composer's desired
+          // next-turn selection. Conversation metadata must never be painted
+          // as if an unsubmitted Model/Thinking choice had already run.
+          piState: data.state,
           messages: protectedTranscript.messages,
           messageTotal: protectedTranscript.messageTotal,
           turnTotal: protectedTranscript.turnTotal,
@@ -1959,13 +1958,6 @@ export function App() {
       const nextRuntimeStatus =
         resolvedView.runtimeStatus ||
         (resolvedView.isActive ? "active" : "view-only");
-      // A cold preference remains authoritative through Runtime activation. Do not
-      // discard it merely because the activation view reports the history's last
-      // persisted settings; send() clears it only after both desired settings are
-      // successfully applied to this Runtime.
-      const staged = pendingSessionPrefsRef.current.get(
-        resolvedView.session.id,
-      );
       // Same open-mode auto-allow path for pending requests restored via view/bootstrap.
       const pending = view.pendingExtensionRequest || null;
       const paneAuthority =
@@ -1986,10 +1978,6 @@ export function App() {
             // A cold JSONL view can commit before the global sidebar inventory.
             // Keep its own identity metadata in the same atomic pane projection.
             sessionName: resolvedView.session.name,
-            ...(staged?.model !== undefined ? { model: staged.model } : null),
-            ...(staged?.thinkingLevel !== undefined
-              ? { thinkingLevel: staged.thinkingLevel }
-              : null),
           },
           messages: resolvedView.messages,
           messageTotal: resolvedView.messageTotal,
@@ -2778,8 +2766,6 @@ export function App() {
         draftWorkspacePickerTokenRef.current = null;
         workspaceDefaultPickerTokenRef.current = null;
         setWorkspacePicking(false);
-        settingsOperationTokenRef.current = null;
-        setSettingsBusy(false);
         refreshOperationTokenRef.current = null;
         setRefreshing(false);
         clearStoppingForSession();
@@ -2866,14 +2852,6 @@ export function App() {
             : next.sessionId
               ? { kind: "session" as const, sessionId: next.sessionId }
               : { kind: "draft" as const };
-          const preferenceKey = localDraftRef.current
-            ? DRAFT_PREFS_KEY
-            : next.sessionId || "";
-          const staged = preferenceKey
-            ? pendingSessionPrefsRef.current.get(preferenceKey)
-            : undefined;
-          const selectedModel =
-            staged?.model !== undefined ? staged.model : next.model;
           const snapshot = {
             generation: next.generation,
             modelKeys: [modelCapabilityKey(next.model)].filter(Boolean),
@@ -2881,13 +2859,12 @@ export function App() {
           primaryCapabilitySnapshotRef.current = snapshot;
           setPrimaryCapabilitySnapshot(snapshot);
           dispatchPane({
-            type: "PREFERENCES_STAGED",
+            type: "RUNTIME_SETTINGS_ADOPTED",
             target,
-            model: selectedModel,
-            thinkingLevel:
-              staged?.thinkingLevel !== undefined
-                ? staged.thinkingLevel
-                : next.thinkingLevel,
+            state: {
+              model: next.model,
+              thinkingLevel: next.thinkingLevel,
+            },
           });
         }
       }
@@ -3508,20 +3485,13 @@ export function App() {
                 : next.sessionId
                   ? { kind: "session" as const, sessionId: next.sessionId }
                   : { kind: "draft" as const };
-              const preferenceKey = localDraftRef.current
-                ? DRAFT_PREFS_KEY
-                : next.sessionId || "";
-              const staged = preferenceKey
-                ? pendingSessionPrefsRef.current.get(preferenceKey)
-                : undefined;
               dispatchPane({
-                type: "PREFERENCES_STAGED",
+                type: "RUNTIME_SETTINGS_ADOPTED",
                 target,
-                model: staged?.model !== undefined ? staged.model : next.model,
-                thinkingLevel:
-                  staged?.thinkingLevel !== undefined
-                    ? staged.thinkingLevel
-                    : next.thinkingLevel,
+                state: {
+                  model: next.model,
+                  thinkingLevel: next.thinkingLevel,
+                },
               });
             }
           }
@@ -4308,8 +4278,6 @@ export function App() {
           bootstrapInFlightRef.current = null;
           handshakeInFlightRef.current = null;
           initialHistoryRef.current = null;
-          settingsOperationTokenRef.current = null;
-          setSettingsBusy(false);
           refreshOperationTokenRef.current = null;
           setRefreshing(false);
           clearStoppingForSession();
@@ -4898,29 +4866,45 @@ export function App() {
         throw new Error("当前模型不支持图片输入");
       };
 
-      // Preferences chosen while cold/draft are local until the first send starts a Runtime.
+      // Capture one immutable selection with the send operation. The visible
+      // Composer may change while a cold Runtime warms, but that later choice
+      // belongs to a later prompt and must not rewrite this one.
       const prefsKey = localDraftRef.current
         ? DRAFT_PREFS_KEY
         : targetSessionId;
       const staged = pendingSessionPrefsRef.current.get(prefsKey);
+      const capturedSelection = staged
+        ? {
+            ...staged,
+            ...(staged.model ? { model: { ...staged.model } } : null),
+          }
+        : undefined;
+      const capturedPromptSettings = promptSettingsForSelection(
+        capturedSelection,
+      );
       // A child JSONL's historical settings describe the child only. They must
       // never silently reconfigure its parent merely because this composer
       // routes an ordinary message to that verified parent.
       const sendingFromChildView =
-        Boolean(targetSessionId) && targetSessionId !== viewedSessionIdRef.current;
-      let preferredModel =
-        staged?.model !== undefined
-          ? staged.model
+        Boolean(targetSessionId) &&
+        targetSessionId !== viewedSessionIdRef.current;
+      const preferredModel =
+        capturedSelection?.model !== undefined
+          ? capturedSelection.model
           : sendingFromChildView
             ? undefined
             : state.model;
-      let preferredThinking =
-        staged?.thinkingLevel !== undefined
-          ? staged.thinkingLevel
+      const preferredThinking =
+        capturedSelection?.thinkingLevel !== undefined
+          ? capturedSelection.thinkingLevel
           : sendingFromChildView
             ? undefined
             : (state.thinkingLevel as ThinkingLevel | undefined);
-      let confirmedPromptModel = state.model;
+      // A child transcript's model describes only that child. It is never
+      // capability evidence for a parent-targeted ordinary prompt.
+      let confirmedPromptModel = sendingFromChildView
+        ? undefined
+        : preferredModel || state.model;
       let initialPromptResult: Awaited<ReturnType<typeof api.prompt>> | null =
         null;
       if (localDraftRef.current) {
@@ -4960,6 +4944,8 @@ export function App() {
               input.images,
               view.session.id,
               input.gateMode,
+              "queue",
+              promptSettingsForSelection(capturedSelection),
             );
             return {
               sessionId: view.session.id,
@@ -4974,8 +4960,11 @@ export function App() {
           cwd: draftWorkspaceCwd || workspaceCwd,
           message,
           images,
-          model: preferredModel,
-          thinkingLevel: preferredThinking,
+          // PiState supplies the displayed default only. Creating a new
+          // Runtime must mutate Model/Thinking solely for an explicit Composer
+          // selection captured with this first prompt.
+          model: capturedSelection?.model,
+          thinkingLevel: capturedSelection?.thinkingLevel,
         });
         if (!promptOperationIsInCurrentRun()) return;
         targetSessionId = initial.sessionId;
@@ -5010,7 +4999,26 @@ export function App() {
             clearPending: true,
           });
         } else rememberSessionView(initialView);
-        pendingSessionPrefsRef.current.delete(DRAFT_PREFS_KEY);
+        // A choice made after Send started remains the draft's newer revision;
+        // move it to the just-created ordinary target instead of dropping it.
+        // A replacement New owns a newer draft authority and must keep its own
+        // selection: an old async first-send completion may not touch it.
+        if (draftAuthorityCanCommit(draftAuthority)) {
+          const newestDraftSelection = pendingSessionPrefsRef.current.get(
+            DRAFT_PREFS_KEY,
+          );
+          if (
+            newestDraftSelection &&
+            newestDraftSelection.revision !== capturedSelection?.revision
+          ) {
+            pendingSessionPrefsRef.current.set(
+              targetSessionId,
+              newestDraftSelection,
+            );
+            setComposerSelectionRevision((revision) => revision + 1);
+          }
+          pendingSessionPrefsRef.current.delete(DRAFT_PREFS_KEY);
+        }
         // Preserve the ordinary acknowledgement/optimistic-turn path below;
         // only the transport setup was collapsed into this first request.
         initialPromptResult = initial;
@@ -5026,25 +5034,11 @@ export function App() {
         });
         protectLocalPrompt();
         promptAuthority = activationAuthority;
-        // A selected cold Session is normally already warming in the
-        // background. Await only its minimal capability promise; do not turn
-        // the first prompt into a full history/stats/commands activation.
+        // Warming establishes only Runtime capability. The exact captured
+        // selection is applied by the server together with this prompt.
         const ready = await warmSessionRuntime(targetSessionId);
         if (!promptOperationIsInCurrentRun()) return;
-        // The pane state is optimistic while cold. Compare staged settings to
-        // the Runtime state proven by /warm, not to that optimistic snapshot;
-        // otherwise a selection made during warm can be skipped accidentally.
-        const latestStaged =
-          pendingSessionPrefsRef.current.get(targetSessionId);
-        preferredModel =
-          latestStaged?.model !== undefined
-            ? latestStaged.model
-            : preferredModel;
-        preferredThinking =
-          latestStaged?.thinkingLevel !== undefined
-            ? latestStaged.thinkingLevel
-            : preferredThinking;
-        confirmedPromptModel = ready.state.model;
+        confirmedPromptModel = preferredModel || ready.state.model;
         const activationIsCurrent = applyWarmReadiness(
           targetSessionId,
           ready,
@@ -5057,85 +5051,12 @@ export function App() {
             status: WAITING_FOR_PI_STATUS,
             clearPending: true,
           });
-        // Re-apply staged cold preferences only when they differ from the
-        // readiness state; this avoids a full activation view merely to learn
-        // settings that were already cached with the JSONL pane.
-        if (
-          preferredModel &&
-          (ready.state.model?.provider !== preferredModel.provider ||
-            ready.state.model?.id !== preferredModel.id)
-        ) {
-          const selected = await api.setModel(
-            preferredModel.provider,
-            preferredModel.id,
-            targetSessionId,
-          );
-          if (!promptOperationIsInCurrentRun()) return;
-          confirmedPromptModel = selected.model;
-          commitPaneIfCurrent(activationAuthority, {
-            type: "SETTINGS_CONFIRMED",
-            sessionId: targetSessionId,
-            state: { model: selected.model },
-          });
-        }
-        if (
-          preferredThinking &&
-          ready.state.thinkingLevel !== preferredThinking
-        ) {
-          const selected = await api.setThinking(
-            preferredThinking,
-            targetSessionId,
-          );
-          if (!promptOperationIsInCurrentRun()) return;
-          commitPaneIfCurrent(activationAuthority, {
-            type: "SETTINGS_CONFIRMED",
-            sessionId: targetSessionId,
-            state: { thinkingLevel: selected.level },
-          });
-        }
-        if (activationIsCurrent)
-          pendingSessionPrefsRef.current.delete(targetSessionId);
-      } else if (!alreadyStreaming) {
-        if (promptAuthority)
-          commitPaneIfCurrent(promptAuthority, {
-            type: "PROMPT_PREPARING",
-            target: { kind: "session", sessionId: targetSessionId },
-            status: WAITING_FOR_PI_STATUS,
-          });
-        // A staged cold preference can survive a prior explicit activation
-        // (for example, Take control). Apply it here too; otherwise this active
-        // path would prompt with the historical last-turn settings.
-        if (staged) {
-          if (staged.model) {
-            const selected = await api.setModel(
-              staged.model.provider,
-              staged.model.id,
-              targetSessionId,
-            );
-            if (!promptOperationIsInCurrentRun()) return;
-            confirmedPromptModel = selected.model;
-            if (promptAuthority)
-              commitPaneIfCurrent(promptAuthority, {
-                type: "SETTINGS_CONFIRMED",
-                sessionId: targetSessionId,
-                state: { model: selected.model },
-              });
-          }
-          if (staged.thinkingLevel) {
-            const selected = await api.setThinking(
-              staged.thinkingLevel,
-              targetSessionId,
-            );
-            if (!promptOperationIsInCurrentRun()) return;
-            if (promptAuthority)
-              commitPaneIfCurrent(promptAuthority, {
-                type: "SETTINGS_CONFIRMED",
-                sessionId: targetSessionId,
-                state: { thinkingLevel: selected.level },
-              });
-          }
-          pendingSessionPrefsRef.current.delete(prefsKey);
-        }
+      } else if (!alreadyStreaming && promptAuthority) {
+        commitPaneIfCurrent(promptAuthority, {
+          type: "PROMPT_PREPARING",
+          target: { kind: "session", sessionId: targetSessionId },
+          status: WAITING_FOR_PI_STATUS,
+        });
       }
 
       if (!initialPromptResult) assertImageCapability(confirmedPromptModel);
@@ -5177,12 +5098,25 @@ export function App() {
               requestedGateMode,
               "steer",
             )
-          : await api.prompt(
-              message,
-              images,
-              targetSessionId,
-              requestedGateMode,
-            ));
+          : capturedPromptSettings
+            ? await api.prompt(
+                message,
+                images,
+                targetSessionId,
+                requestedGateMode,
+                "queue",
+                capturedPromptSettings,
+              )
+            : await api.prompt(
+                message,
+                images,
+                targetSessionId,
+                requestedGateMode,
+              ));
+      // This Session-scoped selection remains the Composer's next-normal-turn
+      // default after admission, matching a persistent Model chooser. The
+      // immutable captured object above still prevents a later click from
+      // rewriting this already-admitted prompt.
       // HTTP acceptance can mean the prompt was queued, before Gate reaches its
       // dispatch boundary. First reconcile its Session-local admission even if
       // a refresh/navigation committed a newer pane while this response was in
@@ -5956,11 +5890,10 @@ export function App() {
       window.clearTimeout(promptReconcileTimerRef.current);
     promptReconcileTimerRef.current = null;
     const previousViewedSessionId = viewedSessionIdRef.current;
-    // Carry over the currently displayed model/thinking as the draft defaults.
-    pendingSessionPrefsRef.current.set(DRAFT_PREFS_KEY, {
-      model: state.model,
-      thinkingLevel: state.thinkingLevel as ThinkingLevel | undefined,
-    });
+    // Each New displays the current Runtime default. It does not inherit an
+    // old Composer intent: only an explicit selection belongs to its next send.
+    pendingSessionPrefsRef.current.delete(DRAFT_PREFS_KEY);
+    setComposerSelectionRevision((revision) => revision + 1);
     // Each New starts from the current application default. Choosing a folder
     // below changes only this draft, never an already-running Session.
     commitPane({
@@ -5994,19 +5927,7 @@ export function App() {
   ) {
     const state = capabilityOnly
       ? { isStreaming: ready.state.isStreaming }
-      : {
-          ...ready.state,
-          ...(pendingSessionPrefsRef.current.get(sessionId)?.model !== undefined
-            ? { model: pendingSessionPrefsRef.current.get(sessionId)!.model }
-            : null),
-          ...(pendingSessionPrefsRef.current.get(sessionId)?.thinkingLevel !==
-          undefined
-            ? {
-                thinkingLevel:
-                  pendingSessionPrefsRef.current.get(sessionId)!.thinkingLevel,
-              }
-            : null),
-        };
+      : ready.state;
     // A returned pane has a newer view projection than the shared warm
     // request. Capability-only mode therefore never copies old model/thinking
     // facts into it.
@@ -6053,14 +5974,7 @@ export function App() {
         .then((ready) => {
           if (runEpochGenerationRef.current !== runEpochGeneration)
             return ready;
-          const staged = pendingSessionPrefsRef.current.get(sessionId);
-          const cacheState = {
-            ...ready.state,
-            ...(staged?.model !== undefined ? { model: staged.model } : null),
-            ...(staged?.thinkingLevel !== undefined
-              ? { thinkingLevel: staged.thinkingLevel }
-              : null),
-          };
+          const cacheState = ready.state;
           // Warming does not apply a staged Gate choice. Keep the runtime's
           // confirmed mode separate so an unconfirmed "open" cannot auto-allow.
           updateGateMode(sessionId, ready.gateMode);
@@ -6104,17 +6018,34 @@ export function App() {
     return target;
   };
 
-  const stageSessionPref = (patch: {
-    model?: ModelInfo | null;
-    thinkingLevel?: ThinkingLevel;
-  }) => {
-    const key = localDraftRef.current ? DRAFT_PREFS_KEY : composerTargetForViewedSession();
-    if (!key) return;
-    const current = pendingSessionPrefsRef.current.get(key) || {};
-    pendingSessionPrefsRef.current.set(key, { ...current, ...patch });
+  const stageComposerSelection = (
+    key: string,
+    patch: Pick<SessionComposerSelection, "model" | "thinkingLevel">,
+  ) => {
+    if (!key) return undefined;
+    const next = stageSessionComposerSelection(
+      pendingSessionPrefsRef.current.get(key),
+      patch,
+    );
+    pendingSessionPrefsRef.current.set(key, next);
+    // This value is only a render invalidator. The selection itself remains
+    // session-keyed in the ref so navigation never aliases one target's choice
+    // onto another target's Composer.
+    setComposerSelectionRevision((revision) => revision + 1);
+    return next;
   };
 
-  const changeModel = async (provider: string, modelId: string) => {
+  const stageSessionPref = (patch: Pick<
+    SessionComposerSelection,
+    "model" | "thinkingLevel"
+  >) => {
+    const key = localDraftRef.current
+      ? DRAFT_PREFS_KEY
+      : composerTargetForViewedSession();
+    return stageComposerSelection(key, patch);
+  };
+
+  const changeModel = (provider: string, modelId: string) => {
     if (buildIdentityMismatch || !provider || !modelId) return;
     const model = models.find(
       (candidate) =>
@@ -6122,136 +6053,35 @@ export function App() {
     );
     const viewed = viewedSessionIdRef.current;
     const targetSessionId = composerTargetForViewedSession();
-    const childOriginated = Boolean(viewed && targetSessionId && viewed !== targetSessionId);
-    // A child transcript is read-only. A child-originated model choice must
-    // never be staged as a parent preference; reject it explicitly instead.
+    const childOriginated = Boolean(
+      viewed && targetSessionId && viewed !== targetSessionId,
+    );
+    // A child transcript is read-only. Do not let its controls mutate the
+    // verified ordinary parent selection, even through a programmatic call.
     if (childOriginated) {
       setNotice("子代理对话为只读，不能修改模型设置");
       return;
     }
-    // Cold history and a superseded setting request only stage a per-target
-    // preference. The eventual prompt path owns application to Pi, so a
-    // setting click never preempts a concurrent prompt. Staging is local and
-    // never blocked by an in-flight settings request.
-    if (localDraftRef.current || runtimeStatus !== "active" || state.isCompacting) {
-      if (model) {
-        stageSessionPref({ model });
-        dispatchPane({
-          type: "PREFERENCES_STAGED",
-          target: localDraftRef.current
-            ? { kind: "draft" }
-            : { kind: "session", sessionId: viewed },
-          model,
-        });
-      }
-      setNotice(`已选择 ${model?.name || modelId}，发送时生效`);
-      return;
-    }
-    const operation = captureViewOperation();
-    const operationToken = Symbol("set-model");
-    settingsOperationTokenRef.current = operationToken;
-    setSettingsBusy(true);
+    if (!model) return;
+    stageSessionPref({ model });
     setError("");
-    try {
-      const result = await api.setModel(provider, modelId, operation.sessionId);
-      if (!viewOperationIsInCurrentRun(operation)) return;
-      const stagedModel = pendingSessionPrefsRef.current.get(operation.sessionId)?.model;
-      const superseded = Boolean(
-        stagedModel &&
-        (stagedModel.provider !== result.model?.provider || stagedModel.id !== result.model?.id),
-      );
-      if (superseded) return;
-      patchSessionCache(operation.sessionId, {
-        state: { model: result.model },
-      });
-      if (
-        !commitPaneIfCurrent(operation, {
-          type: "SETTINGS_CONFIRMED",
-          sessionId: operation.sessionId,
-          state: { model: result.model },
-        })
-      )
-        return;
-      setNotice(
-        result.pending
-          ? `已选择 ${result.model?.name || modelId}，下一轮对话生效`
-          : `已切换到 ${result.model?.name || modelId}`,
-      );
-    } catch (cause) {
-      if (viewOperationIsCurrent(operation))
-        setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      if (
-        settingsOperationTokenRef.current === operationToken &&
-        viewOperationIsInCurrentRun(operation)
-      ) {
-        settingsOperationTokenRef.current = null;
-        setSettingsBusy(false);
-      }
-    }
   };
 
-  const changeThinking = async (level: ThinkingLevel) => {
+  const changeThinking = (level: ThinkingLevel) => {
     if (buildIdentityMismatch) return;
     const viewed = viewedSessionIdRef.current;
     const targetSessionId = composerTargetForViewedSession();
-    const childOriginated = Boolean(viewed && targetSessionId && viewed !== targetSessionId);
-    // A child transcript is read-only. A child-originated thinking choice must
-    // never be staged as a parent preference; reject it explicitly instead.
+    const childOriginated = Boolean(
+      viewed && targetSessionId && viewed !== targetSessionId,
+    );
+    // A child transcript is read-only. Do not let its controls mutate the
+    // verified ordinary parent selection, even through a programmatic call.
     if (childOriginated) {
       setNotice("子代理对话为只读，不能修改思考强度");
       return;
     }
-    if (localDraftRef.current || runtimeStatus !== "active" || state.isCompacting) {
-      stageSessionPref({ thinkingLevel: level });
-      dispatchPane({
-        type: "PREFERENCES_STAGED",
-        target: localDraftRef.current
-          ? { kind: "draft" }
-          : { kind: "session", sessionId: viewed },
-        thinkingLevel: level,
-      });
-      setNotice(`已选择 ${level} 思考强度，发送时生效`);
-      return;
-    }
-    const operation = captureViewOperation();
-    const operationToken = Symbol("set-thinking");
-    settingsOperationTokenRef.current = operationToken;
-    setSettingsBusy(true);
+    stageSessionPref({ thinkingLevel: level });
     setError("");
-    try {
-      const result = await api.setThinking(level, operation.sessionId);
-      if (!viewOperationIsInCurrentRun(operation)) return;
-      const stagedThinking = pendingSessionPrefsRef.current.get(operation.sessionId)?.thinkingLevel;
-      if (stagedThinking && stagedThinking !== result.level) return;
-      patchSessionCache(operation.sessionId, {
-        state: { thinkingLevel: result.level },
-      });
-      if (
-        !commitPaneIfCurrent(operation, {
-          type: "SETTINGS_CONFIRMED",
-          sessionId: operation.sessionId,
-          state: { thinkingLevel: result.level },
-        })
-      )
-        return;
-      setNotice(
-        result.pending
-          ? `已选择 ${result.level}，下一轮对话生效`
-          : `思考强度已切换为 ${result.level}`,
-      );
-    } catch (cause) {
-      if (viewOperationIsCurrent(operation))
-        setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      if (
-        settingsOperationTokenRef.current === operationToken &&
-        viewOperationIsInCurrentRun(operation)
-      ) {
-        settingsOperationTokenRef.current = null;
-        setSettingsBusy(false);
-      }
-    }
   };
 
   const selectDraftWorkspace = (cwd: string) => {
@@ -6976,6 +6806,18 @@ export function App() {
   const viewingSubagentSession = Boolean(subagentComposerAddress);
   /** A child transcript is read-only; normal messages use its verified ordinary ancestor. */
   const composerTargetSessionId = composerTargetForViewedSession();
+  // The bottom controls show the selection for the *next* ordinary prompt.
+  // PiState remains a historical/Runtime projection for the transcript.
+  const composerSelectionKey = localDraft
+    ? DRAFT_PREFS_KEY
+    : composerTargetSessionId;
+  const composerSelection = composerSelectionKey
+    ? pendingSessionPrefsRef.current.get(composerSelectionKey)
+    : undefined;
+  const composerState = useMemo(
+    () => composerStateForSelection(state, composerSelection),
+    [state, composerSelection, composerSelectionRevision],
+  );
   const currentSessionBusy = busySessionIds.includes(
     viewedSessionId || (localDraft ? LOCAL_DRAFT_BUSY_ID : ""),
   );
@@ -7490,12 +7332,10 @@ export function App() {
 
   const composerControls = (
     <ComposerControls
-      state={state}
+      state={composerState}
       models={models}
       stats={stats}
       disabled={mutationBlocked || viewingSubagentSession}
-      settingsBusy={settingsBusy}
-      streaming={state.isStreaming}
       gateAvailable={gateAvailable}
       gateMode={gateMode}
       primaryUnavailable={false}
@@ -7727,14 +7567,17 @@ export function App() {
             : lifecycleBlocked
               ? "Pi Chat 正在执行全局维护，暂时不能提交新操作"
               : undefined,
-          acceptsImages: state.model?.input?.includes("image") === true,
-          imageInputPending: primaryCapabilityPending,
+          acceptsImages:
+            !viewingSubagentSession &&
+            composerState.model?.input?.includes("image") === true,
+          imageInputPending:
+            !viewingSubagentSession && primaryCapabilityPending,
           imageInputPendingMessage,
           resolveImageCapabilityOnSend:
-            viewingSubagentSession ||
-            (primaryRuntime.status === "ready" &&
-              !localDraft &&
-              runtimeStatus !== "active"),
+            !viewingSubagentSession &&
+            primaryRuntime.status === "ready" &&
+            !localDraft &&
+            runtimeStatus !== "active",
           restoredDraft: cancelledDraft,
           onDraftRevisionChange: (revision) => {
             composerDraftRevisionRef.current = revision;

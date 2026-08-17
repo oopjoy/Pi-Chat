@@ -227,6 +227,13 @@ test("clicking a verified Subagent row opens its read-only transcript without wa
     assert.equal([...dom.window.document.querySelectorAll(".session-item")].some((item) => item.textContent?.includes("review child")), false);
     assert.equal(dom.window.document.querySelector('[aria-label*="重命名 review child"], [aria-label*="删除 review child"]'), null);
     assert.equal(textarea.disabled, false, "the child transcript remains read-only while its parent-targeted composer stays editable");
+    const attachment = dom.window.document.querySelector<HTMLButtonElement>(".attachment-button")!;
+    await act(async () => attachment.click());
+    assert.match(
+      dom.window.document.querySelector(".attachment-menu")?.textContent || "",
+      /发送时检查模型支持/,
+      "child historical image capability never authorizes a parent-targeted attachment",
+    );
     const parentBreadcrumb = dom.window.document.querySelector<HTMLButtonElement>(
       '.topbar-breadcrumb-link[aria-label="返回父对话：Active"]',
     );

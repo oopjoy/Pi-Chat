@@ -342,6 +342,12 @@ export interface BootstrapData {
 
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
+/** Exact settings intentionally captured for one ordinary prompt dispatch. */
+export interface PromptSettingsSnapshot {
+  model?: { provider: string; modelId: string };
+  thinkingLevel?: ThinkingLevel;
+}
+
 export interface PromptImage {
   type: "image";
   data: string;

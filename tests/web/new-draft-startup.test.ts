@@ -611,3 +611,120 @@ test("draft startup races keep the composer usable, preserve newer control, and 
     restoreApi();
   }
 });
+
+test("a New draft sends Model and Thinking only after an explicit Composer choice", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const submitted: Array<Record<string, unknown>> = [];
+  Object.assign(api, {
+    bootstrap: async () => bootstrap,
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    clearSessionViewed: async () => ({ viewing: "" }),
+    submitNewSession: async (input: Record<string, unknown>) => {
+      submitted.push(input);
+      return {
+        sessionId: draftView.session.id,
+        session: draftView.session,
+        state: draftView.state,
+        gateMode: "strict" as const,
+        accepted: true as const,
+        queued: false as const,
+      };
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const newButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.trim() === "New")!;
+    await act(async () => newButton.click());
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "default model is display only");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "default model is display only" }));
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(submitted.length, 1);
+    assert.equal(submitted[0]?.model, undefined);
+    assert.equal(submitted[0]?.thinkingLevel, undefined);
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
+test("a late first-draft completion cannot steal a replacement draft selection", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const modelA = { provider: "xwill", id: "gpt-5.6-sol", name: "Sol", input: ["text"], reasoning: true };
+  const modelB = { provider: "xwill", id: "gpt-5.6-terra", name: "Terra", input: ["text"], reasoning: true };
+  const submissions: Array<Record<string, unknown>> = [];
+  let resolveFirst!: (value: { sessionId: string; session: SessionViewData["session"]; state: SessionViewData["state"]; gateMode: "strict"; accepted: true; queued: false }) => void;
+  const first = new Promise<{ sessionId: string; session: SessionViewData["session"]; state: SessionViewData["state"]; gateMode: "strict"; accepted: true; queued: false }>((resolve) => { resolveFirst = resolve; });
+  Object.assign(api, {
+    bootstrap: async () => ({ ...bootstrap, models: [...bootstrap.models, modelA, modelB] }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    clearSessionViewed: async () => ({ viewing: "" }),
+    submitNewSession: async (input: Record<string, unknown>) => {
+      submissions.push(input);
+      return first;
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  const choose = async (label: string) => {
+    const trigger = dom.window.document.querySelector<HTMLButtonElement>(".composer-model-select .compact-select-trigger")!;
+    await act(async () => { trigger.click(); await Promise.resolve(); });
+    const option = [...dom.window.document.querySelectorAll<HTMLElement>(".compact-select-option")]
+      .find((candidate) => candidate.textContent?.includes(label));
+    assert.ok(option, `missing ${label} option`);
+    await act(async () => { option.click(); await Promise.resolve(); });
+  };
+  try {
+    await act(async () => root.render(createElement(App)));
+    const newButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.trim() === "New")!;
+    await act(async () => newButton.click());
+    await choose("Sol");
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "draft A");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "draft A" }));
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+    });
+    assert.equal(submissions.length, 1);
+    assert.deepEqual(submissions[0]?.model, modelA);
+    await act(async () => newButton.click());
+    await choose("Terra");
+    await act(async () => {
+      resolveFirst({
+        sessionId: draftView.session.id,
+        session: draftView.session,
+        state: draftView.state,
+        gateMode: "strict",
+        accepted: true,
+        queued: false,
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.match(
+      dom.window.document.querySelector<HTMLButtonElement>(".composer-model-select .compact-select-trigger")!.textContent || "",
+      /Terra/,
+      "the replacement draft retains its own next-prompt model after A resolves",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});

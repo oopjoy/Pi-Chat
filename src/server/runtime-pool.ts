@@ -1,5 +1,5 @@
 import { unlink } from "node:fs/promises";
-import type { ExtensionUiRequest, GateMode, PiMessage, PiState, PromptImage, SessionStats, SessionSummary, SlashCommand, ThinkingLevel } from "../shared/types.js";
+import type { ExtensionUiRequest, GateMode, ModelInfo, PiMessage, PiState, PromptImage, PromptSettingsSnapshot, SessionStats, SessionSummary, SlashCommand, ThinkingLevel } from "../shared/types.js";
 import { asMessages, asState } from "./pi-data.js";
 import { idForPath, readSessionMessages } from "./session-index.js";
 import { OperationAdmission } from "./operation-admission.js";
@@ -15,6 +15,24 @@ export interface PendingTurnSettings {
   thinkingLevel?: ThinkingLevel;
 }
 
+/** Runtime-confirmed display facts produced while applying one prompt snapshot. */
+export interface AppliedTurnSettings {
+  model?: ModelInfo;
+  thinkingLevel?: ThinkingLevel;
+}
+
+/** A later setting command failed after an earlier one already changed Pi. */
+export class PartialTurnSettingsError extends Error {
+  constructor(
+    readonly applied: AppliedTurnSettings,
+    cause: unknown,
+  ) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = "PartialTurnSettingsError";
+    this.cause = cause;
+  }
+}
+
 export interface RuntimeQueuedPrompt {
   id: string;
   message: string;
@@ -23,6 +41,8 @@ export interface RuntimeQueuedPrompt {
   images: PromptImage[];
   /** Gate mode selected for this turn; replayed immediately before dispatch. */
   gateMode?: GateMode;
+  /** Exact Model/Thinking selection captured when this prompt was admitted. */
+  settings?: PromptSettingsSnapshot;
 }
 
 export interface DraftRuntimeLease {

@@ -58,13 +58,11 @@ function UsageStats({ stats, isCompacting, fastModeActive = false }: { stats?: S
   );
 }
 
-export function ComposerControls({ state, models, stats, disabled, settingsBusy = false, streaming, gateAvailable, gateMode, primaryUnavailable = false, onGate, onModel, onThinking }: {
+export function ComposerControls({ state, models, stats, disabled, gateAvailable, gateMode, primaryUnavailable = false, onGate, onModel, onThinking }: {
   state: PiState;
   models: ModelInfo[];
   stats?: SessionStats;
   disabled: boolean;
-  settingsBusy?: boolean;
-  streaming: boolean;
   gateAvailable: boolean;
   gateMode?: GateMode;
   /** Model, thinking, and Gate mutate the selected Primary Runtime. */
@@ -84,7 +82,7 @@ export function ComposerControls({ state, models, stats, disabled, settingsBusy 
   }));
   const unavailableTitle = "Pi Runtime 尚未就绪；历史仍可阅读，Runtime 恢复后可修改此设置";
 
-  return <div className="composer-controls" title={primaryUnavailable ? unavailableTitle : settingsBusy ? "正在切换模型或思考强度…" : streaming ? "当前回复不会中断；新设置将在下一轮对话生效" : undefined}>
+  return <div className="composer-controls" title={primaryUnavailable ? unavailableTitle : undefined}>
     <CompactSelect value={current} options={modelOptions} disabled={controlsDisabled || !models.length} ariaLabel="模型" title="模型" align="left" icon={<ChipIcon className="model-icon" />} checkPosition="start" className="composer-model-select" fallbackLabel={state.model?.name || state.model?.id || "未选择模型"} onChange={(value) => {
       const model = models.find((candidate) => modelValue(candidate) === value);
       if (model) onModel(model.provider, model.id);
