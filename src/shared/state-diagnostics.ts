@@ -232,6 +232,7 @@ const ENUM_DETAIL_VALUES: Record<string, ReadonlySet<string>> = {
     "malformed-critical-event",
     "malformed-json",
     "missing-session",
+    "post-assistant-terminal",
     "session-deleted",
     "settled-run-generation",
     "stale-draft-authority",

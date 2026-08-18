@@ -869,6 +869,13 @@ export function App() {
   );
   /** message_end may precede agent_settled; only their pair creates an unread completion notice. */
   const terminalAssistantSessionIdsRef = useRef(new Set<string>());
+  /**
+   * A canonical assistant terminal closes only that assistant stream. A later
+   * same-generation update is stale until Pi explicitly starts another
+   * assistant stream; tool calls may still produce another assistant stream in
+   * the same generation, so this is intentionally not a generation-wide fence.
+   */
+  const terminalAssistantStreamGenerationsRef = useRef(new Map<string, number>());
   /** SSE lifecycle is newer than a delayed sidebar/bootstrap summary. */
   const sessionRunningOverridesRef = useRef(new Map<string, boolean>());
   const normalizeSessionRunning = (session: SessionSummary): SessionSummary => {
@@ -2823,6 +2830,7 @@ export function App() {
         streamDiagnosticsRef.current?.clear();
         sessionRunGenerationsRef.current.clear();
         settledRunGenerationsRef.current.clear();
+        terminalAssistantStreamGenerationsRef.current.clear();
         runEpochRef.current = readyRunEpoch;
       } else if (readyRunEpoch && !runEpochRef.current) {
         // The first ready only discovers the initial epoch; it is not a
@@ -3192,7 +3200,32 @@ export function App() {
           }
         }
         const assistant = assistantMessage(event);
-        if (assistant && eventSessionId) {
+        let rejectedPostTerminalAssistantUpdate = false;
+        if (assistant && eventSessionId && typeof eventRunGeneration === "number") {
+          if (type === "message_start") {
+            // A new assistant start is the only browser-visible boundary that
+            // reopens a stream after its prior canonical terminal. This keeps
+            // tool-use continuations in the same Pi generation valid.
+            if (
+              terminalAssistantStreamGenerationsRef.current.get(eventSessionId) ===
+              eventRunGeneration
+            )
+              terminalAssistantStreamGenerationsRef.current.delete(eventSessionId);
+          } else if (
+            type === "message_update" &&
+            terminalAssistantStreamGenerationsRef.current.get(eventSessionId) ===
+              eventRunGeneration
+          ) {
+            rejectedPostTerminalAssistantUpdate = true;
+            recordSseRejectionDiagnostic({
+              sessionId: eventSessionId,
+              runGeneration: eventRunGeneration,
+              eventType: type,
+              decisionReason: "post-assistant-terminal",
+            });
+          }
+        }
+        if (assistant && eventSessionId && !rejectedPostTerminalAssistantUpdate) {
           releasePromptBusy(eventSessionId, eventRunGeneration, eventRunEpoch);
           updateLiveSessionCache(eventSessionId, assistant);
           if (typeof eventRunGeneration === "number")
@@ -3206,7 +3239,7 @@ export function App() {
         }
         // Only the selected destination is allowed to turn an SSE draft into a
         // React update. Off-screen panes retain their latest draft in cache.
-        if (assistant && viewingEventSession)
+        if (assistant && !rejectedPostTerminalAssistantUpdate && viewingEventSession)
           scheduleLiveMessage({
             message: assistant,
             authority: capturePaneAuthority(eventSessionId),
@@ -3226,6 +3259,11 @@ export function App() {
           if (viewingEventSession) clearPendingLiveMessage();
           if (eventSessionId) {
             terminalAssistantSessionIdsRef.current.add(eventSessionId);
+            if (typeof eventRunGeneration === "number")
+              terminalAssistantStreamGenerationsRef.current.set(
+                eventSessionId,
+                eventRunGeneration,
+              );
             appendTerminalSessionCache(eventSessionId, terminal);
           }
           if (viewingEventSession) {
@@ -4286,6 +4324,7 @@ export function App() {
           viewCacheRef.current.clear();
           sessionRunGenerationsRef.current.clear();
           settledRunGenerationsRef.current.clear();
+          terminalAssistantStreamGenerationsRef.current.clear();
           const recoveredReadiness = {
             status: "starting" as const,
             generation: 0,
@@ -6282,6 +6321,7 @@ export function App() {
     localUserTurnsRef.current.delete(sessionId);
     syncPendingSteers(sessionId, []);
     sourceTurnTotalsRef.current.delete(sessionId);
+    terminalAssistantStreamGenerationsRef.current.delete(sessionId);
     cancelledQueueIdsRef.current.delete(sessionId);
     queueProjectionRevisionRef.current.delete(sessionId);
     latestQueueProjectionRef.current.delete(sessionId);

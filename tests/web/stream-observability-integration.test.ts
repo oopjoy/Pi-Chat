@@ -290,6 +290,161 @@ test("canonical terminal clears but never substitutes a browser-pending draft", 
   }
 });
 
+test("post-terminal assistant updates are fenced without blocking a later assistant stream", async () => {
+  const { dom, FakeEventSource } = installAppDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const { browserStateDiagnosticSnapshot } = await import("../../src/web/lib/state-diagnostics");
+  const restoreApi = captureApiSnapshot(api);
+  Object.assign(api, {
+    bootstrap: async () => createBootstrapFixture(),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async (sessionId: string) => ({ viewing: sessionId }),
+    viewSession: async () => createSessionViewFixture(),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.emitPi({
+        type: "agent_start",
+        piChatSessionId: activeSessionId,
+        piChatRunGeneration: 70,
+      });
+      source.emitPi({
+        type: "message_start",
+        piChatSessionId: activeSessionId,
+        piChatRunGeneration: 70,
+        message: { role: "assistant", content: "first draft" },
+      });
+      await Promise.resolve();
+    });
+    await act(async () => {
+      source.emitPi({
+        type: "message_end",
+        piChatSessionId: activeSessionId,
+        piChatRunGeneration: 70,
+        message: { role: "assistant", content: "first terminal" },
+      });
+      await Promise.resolve();
+    });
+    assert.ok(dom.window.document.body.textContent?.includes("first terminal"));
+
+    // An assistant terminal does not settle the whole run: a tool may execute
+    // before Pi starts a second assistant stream in the same generation.
+    await act(async () => {
+      source.emitPi({
+        type: "tool_execution_start",
+        piChatSessionId: activeSessionId,
+        piChatRunGeneration: 70,
+        toolName: "bash",
+      });
+      await Promise.resolve();
+    });
+    assert.match(
+      dom.window.document.querySelector(".agent-status")?.textContent || "",
+      /正在运行工具：bash/,
+    );
+    await act(async () => {
+      source.emitPi({
+        type: "tool_execution_end",
+        piChatSessionId: activeSessionId,
+        piChatRunGeneration: 70,
+        toolName: "bash",
+        isError: false,
+      });
+      await Promise.resolve();
+    });
+    assert.match(
+      dom.window.document.querySelector(".agent-status")?.textContent || "",
+      /bash 已完成，Pi 正在继续…/,
+    );
+
+    const beforeLateUpdate =
+      browserStateDiagnosticSnapshot().entries.at(-1)?.sequence || 0;
+    await act(async () => {
+      source.emitPi({
+        type: "message_update",
+        piChatSessionId: activeSessionId,
+        piChatRunGeneration: 70,
+        message: { role: "assistant", content: "late stale update" },
+      });
+      await Promise.resolve();
+    });
+    assert.equal(dom.window.document.body.textContent?.includes("late stale update"), false);
+    assert.ok(
+      browserStateDiagnosticSnapshot().entries.some((entry) =>
+        entry.sequence > beforeLateUpdate
+        && entry.category === "sse"
+        && entry.name === "rejected"
+        && entry.sessionId === activeSessionId
+        && entry.runGeneration === 70
+        && entry.details.eventType === "message_update"
+        && entry.details.decisionReason === "post-assistant-terminal",
+      ),
+    );
+
+    await act(async () => {
+      source.emitPi({
+        type: "message_start",
+        piChatSessionId: activeSessionId,
+        piChatRunGeneration: 70,
+        message: { role: "assistant", content: "second draft" },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    });
+    assert.ok(dom.window.document.body.textContent?.includes("second draft"));
+    const reopenedSource = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      reopenedSource.emitPi({
+        type: "message_update",
+        piChatSessionId: activeSessionId,
+        piChatRunGeneration: 70,
+        message: { role: "assistant", content: "second live" },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    });
+    assert.ok(dom.window.document.body.textContent?.includes("second live"));
+
+    // A terminal from generation 70 cannot fence a later run generation even
+    // if the later stream starts with a compatibility-style cumulative update.
+    await act(async () => {
+      reopenedSource.emitPi({
+        type: "message_end",
+        piChatSessionId: activeSessionId,
+        piChatRunGeneration: 70,
+        message: { role: "assistant", content: "second terminal" },
+      });
+      await Promise.resolve();
+    });
+    const newerGenerationSource = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      newerGenerationSource.emitPi({
+        type: "agent_start",
+        piChatSessionId: activeSessionId,
+        piChatRunGeneration: 71,
+      });
+      await Promise.resolve();
+    });
+    const newerGenerationUpdateSource = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      newerGenerationUpdateSource.emitPi({
+        type: "message_update",
+        piChatSessionId: activeSessionId,
+        piChatRunGeneration: 71,
+        message: { role: "assistant", content: "newer generation live" },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    });
+    assert.ok(dom.window.document.body.textContent?.includes("newer generation live"));
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("terminal session-status summaries include visible scheduler clearing", async () => {
   const { dom, FakeEventSource } = installAppDom();
   const originalNow = globalThis.performance.now;
