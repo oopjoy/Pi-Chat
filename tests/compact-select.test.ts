@@ -140,7 +140,9 @@ test("CompactSelect renders a readable fallback instead of an unmatched internal
     });
     const trigger = dom.window.document.querySelector<HTMLButtonElement>(".compact-select-trigger")!;
     assert.equal(trigger.textContent?.trim(), "gpt-5.6-sol");
+    assert.equal(trigger.getAttribute("aria-label"), "模型：gpt-5.6-sol");
     assert.doesNotMatch(trigger.textContent || "", /xwill|\u0000/);
+    assert.doesNotMatch(trigger.getAttribute("aria-label") || "", /xwill|\u0000/);
     await act(async () => trigger.click());
     assert.equal(
       dom.window.document.querySelector(".compact-select-option.is-selected"),
@@ -148,6 +150,38 @@ test("CompactSelect renders a readable fallback instead of an unmatched internal
       "an unmatched controlled value must not mark the first option selected",
     );
   } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+test("CompactSelect exposes its matched selection in the trigger accessible name", async () => {
+  const { dom, root } = await renderSelect();
+  try {
+    const trigger = dom.window.document.querySelector<HTMLButtonElement>(".compact-select-trigger")!;
+    assert.equal(trigger.getAttribute("aria-label"), "Test choice：Beta");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+test("CompactSelect keeps a keyboard-active option in view", async () => {
+  const { dom, root } = await renderSelect();
+  const trigger = dom.window.document.querySelector<HTMLButtonElement>(".compact-select-trigger")!;
+  const scrollCalls: Array<ScrollIntoViewOptions | boolean | undefined> = [];
+  const prototype = dom.window.HTMLElement.prototype as HTMLElement;
+  const previous = Object.getOwnPropertyDescriptor(prototype, "scrollIntoView");
+  Object.defineProperty(prototype, "scrollIntoView", {
+    configurable: true,
+    value: (options?: ScrollIntoViewOptions | boolean) => scrollCalls.push(options),
+  });
+  try {
+    await act(async () => key(dom, trigger, "ArrowDown"));
+    scrollCalls.length = 0;
+    await act(async () => key(dom, dom.window.document.querySelector<HTMLElement>("[role='listbox']")!, "End"));
+    assert.deepEqual(scrollCalls, [{ block: "nearest" }]);
+  } finally {
+    if (previous) Object.defineProperty(prototype, "scrollIntoView", previous);
+    else delete (prototype as { scrollIntoView?: unknown }).scrollIntoView;
     await act(async () => root.unmount());
   }
 });
