@@ -1793,7 +1793,7 @@ test("ChatInput places Steer beside Queue and sends explicit steering delivery",
     )!;
     assert.equal(queueButton.textContent, "排队");
     assert.equal(steerButton.textContent, "Steer");
-    assert.equal(queueButton.nextElementSibling, steerButton);
+    assert.ok(queueButton.nextElementSibling === steerButton);
     assert.equal(steerButton.nextElementSibling?.className, "attachment-control");
     await act(async () => {
       Object.getOwnPropertyDescriptor(
@@ -1959,7 +1959,7 @@ test("an authoritative stopped Steer rejection settles the stale Composer and re
   try {
     await act(async () => root.render(createElement(App)));
     assert.ok(dom.window.document.querySelector(".steer-submit-button"));
-    assert.equal(dom.window.document.querySelector(".message-generated-at"), null);
+    assert.ok(!dom.window.document.querySelector(".message-generated-at"));
     const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
       "textarea[aria-label='消息输入']",
     )!;
@@ -1984,10 +1984,10 @@ test("an authoritative stopped Steer rejection settles the stale Composer and re
       await Promise.resolve();
     });
     assert.equal(textarea.value, "too late steer", "the rejected Steer remains in the draft");
-    assert.equal(dom.window.document.querySelector(".steer-submit-button"), null);
-    assert.equal(dom.window.document.querySelector(".stop-button"), null);
+    assert.ok(!dom.window.document.querySelector(".steer-submit-button"));
+    assert.ok(!dom.window.document.querySelector(".stop-button"));
     assert.ok(dom.window.document.querySelector(".send-button"));
-    assert.equal(dom.window.document.querySelector(".session-status.is-running"), null);
+    assert.ok(!dom.window.document.querySelector(".session-status.is-running"));
     assert.ok(
       dom.window.document.querySelector(".message-generated-at"),
       "the authoritative persisted view restores the terminal answer timestamp",

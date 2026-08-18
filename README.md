@@ -97,7 +97,7 @@ npm run verify:e2e
 npm run verify
 ```
 
-Harness 会递归发现 `tests/**/*.test.ts`，不会跟随测试目录中的符号链接；`--file` 同时接受 `/` 和 Windows `\\` 分隔符。使用 `--test-name-pattern` 时，Harness 会先确认所选文件中至少有一个可静态解析的具体测试名匹配，拼错名称会以状态码 `2` 失败。对于 `for...of` 字面量数组生成的模板名称，Harness 会展开为具体名称；其他无法静态解析的动态名称应先重写为明确测试声明。不要绕过 `scripts/run-tests.mjs` 直接调用 `node --test`。需要保留指定构建产物的发布验证仍应显式设置独立 `PI_CHAT_DIST_DIR`；普通贡献者验证优先使用上述 wrapper。少数安全边界测试需要 `NODE_ENV=test` 才能使用仅限 JSDOM 的 identity override；生产 Web artifact 不存在该 override。
+Harness 会递归发现 `tests/**/*.test.ts`，不会跟随测试目录中的符号链接；`--file` 同时接受 `/` 和 Windows `\\` 分隔符。使用 `--test-name-pattern` 时，Harness 会先确认所选文件中至少有一个可静态解析的具体测试名匹配，拼错名称会以状态码 `2` 失败。对于 `for...of` 字面量数组生成的模板名称，Harness 会展开为具体名称；其他无法静态解析的动态名称应先重写为明确测试声明。Harness 固定单文件并发、`45` 秒 Node test timeout 与 `2 GiB` V8 old-space；Windows 还会在创建任何 Node 后代前，将整个测试树加入 `3 GiB` Job Object，超限会明确输出 `PI_CHAT_TEST_MEMORY_LIMIT_EXCEEDED` 并终止测试树。`--test-concurrency` 与 `--test-timeout` 不能由调用方覆盖；调用方仅可使用 `--test-name-pattern`、`--test-shard`、`--test-skip-pattern` 与无值的 `--test-only` 选择测试，reporter、coverage、snapshot mutation 和 force-exit 参数不会转发。这些限制仅属于开发验证测试树，不会施加给生产 Pi Chat server 或 Pi RPC。不要绕过 `scripts/run-tests.mjs` 直接调用 `node --test`。需要保留指定构建产物的发布验证仍应显式设置独立 `PI_CHAT_DIST_DIR`；普通贡献者验证优先使用上述 wrapper。少数安全边界测试需要 `NODE_ENV=test` 才能使用仅限 JSDOM 的 identity override；生产 Web artifact 不存在该 override。
 
 修改现有功能前，可先查阅 [`docs/change-map.md`](docs/change-map.md)：它把常见改动映射到唯一状态所有者、epoch/generation 边界、关键不变量和聚焦测试入口。详细政策仍以对应架构文档为准。
 

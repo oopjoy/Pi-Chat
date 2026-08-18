@@ -86,7 +86,7 @@ test("rich Ask dialog keeps choices compact and replaces the custom prompt in pl
   )!;
   assert.equal(customMarker.textContent, "3");
   assert.equal(customTrigger.textContent?.replace(/\s/g, ""), "3输入你的答案");
-  assert.equal(dom.window.document.querySelector(".ask-questionnaire-custom input"), null);
+  assert.ok(!dom.window.document.querySelector(".ask-questionnaire-custom input"));
   assert.doesNotMatch(dom.window.document.body.textContent || "", /自由输入|在当前选项行/);
 
   await act(async () => customMarker.click());
@@ -97,7 +97,7 @@ test("rich Ask dialog keeps choices compact and replaces the custom prompt in pl
   assert.equal(input.value, "");
   assert.equal(input.placeholder, "");
   assert.equal(input.getAttribute("aria-label"), "3. Scope 自由输入");
-  assert.equal(dom.window.document.querySelector(".ask-questionnaire-custom-trigger"), null);
+  assert.ok(!dom.window.document.querySelector(".ask-questionnaire-custom-trigger"));
   assert.equal(dom.window.document.querySelector(".ask-questionnaire-custom")?.classList.contains("is-selected"), true);
   assert.equal(
     dom.window.document.querySelector(".ask-questionnaire-custom .ask-questionnaire-option-marker")?.textContent,
@@ -119,7 +119,7 @@ test("rich Ask dialog keeps choices compact and replaces the custom prompt in pl
   })));
   assert.match(dom.window.document.body.textContent || "", /问题 2 \/ 2/);
   assert.equal(dom.window.document.activeElement?.classList.contains("ask-questionnaire-progress"), true);
-  assert.equal(dom.window.document.querySelector("section.extension-dialog"), originalFrame);
+  assert.ok(dom.window.document.querySelector("section.extension-dialog") === originalFrame);
 
   await act(async () => [...dom.window.document.querySelectorAll<HTMLButtonElement>(
     ".extension-dialog-actions button",
@@ -143,10 +143,10 @@ test("rich Ask dialog keeps choices compact and replaces the custom prompt in pl
 
   await act(async () => submit.click());
   assert.deepEqual(responses, [{ id: "q1", value: "3. Type something." }]);
-  assert.equal(dom.window.document.querySelector("section.extension-dialog"), originalFrame);
+  assert.ok(dom.window.document.querySelector("section.extension-dialog") === originalFrame);
 
   await act(async () => render(null, false));
-  assert.equal(dom.window.document.querySelector("section.extension-dialog"), null);
+  assert.ok(!dom.window.document.querySelector("section.extension-dialog"));
   await act(async () => render(request("q1-input", "input", "[Scope] Which scope?\n\nType your answer:"), true));
   assert.deepEqual(responses.at(-1), { id: "q1-input", value: "Keep it in the row" });
   await act(async () => render(request("q2", "select", "[UX] How should it look?", [

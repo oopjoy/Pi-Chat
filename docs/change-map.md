@@ -120,7 +120,7 @@
 | Release / launcher | launcher/restart focused tests | build、unit、E2E、release checklist |
 | 测试文件物理拆分 | `npm run test:focus -- --file tests/<domain>/<name>.test.ts` | 拆分前后具体测试名称多重集合一致，且全量结果不减少 |
 
-Harness 递归发现 `tests/**/*.test.ts`，正式按文件入口是可重复的 repository-relative `--file`；`test:focus` 会原样转发这些参数，并可与 `--test-name-pattern` 组合。名称 pattern 必须匹配所选文件中至少一个可静态解析的具体测试名，否则在启动 Node test runner 前以状态码 `2` 失败。Harness 会展开 `for...of` 字面量数组生成的模板名称；其他无法静态解析的动态名称应改写为明确测试声明。
+Harness 递归发现 `tests/**/*.test.ts`，正式按文件入口是可重复的 repository-relative `--file`；`test:focus` 会原样转发这些参数，并可与 `--test-name-pattern` 组合。名称 pattern 必须匹配所选文件中至少一个可静态解析的具体测试名，否则在启动 Node test runner 前以状态码 `2` 失败。Harness 会展开 `for...of` 字面量数组生成的模板名称；其他无法静态解析的动态名称应改写为明确测试声明。资源策略由 harness 单独拥有：固定单文件并发、`45` 秒 test timeout 与 `2 GiB` V8 old-space，并拒绝调用方覆盖 `--test-concurrency` / `--test-timeout`；调用方只能转发 `--test-name-pattern`、`--test-shard`、`--test-skip-pattern` 和无值的 `--test-only`，不能借 reporter、coverage、snapshot mutation 或 force-exit 扩大测试权限；Windows 仅对该测试后代树附加 `3 GiB` Job Object 上限和超限终止诊断，绝不影响生产 server/RPC。
 
 ## 修改审查模板
 

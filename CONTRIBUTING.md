@@ -20,7 +20,7 @@ npm run test:focus -- --file tests/web/composer-capabilities.test.ts
 npm run test:focus -- --file tests/web/composer-capabilities.test.ts --test-name-pattern="slash suggestions"
 ```
 
-`--file` is repeatable. The harness discovers `tests/**/*.test.ts`, sets `NODE_ENV=test`, rejects paths outside the repository, and fails before starting Node when a name pattern matches no statically resolved concrete test.
+`--file` is repeatable. The harness discovers `tests/**/*.test.ts`, sets `NODE_ENV=test`, rejects paths outside the repository, and fails before starting Node when a name pattern matches no statically resolved concrete test. It also owns the test-only resource policy: one Node test file at a time, a 45-second Node test timeout, and a 2 GiB V8 old-space limit. On Windows, the official harness starts its Node test process suspended inside a 3 GiB Job Object before it can create descendants; crossing that Job limit terminates the test tree with `PI_CHAT_TEST_MEMORY_LIMIT_EXCEEDED`. These limits never apply to the production Pi Chat server or Pi RPC process. `--test-concurrency` and `--test-timeout` are therefore reserved harness options rather than caller overrides. The only caller-supplied Node test selectors are `--test-name-pattern`, `--test-shard`, `--test-skip-pattern`, and valueless `--test-only`; reporters, coverage, snapshot mutation, and force-exit flags are deliberately not forwarded.
 
 Do not call `node --test` directly. Do not use bare `npm test` while a live service is running unless `PI_CHAT_DIST_DIR` is already an approved isolated path.
 

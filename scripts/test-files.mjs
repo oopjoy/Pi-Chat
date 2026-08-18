@@ -2,6 +2,7 @@ import { readdirSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { validateSelectedTestNamePattern } from "./test-name-patterns.mjs";
+import { isHarnessControlledTestOption } from "./test-harness-policy.mjs";
 
 export const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const testsRoot = resolve(repositoryRoot, "tests");
@@ -42,15 +43,22 @@ function normalizedSelection(value) {
   return value.replaceAll("\\", "/").replace(/^\.\//, "");
 }
 
-const NODE_OPTIONS_WITH_SEPARATE_VALUE = new Set([
-  "--test-concurrency",
+const ALLOWED_NODE_TEST_OPTIONS = new Set([
   "--test-name-pattern",
-  "--test-reporter",
-  "--test-reporter-destination",
   "--test-shard",
   "--test-skip-pattern",
-  "--test-timeout",
+  "--test-only",
 ]);
+
+const NODE_OPTIONS_WITH_SEPARATE_VALUE = new Set([
+  "--test-name-pattern",
+  "--test-shard",
+  "--test-skip-pattern",
+]);
+
+function nodeTestOptionName(argument) {
+  return argument.split("=", 1)[0];
+}
 
 export class TestHarnessArgumentError extends Error {}
 
@@ -91,7 +99,14 @@ export function parseTestArguments(argv, discovered = discoverTestFiles()) {
     if (!argument.startsWith("-"))
       throw new TestHarnessArgumentError(`Unexpected positional argument: ${argument}. Use --file for test selection.`);
     if (!argument.startsWith("--test-"))
-      throw new TestHarnessArgumentError(`Unsupported harness argument: ${argument}. Only --file and Node --test-* options are accepted.`);
+      throw new TestHarnessArgumentError(`Unsupported harness argument: ${argument}. Only --file and approved Node test-selection options are accepted.`);
+    const optionName = nodeTestOptionName(argument);
+    if (isHarnessControlledTestOption(argument))
+      throw new TestHarnessArgumentError(`${optionName} is fixed by the Pi Chat test harness`);
+    if (!ALLOWED_NODE_TEST_OPTIONS.has(optionName))
+      throw new TestHarnessArgumentError(`${optionName} is not allowed by the Pi Chat test harness`);
+    if (optionName === "--test-only" && argument !== optionName)
+      throw new TestHarnessArgumentError("--test-only does not take a value");
     nodeArguments.push(argument);
     if (NODE_OPTIONS_WITH_SEPARATE_VALUE.has(argument)) {
       const value = argv[index + 1];

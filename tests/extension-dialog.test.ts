@@ -200,11 +200,11 @@ test("sequential Extension requests reuse one dialog frame for custom answers", 
   const buttons = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")];
   await act(async () => buttons[2].click());
   assert.deepEqual(responses, [{ id: "ask-select", value: options[2] }]);
-  assert.equal(dom.window.document.querySelector("section.extension-dialog"), originalFrame);
+  assert.ok(dom.window.document.querySelector("section.extension-dialog") === originalFrame);
   assert.match(dom.window.document.querySelector("[role=status]")?.textContent || "", /正在准备下一步/);
 
   await act(async () => renderDialog(null, true));
-  assert.equal(dom.window.document.querySelector("section.extension-dialog"), originalFrame);
+  assert.ok(dom.window.document.querySelector("section.extension-dialog") === originalFrame);
   assert.equal(dom.window.document.querySelectorAll(".dialog-backdrop").length, 1);
 
   await act(async () => renderDialog({
@@ -214,7 +214,7 @@ test("sequential Extension requests reuse one dialog frame for custom answers", 
     title: "[Scope] Which implementation style?\n\nType your answer:",
     prefill: "A custom answer",
   }, true));
-  assert.equal(dom.window.document.querySelector("section.extension-dialog"), originalFrame);
+  assert.ok(dom.window.document.querySelector("section.extension-dialog") === originalFrame);
   assert.equal(dom.window.document.querySelector<HTMLInputElement>("input")?.value, "A custom answer");
   const inputButtons = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")];
   await act(async () => inputButtons.find((button) => button.textContent === "确定")?.click());
@@ -224,6 +224,6 @@ test("sequential Extension requests reuse one dialog frame for custom answers", 
   ]);
 
   await act(async () => renderDialog(null, false));
-  assert.equal(dom.window.document.querySelector("section.extension-dialog"), null);
+  assert.ok(!dom.window.document.querySelector("section.extension-dialog"));
   await act(async () => root.unmount());
 });

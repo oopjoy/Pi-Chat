@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -12,6 +12,15 @@ import {
   TestHarnessArgumentError,
 } from "../../scripts/test-files.mjs";
 import { declaredTestNamePatterns } from "../../scripts/test-name-patterns.mjs";
+import {
+  controlledTestEnvironment,
+  TEST_JOB_MEMORY_MIB,
+  TEST_MAX_OLD_SPACE_MIB,
+  TEST_NODE_CONCURRENCY,
+  TEST_TIMEOUT_MS,
+  testRunnerArguments,
+  windowsTestJobInvocation,
+} from "../../scripts/test-harness-policy.mjs";
 
 test("test discovery recursively finds regular test files in stable order", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-test-discovery-"));
@@ -67,15 +76,30 @@ test("test selection preserves supported separate Node test option values", () =
     "--file=tests/active-sessions.test.ts",
     "--test-name-pattern",
     "active Session",
-    "--test-concurrency",
-    "1",
+    "--test-shard",
+    "1/2",
   ]);
   assert.deepEqual(parsed.nodeArguments, [
     "--test-name-pattern",
     "active Session",
-    "--test-concurrency",
-    "1",
+    "--test-shard",
+    "1/2",
   ]);
+});
+
+test("test selection rejects harness-controlled resource overrides before spawning Node", () => {
+  for (const arguments_ of [
+    ["--test-concurrency=2"],
+    ["--test-concurrency", "1"],
+    ["--test-timeout=1"],
+    ["--test-timeout", "45000"],
+  ]) {
+    assert.throws(
+      () => parseTestArguments(arguments_),
+      (error) => error instanceof TestHarnessArgumentError && /fixed by the Pi Chat test harness/.test(error.message),
+      arguments_.join(" "),
+    );
+  }
 });
 
 test("test selection rejects ambiguous or external paths before spawning Node", () => {
@@ -84,6 +108,9 @@ test("test selection rejects ambiguous or external paths before spawning Node", 
     ["--file="],
     ["tests/active-sessions.test.ts"],
     ["--eval=process.exit(0)"],
+    ["--test-reporter=./untrusted-reporter.mjs"],
+    ["--test-reporter-destination", "C:\\outside.tap"],
+    ["--test-update-snapshots"],
     ["--file", "package.json"],
     ["--file", "tests"],
     ["--file", "tests/missing.test.ts"],
@@ -99,6 +126,74 @@ test("test selection rejects ambiguous or external paths before spawning Node", 
       arguments_.join(" "),
     );
   }
+});
+
+test("test runner policy resets inherited Node options and fixes resource limits", () => {
+  const environment = controlledTestEnvironment({
+    NODE_OPTIONS: "--require untrusted.cjs",
+    NODE_ENV: "production",
+    PI_CHAT_TEST_JOB_ACTIVE: "1",
+    PI_CHAT_TEST_JOB_MEMORY_MIB: "1",
+  });
+  assert.equal(environment.NODE_ENV, "test");
+  assert.equal(environment.NODE_OPTIONS, `--max-old-space-size=${TEST_MAX_OLD_SPACE_MIB}`);
+  assert.equal(environment.PI_CHAT_TEST_JOB_ACTIVE, undefined);
+  assert.equal(environment.PI_CHAT_TEST_JOB_MEMORY_MIB, undefined);
+  assert.deepEqual(
+    testRunnerArguments(["--test-name-pattern=focused"], ["C:/repo/tests/focused.test.ts"]),
+    [
+      "--test",
+      "--import",
+      "tsx",
+      `--test-concurrency=${TEST_NODE_CONCURRENCY}`,
+      `--test-timeout=${TEST_TIMEOUT_MS}`,
+      "--test-name-pattern=focused",
+      "--",
+      "C:/repo/tests/focused.test.ts",
+    ],
+  );
+});
+
+test("Windows job invocation carries only final constrained Node arguments", () => {
+  const nodeArguments = ["--test", "--import", "tsx", "--", "C:/repo/tests/focused.test.ts"];
+  const invocation = windowsTestJobInvocation({
+    nodePath: "C:/Program Files/nodejs/node.exe",
+    workingDirectory: "C:/repo",
+    nodeArguments,
+    powershellPath: "pwsh.exe",
+  });
+  assert.equal(invocation.command, "pwsh.exe");
+  assert.deepEqual(invocation.environment, {});
+  assert.equal(invocation.args.at(-1), String(TEST_JOB_MEMORY_MIB));
+  const encoded = invocation.args[invocation.args.indexOf("-NodeArgumentsBase64") + 1]!;
+  assert.deepEqual(JSON.parse(Buffer.from(encoded, "base64").toString("utf8")), nodeArguments);
+});
+
+test("Windows test Job keeps a suspended-create memory fence and explicit overflow termination", async () => {
+  const launcher = await readFile(join(repositoryRoot, "scripts", "windows-test-job.ps1"), "utf8");
+  assert.match(launcher, /CREATE_SUSPENDED/);
+  assert.match(launcher, /JOB_OBJECT_LIMIT_JOB_MEMORY/);
+  assert.match(launcher, /JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE/);
+  assert.match(launcher, /QueryInformationJobObject\(JobMemoryLimit\)/);
+  assert.match(launcher, /JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO/);
+  assert.match(launcher, /JOB_OBJECT_MSG_JOB_MEMORY_LIMIT/);
+  assert.match(launcher, /terminalNotification\.WaitOne\(5000\)/);
+  assert.match(launcher, /TerminateJobObject\(job, ERROR_NOT_ENOUGH_MEMORY\)/);
+  assert.match(launcher, /PI_CHAT_TEST_MEMORY_LIMIT_EXCEEDED/);
+  assert.doesNotMatch(launcher, /BREAKAWAY/);
+  assert.doesNotMatch(launcher, /PI_CHAT_TEST_JOB_ACTIVE/);
+  const extendedLimit = launcher.slice(
+    launcher.indexOf("private struct ExtendedLimitInformation"),
+    launcher.indexOf("private struct AssociateCompletionPort"),
+  );
+  assert.ok(
+    extendedLimit.indexOf("BasicLimitInformation BasicLimitInformation") < extendedLimit.indexOf("IoCounters IoInfo"),
+    "the native extended-limit struct must retain the Windows ABI field order",
+  );
+  const assign = launcher.indexOf("AssignProcessToJobObject(job, processInformation.hProcess)");
+  const associate = launcher.indexOf("SetInformationJobObject(CompletionPort)");
+  const resume = launcher.indexOf("ResumeThread(processInformation.hThread)");
+  assert.ok(assign < associate && associate < resume, "the Node child must enter the Job before it can run or report terminal state");
 });
 
 test("default selection includes this nested harness regression with NODE_ENV=test", () => {

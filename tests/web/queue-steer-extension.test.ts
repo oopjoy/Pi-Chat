@@ -1297,9 +1297,8 @@ test("agent settlement clears a completed tool status left after compaction", as
     assert.ok(
       dom.window.document.querySelector(".agent-status .loader.small"),
     );
-    assert.equal(
-      dom.window.document.querySelector(".agent-status.is-compacting"),
-      null,
+    assert.ok(
+      !dom.window.document.querySelector(".agent-status.is-compacting"),
       "a completed tool frame proves Pi has resumed work after compaction",
     );
 
@@ -1310,16 +1309,14 @@ test("agent settlement clears a completed tool status left after compaction", as
         piChatRunGeneration: 1,
       }),
     );
-    assert.equal(
-      dom.window.document.querySelector(".agent-status"),
-      null,
+    assert.ok(
+      !dom.window.document.querySelector(".agent-status"),
       "settled conversations must not retain a status spinner",
     );
-    assert.equal(
-      dom.window.document.querySelector(
+    assert.ok(
+      !dom.window.document.querySelector(
         ".conversation-process .process-status-icon.is-running",
       ),
-      null,
     );
     assert.equal(
       dom.window.document.querySelector<HTMLTextAreaElement>(
@@ -1342,14 +1339,12 @@ test("agent settlement clears a completed tool status left after compaction", as
         activity: { execution: "running", awaitingConfirmation: false },
       });
     });
-    assert.equal(
-      dom.window.document.querySelector(".agent-status"),
-      null,
+    assert.ok(
+      !dom.window.document.querySelector(".agent-status"),
       "late tool/status events from a settled generation must not restore a spinner",
     );
-    assert.equal(
-      dom.window.document.querySelector(".session-status.is-running"),
-      null,
+    assert.ok(
+      !dom.window.document.querySelector(".session-status.is-running"),
       "late running activity must not restore the sidebar spinner",
     );
   } finally {
@@ -1985,7 +1980,7 @@ test("ask questionnaire collects all answers before bridging scalar RPC requests
       sessionId: activeId,
       value: "Inline answer",
     });
-    assert.equal(dom.window.document.querySelector("section.extension-dialog"), originalFrame);
+    assert.ok(dom.window.document.querySelector("section.extension-dialog") === originalFrame);
 
     await act(async () => source.emitPi({
       type: "tool_execution_end",
@@ -1994,7 +1989,7 @@ test("ask questionnaire collects all answers before bridging scalar RPC requests
       toolName: "ask_user_question",
       isError: false,
     }));
-    assert.equal(dom.window.document.querySelector("section.extension-dialog"), null);
+    assert.ok(!dom.window.document.querySelector("section.extension-dialog"));
   } finally {
     await act(async () => root.unmount());
     restoreApi();
