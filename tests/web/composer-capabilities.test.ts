@@ -1359,6 +1359,49 @@ test("ChatInput pauses undrained snapshots when navigation changes submission sc
   }
 });
 
+test("ChatInput protects IME confirmation and exposes slash suggestions as an active descendant", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { ChatInput } = await import("../../src/web/components/ChatInput");
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  const sent: string[] = [];
+  try {
+    await act(async () => root.render(createElement(ChatInput, {
+      streaming: false,
+      stopping: false,
+      disabled: false,
+      submissionScope: "session:ime",
+      acceptsImages: true,
+      commands: [{ name: "gate", source: "extension", description: "Gate" }],
+      onSend: async (message: string) => { sent.push(message); },
+      onAbort: async () => undefined,
+      onPickLocalFiles: async () => [],
+      onReadClipboardFiles: async () => [],
+      onError: () => undefined,
+    })));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "/g");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "/g" }));
+    });
+    const listboxId = textarea.getAttribute("aria-controls");
+    assert.ok(listboxId);
+    assert.equal(textarea.getAttribute("aria-expanded"), "true");
+    assert.equal(textarea.getAttribute("aria-activedescendant"), `${listboxId}-option-0`);
+
+    await act(async () => {
+      textarea.dispatchEvent(new dom.window.CompositionEvent("compositionstart", { bubbles: true }));
+      textarea.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      textarea.dispatchEvent(new dom.window.CompositionEvent("compositionend", { bubbles: true }));
+      textarea.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      await Promise.resolve();
+    });
+    assert.deepEqual(sent, [], "IME confirmation Enter must not complete or submit a suggestion");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
 test("ChatInput restores a definite failure without overwriting a newer draft", async () => {
   const { dom } = installDom();
   Object.assign(globalThis, { FileReader: dom.window.FileReader });
@@ -1420,6 +1463,10 @@ test("ChatInput restores a definite failure without overwriting a newer draft", 
     });
     const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
     assert.equal(textarea.value, "failed message");
+    assert.match(
+      dom.window.document.querySelector(".composer-submission-status")?.textContent || "",
+      /发送失败，草稿已恢复/,
+    );
     assert.ok(dom.window.document.querySelector(".image-preview"), "the failed image is restored with its text");
     await act(async () => {
       dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
@@ -2100,6 +2147,26 @@ test("system Gate selector remains visible when startup command inventory is emp
   }
 });
 
+test("Gate control disables an unconfirmed existing Session instead of inventing strict", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { GateControl } = await import("../../src/web/components/GateControl");
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(GateControl, {
+      mode: undefined,
+      disabled: false,
+      onChange: () => undefined,
+    })));
+    const trigger = dom.window.document.querySelector<HTMLButtonElement>(".gate-control .compact-select-trigger")!;
+    assert.equal(trigger.disabled, true);
+    assert.equal(trigger.textContent?.trim(), "正在确认");
+    assert.doesNotMatch(trigger.textContent || "", /未同步|严格/);
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
 test("conversation controls live in the composer while settings moves to the top bar", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");
@@ -2110,6 +2177,7 @@ test("conversation controls live in the composer while settings moves to the top
     bootstrap: async () => ({
       ...bootstrap,
       commands: [{ name: "gate", description: "Gate", source: "extension" }],
+      gateMode: "strict" as const,
       stats: {
         tokens: {
           input: 10,
@@ -2145,7 +2213,7 @@ test("conversation controls live in the composer while settings moves to the top
     const gateTrigger = dom.window.document.querySelector<HTMLButtonElement>(
       ".composer .gate-control .compact-select-trigger",
     )!;
-    assert.equal(gateTrigger.textContent?.trim(), "未同步");
+    assert.equal(gateTrigger.textContent?.trim(), "严格");
     await act(async () => gateTrigger.click());
     assert.deepEqual(
       [
@@ -2153,7 +2221,7 @@ test("conversation controls live in the composer while settings moves to the top
           ".gate-control .compact-select-option > span:last-of-type",
         ),
       ].map((node) => node.textContent),
-      ["未同步", "严格", "放行"],
+      ["严格", "放行"],
     );
     assert.ok(dom.window.document.querySelector(".composer .composer-usage"));
     assert.ok(

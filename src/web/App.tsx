@@ -7043,8 +7043,12 @@ export function App() {
   const gateAvailable = gateAvailableOverride ?? true;
   // A staged value can describe the next prompt in a cold history pane, but
   // never alters gateModesRef, which is the only authority for auto-allow.
-  const gateMode =
+  const confirmedGateMode =
     pendingGateModes[composerTargetSessionId] ?? gateModes[composerTargetSessionId];
+  // A local New draft has no existing Runtime whose prior open mode could be
+  // hidden, so strict is its explicit security default. Existing Sessions keep
+  // an absent projection distinct from a confirmed strict mode.
+  const gateMode = confirmedGateMode ?? (localDraft ? "strict" : undefined);
   const effectiveControl = { ...viewedSession, ...viewControl };
   const observing = Boolean(
     effectiveControl.controlOwner && !effectiveControl.controlledByThisWindow,

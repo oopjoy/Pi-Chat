@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent, type ReactNode } from "react";
 import {
   MAX_PROMPT_IMAGE_BYTES,
   MAX_PROMPT_IMAGES,
@@ -8,6 +8,7 @@ import type { PromptDelivery, PromptImage, SlashCommand } from "../../shared/typ
 import { CloseIcon, FileSearchIcon, ImageIcon, PaperclipIcon, SendIcon } from "./Icons";
 
 const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+const COMPOSITION_END_ENTER_GRACE_MS = 100;
 
 type PendingSubmission = {
   scope: string;
@@ -152,6 +153,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   const [pickingFiles, setPickingFiles] = useState(false);
   const [, setSubmissionRevision] = useState(0);
   const [suggestionIndex, setSuggestionIndex] = useState(0);
+  const suggestionListId = useId();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const attachmentRef = useRef<HTMLDivElement>(null);
@@ -173,6 +175,8 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   const isExtensionCommand = invokedCommand?.source === "extension";
   const restoredDraftRef = useRef(restoredDraft);
   const draftRevisionRef = useRef(0);
+  const composingRef = useRef(false);
+  const lastCompositionEndAtRef = useRef(0);
   currentScopeRef.current = submissionScope;
   mutationDisabledRef.current = disabled;
   submissionPausedRef.current = submissionPaused;
@@ -194,15 +198,36 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     requestAnimationFrame(() => textareaRef.current?.focus());
   }, [restoredDraft]);
 
-  useEffect(() => {
+  const resizeTextarea = useCallback(() => {
     const textarea = textareaRef.current;
     if (!textarea) return;
+    const viewportHeight = textarea.ownerDocument.defaultView?.visualViewport?.height
+      || textarea.ownerDocument.defaultView?.innerHeight
+      || 0;
+    // Preserve room for the visible transcript and the software keyboard while
+    // allowing a comfortably sized technical draft before internal scrolling.
+    const maxHeight = Math.min(240, Math.max(115, Math.floor(viewportHeight * 0.35)));
     textarea.style.height = "auto";
-    const maxHeight = Number.parseFloat(textarea.ownerDocument.defaultView?.getComputedStyle(textarea).maxHeight || "") || 115;
     textarea.style.height = `${Math.min(textarea.scrollHeight, maxHeight)}px`;
     textarea.style.overflowY = "auto";
+  }, []);
+
+  useEffect(() => {
+    resizeTextarea();
     setSuggestionIndex((current) => Math.min(current, Math.max(0, suggestions.length - 1)));
-  }, [suggestions.length, value]);
+  }, [resizeTextarea, suggestions.length, value]);
+
+  useEffect(() => {
+    const view = textareaRef.current?.ownerDocument.defaultView;
+    const viewport = view?.visualViewport;
+    const resize = () => resizeTextarea();
+    view?.addEventListener("resize", resize);
+    viewport?.addEventListener("resize", resize);
+    return () => {
+      view?.removeEventListener("resize", resize);
+      viewport?.removeEventListener("resize", resize);
+    };
+  }, [resizeTextarea]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -409,6 +434,16 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   };
 
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    const nativeEvent = event.nativeEvent;
+    const recentlyComposed = Date.now() - lastCompositionEndAtRef.current < COMPOSITION_END_ENTER_GRACE_MS;
+    const composing = composingRef.current || nativeEvent.isComposing || nativeEvent.keyCode === 229;
+    // IME candidates own Enter/arrow keys. The short post-composition window
+    // also prevents a confirming Enter from becoming an accidental send.
+    if (event.key === "Enter" && !event.shiftKey && (composing || recentlyComposed)) {
+      if (recentlyComposed) event.preventDefault();
+      return;
+    }
+    if (composing) return;
     if (suggestions.length) {
       if (event.key === "ArrowDown") { event.preventDefault(); setSuggestionIndex((index) => (index + 1) % suggestions.length); return; }
       if (event.key === "ArrowUp") { event.preventDefault(); setSuggestionIndex((index) => (index - 1 + suggestions.length) % suggestions.length); return; }
@@ -494,11 +529,12 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   return (
     <div className="composer-wrap">
       {notices && <div className="system-notice-stack" aria-live="polite">{notices}</div>}
-      {currentPendingSubmissions > 0 && submissionPaused && <div className="composer-submission-status" role="status">{submissionPausedMessage}</div>}
+      {blockedScopesRef.current.has(submissionScope) && <div className="composer-submission-status is-failed" role="status">发送失败，草稿已恢复；修改后可重试</div>}
+      {currentPendingSubmissions > 0 && submissionPaused && !blockedScopesRef.current.has(submissionScope) && <div className="composer-submission-status" role="status">{submissionPausedMessage}</div>}
       <div className={`composer ${dragging ? "is-dragging" : ""}`} onDragOver={(event) => { event.preventDefault(); if (!editorDisabled) setDragging(true); }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }} onDrop={drop}>
-        {!editorDisabled && suggestions.length > 0 && <div className="command-suggestions" role="listbox" aria-label="Pi 指令联想">{suggestions.map((command, index) => <button type="button" role="option" aria-selected={index === suggestionIndex} className={index === suggestionIndex ? "is-active" : ""} key={`${command.source}-${command.name}`} onMouseDown={(event) => event.preventDefault()} onClick={() => completeCommand(command)}><strong>/{command.name}</strong><span>{command.description || "Pi 指令"}</span><small>{command.source}</small></button>)}</div>}
+        {!editorDisabled && suggestions.length > 0 && <div id={suggestionListId} className="command-suggestions" role="listbox" aria-label="Pi 指令联想">{suggestions.map((command, index) => <button id={`${suggestionListId}-option-${index}`} type="button" role="option" aria-selected={index === suggestionIndex} className={index === suggestionIndex ? "is-active" : ""} key={`${command.source}-${command.name}`} onMouseDown={(event) => event.preventDefault()} onClick={() => completeCommand(command)}><strong>/{command.name}</strong><span>{command.description || "Pi 指令"}</span><small>{command.source}</small></button>)}</div>}
         {images.length > 0 && <div className="image-previews">{images.map((image, index) => <div className="image-preview" key={`${image.fileName}-${index}`}><img src={`data:${image.mimeType};base64,${image.data}`} alt={image.fileName || `图片 ${index + 1}`} /><button type="button" disabled={editorDisabled} onClick={() => { const next = imagesRef.current.filter((_, itemIndex) => itemIndex !== index); imagesRef.current = next; setImages(next); advanceUserDraftRevision(); }} aria-label={`移除 ${image.fileName || "图片"}`}><CloseIcon /></button><small>{image.fileName || "粘贴的图片"}</small></div>)}</div>}
-        <textarea ref={textareaRef} value={value} onChange={(event) => { valueRef.current = event.target.value; setValue(event.target.value); advanceUserDraftRevision(); }} onPaste={paste} onKeyDown={keyDown} disabled={editorDisabled} rows={1} placeholder={editorDisabled ? disabledPlaceholder || "输入消息，或粘贴、拖入附件" : placeholder || (streaming ? "继续输入，发送后加入队列；输入 / 查看指令" : "输入消息，或粘贴、拖入附件")} aria-label="消息输入" />
+        <textarea ref={textareaRef} value={value} onChange={(event) => { valueRef.current = event.target.value; setValue(event.target.value); advanceUserDraftRevision(); }} onPaste={paste} onKeyDown={keyDown} onCompositionStart={() => { composingRef.current = true; }} onCompositionEnd={(event) => { composingRef.current = false; lastCompositionEndAtRef.current = Date.now(); const next = event.currentTarget.value; valueRef.current = next; setValue(next); }} disabled={editorDisabled} rows={1} placeholder={editorDisabled ? disabledPlaceholder || "输入消息，或粘贴、拖入附件" : placeholder || (streaming ? "继续输入，发送后加入队列；输入 / 查看指令" : "输入消息，或粘贴、拖入附件")} aria-label="消息输入" aria-autocomplete="list" aria-expanded={suggestions.length > 0} aria-controls={suggestions.length > 0 ? suggestionListId : undefined} aria-activedescendant={suggestions.length > 0 ? `${suggestionListId}-option-${suggestionIndex}` : undefined} />
         <div className="composer-toolbar">
           <div className="composer-toolbar-controls">{controls}</div>
           <div className="composer-actions">
