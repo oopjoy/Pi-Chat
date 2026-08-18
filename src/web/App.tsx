@@ -33,6 +33,7 @@ import { ApiRequestError, api } from "./api";
 import { AppShell } from "./components/AppShell";
 import { AskQuestionnaireDialog } from "./components/AskQuestionnaireDialog";
 import { ConversationPane } from "./components/ConversationPane";
+import { composerDraftKeyId, type ComposerDraftKey } from "./state/composer";
 import { ComposerControls } from "./components/ComposerControls";
 import { EditDiffSidebar } from "./components/EditToolDiff";
 import {
@@ -827,8 +828,10 @@ export function App() {
   const latestQueueProjectionRef = useRef(
     new Map<string, { queue: QueuedPrompt[]; paused: boolean }>(),
   );
-  const composerDraftRevisionRef = useRef(0);
+  /** Revision guards are partitioned with the same key as Composer drafts. */
+  const composerDraftRevisionsRef = useRef(new Map<string, number>());
   const [cancelledDraft, setCancelledDraft] = useState<{
+    key: ComposerDraftKey;
     revision: number;
     expectedDraftRevision: number;
     message: string;
@@ -6900,9 +6903,16 @@ export function App() {
   // Once Pi has authoritatively started generating, the composer may accept a
   // follow-up into the queue even if the first HTTP acknowledgement is late.
   const currentSessionPreparing = currentSessionBusy && !state.isStreaming;
-  const composerSubmissionScope = localDraft
-    ? `draft:${draftGenerationRef.current}`
-    : `session:${composerTargetSessionId || "none"}`;
+  // Content partitions use the ordinary prompt target. An empty unindexed
+  // Primary is therefore a Session partition even though it renders the New
+  // presentation; only an actual local Draft receives a New generation key.
+  const composerDraftKey: ComposerDraftKey = localDraft
+    ? { kind: "new", generation: draftGenerationRef.current }
+    : {
+        kind: "session",
+        sessionId: composerTargetSessionId || viewedSessionId || "none",
+      };
+  const composerSubmissionScope = composerDraftKeyId(composerDraftKey);
   const composerSubmissionPending = composerPendingByScope[composerSubmissionScope] || 0;
   const composerSubmissionPaused =
     !mutationBlocked &&
@@ -7057,7 +7067,12 @@ export function App() {
     const operation = captureViewOperation();
     queueCancellationSequenceRef.current += 1;
     const cancellationSequence = queueCancellationSequenceRef.current;
-    const expectedDraftRevision = composerDraftRevisionRef.current;
+    const cancellationDraftKey: ComposerDraftKey = {
+      kind: "session",
+      sessionId: operation.sessionId,
+    };
+    const expectedDraftRevision =
+      composerDraftRevisionsRef.current.get(composerDraftKeyId(cancellationDraftKey)) || 0;
     const queueProjectionRevision =
       queueProjectionRevisionRef.current.get(operation.sessionId) || 0;
     const mutationSequence =
@@ -7171,6 +7186,7 @@ export function App() {
           if (cancellationSequence > appliedCancelledDraftSequenceRef.current) {
             appliedCancelledDraftSequenceRef.current = cancellationSequence;
             setCancelledDraft({
+              key: cancellationDraftKey,
               revision: cancellationSequence,
               expectedDraftRevision,
               ...restored,
@@ -7660,9 +7676,10 @@ export function App() {
             !localDraft &&
             runtimeStatus !== "active",
           restoredDraft: cancelledDraft,
-          onDraftRevisionChange: (revision) => {
-            composerDraftRevisionRef.current = revision;
+          onDraftRevisionChange: (key, revision) => {
+            composerDraftRevisionsRef.current.set(composerDraftKeyId(key), revision);
           },
+          draftKey: composerDraftKey,
           submissionScope: composerSubmissionScope,
           submissionTargetSessionId: composerTargetSessionId || undefined,
           allowFollowupSubmissions: true,
@@ -7672,15 +7689,16 @@ export function App() {
           commands: composerCommands,
           controls: composerControls,
           notices: composerNotices,
-          onSend: async (message, images, delivery) => {
+          onSend: async (message, images, delivery, snapshotTargetSessionId) => {
+            const targetSessionId = snapshotTargetSessionId || "";
             if (
               viewingSubagentSession &&
-              (!composerTargetSessionId ||
+              (!targetSessionId ||
                 delivery !== "queue" ||
                 message.startsWith("/"))
             )
               throw new Error("子代理视图仅支持向已验证父对话发送普通消息");
-            return send(message, images, delivery, viewingSubagentSession ? composerTargetSessionId : "");
+            return send(message, images, delivery, targetSessionId);
           },
           onPickLocalFiles: async () => (await api.pickLocalFiles()).paths,
           onReadClipboardFiles: async () =>

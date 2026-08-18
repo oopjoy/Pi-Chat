@@ -15,7 +15,7 @@ beforeEach(() => {
 });
 
 
-test("ChatInput keeps an unsent draft and image attachment across Session navigation", async () => {
+test("ChatInput partitions unsent drafts and images by Session without remounting", async () => {
   const { dom } = installDom();
   Object.assign(globalThis, {
     FileReader: dom.window.FileReader,
@@ -48,6 +48,11 @@ test("ChatInput keeps an unsent draft and image attachment across Session naviga
     runtimeStatus: "view-only",
     isActive: false,
   };
+  const activeView: SessionViewData = {
+    ...draftView,
+    session: bootstrap.sessions[0],
+    state: { ...draftView.state, model: imageModel, sessionId: "active" },
+  };
   Object.assign(api, {
     bootstrap: async () => ({
       ...bootstrap,
@@ -59,7 +64,7 @@ test("ChatInput keeps an unsent draft and image attachment across Session naviga
     eventsUrl: () => "/api/events",
     markSessionViewed: async (id: string) => ({ viewing: id }),
     viewSession: async (id: string) =>
-      id === secondId ? secondView : draftView,
+      id === secondId ? secondView : activeView,
   });
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {
@@ -123,6 +128,13 @@ test("ChatInput keeps an unsent draft and image attachment across Session naviga
       ),
     ].find((button) => button.textContent?.includes("Draft preservation"))!;
     await act(async () => sessionButton.click());
+    const inSecondSession =
+      dom.window.document.querySelector<HTMLTextAreaElement>(
+        "textarea[aria-label='消息输入']",
+      )!;
+    assert.equal(inSecondSession, textarea, "the unkeyed ChatInput must not remount");
+    assert.equal(inSecondSession.value, "");
+    assert.equal(dom.window.document.querySelector(".image-preview img[alt='keep.png']"), null);
     await act(async () =>
       [
         ...dom.window.document.querySelectorAll<HTMLButtonElement>(
@@ -132,19 +144,12 @@ test("ChatInput keeps an unsent draft and image attachment across Session naviga
         .find((button) => button.textContent?.includes("Active"))!
         .click(),
     );
-    const afterNavigation =
+    const afterReturn =
       dom.window.document.querySelector<HTMLTextAreaElement>(
         "textarea[aria-label='消息输入']",
       )!;
-    assert.equal(
-      afterNavigation,
-      textarea,
-      "the unkeyed ChatInput must not remount",
-    );
-    assert.equal(afterNavigation.value, "keep this unsent draft");
-    assert.ok(
-      dom.window.document.querySelector(".image-preview img[alt='keep.png']"),
-    );
+    assert.equal(afterReturn.value, "keep this unsent draft");
+    assert.ok(dom.window.document.querySelector(".image-preview img[alt='keep.png']"));
   } finally {
     await act(async () => root.unmount());
     restoreApi();

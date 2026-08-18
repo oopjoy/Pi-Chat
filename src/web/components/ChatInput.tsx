@@ -5,21 +5,12 @@ import {
   MAX_PROMPT_IMAGES_TOTAL_BYTES,
 } from "../../shared/rpc-contracts";
 import type { PromptDelivery, PromptImage, SlashCommand } from "../../shared/types";
+import { useComposerController, type ComposerRestoredDraft } from "../hooks/use-composer-controller";
+import type { ComposerDraftKey } from "../state/composer";
 import { CloseIcon, FileSearchIcon, ImageIcon, PaperclipIcon, SendIcon } from "./Icons";
 
 const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 const COMPOSITION_END_ENTER_GRACE_MS = 100;
-
-type PendingSubmission = {
-  scope: string;
-  /** Immutable normal-session target captured when the editor accepts this snapshot. */
-  targetSessionId?: string;
-  message: string;
-  images: PromptImage[];
-  delivery: PromptDelivery;
-};
-
-type SuspendedDraft = { message: string; images: PromptImage[] };
 
 export function promptImageByteLength(image: Pick<PromptImage, "data" | "size">): number {
   const padding = image.data.endsWith("==") ? 2 : image.data.endsWith("=") ? 1 : 0;
@@ -106,7 +97,7 @@ export function commandMatches(value: string, commands: SlashCommand[]): SlashCo
   }).sort((a, b) => a.rank - b.rank || a.score - b.score || a.command.name.localeCompare(b.command.name)).slice(0, 9).map(({ command }) => command);
 }
 
-export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, placeholder, acceptsImages, imageInputPending = false, imageInputPendingMessage = "模型图片能力尚未确认", resolveImageCapabilityOnSend = false, restoredDraft, onDraftRevisionChange, submissionScope, submissionTargetSessionId, allowFollowupSubmissions = true, submissionPaused = false, submissionPausedMessage = "消息已保存，等待发送条件恢复", onSubmissionPendingChange, commands, controls, notices, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles, onError }: {
+export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, placeholder, acceptsImages, imageInputPending = false, imageInputPendingMessage = "模型图片能力尚未确认", resolveImageCapabilityOnSend = false, restoredDraft, onDraftRevisionChange, draftKey, submissionScope, submissionTargetSessionId, allowFollowupSubmissions = true, submissionPaused = false, submissionPausedMessage = "消息已保存，等待发送条件恢复", onSubmissionPendingChange, commands, controls, notices, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles, onError }: {
   /** True when a submission will enter the local queue. */
   streaming: boolean;
   /** True only while Pi is actively generating and can be stopped. */
@@ -123,9 +114,11 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   /** A cold/draft send can prepare its Runtime before validating image support. */
   resolveImageCapabilityOnSend?: boolean;
   /** A cancelled queued prompt replaces the current Composer draft. */
-  restoredDraft?: { revision: number; expectedDraftRevision: number; message: string; images: PromptImage[] } | null;
-  onDraftRevisionChange?: (revision: number) => void;
-  /** Stable pane identity used only to pause editor-owned submissions during navigation. */
+  restoredDraft?: ComposerRestoredDraft | null;
+  onDraftRevisionChange?: (key: ComposerDraftKey, revision: number) => void;
+  /** Typed partition for an existing prompt target or one New draft generation. */
+  draftKey?: ComposerDraftKey;
+  /** Stable pane identity used only for App-owned pending projections. */
   submissionScope: string;
   /** Immutable normal-session prompt target, never inferred again after navigation. */
   submissionTargetSessionId?: string;
@@ -140,63 +133,50 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   controls?: ReactNode;
   /** System status sits immediately above the actual Composer, never over its input. */
   notices?: ReactNode;
-  onSend: (message: string, images: PromptImage[], delivery?: PromptDelivery) => Promise<void>;
+  onSend: (message: string, images: PromptImage[], delivery?: PromptDelivery, targetSessionId?: string) => Promise<void>;
   onAbort: () => Promise<void>;
   onPickLocalFiles: () => Promise<string[]>;
   onReadClipboardFiles: () => Promise<string[]>;
   onError: (message: string) => void;
 }) {
-  const [value, setValue] = useState("");
-  const [images, setImages] = useState<PromptImage[]>([]);
   const [dragging, setDragging] = useState(false);
   const [attachmentOpen, setAttachmentOpen] = useState(false);
   const [pickingFiles, setPickingFiles] = useState(false);
-  const [, setSubmissionRevision] = useState(0);
   const [suggestionIndex, setSuggestionIndex] = useState(0);
   const suggestionListId = useId();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const attachmentRef = useRef<HTMLDivElement>(null);
-  const valueRef = useRef("");
-  const imagesRef = useRef<PromptImage[]>([]);
-  const currentScopeRef = useRef(submissionScope);
-  const mutationDisabledRef = useRef(disabled);
-  const submissionPausedRef = useRef(submissionPaused);
-  const onSendRef = useRef(onSend);
-  const pendingByScopeRef = useRef(new Map<string, number>());
-  const submissionQueueRef = useRef<PendingSubmission[]>([]);
-  const drainingRef = useRef(false);
-  const blockedScopesRef = useRef(new Set<string>());
-  const failedSubmissionsRef = useRef(new Map<string, PendingSubmission>());
-  const suspendedDraftsRef = useRef(new Map<string, SuspendedDraft>());
-  const mountedRef = useRef(true);
+  const composingRef = useRef(false);
+  const lastCompositionEndAtRef = useRef(0);
+  // Legacy unit fixtures may provide only a scope. Production App always
+  // supplies the typed identity; the fallback retains the old fixture contract.
+  const resolvedDraftKey: ComposerDraftKey = draftKey || (
+    submissionScope.startsWith("draft:")
+      ? { kind: "new", generation: Number(submissionScope.slice(6)) || 0 }
+      : { kind: "session", sessionId: submissionScope.replace(/^session:/, "") }
+  );
+  const composer = useComposerController({
+    draftKey: resolvedDraftKey,
+    targetSessionId: submissionTargetSessionId,
+    disabled,
+    paused: submissionPaused,
+    allowFollowupSubmissions,
+    restoredDraft,
+    onDraftRevisionChange,
+    onSubmissionPendingChange,
+    onSend,
+  });
+  const value = composer.draft.message;
+  const images = composer.draft.images;
   const suggestions = useMemo(() => commandMatches(value, commands), [commands, value]);
   const invokedCommand = value.startsWith("/") ? commands.find((command) => command.name === value.slice(1).split(/\s/, 1)[0]) : undefined;
   const isExtensionCommand = invokedCommand?.source === "extension";
-  const restoredDraftRef = useRef(restoredDraft);
-  const draftRevisionRef = useRef(0);
-  const composingRef = useRef(false);
-  const lastCompositionEndAtRef = useRef(0);
-  currentScopeRef.current = submissionScope;
-  mutationDisabledRef.current = disabled;
-  submissionPausedRef.current = submissionPaused;
-  onSendRef.current = onSend;
-  const advanceUserDraftRevision = () => {
-    draftRevisionRef.current += 1;
-    onDraftRevisionChange?.(draftRevisionRef.current);
-  };
 
   useEffect(() => {
-    if (!restoredDraft || restoredDraft === restoredDraftRef.current) return;
-    restoredDraftRef.current = restoredDraft;
-    if (draftRevisionRef.current !== restoredDraft.expectedDraftRevision) return;
-    valueRef.current = restoredDraft.message;
-    imagesRef.current = restoredDraft.images;
-    setValue(restoredDraft.message);
-    setImages(restoredDraft.images);
-    setSuggestionIndex(0);
+    if (!restoredDraft) return;
     requestAnimationFrame(() => textareaRef.current?.focus());
-  }, [restoredDraft]);
+  }, [restoredDraft, resolvedDraftKey]);
 
   const resizeTextarea = useCallback(() => {
     const textarea = textareaRef.current;
@@ -229,21 +209,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     };
   }, [resizeTextarea]);
 
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    // Navigation pauses undrained editor snapshots for the old pane. Returning
-    // to that pane, regaining mutation authority, or losing a local send pause
-    // resumes them with the newest App callback and committed scope.
-    void drainSubmissions();
-  }, [submissionScope, disabled, submissionPaused]);
-
-  const currentPendingSubmissions = pendingByScopeRef.current.get(submissionScope) || 0;
+  const currentPendingSubmissions = composer.pendingCount;
   const submissionLocked = !allowFollowupSubmissions && currentPendingSubmissions > 0;
   const editorDisabled = disabled || submissionLocked;
   const imageAttachmentLimitReached =
@@ -268,169 +234,48 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     if (editorDisabled) return;
     const candidates = files.filter((file) => file.type.startsWith("image/"));
     if (!candidates.length) return;
-    const preflightError = promptImageAdditionError(imagesRef.current, candidates);
+    const preflightError = promptImageAdditionError(composer.currentDraft().images, candidates);
     if (preflightError) return onError(preflightError);
     try {
       const added = await Promise.all(candidates.map(imageFromFile));
       // FileReader completions may overlap across paste/drop/picker events. Recheck
-      // against the latest committed attachment set so count and byte caps remain
-      // atomic without introducing a second draft or upload authority.
+      // against the latest partition so count and byte caps remain atomic.
+      const current = composer.currentDraft();
       const commitError = promptImageAdditionError(
-        imagesRef.current,
-        added.map((image) => ({
-          name: image.fileName,
-          size: promptImageByteLength(image),
-        })),
+        current.images,
+        added.map((image) => ({ name: image.fileName, size: promptImageByteLength(image) })),
       );
       if (commitError) return onError(commitError);
-      const next = [...imagesRef.current, ...added];
-      imagesRef.current = next;
-      setImages(next);
-      advanceUserDraftRevision();
+      composer.edit(current.message);
+      composer.replace(current.message, [...current.images, ...added]);
     } catch (error) {
       onError(error instanceof Error ? error.message : String(error));
     }
   };
 
   const completeCommand = (command: SlashCommand) => {
-    const next = `/${command.name} `;
-    valueRef.current = next;
-    setValue(next);
+    composer.edit(`/${command.name} `);
     setSuggestionIndex(0);
-    advanceUserDraftRevision();
     requestAnimationFrame(() => textareaRef.current?.focus());
   };
-
-  const updatePendingScope = (scope: string, delta: number) => {
-    const next = Math.max(0, (pendingByScopeRef.current.get(scope) || 0) + delta);
-    if (next) pendingByScopeRef.current.set(scope, next);
-    else pendingByScopeRef.current.delete(scope);
-    onSubmissionPendingChange?.(scope, next);
-    if (mountedRef.current) setSubmissionRevision((revision) => revision + 1);
-  };
-
-  const replaceDraft = (message: string, nextImages: PromptImage[]) => {
-    valueRef.current = message;
-    imagesRef.current = nextImages;
-    if (mountedRef.current) {
-      setValue(message);
-      setImages(nextImages);
-      setSuggestionIndex(0);
-    }
-  };
-
-  function restoreFailedSubmission(scope: string) {
-    const failed = failedSubmissionsRef.current.get(scope);
-    if (!failed || currentScopeRef.current !== scope) return;
-    if (
-      !suspendedDraftsRef.current.has(scope) &&
-      (valueRef.current.trim() || imagesRef.current.length)
-    )
-      suspendedDraftsRef.current.set(scope, {
-        message: valueRef.current,
-        images: imagesRef.current,
-      });
-    replaceDraft(failed.message, failed.images);
-    requestAnimationFrame(() => textareaRef.current?.focus());
-  }
-
-  const restoreSuspendedDraft = (scope: string) => {
-    const suspended = suspendedDraftsRef.current.get(scope);
-    if (
-      !suspended ||
-      currentScopeRef.current !== scope ||
-      valueRef.current.trim() ||
-      imagesRef.current.length ||
-      (pendingByScopeRef.current.get(scope) || 0) > 0 ||
-      blockedScopesRef.current.has(scope)
-    )
-      return;
-    suspendedDraftsRef.current.delete(scope);
-    replaceDraft(suspended.message, suspended.images);
-  };
-
-  function drainSubmissions() {
-    if (drainingRef.current || mutationDisabledRef.current || submissionPausedRef.current) return;
-    const scope = currentScopeRef.current;
-    if (blockedScopesRef.current.has(scope)) {
-      restoreFailedSubmission(scope);
-      return;
-    }
-    const index = submissionQueueRef.current.findIndex(
-      (submission) => submission.scope === scope,
-    );
-    if (index < 0) {
-      restoreSuspendedDraft(scope);
-      return;
-    }
-    const [submission] = submissionQueueRef.current.splice(index, 1);
-    drainingRef.current = true;
-    void onSendRef.current(submission.message, submission.images, submission.delivery)
-      .catch((error) => {
-        failedSubmissionsRef.current.set(submission.scope, submission);
-        blockedScopesRef.current.add(submission.scope);
-        restoreFailedSubmission(submission.scope);
-      })
-      .finally(() => {
-        updatePendingScope(submission.scope, -1);
-        drainingRef.current = false;
-        if (!mountedRef.current) return;
-        if (!blockedScopesRef.current.has(currentScopeRef.current))
-          drainSubmissions();
-        else restoreFailedSubmission(currentScopeRef.current);
-        requestAnimationFrame(() => textareaRef.current?.focus());
-      });
-  }
 
   const submit = (delivery: PromptDelivery = "queue") => {
-    const message = valueRef.current.trim();
-    const currentImages = imagesRef.current;
-    const scope = currentScopeRef.current;
-    if (
-      (!message && !currentImages.length) ||
-      disabled ||
-      (!allowFollowupSubmissions &&
-        (pendingByScopeRef.current.get(scope) || 0) > 0)
-    )
-      return;
+    const current = composer.currentDraft();
+    const message = current.message.trim();
+    if (!message && !current.images.length) return;
     if (delivery === "steer" && message.startsWith("/")) {
       onError("Slash 指令不能作为 Steer 消息发送");
       return;
     }
     if (
-      currentImages.length &&
+      current.images.length &&
       !resolveImageCapabilityOnSend &&
       (imageInputPending || !acceptsImages)
     ) {
-      onError(
-        imageInputPending
-          ? imageInputPendingMessage
-          : "当前模型不支持图片输入",
-      );
+      onError(imageInputPending ? imageInputPendingMessage : "当前模型不支持图片输入");
       return;
     }
-    const retryingFailedSubmission =
-      blockedScopesRef.current.has(scope) &&
-      failedSubmissionsRef.current.has(scope);
-    if (retryingFailedSubmission) {
-      blockedScopesRef.current.delete(scope);
-      failedSubmissionsRef.current.delete(scope);
-    }
-    const submission: PendingSubmission = {
-      scope,
-      ...(submissionTargetSessionId
-        ? { targetSessionId: submissionTargetSessionId }
-        : null),
-      message,
-      images: currentImages,
-      delivery,
-    };
-    if (retryingFailedSubmission) submissionQueueRef.current.unshift(submission);
-    else submissionQueueRef.current.push(submission);
-    replaceDraft("", []);
-    advanceUserDraftRevision();
-    updatePendingScope(scope, 1);
-    drainSubmissions();
+    composer.submit(delivery);
   };
 
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -448,7 +293,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
       if (event.key === "ArrowDown") { event.preventDefault(); setSuggestionIndex((index) => (index + 1) % suggestions.length); return; }
       if (event.key === "ArrowUp") { event.preventDefault(); setSuggestionIndex((index) => (index - 1 + suggestions.length) % suggestions.length); return; }
       if (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey && `/${suggestions[suggestionIndex].name}` !== value)) { event.preventDefault(); completeCommand(suggestions[suggestionIndex]); return; }
-      if (event.key === "Escape") { event.preventDefault(); const next = valueRef.current === "/" ? "" : valueRef.current; valueRef.current = next; setValue(next); advanceUserDraftRevision(); return; }
+      if (event.key === "Escape") { event.preventDefault(); const current = composer.currentDraft(); composer.edit(current.message === "/" ? "" : current.message); return; }
     }
     if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault();
@@ -460,10 +305,9 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     if (editorDisabled) return;
     const references = fileReferences(paths);
     if (references) {
-      const next = valueRef.current.trim() ? `${valueRef.current.trimEnd()}\n\n${references}` : references;
-      valueRef.current = next;
-      setValue(next);
-      advanceUserDraftRevision();
+      const current = composer.currentDraft();
+      const next = current.message.trim() ? `${current.message.trimEnd()}\n\n${references}` : references;
+      composer.edit(next);
     }
   };
 
@@ -485,7 +329,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     }
     if (clipboardFiles.length || event.clipboardData.types.includes("Files")) {
       event.preventDefault();
-      advanceUserDraftRevision();
+      composer.edit(composer.currentDraft().message);
       void onReadClipboardFiles().then((paths) => {
         if (paths.length) appendFileReferences(paths);
         else onError("无法取得文件的本地路径，请使用发送按钮旁的附件按钮选择本地文件");
@@ -514,7 +358,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     if (editorDisabled) return;
     setAttachmentOpen(false);
     setPickingFiles(true);
-    advanceUserDraftRevision();
+    composer.edit(composer.currentDraft().message);
     try {
       const paths = await onPickLocalFiles();
       appendFileReferences(paths);
@@ -529,12 +373,12 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   return (
     <div className="composer-wrap">
       {notices && <div className="system-notice-stack" aria-live="polite">{notices}</div>}
-      {blockedScopesRef.current.has(submissionScope) && <div className="composer-submission-status is-failed" role="status">发送失败，草稿已恢复；修改后可重试</div>}
-      {currentPendingSubmissions > 0 && submissionPaused && !blockedScopesRef.current.has(submissionScope) && <div className="composer-submission-status" role="status">{submissionPausedMessage}</div>}
+      {composer.blocked && <div className="composer-submission-status is-failed" role="status">发送失败，草稿已恢复；修改后可重试</div>}
+      {currentPendingSubmissions > 0 && submissionPaused && !composer.blocked && <div className="composer-submission-status" role="status">{submissionPausedMessage}</div>}
       <div className={`composer ${dragging ? "is-dragging" : ""}`} onDragOver={(event) => { event.preventDefault(); if (!editorDisabled) setDragging(true); }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }} onDrop={drop}>
         {!editorDisabled && suggestions.length > 0 && <div id={suggestionListId} className="command-suggestions" role="listbox" aria-label="Pi 指令联想">{suggestions.map((command, index) => <button id={`${suggestionListId}-option-${index}`} type="button" role="option" aria-selected={index === suggestionIndex} className={index === suggestionIndex ? "is-active" : ""} key={`${command.source}-${command.name}`} onMouseDown={(event) => event.preventDefault()} onClick={() => completeCommand(command)}><strong>/{command.name}</strong><span>{command.description || "Pi 指令"}</span><small>{command.source}</small></button>)}</div>}
-        {images.length > 0 && <div className="image-previews">{images.map((image, index) => <div className="image-preview" key={`${image.fileName}-${index}`}><img src={`data:${image.mimeType};base64,${image.data}`} alt={image.fileName || `图片 ${index + 1}`} /><button type="button" disabled={editorDisabled} onClick={() => { const next = imagesRef.current.filter((_, itemIndex) => itemIndex !== index); imagesRef.current = next; setImages(next); advanceUserDraftRevision(); }} aria-label={`移除 ${image.fileName || "图片"}`}><CloseIcon /></button><small>{image.fileName || "粘贴的图片"}</small></div>)}</div>}
-        <textarea ref={textareaRef} value={value} onChange={(event) => { valueRef.current = event.target.value; setValue(event.target.value); advanceUserDraftRevision(); }} onPaste={paste} onKeyDown={keyDown} onCompositionStart={() => { composingRef.current = true; }} onCompositionEnd={(event) => { composingRef.current = false; lastCompositionEndAtRef.current = Date.now(); const next = event.currentTarget.value; valueRef.current = next; setValue(next); }} disabled={editorDisabled} rows={1} placeholder={editorDisabled ? disabledPlaceholder || "输入消息，或粘贴、拖入附件" : placeholder || (streaming ? "继续输入，发送后加入队列；输入 / 查看指令" : "输入消息，或粘贴、拖入附件")} aria-label="消息输入" aria-autocomplete="list" aria-expanded={suggestions.length > 0} aria-controls={suggestions.length > 0 ? suggestionListId : undefined} aria-activedescendant={suggestions.length > 0 ? `${suggestionListId}-option-${suggestionIndex}` : undefined} />
+        {images.length > 0 && <div className="image-previews">{images.map((image, index) => <div className="image-preview" key={`${image.fileName}-${index}`}><img src={`data:${image.mimeType};base64,${image.data}`} alt={image.fileName || `图片 ${index + 1}`} /><button type="button" disabled={editorDisabled} onClick={() => { const current = composer.currentDraft(); composer.edit(current.message); composer.replace(current.message, current.images.filter((_, itemIndex) => itemIndex !== index)); }} aria-label={`移除 ${image.fileName || "图片"}`}><CloseIcon /></button><small>{image.fileName || "粘贴的图片"}</small></div>)}</div>}
+        <textarea ref={textareaRef} value={value} onChange={(event) => composer.edit(event.target.value)} onPaste={paste} onKeyDown={keyDown} onCompositionStart={() => { composingRef.current = true; }} onCompositionEnd={() => { composingRef.current = false; lastCompositionEndAtRef.current = Date.now(); }} disabled={editorDisabled} rows={1} placeholder={editorDisabled ? disabledPlaceholder || "输入消息，或粘贴、拖入附件" : placeholder || (streaming ? "继续输入，发送后加入队列；输入 / 查看指令" : "输入消息，或粘贴、拖入附件")} aria-label="消息输入" aria-autocomplete="list" aria-expanded={suggestions.length > 0} aria-controls={suggestions.length > 0 ? suggestionListId : undefined} aria-activedescendant={suggestions.length > 0 ? `${suggestionListId}-option-${suggestionIndex}` : undefined} />
         <div className="composer-toolbar">
           <div className="composer-toolbar-controls">{controls}</div>
           <div className="composer-actions">
@@ -543,7 +387,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
             <div className="attachment-control" ref={attachmentRef}>
               <button type="button" className={`attachment-button ${attachmentOpen ? "is-open" : ""}`} disabled={editorDisabled || pickingFiles} onClick={() => setAttachmentOpen((open) => !open)} title="添加附件" aria-label="添加附件" aria-haspopup="menu" aria-expanded={attachmentOpen}><PaperclipIcon /></button>
               {attachmentOpen && <div className="attachment-menu" role="menu">
-                <button type="button" role="menuitem" disabled={imageAttachmentLimitReached} onClick={() => { setAttachmentOpen(false); advanceUserDraftRevision(); imageInputRef.current?.click(); }}><ImageIcon className="attachment-menu-icon" /><strong>图片</strong><small>{resolveImageCapabilityOnSend ? "最多 10 张，单张 8 MB / 总计 40 MB；发送时准备 Runtime 并检查支持" : imageInputPending ? "最多 10 张，单张 8 MB / 总计 40 MB；发送前等待模型能力同步" : acceptsImages ? "最多 10 张，单张 8 MB / 总计 40 MB；直接解析，可粘贴或拖入" : "最多 10 张，单张 8 MB / 总计 40 MB；发送时检查模型支持"}</small></button>
+                <button type="button" role="menuitem" disabled={imageAttachmentLimitReached} onClick={() => { setAttachmentOpen(false); composer.edit(composer.currentDraft().message); imageInputRef.current?.click(); }}><ImageIcon className="attachment-menu-icon" /><strong>图片</strong><small>{resolveImageCapabilityOnSend ? "最多 10 张，单张 8 MB / 总计 40 MB；发送时准备 Runtime 并检查支持" : imageInputPending ? "最多 10 张，单张 8 MB / 总计 40 MB；发送前等待模型能力同步" : acceptsImages ? "最多 10 张，单张 8 MB / 总计 40 MB；直接解析，可粘贴或拖入" : "最多 10 张，单张 8 MB / 总计 40 MB；发送时检查模型支持"}</small></button>
                 <button type="button" role="menuitem" disabled={pickingFiles} onClick={() => void pickFiles()}><FileSearchIcon className="attachment-menu-icon" /><strong>{pickingFiles ? "选择中…" : "本地文件"}</strong><small>引用 Windows 绝对路径</small></button>
               </div>}
               <input ref={imageInputRef} className="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple onChange={(event) => { void addImages([...event.target.files || []]); event.target.value = ""; }} />

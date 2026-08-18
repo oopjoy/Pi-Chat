@@ -1359,6 +1359,52 @@ test("ChatInput pauses undrained snapshots when navigation changes submission sc
   }
 });
 
+test("ChatInput keeps unsent drafts partitioned by Session target and New generation", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { ChatInput } = await import("../../src/web/components/ChatInput");
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  const render = (draftKey: { kind: "session"; sessionId: string } | { kind: "new"; generation: number }) => createElement(ChatInput, {
+    streaming: false,
+    stopping: false,
+    disabled: false,
+    draftKey,
+    submissionScope: draftKey.kind === "session" ? `session:${draftKey.sessionId}` : `draft:${draftKey.generation}`,
+    acceptsImages: true,
+    commands: [],
+    onSend: async () => undefined,
+    onAbort: async () => undefined,
+    onPickLocalFiles: async () => [],
+    onReadClipboardFiles: async () => [],
+    onError: () => undefined,
+  });
+  const type = async (message: string) => {
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, message);
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: message }));
+    });
+  };
+  try {
+    await act(async () => root.render(render({ kind: "session", sessionId: "A" })));
+    await type("A draft");
+    await act(async () => root.render(render({ kind: "session", sessionId: "B" })));
+    assert.equal(dom.window.document.querySelector<HTMLTextAreaElement>("textarea")!.value, "");
+    await type("B draft");
+    await act(async () => root.render(render({ kind: "session", sessionId: "A" })));
+    assert.equal(dom.window.document.querySelector<HTMLTextAreaElement>("textarea")!.value, "A draft");
+    await act(async () => root.render(render({ kind: "new", generation: 1 })));
+    await type("first New");
+    await act(async () => root.render(render({ kind: "new", generation: 2 })));
+    assert.equal(dom.window.document.querySelector<HTMLTextAreaElement>("textarea")!.value, "");
+    await type("second New");
+    await act(async () => root.render(render({ kind: "new", generation: 1 })));
+    assert.equal(dom.window.document.querySelector<HTMLTextAreaElement>("textarea")!.value, "first New");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
 test("ChatInput protects IME confirmation and exposes slash suggestions as an active descendant", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");
