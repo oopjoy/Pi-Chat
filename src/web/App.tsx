@@ -990,13 +990,52 @@ export function App() {
     >(),
   );
   const optimisticSessionMutationTokenRef = useRef(0);
-  const syncMutatingSessionIds = () =>
-    setMutatingSessionIds([
-      ...new Set([
-        ...optimisticRenamesRef.current.keys(),
-        ...optimisticDeletesRef.current.keys(),
+  const syncMutatingSessionIds = useCallback(
+    () =>
+      setMutatingSessionIds([
+        ...new Set([
+          ...optimisticRenamesRef.current.keys(),
+          ...optimisticDeletesRef.current.keys(),
+        ]),
       ]),
-    ]);
+    [],
+  );
+  /**
+   * Drop UI facts whose producer is the previous Pi Chat process. Persistent
+   * session data, Pane authority, and local draft state deliberately remain
+   * outside this boundary. Both an observed epoch replacement and token-only
+   * transport recovery must run this exact reset before B bootstraps.
+   */
+  const resetProcessOwnedUiState = useCallback(() => {
+    sessionRunningOverridesRef.current.clear();
+    setFailedSessionIds([]);
+    setConfirmedCommands([]);
+    setAskQuestionnaires({});
+    completedCompactionSessionIdsRef.current.clear();
+    cancelledQueueIdsRef.current.clear();
+    queueProjectionRevisionRef.current.clear();
+    latestQueueProjectionRef.current.clear();
+    queueMutationSequenceRef.current.clear();
+    appliedQueueMutationSequenceRef.current.clear();
+    viewCacheRef.current.clear();
+    optimisticRenamesRef.current.clear();
+    optimisticDeletesRef.current.clear();
+    syncMutatingSessionIds();
+    busySessionCountsRef.current.clear();
+    setBusySessionIds([]);
+    for (const lease of promptBusyReleasesRef.current.values()) {
+      lease.markTerminal();
+      lease.release();
+    }
+    promptBusyReleasesRef.current.clear();
+    warmingRuntimeStartsRef.current.clear();
+    warmingSessionIdsRef.current.clear();
+    setWarmingSessionIds([]);
+    streamDiagnosticsRef.current?.clear();
+    sessionRunGenerationsRef.current.clear();
+    settledRunGenerationsRef.current.clear();
+    terminalAssistantStreamGenerationsRef.current.clear();
+  }, [syncMutatingSessionIds]);
   const recordSourceTurnTotal = (sessionId: string, total: number): void => {
     if (!Number.isFinite(total)) return;
     sourceTurnTotalsRef.current.set(
@@ -2789,22 +2828,7 @@ export function App() {
         refreshOperationTokenRef.current = null;
         setRefreshing(false);
         clearStoppingForSession();
-        completedCompactionSessionIdsRef.current.clear();
-        sessionRunningOverridesRef.current.clear();
-        setFailedSessionIds([]);
-        setConfirmedCommands([]);
-        setAskQuestionnaires({});
-        cancelledQueueIdsRef.current.clear();
-        queueProjectionRevisionRef.current.clear();
-        latestQueueProjectionRef.current.clear();
-        queueMutationSequenceRef.current.clear();
-        appliedQueueMutationSequenceRef.current.clear();
-        viewCacheRef.current.clear();
-        optimisticRenamesRef.current.clear();
-        optimisticDeletesRef.current.clear();
-        syncMutatingSessionIds();
-        busySessionCountsRef.current.clear();
-        setBusySessionIds([]);
+        resetProcessOwnedUiState();
         sidebarInventoryReadyRef.current = false;
         setSidebarInventoryReady(false);
         setSessions([]);
@@ -2822,18 +2846,6 @@ export function App() {
             ? ready.workspaceEpoch
             : readyRunEpoch;
         workspaceRevisionRef.current = 0;
-        for (const lease of promptBusyReleasesRef.current.values()) {
-          lease.markTerminal();
-          lease.release();
-        }
-        promptBusyReleasesRef.current.clear();
-        warmingRuntimeStartsRef.current.clear();
-        warmingSessionIdsRef.current.clear();
-        setWarmingSessionIds([]);
-        streamDiagnosticsRef.current?.clear();
-        sessionRunGenerationsRef.current.clear();
-        settledRunGenerationsRef.current.clear();
-        terminalAssistantStreamGenerationsRef.current.clear();
         runEpochRef.current = readyRunEpoch;
       } else if (readyRunEpoch && !runEpochRef.current) {
         // The first ready only discovers the initial epoch; it is not a
@@ -2929,6 +2941,7 @@ export function App() {
       cancelPendingNavigation,
       clearStoppingForSession,
       recordSseRejectionDiagnostic,
+      resetProcessOwnedUiState,
       startIdleRecovery,
     ],
   );
@@ -4315,23 +4328,8 @@ export function App() {
           setSessions([]);
           setSessionsTotal(0);
           setSessionDirectories([]);
-          optimisticRenamesRef.current.clear();
-          optimisticDeletesRef.current.clear();
-          syncMutatingSessionIds();
           // Drop every process-derived authority before bootstrapping that token.
-          sessionRunningOverridesRef.current.clear();
-          setFailedSessionIds([]);
-          setConfirmedCommands([]);
-          completedCompactionSessionIdsRef.current.clear();
-          cancelledQueueIdsRef.current.clear();
-          queueProjectionRevisionRef.current.clear();
-          latestQueueProjectionRef.current.clear();
-          queueMutationSequenceRef.current.clear();
-          appliedQueueMutationSequenceRef.current.clear();
-          viewCacheRef.current.clear();
-          sessionRunGenerationsRef.current.clear();
-          settledRunGenerationsRef.current.clear();
-          terminalAssistantStreamGenerationsRef.current.clear();
+          resetProcessOwnedUiState();
           const recoveredReadiness = {
             status: "starting" as const,
             generation: 0,
@@ -4349,12 +4347,6 @@ export function App() {
           draftWorkspacePickerTokenRef.current = null;
           workspaceDefaultPickerTokenRef.current = null;
           setWorkspacePicking(false);
-          busySessionCountsRef.current.clear();
-          setBusySessionIds([]);
-          promptBusyReleasesRef.current.clear();
-          warmingRuntimeStartsRef.current.clear();
-          warmingSessionIdsRef.current.clear();
-          setWarmingSessionIds([]);
           setError("");
           setEventSourceGeneration((generation) => generation + 1);
           return refresh();
@@ -4364,7 +4356,7 @@ export function App() {
           recoveringConnectionRef.current = null;
         });
     },
-    [clearStoppingForSession, refresh, reportBackgroundRefreshError],
+    [clearStoppingForSession, refresh, reportBackgroundRefreshError, resetProcessOwnedUiState],
   );
 
   const handleOversizedEventSourceFrame = useCallback(

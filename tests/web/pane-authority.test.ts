@@ -2089,6 +2089,63 @@ test("token recovery clears full inventory retained by the previous process", as
   }
 });
 
+test("token recovery clears a stale ask questionnaire owned by the prior process", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  Object.assign(api, {
+    bootstrap: async () => bootstrap,
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    recoverConnection: async () => undefined,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () =>
+      source.emitPi({
+        type: "tool_execution_start",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        toolName: "ask_user_question",
+        toolCallId: "ask-process-a",
+        args: {
+          questions: [{
+            question: "Process A question?",
+            header: "Process A",
+            options: [
+              { label: "One", description: "first" },
+              { label: "Two", description: "second" },
+            ],
+          }],
+        },
+      }),
+    );
+    assert.match(
+      dom.window.document.body.textContent || "",
+      /Process A question\?/,
+      "A's live Ask projection is initially visible",
+    );
+
+    await act(async () => {
+      source.onerror?.(new dom.window.Event("error"));
+      await new Promise((resolve) => dom.window.setTimeout(resolve, 0));
+      await new Promise((resolve) => dom.window.setTimeout(resolve, 0));
+    });
+    assert.doesNotMatch(
+      dom.window.document.body.textContent || "",
+      /Process A question\?/,
+      "token recovery must not render an Ask projection produced by process A",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("EventSource reconnect refreshes an authoritative terminal without duplicating it", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");

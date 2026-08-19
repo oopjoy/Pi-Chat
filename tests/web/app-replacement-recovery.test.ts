@@ -319,6 +319,65 @@ for (const terminal of ["ready", "failed"] as const) {
   });
 }
 
+test("an observed epoch replacement clears a stale ask questionnaire", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  Object.assign(api, {
+    bootstrap: async () => ({ ...bootstrap, workspaceEpoch: "epoch-a" }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    invalidateHandshake: () => undefined,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () =>
+      source.emitPi({
+        type: "tool_execution_start",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        toolName: "ask_user_question",
+        toolCallId: "ask-epoch-a",
+        args: {
+          questions: [{
+            question: "Epoch A question?",
+            header: "Epoch A",
+            options: [
+              { label: "One", description: "first" },
+              { label: "Two", description: "second" },
+            ],
+          }],
+        },
+      }),
+    );
+    assert.match(dom.window.document.body.textContent || "", /Epoch A question\?/);
+
+    await act(async () =>
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "idle",
+            piChatRunEpoch: "epoch-b",
+            workspaceEpoch: "epoch-b",
+          }),
+        }),
+      ),
+    );
+    assert.doesNotMatch(
+      dom.window.document.body.textContent || "",
+      /Epoch A question\?/,
+      "B must not inherit A's extension-owned questionnaire",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("a replacement clears the old Primary readiness generation before accepting its lower generation", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");
