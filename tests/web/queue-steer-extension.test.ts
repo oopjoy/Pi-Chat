@@ -1225,7 +1225,7 @@ test("queue SSE invalidates an older Session view before it can erase queue stat
   }
 });
 
-test("agent settlement clears a completed tool status left after compaction", async () => {
+test("agent settlement preserves a completed compaction status until its terminal event", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../../src/web/api");
@@ -1292,14 +1292,11 @@ test("agent settlement clears a completed tool status left after compaction", as
     );
     assert.match(
       dom.window.document.querySelector(".agent-status")?.textContent || "",
-      /bash 已完成，Pi 正在继续…/,
+      /正在压缩上下文，当前消息会在完成后继续发送…/,
     );
     assert.ok(
-      dom.window.document.querySelector(".agent-status .loader.small"),
-    );
-    assert.ok(
-      !dom.window.document.querySelector(".agent-status.is-compacting"),
-      "a completed tool frame proves Pi has resumed work after compaction",
+      dom.window.document.querySelector(".agent-status.is-compacting"),
+      "a tool terminal cannot prove that an existing compaction has finished",
     );
 
     await act(async () =>
