@@ -112,6 +112,89 @@ test("cold history settings stage immediately and survive until send", async () 
   }
 });
 
+test("a cold prompt remains visible between Runtime readiness and prompt acknowledgement", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const coldId = "cold-visible-12345678";
+  const cold: SessionViewData = {
+    ...draftView,
+    session: {
+      ...draftView.session,
+      id: coldId,
+      sessionId: "cold-visible",
+      name: "Cold visible",
+      active: false,
+      writable: true,
+    },
+    state: { ...draftView.state, sessionId: "cold-visible" },
+    runtimeStatus: "view-only",
+    isActive: false,
+  };
+  let resolveWarm!: (value: Awaited<ReturnType<typeof api.warmSession>>) => void;
+  let resolvePrompt!: (value: Awaited<ReturnType<typeof api.prompt>>) => void;
+  const warm = new Promise<Awaited<ReturnType<typeof api.warmSession>>>((resolve) => { resolveWarm = resolve; });
+  const prompt = new Promise<Awaited<ReturnType<typeof api.prompt>>>((resolve) => { resolvePrompt = resolve; });
+  let promptCalls = 0;
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      sessions: [...bootstrap.sessions, cold.session],
+      sessionsTotal: 2,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    viewSession: async (id: string) => id === coldId ? cold : draftView,
+    warmSession: async () => warm,
+    prompt: async () => { promptCalls += 1; return prompt; },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    await act(async () => {
+      [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
+        .find((button) => button.textContent?.includes("Cold visible"))!
+        .click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "keep me visible");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "keep me visible" }));
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+    });
+    assert.match(dom.window.document.body.textContent || "", /keep me visible/);
+
+    await act(async () => {
+      resolveWarm({ sessionId: coldId, state: cold.state, gateMode: "strict" });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(promptCalls, 1, "prompt dispatch begins after Runtime readiness");
+    assert.match(
+      dom.window.document.body.textContent || "",
+      /keep me visible/,
+      "Runtime readiness cannot clear the local bubble before acknowledgement",
+    );
+
+    await act(async () => {
+      resolvePrompt({ accepted: true, queued: false });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.match(dom.window.document.body.textContent || "", /keep me visible/);
+  } finally {
+    resolveWarm?.({ sessionId: coldId, state: cold.state, gateMode: "strict" });
+    resolvePrompt?.({ accepted: true, queued: false });
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("one active-session Composer selection stays local until its prompt captures Model and Thinking together", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");

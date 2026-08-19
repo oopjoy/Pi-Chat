@@ -5109,7 +5109,9 @@ export function App() {
             type: "PROMPT_PREPARING",
             target: { kind: "session", sessionId: targetSessionId },
             status: WAITING_FOR_PI_STATUS,
-            clearPending: true,
+            // Runtime readiness is not prompt acknowledgement. Keep the local
+            // user bubble visible until PROMPT_ACKNOWLEDGED atomically moves it
+            // into messages (or a definite rejection removes it).
           });
       } else if (!alreadyStreaming && promptAuthority) {
         commitPaneIfCurrent(promptAuthority, {

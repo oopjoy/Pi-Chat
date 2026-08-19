@@ -306,6 +306,57 @@ test("empty terminal assistant SSE events retain the cumulative answer payload",
   }
 });
 
+test("delta-only assistant RPC events reach SSE as cumulative live snapshots", async () => {
+  const path = "C:\\sessions\\primary-delta-stream.jsonl";
+  const primary = new FakeRpc(path, "primary-delta-stream");
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const frames: string[] = [];
+  const clients = (app as unknown as { sseClients: Map<{ write: (frame: string) => boolean }, string> }).sseClients;
+  clients.set({ write: (frame) => { frames.push(frame); return true; } }, "11111111-1111-4111-8111-111111111111");
+  try {
+    await (app as unknown as { ensurePrimaryIdentity(): Promise<void> }).ensurePrimaryIdentity();
+    primary.emit({ type: "agent_start" });
+    primary.emit({ type: "message_start", message: { role: "assistant", content: [] } });
+    primary.emit({
+      type: "message_update",
+      message: {},
+      assistantMessageEvent: { type: "text_start", contentIndex: 0 },
+    });
+    primary.emit({
+      type: "message_update",
+      message: {},
+      assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "连续" },
+    });
+    primary.emit({
+      type: "message_update",
+      assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "吐字" },
+    });
+    primary.emit({ type: "message_end", message: { role: "assistant", content: [] } });
+
+    const payloads = frames
+      .filter((frame) => frame.includes('"type":"message_update"'))
+      .map((frame) => JSON.parse((frame.split("data: ")[1] || "{}").trim()) as {
+        message?: { role?: string; content?: unknown; piChatLiveMessageId?: string };
+      });
+    assert.ok(payloads.length >= 1);
+    const latest = payloads.at(-1)?.message;
+    assert.equal(latest?.role, "assistant");
+    assert.deepEqual(latest?.content, [{ type: "text", text: "连续吐字" }]);
+    assert.equal(typeof latest?.piChatLiveMessageId, "string");
+    const terminal = frames
+      .filter((frame) => frame.includes('"type":"message_end"'))
+      .map((frame) => JSON.parse((frame.split("data: ")[1] || "{}").trim()) as {
+        message?: { content?: unknown; piChatLiveMessageId?: string };
+      })
+      .at(-1)?.message;
+    assert.deepEqual(terminal?.content, [{ type: "text", text: "连续吐字" }]);
+    assert.equal(terminal?.piChatLiveMessageId, latest?.piChatLiveMessageId);
+  } finally {
+    clients.clear();
+    await app.close();
+  }
+});
+
 test("malformed Secondary terminals do not mutate owner state or LRU recency", async () => {
   const primaryPath = "C:\\sessions\\primary-terminal-owner.jsonl";
   const secondaryPath = "C:\\sessions\\secondary-terminal-owner.jsonl";

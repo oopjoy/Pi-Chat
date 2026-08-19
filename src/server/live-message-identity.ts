@@ -37,7 +37,12 @@ export class LiveMessageIdentityRegistry {
     if (type !== "message_start" && type !== "message_update" && type !== "message_end") return event;
 
     const message = messageRecord(event.message);
-    const slot = message ? lifecycleSlot(message) : type === "message_update" ? "assistant" : null;
+    // Pi's delta-only RPC projection may emit message_update with `{}` (or no
+    // message) while assistantMessageEvent carries the actual token. The event
+    // protocol itself proves this lifecycle is assistant-owned.
+    const slot = message
+      ? lifecycleSlot(message) || (type === "message_update" ? "assistant" : null)
+      : type === "message_update" ? "assistant" : null;
     if (!slot) return event;
 
     let active = this.activeBySession.get(sessionId);
@@ -58,7 +63,15 @@ export class LiveMessageIdentityRegistry {
         piChatPersistedMessageId: _untrustedPersistedMessageId,
         ...runtimeMessage
       } = message;
-      projectedMessage = { ...runtimeMessage, piChatLiveMessageId: id };
+      projectedMessage = {
+        ...runtimeMessage,
+        ...(type === "message_update" && runtimeMessage.role !== "assistant"
+          ? { role: "assistant" }
+          : null),
+        piChatLiveMessageId: id,
+      };
+    } else if (type === "message_update") {
+      projectedMessage = { role: "assistant", content: [], piChatLiveMessageId: id };
     }
     const projected = {
       ...event,

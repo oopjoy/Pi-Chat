@@ -72,6 +72,33 @@ test("live identities stay Session-scoped and settlement clears an orphan lifecy
   assert.equal(projectedId(continuedB), "live-2");
 });
 
+test("delta-only assistant updates receive the active identity and projected role", () => {
+  const registry = new LiveMessageIdentityRegistry(ids());
+  const start = registry.project("session-a", {
+    type: "message_start",
+    message: { role: "assistant", content: [] },
+  });
+  const emptyObjectUpdate = registry.project("session-a", {
+    type: "message_update",
+    message: {},
+    assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "A" },
+  });
+  const missingMessageUpdate = registry.project("session-a", {
+    type: "message_update",
+    assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "B" },
+  });
+
+  assert.equal(projectedId(start), "live-1");
+  assert.equal(projectedId(emptyObjectUpdate), "live-1");
+  assert.equal(projectedId(missingMessageUpdate), "live-1");
+  assert.equal((emptyObjectUpdate.message as { role?: unknown }).role, "assistant");
+  assert.deepEqual(missingMessageUpdate.message, {
+    role: "assistant",
+    content: [],
+    piChatLiveMessageId: "live-1",
+  });
+});
+
 test("terminal-only tool results receive independent live identities", () => {
   const registry = new LiveMessageIdentityRegistry(ids());
   const first = registry.project("session-a", {

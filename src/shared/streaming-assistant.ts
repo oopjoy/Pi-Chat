@@ -1,10 +1,13 @@
 import type { PiContentBlock, PiMessage } from "./types.js";
 
+const MAX_ASSISTANT_CONTENT_BLOCKS = 256;
+
 interface AssistantStreamEvent {
   type?: unknown;
   contentIndex?: unknown;
   delta?: unknown;
   content?: unknown;
+  toolCall?: unknown;
 }
 
 /**
@@ -17,7 +20,12 @@ export function normalizeStreamingAssistantMessage(message: PiMessage, assistant
   const streamEvent = assistantMessageEvent as AssistantStreamEvent | undefined;
   if (!streamEvent || typeof streamEvent.type !== "string" || !streamEvent.type.startsWith("thinking_")) return message;
   const contentIndex = streamEvent.contentIndex;
-  if (typeof contentIndex !== "number" || !Number.isInteger(contentIndex) || contentIndex < 0) return message;
+  if (
+    typeof contentIndex !== "number"
+    || !Number.isInteger(contentIndex)
+    || contentIndex < 0
+    || contentIndex >= MAX_ASSISTANT_CONTENT_BLOCKS
+  ) return message;
 
   const rawBlocks = Array.isArray(message.content)
     ? message.content
@@ -37,6 +45,116 @@ export function normalizeStreamingAssistantMessage(message: PiMessage, assistant
   const blocks = [...rawBlocks];
   blocks[contentIndex] = normalized;
   return { ...message, content: blocks };
+}
+
+function assistantBlocks(message: PiMessage | undefined): PiContentBlock[] {
+  if (!message) return [];
+  if (typeof message.content === "string")
+    return message.content ? [{ type: "text", text: message.content }] : [];
+  return Array.isArray(message.content)
+    ? message.content.map((block) => ({ ...block }))
+    : [];
+}
+
+function hasAssistantPayload(message: PiMessage): boolean {
+  if (typeof message.content === "string") return message.content.length > 0;
+  if (!Array.isArray(message.content)) return false;
+  return message.content.some((block) => {
+    if (block.type === "text") return Boolean(block.text);
+    if (block.type === "thinking") return Boolean(block.thinking);
+    if (block.type === "toolCall") return Boolean(block.id || block.name || block.arguments);
+    if (block.type === "image") return Boolean(block.data && block.mimeType);
+    return true;
+  });
+}
+
+function validContentIndex(value: unknown): value is number {
+  return typeof value === "number"
+    && Number.isInteger(value)
+    && value >= 0
+    && value < MAX_ASSISTANT_CONTENT_BLOCKS;
+}
+
+function ensureBlockSlot(blocks: PiContentBlock[], index: number): void {
+  while (blocks.length <= index) blocks.push({ type: "text", text: "" });
+}
+
+/**
+ * Project Pi's token delta protocol into one cumulative live assistant message.
+ * Some RPC builds expose only `assistantMessageEvent.delta` while leaving both
+ * `message.content` and `assistantMessageEvent.partial` empty. The TUI consumes
+ * those deltas directly; Pi Chat must do the same before applying its cumulative
+ * SSE/browser throttles. Providers that already supply a non-empty cumulative
+ * message remain authoritative and are never double-appended.
+ */
+export function accumulateStreamingAssistantMessage(
+  previous: PiMessage | undefined,
+  incoming: PiMessage,
+  assistantMessageEvent: unknown,
+): PiMessage {
+  // Check the Runtime envelope before thinking normalization: normalization can
+  // synthesize one block from the current delta, but that single delta is not a
+  // cumulative snapshot and must still be appended to the previous projection.
+  const incomingHasPayload = hasAssistantPayload(incoming);
+  const normalized = normalizeStreamingAssistantMessage(incoming, assistantMessageEvent);
+  const previousAssistant = previous?.role === "assistant" ? previous : undefined;
+  const merged: PiMessage = {
+    ...previousAssistant,
+    ...normalized,
+    role: "assistant",
+  };
+  if (incomingHasPayload) return merged;
+
+  const blocks = assistantBlocks(previousAssistant);
+  const streamEvent = assistantMessageEvent as AssistantStreamEvent | undefined;
+  const type = typeof streamEvent?.type === "string" ? streamEvent.type : "";
+  const index = streamEvent?.contentIndex;
+  if (!validContentIndex(index)) return { ...merged, content: blocks };
+  ensureBlockSlot(blocks, index);
+
+  if (type === "text_start") {
+    blocks[index] = { type: "text", text: "" };
+  } else if (type === "text_delta") {
+    const current = blocks[index];
+    const text = current?.type === "text" && typeof current.text === "string"
+      ? current.text
+      : "";
+    blocks[index] = {
+      ...(current?.type === "text" ? current : null),
+      type: "text",
+      text: text + (typeof streamEvent?.delta === "string" ? streamEvent.delta : ""),
+    };
+  } else if (type === "text_end") {
+    blocks[index] = {
+      ...(blocks[index]?.type === "text" ? blocks[index] : null),
+      type: "text",
+      text: typeof streamEvent?.content === "string" ? streamEvent.content : "",
+    };
+  } else if (type === "thinking_start") {
+    blocks[index] = { type: "thinking", thinking: "" };
+  } else if (type === "thinking_delta") {
+    const current = blocks[index];
+    const thinking = current?.type === "thinking" && typeof current.thinking === "string"
+      ? current.thinking
+      : "";
+    blocks[index] = {
+      ...(current?.type === "thinking" ? current : null),
+      type: "thinking",
+      thinking: thinking + (typeof streamEvent?.delta === "string" ? streamEvent.delta : ""),
+    };
+  } else if (type === "thinking_end") {
+    blocks[index] = {
+      ...(blocks[index]?.type === "thinking" ? blocks[index] : null),
+      type: "thinking",
+      thinking: typeof streamEvent?.content === "string" ? streamEvent.content : "",
+    };
+  } else if (type === "toolcall_end" && streamEvent?.toolCall && typeof streamEvent.toolCall === "object") {
+    blocks[index] = {
+      ...(streamEvent.toolCall as Omit<PiContentBlock, "type">),
+      type: "toolCall",
+    } as PiContentBlock;
+  }
+  return { ...merged, content: blocks };
 }
 
 function contentIdentity(content: PiMessage["content"]): string {

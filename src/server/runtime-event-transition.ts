@@ -1,5 +1,5 @@
 import { canonicalMessageEndPayload } from "../shared/runtime-events.js";
-import { appendTerminalMessage, normalizeStreamingAssistantMessage } from "../shared/streaming-assistant.js";
+import { accumulateStreamingAssistantMessage, appendTerminalMessage } from "../shared/streaming-assistant.js";
 import type { ExtensionUiRequest, GateMode, PiMessage } from "../shared/types.js";
 
 export type RuntimeEventState = {
@@ -78,8 +78,23 @@ export function transitionRuntimeEvent(
   }
   if (type === "message_start") effects.push({ type: "session-created" });
   if (type === "compaction_end" && event.aborted === false) effects.push({ type: "context-pending" });
-  if ((type === "message_start" || type === "message_update") && event.message && typeof event.message === "object" && (event.message as PiMessage).role === "assistant")
-    state = { ...state, liveMessage: normalizeStreamingAssistantMessage(event.message as PiMessage, event.assistantMessageEvent) };
+  if (
+    (type === "message_start" || type === "message_update")
+    && event.message
+    && typeof event.message === "object"
+    && (event.message as PiMessage).role === "assistant"
+  ) {
+    const liveMessage = accumulateStreamingAssistantMessage(
+      state.liveMessage,
+      event.message as PiMessage,
+      event.assistantMessageEvent,
+    );
+    state = { ...state, liveMessage };
+    // Browser and SSE throttles operate on cumulative snapshots. Never forward
+    // a delta-only Runtime envelope whose empty message would hide all text
+    // until message_end (or abort) produces a terminal payload.
+    broadcastEvent = { ...event, message: liveMessage };
+  }
   if (type === "message_end") {
     if (!event.message || typeof event.message !== "object")
       return { state, broadcastEvent: null, effects: [] };

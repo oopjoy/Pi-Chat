@@ -43,6 +43,92 @@ test("shared Runtime transition derives lifecycle and streaming facts without mu
   assert.equal(terminal.state.pendingTerminalMessages.length, 1);
 });
 
+test("delta-only Runtime updates become cumulative browser snapshots", () => {
+  const started = transitionRuntimeEvent("session-a", base(), {
+    type: "message_start",
+    message: { role: "assistant", content: [], piChatLiveMessageId: "live-1" },
+  });
+  const thinkingStart = transitionRuntimeEvent("session-a", started.state, {
+    type: "message_update",
+    message: { role: "assistant", content: [], piChatLiveMessageId: "live-1" },
+    assistantMessageEvent: { type: "thinking_start", contentIndex: 0 },
+  });
+  const thinkingPrefix = transitionRuntimeEvent("session-a", thinkingStart.state, {
+    type: "message_update",
+    message: { role: "assistant", content: [], piChatLiveMessageId: "live-1" },
+    assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "pl" },
+  });
+  const thinking = transitionRuntimeEvent("session-a", thinkingPrefix.state, {
+    type: "message_update",
+    message: { role: "assistant", content: [], piChatLiveMessageId: "live-1" },
+    assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "an" },
+  });
+  const textStart = transitionRuntimeEvent("session-a", thinking.state, {
+    type: "message_update",
+    message: { role: "assistant", content: [], piChatLiveMessageId: "live-1" },
+    assistantMessageEvent: { type: "text_start", contentIndex: 1 },
+  });
+  const first = transitionRuntimeEvent("session-a", textStart.state, {
+    type: "message_update",
+    message: { role: "assistant", content: [], piChatLiveMessageId: "live-1" },
+    assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: "连续" },
+  });
+  const second = transitionRuntimeEvent("session-a", first.state, {
+    type: "message_update",
+    message: { role: "assistant", content: [], piChatLiveMessageId: "live-1" },
+    assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: "输出" },
+  });
+
+  assert.deepEqual(second.state.liveMessage?.content, [
+    { type: "thinking", thinking: "plan" },
+    { type: "text", text: "连续输出" },
+  ]);
+  assert.deepEqual(
+    (second.broadcastEvent?.message as { content?: unknown }).content,
+    second.state.liveMessage?.content,
+    "SSE receives the cumulative projection rather than the empty Runtime envelope",
+  );
+
+  const terminal = transitionRuntimeEvent("session-a", second.state, {
+    type: "message_end",
+    message: { role: "assistant", content: [], piChatLiveMessageId: "live-1" },
+  });
+  assert.deepEqual((terminal.broadcastEvent?.message as { content?: unknown }).content, [
+    { type: "thinking", thinking: "plan" },
+    { type: "text", text: "连续输出" },
+  ]);
+});
+
+test("malformed huge content indexes cannot expand the live projection", () => {
+  const previous = {
+    ...base(),
+    liveMessage: { role: "assistant" as const, content: [{ type: "text" as const, text: "safe" }] },
+  };
+  const updated = transitionRuntimeEvent("session-a", previous, {
+    type: "message_update",
+    message: { role: "assistant", content: [] },
+    assistantMessageEvent: {
+      type: "text_delta",
+      contentIndex: Number.MAX_SAFE_INTEGER,
+      delta: "unsafe",
+    },
+  });
+  assert.deepEqual(updated.state.liveMessage?.content, [{ type: "text", text: "safe" }]);
+});
+
+test("an already cumulative Runtime update is not double-appended", () => {
+  const previous = {
+    ...base(),
+    liveMessage: { role: "assistant" as const, content: [{ type: "text" as const, text: "A" }] },
+  };
+  const updated = transitionRuntimeEvent("session-a", previous, {
+    type: "message_update",
+    message: { role: "assistant", content: [{ type: "text", text: "AB" }] },
+    assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "B" },
+  });
+  assert.deepEqual(updated.state.liveMessage?.content, [{ type: "text", text: "AB" }]);
+});
+
 test("shared Runtime transition rejects malformed terminals without state mutation", () => {
   const previous = {
     ...base(),
