@@ -206,6 +206,88 @@ test("authoritative persisted history retains only explicit unconfirmed terminal
   assert.deepEqual(confirmed.pending, []);
 });
 
+test("a persisted terminal confirms an equivalent SSE lease despite timestamp drift", () => {
+  const persisted = [
+    { role: "user", content: "question", timestamp: 1 },
+    { role: "assistant", content: [{ type: "text", text: "answer" }], timestamp: 20 },
+  ] as const;
+  const terminal = { role: "assistant", content: "answer", timestamp: 21 } as const;
+  const reconciled = reconcilePersistedHistory([...persisted], [terminal]);
+  assert.deepEqual(reconciled.messages, persisted);
+  assert.deepEqual(reconciled.pending, []);
+});
+
+test("a persisted terminal confirms an SSE lease when only Pi textSignature differs", () => {
+  const persisted = [
+    { role: "user", content: "question", timestamp: 1 },
+    {
+      role: "assistant",
+      content: [{
+        type: "text",
+        text: "answer",
+        textSignature: '{"v":1,"id":"provider-final"}',
+      }],
+      timestamp: 2,
+    },
+  ] as const;
+  const terminal = {
+    role: "assistant",
+    content: [{ type: "text", text: "answer" }],
+    timestamp: 2,
+  } as const;
+  const reconciled = reconcilePersistedHistory([...persisted], [terminal]);
+  assert.deepEqual(reconciled.messages, persisted);
+  assert.deepEqual(reconciled.pending, []);
+});
+
+test("textSignature-insensitive terminal matching retains a distinct same-millisecond answer", () => {
+  const persisted = [
+    { role: "user", content: "question", timestamp: 1 },
+    {
+      role: "assistant",
+      content: [{
+        type: "text",
+        text: "first answer",
+        textSignature: '{"v":1,"id":"provider-final"}',
+      }],
+      timestamp: 2,
+    },
+  ] as const;
+  const terminal = {
+    role: "assistant",
+    content: [{ type: "text", text: "second answer" }],
+    timestamp: 2,
+  } as const;
+  const reconciled = reconcilePersistedHistory([...persisted], [terminal]);
+  assert.deepEqual(reconciled.messages, [...persisted, terminal]);
+  assert.deepEqual(reconciled.pending, [terminal]);
+});
+
+test("terminal lease matching never suppresses an older identical answer before a newer user turn", () => {
+  const persisted = [
+    { role: "user", content: "first question", timestamp: 1 },
+    { role: "assistant", content: "same answer", timestamp: 2 },
+    { role: "user", content: "second question", timestamp: 3 },
+  ] as const;
+  const terminal = { role: "assistant", content: "same answer", timestamp: 4 } as const;
+  const reconciled = reconcilePersistedHistory([...persisted], [terminal]);
+  assert.deepEqual(reconciled.messages, [...persisted, terminal]);
+  assert.deepEqual(reconciled.pending, [terminal]);
+});
+
+test("adjacent duplicate assistant terminal leases collapse despite timestamp drift", () => {
+  const terminal = { role: "assistant", content: "answer", timestamp: 3 } as const;
+  const reconciled = reconcilePersistedHistory(
+    [{ role: "user", content: "question", timestamp: 1 }],
+    [{ role: "assistant", content: "answer", timestamp: 2 }, terminal],
+  );
+  assert.deepEqual(reconciled.messages, [
+    { role: "user", content: "question", timestamp: 1 },
+    terminal,
+  ]);
+  assert.deepEqual(reconciled.pending, [terminal]);
+});
+
 test("message identity tolerates metadata records without content", () => {
   const metadata = { role: "compactionSummary", summary: "summary", timestamp: 10 };
   assert.doesNotThrow(() => reconcilePersistedHistory([metadata], [metadata]));

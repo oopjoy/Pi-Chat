@@ -47,6 +47,26 @@ function contentIdentity(content: PiMessage["content"]): string {
   catch { return String(canonical ?? ""); }
 }
 
+/**
+ * Pi providers may add a transport-only textSignature to a persisted text
+ * block while the same SSE message_end block omits it. It must not keep one
+ * logical terminal answer alive as a second visible lease.
+ */
+function terminalContentIdentity(content: PiMessage["content"]): string {
+  if (!Array.isArray(content)) return contentIdentity(content);
+  const canonical = content.map((block) => {
+    if (!block || typeof block !== "object") return block;
+    const { textSignature: _textSignature, ...semantic } = block as unknown as Record<string, unknown>;
+    return semantic;
+  });
+  try { return JSON.stringify(canonical) ?? String(canonical ?? ""); }
+  catch { return String(canonical ?? ""); }
+}
+
+function sameTerminalContent(left: PiMessage["content"], right: PiMessage["content"]): boolean {
+  return terminalContentIdentity(left) === terminalContentIdentity(right);
+}
+
 /** Pi exposes no universal message ID, so prefer stable terminal identifiers. */
 export function messageIdentity(message: PiMessage): string {
   if (message.role === "toolResult" && message.toolCallId) return `tool:${message.toolCallId}`;
@@ -72,19 +92,49 @@ export function userTurnCount(messages: PiMessage[]): number {
 }
 
 /**
+ * An assistant terminal is a short-lived SSE lease until JSONL/RPC publishes
+ * the same answer. Pi may stamp those two projections independently, so a
+ * timestamp mismatch alone must not create a second copy of the one terminal.
+ * This deliberately applies only to the latest assistant after the latest user
+ * boundary; ordinary persisted transcript rows retain strict identity.
+ */
+function persistedConfirmsTerminal(persisted: PiMessage[], terminal: PiMessage): boolean {
+  if (persisted.some((message) => sameMessage(message, terminal))) return true;
+  if (terminal.role !== "assistant") return false;
+  for (let index = persisted.length - 1; index >= 0; index -= 1) {
+    const candidate = persisted[index];
+    if (candidate.role === "user") break;
+    if (candidate.role === "assistant")
+      return sameTerminalContent(candidate.content, terminal.content);
+  }
+  return false;
+}
+
+/** Collapse only adjacent duplicate assistant SSE terminal leases. */
+function appendTerminalLease(tail: PiMessage[], terminal: PiMessage): PiMessage[] {
+  const previous = tail.at(-1);
+  if (
+    previous?.role === "assistant"
+    && terminal.role === "assistant"
+    && sameTerminalContent(previous.content, terminal.content)
+  ) return [...tail.slice(0, -1), terminal];
+  return appendTerminalMessage(tail, terminal);
+}
+
+/**
  * Treat persisted JSONL/RPC history as authoritative and retain only terminal
  * SSE rows that the persisted branch has not exposed yet. This deliberately
  * rejects arbitrary stale Runtime history, which may contain duplicated or
  * abandoned branch segments.
  */
 export function reconcilePersistedHistory(persisted: PiMessage[], terminalTail: PiMessage[]): { messages: PiMessage[]; pending: PiMessage[] } {
-  const uniqueTail = terminalTail.reduce<PiMessage[]>((unique, terminal) => appendTerminalMessage(unique, terminal), []);
+  const uniqueTail = terminalTail.reduce<PiMessage[]>(appendTerminalLease, []);
   const persistedTimes = persisted
     .map((message) => typeof message.timestamp === "number" && Number.isFinite(message.timestamp) ? message.timestamp : undefined)
     .filter((value): value is number => value !== undefined);
   const persistedWatermark = persistedTimes.length ? Math.max(...persistedTimes) : undefined;
   const pending = uniqueTail.filter((terminal) => {
-    if (persisted.some((message) => sameMessage(message, terminal))) return false;
+    if (persistedConfirmsTerminal(persisted, terminal)) return false;
     const terminalTime = typeof terminal.timestamp === "number" && Number.isFinite(terminal.timestamp) ? terminal.timestamp : undefined;
     // A stale persisted prefix ends before the terminal and must retain it. If
     // the authoritative branch has advanced beyond an absent terminal, the row
