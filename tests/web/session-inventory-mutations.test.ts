@@ -229,6 +229,56 @@ test("a replacement clears stale rename intent and ignores its old finalization"
   }
 });
 
+test("a narrow rename acknowledgement retains the optimistic name and unlocks management", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  Object.assign(api, {
+    bootstrap: async () => bootstrap,
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    renameSession: async () => ({ id: activeId, name: "Narrow acknowledgement" }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    await act(async () =>
+      dom.window.document
+        .querySelector<HTMLButtonElement>(".session-menu-trigger")!
+        .click(),
+    );
+    await act(async () =>
+      [...dom.window.document.querySelectorAll<HTMLButtonElement>("[role='menuitem']")]
+        .find((button) => button.textContent === "重命名")!
+        .click(),
+    );
+    const input = dom.window.document.querySelector<HTMLInputElement>("input[aria-label='对话名称']")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value")
+        ?.set?.call(input, "Narrow acknowledgement");
+      input.dispatchEvent(new dom.window.InputEvent("input", {
+        bubbles: true,
+        inputType: "insertText",
+        data: "Narrow acknowledgement",
+      }));
+    });
+    await act(async () =>
+      [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-dialog button")]
+        .find((button) => button.textContent === "确认")!
+        .click(),
+    );
+    await act(async () => { await Promise.resolve(); });
+    assert.equal(dom.window.document.querySelector(".session-name")?.textContent, "Narrow acknowledgement");
+    assert.match(dom.window.document.querySelector(".app-toast")?.textContent || "", /对话已重命名/);
+    assert.equal(dom.window.document.querySelector<HTMLButtonElement>(".session-menu-trigger")?.disabled, false);
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("an uncertain delete keeps its row hidden without overriding the newer local draft", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");

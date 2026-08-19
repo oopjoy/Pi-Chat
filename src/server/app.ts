@@ -3785,15 +3785,16 @@ export class PiChatApp {
   private async renameSession(
     id: string,
     name: string,
-  ): Promise<BootstrapData> {
-    await this.options.sessions.list(undefined, this.currentCwd);
+  ): Promise<{ id: string; name: string }> {
     const isPrimary = id === this.activeSessionId;
-    const draft = this.runtimePool.get(id)?.draftSession;
+    const knownRuntime = this.runtimePool.get(id);
+    const draft = knownRuntime?.draftSession;
     if (draft)
       throw new Error("空白新对话会在发送第一条消息后保存，届时才能重命名");
-    const path = this.options.sessions.pathForId(id);
-    if (!isPrimary && !path) throw new Error("会话不存在");
-    const existingRuntime = isPrimary ? null : this.runtimePool.get(id) || null;
+    // A hot Runtime is already bound to this persisted Session. Avoid a global
+    // index scan on its mutation response path; a cold target still gets the
+    // existing ensureRuntime() lookup/retry before it can be written.
+    const existingRuntime = isPrimary ? null : knownRuntime || null;
     const wasOpen = isPrimary || Boolean(existingRuntime);
     const runtime = isPrimary
       ? null
@@ -3815,21 +3816,19 @@ export class PiChatApp {
       this.clearNativeSteeringState(id, "reclaim");
       await this.runtimePool.reclaim(id, "idle");
     }
-    await this.options.sessions.list(this.activeSessionPath, this.currentCwd);
-    const renamedSummary =
-      this.options.sessions.summaryForId?.(id) || undefined;
-    if (id === this.activeSessionId)
-      this.primarySummarySnapshot =
-        renamedSummary || this.primarySummarySnapshot;
-    else if (existingRuntime)
-      existingRuntime.summarySnapshot =
-        renamedSummary || existingRuntime.summarySnapshot;
+    // JSONL indexing is read projection, not mutation authority. Do not make
+    // a confirmed Pi write wait for a recursive SessionIndex scan or bootstrap;
+    // the existing sessions-changed SSE refresh converges it asynchronously.
+    if (id === this.activeSessionId && this.primarySummarySnapshot)
+      this.primarySummarySnapshot = { ...this.primarySummarySnapshot, name };
+    else if (existingRuntime?.summarySnapshot)
+      existingRuntime.summarySnapshot = { ...existingRuntime.summarySnapshot, name };
     this.broadcast({
       type: "pi_chat_sessions_changed",
       action: "renamed",
       sessionId: id,
     });
-    return this.bootstrap();
+    return { id, name };
   }
 
   private async deleteSession(id: string): Promise<BootstrapData> {

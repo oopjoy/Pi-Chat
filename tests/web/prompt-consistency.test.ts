@@ -539,6 +539,81 @@ test("a stale hot view cannot restore the composer compaction lock after compact
   }
 });
 
+test("a tool completion preserves compaction only when Pi explicitly starts it", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true },
+      sessions: [{ ...bootstrap.sessions[0], running: true }],
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async (sessionId: string) => ({ viewing: sessionId }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.emitPi({
+        type: "agent_start",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 41,
+      });
+      source.emitPi({
+        type: "tool_execution_end",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 41,
+        toolName: "bash",
+        isError: false,
+      });
+      await Promise.resolve();
+    });
+    assert.match(
+      dom.window.document.querySelector(".agent-status")?.textContent || "",
+      /bash 已完成，Pi 正在继续…/,
+      "a completed tool alone must not guess that Pi is compacting",
+    );
+
+    await act(async () => {
+      source.emitPi({
+        type: "compaction_start",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 41,
+        reason: "overflow",
+      });
+      await Promise.resolve();
+    });
+    assert.match(
+      dom.window.document.querySelector(".agent-status")?.textContent || "",
+      /上下文溢出，正在自动压缩…/,
+    );
+
+    await act(async () => {
+      source.emitPi({
+        type: "tool_execution_end",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 41,
+        toolName: "bash",
+        isError: false,
+      });
+      await Promise.resolve();
+    });
+    assert.match(
+      dom.window.document.querySelector(".agent-status")?.textContent || "",
+      /上下文溢出，正在自动压缩…/,
+      "a delayed tool terminal cannot clear an actual compaction_start",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("a recovered Runtime clears the sidebar's retained failure reason before its status refresh", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");

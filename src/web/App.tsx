@@ -3358,26 +3358,30 @@ export function App() {
                 : session,
             ),
           );
-          completedCompactionSessionIdsRef.current.add(eventSessionId);
+          // A completed tool proves that the turn continues, but says nothing
+          // about a following auto-compaction. Only compaction_start/end own
+          // the compaction fact; do not clear a newer compaction projection.
+          const cacheCompacting =
+            viewCacheRef.current.get(eventSessionId)?.state.isCompacting ===
+            true;
           patchSessionCache(eventSessionId, {
             isStreaming: true,
-            toolStatus: status,
-            state: { isStreaming: true, isCompacting: false },
+            // A preceding compaction_start owns the visible phase until its
+            // matching terminal event; a delayed tool terminal is stale for
+            // that field even though it still proves the turn remains active.
+            ...(cacheCompacting ? null : { toolStatus: status }),
+            state: { isStreaming: true },
           });
         }
-        if (viewingEventSession)
-          dispatchPane(
-            sessionStillRunning
-              ? {
-                  type: "AGENT_STARTED",
-                  sessionId: eventSessionId,
-                  toolStatus: status,
-                }
-              : {
-                  type: "COMPACTION_FINISHED",
-                  sessionId: eventSessionId,
-                },
-          );
+        const paneCompacting =
+          viewedSessionIdRef.current === eventSessionId &&
+          paneStateRef.current.isCompacting === true;
+        if (viewingEventSession && sessionStillRunning && !paneCompacting)
+          dispatchPane({
+            type: "TOOL_STATUS_UPDATED",
+            sessionId: eventSessionId,
+            status,
+          });
       } else if (type === "pi_chat_native_steering_cleared") {
         if (eventSessionId) {
           const pending = localUserTurnsRef.current.get(eventSessionId) || [];
@@ -6560,7 +6564,7 @@ export function App() {
     });
     void api
       .renameSession(sessionId, name)
-      .then((data) => {
+      .then(() => {
         if (optimisticRenamesRef.current.get(sessionId)?.token !== token)
           return;
         if (runEpochGenerationRef.current !== runEpochGeneration) {
@@ -6569,7 +6573,9 @@ export function App() {
         }
         optimisticRenamesRef.current.delete(sessionId);
         syncMutatingSessionIds();
-        applyBootstrapMetadata(data);
+        // `set_session_name` is the mutation authority. Sidebar/session views
+        // refresh asynchronously through the renamed SSE event, so never make
+        // a running rename wait for a full Bootstrap projection.
         setNotice("对话已重命名");
       })
       .catch(async (cause) => {

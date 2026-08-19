@@ -422,6 +422,70 @@ test("session rename uses Pi RPC and delete stops the worker before removing JSO
   }
 });
 
+test("a running Session rename acknowledges without waiting for the SessionIndex refresh", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-running-rename-"));
+  try {
+    const path = join(root, "running.jsonl");
+    await writeFile(path, [
+      { type: "session", id: "running", cwd: process.cwd() },
+      { type: "message", id: "m1", parentId: null, message: { role: "user", content: "running" } },
+    ].map(JSON.stringify).join("\n") + "\n");
+    const sessionId = idForPath(path);
+    let refreshes = 0;
+    const worker = new SessionWorker(path);
+    const primary = {
+      onEvent: () => () => {},
+      send: async (command: Record<string, unknown>) => {
+        if (command.type === "get_state") return { type: "response", success: true, data: { model: null, sessionFile: join(root, "primary.jsonl"), sessionId: "primary", isStreaming: false } };
+        throw new Error(`Unexpected primary command: ${String(command.type)}`);
+      },
+    } as unknown as PiRpcClient;
+    const sessions = {
+      list: async () => {
+        refreshes += 1;
+        if (refreshes > 1) return new Promise<never>(() => {});
+        return [{ id: sessionId, sessionId: "running", name: "Running", preview: "running", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: false }];
+      },
+      pathForId: (id: string) => id === sessionId ? path : null,
+      summaryForId: (id: string) => id === sessionId
+        ? { id: sessionId, sessionId: "running", name: "Running", preview: "running", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: false }
+        : null,
+      messagesForId: async () => [],
+    } as unknown as SessionIndex;
+    const app = new PiChatApp({
+      rpc: primary,
+      createRpc: () => worker as unknown as PiRpcClient,
+      sessions,
+      resources: {} as ResourceManager,
+      cwd: process.cwd(),
+      webRoot: process.cwd(),
+    });
+    const server = createServer((request, response) => void app.handle(request, response));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const origin = `http://127.0.0.1:${address.port}`;
+    try {
+      await (app as unknown as { ensureRuntime(id: string): Promise<unknown> }).ensureRuntime(sessionId);
+      const renamed = await fetch(`${origin}/api/sessions/${sessionId}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "Renamed while running" }),
+        signal: AbortSignal.timeout(1_000),
+      });
+      assert.equal(renamed.status, 200);
+      assert.deepEqual(await renamed.json(), { id: sessionId, name: "Renamed while running" });
+      assert.equal(refreshes, 0, "the acknowledged rename never waits for a global index scan");
+      assert.equal(worker.commands.filter((command) => command.type === "set_session_name").length, 1);
+    } finally {
+      server.close();
+      await app.close();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("cold view keeps reasoning/input for a configured catalogue model", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-cold-catalog-"));
   try {
