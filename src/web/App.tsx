@@ -7497,6 +7497,8 @@ export function App() {
         loadingDirectoryKeys={loadingDirectoryKeys}
         viewedSessionId={viewedSessionId}
         workspaceCwd={workspaceCwd}
+        workspaceEpoch={workspaceEpochRef.current}
+        workspaceRevision={workspaceRevisionRef.current}
         open={sidebarOpen}
         width={sidebarWidth}
         onWidthChange={setSidebarWidth}

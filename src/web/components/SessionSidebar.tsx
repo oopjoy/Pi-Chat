@@ -15,6 +15,17 @@ function relativeTime(timestamp: number): string {
 
 type SessionStatus = "idle" | "unread" | "pending" | "running" | "error";
 
+type WorkspaceAuthority = { cwd: string; epoch: string; revision: number };
+
+export function workspaceAuthorityRequiresSidebarReset(previous: WorkspaceAuthority, current: WorkspaceAuthority): boolean {
+  return Boolean(
+    previous.epoch &&
+    previous.epoch === current.epoch &&
+    current.revision > previous.revision &&
+    previous.cwd !== current.cwd,
+  );
+}
+
 function legacyActivity(session: SessionSummary, failed: boolean): SessionActivityState {
   return {
     execution: failed ? "failed" : session.running ? "running" : session.queued ? "queued" : "idle",
@@ -73,7 +84,7 @@ function ResizeHandle({ width, onWidthChange }: { width: number; onWidthChange: 
   return <div className="sidebar-resize-handle" role="separator" aria-orientation="vertical" aria-label="拖动调整会话栏宽度" aria-valuemin={SIDEBAR_WIDTH_MIN} aria-valuemax={SIDEBAR_WIDTH_MAX} aria-valuenow={Math.round(width)} tabIndex={0} onPointerDown={onPointerDown} onKeyDown={onKeyDown} />;
 }
 
-export function SessionSidebar({ sessions, sessionsTotal, sessionDirectories, inventoryReady, loadingAllSessions, loadingDirectoryKeys, viewedSessionId, workspaceCwd, open, width, newDisabled, refreshDisabled, restartDisabled, viewBusy, refreshing, pinnedSessionIds, pinnedDirectoryKeys, collapsedDirectoryKeys, expandedDirectoryKeys, failedSessionIds, unseenReplySessionIds, mutatingSessionIds, onClose, onCollapse, onNew, onRefresh, onLoadAllSessions, onLoadDirectory, onRestart, onView, onTogglePin, onToggleDirectoryPin, onSetDirectoryCollapsed, onRename, onDelete, onWidthChange }: {
+export function SessionSidebar({ sessions, sessionsTotal, sessionDirectories, inventoryReady, loadingAllSessions, loadingDirectoryKeys, viewedSessionId, workspaceCwd, workspaceEpoch, workspaceRevision, open, width, newDisabled, refreshDisabled, restartDisabled, viewBusy, refreshing, pinnedSessionIds, pinnedDirectoryKeys, collapsedDirectoryKeys, expandedDirectoryKeys, failedSessionIds, unseenReplySessionIds, mutatingSessionIds, onClose, onCollapse, onNew, onRefresh, onLoadAllSessions, onLoadDirectory, onRestart, onView, onTogglePin, onToggleDirectoryPin, onSetDirectoryCollapsed, onRename, onDelete, onWidthChange }: {
   sessions: SessionSummary[];
   sessionsTotal: number;
   sessionDirectories: SessionDirectorySummary[];
@@ -83,6 +94,10 @@ export function SessionSidebar({ sessions, sessionsTotal, sessionDirectories, in
   loadingDirectoryKeys: string[];
   viewedSessionId: string;
   workspaceCwd: string;
+  /** Server process epoch that scopes authoritative workspace revisions. */
+  workspaceEpoch: string;
+  /** Monotonic only within workspaceEpoch; temporary JSONL inventory does not advance it. */
+  workspaceRevision: number;
   open: boolean;
   width: number;
   newDisabled: boolean;
@@ -119,6 +134,11 @@ export function SessionSidebar({ sessions, sessionsTotal, sessionDirectories, in
   const [sessionMenuPosition, setSessionMenuPosition] = useState({ top: 0, left: 0 });
   const sessionMenuRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const previousWorkspaceAuthorityRef = useRef({
+    cwd: workspaceCwd,
+    epoch: workspaceEpoch,
+    revision: workspaceRevision,
+  });
   useEffect(() => {
     if (!sessionMenuId) return;
     const closeOnOutside = (event: PointerEvent) => {
@@ -144,9 +164,24 @@ export function SessionSidebar({ sessions, sessionsTotal, sessionDirectories, in
     if (!open) setSessionMenuId("");
   }, [open]);
   useEffect(() => {
+    const previous = previousWorkspaceAuthorityRef.current;
+    previousWorkspaceAuthorityRef.current = {
+      cwd: workspaceCwd,
+      epoch: workspaceEpoch,
+      revision: workspaceRevision,
+    };
+    // Startup may move from no cwd to JSONL-derived cwd and then to a distinct
+    // Bootstrap cwd. A replacement process can do the same. Neither is a user
+    // workspace switch, so reset only when the authoritative revision advances
+    // within one already-established server epoch.
+    if (!workspaceAuthorityRequiresSidebarReset(previous, {
+      cwd: workspaceCwd,
+      epoch: workspaceEpoch,
+      revision: workspaceRevision,
+    })) return;
     setSearchQuery("");
     setSessionMenuId("");
-  }, [workspaceCwd]);
+  }, [workspaceCwd, workspaceEpoch, workspaceRevision]);
   const menuSession = sessions.find((session) => session.id === sessionMenuId);
   const searching = Boolean(searchQuery.trim());
   const groups = groupSessionsForNavigation(

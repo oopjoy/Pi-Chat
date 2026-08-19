@@ -3,7 +3,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import test from "node:test";
 import type { SessionSummary } from "../src/shared/types";
-import { SessionSidebar, sessionStatus } from "../src/web/components/SessionSidebar";
+import { SessionSidebar, sessionStatus, workspaceAuthorityRequiresSidebarReset } from "../src/web/components/SessionSidebar";
 
 const session = (patch: Partial<SessionSummary>): SessionSummary => ({
   id: "session", sessionId: "session", name: "Session", preview: "", cwd: "C:/work", updatedAt: 0, messageCount: 1,
@@ -39,6 +39,20 @@ test("sidebar separates normal work from confirmation, paused work, failure, and
   assert.deepEqual(sessionStatus(session(activity("idle")), false, true), { kind: "unread", label: "有新回复" });
 });
 
+test("sidebar resets workspace-scoped UI only for an authoritative same-process workspace advance", () => {
+  const empty = { cwd: "", epoch: "", revision: 0 };
+  const jsonl = { cwd: "C:/session-derived", epoch: "", revision: 0 };
+  const hydrated = { cwd: "D:/authoritative-default", epoch: "epoch-a", revision: 0 };
+  const replacement = { cwd: "E:/replacement-default", epoch: "epoch-b", revision: 0 };
+  const selected = { cwd: "F:/selected", epoch: "epoch-b", revision: 1 };
+
+  assert.equal(workspaceAuthorityRequiresSidebarReset(empty, jsonl), false);
+  assert.equal(workspaceAuthorityRequiresSidebarReset(jsonl, hydrated), false);
+  assert.equal(workspaceAuthorityRequiresSidebarReset(hydrated, replacement), false);
+  assert.equal(workspaceAuthorityRequiresSidebarReset(replacement, selected), true);
+  assert.equal(workspaceAuthorityRequiresSidebarReset(selected, { ...selected, revision: 2 }), false);
+});
+
 test("sidebar renders directory hierarchy, status description, and session actions accessibly", () => {
   const active = session({
     activity: { execution: "running", awaitingConfirmation: false },
@@ -54,6 +68,8 @@ test("sidebar renders directory hierarchy, status description, and session actio
     loadingDirectoryKeys: [],
     viewedSessionId: "",
     workspaceCwd: "C:/work",
+    workspaceEpoch: "epoch-a",
+    workspaceRevision: 0,
     open: true,
     width: 320,
     newDisabled: false,

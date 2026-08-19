@@ -107,23 +107,61 @@ test("narrow Composer keeps visible Fast-mode contents within its viewport", { t
 });
 
 test("sidebar search clear stays at the field edge and restores input focus", { tag: "@desktop-only" }, async ({ page }) => {
-  await page.goto("/");
-  const search = page.getByRole("searchbox", { name: "搜索对话" });
-  await search.fill("First");
-  const clear = page.getByRole("button", { name: "清除对话搜索" });
-  await expect(clear).toBeVisible();
-  const [searchBox, clearBox] = await Promise.all([
-    search.boundingBox(),
-    clear.boundingBox(),
-  ]);
-  expect(searchBox).not.toBeNull();
-  expect(clearBox).not.toBeNull();
-  expect(searchBox!.x + searchBox!.width - (clearBox!.x + clearBox!.width)).toBeLessThanOrEqual(4);
-  expect(clearBox!.x).toBeGreaterThan(searchBox!.x + searchBox!.width - 34);
-  await clear.click();
-  await expect(search).toHaveValue("");
-  await expect(search).toBeFocused();
-  await expect(clear).toHaveCount(0);
+  let releaseBootstrap!: () => void;
+  let markBootstrapIntercepted!: () => void;
+  let bootstrapReleased = false;
+  const heldBootstrap = new Promise<void>((resolve) => { releaseBootstrap = resolve; });
+  const bootstrapIntercepted = new Promise<void>((resolve) => { markBootstrapIntercepted = resolve; });
+  const releaseHeldBootstrap = () => {
+    if (bootstrapReleased) return;
+    bootstrapReleased = true;
+    releaseBootstrap();
+  };
+  await page.route("**/api/bootstrap", async (route) => {
+    markBootstrapIntercepted();
+    await heldBootstrap;
+    const requestUrl = new URL(route.request().url());
+    const response = await route.fetch({
+      headers: { ...route.request().headers(), origin: requestUrl.origin },
+    });
+    const data = await response.json();
+    await route.fulfill({
+      response,
+      json: { ...data, workspaceCwd: "C:/authoritative-default" },
+    });
+  });
+  try {
+    await page.goto("/");
+    await bootstrapIntercepted;
+    await page.waitForResponse((response) => new URL(response.url()).pathname === "/api/sessions");
+    await expect(page.locator(".session-item", { hasText: "First session" })).toBeVisible();
+    const search = page.getByRole("searchbox", { name: "搜索对话" });
+    await search.fill("First");
+    const clear = page.getByRole("button", { name: "清除对话搜索" });
+    await expect(clear).toBeVisible();
+    const bootstrapResponse = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/bootstrap");
+    releaseHeldBootstrap();
+    const hydratedBootstrap = await bootstrapResponse;
+    expect((await hydratedBootstrap.json()).workspaceCwd).toBe("C:/authoritative-default");
+    await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    await expect(search).toHaveValue("First");
+    await expect(clear).toBeVisible();
+    const [searchBox, clearBox] = await Promise.all([
+      search.boundingBox(),
+      clear.boundingBox(),
+    ]);
+    expect(searchBox).not.toBeNull();
+    expect(clearBox).not.toBeNull();
+    expect(searchBox!.x + searchBox!.width - (clearBox!.x + clearBox!.width)).toBeLessThanOrEqual(4);
+    expect(clearBox!.x).toBeGreaterThan(searchBox!.x + searchBox!.width - 34);
+    await clear.click();
+    await expect(search).toHaveValue("");
+    await expect(search).toBeFocused();
+    await expect(clear).toHaveCount(0);
+  } finally {
+    releaseHeldBootstrap();
+    await page.unrouteAll({ behavior: "ignoreErrors" });
+  }
 });
 
 test("a mismatched Web artifact blocks mutations but keeps guarded recovery actions", { tag: "@desktop-only" }, async ({ page, mismatchedBaseURL }) => {
