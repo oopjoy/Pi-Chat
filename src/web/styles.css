@@ -584,8 +584,10 @@ details.conversation-process { display: block; padding: 0; }
 .edit-tool-diff-body section { border-radius: 0; }
 .edit-tool-diff-body section + section { border-top: 1px solid var(--code-border); }
 .edit-tool-diff-body header { padding: 3px 8px; background: color-mix(in srgb, var(--accent), transparent 92%); color: var(--muted); font: 10px ui-monospace, Consolas, monospace; }
-.edit-tool-diff-body pre { margin: 0; padding: 0; white-space: pre; }
-.edit-tool-diff-body pre span { display: block; min-height: 1.6em; padding: 0 8px; font: 12.5px/1.62 ui-monospace, Consolas, monospace; }
+.edit-tool-diff-body pre { margin: 0; padding: 0; white-space: normal; }
+.edit-tool-diff-line { display: grid; min-height: 1.62em; grid-template-columns: 1.5em minmax(0, 1fr); align-items: start; font: 12.5px/1.62 ui-monospace, Consolas, monospace; }
+.edit-tool-diff-marker { position: sticky; left: 0; display: block; align-self: stretch; padding-left: 6px; font: inherit; font-weight: 700; user-select: none; }
+.edit-tool-diff-line-content { display: block; min-width: 0; padding: 0 8px 0 2px; color: inherit; font: inherit; overflow-wrap: anywhere; tab-size: 2; white-space: pre-wrap; word-break: break-word; }
 .edit-tool-diff-body pre .is-add { background: color-mix(in srgb, #2f9e44, transparent 88%); color: color-mix(in srgb, #2f9e44, var(--code-text) 30%); }
 .edit-tool-diff-body pre .is-delete { background: color-mix(in srgb, #d9485f, transparent 89%); color: color-mix(in srgb, #d9485f, var(--code-text) 28%); }
 .edit-tool-diff-note { margin: 0; padding: 8px; color: var(--muted); font-size: 10px; }

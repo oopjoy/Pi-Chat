@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import { Fragment, useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { compactEditPath, type ToolEditDiff } from "../lib/tool-edit-diff";
 
 const OPEN_DIFF_EVENT = "pi-chat-open-edit-diff";
@@ -12,7 +12,7 @@ export function EditToolDiff({ diff }: { diff: ToolEditDiff }) {
   return <div className="edit-tool-diff-body">
     {diff.hunks.map((hunk, index) => <section key={index}>
       <header>@@</header>
-      <pre>{hunk.lines.map((line, lineIndex) => <span className={`is-${line.kind}`} key={lineIndex}>{line.text}{"\n"}</span>)}</pre>
+      <pre className="edit-tool-diff-unified">{hunk.lines.map((line, lineIndex) => <Fragment key={lineIndex}><span className={`edit-tool-diff-line is-${line.kind}`}><span className="edit-tool-diff-marker" aria-hidden="true">{line.kind === "add" ? "+" : "-"}</span><code className="edit-tool-diff-line-content">{line.text || " "}</code></span>{"\n"}</Fragment>)}</pre>
     </section>)}
     {diff.truncated && <p className="edit-tool-diff-note">Diff 过大，已截断显示。</p>}
   </div>;

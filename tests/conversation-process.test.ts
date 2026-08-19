@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
@@ -13,6 +14,13 @@ import {
 import { ConversationProcess, toolLabel } from "../src/web/components/ConversationProcess";
 import { EditDiffSidebar } from "../src/web/components/EditToolDiff";
 import { groupConversation, messageItemKey } from "../src/web/lib/conversation-process";
+
+test("unified edit Diff uses visible patch markers and wraps long lines", () => {
+  const css = readFileSync(new URL("../src/web/styles.css", import.meta.url), "utf8");
+  assert.match(css, /\.edit-tool-diff-line-content\s*\{[^}]*overflow-wrap:\s*anywhere;/s);
+  assert.match(css, /\.edit-tool-diff-line-content\s*\{[^}]*white-space:\s*pre-wrap;/s);
+  assert.match(css, /\.edit-tool-diff-line\s*\{[^}]*grid-template-columns:\s*1\.5em minmax\(0, 1fr\);/s);
+});
 
 test("conversation item keys prefer projected message identities", () => {
   assert.equal(
@@ -613,9 +621,17 @@ test("a completed edit opens the diff sidebar while a failed edit does not", asy
   assert.equal(dom.window.document.querySelector(".edit-diff-sidebar")?.getAttribute("aria-hidden"), "false");
   assert.match(dom.window.document.querySelector(".edit-diff-sidebar-header")?.textContent || "", /app\.ts\+1-1/);
   const diffBody = dom.window.document.querySelector(".edit-diff-sidebar .edit-tool-diff-body")?.textContent || "";
-  assert.match(diffBody, /old/);
-  assert.match(diffBody, /new/);
-  assert.doesNotMatch(diffBody, /-old|\+new/);
+  assert.match(diffBody, /-old/);
+  assert.match(diffBody, /\+new/);
+  assert.equal(
+    dom.window.document.querySelector(".edit-tool-diff-unified")?.textContent,
+    "-old\n+new\n",
+    "copyable unified Diff keeps one patch line per source line",
+  );
+  assert.deepEqual(
+    [...dom.window.document.querySelectorAll(".edit-tool-diff-line")].map((line) => line.className),
+    ["edit-tool-diff-line is-delete", "edit-tool-diff-line is-add"],
+  );
   const panel = dom.window.document.querySelector<HTMLElement>(".edit-diff-sidebar")!;
   const initialWidth = Number.parseFloat(panel.style.getPropertyValue("--edit-diff-width"));
   const resize = panel.querySelector<HTMLElement>(".edit-diff-sidebar-resize")!;
