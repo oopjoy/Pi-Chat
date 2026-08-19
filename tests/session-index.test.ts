@@ -147,10 +147,26 @@ test("session message reader follows only the current JSONL branch", async () =>
       { type: "message", id: "u1", parentId: null, timestamp: "2026-01-01T00:00:00Z", message: { role: "user", content: "kept user" } },
       { type: "message", id: "abandoned", parentId: "u1", message: { role: "assistant", content: "abandoned answer" } },
       { type: "message", id: "u2", parentId: "u1", message: { role: "user", content: "current user" } },
-      { type: "message", id: "a2", parentId: "u2", message: { role: "assistant", content: "current answer" } },
+      {
+        type: "message",
+        id: "a2",
+        parentId: "u2",
+        message: {
+          role: "assistant",
+          content: "current answer",
+          piChatLiveMessageId: "untrusted-live",
+          piChatPersistedMessageId: "untrusted-persisted",
+        },
+      },
     ].map(JSON.stringify).join("\n"));
     const messages = await readSessionMessages(path);
     assert.deepEqual(messages.map((message) => message.content), ["kept user", "current user", "current answer"]);
+    assert.deepEqual(
+      messages.map((message) => message.piChatPersistedMessageId),
+      ["u1:0", "u2:0", "a2:0"],
+      "projected message identity follows the active JSONL entry chain",
+    );
+    assert.equal(messages[2].piChatLiveMessageId, undefined);
     assert.equal(messages[0].timestamp, Date.parse("2026-01-01T00:00:00Z"));
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -183,6 +199,7 @@ test("an intercom custom message stays visible as a read-only timeline boundary"
     assert.deepEqual(messages.map((message) => message.role), ["user", "assistant", LOCAL_COORDINATION_ROLE, "assistant"]);
     assert.equal(messages[2].content, "请停止运行中的操作，只报告当前状态。");
     assert.deepEqual(messages[2].localCoordination, { source: "chat2" });
+    assert.equal(messages[2].piChatPersistedMessageId, "coordination:0");
     assert.equal(messages[2].timestamp, Date.parse("2026-01-01T00:00:03.000Z"));
 
     const [summary] = await new SessionIndex(root, join(root, "cache.json")).list();

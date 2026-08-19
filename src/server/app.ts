@@ -66,6 +66,7 @@ import {
   requestPageId,
   SECURITY_HEADERS,
 } from "./http-transport.js";
+import { LiveMessageIdentityRegistry } from "./live-message-identity.js";
 import { ModelManager } from "./model-manager.js";
 import {
   OperationAdmission,
@@ -488,6 +489,8 @@ export class PiChatApp {
   /** Authoritative mode of the bundled Gate extension in the Primary Runtime. */
   private primaryGateMode: GateMode = "strict";
   private readonly runEpoch: string;
+  /** Stable identity for each transient Runtime message lifecycle. */
+  private readonly liveMessageIdentities = new LiveMessageIdentityRegistry();
   private readonly runGenerationsBySession = new Map<string, number>();
   /** Session preference survives Runtime reclaim, but never outlives the Pi Chat process. */
   private readonly gateModesBySession = new Map<string, GateMode>();
@@ -1967,10 +1970,11 @@ export class PiChatApp {
     runtime: SecondaryRuntime | undefined,
     event: Record<string, unknown>,
   ) {
+    const projectedEvent = this.liveMessageIdentities.project(sessionId, event);
     const transition = transitionRuntimeEvent(
       sessionId,
       this.runtimeEventState(sessionId, runtime),
-      event,
+      projectedEvent,
     );
     if (!transition.broadcastEvent) return transition;
     const state = transition.state;

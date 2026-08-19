@@ -23,6 +23,7 @@ export interface CanonicalMessageEndEvent extends CanonicalMessageEndPayload {
 
 const SESSION_ID_PATTERN = /^[a-f0-9]{20}$/;
 const RUN_EPOCH_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+const LIVE_MESSAGE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
 function boundedString(value: unknown, maximum: number): string | undefined {
   return typeof value === "string" && value.length <= maximum ? value : undefined;
@@ -98,6 +99,14 @@ export function canonicalPiMessage(value: unknown): CanonicalTerminalMessage | n
   if (input.timestamp !== undefined && (typeof input.timestamp !== "number" || !Number.isFinite(input.timestamp)))
     return null;
   if (input.isError !== undefined && typeof input.isError !== "boolean") return null;
+  const liveMessageId = input.piChatLiveMessageId;
+  if (
+    liveMessageId !== undefined
+    && (typeof liveMessageId !== "string" || !LIVE_MESSAGE_ID_PATTERN.test(liveMessageId))
+  ) return null;
+  const projectionIdentity = typeof liveMessageId === "string"
+    ? { piChatLiveMessageId: liveMessageId }
+    : {};
 
   if (role === "toolResult") {
     const toolCallId = requiredString(input.toolCallId, 400);
@@ -106,6 +115,7 @@ export function canonicalPiMessage(value: unknown): CanonicalTerminalMessage | n
     return {
       role,
       content,
+      ...projectionIdentity,
       toolCallId,
       toolName,
       ...(input.isError !== undefined ? { isError: input.isError as boolean } : null),
@@ -116,12 +126,14 @@ export function canonicalPiMessage(value: unknown): CanonicalTerminalMessage | n
     return {
       role,
       content,
+      ...projectionIdentity,
       ...(input.timestamp !== undefined ? { timestamp: input.timestamp as number } : null),
     };
   }
   return {
     role,
     content,
+    ...projectionIdentity,
     ...(input.timestamp !== undefined ? { timestamp: input.timestamp as number } : null),
     ...(input.stopReason !== undefined ? { stopReason: input.stopReason as string } : null),
     ...(input.provider !== undefined ? { provider: input.provider as string } : null),

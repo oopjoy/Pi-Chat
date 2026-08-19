@@ -24,6 +24,8 @@ export function processItemKey(anchor: string, ordinal = 0): string {
 }
 
 export function messageItemKey(message: PiMessage, collisionOrdinal = 0): string {
+  if (message.piChatPersistedMessageId) return `message:persisted:${message.piChatPersistedMessageId}:${collisionOrdinal}`;
+  if (message.piChatLiveMessageId) return `message:live:${message.piChatLiveMessageId}:${collisionOrdinal}`;
   if (message.role === "toolResult" && message.toolCallId) return `message:toolResult:${message.toolCallId}:${collisionOrdinal}`;
   if (typeof message.timestamp === "number" && Number.isFinite(message.timestamp)) {
     return `message:${message.role}:${message.timestamp}:${compactContentKey(message)}:${collisionOrdinal}`;
@@ -98,6 +100,17 @@ function cumulativeAssistantMessage(earlier: PiMessage, later: PiMessage): boole
 function withLiveAssistantSnapshot(messages: PiMessage[], liveMessage?: PiMessage): PiMessage[] {
   if (!liveMessage) return messages;
   if (liveMessage.role !== "assistant") return [...messages, liveMessage];
+  if (liveMessage.piChatLiveMessageId) {
+    const index = messages.findIndex((message) =>
+      message.role === "assistant"
+      && message.piChatLiveMessageId === liveMessage.piChatLiveMessageId,
+    );
+    if (index >= 0) {
+      const next = [...messages];
+      next[index] = liveMessage;
+      return next;
+    }
+  }
 
   // A provider can finish and persist a reply before the browser receives its
   // final live snapshot. Some adapters omit or rewrite the snapshot timestamp,

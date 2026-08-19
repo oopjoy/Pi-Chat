@@ -72,8 +72,10 @@ function sameTerminalContent(left: PiMessage["content"], right: PiMessage["conte
   return terminalContentIdentity(left) === terminalContentIdentity(right);
 }
 
-/** Pi exposes no universal message ID, so prefer stable terminal identifiers. */
+/** Prefer server-projected structural identity before legacy correlation. */
 export function messageIdentity(message: PiMessage): string {
+  if (message.piChatPersistedMessageId) return `persisted:${message.piChatPersistedMessageId}`;
+  if (message.piChatLiveMessageId) return `live:${message.piChatLiveMessageId}`;
   if (message.role === "toolResult" && message.toolCallId) return `tool:${message.toolCallId}`;
   if (typeof message.timestamp === "number" && Number.isFinite(message.timestamp)) return `time:${message.role}:${message.timestamp}`;
   return `content:${message.role}:${message.toolCallId || ""}:${message.toolName || ""}:${contentIdentity(message.content)}`;
@@ -81,6 +83,10 @@ export function messageIdentity(message: PiMessage): string {
 
 export function sameMessage(left: PiMessage, right: PiMessage): boolean {
   if (left.role !== right.role) return false;
+  if (left.piChatPersistedMessageId && right.piChatPersistedMessageId)
+    return left.piChatPersistedMessageId === right.piChatPersistedMessageId;
+  if (left.piChatLiveMessageId && right.piChatLiveMessageId)
+    return left.piChatLiveMessageId === right.piChatLiveMessageId;
   if (left.role === "toolResult" && (left.toolCallId || right.toolCallId)) return left.toolCallId === right.toolCallId;
   const leftTime = typeof left.timestamp === "number" && Number.isFinite(left.timestamp) ? left.timestamp : undefined;
   const rightTime = typeof right.timestamp === "number" && Number.isFinite(right.timestamp) ? right.timestamp : undefined;
@@ -118,11 +124,15 @@ function persistedConfirmsTerminal(persisted: PiMessage[], terminal: PiMessage):
 /** Collapse only adjacent duplicate assistant SSE terminal leases. */
 function appendTerminalLease(tail: PiMessage[], terminal: PiMessage): PiMessage[] {
   const previous = tail.at(-1);
-  if (
-    previous?.role === "assistant"
-    && terminal.role === "assistant"
-    && sameTerminalContent(previous.content, terminal.content)
-  ) return [...tail.slice(0, -1), terminal];
+  if (previous?.role === "assistant" && terminal.role === "assistant") {
+    if (previous.piChatLiveMessageId && terminal.piChatLiveMessageId) {
+      if (previous.piChatLiveMessageId === terminal.piChatLiveMessageId)
+        return [...tail.slice(0, -1), terminal];
+      return appendTerminalMessage(tail, terminal);
+    }
+    if (sameTerminalContent(previous.content, terminal.content))
+      return [...tail.slice(0, -1), terminal];
+  }
   return appendTerminalMessage(tail, terminal);
 }
 
@@ -154,8 +164,12 @@ export function reconcilePersistedHistory(persisted: PiMessage[], terminalTail: 
 
 /** Add a terminal Pi message exactly once, replacing an earlier form if needed. */
 export function appendTerminalMessage(messages: PiMessage[], message: PiMessage): PiMessage[] {
-  const hasStableIdentity = (message.role === "toolResult" && Boolean(message.toolCallId))
-    || (typeof message.timestamp === "number" && Number.isFinite(message.timestamp));
+  const hasStableIdentity = Boolean(
+    message.piChatPersistedMessageId
+    || message.piChatLiveMessageId
+    || (message.role === "toolResult" && message.toolCallId)
+    || (typeof message.timestamp === "number" && Number.isFinite(message.timestamp)),
+  );
   const index = hasStableIdentity
     ? messages.findIndex((candidate) => sameMessage(candidate, message))
     : messages.length && sameMessage(messages[messages.length - 1], message) ? messages.length - 1 : -1;

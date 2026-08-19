@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { appendTerminalMessage, mergeMessageHistory, reconcilePersistedHistory } from "../src/shared/streaming-assistant";
+import { appendTerminalMessage, mergeMessageHistory, messageIdentity, reconcilePersistedHistory, sameMessage } from "../src/shared/streaming-assistant";
 import { assistantMessage, canonicalMessageEndFromEvent, lifecycleFromEvent, parseEventData, userMessage } from "../src/web/lib/pi-events";
 
 test("Pi event helpers normalize lifecycle and message payloads", () => {
@@ -28,6 +28,7 @@ test("canonical terminal decoder reconstructs a closed payload and provenance en
       role: "assistant",
       content: [{ type: "text", text: "answer", secret: "drop me" }],
       timestamp: 10,
+      piChatLiveMessageId: "live-message-1",
       secret: "drop me",
     },
     requestToken: "drop me",
@@ -39,6 +40,7 @@ test("canonical terminal decoder reconstructs a closed payload and provenance en
       role: "assistant",
       content: [{ type: "text", text: "answer" }],
       timestamp: 10,
+      piChatLiveMessageId: "live-message-1",
     },
     ...provenance,
   });
@@ -88,6 +90,11 @@ test("canonical terminal decoder reconstructs a closed payload and provenance en
       type: "message_end",
       ...provenance,
       message: { role: "evil", content: "unknown role" },
+    },
+    {
+      type: "message_end",
+      ...provenance,
+      message: { role: "assistant", content: "bad live identity", piChatLiveMessageId: "bad identity!" },
     },
     {
       type: "message_end",
@@ -149,6 +156,19 @@ test("same-millisecond terminal messages remain distinct unless their content ma
   const second = { role: "assistant", content: "second", timestamp: 100 };
   assert.deepEqual(appendTerminalMessage([first], second), [first, second]);
   assert.deepEqual(mergeMessageHistory([first], [first, second]), [first, second]);
+});
+
+test("server-projected identities replace one live lifecycle and preserve distinct persisted rows", () => {
+  const partial = { role: "assistant", content: "partial", piChatLiveMessageId: "live-1" };
+  const terminal = { role: "assistant", content: "final", piChatLiveMessageId: "live-1" };
+  assert.equal(sameMessage(partial, terminal), true);
+  assert.equal(messageIdentity(terminal), "live:live-1");
+  assert.deepEqual(appendTerminalMessage([partial], terminal), [terminal]);
+
+  const first = { role: "assistant", content: "same", timestamp: 100, piChatPersistedMessageId: "entry-a:0" };
+  const second = { role: "assistant", content: "same", timestamp: 100, piChatPersistedMessageId: "entry-b:0" };
+  assert.equal(sameMessage(first, second), false);
+  assert.deepEqual(mergeMessageHistory([first], [second]), [first, second]);
 });
 
 test("adjacent legacy messages without timestamps are deduplicated conservatively", () => {
@@ -296,6 +316,16 @@ test("adjacent duplicate assistant terminal leases collapse despite timestamp dr
     terminal,
   ]);
   assert.deepEqual(reconciled.pending, [terminal]);
+});
+
+test("distinct server-owned live lifecycles retain identical adjacent answers", () => {
+  const first = { role: "assistant", content: "same answer", timestamp: 2, piChatLiveMessageId: "live-1" };
+  const second = { role: "assistant", content: "same answer", timestamp: 3, piChatLiveMessageId: "live-2" };
+  const reconciled = reconcilePersistedHistory(
+    [{ role: "user", content: "question", timestamp: 1 }],
+    [first, second],
+  );
+  assert.deepEqual(reconciled.pending, [first, second]);
 });
 
 test("message identity tolerates metadata records without content", () => {

@@ -12,7 +12,18 @@ import {
 } from "../src/web/components/CoordinationMessage";
 import { ConversationProcess, toolLabel } from "../src/web/components/ConversationProcess";
 import { EditDiffSidebar } from "../src/web/components/EditToolDiff";
-import { groupConversation } from "../src/web/lib/conversation-process";
+import { groupConversation, messageItemKey } from "../src/web/lib/conversation-process";
+
+test("conversation item keys prefer projected message identities", () => {
+  assert.equal(
+    messageItemKey({ role: "assistant", content: "answer", piChatLiveMessageId: "live-1" }),
+    "message:live:live-1:0",
+  );
+  assert.equal(
+    messageItemKey({ role: "assistant", content: "answer", piChatPersistedMessageId: "entry-a:0" }),
+    "message:persisted:entry-a:0:0",
+  );
+});
 
 test("groups thinking, tool calls and matching tool results into one collapsed process", () => {
   const messages: PiMessage[] = [
@@ -306,6 +317,18 @@ test("only an explicitly live trailing empty assistant keeps a metadata placehol
   const live = groupConversation([{ role: "assistant", content: "", timestamp: 10 }], { preserveTrailingAssistantPlaceholder: true });
   assert.equal(live.length, 1);
   assert.equal(live[0]?.kind, "message");
+});
+
+test("an explicit live snapshot replaces its earlier lifecycle form by server identity", () => {
+  const items = groupConversation([
+    { role: "assistant", content: "partial", piChatLiveMessageId: "live-1" },
+  ], {
+    liveMessage: { role: "assistant", content: "final", piChatLiveMessageId: "live-1" },
+  });
+  assert.equal(items.length, 1);
+  assert.equal(items[0]?.kind, "message");
+  if (items[0]?.kind !== "message") throw new Error("Expected one message");
+  assert.equal(items[0].message.content, "final");
 });
 
 test("a cumulative live assistant snapshot replaces its persisted prefix", () => {

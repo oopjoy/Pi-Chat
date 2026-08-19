@@ -64,7 +64,7 @@ Current ownership still centers on `src/server/app.ts` (`PiChatApp`), with progr
 | `http-transport.ts` | JSON bodies, headers, MIME helpers |
 | `pi-data.ts` | RPC payload decoding, message windowing |
 | `file-transaction.ts` | Atomic write + snapshot restore |
-| `session-index.ts` | JSONL index, cold snapshots, usage |
+| `session-index.ts` | JSONL index, cold snapshots, usage, and stable persisted message projection IDs derived from active-branch entry ID plus per-entry message index; raw JSONL is never mutated |
 | `application-restart.ts` | Staging build, promote, handoff |
 | `rpc-client.ts` | Global Pi process transport + capability probe |
 | `primary-runtime-readiness.ts` | Primary start/recovery, compatibility gate, readiness generations |
@@ -72,6 +72,7 @@ Current ownership still centers on `src/server/app.ts` (`PiChatApp`), with progr
 | `session-control.ts` | Multi-window presence, exclusive control owner, delayed release timers |
 | `prompt-scheduler.ts` | Primary queue/dispatch, secondary queue dispatch, enqueue limits |
 | `sse-hub.ts` | SSE client map, broadcast / broadcastEach, and payload-free delivery-outcome observation after throttle/backpressure/oversize decisions |
+| `live-message-identity.ts` | Server-owned transient identity registry: one opaque ID per Session-scoped `message_start` / `message_update` / `message_end` lifecycle; provider-supplied Pi Chat identity fields are discarded |
 | `runtime-event-transition.ts` | Pure shared event-derived Runtime projection; no transport, timer, queue, binding, or provenance ownership. `message_end` is the first closed critical wire event: the server repairs and reconstructs only documented `user`/`assistant`/`toolResult` terminals before SSE, while malformed roles, role-incompatible blocks, and claimed terminals fail closed. |
 | `state-diagnostics.ts` | Always-on, bounded five-minute in-memory flight recorder for closed-schema server API/RPC/SSE/projection facts; export is read-only and owns no Runtime, transport, window, or Session authority |
 | `prompt-evidence-ledger.ts` | Observation-only, whole-record-bounded Prompt evidence ledger. It folds exact scheduler, RPC, and correlated Runtime facts into independent delivery-certainty and execution-status axes; it is never consulted for scheduling, Queue, recovery, HTTP, or UI authority. |

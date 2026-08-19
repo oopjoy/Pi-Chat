@@ -66,6 +66,11 @@ function localCoordinationMessage(entry: SessionEntry): PiMessage | null {
   };
 }
 
+function persistedProjectionIdentity(entry: SessionEntry, messageIndex = 0): Pick<PiMessage, "piChatPersistedMessageId"> | Record<string, never> {
+  if (typeof entry.id !== "string" || !entry.id || entry.id.length > 400) return {};
+  return { piChatPersistedMessageId: `${entry.id}:${messageIndex}` };
+}
+
 function timestampFromEntry(entry: SessionEntry): number | undefined {
   const messageTime = entry.message?.timestamp;
   if (typeof messageTime === "number" && Number.isFinite(messageTime)) return messageTime;
@@ -219,6 +224,7 @@ function sessionSnapshotFromBranch(branch: SessionEntry[]): SessionFileSnapshot 
       const timestamp = timestampFromEntry(entry);
       messages.push({
         ...coordination,
+        ...persistedProjectionIdentity(entry),
         ...(Number.isFinite(timestamp) ? { timestamp } : {}),
       });
       continue;
@@ -241,9 +247,15 @@ function sessionSnapshotFromBranch(branch: SessionEntry[]): SessionFileSnapshot 
         : typeof entry.timestamp === "string"
           ? Date.parse(entry.timestamp)
           : undefined;
-    const message = entry.message as unknown as Record<string, unknown>;
+    const {
+      piChatLiveMessageId: _untrustedLiveMessageId,
+      piChatPersistedMessageId: _untrustedPersistedMessageId,
+      ...persistedMessage
+    } = entry.message;
+    const message = persistedMessage as unknown as Record<string, unknown>;
     messages.push({
-      ...entry.message,
+      ...persistedMessage,
+      ...persistedProjectionIdentity(entry),
       ...(Number.isFinite(timestamp) ? { timestamp } : {}),
       ...(message.role === "assistant" && activeThinkingLevel ? { thinkingLevel: activeThinkingLevel } : {}),
     });

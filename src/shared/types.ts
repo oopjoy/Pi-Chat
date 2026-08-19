@@ -113,6 +113,10 @@ export const LOCAL_COORDINATION_ROLE = "localCoordination";
 export interface PiMessage {
   /** Pi Chat-only metadata for a localCoordination event. */
   localCoordination?: { source?: string };
+  /** Stable identity of one server-projected Runtime message lifecycle. */
+  piChatLiveMessageId?: string;
+  /** Stable identity derived from the owning persisted JSONL entry. */
+  piChatPersistedMessageId?: string;
   role: string;
   /** Metadata records such as compactionSummary legitimately omit content. */
   content?: string | PiContentBlock[];

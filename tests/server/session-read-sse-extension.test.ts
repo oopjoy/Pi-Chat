@@ -231,7 +231,7 @@ test("busy bootstrap uses persisted JSONL history without queueing get_messages"
   assert.ok(address && typeof address === "object");
   try {
     const result = await (await fetch(`http://127.0.0.1:${address.port}/api/bootstrap`)).json() as { messages: unknown[] };
-    assert.deepEqual(result.messages, persisted);
+    assert.deepEqual(result.messages, [{ ...persisted[0], piChatPersistedMessageId: "1:0" }]);
     assert.equal(primary.commands.some((command) => command.type === "get_messages"), false);
   } finally {
     server.close();
@@ -272,6 +272,7 @@ test("empty terminal assistant SSE events retain the cumulative answer payload",
     assert.strictEqual(ownerBeforeMalformed.primaryPendingTerminalMessages, pendingBeforeMalformed);
     assert.strictEqual(ownerBeforeMalformed.liveMessage, liveBeforeMalformed);
     assert.equal(ownerBeforeMalformed.runGenerationsBySession.values().next().value, generationBeforeMalformed);
+    const updates = frames.filter((frame) => frame.includes('"type":"message_update"'));
     const terminals = frames.filter((frame) => frame.includes('"type":"message_end"'));
     assert.match(terminals[0] || "", /"content":"cumulative answer"/);
     assert.match(terminals[0] || "", /"piChatSessionId"/);
@@ -280,8 +281,17 @@ test("empty terminal assistant SSE events retain the cumulative answer payload",
     assert.match(terminals[1] || "", /"piChatRunGeneration":2/);
     assert.equal(terminals.length, 2, "malformed known terminal events fail closed");
     const firstPayload = JSON.parse((terminals[0].split("data: ")[1] || "{}").trim()) as Record<string, unknown>;
+    const secondPayload = JSON.parse((terminals[1].split("data: ")[1] || "{}").trim()) as Record<string, unknown>;
     assert.equal(firstPayload.piChatEventSchema, 1);
     assert.equal(firstPayload.terminalKind, "assistant");
+    const updatePayload = JSON.parse((updates[0]?.split("data: ")[1] || "{}").trim()) as Record<string, unknown>;
+    const firstLiveId = (firstPayload.message as { piChatLiveMessageId?: unknown }).piChatLiveMessageId;
+    const updateLiveId = (updatePayload.message as { piChatLiveMessageId?: unknown } | undefined)?.piChatLiveMessageId;
+    const secondLiveId = (secondPayload.message as { piChatLiveMessageId?: unknown }).piChatLiveMessageId;
+    assert.equal(typeof firstLiveId, "string");
+    assert.equal(typeof secondLiveId, "string");
+    assert.equal(updateLiveId, firstLiveId, "cumulative update and terminal share one live identity");
+    assert.notEqual(firstLiveId, secondLiveId, "each assistant lifecycle receives a new server identity");
     assert.equal(JSON.stringify(firstPayload).includes("drop me"), false);
     assert.ok((app as unknown as {
       stateDiagnostics: { snapshot(): { entries: Array<{ category: string; name: string; details: Record<string, unknown> }> } };
