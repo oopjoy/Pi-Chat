@@ -62,7 +62,6 @@ import {
 } from "./lib/active-sessions";
 import {
   parseAskQuestionnaire,
-  type AskQuestionnairePlan,
 } from "./lib/ask-questionnaire";
 import { recentSessionWorkspaces } from "./lib/session-workspaces";
 import { adjacentUserMessageOffset } from "./lib/conversation-navigation";
@@ -144,6 +143,10 @@ import {
   type ConversationPaneIdentity,
   type ConversationRuntimeStatus,
 } from "./state/conversation-pane";
+import {
+  askQuestionnaireReducer,
+  emptyAskQuestionnaireState,
+} from "./state/ask-questionnaire";
 
 const LOCAL_DRAFT_BUSY_ID = "__local_draft_busy__";
 const WAITING_FOR_PI_STATUS = "正在等待 Pi 处理…";
@@ -529,9 +532,11 @@ export function App() {
     runtimeStatus,
     control: viewControl,
   } = pane;
-  const [askQuestionnaires, setAskQuestionnaires] = useState<
-    Record<string, AskQuestionnairePlan>
-  >({});
+  const [askQuestionnaires, dispatchAskQuestionnaire] = useReducer(
+    askQuestionnaireReducer,
+    undefined,
+    emptyAskQuestionnaireState,
+  );
   const localDraft = pane.identity.kind === "draft";
   const [eventSourceGeneration, setEventSourceGeneration] = useState(0);
   const [applicationLifecycle, setApplicationLifecycle] =
@@ -1010,7 +1015,7 @@ export function App() {
     sessionRunningOverridesRef.current.clear();
     setFailedSessionIds([]);
     setConfirmedCommands([]);
-    setAskQuestionnaires({});
+    dispatchAskQuestionnaire({ type: "RESET" });
     completedCompactionSessionIdsRef.current.clear();
     cancelledQueueIdsRef.current.clear();
     queueProjectionRevisionRef.current.clear();
@@ -3313,10 +3318,11 @@ export function App() {
         if (eventSessionId && toolName === "ask_user_question") {
           const questionnaire = parseAskQuestionnaire(event.toolCallId, event.args);
           if (questionnaire)
-            setAskQuestionnaires((current) => ({
-              ...current,
-              [eventSessionId]: questionnaire,
-            }));
+            dispatchAskQuestionnaire({
+              type: "OPEN",
+              sessionId: eventSessionId,
+              questionnaire,
+            });
         }
         if (eventSessionId) {
           // A tool invocation is authoritative active-turn evidence even when a
@@ -3344,12 +3350,10 @@ export function App() {
           });
       } else if (type === "tool_execution_end") {
         if (eventSessionId && String(event.toolName || "") === "ask_user_question")
-          setAskQuestionnaires((current) => {
-            const active = current[eventSessionId];
-            if (!active || active.toolCallId !== String(event.toolCallId || "")) return current;
-            const next = { ...current };
-            delete next[eventSessionId];
-            return next;
+          dispatchAskQuestionnaire({
+            type: "CLOSE_IF_MATCH",
+            sessionId: eventSessionId,
+            toolCallId: String(event.toolCallId || ""),
           });
         const status = `${String(event.toolName || "工具")} ${event.isError ? "执行失败" : "已完成，Pi 正在继续…"}`;
         // Current servers attach a run generation. If that generation had
@@ -3437,11 +3441,9 @@ export function App() {
         }
       } else if (type === "agent_settled") {
         if (eventSessionId)
-          setAskQuestionnaires((current) => {
-            if (!current[eventSessionId]) return current;
-            const next = { ...current };
-            delete next[eventSessionId];
-            return next;
+          dispatchAskQuestionnaire({
+            type: "CLOSE_SESSION",
+            sessionId: eventSessionId,
           });
         if (eventSessionId && clearStoppingForSession(eventSessionId)) {
           setNotice((current) =>
@@ -4179,11 +4181,9 @@ export function App() {
         }
       } else if (type === "pi_chat_process_error") {
         if (eventSessionId)
-          setAskQuestionnaires((current) => {
-            if (!current[eventSessionId]) return current;
-            const next = { ...current };
-            delete next[eventSessionId];
-            return next;
+          dispatchAskQuestionnaire({
+            type: "CLOSE_SESSION",
+            sessionId: eventSessionId,
           });
         if (eventSessionId) {
           completedCompactionSessionIdsRef.current.delete(eventSessionId);
@@ -7744,11 +7744,10 @@ export function App() {
           visible={askSessionId === viewedSessionId}
           disabled={buildIdentityMismatch}
           onRespond={respondToExtension}
-          onFallback={() => setAskQuestionnaires((current) => {
-            if (current[askSessionId]?.toolCallId !== questionnaire.toolCallId) return current;
-            const next = { ...current };
-            delete next[askSessionId];
-            return next;
+          onFallback={() => dispatchAskQuestionnaire({
+            type: "CLOSE_IF_MATCH",
+            sessionId: askSessionId,
+            toolCallId: questionnaire.toolCallId,
           })}
         />
       ))}
