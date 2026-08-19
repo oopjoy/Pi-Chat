@@ -183,10 +183,10 @@ test("New is instant and the first send shows Pi startup before materializing a 
     );
     assert.match(
       dom.window.document.querySelector(".timeline-inner")?.textContent || "",
-      /正在等待 Pi 处理/,
+      /正在准备 Pi Runtime；消息已保存，准备完成后自动发送/,
     );
     assert.equal(
-      dom.window.document.querySelector(".composer-preparing-status"),
+      dom.window.document.querySelector(".composer-submission-status"),
       null,
       "submission waiting belongs to the conversation body, not above the composer",
     );
@@ -197,6 +197,10 @@ test("New is instant and the first send shows Pi startup before materializing a 
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     assert.equal(newSessionCalls, 1);
+    assert.match(
+      dom.window.document.querySelector(".timeline-inner")?.textContent || "",
+      /正在准备 Pi Runtime；消息已保存，准备完成后自动发送/,
+    );
     await act(async () => {
       resolveNew(draftView);
       await new Promise((resolve) => setTimeout(resolve, 0));

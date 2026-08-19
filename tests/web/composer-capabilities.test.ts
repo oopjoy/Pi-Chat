@@ -1254,7 +1254,6 @@ test("ChatInput keeps a send snapshot while local control is unavailable and dra
     stopping: false,
     disabled: false,
     submissionPaused,
-    submissionPausedMessage: "另一窗口正在控制此对话；消息已保留，控制权可用后将发送",
     submissionScope: "session:foreign-control",
     acceptsImages: true,
     commands: [],
@@ -1275,7 +1274,11 @@ test("ChatInput keeps a send snapshot while local control is unavailable and dra
     });
     assert.deepEqual(calls, []);
     assert.equal(textarea.disabled, false, "a paused send does not lock later editing");
-    assert.match(dom.window.document.querySelector(".composer-submission-status")?.textContent || "", /控制权可用后将发送/);
+    assert.equal(
+      dom.window.document.querySelector(".composer-submission-status"),
+      null,
+      "retained submissions use the conversation-body status instead of a duplicate Composer banner",
+    );
     await act(async () => {
       root.render(render(false));
       await Promise.resolve();

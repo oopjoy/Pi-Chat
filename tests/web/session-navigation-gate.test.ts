@@ -1032,7 +1032,12 @@ test("opening a cold conversation paints JSONL without starting a dedicated Runt
     );
     assert.match(
       dom.window.document.querySelector(".timeline-inner")?.textContent || "",
-      /正在等待 Pi 处理/,
+      /正在准备 Pi Runtime；消息已保存，准备完成后自动发送/,
+    );
+    assert.equal(
+      dom.window.document.querySelector(".composer-submission-status"),
+      null,
+      "the conversation body owns the retained-submission explanation",
     );
     assert.equal(
       coldRow

@@ -29,7 +29,8 @@ export interface ConversationPaneProps {
   liveMessage: PiMessage | null;
   localDraft: boolean;
   newConversationPresentation: boolean;
-  waitingForPi: boolean;
+  /** Sole conversation-body explanation for a retained or preparing prompt. */
+  waitingForPiMessage: string;
   draftWorkspaceCwd: string;
   workspaceCwd: string;
   workspacePicking: boolean;
@@ -69,7 +70,7 @@ export function ConversationPane({
   liveMessage,
   localDraft,
   newConversationPresentation,
-  waitingForPi,
+  waitingForPiMessage,
   draftWorkspaceCwd,
   workspaceCwd,
   workspacePicking,
@@ -223,13 +224,13 @@ export function ConversationPane({
             fallback={activeAssistantMetadata}
           />}
         </>}
-        {waitingForPi && <div className="agent-status is-waiting" role="status" aria-live="polite">
+        {!state.isCompacting && waitingForPiMessage && <div className="agent-status is-waiting" role="status" aria-live="polite">
           <span className="loader small" />
-          正在等待 Pi 处理…
+          {waitingForPiMessage}
         </div>}
-        {state.isCompacting && <div className="agent-status is-compacting" role="status">
+        {state.isCompacting && <div className="agent-status is-compacting" role="status" aria-live="polite">
           <span className="loader small" />
-          {toolStatus || "正在压缩上下文，当前消息会在完成后继续发送…"}
+          {waitingForPiMessage || toolStatus || "正在压缩上下文，当前消息会在完成后继续发送…"}
         </div>}
         {state.isStreaming && !state.isCompacting && toolStatus && <div className="agent-status">
           <span className="loader small" />

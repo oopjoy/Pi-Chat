@@ -65,6 +65,7 @@ import {
 } from "./lib/ask-questionnaire";
 import { recentSessionWorkspaces } from "./lib/session-workspaces";
 import { adjacentUserMessageOffset } from "./lib/conversation-navigation";
+import { composerWaitStatus } from "./lib/composer-wait-status";
 import { extensionExecutionNotice } from "./lib/extension-notice";
 import {
   gateModeFromCommand,
@@ -6918,16 +6919,15 @@ export function App() {
       currentSessionPreparing ||
       Boolean(state.isCompacting) ||
       (viewingSubagentSession && !composerTargetSessionId));
-  const composerSubmissionPausedMessage = viewingSubagentSession && !composerTargetSessionId
-    ? "子代理父对话地址不可用；消息已保留，等待验证恢复"
-    : state.isCompacting
-      ? "消息已保存，等待压缩完成后发送"
-      : currentSessionPreparing
-        ? "消息已保存，正在准备 Runtime 后发送"
-        : "消息已保存，等待会话切换完成后发送";
-  const waitingForPi =
-    !state.isStreaming &&
-    (currentSessionPreparing || composerSubmissionPending > 0);
+  const waitingForPiMessage = composerWaitStatus({
+    isStreaming: state.isStreaming,
+    pendingSubmissions: composerSubmissionPending,
+    viewSwitching,
+    runtimePreparing: currentSessionPreparing,
+    compacting: Boolean(state.isCompacting),
+    subagentTargetUnavailable:
+      viewingSubagentSession && !composerTargetSessionId,
+  });
   // The server intentionally keeps an empty active Primary out of the indexed
   // sidebar until its first user turn. Preserve its real Session authority, but
   // present the same New-conversation shell instead of the legacy saved fallback.
@@ -7619,7 +7619,7 @@ export function App() {
         liveMessage={liveMessage}
         localDraft={localDraft}
         newConversationPresentation={newConversationPresentation}
-        waitingForPi={waitingForPi}
+        waitingForPiMessage={waitingForPiMessage}
         draftWorkspaceCwd={draftWorkspaceCwd}
         workspaceCwd={conversationWorkspace}
         workspacePicking={workspacePicking}
@@ -7682,7 +7682,6 @@ export function App() {
           submissionTargetSessionId: composerTargetSessionId || undefined,
           allowFollowupSubmissions: true,
           submissionPaused: composerSubmissionPaused,
-          submissionPausedMessage: composerSubmissionPausedMessage,
           onSubmissionPendingChange: updateComposerPending,
           commands: composerCommands,
           controls: composerControls,

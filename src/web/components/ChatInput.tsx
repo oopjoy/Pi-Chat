@@ -97,7 +97,7 @@ export function commandMatches(value: string, commands: SlashCommand[]): SlashCo
   }).sort((a, b) => a.rank - b.rank || a.score - b.score || a.command.name.localeCompare(b.command.name)).slice(0, 9).map(({ command }) => command);
 }
 
-export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, placeholder, acceptsImages, imageInputPending = false, imageInputPendingMessage = "模型图片能力尚未确认", resolveImageCapabilityOnSend = false, restoredDraft, onDraftRevisionChange, draftKey, submissionScope, submissionTargetSessionId, allowFollowupSubmissions = true, submissionPaused = false, submissionPausedMessage = "消息已保存，等待发送条件恢复", onSubmissionPendingChange, commands, controls, notices, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles, onError }: {
+export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, placeholder, acceptsImages, imageInputPending = false, imageInputPendingMessage = "模型图片能力尚未确认", resolveImageCapabilityOnSend = false, restoredDraft, onDraftRevisionChange, draftKey, submissionScope, submissionTargetSessionId, allowFollowupSubmissions = true, submissionPaused = false, onSubmissionPendingChange, commands, controls, notices, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles, onError }: {
   /** True when a submission will enter the local queue. */
   streaming: boolean;
   /** True only while Pi is actively generating and can be stopped. */
@@ -126,8 +126,6 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   allowFollowupSubmissions?: boolean;
   /** Keeps accepted editor snapshots local until their target may be submitted. */
   submissionPaused?: boolean;
-  /** Explains why an accepted snapshot is waiting without disabling editing. */
-  submissionPausedMessage?: string;
   onSubmissionPendingChange?: (scope: string, count: number) => void;
   commands: SlashCommand[];
   controls?: ReactNode;
@@ -374,7 +372,6 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     <div className="composer-wrap">
       {notices && <div className="system-notice-stack" aria-live="polite">{notices}</div>}
       {composer.blocked && <div className="composer-submission-status is-failed" role="status">发送失败，草稿已恢复；修改后可重试</div>}
-      {currentPendingSubmissions > 0 && submissionPaused && !composer.blocked && <div className="composer-submission-status" role="status">{submissionPausedMessage}</div>}
       <div className={`composer ${dragging ? "is-dragging" : ""}`} onDragOver={(event) => { event.preventDefault(); if (!editorDisabled) setDragging(true); }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }} onDrop={drop}>
         {!editorDisabled && suggestions.length > 0 && <div id={suggestionListId} className="command-suggestions" role="listbox" aria-label="Pi 指令联想">{suggestions.map((command, index) => <button id={`${suggestionListId}-option-${index}`} type="button" role="option" aria-selected={index === suggestionIndex} className={index === suggestionIndex ? "is-active" : ""} key={`${command.source}-${command.name}`} onMouseDown={(event) => event.preventDefault()} onClick={() => completeCommand(command)}><strong>/{command.name}</strong><span>{command.description || "Pi 指令"}</span><small>{command.source}</small></button>)}</div>}
         {images.length > 0 && <div className="image-previews">{images.map((image, index) => <div className="image-preview" key={`${image.fileName}-${index}`}><img src={`data:${image.mimeType};base64,${image.data}`} alt={image.fileName || `图片 ${index + 1}`} /><button type="button" disabled={editorDisabled} onClick={() => { const current = composer.currentDraft(); composer.edit(current.message); composer.replace(current.message, current.images.filter((_, itemIndex) => itemIndex !== index)); }} aria-label={`移除 ${image.fileName || "图片"}`}><CloseIcon /></button><small>{image.fileName || "粘贴的图片"}</small></div>)}</div>}
