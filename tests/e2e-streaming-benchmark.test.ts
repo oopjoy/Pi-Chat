@@ -40,13 +40,20 @@ test("Markdown and KaTeX stream snapshots retain complete deterministic syntax",
   const snapshots = streamingBenchmarkSnapshots({
     ...base,
     contentKind: "markdown-katex",
-    updateCount: 4,
+    updateCount: 10,
   });
+  assert.match(snapshots[4], /```ts\nconst unfinished5 = $/, "the fifth cumulative snapshot ends inside a code fence");
+  assert.match(snapshots[5], /const unfinished5 = \n```/, "the following snapshot closes that code fence");
+  assert.match(snapshots[8], /\$\$\n\\sum_\{k=1\}\^\{9\} k$/, "the ninth cumulative snapshot ends inside display math");
+  assert.match(snapshots[9], /\\sum_\{k=1\}\^\{9\} k\n\$\$/, "the following snapshot closes that display math");
   const final = snapshots.at(-1) || "";
-  assert.match(final, /## Deterministic section 4/);
-  assert.match(final, /\$a_4 = 4\^2 \+ 1\$/);
-  assert.match(final, /\\sum_\{k=1\}\^\{4\}/);
+  assert.match(final, /## Deterministic section 10/);
+  assert.match(final, /\$a_10 = 10\^2 \+ 1\$/);
+  assert.match(final, /\\sum_\{k=1\}\^\{10\}/);
   assert.match(final, /```ts/);
+  assert.match(final, /const unfinished5 = \n```/, "the fixture closes a code fence that was intentionally incomplete in an earlier snapshot");
+  assert.match(final, /\\sum_\{k=1\}\^\{9\} k\n\$\$/, "the fixture closes display math that was intentionally incomplete in an earlier snapshot");
+  assert.equal(final.includes("PI_CHAT_STREAM_FINAL"), true);
 });
 
 test("stream benchmark configuration rejects ambiguous or unsafe values", () => {

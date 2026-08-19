@@ -1,7 +1,8 @@
-import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import { createMarkdownRehypePlugins, markdownRemarkPlugins } from "../lib/markdown";
-import { normalizeDisplayMathForRender, normalizeDisplayMathWithSourceMap, registerSourceCopyRoot } from "../lib/markdown-source-copy";
+import { normalizeDisplayMathWithSourceMap, registerSourceCopyRoot } from "../lib/markdown-source-copy";
+import { streamingMarkdownBlocks } from "../lib/streaming-markdown";
 import { CheckIcon, CopyIcon } from "./Icons";
 
 interface MarkdownBodyProps {
@@ -9,15 +10,68 @@ interface MarkdownBodyProps {
   streaming?: boolean;
 }
 
-export const MarkdownBody = memo(function MarkdownBody({ children, streaming = false }: MarkdownBodyProps) {
-  // Streaming still runs remark-math + KaTeX so formulas appear as they complete.
-  // Only the exact source-map copy pass waits until message_end.
-  const sourceMapped = useMemo(() => streaming
-    ? { markdown: normalizeDisplayMathForRender(children), source: children, mapOffset: undefined }
-    : normalizeDisplayMathWithSourceMap(children), [children, streaming]);
+const markdownComponents = {
+  code({ className, children: codeChildren, ...props }: { className?: string; children?: ReactNode }) {
+    const raw = String(codeChildren);
+    const language = className?.replace("language-", "") || "text";
+    const block = Boolean(className?.includes("language-") || raw.includes("\n"));
+    if (block) return <CodeBlock language={language}>{raw.replace(/\n$/, "")}</CodeBlock>;
+    return <code className="inline-code" {...props}>{codeChildren}</code>;
+  },
+  pre({ children: preChildren }: { children?: ReactNode }) {
+    return <>{preChildren}</>;
+  },
+  a({ children: linkChildren, ...props }: { children?: ReactNode; node?: unknown }) {
+    delete props.node;
+    return <a {...props} target="_blank" rel="noopener noreferrer">{linkChildren}</a>;
+  },
+  table({ children: tableChildren, ...props }: { children?: ReactNode; node?: unknown }) {
+    delete props.node;
+    return <div className="table-scroll"><table {...props}>{tableChildren}</table></div>;
+  },
+};
+
+function streamingInlineText(text: string): ReactNode {
+  const pieces: ReactNode[] = [];
+  const pattern = /(?<!\\)\*\*([^*\r\n]+?)\*\*/g;
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(text))) {
+    if (match.index > cursor) pieces.push(text.slice(cursor, match.index));
+    pieces.push(<strong key={match.index}>{match[1]}</strong>);
+    cursor = match.index + match[0].length;
+  }
+  if (cursor < text.length) pieces.push(text.slice(cursor));
+  return pieces.length ? pieces : text;
+}
+
+function StreamingMarkdownBody({ children }: { children: string }) {
+  const blocks = useMemo(() => streamingMarkdownBlocks(children), [children]);
+  return <div className="markdown-body markdown-streaming">
+    {blocks.map((block, index) => {
+      if (block.kind === "heading") {
+        const Heading = `h${block.level}` as "h1" | "h2" | "h3" | "h4";
+        return <Heading key={index}>{streamingInlineText(block.text)}</Heading>;
+      }
+      if (block.kind === "list") {
+        const List = block.ordered ? "ol" : "ul";
+        return <List key={index}>{block.items.map((item, itemIndex) => <li key={itemIndex}>{streamingInlineText(item)}</li>)}</List>;
+      }
+      if (block.kind === "quote") return <blockquote key={index}>{streamingInlineText(block.text)}</blockquote>;
+      if (block.kind === "code") return <CodeBlock key={index} language={block.language}>{block.text}</CodeBlock>;
+      return <p key={index}>{block.text.split("\n").map((line, lineIndex) => <Fragment key={lineIndex}>{lineIndex > 0 && <br />}{streamingInlineText(line)}</Fragment>)}</p>;
+    })}
+  </div>;
+}
+
+function FinalMarkdownBody({ children }: { children: string }) {
+  const sourceMapped = useMemo(
+    () => normalizeDisplayMathWithSourceMap(children),
+    [children],
+  );
   const rehypePlugins = useMemo(
-    () => createMarkdownRehypePlugins(streaming ? undefined : sourceMapped.mapOffset),
-    [sourceMapped, streaming],
+    () => createMarkdownRehypePlugins(sourceMapped.mapOffset),
+    [sourceMapped.mapOffset],
   );
   const rootRef = useRef<HTMLDivElement>(null);
   const [sourceCopied, setSourceCopied] = useState(false);
@@ -25,7 +79,7 @@ export const MarkdownBody = memo(function MarkdownBody({ children, streaming = f
 
   useEffect(() => {
     const root = rootRef.current;
-    if (!root || streaming) return;
+    if (!root) return;
     return registerSourceCopyRoot(root, {
       source: sourceMapped.source,
       onCopied: () => {
@@ -34,7 +88,7 @@ export const MarkdownBody = memo(function MarkdownBody({ children, streaming = f
         timerRef.current = window.setTimeout(() => setSourceCopied(false), 1600);
       },
     });
-  }, [sourceMapped.source, streaming]);
+  }, [sourceMapped.source]);
 
   useEffect(() => () => {
     if (timerRef.current) window.clearTimeout(timerRef.current);
@@ -45,32 +99,19 @@ export const MarkdownBody = memo(function MarkdownBody({ children, streaming = f
       <ReactMarkdown
         remarkPlugins={markdownRemarkPlugins}
         rehypePlugins={rehypePlugins}
-        components={{
-          code({ className, children: codeChildren, ...props }) {
-            const raw = String(codeChildren);
-            const language = className?.replace("language-", "") || "text";
-            const block = Boolean(className?.includes("language-") || raw.includes("\n"));
-            if (block) return <CodeBlock language={language}>{raw.replace(/\n$/, "")}</CodeBlock>;
-            return <code className="inline-code" {...props}>{codeChildren}</code>;
-          },
-          pre({ children: preChildren }) {
-            return <>{preChildren}</>;
-          },
-          a({ children: linkChildren, ...props }) {
-            delete props.node;
-            return <a {...props} target="_blank" rel="noopener noreferrer">{linkChildren}</a>;
-          },
-          table({ children: tableChildren, ...props }) {
-            delete props.node;
-            return <div className="table-scroll"><table {...props}>{tableChildren}</table></div>;
-          },
-        }}
+        components={markdownComponents}
       >
         {sourceMapped.markdown}
       </ReactMarkdown>
       {sourceCopied && <span className="copy-toast" role="status">已复制 Markdown / LaTeX 源码</span>}
     </div>
   );
+}
+
+export const MarkdownBody = memo(function MarkdownBody({ children, streaming = false }: MarkdownBodyProps) {
+  return streaming
+    ? <StreamingMarkdownBody>{children}</StreamingMarkdownBody>
+    : <FinalMarkdownBody>{children}</FinalMarkdownBody>;
 });
 
 function CodeBlock({ language, children }: { language: string; children: ReactNode }) {

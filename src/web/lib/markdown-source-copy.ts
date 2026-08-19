@@ -93,11 +93,6 @@ function normalizeDisplayMath(source: string, trackOffsets: boolean): SourceMapp
   };
 }
 
-/** Lightweight normalization for streaming renders that do not need copy offsets. */
-export function normalizeDisplayMathForRender(source: string): string {
-  return normalizeDisplayMath(source, false).markdown;
-}
-
 export function normalizeDisplayMathWithSourceMap(source: string): SourceMappedMarkdown {
   return normalizeDisplayMath(source, true);
 }

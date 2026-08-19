@@ -5,19 +5,12 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { JSDOM } from "jsdom";
 import { MarkdownBody } from "../src/web/components/MarkdownBody";
 import { createMarkdownRehypePlugins, markdownRemarkPlugins } from "../src/web/lib/markdown";
-import { normalizeDisplayMathForRender, normalizeDisplayMathWithSourceMap, selectionInsideSingleCodeBlock, sourceForSelection } from "../src/web/lib/markdown-source-copy";
+import { normalizeDisplayMathWithSourceMap, selectionInsideSingleCodeBlock, sourceForSelection } from "../src/web/lib/markdown-source-copy";
 
-test("streaming Markdown keeps math plugins while skipping source-range mapping", () => {
+test("full Markdown keeps math plugins and source-range mapping", () => {
   assert.equal(markdownRemarkPlugins.length, 3);
-  const streamingPlugins = createMarkdownRehypePlugins();
   const finalPlugins = createMarkdownRehypePlugins((offset) => offset);
-  assert.equal(streamingPlugins.length, 3);
   assert.equal(finalPlugins.length, 4);
-});
-
-test("streaming display-math normalization matches the final mapped Markdown", () => {
-  const source = "before\n$$x + y$$\nafter";
-  assert.equal(normalizeDisplayMathForRender(source), normalizeDisplayMathWithSourceMap(source).markdown);
 });
 
 function renderDom(markdown: string) {

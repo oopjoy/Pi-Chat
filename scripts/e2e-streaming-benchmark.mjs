@@ -69,11 +69,28 @@ export function streamingBenchmarkDelay(target, now) {
 export function streamingBenchmarkSnapshots(input) {
   const config = parseStreamingBenchmarkConfig(input);
   let cumulative = "";
+  let pendingTailClose = "";
   const snapshots = [];
   for (let index = 0; index < config.updateCount; index += 1) {
+    // Deliberately cross snapshot boundaries with unfinished syntax. This
+    // exercises the same long cumulative Markdown tail a real stream produces,
+    // while the final snapshot remains complete for structural verification.
+    if (pendingTailClose) {
+      cumulative += pendingTailClose;
+      pendingTailClose = "";
+    }
     cumulative += config.contentKind === "plain"
       ? plainChunk(index)
       : markdownKatexChunk(index);
+    if (config.contentKind === "markdown-katex" && index < config.updateCount - 1) {
+      if (index % 10 === 4) {
+        cumulative += `\n\n\`\`\`ts\nconst unfinished${index + 1} = `;
+        pendingTailClose = "\n```";
+      } else if (index % 10 === 8) {
+        cumulative += `\n\n$$\n\\sum_{k=1}^{${index + 1}} k`;
+        pendingTailClose = "\n$$";
+      }
+    }
     if (index === config.updateCount - 1)
       cumulative += `\n\n${config.finalMarker}`;
     snapshots.push(cumulative);
