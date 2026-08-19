@@ -667,67 +667,75 @@ export class PiChatApp {
     this.connectedClients = this.sessionControl.connectedClients;
     this.viewedSessionsByClient = this.sessionControl.viewedSessionsByClient;
     this.scheduler = new PromptScheduler({
-      isClosed: () => this.closed,
-      isLifecycleIdle: () => this.applicationLifecycle === "idle",
-      primaryRpc: () => this.options.rpc,
-      activeSessionId: () => this.activeSessionId,
-      ensurePrimaryRuntime: () => this.ensurePrimaryRuntime(),
-      recoverRuntime: (runtime) => this.recoverRuntime(runtime),
-      acquirePrimaryOperation: () =>
-        this.primaryOperationAdmission.acquire().release,
-      acquireRuntimeOperation: (runtime) =>
-        this.runtimePool.acquireOperation(runtime),
-      touchRuntime: (runtime) => this.runtimePool.touch(runtime),
-      applyPendingTurnSettings: (rpc, pending) =>
-        this.applyPendingTurnSettings(rpc, pending),
-      applyPromptSettings: (rpc, pending, settings, consumeSupersededLegacy) =>
-        this.applyPromptSettings(
-          rpc,
-          pending,
-          settings,
-          consumeSupersededLegacy,
-        ),
-      onPrimaryPromptSettingsApplied: (settings) =>
-        this.rememberPrimaryAppliedTurnSettings(settings),
-      onRuntimePromptSettingsApplied: (runtime, settings) =>
-        this.rememberRuntimeAppliedTurnSettings(runtime, settings),
-      syncGateMode: (rpc, sessionId, mode) =>
-        this.syncGateMode(rpc, sessionId, mode),
-      promptRpcObserver: (rpc, sessionId, promptId) =>
-        this.promptRpcObserver(rpc, sessionId, promptId),
-      tracePrompt: (sessionId, promptId, name) =>
-        this.tracePrompt(name, sessionId, promptId),
-      abandonPromptDiagnostic: (sessionId, promptId) =>
-        this.clearPromptDiagnostic(sessionId, promptId),
-      broadcast: (event) => this.broadcast(event),
-      publishSessionActivity: (sessionId) =>
-        this.broadcastSessionActivity(sessionId),
-      onPrimaryPromptAccepted: (sessionId, promptAt) => {
-        this.recordUserPrompt(sessionId, promptAt);
-        this.warmPrimaryMessageSnapshot();
-        this.broadcast({
-          type: "pi_chat_sessions_changed",
-          action: "created",
-          sessionId,
-        });
+      runtime: {
+        isClosed: () => this.closed,
+        isLifecycleIdle: () => this.applicationLifecycle === "idle",
+        primaryRpc: () => this.options.rpc,
+        activeSessionId: () => this.activeSessionId,
+        ensurePrimaryRuntime: () => this.ensurePrimaryRuntime(),
+        recoverRuntime: (runtime) => this.recoverRuntime(runtime),
+        acquirePrimaryOperation: () =>
+          this.primaryOperationAdmission.acquire().release,
+        acquireRuntimeOperation: (runtime) =>
+          this.runtimePool.acquireOperation(runtime),
+        touchRuntime: (runtime) => this.runtimePool.touch(runtime),
       },
-      onSecondaryPromptAccepted: (runtime, promptAt) => {
-        this.recordUserPrompt(runtime.id, promptAt);
-        this.warmRuntimeMessageSnapshot(runtime);
-        // Keep draftSession until agent_settled confirms JSONL has the user turn.
-        // Mark prompted so sessionSummaries can inject a sidebar row immediately —
-        // SessionIndex only lists files after at least one message is on disk, which
-        // for long answers used to mean "only after the whole reply finished".
-        runtime.prompted = true;
-        // Pi can finish an extremely short first turn before agent_settled is
-        // observed here. Start bounded JSONL visibility confirmation at prompt
-        // admission too, then settlement can simply accelerate the same path.
-        void this.finalizePersistedDraftWhenVisible(runtime);
-        this.broadcast({
-          type: "pi_chat_sessions_changed",
-          action: "created",
-          sessionId: runtime.id,
-        });
+      preparation: {
+        applyPendingTurnSettings: (rpc, pending) =>
+          this.applyPendingTurnSettings(rpc, pending),
+        applyPromptSettings: (rpc, pending, settings, consumeSupersededLegacy) =>
+          this.applyPromptSettings(
+            rpc,
+            pending,
+            settings,
+            consumeSupersededLegacy,
+          ),
+        onPrimaryPromptSettingsApplied: (settings) =>
+          this.rememberPrimaryAppliedTurnSettings(settings),
+        onRuntimePromptSettingsApplied: (runtime, settings) =>
+          this.rememberRuntimeAppliedTurnSettings(runtime, settings),
+        syncGateMode: (rpc, sessionId, mode) =>
+          this.syncGateMode(rpc, sessionId, mode),
+      },
+      observation: {
+        promptRpcObserver: (rpc, sessionId, promptId) =>
+          this.promptRpcObserver(rpc, sessionId, promptId),
+        tracePrompt: (sessionId, promptId, name) =>
+          this.tracePrompt(name, sessionId, promptId),
+        abandonPromptDiagnostic: (sessionId, promptId) =>
+          this.clearPromptDiagnostic(sessionId, promptId),
+      },
+      publication: {
+        broadcast: (event) => this.broadcast(event),
+        publishSessionActivity: (sessionId) =>
+          this.broadcastSessionActivity(sessionId),
+        onPrimaryPromptAccepted: (sessionId, promptAt) => {
+          this.recordUserPrompt(sessionId, promptAt);
+          this.warmPrimaryMessageSnapshot();
+          this.broadcast({
+            type: "pi_chat_sessions_changed",
+            action: "created",
+            sessionId,
+          });
+        },
+        onSecondaryPromptAccepted: (runtime, promptAt) => {
+          this.recordUserPrompt(runtime.id, promptAt);
+          this.warmRuntimeMessageSnapshot(runtime);
+          // Keep draftSession until agent_settled confirms JSONL has the user turn.
+          // Mark prompted so sessionSummaries can inject a sidebar row immediately —
+          // SessionIndex only lists files after at least one message is on disk, which
+          // for long answers used to mean "only after the whole reply finished".
+          runtime.prompted = true;
+          // Pi can finish an extremely short first turn before agent_settled is
+          // observed here. Start bounded JSONL visibility confirmation at prompt
+          // admission too, then settlement can simply accelerate the same path.
+          void this.finalizePersistedDraftWhenVisible(runtime);
+          this.broadcast({
+            type: "pi_chat_sessions_changed",
+            action: "created",
+            sessionId: runtime.id,
+          });
+        },
       },
     });
     this.runtimePool = new RuntimePool({

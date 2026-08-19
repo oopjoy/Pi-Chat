@@ -2,11 +2,49 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { MAX_PROMPT_IMAGES_ENCODED_BYTES } from "../src/shared/rpc-contracts.ts";
 import { PromptScheduler } from "../src/server/prompt-scheduler.ts";
+import { promptSchedulerHost } from "./helpers/prompt-scheduler-host.ts";
 import { RpcRequestTimeoutError } from "../src/server/rpc-client.ts";
+
+test("scheduler host groups keep runtime, preparation, observation, and publication boundaries distinct", async () => {
+  const steps: string[] = [];
+  const rpc = {
+    send: async () => {
+      steps.push("send");
+      return { type: "response", success: true };
+    },
+  };
+  const scheduler = new PromptScheduler({
+    runtime: {
+      isClosed: () => false,
+      isLifecycleIdle: () => true,
+      primaryRpc: () => rpc as never,
+      activeSessionId: () => "primary",
+      ensurePrimaryRuntime: async () => { steps.push("ready"); },
+      recoverRuntime: async () => {},
+      acquirePrimaryOperation: () => () => {},
+      acquireRuntimeOperation: () => () => {},
+      touchRuntime: () => {},
+    },
+    preparation: {
+      applyPendingTurnSettings: async () => { steps.push("settings"); },
+      syncGateMode: async () => { steps.push("gate"); },
+    },
+    observation: {
+      tracePrompt: (_sessionId, _promptId, name) => steps.push(name),
+    },
+    publication: {
+      broadcast: () => {},
+      onPrimaryPromptAccepted: () => { steps.push("accepted"); },
+      onSecondaryPromptAccepted: () => {},
+    },
+  });
+  await scheduler.sendPrimaryPrompt("one", [], 1, "strict", "prompt-1");
+  assert.deepEqual(steps, ["ready", "settings", "gate", "dispatch", "send", "accepted"]);
+});
 
 test("enqueue limits protect queue length and image payload size", () => {
   const events: Record<string, unknown>[] = [];
-  const scheduler = new PromptScheduler({
+  const scheduler = new PromptScheduler(promptSchedulerHost({
     isClosed: () => false,
     isLifecycleIdle: () => true,
     primaryRpc: () => ({ send: async () => ({ type: "response", success: true }) } as never),
@@ -21,7 +59,7 @@ test("enqueue limits protect queue length and image payload size", () => {
     broadcast: (event) => events.push(event),
     onPrimaryPromptAccepted: () => {},
     onSecondaryPromptAccepted: () => {},
-  });
+  }));
 
   for (let i = 0; i < 20; i += 1) {
     assert.equal(scheduler.assertCanEnqueue(scheduler.primaryQueue, []), null);
@@ -41,7 +79,7 @@ test("enqueue limits protect queue length and image payload size", () => {
 
 test("a timed-out Primary prompt remains conservatively running because Pi may have received it", async () => {
   let accepted = 0;
-  const scheduler = new PromptScheduler({
+  const scheduler = new PromptScheduler(promptSchedulerHost({
     isClosed: () => false,
     isLifecycleIdle: () => true,
     primaryRpc: () => ({
@@ -60,7 +98,7 @@ test("a timed-out Primary prompt remains conservatively running because Pi may h
     broadcast: () => {},
     onPrimaryPromptAccepted: () => { accepted += 1; },
     onSecondaryPromptAccepted: () => {},
-  });
+  }));
 
   assert.equal(await scheduler.sendPrimaryPrompt("possibly accepted", []), "unknown");
   assert.equal(scheduler.primaryRunning, true);
@@ -70,7 +108,7 @@ test("a timed-out Primary prompt remains conservatively running because Pi may h
 test("a timed-out queued Primary prompt emits an asynchronous uncertainty verdict", async () => {
   const events: Record<string, unknown>[] = [];
   const traces: Array<{ sessionId: string; promptId: string; name: string }> = [];
-  const scheduler = new PromptScheduler({
+  const scheduler = new PromptScheduler(promptSchedulerHost({
     isClosed: () => false,
     isLifecycleIdle: () => true,
     primaryRpc: () => ({
@@ -90,7 +128,7 @@ test("a timed-out queued Primary prompt emits an asynchronous uncertainty verdic
     broadcast: (event) => events.push(event),
     onPrimaryPromptAccepted: () => {},
     onSecondaryPromptAccepted: () => {},
-  });
+  }));
   const queued = scheduler.enqueuePrimary("possibly accepted", []);
 
   await scheduler.dispatchPrimaryNext();
@@ -132,7 +170,7 @@ test("a timed-out queued Secondary prompt is not requeued and remains conservati
     abortGeneration: 0,
     failed: false,
   };
-  const scheduler = new PromptScheduler({
+  const scheduler = new PromptScheduler(promptSchedulerHost({
     isClosed: () => false,
     isLifecycleIdle: () => true,
     primaryRpc: () => rpc as never,
@@ -147,7 +185,7 @@ test("a timed-out queued Secondary prompt is not requeued and remains conservati
     broadcast: (event) => events.push(event),
     onPrimaryPromptAccepted: () => {},
     onSecondaryPromptAccepted: () => { accepted += 1; },
-  });
+  }));
   scheduler.enqueueRuntime(runtime as never, "possibly accepted", [], 1234);
 
   await scheduler.dispatchRuntimeNext(runtime as never);
@@ -169,7 +207,7 @@ test("a timed-out queued Secondary prompt is not requeued and remains conservati
 test("failed queued dispatch reports the requeued prompt for transcript rollback", async () => {
   const events: Record<string, unknown>[] = [];
   const traces: Array<{ sessionId: string; promptId: string; name: string }> = [];
-  const scheduler = new PromptScheduler({
+  const scheduler = new PromptScheduler(promptSchedulerHost({
     isClosed: () => false,
     isLifecycleIdle: () => true,
     primaryRpc: () => ({ send: async () => { throw new Error("rejected"); } } as never),
@@ -185,7 +223,7 @@ test("failed queued dispatch reports the requeued prompt for transcript rollback
     broadcast: (event) => events.push(event),
     onPrimaryPromptAccepted: () => {},
     onSecondaryPromptAccepted: () => {},
-  });
+  }));
   const queued = scheduler.enqueuePrimary("later", []);
 
   await scheduler.dispatchPrimaryNext();
@@ -217,7 +255,7 @@ test("diagnostic callbacks are fail-open and cannot replace scheduler delivery",
       return { type: "response", success: true };
     },
   };
-  const scheduler = new PromptScheduler({
+  const scheduler = new PromptScheduler(promptSchedulerHost({
     isClosed: () => false,
     isLifecycleIdle: () => true,
     primaryRpc: () => rpc as never,
@@ -235,7 +273,7 @@ test("diagnostic callbacks are fail-open and cannot replace scheduler delivery",
     broadcast: () => {},
     onPrimaryPromptAccepted: () => {},
     onSecondaryPromptAccepted: () => {},
-  });
+  }));
 
   assert.equal(await scheduler.sendPrimaryPrompt(
     "delivered once",
@@ -255,7 +293,7 @@ test("Primary dispatch observation follows settings and Gate preflight immediate
       return { type: "response", success: true };
     },
   };
-  const scheduler = new PromptScheduler({
+  const scheduler = new PromptScheduler(promptSchedulerHost({
     isClosed: () => false,
     isLifecycleIdle: () => true,
     primaryRpc: () => rpc as never,
@@ -275,7 +313,7 @@ test("Primary dispatch observation follows settings and Gate preflight immediate
     broadcast: () => {},
     onPrimaryPromptAccepted: () => {},
     onSecondaryPromptAccepted: () => {},
-  });
+  }));
 
   await scheduler.sendPrimaryPrompt(
     "next",
@@ -297,7 +335,7 @@ test("Primary dispatch observation follows settings and Gate preflight immediate
 test("Gate mode is synchronized immediately before the next Primary prompt", async () => {
   const commands: string[] = [];
   const rpc = { send: async (command: { type: string; message?: string }) => { commands.push(command.message || command.type); return { type: "response", success: true }; } };
-  const scheduler = new PromptScheduler({
+  const scheduler = new PromptScheduler(promptSchedulerHost({
     isClosed: () => false,
     isLifecycleIdle: () => true,
     primaryRpc: () => rpc as never,
@@ -312,7 +350,7 @@ test("Gate mode is synchronized immediately before the next Primary prompt", asy
     broadcast: () => {},
     onPrimaryPromptAccepted: () => {},
     onSecondaryPromptAccepted: () => {},
-  });
+  }));
 
   await scheduler.sendPrimaryPrompt("next turn", [], 1, "strict");
 
@@ -333,7 +371,7 @@ test("queued Secondary turns retain Gate mode until actual dispatch", async () =
     abortGeneration: 0,
     failed: false,
   };
-  const scheduler = new PromptScheduler({
+  const scheduler = new PromptScheduler(promptSchedulerHost({
     isClosed: () => false,
     isLifecycleIdle: () => true,
     primaryRpc: () => rpc as never,
@@ -348,7 +386,7 @@ test("queued Secondary turns retain Gate mode until actual dispatch", async () =
     broadcast: () => {},
     onPrimaryPromptAccepted: () => {},
     onSecondaryPromptAccepted: () => {},
-  });
+  }));
   const queued = scheduler.enqueueRuntime(runtime as never, "queued next", [], 1, "open");
   assert.deepEqual(commands, [], "enqueue must not alter the Gate during the current turn");
   assert.equal((scheduler.publicQueue(runtime.promptQueue as never)[0] as Record<string, unknown>).gateMode, undefined);
@@ -373,7 +411,7 @@ test("successful queued Secondary dispatch performs acceptance bookkeeping with 
     abortGeneration: 0,
     failed: false,
   };
-  const scheduler = new PromptScheduler({
+  const scheduler = new PromptScheduler(promptSchedulerHost({
     isClosed: () => false,
     isLifecycleIdle: () => true,
     primaryRpc: () => rpc as never,
@@ -388,7 +426,7 @@ test("successful queued Secondary dispatch performs acceptance bookkeeping with 
     broadcast: () => {},
     onPrimaryPromptAccepted: () => {},
     onSecondaryPromptAccepted: (acceptedRuntime, promptAt) => accepted.push({ runtime: acceptedRuntime, promptAt }),
-  });
+  }));
   const queued = scheduler.enqueueRuntime(runtime as never, "accepted from queue", [], 1234);
 
   await scheduler.dispatchRuntimeNext(runtime as never);
@@ -412,7 +450,7 @@ test("failed queued Secondary dispatch does not perform acceptance bookkeeping",
     abortGeneration: 0,
     failed: false,
   };
-  const scheduler = new PromptScheduler({
+  const scheduler = new PromptScheduler(promptSchedulerHost({
     isClosed: () => false,
     isLifecycleIdle: () => true,
     primaryRpc: () => rpc as never,
@@ -429,7 +467,7 @@ test("failed queued Secondary dispatch does not perform acceptance bookkeeping",
     broadcast: () => {},
     onPrimaryPromptAccepted: () => {},
     onSecondaryPromptAccepted: () => { accepted += 1; },
-  });
+  }));
   const queued = scheduler.enqueueRuntime(runtime as never, "rejected from queue", [], 1234);
 
   await scheduler.dispatchRuntimeNext(runtime as never);
@@ -444,7 +482,7 @@ test("failed queued Secondary dispatch does not perform acceptance bookkeeping",
 });
 
 test("publicQueue strips image payloads", () => {
-  const scheduler = new PromptScheduler({
+  const scheduler = new PromptScheduler(promptSchedulerHost({
     isClosed: () => false,
     isLifecycleIdle: () => true,
     primaryRpc: () => ({ send: async () => ({}) } as never),
@@ -459,7 +497,7 @@ test("publicQueue strips image payloads", () => {
     broadcast: () => {},
     onPrimaryPromptAccepted: () => {},
     onSecondaryPromptAccepted: () => {},
-  });
+  }));
   const item = scheduler.enqueuePrimary("hi", [{ type: "image", data: "abc", mimeType: "image/png" } as never]);
   assert.deepEqual(scheduler.publicQueue()[0], {
     id: item.id,
@@ -478,7 +516,7 @@ test("queued prompts retain their own immutable Model and Thinking snapshot", as
       return { type: "response", success: true };
     },
   };
-  const scheduler = new PromptScheduler({
+  const scheduler = new PromptScheduler(promptSchedulerHost({
     isClosed: () => false,
     isLifecycleIdle: () => true,
     primaryRpc: () => rpc as never,
@@ -499,7 +537,7 @@ test("queued prompts retain their own immutable Model and Thinking snapshot", as
     broadcast: () => {},
     onPrimaryPromptAccepted: () => {},
     onSecondaryPromptAccepted: () => {},
-  });
+  }));
   scheduler.enqueuePrimary("first", [], 1, undefined, {
     model: { provider: "provider-a", modelId: "model-a" },
     thinkingLevel: "high",
