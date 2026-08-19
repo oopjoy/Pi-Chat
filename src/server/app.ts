@@ -113,6 +113,7 @@ import {
   PartialTurnSettingsError,
   RuntimeCapacityError,
   RuntimePool,
+  SessionNotFoundError,
   type AppliedTurnSettings,
   type PendingTurnSettings,
   type SecondaryRuntime,
@@ -5887,12 +5888,34 @@ export class PiChatApp {
       if (request.method !== "POST") return methodNotAllowed(response);
       const body = preparedBody || (await bodyJson(request));
       const sessionId = requiredSessionId(body);
-      const secondaryRuntime = this.runtimePool.get(sessionId) || null;
+      // Compact changes the target Runtime's context outside PromptScheduler's
+      // ordinary-turn FIFO. Serialize its target resolution, idle proof, and
+      // RPC write with prompt admission so a concurrent send cannot pass the
+      // idle check and start against a newly compacted context.
+      const releasePromptAdmission = await this.beginPromptAdmission(sessionId);
       let releaseRuntimeOperation: (() => void) | null = null;
       try {
+        // A cold/reclaimed persisted Session is neither the Primary nor an
+        // error. Bind Primary identity before allocating a new Secondary, then
+        // use the App-owned restoration path so Gate, recovery, fast mode, and
+        // RuntimePool capacity/reclaim ownership remain authoritative here.
+        let secondaryRuntime = this.runtimePool.get(sessionId) || null;
+        if (!secondaryRuntime && !this.activeSessionId)
+          await this.ensurePrimaryIdentity();
+        const requestedIsPrimary = sessionId === this.activeSessionId;
+        if (!requestedIsPrimary && !secondaryRuntime) {
+          try {
+            secondaryRuntime = await this.ensureRuntime(sessionId);
+          } catch (error) {
+            if (error instanceof SessionNotFoundError)
+              return json(response, 409, { error: "该会话尚未启用" });
+            throw error;
+          }
+        }
         if (secondaryRuntime) {
           releaseRuntimeOperation =
             this.runtimePool.acquireOperation(secondaryRuntime);
+          this.runtimePool.touch(secondaryRuntime);
           if (this.secondaryNeedsRecovery(secondaryRuntime))
             await this.recoverRuntime(secondaryRuntime);
         } else {
@@ -5901,14 +5924,13 @@ export class PiChatApp {
           await this.ensurePrimaryRuntime();
         }
         if (
-          (!secondaryRuntime && (this.running || this.promptQueue.length)) ||
-          secondaryRuntime?.running
+          secondaryRuntime
+            ? this.scheduler.runtimeBusyForQueue(secondaryRuntime)
+            : this.scheduler.primaryBusyForQueue()
         )
           return json(response, 409, {
             error: "请先停止该会话的生成并清空队列",
           });
-        if (!secondaryRuntime && sessionId !== this.activeSessionId)
-          return json(response, 409, { error: "该会话尚未启用" });
         const customInstructions =
           typeof body.customInstructions === "string"
             ? body.customInstructions.trim()
@@ -5926,6 +5948,7 @@ export class PiChatApp {
         return;
       } finally {
         releaseRuntimeOperation?.();
+        releasePromptAdmission();
       }
     }
 

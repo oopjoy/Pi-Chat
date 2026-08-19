@@ -116,6 +116,13 @@ export interface SecondaryRuntime {
 
 export type RuntimeReclaimReason = "idle" | "capacity";
 export class RuntimeCapacityError extends Error {}
+/** A syntactically valid ID has no known persisted Session path. */
+export class SessionNotFoundError extends Error {
+  constructor() {
+    super("会话不存在");
+    this.name = "SessionNotFoundError";
+  }
+}
 
 export interface RuntimePoolOptions {
   now: () => number;
@@ -419,7 +426,7 @@ export class RuntimePool {
         path = this.options.pathForId(id);
         summary = this.options.summaryForId?.(id) || undefined;
       }
-      if (!path) throw new Error("会话不存在");
+      if (!path) throw new SessionNotFoundError();
       const runtimeCwd = summary?.cwd || this.options.cwd();
       const reservation = await this.reserveStart();
       const rpc = this.options.createRpc!(runtimeCwd);
