@@ -48,15 +48,20 @@ function contentIdentity(content: PiMessage["content"]): string {
 }
 
 /**
- * Pi providers may add a transport-only textSignature to a persisted text
- * block while the same SSE message_end block omits it. It must not keep one
- * logical terminal answer alive as a second visible lease.
+ * Pi providers may persist replay/verification signatures that are absent from
+ * the same SSE message_end snapshot. They are transport metadata, not visible
+ * terminal semantics, and must not keep one logical answer alive as a second
+ * lease while JSONL catches up.
  */
 function terminalContentIdentity(content: PiMessage["content"]): string {
   if (!Array.isArray(content)) return contentIdentity(content);
   const canonical = content.map((block) => {
     if (!block || typeof block !== "object") return block;
-    const { textSignature: _textSignature, ...semantic } = block as unknown as Record<string, unknown>;
+    const {
+      textSignature: _textSignature,
+      thinkingSignature: _thinkingSignature,
+      ...semantic
+    } = block as unknown as Record<string, unknown>;
     return semantic;
   });
   try { return JSON.stringify(canonical) ?? String(canonical ?? ""); }

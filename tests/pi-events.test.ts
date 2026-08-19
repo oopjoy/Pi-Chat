@@ -217,22 +217,32 @@ test("a persisted terminal confirms an equivalent SSE lease despite timestamp dr
   assert.deepEqual(reconciled.pending, []);
 });
 
-test("a persisted terminal confirms an SSE lease when only Pi textSignature differs", () => {
+test("a persisted terminal confirms an SSE lease when only Pi provider signatures differ", () => {
   const persisted = [
     { role: "user", content: "question", timestamp: 1 },
     {
       role: "assistant",
-      content: [{
-        type: "text",
-        text: "answer",
-        textSignature: '{"v":1,"id":"provider-final"}',
-      }],
+      content: [
+        {
+          type: "thinking",
+          thinking: "checked the implementation",
+          thinkingSignature: '{"id":"provider-reasoning"}',
+        },
+        {
+          type: "text",
+          text: "answer",
+          textSignature: '{"v":1,"id":"provider-final"}',
+        },
+      ],
       timestamp: 2,
     },
   ] as const;
   const terminal = {
     role: "assistant",
-    content: [{ type: "text", text: "answer" }],
+    content: [
+      { type: "thinking", thinking: "checked the implementation" },
+      { type: "text", text: "answer" },
+    ],
     timestamp: 2,
   } as const;
   const reconciled = reconcilePersistedHistory([...persisted], [terminal]);
@@ -240,7 +250,7 @@ test("a persisted terminal confirms an SSE lease when only Pi textSignature diff
   assert.deepEqual(reconciled.pending, []);
 });
 
-test("textSignature-insensitive terminal matching retains a distinct same-millisecond answer", () => {
+test("provider-signature-insensitive terminal matching retains a distinct same-millisecond answer", () => {
   const persisted = [
     { role: "user", content: "question", timestamp: 1 },
     {
