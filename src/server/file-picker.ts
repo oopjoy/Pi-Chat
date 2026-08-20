@@ -115,11 +115,28 @@ $result = [PiChatFolderPicker]::Pick($env:PI_CHAT_PICKER_INITIAL)
 if ($null -eq $result) { 'null' } else { ConvertTo-Json -InputObject $result -Compress }
 `;
 
+/**
+ * Workspace selection may use a canonical Windows UNC path, including WSL's
+ * `\\\\wsl.localhost\\Distro\\…` shares. The workspace route normalizes equivalent
+ * spellings and still proves the returned path with `stat()`.
+ */
+export function isWindowsWorkspacePath(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  if (/^[A-Za-z]:[\\/]/.test(value)) return true;
+  if (value.charCodeAt(0) !== 92 || value.charCodeAt(1) !== 92) return false;
+  if (value.includes("/")) return false;
+  const [host, share] = value.slice(2).split(String.fromCharCode(92), 3);
+  return Boolean(host && share)
+    && !/[\\/:*?"<>|\u0000-\u001f]/.test(host)
+    && !/[\\/:*?"<>|\u0000-\u001f]/.test(share);
+}
+
 export function parsePickerOutput(output: string): string[] {
   const trimmed = output.trim();
   if (!trimmed) return [];
   const parsed: unknown = JSON.parse(trimmed);
   const values = Array.isArray(parsed) ? parsed : [parsed];
+  // Local-file and clipboard attachment behavior intentionally stays drive-only.
   return values.filter((value): value is string => typeof value === "string" && /^[A-Za-z]:[\\/]/.test(value));
 }
 
@@ -181,7 +198,7 @@ export async function pickWorkspaceFolder(initialPath?: string): Promise<string 
     if (!output) return null;
     const jsonLine = output.split(/\r?\n/).filter(Boolean).at(-1) || "null";
     const value: unknown = JSON.parse(jsonLine);
-    return typeof value === "string" && /^[A-Za-z]:[\\/]/.test(value) ? value : null;
+    return isWindowsWorkspacePath(value) ? value : null;
   } catch (error) {
     if (error instanceof SyntaxError) throw new Error("无法读取 Windows 文件夹选择器结果");
     throw error;

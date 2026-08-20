@@ -9,7 +9,10 @@ import {
   MAX_RPC_OUTBOUND_LINE_BYTES,
 } from "../src/shared/rpc-contracts";
 import { PiChatApp, promptImages } from "../src/server/app";
-import { parsePickerOutput } from "../src/server/file-picker";
+import {
+  isWindowsWorkspacePath,
+  parsePickerOutput,
+} from "../src/server/file-picker";
 import type { PiRpcClient } from "../src/server/rpc-client";
 import { idForPath, type SessionIndex } from "../src/server/session-index";
 import type { ResourceManager } from "../src/server/resource-manager";
@@ -76,13 +79,24 @@ test("browser attachment preflight shares the ten-image and 40 MB budgets", () =
   assert.equal(promptImagesByteLength([{ data: "YQ==" }, { data: "", size: 7 }]), 8);
 });
 
-test("Windows file picker output keeps only absolute drive paths", () => {
+test("file attachments stay drive-only while workspaces accept canonical WSL UNC paths", () => {
+  const wslWorkspace = "\\\\wsl.localhost\\Ubuntu\\home\\brave\\projects";
   assert.deepEqual(parsePickerOutput('["C:\\\\Users\\\\me\\\\note.md","D:\\\\资料\\\\文档.pdf"]'), [
     "C:\\Users\\me\\note.md",
     "D:\\资料\\文档.pdf",
   ]);
   assert.deepEqual(parsePickerOutput('"C:\\\\single.txt"'), ["C:\\single.txt"]);
-  assert.deepEqual(parsePickerOutput('["relative.txt","/tmp/a"]'), []);
+  assert.deepEqual(parsePickerOutput(JSON.stringify([wslWorkspace])), []);
+  assert.equal(isWindowsWorkspacePath(wslWorkspace), true);
+  assert.equal(isWindowsWorkspacePath("\\\\wsl$\\Ubuntu\\home\\brave\\projects"), true);
+  assert.equal(isWindowsWorkspacePath("\\\\fileserver\\share\\project"), true);
+  assert.equal(isWindowsWorkspacePath("\\\\?\\UNC\\server\\share\\project"), false);
+  assert.equal(isWindowsWorkspacePath("\\\\.\\C:\\project"), false);
+  assert.equal(isWindowsWorkspacePath("//wsl.localhost/Ubuntu/home/brave/projects"), false);
+  assert.equal(isWindowsWorkspacePath("\\\\wsl.localhost/Ubuntu/home/brave/projects"), false);
+  assert.equal(isWindowsWorkspacePath("\\\\wsl.localhost\\Ubuntu/home/brave/projects"), false);
+  assert.equal(isWindowsWorkspacePath("\\\\wsl.localhost"), false);
+  assert.equal(isWindowsWorkspacePath("\\\\wsl.localhost\\"), false);
 });
 
 test("attachment path helpers preserve Windows absolute paths", () => {

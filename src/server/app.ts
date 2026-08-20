@@ -3766,6 +3766,8 @@ export class PiChatApp {
     try {
       const releaseMutation = this.beginMutation();
       try {
+        // Normalize equivalent spellings while retaining canonical UNC/WSL
+        // workspace identity; Windows path.resolve() preserves UNC roots.
         const selectedCwd = resolve(selected);
         if (!(await stat(selectedCwd)).isDirectory())
           throw new Error("所选工作目录不存在或不是文件夹");
