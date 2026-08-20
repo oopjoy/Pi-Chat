@@ -55,6 +55,53 @@ test("warm starts a dedicated Runtime without full-view probes and same-mode Gat
   }
 });
 
+test("an idle known Runtime view never waits for a global Session inventory", async () => {
+  const primaryPath = "C:\\sessions\\idle-view-primary.jsonl";
+  const secondaryPath = "C:\\sessions\\idle-view-secondary.jsonl";
+  const primaryId = idForPath(primaryPath);
+  const secondaryId = idForPath(secondaryPath);
+  const primary = new FakeRpc(primaryPath, "idle-view-primary");
+  const secondary = new FakeRpc(secondaryPath, "idle-view-secondary");
+  const summaries = [
+    { id: primaryId, sessionId: "idle-view-primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 2, messageCount: 1, active: true },
+    { id: secondaryId, sessionId: "idle-view-secondary", name: "Secondary", preview: "saved", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: false },
+  ];
+  let listCalls = 0;
+  let blockInventory = false;
+  const sessions = {
+    list: async () => {
+      listCalls += 1;
+      if (blockInventory) return new Promise<SessionSummary[]>(() => undefined);
+      return summaries;
+    },
+    pathForId: (id: string) => id === primaryId ? primaryPath : id === secondaryId ? secondaryPath : null,
+    summaryForId: (id: string) => summaries.find((summary) => summary.id === id) || null,
+    messagesForId: async () => [{ role: "user", content: "saved" }],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, createRpc: () => secondary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    assert.equal((await fetch(`${origin}/api/bootstrap`)).status, 200);
+    assert.equal((await fetch(`${origin}/api/sessions/${secondaryId}/warm`, { method: "POST" })).status, 200);
+    const callsBeforeView = listCalls;
+    blockInventory = true;
+    const response = await fetch(`${origin}/api/sessions/${secondaryId}/view`, { signal: AbortSignal.timeout(500) });
+    assert.equal(response.status, 200);
+    const view = await response.json() as { session: { id: string; active: boolean }; runtimeStatus: string };
+    assert.equal(view.session.id, secondaryId);
+    assert.equal(view.session.active, true);
+    assert.equal(view.runtimeStatus, "active");
+    assert.equal(listCalls, callsBeforeView);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
 test("a running persisted Session retains its indexed sidebar summary while a refresh omits it", async () => {
   const primaryPath = "C:\\sessions\\summary-primary.jsonl";
   const secondaryPath = "C:\\sessions\\summary-secondary.jsonl";

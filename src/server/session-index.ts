@@ -95,8 +95,12 @@ async function listJsonlFiles(root: string): Promise<string[]> {
     const entries = await readdir(directory, { withFileTypes: true });
     for (const entry of entries) {
       const path = join(directory, entry.name);
-      if (entry.isDirectory()) queue.push(path);
-      else if (entry.isFile() && extname(entry.name).toLowerCase() === ".jsonl") files.push(path);
+      // Pi reserves run-N directories for nested Subagent sessions. They are
+      // never ordinary sidebar conversations, so do not enumerate/stat/parse
+      // their JSONL children during every global inventory refresh.
+      if (entry.isDirectory()) {
+        if (!/^run-\d+$/i.test(entry.name)) queue.push(path);
+      } else if (entry.isFile() && extname(entry.name).toLowerCase() === ".jsonl") files.push(path);
     }
   }
   return files;
@@ -387,27 +391,48 @@ export class SessionIndex {
   private cache: Map<string, SessionCacheEntry> | null = null;
   private pathsById = new Map<string, string>();
   private refreshPromise: Promise<SessionSummary[]> | null = null;
-  private refreshKey = "";
-  private latestList: { activePath: string; cwd: string; sessions: SessionSummary[]; refreshedAt: number } | null = null;
+  /** One physical inventory; active/workspace variants are pure projections. */
+  private latestList: { sessions: SessionSummary[]; refreshedAt: number } | null = null;
   private readonly statFile: (path: string) => Promise<Stats>;
+  private readonly parseFile: typeof parseSession;
   private readonly snapshotCache = new Map<string, { mtimeMs: number; size: number; snapshot: SessionFileSnapshot; bytes: number }>();
   private snapshotCacheBytes = 0;
   private readonly snapshotCacheMaxEntries = 32;
   private readonly snapshotCacheMaxBytes = 64 * 1024 * 1024;
   private readonly snapshotReads = new Map<string, Promise<SessionFileSnapshot | null>>();
 
-  constructor(root?: string, cachePath?: string, statFile: (path: string) => Promise<Stats> = stat) {
+  constructor(
+    root?: string,
+    cachePath?: string,
+    statFile: (path: string) => Promise<Stats> = stat,
+    parseFile: typeof parseSession = parseSession,
+  ) {
     this.root = root || process.env.PI_CODING_AGENT_SESSION_DIR || join(homedir(), ".pi", "agent", "sessions");
     this.cachePath = cachePath || (root ? join(this.root, ".pi-chat-session-index.json") : join(homedir(), ".pi", "agent", "pi-chat-session-index.json"));
     this.statFile = statFile;
+    this.parseFile = parseFile;
+  }
+
+  private projectList(
+    sessions: readonly SessionSummary[],
+    activePath?: string,
+    cwd?: string,
+  ): SessionSummary[] {
+    const active = activePath ? resolve(activePath).toLowerCase() : "";
+    const workspace = cwd ? resolve(cwd).toLowerCase() : "";
+    return sessions.flatMap((session) => {
+      if (workspace && resolve(session.cwd || "").toLowerCase() !== workspace) return [];
+      const path = this.pathsById.get(session.id);
+      return [{
+        ...session,
+        active: Boolean(path && resolve(path).toLowerCase() === active),
+      }];
+    });
   }
 
   snapshot(activePath?: string, cwd?: string): SessionSummary[] | null {
     if (!this.latestList) return null;
-    const active = activePath ? resolve(activePath).toLowerCase() : "";
-    const workspace = cwd ? resolve(cwd).toLowerCase() : "";
-    if (this.latestList.activePath !== active || this.latestList.cwd !== workspace) return null;
-    return this.latestList.sessions.map((session) => ({ ...session }));
+    return this.projectList(this.latestList.sessions, activePath, cwd);
   }
 
   /** Return the latest complete snapshot immediately and refresh it periodically in the background. */
@@ -421,35 +446,21 @@ export class SessionIndex {
   }
 
   async list(activePath?: string, cwd?: string): Promise<SessionSummary[]> {
-    // Bootstrap and sidebar refresh may arrive together.
-    // Share identical scans and serialize different scans so pathsById/cache are
-    // never mutated concurrently by callers released from the same await.
-    const key = `${activePath ? resolve(activePath).toLowerCase() : ""}\0${cwd ? resolve(cwd).toLowerCase() : ""}`;
-    while (this.refreshPromise) {
-      if (this.refreshKey === key) return this.refreshPromise;
-      await this.refreshPromise;
-    }
-    const refresh = this.refresh(activePath, cwd);
-    this.refreshPromise = refresh;
-    this.refreshKey = key;
+    // Every caller needs the same physical inventory. Active path and workspace
+    // only change the returned projection, so bootstrap/sidebar/view requests
+    // must share one scan instead of serially rescanning the same JSONL tree.
+    if (!this.refreshPromise) this.refreshPromise = this.refresh();
+    const refresh = this.refreshPromise;
     try {
       const sessions = await refresh;
-      this.latestList = {
-        activePath: activePath ? resolve(activePath).toLowerCase() : "",
-        cwd: cwd ? resolve(cwd).toLowerCase() : "",
-        sessions,
-        refreshedAt: Date.now(),
-      };
-      return sessions;
+      this.latestList = { sessions, refreshedAt: Date.now() };
+      return this.projectList(sessions, activePath, cwd);
     } finally {
-      if (this.refreshPromise === refresh) {
-        this.refreshPromise = null;
-        this.refreshKey = "";
-      }
+      if (this.refreshPromise === refresh) this.refreshPromise = null;
     }
   }
 
-  private async refresh(activePath?: string, cwd?: string): Promise<SessionSummary[]> {
+  private async refresh(): Promise<SessionSummary[]> {
     if (!this.cache) this.cache = await loadSessionCache(this.cachePath);
     const files = await listJsonlFiles(this.root);
     const livePaths = new Set(files.map((path) => resolve(path)));
@@ -460,8 +471,6 @@ export class SessionIndex {
         this.snapshotCache.delete(id);
       }
     }
-    const normalizedActive = activePath ? resolve(activePath).toLowerCase() : "";
-    const normalizedCwd = cwd ? resolve(cwd).toLowerCase() : "";
     const summaries: SessionSummary[] = [];
     const nextPathsById = new Map<string, string>();
     let cacheChanged = false;
@@ -478,27 +487,19 @@ export class SessionIndex {
         if (this.cache.delete(normalized)) cacheChanged = true;
         continue;
       }
-      const isActive = normalized.toLowerCase() === normalizedActive;
       let cached = this.cache.get(normalized);
       if (!cached || cached.mtimeMs !== fileStat.mtimeMs || cached.size !== fileStat.size) {
-        const summary = await parseSession(normalized, fileStat.mtimeMs);
-        if (!summary) {
-          if (this.cache.delete(normalized)) cacheChanged = true;
-          continue;
-        }
+        const summary = await this.parseFile(normalized, fileStat.mtimeMs);
         cached = { mtimeMs: fileStat.mtimeMs, size: fileStat.size, summary };
         this.cache.set(normalized, cached);
         cacheChanged = true;
       }
-      if (cached.summary.messageCount === 0 || isSubagentSession(normalized, cached.summary.name)) {
-        if (this.cache.delete(normalized)) cacheChanged = true;
-        continue;
-      }
-      // Keep the global ID lookup complete even when this caller requests a
-      // workspace-filtered sidebar. Runtime restore may target another cwd.
+      // Null is a durable negative cache entry. Unchanged empty drafts,
+      // generated Subagent histories, and malformed/non-session JSONL are
+      // statted but never reparsed on subsequent inventory refreshes.
+      if (!cached.summary) continue;
       nextPathsById.set(cached.summary.id, normalized);
-      if (normalizedCwd && resolve(cached.summary.cwd || "").toLowerCase() !== normalizedCwd) continue;
-      summaries.push({ ...cached.summary, active: isActive });
+      summaries.push({ ...cached.summary, active: false });
     }
 
     for (const cachedPath of this.cache.keys()) {
@@ -521,8 +522,8 @@ export class SessionIndex {
 
   summaryForId(id: string): SessionSummary | null {
     const path = this.pathForId(id);
-    const cached = path && this.cache?.get(resolve(path));
-    return cached ? { ...cached.summary, active: false } : null;
+    const cached = path ? this.cache?.get(resolve(path)) : undefined;
+    return cached?.summary ? { ...cached.summary, active: false } : null;
   }
 
   /**
@@ -536,7 +537,7 @@ export class SessionIndex {
     if (known) return known;
     if (!this.cache) this.cache = await loadSessionCache(this.cachePath);
     for (const [path, entry] of this.cache) {
-      if (entry.summary.id !== id) continue;
+      if (!entry.summary || entry.summary.id !== id) continue;
       const normalized = resolve(path);
       const withinRoot = relative(resolve(this.root), normalized);
       const validPath = extname(normalized).toLowerCase() === ".jsonl"
@@ -559,16 +560,12 @@ export class SessionIndex {
       }
       let summary = entry.summary;
       if (entry.mtimeMs !== fileStat.mtimeMs || entry.size !== fileStat.size) {
-        const refreshed = await parseSession(normalized, fileStat.mtimeMs);
-        if (!refreshed || refreshed.id !== id) {
-          this.cache.delete(path);
-          await saveSessionCache(this.cachePath, this.cache);
-          return null;
-        }
-        summary = refreshed;
+        const refreshed = await this.parseFile(normalized, fileStat.mtimeMs);
         this.cache.set(normalized, { mtimeMs: fileStat.mtimeMs, size: fileStat.size, summary: refreshed });
         if (normalized !== path) this.cache.delete(path);
         await saveSessionCache(this.cachePath, this.cache);
+        if (!refreshed || refreshed.id !== id) return null;
+        summary = refreshed;
       }
       this.pathsById.set(id, normalized);
       return { ...summary, active: false };

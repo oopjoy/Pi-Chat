@@ -3,7 +3,7 @@ import { appendFile, mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { SessionIndex, cleanPreview, idForPath, readSessionMessages, readSessionUsage, textFromContent } from "../src/server/session-index";
+import { SessionIndex, cleanPreview, idForPath, parseSession, readSessionMessages, readSessionUsage, textFromContent } from "../src/server/session-index";
 import { LOCAL_COORDINATION_ROLE } from "../src/shared/types";
 
 test("session index extracts header, title, preview, message count and user turn count", async () => {
@@ -365,7 +365,7 @@ test("session index returns a complete cached snapshot without waiting for the n
   }
 });
 
-test("session index serializes concurrent refreshes with different keys", async () => {
+test("session index shares one physical refresh across different projection keys", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-session-different-keys-"));
   try {
     const sessionPath = join(root, "session.jsonl");
@@ -375,9 +375,11 @@ test("session index serializes concurrent refreshes with different keys", async 
     ].map(JSON.stringify).join("\n"));
     const index = new SessionIndex(root, join(root, "cache.json"));
     const originalRefresh = (index as unknown as { refresh: (activePath?: string, cwd?: string) => Promise<unknown> }).refresh.bind(index);
+    let refreshStarts = 0;
     let activeRefreshes = 0;
     let maximumConcurrentRefreshes = 0;
     (index as unknown as { refresh: (activePath?: string, cwd?: string) => Promise<unknown> }).refresh = async (activePath?: string, cwd?: string) => {
+      refreshStarts += 1;
       activeRefreshes += 1;
       maximumConcurrentRefreshes = Math.max(maximumConcurrentRefreshes, activeRefreshes);
       await new Promise((resolve) => setTimeout(resolve, 10));
@@ -392,6 +394,7 @@ test("session index serializes concurrent refreshes with different keys", async 
       index.list(sessionPath, process.cwd()),
       index.list(undefined, join(process.cwd(), "other")),
     ]);
+    assert.equal(refreshStarts, 1);
     assert.equal(maximumConcurrentRefreshes, 1);
     assert.equal(index.pathForId(idForPath(sessionPath)), sessionPath);
   } finally {
@@ -399,7 +402,7 @@ test("session index serializes concurrent refreshes with different keys", async 
   }
 });
 
-test("session index joins a same-key refresh that starts while waiting on another scan", async () => {
+test("session index projects different callers from the same in-flight inventory", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-session-join-after-wait-"));
   try {
     const sessionPath = join(root, "session.jsonl");
@@ -415,8 +418,8 @@ test("session index joins a same-key refresh that starts while waiting on anothe
       await new Promise((resolve) => setTimeout(resolve, refreshStarts === 1 ? 30 : 5));
       return originalRefresh(activePath, cwd);
     };
-    // First caller starts key A. While it is still running, two key-B callers
-    // wait. After A finishes they must share one B refresh, not race two.
+    // Active/workspace parameters only change the returned projection. All
+    // callers must join the same physical inventory even when their keys differ.
     const first = index.list(undefined, join(process.cwd(), "other"));
     await new Promise((resolve) => setTimeout(resolve, 5));
     const [second, third] = await Promise.all([
@@ -424,9 +427,70 @@ test("session index joins a same-key refresh that starts while waiting on anothe
       index.list(undefined, process.cwd()),
     ]);
     await first;
-    assert.equal(refreshStarts, 2);
+    assert.equal(refreshStarts, 1);
     assert.deepEqual(second, third);
     assert.equal(index.pathForId(idForPath(sessionPath)), sessionPath);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("session index persists negative results and rechecks them only after file change", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-session-negative-cache-"));
+  try {
+    const empty = join(root, "empty.jsonl");
+    await writeFile(empty, `${JSON.stringify({ type: "session", id: "empty", cwd: root })}\n`);
+    const cachePath = join(root, "index.json");
+    let parseCalls = 0;
+    const countParse: typeof import("../src/server/session-index").parseSession = async (...args) => {
+      parseCalls += 1;
+      return parseSession(...args);
+    };
+    const index = new SessionIndex(root, cachePath, stat, countParse);
+    assert.deepEqual(await index.list(), []);
+    assert.equal(parseCalls, 1);
+    assert.deepEqual(await index.list(), []);
+    assert.equal(parseCalls, 1, "an unchanged negative entry is not reparsed");
+    const stored = JSON.parse(await readFile(cachePath, "utf8")) as {
+      version: number;
+      entries: Record<string, { summary: unknown }>;
+    };
+    assert.equal(stored.version, 4);
+    assert.equal(stored.entries[empty]?.summary, null);
+
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    await appendFile(empty, `${JSON.stringify({ type: "message", id: "u1", message: { role: "user", content: "now visible" } })}\n`);
+    const [visible] = await index.list();
+    assert.equal(parseCalls, 2, "mtime/size movement invalidates the negative entry");
+    assert.equal(visible.sessionId, "empty");
+    assert.equal(visible.preview, "now visible");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("session inventory skips reserved run-N Subagent trees before statting JSONL", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-session-skip-run-"));
+  try {
+    const parent = join(root, "parent.jsonl");
+    const childDirectory = join(root, "parent", "run-0");
+    const child = join(childDirectory, "session.jsonl");
+    await mkdir(childDirectory, { recursive: true });
+    await writeFile(parent, [
+      { type: "session", id: "parent", cwd: root },
+      { type: "message", id: "u1", message: { role: "user", content: "parent" } },
+    ].map(JSON.stringify).join("\n"));
+    await writeFile(child, [
+      { type: "session", id: "child", cwd: root },
+      { type: "message", id: "u1", message: { role: "user", content: "child" } },
+    ].map(JSON.stringify).join("\n"));
+    const statPaths: string[] = [];
+    const index = new SessionIndex(root, join(root, "index.json"), async (path) => {
+      statPaths.push(path);
+      return stat(path);
+    });
+    assert.deepEqual((await index.list()).map((session) => session.sessionId), ["parent"]);
+    assert.deepEqual(statPaths, [parent]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

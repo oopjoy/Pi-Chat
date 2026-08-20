@@ -4155,15 +4155,41 @@ export class PiChatApp {
             (this.runtimeTurnActive(secondaryRuntime) ||
               secondaryRuntime.dispatching),
           );
-    // A busy Runtime already has a known Session path/index entry. Do not rescan
-    // every JSONL merely to switch back to it: streaming writes continuously
-    // invalidate mtime and made this navigation visibly stall.
-    const indexedSession = knownBusy
+    // An already-open Runtime has stable target identity in memory or in the
+    // persisted metadata cache. Opening its idle view must not wait behind a
+    // global JSONL inventory refresh.
+    const index = this.options.sessions as SessionIndex & {
+      cachedSummaryForId?: (
+        sessionId: string,
+      ) => Promise<SessionSummary | null>;
+    };
+    const knownHotRuntime =
+      id === this.activeSessionId || Boolean(secondaryRuntime);
+    let indexedSession = knownHotRuntime
       ? this.options.sessions.summaryForId?.(id) ||
-        secondaryRuntime?.draftSession
+        (id === this.activeSessionId && this.primarySummarySnapshot?.id === id
+          ? this.primarySummarySnapshot
+          : null) ||
+        secondaryRuntime?.summarySnapshot ||
+        secondaryRuntime?.draftSession ||
+        null
       : null;
+    if (!indexedSession && knownHotRuntime)
+      indexedSession = await index.cachedSummaryForId?.(id) || null;
+    if (!indexedSession && id === this.activeSessionId) {
+      indexedSession = {
+        id,
+        sessionId: state.sessionId || id,
+        name: state.sessionName || "当前对话",
+        preview: state.sessionName || "当前对话",
+        cwd: this.currentCwd,
+        updatedAt: this.now(),
+        messageCount: state.messageCount || 0,
+        active: true,
+      };
+    }
     const sessions = indexedSession
-      ? this.sessionSummaries([indexedSession], clientId)
+      ? this.sessionSummaries([{ ...indexedSession, active: true }], clientId)
       : this.sessionSummaries(
           await this.options.sessions.list(
             this.activeSessionPath,
