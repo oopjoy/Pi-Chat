@@ -350,6 +350,15 @@ function settleSidebarActivity(session: SessionSummary): SessionSummary {
   return applySidebarRunningOverride(session, false);
 }
 
+/** A fresh target view can repair a missed terminal SSE only when every live fact is idle. */
+export function sessionViewConfirmsIdle(view: SessionViewData): boolean {
+  return view.isStreaming !== true
+    && view.state.isStreaming !== true
+    && view.session.running !== true
+    && !view.liveMessage
+    && !view.toolStatus;
+}
+
 /** Ignore older generations and same-generation startup snapshots that arrive after a terminal SSE state. */
 function newerPrimaryReadiness(
   current: PrimaryRuntimeReadiness,
@@ -1080,6 +1089,33 @@ export function App() {
       projection?.paused ??
         (viewCacheRef.current.get(session.id)?.queuePaused === true),
     );
+  };
+  /**
+   * A version-guarded target view is newer than the last browser SSE fact. If
+   * it proves the Runtime fully idle, release a stale running override before
+   * applying the view; otherwise the pane can settle while the sidebar remains
+   * blue until F5 clears process-owned overlays.
+   */
+  const acceptAuthoritativeIdleSessionView = (
+    view: SessionViewData,
+  ): SessionViewData => {
+    if (!sessionViewConfirmsIdle(view)) return view;
+    sessionRunningOverridesRef.current.set(view.session.id, false);
+    setSessions((current) =>
+      current.map((session) =>
+        session.id === view.session.id
+          ? settleSidebarActivity(session)
+          : session,
+      ),
+    );
+    return {
+      ...view,
+      session: settleSidebarActivity(view.session),
+      isStreaming: false,
+      liveMessage: undefined,
+      toolStatus: "",
+      state: { ...view.state, isStreaming: false },
+    };
   };
   const reconcileOptimisticSessions = (incoming: SessionSummary[]) =>
     uniqueSessionSummaries(incoming)
@@ -4737,8 +4773,9 @@ export function App() {
             schedulePromptReconcile(sessionId, completedVersion);
             return;
           }
-          applySessionView(view, authority, queueRequestRevision);
-          if (view.isStreaming)
+          const reconciledView = acceptAuthoritativeIdleSessionView(view);
+          applySessionView(reconciledView, authority, queueRequestRevision);
+          if (reconciledView.isStreaming)
             schedulePromptReconcile(sessionId, completedVersion);
         })
         .catch((cause) => {
@@ -5816,19 +5853,20 @@ export function App() {
             );
             return;
           }
+          const reconciledView = acceptAuthoritativeIdleSessionView(view);
           // An empty busy-runtime read may update transient state, but cached
           // terminal leases are not evidence that JSONL persisted those rows.
           // Patch the already-painted cache without promoting its transcript into
           // the authoritative branch; a later non-empty view performs confirmation.
-          if (!view.messages.length && cached.messages.length) {
+          if (!reconciledView.messages.length && cached.messages.length) {
             const projection = acceptQueueProjectionIfCurrent(
               id,
               queueRequestRevision,
-              view.queue || [],
-              view.queuePaused === true,
+              reconciledView.queue || [],
+              reconciledView.queuePaused === true,
             );
             const patched = refreshSessionCache(id, {
-              ...view,
+              ...reconciledView,
               queue: projection.queue,
               queuePaused: projection.paused,
             });
@@ -5839,7 +5877,11 @@ export function App() {
                 queueProjectionRevisionRef.current.get(id) || 0,
               );
           } else
-            applySessionView(view, reconcileAuthority, queueRequestRevision);
+            applySessionView(
+              reconciledView,
+              reconcileAuthority,
+              queueRequestRevision,
+            );
         })
         .catch(() => undefined);
       return;

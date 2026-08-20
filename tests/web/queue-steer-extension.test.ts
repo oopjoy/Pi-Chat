@@ -1350,6 +1350,102 @@ test("agent settlement preserves a completed compaction status until its termina
   }
 });
 
+test("a fresh idle view repairs a missed settlement spinner without F5", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const nativeSetTimeout = dom.window.setTimeout.bind(dom.window);
+  const originalSetTimeout = dom.window.setTimeout;
+  dom.window.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) =>
+    nativeSetTimeout(handler, timeout === 4_000 ? 100 : timeout, ...args)) as typeof dom.window.setTimeout;
+  const idleView: SessionViewData = {
+    ...draftView,
+    session: {
+      ...bootstrap.sessions[0],
+      running: false,
+      queued: false,
+      activity: { execution: "idle", awaitingConfirmation: false },
+    },
+    state: { ...bootstrap.state, isStreaming: false, isCompacting: false },
+    messages: [
+      { role: "user", content: "run bash" },
+      { role: "assistant", content: "completed" },
+    ],
+    messageTotal: 2,
+    turnTotal: 1,
+    isActive: true,
+    runtimeStatus: "active",
+    isStreaming: false,
+    liveMessage: undefined,
+    toolStatus: "",
+  };
+  Object.assign(api, {
+    bootstrap: async () => bootstrap,
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    prompt: async () => ({ accepted: true, queued: false }),
+    viewSession: async () => idleView,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "run bash");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true }));
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+    });
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.emitPi({
+        type: "agent_start",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+      });
+      source.emitPi({
+        type: "tool_execution_end",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        toolName: "bash",
+        isError: false,
+      });
+      source.emitPi({
+        type: "message_end",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        message: { role: "assistant", content: "completed" },
+      });
+    });
+    assert.ok(
+      dom.window.document.querySelector(".session-status.is-running"),
+      "without settlement evidence the active turn remains blue",
+    );
+
+    await act(async () => {
+      await new Promise((resolve) => nativeSetTimeout(resolve, 180));
+    });
+    assert.equal(
+      dom.window.document.querySelector(".session-status.is-running"),
+      null,
+      "the version-guarded idle view must release the stale running override",
+    );
+    assert.equal(dom.window.document.querySelector(".agent-status"), null);
+    assert.equal(textarea.disabled, false);
+  } finally {
+    dom.window.setTimeout = originalSetTimeout;
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("idle activity clears a stale tool-completion wait even without agent_settled", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");
