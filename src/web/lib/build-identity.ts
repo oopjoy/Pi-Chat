@@ -32,5 +32,11 @@ export function buildIdentityMatches(server: BuildIdentity): boolean {
 }
 
 export function buildIdentityLabel(identity: BuildIdentity): string {
-  return `${identity.packageVersion} · ${identity.fingerprint.slice(0, 12)}`;
+  const revision = identity.revision === "unknown"
+    ? "unknown"
+    : identity.revision.slice(0, 12);
+  const fingerprint = identity.fingerprint === "unknown"
+    ? "unknown"
+    : identity.fingerprint.slice(0, 8);
+  return `${identity.packageVersion} · rev ${revision} · fp ${fingerprint}`;
 }
