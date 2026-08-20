@@ -118,6 +118,10 @@ import {
   refreshFailureKeepsCommittedView,
   sidebarNavigationBlocked,
 } from "./lib/refresh-navigation-guards";
+import {
+  recoverableRefreshError,
+  surfaceAutomaticRefreshError,
+} from "./lib/refresh-error-policy";
 import { SessionScrollMemory } from "./lib/session-scroll-memory";
 import { SessionViewCache } from "./lib/session-view-cache";
 import {
@@ -344,10 +348,6 @@ function applySidebarQueueProjection(
 /** Optimistic terminal state for the narrow abort/settlement-to-SSE gap. */
 function settleSidebarActivity(session: SessionSummary): SessionSummary {
   return applySidebarRunningOverride(session, false);
-}
-
-function recoverableRefreshError(message: string): boolean {
-  return /请求超时|RPC 请求超时|RPC 查询仍在处理中/.test(message);
 }
 
 /** Ignore older generations and same-generation startup snapshots that arrive after a terminal SSE state. */
@@ -1253,9 +1253,14 @@ export function App() {
   useEffect(() => () => streamDiagnosticsRef.current?.clear(), []);
   const reportBackgroundRefreshError = useCallback((cause: unknown) => {
     const message = cause instanceof Error ? cause.message : String(cause);
-    // Automatic reconciliation is best-effort. History is already readable from
-    // JSONL, so a busy/still-pending RPC query must not become a fatal red banner.
-    if (recoverableRefreshError(message)) return;
+    const hasReadableProjection =
+      committedPaneIdentityRef.current.kind !== "none"
+      || sessionsRef.current.length > 0
+      || Boolean(localDraftRef.current);
+    // Automatic reconciliation is best-effort once history or a local draft is
+    // already readable. A slow read must not look like conversation loss or a
+    // failed mutation; later SSE/sidebar refreshes remain authoritative.
+    if (!surfaceAutomaticRefreshError(message, hasReadableProjection)) return;
     setError(message);
   }, []);
 
@@ -2598,12 +2603,10 @@ export function App() {
       sessionRefreshGenerationRef.current = null;
       if (sessionRefreshRequestedRef.current) {
         sessionRefreshRequestedRef.current = false;
-        void refreshSidebarSessions().catch((cause) =>
-          setError(cause instanceof Error ? cause.message : String(cause)),
-        );
+        void refreshSidebarSessions().catch(reportBackgroundRefreshError);
       }
     }
-  }, []);
+  }, [reportBackgroundRefreshError]);
 
   const loadAllSessions = useCallback(async () => {
     const runEpochGeneration = runEpochGenerationRef.current;
@@ -2715,17 +2718,13 @@ export function App() {
     sessionRefreshTimerRef.current = window.setTimeout(() => {
       sessionRefreshTimerRef.current = null;
       if (runEpochGenerationRef.current !== runEpochGeneration) return;
-      void refreshSidebarSessions().catch((cause) =>
-        setError(cause instanceof Error ? cause.message : String(cause)),
-      );
+      void refreshSidebarSessions().catch(reportBackgroundRefreshError);
     }, 180);
-  }, [refreshSidebarSessions]);
+  }, [refreshSidebarSessions, reportBackgroundRefreshError]);
 
   useEffect(() => {
     refresh()
-      .catch((cause) =>
-        setError(cause instanceof Error ? cause.message : String(cause)),
-      )
+      .catch(reportBackgroundRefreshError)
       .finally(() => setLoading(false));
     return () => {
       if (sessionRefreshTimerRef.current !== null)
@@ -2734,7 +2733,7 @@ export function App() {
         request.controller.abort();
       cancelPendingNavigation();
     };
-  }, [cancelPendingNavigation, refresh]);
+  }, [cancelPendingNavigation, refresh, reportBackgroundRefreshError]);
 
   useEffect(() => {
     applyAppearance(appearance);
@@ -2758,11 +2757,10 @@ export function App() {
     const attempt = `${runEpochGenerationRef.current}:${pinned.join(",")}`;
     if (pinnedInventoryAttemptRef.current === attempt) return;
     pinnedInventoryAttemptRef.current = attempt;
-    void refreshSidebarSessions().catch((cause) =>
-      setError(cause instanceof Error ? cause.message : String(cause)),
-    );
+    void refreshSidebarSessions().catch(reportBackgroundRefreshError);
   }, [
     refreshSidebarSessions,
+    reportBackgroundRefreshError,
     sessionNavigation.pinnedSessionIds,
     sessions,
     sidebarInventoryReady,
