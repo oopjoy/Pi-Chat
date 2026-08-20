@@ -3,101 +3,96 @@ import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MarkdownBody } from "../src/web/components/MarkdownBody";
-import { streamingMarkdownBlocks } from "../src/web/lib/streaming-markdown";
+import { streamingMarkdownSegments } from "../src/web/lib/streaming-markdown";
 
-test("streaming Markdown keeps stable line-oriented blocks without full Markdown transforms", () => {
+test("streaming Markdown freezes completed regions and keeps only one growing tail", () => {
   const markdown = [
     "# Heading",
     "",
-    "- first **bold** item",
+    "- first item",
     "- second item",
     "",
-    "> quoted **text**",
-    "",
-    "| table | waits |",
-    "| --- | --- |",
-    "| $x$ | final pass |",
-    "",
     "```ts",
-    "const value = $x$;",
+    "const first = 1;",
+    "",
+    "const second = 2;",
+    "```",
+    "",
+    "Tail **still growing**",
   ].join("\n");
-  const blocks = streamingMarkdownBlocks(markdown);
-  assert.deepEqual(
-    blocks.map((block) => block.kind),
-    ["heading", "list", "quote", "paragraph", "code"],
-  );
-  assert.equal(blocks.at(-1)?.kind, "code");
-  if (blocks.at(-1)?.kind === "code")
-    assert.equal(blocks.at(-1)?.text, "const value = $x$;", "an unfinished fence remains readable code");
+  const segments = streamingMarkdownSegments(markdown);
+  assert.deepEqual(segments.stable, [
+    "# Heading\n\n",
+    "- first item\n- second item\n\n",
+    "```ts\nconst first = 1;\n\nconst second = 2;\n```\n\n",
+  ]);
+  assert.equal(segments.tail, "Tail **still growing**");
 
-  const html = renderToStaticMarkup(
-    React.createElement(MarkdownBody, { streaming: true }, markdown),
-  );
-  assert.match(html, /class="markdown-body markdown-streaming"/);
-  assert.doesNotMatch(html, /aria-live=/, "the streaming body must not repeat the full cumulative reply to assistive technology");
-  assert.match(html, /<h1>Heading<\/h1>/);
-  assert.match(html, /<strong>bold<\/strong>/);
-  assert.match(html, /<blockquote>quoted <strong>text<\/strong><\/blockquote>/);
-  assert.match(html, /\| table \| waits \|/);
-  assert.match(html, /\$x\$/, "unsettled math stays literal during streaming");
-  assert.doesNotMatch(html, /katex|<table|source-fragment/);
-
-  const unsafeLanguage = streamingMarkdownBlocks("```<img src=x onerror=alert(1)>\ntext");
-  assert.equal(unsafeLanguage.at(0)?.kind, "code");
-  if (unsafeLanguage.at(0)?.kind === "code")
-    assert.equal(unsafeLanguage.at(0)?.language, "text", "untrusted fence info never becomes an HTML/CSS selector");
+  const displayMath = streamingMarkdownSegments([
+    "$$",
+    String.raw`\frac{1}{2}`,
+    "",
+    "+ 1",
+    "$$",
+    "",
+    "after",
+  ].join("\n"));
+  assert.equal(displayMath.stable.length, 1, "blank lines inside display math never split its Markdown region");
+  assert.equal(displayMath.tail, "after");
 });
 
-test("terminal Markdown restores full table, KaTeX, and source-copy rendering", () => {
+test("streaming Markdown renders GFM and KaTeX before the terminal pass", () => {
   const markdown = [
     "# Heading",
     "",
     "| term | value |",
     "| --- | ---: |",
-    "| $x$ | 1 |",
+    "| $x$ | **one** |",
     "",
     "$$",
     String.raw`\frac{1}{2}`,
     "$$",
+    "",
+    "```ts",
+    "const value = 1;",
+    "```",
   ].join("\n");
   const streaming = renderToStaticMarkup(
     React.createElement(MarkdownBody, { streaming: true }, markdown),
   );
-  const terminal = renderToStaticMarkup(
-    React.createElement(MarkdownBody, null, markdown),
-  );
-  assert.doesNotMatch(streaming, /<table|katex|source-fragment/);
-  assert.match(terminal, /<table(?:\s|>)/);
-  assert.match(terminal, /class="katex/);
-  assert.match(terminal, /source-fragment/);
+  assert.match(streaming, /class="markdown-body markdown-streaming"/);
+  assert.doesNotMatch(streaming, /aria-live=/, "the cumulative body must not be re-announced on every update");
+  assert.match(streaming, /<h1>Heading<\/h1>/);
+  assert.match(streaming, /<table(?:\s|>)/);
+  assert.match(streaming, /class="katex/);
+  assert.match(streaming, /<strong>one<\/strong>/);
+  assert.match(streaming, /const value = 1/);
+  assert.doesNotMatch(streaming, /source-fragment/, "streaming skips only source-range mapping, not Markdown rendering");
 });
 
-test("long cumulative streaming Markdown stays on the lightweight path until terminal rendering", () => {
-  const chunks = Array.from({ length: 120 }, (_, index) => [
-    `## Snapshot ${index + 1}`,
-    "",
-    `- item **${index + 1}**`,
-    "",
-    "| a | b |",
-    "| --- | --- |",
-    `| $x_${index + 1}$ | ${index + 1} |`,
-    "",
-    "```ts",
-    `const value${index + 1} = ${index + 1};`,
-    "```",
-  ].join("\n"));
-  let cumulative = "";
-  for (const chunk of chunks) {
-    cumulative += `\n\n${chunk}`;
-    const html = renderToStaticMarkup(
-      React.createElement(MarkdownBody, { streaming: true }, cumulative),
-    );
-    assert.doesNotMatch(html, /katex|<table|source-fragment/);
-  }
+test("streaming Markdown sanitizes raw HTML and bounds a long active tail", () => {
+  const unsafe = renderToStaticMarkup(
+    React.createElement(
+      MarkdownBody,
+      { streaming: true },
+      '<script>alert("unsafe")</script>\n\n<img src="x" onerror="alert(1)">',
+    ),
+  );
+  assert.doesNotMatch(unsafe, /<script|onerror=/i);
+
+  const long = `${"word ".repeat(4_000)}\nfinal line`;
+  const segments = streamingMarkdownSegments(long);
+  assert.ok(segments.stable.length > 0, "a long no-blank response is incrementally committed at a completed line");
+  assert.ok(segments.tail.length < 8_192);
+
   const terminal = renderToStaticMarkup(
-    React.createElement(MarkdownBody, null, cumulative),
+    React.createElement(MarkdownBody, null, [
+      "| a | b |",
+      "| --- | --- |",
+      "| $x$ | 1 |",
+    ].join("\n")),
   );
   assert.match(terminal, /<table(?:\s|>)/);
   assert.match(terminal, /class="katex/);
-  assert.match(terminal, /const value120 = 120/);
+  assert.match(terminal, /source-fragment/, "terminal rendering retains canonical source-copy mapping");
 });

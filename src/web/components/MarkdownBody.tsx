@@ -1,8 +1,8 @@
-import { Fragment, memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import { createMarkdownRehypePlugins, markdownRemarkPlugins } from "../lib/markdown";
 import { normalizeDisplayMathWithSourceMap, registerSourceCopyRoot } from "../lib/markdown-source-copy";
-import { streamingMarkdownBlocks } from "../lib/streaming-markdown";
+import { streamingMarkdownSegments } from "../lib/streaming-markdown";
 import { CheckIcon, CopyIcon } from "./Icons";
 
 interface MarkdownBodyProps {
@@ -31,36 +31,25 @@ const markdownComponents = {
   },
 };
 
-function streamingInlineText(text: string): ReactNode {
-  const pieces: ReactNode[] = [];
-  const pattern = /(?<!\\)\*\*([^*\r\n]+?)\*\*/g;
-  let cursor = 0;
-  let match: RegExpExecArray | null;
-  while ((match = pattern.exec(text))) {
-    if (match.index > cursor) pieces.push(text.slice(cursor, match.index));
-    pieces.push(<strong key={match.index}>{match[1]}</strong>);
-    cursor = match.index + match[0].length;
-  }
-  if (cursor < text.length) pieces.push(text.slice(cursor));
-  return pieces.length ? pieces : text;
-}
+const streamingRehypePlugins = createMarkdownRehypePlugins();
+
+const StreamingMarkdownSegment = memo(function StreamingMarkdownSegment({ children }: { children: string }) {
+  return <ReactMarkdown
+    remarkPlugins={markdownRemarkPlugins}
+    rehypePlugins={streamingRehypePlugins}
+    components={markdownComponents}
+  >
+    {children}
+  </ReactMarkdown>;
+});
 
 function StreamingMarkdownBody({ children }: { children: string }) {
-  const blocks = useMemo(() => streamingMarkdownBlocks(children), [children]);
+  const segments = useMemo(() => streamingMarkdownSegments(children), [children]);
   return <div className="markdown-body markdown-streaming">
-    {blocks.map((block, index) => {
-      if (block.kind === "heading") {
-        const Heading = `h${block.level}` as "h1" | "h2" | "h3" | "h4";
-        return <Heading key={index}>{streamingInlineText(block.text)}</Heading>;
-      }
-      if (block.kind === "list") {
-        const List = block.ordered ? "ol" : "ul";
-        return <List key={index}>{block.items.map((item, itemIndex) => <li key={itemIndex}>{streamingInlineText(item)}</li>)}</List>;
-      }
-      if (block.kind === "quote") return <blockquote key={index}>{streamingInlineText(block.text)}</blockquote>;
-      if (block.kind === "code") return <CodeBlock key={index} language={block.language}>{block.text}</CodeBlock>;
-      return <p key={index}>{block.text.split("\n").map((line, lineIndex) => <Fragment key={lineIndex}>{lineIndex > 0 && <br />}{streamingInlineText(line)}</Fragment>)}</p>;
-    })}
+    {segments.stable.map((segment, index) => (
+      <StreamingMarkdownSegment key={`stable-${index}`}>{segment}</StreamingMarkdownSegment>
+    ))}
+    {segments.tail && <StreamingMarkdownSegment key="tail">{segments.tail}</StreamingMarkdownSegment>}
   </div>;
 }
 

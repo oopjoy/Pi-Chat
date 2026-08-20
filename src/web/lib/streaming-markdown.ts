@@ -1,124 +1,91 @@
-export type StreamingMarkdownBlock =
-  | { kind: "heading"; level: 1 | 2 | 3 | 4; text: string }
-  | { kind: "list"; ordered: boolean; items: string[] }
-  | { kind: "quote"; text: string }
-  | { kind: "code"; language: string; text: string }
-  | { kind: "paragraph"; text: string };
-
-const headingPattern = /^ {0,3}(#{1,4})\s+(.+?)\s*#*\s*$/;
-const unorderedListPattern = /^ {0,3}[-+*]\s+(.+)$/;
-const orderedListPattern = /^ {0,3}\d+[.)]\s+(.+)$/;
-const quotePattern = /^ {0,3}>\s?(.*)$/;
-const fencePattern = /^ {0,3}(`{3,}|~{3,})(.*)$/;
-const codeLanguagePattern = /^[A-Za-z0-9_+.-]+$/;
-
-function fenceCloses(line: string, marker: string): boolean {
-  const close = /^ {0,3}(`{3,}|~{3,})\s*$/.exec(line);
-  return Boolean(
-    close
-    && close[1][0] === marker[0]
-    && close[1].length >= marker.length,
-  );
+export interface StreamingMarkdownSegments {
+  /** Completed Markdown regions whose source no longer changes during append-only streaming. */
+  stable: string[];
+  /** The currently growing region; only this region needs repeated Markdown parsing. */
+  tail: string;
 }
 
-function fenceLanguage(value: string): string {
-  const candidate = value.trim().split(/\s+/, 1)[0] || "";
-  return codeLanguagePattern.test(candidate) ? candidate : "text";
+const MAX_STREAMING_TAIL_CHARS = 8_192;
+
+function fenceMarker(line: string): string | null {
+  const trimmed = line.trimStart();
+  const marker = trimmed.startsWith("```")
+    ? trimmed.match(/^`{3,}/)?.[0]
+    : trimmed.startsWith("~~~")
+      ? trimmed.match(/^~{3,}/)?.[0]
+      : undefined;
+  return marker || null;
 }
 
-function startsBlock(line: string): boolean {
-  return Boolean(
-    !line.trim()
-    || headingPattern.test(line)
-    || unorderedListPattern.test(line)
-    || orderedListPattern.test(line)
-    || quotePattern.test(line)
-    || fencePattern.test(line),
-  );
+function closesFence(line: string, marker: string): boolean {
+  const trimmed = line.trim();
+  return trimmed[0] === marker[0]
+    && trimmed.length >= marker.length
+    && [...trimmed].every((character) => character === marker[0]);
+}
+
+function displayMathBoundary(line: string): boolean {
+  return line.trim() === "$$";
 }
 
 /**
- * Deliberately conservative streaming presentation. It handles only stable
- * line-oriented structure and leaves tables, inline math, HTML, and unfinished
- * inline syntax as literal text until the terminal full Markdown pass.
+ * Split cumulative Markdown into immutable completed regions and one growing
+ * tail. Stable regions are memoized by React, so GFM/KaTeX/sanitize run once
+ * per completed region instead of across the full answer every 50 ms.
+ *
+ * Blank-line boundaries inside fenced code or display math stay inside the
+ * active region. A very long no-blank paragraph is cut at a completed newline
+ * to keep the repeatedly parsed tail bounded; terminal rendering still runs
+ * the canonical whole-document pipeline.
  */
-export function streamingMarkdownBlocks(source: string): StreamingMarkdownBlock[] {
-  const lines = source.replace(/\r\n?/g, "\n").split("\n");
-  const blocks: StreamingMarkdownBlock[] = [];
-  let index = 0;
+export function streamingMarkdownSegments(source: string): StreamingMarkdownSegments {
+  const normalized = source.replace(/\r\n?/g, "\n");
+  const stable: string[] = [];
+  let segmentStart = 0;
+  let lineStart = 0;
+  let fence: string | null = null;
+  let displayMath = false;
 
-  while (index < lines.length) {
-    const line = lines[index];
-    if (!line.trim()) {
-      index += 1;
+  for (let cursor = 0; cursor <= normalized.length; cursor += 1) {
+    if (cursor < normalized.length && normalized[cursor] !== "\n") {
+      const safeInlineBoundary = !fence
+        && !displayMath
+        && cursor - segmentStart >= MAX_STREAMING_TAIL_CHARS
+        && /\s/.test(normalized[cursor]);
+      if (safeInlineBoundary) {
+        stable.push(normalized.slice(segmentStart, cursor + 1));
+        segmentStart = cursor + 1;
+      }
       continue;
     }
-
-    const fence = fencePattern.exec(line);
+    const line = normalized.slice(lineStart, cursor);
+    const marker = fenceMarker(line);
     if (fence) {
-      const marker = fence[1];
-      const code: string[] = [];
-      index += 1;
-      while (index < lines.length && !fenceCloses(lines[index], marker)) {
-        code.push(lines[index]);
-        index += 1;
-      }
-      if (index < lines.length) index += 1;
-      blocks.push({
-        kind: "code",
-        language: fenceLanguage(fence[2]),
-        text: code.join("\n"),
-      });
-      continue;
+      if (closesFence(line, fence)) fence = null;
+    } else if (marker) {
+      fence = marker;
+    } else if (displayMathBoundary(line)) {
+      displayMath = !displayMath;
     }
 
-    const heading = headingPattern.exec(line);
-    if (heading) {
-      blocks.push({
-        kind: "heading",
-        level: heading[1].length as 1 | 2 | 3 | 4,
-        text: heading[2],
-      });
-      index += 1;
-      continue;
+    const hasLineBreak = cursor < normalized.length;
+    const nextLineStart = hasLineBreak ? cursor + 1 : cursor;
+    const previousLineBreak = lineStart > 0 && normalized[lineStart - 1] === "\n";
+    const blankBoundary = hasLineBreak
+      && !fence
+      && !displayMath
+      && !line.trim()
+      && previousLineBreak;
+    const oversizedTail = hasLineBreak
+      && !fence
+      && !displayMath
+      && nextLineStart - segmentStart >= MAX_STREAMING_TAIL_CHARS;
+    if ((blankBoundary || oversizedTail) && nextLineStart > segmentStart) {
+      stable.push(normalized.slice(segmentStart, nextLineStart));
+      segmentStart = nextLineStart;
     }
-
-    const unordered = unorderedListPattern.exec(line);
-    const ordered = orderedListPattern.exec(line);
-    if (unordered || ordered) {
-      const orderedList = Boolean(ordered);
-      const items: string[] = [];
-      while (index < lines.length) {
-        const item = (orderedList ? orderedListPattern : unorderedListPattern).exec(lines[index]);
-        if (!item) break;
-        items.push(item[1]);
-        index += 1;
-      }
-      blocks.push({ kind: "list", ordered: orderedList, items });
-      continue;
-    }
-
-    const quote = quotePattern.exec(line);
-    if (quote) {
-      const quoted: string[] = [];
-      while (index < lines.length) {
-        const next = quotePattern.exec(lines[index]);
-        if (!next) break;
-        quoted.push(next[1]);
-        index += 1;
-      }
-      blocks.push({ kind: "quote", text: quoted.join("\n") });
-      continue;
-    }
-
-    const paragraph: string[] = [line];
-    index += 1;
-    while (index < lines.length && !startsBlock(lines[index])) {
-      paragraph.push(lines[index]);
-      index += 1;
-    }
-    blocks.push({ kind: "paragraph", text: paragraph.join("\n") });
+    lineStart = nextLineStart;
   }
 
-  return blocks;
+  return { stable, tail: normalized.slice(segmentStart) };
 }
