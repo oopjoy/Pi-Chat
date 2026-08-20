@@ -32,6 +32,7 @@ import {
   createIncidentDiagnostics,
   recordIncident,
 } from "./incident-diagnostics.js";
+import { ensureUtf8ChildProcessEnvironment } from "./child-process-environment.js";
 
 interface CliOptions {
   host: string;
@@ -73,6 +74,10 @@ function findProjectRoot(start: string): string {
     directory = parent;
   }
 }
+
+// Configure the inherited environment before constructing any Pi Runtime.
+// This protects Runtime/subagent Python tools from Windows GBK output errors.
+ensureUtf8ChildProcessEnvironment();
 
 const options = parseArgs(process.argv.slice(2));
 const loopbackHosts = new Set(["127.0.0.1", "localhost", "::1"]);
