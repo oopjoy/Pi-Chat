@@ -131,7 +131,10 @@ async function runNpmBuild(stage: string, browserPolicy: "timeout-50" | "animati
     env: environment,
     stdio: "inherit",
     windowsHide: true,
-    detached: true,
+    // A detached Windows npm build can intermittently fail during the second
+    // variant with STATUS_DLL_INIT_FAILED. POSIX still needs its process group;
+    // Windows cleanup follows the observed child tree without detaching it.
+    detached: process.platform !== "win32",
     shell: process.platform === "win32" && /\.(?:cmd|bat)$/i.test(invocation.command),
   });
   const observed = observeOwnedProcess(child, processGroup);
@@ -558,7 +561,11 @@ async function installBrowserProbe(context: BrowserContext): Promise<void> {
               }
             }
             const evidence = state.sessionEvidence.get(sessionId);
-            if (eventType === "message_update") {
+            if (
+              eventType === "message_update"
+              || eventType === "message_checkpoint"
+              || eventType === "message_delta"
+            ) {
               if (evidence) evidence.updates += 1;
               state.receivedUpdateFrames += 1;
               state.receivedUpdateBytes += new TextEncoder().encode(messageEvent.data).byteLength;
@@ -669,7 +676,9 @@ function aggregateServerSummaries(
       expectedUpdatesPerSummary !== undefined
       && Number(details.snapshotsWritten || 0) + Number(details.snapshotsReplaced || 0)
         !== expectedUpdatesPerSummary
-    ) throw new Error("Streaming cadence server summary does not account for every source update");
+    ) throw new Error(
+      `Streaming cadence server summary does not account for every source update: ${JSON.stringify(details)}`,
+    );
   }
   if (expectedSummaries !== undefined && totals.summaryCount !== expectedSummaries)
     throw new Error("Streaming cadence server summary count is incorrect");
@@ -817,10 +826,6 @@ async function measureSample(options: {
     await Promise.all(selected.map((session) =>
       apiRequest(server.origin, auth, `/api/sessions/${session.id}/warm`, { method: "POST" })
     ));
-    await Promise.all(selected.map((session) =>
-      apiRequest(server.origin, auth, `/api/sessions/${session.id}/control`, { method: "POST" })
-    ));
-
     const activeConfig: StreamConfig = {
       ...baseConfig,
       startAt: Date.now() + START_BARRIER_LEAD_MS,
@@ -973,7 +978,9 @@ async function measureSample(options: {
       server: aggregateServerSummaries(
         diagnosticSnapshot,
         options.cell.concurrency,
-        activeConfig.updateCount,
+        // Delta-capable browsers receive one authoritative stream-start
+        // checkpoint in addition to the configured cumulative source updates.
+        activeConfig.updateCount + 1,
       ),
     };
     if (sample.browser.settledSessions !== options.cell.concurrency)
