@@ -64,7 +64,7 @@ Current ownership still centers on `src/server/app.ts` (`PiChatApp`), with progr
 | `http-transport.ts` | JSON bodies, headers, MIME helpers |
 | `pi-data.ts` | RPC payload decoding, message windowing |
 | `file-transaction.ts` | Atomic write + snapshot restore |
-| `session-index.ts` | JSONL index, cold snapshots, usage, and stable persisted message projection IDs derived from active-branch entry ID plus per-entry message index; raw JSONL is never mutated |
+| `session-index.ts` / `session-projection.ts` | JSONL index and cold snapshot semantics over an incremental physical projection: committed LF byte offset, bounded first/tail prefix fingerprint, suffix-only append parsing, canonical rewrite fallback, active-branch reconstruction, usage, and stable persisted message IDs derived from entry ID plus per-entry message index; raw JSONL is never mutated |
 | `application-restart.ts` | Staging build, promote, handoff |
 | `rpc-client.ts` | Global Pi process transport + capability probe |
 | `primary-runtime-readiness.ts` | Primary start/recovery, compatibility gate, readiness generations |

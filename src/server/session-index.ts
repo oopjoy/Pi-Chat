@@ -7,6 +7,7 @@ import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { LOCAL_COORDINATION_ROLE, type PiMessage, type SessionSummary, type ThinkingLevel } from "../shared/types.js";
 import { compareSessionsByLastUserPrompt } from "../shared/session-order.js";
 import { loadSessionCache, saveSessionCache, type SessionCacheEntry } from "./session-index-cache.js";
+import { SessionProjection } from "./session-projection.js";
 
 interface SessionHeader {
   type?: string;
@@ -142,24 +143,26 @@ async function readSessionEntries(path: string): Promise<SessionEntry[]> {
 }
 
 /** Sidebar scans retain branch identity and compact user facts, never full replies/tool payloads. */
+function outlineSessionEntry(entry: SessionEntry): SessionEntry | null {
+  if (entry.type === "session") return { type: entry.type, id: entry.id, cwd: entry.cwd };
+  if (entry.type === "session_info") return { type: entry.type, name: entry.name };
+  if (entry.type !== "message") return entry.id || entry.parentId
+    ? { type: entry.type, id: entry.id, parentId: entry.parentId, timestamp: entry.timestamp }
+    : null;
+  const role = entry.message?.role;
+  return {
+    type: entry.type,
+    id: entry.id,
+    parentId: entry.parentId,
+    timestamp: entry.timestamp,
+    message: role === "user"
+      ? { role, content: cleanPreview(textFromContent(entry.message?.content), 90), timestamp: entry.message?.timestamp }
+      : { role: role || "unknown", timestamp: entry.message?.timestamp },
+  };
+}
+
 async function readSessionOutline(path: string): Promise<SessionEntry[]> {
-  return scanSessionEntries(path, (entry) => {
-    if (entry.type === "session") return { type: entry.type, id: entry.id, cwd: entry.cwd };
-    if (entry.type === "session_info") return { type: entry.type, name: entry.name };
-    if (entry.type !== "message") return entry.id || entry.parentId
-      ? { type: entry.type, id: entry.id, parentId: entry.parentId, timestamp: entry.timestamp }
-      : null;
-    const role = entry.message?.role;
-    return {
-      type: entry.type,
-      id: entry.id,
-      parentId: entry.parentId,
-      timestamp: entry.timestamp,
-      message: role === "user"
-        ? { role, content: cleanPreview(textFromContent(entry.message?.content), 90), timestamp: entry.message?.timestamp }
-        : { role: role || "unknown", timestamp: entry.message?.timestamp },
-    };
-  });
+  return scanSessionEntries(path, outlineSessionEntry);
 }
 
 /** Follow Pi's current parent chain, excluding file-global session metadata as a leaf. */
@@ -395,7 +398,15 @@ export class SessionIndex {
   private latestList: { sessions: SessionSummary[]; refreshedAt: number } | null = null;
   private readonly statFile: (path: string) => Promise<Stats>;
   private readonly parseFile: typeof parseSession;
-  private readonly snapshotCache = new Map<string, { mtimeMs: number; size: number; snapshot: SessionFileSnapshot; bytes: number }>();
+  private readonly incrementalProjectionEnabled: boolean;
+  private readonly outlineProjections = new Map<string, SessionProjection<SessionEntry>>();
+  private readonly snapshotCache = new Map<string, {
+    mtimeMs: number;
+    size: number;
+    snapshot: SessionFileSnapshot;
+    bytes: number;
+    projection: SessionProjection<SessionEntry>;
+  }>();
   private snapshotCacheBytes = 0;
   private readonly snapshotCacheMaxEntries = 32;
   private readonly snapshotCacheMaxBytes = 64 * 1024 * 1024;
@@ -411,6 +422,28 @@ export class SessionIndex {
     this.cachePath = cachePath || (root ? join(this.root, ".pi-chat-session-index.json") : join(homedir(), ".pi", "agent", "pi-chat-session-index.json"));
     this.statFile = statFile;
     this.parseFile = parseFile;
+    this.incrementalProjectionEnabled = parseFile === parseSession;
+  }
+
+  private async projectSummary(path: string, fileStat: Stats): Promise<Omit<SessionSummary, "active"> | null> {
+    if (!this.incrementalProjectionEnabled) return this.parseFile(path, fileStat.mtimeMs);
+    // A selected Session may already own the richer transcript projection. Reuse
+    // it instead of creating a second physical reader after a process restart
+    // restored only persisted summary metadata.
+    for (const [id, cached] of this.snapshotCache) {
+      if (resolve(this.pathsById.get(id) || "") !== path) continue;
+      const result = await cached.projection.reconcile(fileStat);
+      return sessionSummaryFromEntries(path, fileStat.mtimeMs, [...result.entries]);
+    }
+    let projection = this.outlineProjections.get(path);
+    if (!projection) {
+      projection = new SessionProjection(path, {
+        retain: (value) => outlineSessionEntry(value as SessionEntry),
+      });
+      this.outlineProjections.set(path, projection);
+    }
+    const result = await projection.reconcile(fileStat);
+    return sessionSummaryFromEntries(path, fileStat.mtimeMs, [...result.entries]);
   }
 
   private projectList(
@@ -464,6 +497,9 @@ export class SessionIndex {
     if (!this.cache) this.cache = await loadSessionCache(this.cachePath);
     const files = await listJsonlFiles(this.root);
     const livePaths = new Set(files.map((path) => resolve(path)));
+    for (const path of this.outlineProjections.keys()) {
+      if (!livePaths.has(path)) this.outlineProjections.delete(path);
+    }
     for (const [id, cached] of this.snapshotCache) {
       const path = this.pathsById.get(id);
       if (!path || !livePaths.has(resolve(path))) {
@@ -489,7 +525,7 @@ export class SessionIndex {
       }
       let cached = this.cache.get(normalized);
       if (!cached || cached.mtimeMs !== fileStat.mtimeMs || cached.size !== fileStat.size) {
-        const summary = await this.parseFile(normalized, fileStat.mtimeMs);
+        const summary = await this.projectSummary(normalized, fileStat);
         cached = { mtimeMs: fileStat.mtimeMs, size: fileStat.size, summary };
         this.cache.set(normalized, cached);
         cacheChanged = true;
@@ -560,7 +596,7 @@ export class SessionIndex {
       }
       let summary = entry.summary;
       if (entry.mtimeMs !== fileStat.mtimeMs || entry.size !== fileStat.size) {
-        const refreshed = await this.parseFile(normalized, fileStat.mtimeMs);
+        const refreshed = await this.projectSummary(normalized, fileStat);
         this.cache.set(normalized, { mtimeMs: fileStat.mtimeMs, size: fileStat.size, summary: refreshed });
         if (normalized !== path) this.cache.delete(path);
         await saveSessionCache(this.cachePath, this.cache);
@@ -600,15 +636,25 @@ export class SessionIndex {
       }
       const cached = this.snapshotCache.get(id);
       if (cached && cached.mtimeMs === fileStat.mtimeMs && cached.size === fileStat.size) return cached.snapshot;
-      const snapshot = await readSessionSnapshot(path);
+      const projection = cached?.projection || new SessionProjection<SessionEntry>(path, {
+        retain: (value) => value as SessionEntry,
+      });
+      const projected = await projection.reconcile(fileStat);
+      const snapshot = sessionSnapshotFromBranch(activeSessionBranch([...projected.entries]));
       // The source file size is a conservative cache weight and is already
       // available from stat(). Re-serializing every parsed message doubled the
       // CPU work on the first open of a large cold conversation.
-      const bytes = fileStat.size;
+      const bytes = projected.observedBytes;
       const previous = this.snapshotCache.get(id);
       if (previous) this.snapshotCacheBytes -= previous.bytes;
       this.snapshotCache.delete(id);
-      this.snapshotCache.set(id, { mtimeMs: fileStat.mtimeMs, size: fileStat.size, snapshot, bytes });
+      this.snapshotCache.set(id, {
+        mtimeMs: fileStat.mtimeMs,
+        size: fileStat.size,
+        snapshot,
+        bytes,
+        projection,
+      });
       this.snapshotCacheBytes += bytes;
       while (this.snapshotCache.size > this.snapshotCacheMaxEntries || this.snapshotCacheBytes > this.snapshotCacheMaxBytes) {
         const oldest = this.snapshotCache.keys().next().value;
