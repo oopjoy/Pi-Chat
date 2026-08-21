@@ -289,7 +289,14 @@ export const api = {
       },
     }),
   }, PROMPT_PREPARE_TIMEOUT_MS),
-  warmSession: (id: string) => request<SessionRuntimeReadyData>(`/api/sessions/${id}/warm`, { method: "POST" }),
+  // Cold persisted Sessions may need one whole-process retry after Pi's
+  // startup get_state budget expires. Keep this request aligned with prompt
+  // preparation so the browser does not abort while the safe retry is running.
+  warmSession: (id: string) => request<SessionRuntimeReadyData>(
+    `/api/sessions/${id}/warm`,
+    { method: "POST" },
+    PROMPT_PREPARE_TIMEOUT_MS,
+  ),
   backgroundSubagents: (id: string, signal?: AbortSignal) =>
     request<BackgroundSubagentSnapshot>(`/api/sessions/${id}/background-subagents`, { signal }, API_TIMEOUT_MS, true, false),
   viewBackgroundSubagent: (

@@ -3,7 +3,7 @@ import type { ExtensionUiRequest, GateMode, ModelInfo, PiMessage, PiState, Promp
 import { asMessages, asState } from "./pi-data.js";
 import { idForPath, readSessionMessages } from "./session-index.js";
 import { OperationAdmission } from "./operation-admission.js";
-import type { PiRpcClient, RpcEventSource } from "./rpc-client.js";
+import { RpcRequestTimeoutError, type PiRpcClient, type RpcEventSource } from "./rpc-client.js";
 
 const DEFAULT_SECONDARY_RUNTIME_IDLE_MS = 40 * 60 * 1_000;
 /** Primary + six Secondary workers = seven hot conversations total. */
@@ -396,6 +396,28 @@ export class RuntimePool {
     for (const [id, reason] of reclaim) await this.reclaim(id, reason);
   }
 
+  /**
+   * Resuming a persisted Session can spend most of the ordinary startup budget
+   * loading a large JSONL branch, images, and extensions before get_state is
+   * answered. Pi RPC has no request cancellation, so PiRpcClient tears down the
+   * timed-out child first. Retry that whole safe process boundary once rather
+   * than making the user manually press Send again.
+   */
+  private async startPersistedSession(
+    rpc: PiRpcClient,
+    path: string,
+  ): Promise<Record<string, unknown>> {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return await rpc.start(["--session", path]);
+      } catch (error) {
+        if (!(error instanceof RpcRequestTimeoutError) || attempt === 1)
+          throw error;
+      }
+    }
+    throw new Error("Pi RPC 会话恢复失败");
+  }
+
   async ensure(id: string): Promise<SecondaryRuntime> {
     // Primary owns the one compatibility probe for this local Pi entrypoint.
     // Do not turn cold Session browsing into duplicate capability RPC traffic.
@@ -454,7 +476,7 @@ export class RuntimePool {
       rpc.setDiagnosticSessionId?.(id);
       runtime.unsubscribe = rpc.onEvent((event, source) => this.options.onSecondaryEvent(runtime, event, source));
       try {
-        const startResult = await rpc.start(["--session", path]);
+        const startResult = await this.startPersistedSession(rpc, path);
         runtime.rpcGeneration = rpc.currentGeneration?.() || 0;
         // Lightweight test/embedding RPC implementations predating the
         // readiness-return contract still return void. Production PiRpcClient

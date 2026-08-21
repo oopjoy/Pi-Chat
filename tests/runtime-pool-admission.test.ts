@@ -7,6 +7,7 @@ import {
   RuntimePool,
   type SecondaryRuntime,
 } from "../src/server/runtime-pool";
+import { RpcRequestTimeoutError } from "../src/server/rpc-client";
 import { idForPath } from "../src/server/session-index";
 
 function runtime(stop: () => Promise<void>): SecondaryRuntime {
@@ -218,6 +219,71 @@ test("failed reserved start releases capacity for a later Session", async () => 
   await assert.rejects(() => targetPool.ensure(idForPath(firstPath)), /start failed/);
   await targetPool.ensure(idForPath(secondPath));
   assert.equal(targetPool.size, 1);
+  assert.equal(targetPool.reservedStartCount, 0);
+});
+
+test("a cold persisted Session retries one timed-out startup without a second user send", async () => {
+  const path = "C:\\sessions\\slow-cold-resume.jsonl";
+  const id = idForPath(path);
+  const readiness = {
+    type: "response",
+    success: true,
+    data: {
+      model: null,
+      isStreaming: false,
+      sessionFile: path,
+      sessionId: "slow-cold-resume",
+    },
+  };
+  let createCalls = 0;
+  let startCalls = 0;
+  const targetPool = new RuntimePool({
+    now: () => 1,
+    cwd: () => process.cwd(),
+    createRpc: () => {
+      createCalls += 1;
+      return {
+        onEvent: () => () => {},
+        start: async () => {
+          startCalls += 1;
+          if (startCalls === 1)
+            throw new RpcRequestTimeoutError("get_state");
+          return readiness;
+        },
+        stop: async () => {},
+        isRunning: () => true,
+        send: async () => readiness,
+      } as never;
+    },
+    refreshSessions: async () => {},
+    pathForId: (candidate) => candidate === id ? path : null,
+    summaryForId: (candidate) => candidate === id
+      ? {
+          id,
+          sessionId: "slow-cold-resume",
+          name: "Slow cold resume",
+          preview: "",
+          cwd: process.cwd(),
+          updatedAt: 1,
+          messageCount: 1,
+          active: false,
+        }
+      : null,
+    isClosed: () => false,
+    canSweep: () => true,
+    onSecondaryEvent: () => {},
+    activeSessionIds: () => [],
+    broadcast: () => {},
+  });
+
+  const [first, joined] = await Promise.all([
+    targetPool.ensure(id),
+    targetPool.ensure(id),
+  ]);
+  assert.equal(first, joined, "concurrent sends join the same retrying cold start");
+  assert.equal(createCalls, 1, "retry reuses one Runtime owner");
+  assert.equal(startCalls, 2, "one startup timeout retries the whole Pi process once");
+  assert.equal(targetPool.get(id), first);
   assert.equal(targetPool.reservedStartCount, 0);
 });
 
