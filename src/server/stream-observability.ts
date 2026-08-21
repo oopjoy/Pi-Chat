@@ -43,7 +43,11 @@ export class ServerStreamDiagnosticsAggregator {
   observe(event: SseTransportDiagnostic): boolean {
     if (
       event.eventType !== "message_update"
+      && event.eventType !== "message_checkpoint"
+      && event.eventType !== "message_delta"
       && event.originalEventType !== "message_update"
+      && event.originalEventType !== "message_checkpoint"
+      && event.originalEventType !== "message_delta"
     ) return false;
     if (
       !event.sessionId

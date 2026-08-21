@@ -231,7 +231,7 @@ export const api = {
   detachHandshake,
   invalidateHandshake,
   bootstrap,
-  eventsUrl: () => `/api/events?token=${encodeURIComponent(requestToken)}&client=${encodeURIComponent(clientId)}&page=${encodeURIComponent(pageId)}`,
+  eventsUrl: () => `/api/events?token=${encodeURIComponent(requestToken)}&client=${encodeURIComponent(clientId)}&page=${encodeURIComponent(pageId)}&stream=delta-v1`,
   renewPresence: () => request<{ present: boolean }>("/api/presence", {
     method: "POST",
     body: JSON.stringify({ foreground: true, revision: nextPresenceRevision() }),

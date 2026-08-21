@@ -1,6 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { sanitizeAssistantText } from "../src/web/lib/assistant-text";
+import { sanitizeAssistantText, visibleAssistantBlocksWithSourceIndex } from "../src/web/lib/assistant-text";
+
+test("visible assistant blocks retain their original stream content indexes", () => {
+  assert.deepEqual(
+    visibleAssistantBlocksWithSourceIndex({
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "private" },
+        { type: "text", text: "visible" },
+      ],
+    }),
+    [{ block: { type: "text", text: "visible" }, sourceIndex: 1 }],
+  );
+});
 
 test("collapses an accidentally repeated complete long assistant response", () => {
   const answer = [

@@ -1546,6 +1546,154 @@ test("idle activity clears a stale tool-completion wait even without agent_settl
   }
 });
 
+test("authoritative checkpoints and append deltas stream through the existing browser throttle", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  Object.assign(api, {
+    bootstrap: async () => bootstrap,
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.emitPi({
+        type: "agent_start",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+      });
+      source.emitPi({
+        type: "message_checkpoint",
+        piChatStreamSchema: 1,
+        piChatSequence: 0,
+        piChatStreamStart: true,
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        message: {
+          role: "assistant",
+          content: "Hello",
+          piChatLiveMessageId: "live-browser-1",
+        },
+      });
+      source.emitPi({
+        type: "message_delta",
+        piChatStreamSchema: 1,
+        piChatSequence: 1,
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        piChatLiveMessageId: "live-browser-1",
+        operations: [{ contentIndex: 0, field: "text", append: " world" }],
+      });
+      await new Promise((resolve) => dom.window.setTimeout(resolve, 80));
+    });
+    assert.match(
+      dom.window.document.querySelector(".timeline")?.textContent || "",
+      /Hello world/,
+    );
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
+test("a missing stream sequence closes the lease and reconnects for a fresh checkpoint", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  Object.assign(api, {
+    bootstrap: async () => bootstrap,
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    viewSession: async () => draftView,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    const countBeforeGap = FakeEventSource.instances.length;
+    await act(async () => {
+      source.emitPi({
+        type: "message_checkpoint",
+        piChatStreamSchema: 1,
+        piChatSequence: 0,
+        piChatStreamStart: true,
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        message: {
+          role: "assistant",
+          content: "A",
+          piChatLiveMessageId: "live-gap-1",
+        },
+      });
+      source.emitPi({
+        type: "message_delta",
+        piChatStreamSchema: 1,
+        piChatSequence: 2,
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        piChatLiveMessageId: "live-gap-1",
+        operations: [{ contentIndex: 0, field: "text", append: "missing" }],
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(source.readyState, FakeEventSource.CLOSED);
+    assert.ok(FakeEventSource.instances.length > countBeforeGap);
+    assert.doesNotMatch(
+      dom.window.document.querySelector(".timeline")?.textContent || "",
+      /missing/,
+    );
+
+    const replacement = FakeEventSource.instances.at(-1)!;
+    const countBeforeRepeatedGap = FakeEventSource.instances.length;
+    await act(async () => {
+      replacement.emitPi({
+        type: "message_checkpoint",
+        piChatStreamSchema: 1,
+        piChatSequence: 0,
+        piChatStreamStart: true,
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        message: {
+          role: "assistant",
+          content: "B",
+          piChatLiveMessageId: "live-gap-1",
+        },
+      });
+      replacement.emitPi({
+        type: "message_delta",
+        piChatStreamSchema: 1,
+        piChatSequence: 2,
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        piChatLiveMessageId: "live-gap-1",
+        operations: [{ contentIndex: 0, field: "text", append: "repeat" }],
+      });
+      await Promise.resolve();
+    });
+    assert.equal(replacement.readyState, FakeEventSource.CLOSED);
+    assert.equal(
+      FakeEventSource.instances.length,
+      countBeforeRepeatedGap,
+      "a repeated deterministic gap is rate-limited instead of reconnecting in a tight loop",
+    );
+    await act(async () => {
+      await new Promise((resolve) => dom.window.setTimeout(resolve, 1_100));
+    });
+    assert.ok(FakeEventSource.instances.length > countBeforeRepeatedGap);
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("idle activity cancels a throttled live update before it can repaint the settled pane", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");

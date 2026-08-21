@@ -8,6 +8,14 @@ import {
   useState,
 } from "react";
 import { appendTerminalMessage } from "../shared/streaming-assistant";
+import {
+  applyStreamingDelta,
+  decodeStreamingCheckpoint,
+  MESSAGE_CHECKPOINT_EVENT,
+  MESSAGE_DELTA_EVENT,
+  type StreamingMessageAppend,
+  type StreamingWireProjection,
+} from "../shared/streaming-wire";
 import type { StateDiagnosticExportBundle } from "../shared/state-diagnostics";
 import type {
   ApplicationLifecycle,
@@ -123,6 +131,7 @@ import {
   surfaceAutomaticRefreshError,
 } from "./lib/refresh-error-policy";
 import { SessionScrollMemory } from "./lib/session-scroll-memory";
+import { withStreamingAppendHints } from "./lib/streaming-append";
 import { SessionViewCache } from "./lib/session-view-cache";
 import {
   composerStateForSelection,
@@ -260,6 +269,8 @@ const SESSION_VIEW_INVALIDATING_EVENT_TYPES = new Set([
   "compaction_end",
   "message_start",
   "message_update",
+  MESSAGE_CHECKPOINT_EVENT,
+  MESSAGE_DELTA_EVENT,
   "message_end",
   "tool_execution_start",
   "tool_execution_end",
@@ -894,6 +905,10 @@ export function App() {
    * the same generation, so this is intentionally not a generation-wide fence.
    */
   const terminalAssistantStreamGenerationsRef = useRef(new Map<string, number>());
+  /** Per-Session browser lease for the server-owned checkpoint/delta stream. */
+  const streamingWireProjectionsRef = useRef(new Map<string, StreamingWireProjection>());
+  /** Repeated malformed stream recovery is rate-limited per Session. */
+  const streamGapRecoveriesRef = useRef(new Map<string, { at: number; count: number }>());
   /** SSE lifecycle is newer than a delayed sidebar/bootstrap summary. */
   const sessionRunningOverridesRef = useRef(new Map<string, boolean>());
   const normalizeSessionRunning = (session: SessionSummary): SessionSummary => {
@@ -1050,6 +1065,8 @@ export function App() {
     sessionRunGenerationsRef.current.clear();
     settledRunGenerationsRef.current.clear();
     terminalAssistantStreamGenerationsRef.current.clear();
+    streamingWireProjectionsRef.current.clear();
+    streamGapRecoveriesRef.current.clear();
   }, [syncMutatingSessionIds]);
   const recordSourceTurnTotal = (sessionId: string, total: number): void => {
     if (!Number.isFinite(total)) return;
@@ -3208,7 +3225,12 @@ export function App() {
               .catch(() => undefined);
           }
         }
-      } else if (type === "message_start" || type === "message_update") {
+      } else if (
+        type === "message_start"
+        || type === "message_update"
+        || type === MESSAGE_CHECKPOINT_EVENT
+        || type === MESSAGE_DELTA_EVENT
+      ) {
         const rawMessage =
           event.message && typeof event.message === "object"
             ? (event.message as PiMessage)
@@ -3255,10 +3277,82 @@ export function App() {
             });
           }
         }
-        const assistant = assistantMessage(event);
+
+        let assistant: PiMessage | null = null;
+        let streamStart = type === "message_start";
+        if (type === MESSAGE_CHECKPOINT_EVENT) {
+          const checkpoint = decodeStreamingCheckpoint(event);
+          if (!checkpoint || !eventSessionId) {
+            recordSseRejectionDiagnostic({
+              sessionId: eventSessionId,
+              runGeneration: eventRunGeneration,
+              eventType: type,
+              decisionReason: "malformed-critical-event",
+            });
+            return;
+          }
+          const projection = {
+            message: checkpoint.message,
+            sequence: checkpoint.piChatSequence,
+          };
+          streamingWireProjectionsRef.current.set(eventSessionId, projection);
+          assistant = projection.message;
+          streamStart = checkpoint.piChatStreamStart === true;
+        } else if (type === MESSAGE_DELTA_EVENT) {
+          const projection = eventSessionId
+            ? applyStreamingDelta(
+                streamingWireProjectionsRef.current.get(eventSessionId),
+                event,
+              )
+            : null;
+          if (!projection || !eventSessionId) {
+            recordSseRejectionDiagnostic({
+              sessionId: eventSessionId,
+              runGeneration: eventRunGeneration,
+              eventType: type,
+              decisionReason: "stream-sequence-gap",
+            });
+            if (eventSessionId)
+              streamingWireProjectionsRef.current.delete(eventSessionId);
+            if (viewingEventSession) clearPendingLiveMessage();
+            source.close();
+            const now = Date.now();
+            const previousRecovery = eventSessionId
+              ? streamGapRecoveriesRef.current.get(eventSessionId)
+              : undefined;
+            const count = previousRecovery && now - previousRecovery.at < 30_000
+              ? previousRecovery.count + 1
+              : 1;
+            if (eventSessionId)
+              streamGapRecoveriesRef.current.set(eventSessionId, { at: now, count });
+            const delay = count === 1
+              ? 0
+              : Math.min(30_000, 1_000 * 2 ** Math.min(count - 2, 5));
+            if (sseReconnectTimerRef.current !== null)
+              window.clearTimeout(sseReconnectTimerRef.current);
+            sseReconnectTimerRef.current = window.setTimeout(() => {
+              sseReconnectTimerRef.current = null;
+              setEventSourceGeneration((generation) => generation + 1);
+            }, delay);
+            void refresh().catch(reportBackgroundRefreshError);
+            return;
+          }
+          streamingWireProjectionsRef.current.set(eventSessionId, projection);
+          streamGapRecoveriesRef.current.delete(eventSessionId);
+          assistant = withStreamingAppendHints(
+            projection.message,
+            projection.sequence,
+            event.operations as StreamingMessageAppend[],
+          );
+        } else {
+          assistant = assistantMessage(event);
+          if (assistant && eventSessionId)
+            streamingWireProjectionsRef.current.delete(eventSessionId);
+        }
+
         let rejectedPostTerminalAssistantUpdate = false;
         if (assistant && eventSessionId && typeof eventRunGeneration === "number") {
-          if (type === "message_start") {
+          if (streamStart) {
             // A new assistant start is the only browser-visible boundary that
             // reopens a stream after its prior canonical terminal. This keeps
             // tool-use continuations in the same Pi generation valid.
@@ -3268,7 +3362,6 @@ export function App() {
             )
               terminalAssistantStreamGenerationsRef.current.delete(eventSessionId);
           } else if (
-            type === "message_update" &&
             terminalAssistantStreamGenerationsRef.current.get(eventSessionId) ===
               eventRunGeneration
           ) {
@@ -3302,6 +3395,10 @@ export function App() {
             runGeneration: eventRunGeneration ?? -1,
           });
       } else if (type === "message_end" && terminalEvent) {
+        if (eventSessionId) {
+          streamingWireProjectionsRef.current.delete(eventSessionId);
+          streamGapRecoveriesRef.current.delete(eventSessionId);
+        }
         const terminal = terminalEvent.message;
         if (terminalEvent.terminalKind === "assistant") {
           if (eventSessionId)
@@ -3475,6 +3572,10 @@ export function App() {
           }
         }
       } else if (type === "agent_settled") {
+        if (eventSessionId) {
+          streamingWireProjectionsRef.current.delete(eventSessionId);
+          streamGapRecoveriesRef.current.delete(eventSessionId);
+        }
         if (eventSessionId)
           dispatchAskQuestionnaire({
             type: "CLOSE_SESSION",
@@ -4215,6 +4316,10 @@ export function App() {
           patchSessionCache(eventSessionId, { sessionActivity: activity });
         }
       } else if (type === "pi_chat_process_error") {
+        if (eventSessionId) {
+          streamingWireProjectionsRef.current.delete(eventSessionId);
+          streamGapRecoveriesRef.current.delete(eventSessionId);
+        }
         if (eventSessionId)
           dispatchAskQuestionnaire({
             type: "CLOSE_SESSION",
@@ -4302,6 +4407,7 @@ export function App() {
     [
       applySessionView,
       cancelPendingNavigation,
+      clearPendingLiveMessage,
       drainPendingLiveMessage,
       refresh,
       reportBackgroundRefreshError,

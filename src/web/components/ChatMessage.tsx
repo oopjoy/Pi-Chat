@@ -1,7 +1,8 @@
 import { memo, useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import type { PiContentBlock, PiMessage } from "../../shared/types";
-import { visibleAssistantBlocks } from "../lib/assistant-text";
+import { visibleAssistantBlocksWithSourceIndex } from "../lib/assistant-text";
+import { streamingAppendHint } from "../lib/streaming-append";
 import { CheckIcon, CopyIcon } from "./Icons";
 import { MarkdownBody } from "./MarkdownBody";
 
@@ -134,7 +135,12 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
     previewTriggerRef.current = null;
   }, [previewImage]);
   if (message.role !== "user" && message.role !== "assistant") return null;
-  const content = message.role === "assistant" ? visibleAssistantBlocks(message) : blocks(message);
+  const assistantContent = message.role === "assistant"
+    ? visibleAssistantBlocksWithSourceIndex(message)
+    : [];
+  const content = message.role === "assistant"
+    ? assistantContent.map(({ block }) => block)
+    : blocks(message);
   const hasVisibleContent = content.some((block) =>
     (block.type === "text" && Boolean(block.text))
     || (block.type === "image" && Boolean(block.data && block.mimeType)),
@@ -178,7 +184,11 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
         {message.role === "user"
           ? userTextBlocks.map((block, index) => <div className={`user-plain-text${userTextNeedsFolding && !expandedUserText ? " is-collapsed" : ""}`} key={index}>{block.text}</div>)
           : content.map((block, index) => {
-            if (block.type === "text" && block.text) return <MarkdownBody key={index} streaming={streaming}>{block.text}</MarkdownBody>;
+            if (block.type === "text" && block.text) return <MarkdownBody
+              key={index}
+              streaming={streaming}
+              appendHint={streaming ? streamingAppendHint(message, assistantContent[index]?.sourceIndex ?? index) : undefined}
+            >{block.text}</MarkdownBody>;
             if (block.type === "image" && block.data && block.mimeType) return <img className="message-image" key={index} src={`data:${block.mimeType};base64,${block.data}`} alt="用户附加图片" />;
             return null;
           })}

@@ -1,4 +1,8 @@
 import type { ServerResponse } from "node:http";
+import {
+  projectStreamingWireEvent,
+  type StreamingWireProjection,
+} from "../shared/streaming-wire.js";
 
 const MAX_SSE_EVENT_BYTES = 512 * 1024;
 // A slow local browser must not grow server memory without bound. Normal Pi
@@ -112,6 +116,10 @@ interface ScheduledSnapshot {
   timer: ReturnType<typeof setTimeout>;
 }
 
+interface SseClientOptions {
+  streamingDelta?: boolean;
+}
+
 export type SseDisconnectReason = "request-close" | "write-error" | "pending-buffer-limit" | "shutdown";
 export interface SseDisconnectInfo {
   reason: SseDisconnectReason;
@@ -128,6 +136,8 @@ export interface SseDisconnectInfo {
  */
 export class SseHub {
   private readonly clients = new Map<ServerResponse, string>();
+  private readonly streamingDeltaClients = new Set<ServerResponse>();
+  private readonly streamProjections = new Map<ServerResponse, Map<string, StreamingWireProjection>>();
   private readonly backpressured = new Set<ServerResponse>();
   private readonly pendingFrames = new Map<ServerResponse, PendingFrames>();
   private readonly scheduledSnapshots = new Map<ServerResponse, Map<string, ScheduledSnapshot>>();
@@ -155,8 +165,9 @@ export class SseHub {
     return this.clients;
   }
 
-  add(response: ServerResponse, clientId: string): void {
+  add(response: ServerResponse, clientId: string, options: SseClientOptions = {}): void {
     this.clients.set(response, clientId);
+    if (options.streamingDelta) this.streamingDeltaClients.add(response);
   }
 
   remove(response: ServerResponse): string {
@@ -167,6 +178,8 @@ export class SseHub {
   disconnect(response: ServerResponse, info: SseDisconnectInfo): string {
     const clientId = this.clients.get(response) || "";
     if (!this.clients.delete(response)) return "";
+    this.streamingDeltaClients.delete(response);
+    this.streamProjections.delete(response);
     this.backpressured.delete(response);
     this.pendingFrames.delete(response);
     const scheduled = this.scheduledSnapshots.get(response);
@@ -197,11 +210,24 @@ export class SseHub {
     }
     const type = String(event.type || "");
     const sessionKey = String(event.piChatSessionId || "primary");
+    const assistantStream = (type === "message_start" || type === "message_update")
+      && event.message
+      && typeof event.message === "object"
+      && (event.message as { role?: unknown }).role === "assistant";
     if (type === "message_update") {
       // Delay JSON serialization along with delivery. Pi snapshots contain the
       // whole assistant message, so serializing every discarded intermediate
       // frame creates quadratic work during long parallel responses.
       for (const client of this.clients.keys()) this.writeSnapshot(client, event, sessionKey);
+      return;
+    }
+    if (type === "message_start" && assistantStream) {
+      for (const client of this.clients.keys()) {
+        this.flushScheduledSnapshot(client, sessionKey);
+        if (!this.clients.has(client)) continue;
+        if (this.writeSnapshotFrame(client, event, sessionKey))
+          this.markSnapshotWritten(client, sessionKey);
+      }
       return;
     }
     const snapshotKey = type === "message_start" ? sessionKey : undefined;
@@ -213,6 +239,11 @@ export class SseHub {
       // cumulative snapshot from the same Session.
       this.flushScheduledSnapshot(client, sessionKey);
       if (this.clients.has(client)) this.write(client, framed, snapshotKey);
+      if (
+        type === "message_end"
+        || type === "agent_settled"
+        || type === "pi_chat_process_error"
+      ) this.streamProjections.get(client)?.delete(sessionKey);
     }
   }
 
@@ -245,6 +276,8 @@ export class SseHub {
         // Shutdown path must not throw.
       }
     }
+    this.streamingDeltaClients.clear();
+    this.streamProjections.clear();
     this.backpressured.clear();
     this.pendingFrames.clear();
     this.scheduledSnapshots.clear();
@@ -252,15 +285,15 @@ export class SseHub {
   }
 
   private writeSnapshot(client: ServerResponse, event: Record<string, unknown>, snapshotKey: string): void {
-    // Once Node reports socket pressure, retain the existing immediate enqueue
-    // path: enqueue() already coalesces adjacent cumulative snapshots and its
-    // drain ordering is covered independently.
-    if (this.backpressured.has(client) || this.snapshotIntervalMs <= 0) {
-      this.markSnapshotWritten(client, snapshotKey);
-      const framed = eventFrame(event);
-      if (framed.metadata.originalEventType)
-        this.observe("oversized-substitute", framed.metadata);
-      this.write(client, framed, snapshotKey);
+    // Legacy cumulative snapshots retain the immediate backpressure path where
+    // enqueue() can replace an adjacent snapshot. Dependent delta frames cannot
+    // be replaced safely, so modern clients keep the normal 50 ms cadence.
+    if (
+      (this.backpressured.has(client) && !this.streamingDeltaClients.has(client))
+      || this.snapshotIntervalMs <= 0
+    ) {
+      if (this.writeSnapshotFrame(client, event, snapshotKey))
+        this.markSnapshotWritten(client, snapshotKey);
       return;
     }
     const lastWrite = this.lastSnapshotWrites.get(client)?.get(snapshotKey) || 0;
@@ -268,11 +301,8 @@ export class SseHub {
     const pendingBySession = this.scheduledSnapshots.get(client) || new Map<string, ScheduledSnapshot>();
     const pending = pendingBySession.get(snapshotKey);
     if (!pending && elapsed >= this.snapshotIntervalMs) {
-      this.markSnapshotWritten(client, snapshotKey);
-      const framed = eventFrame(event);
-      if (framed.metadata.originalEventType)
-        this.observe("oversized-substitute", framed.metadata);
-      this.write(client, framed, snapshotKey);
+      if (this.writeSnapshotFrame(client, event, snapshotKey))
+        this.markSnapshotWritten(client, snapshotKey);
       return;
     }
     if (pending) {
@@ -295,11 +325,40 @@ export class SseHub {
     pendingBySession?.delete(snapshotKey);
     if (pendingBySession && !pendingBySession.size) this.scheduledSnapshots.delete(client);
     if (!this.clients.has(client)) return;
-    this.markSnapshotWritten(client, snapshotKey);
-    const framed = eventFrame(pending.event);
-    if (framed.metadata.originalEventType)
+    if (this.writeSnapshotFrame(client, pending.event, snapshotKey))
+      this.markSnapshotWritten(client, snapshotKey);
+  }
+
+  private writeSnapshotFrame(
+    client: ServerResponse,
+    cumulativeEvent: Record<string, unknown>,
+    snapshotKey: string,
+  ): boolean {
+    if (!this.streamingDeltaClients.has(client)) {
+      const framed = eventFrame(cumulativeEvent);
+      if (framed.metadata.originalEventType)
+        this.observe("oversized-substitute", framed.metadata);
+      this.write(client, framed, snapshotKey);
+      return true;
+    }
+
+    const projections = this.streamProjections.get(client) || new Map<string, StreamingWireProjection>();
+    const projected = projectStreamingWireEvent(projections.get(snapshotKey), cumulativeEvent);
+    if (!projected) return false;
+    projections.set(snapshotKey, projected.projection);
+    this.streamProjections.set(client, projections);
+    if (!projected.event) return false;
+    const framed = eventFrame(projected.event);
+    if (framed.metadata.originalEventType) {
       this.observe("oversized-substitute", framed.metadata);
-    this.write(client, framed, snapshotKey);
+      // The browser did not receive this projection. Force the next snapshot to
+      // be a complete checkpoint instead of a delta based on unseen content.
+      projections.delete(snapshotKey);
+    }
+    // Delta frames depend on their preceding checkpoint/delta and therefore
+    // may not use the legacy adjacent-snapshot replacement under backpressure.
+    this.write(client, framed);
+    return true;
   }
 
   private markSnapshotWritten(client: ServerResponse, snapshotKey: string): void {

@@ -73,6 +73,7 @@ test("reconnect token acceptance prevents an older response from restoring its t
 
     await api.recoverConnection();
     assert.match(api.eventsUrl(), /token=token-b/);
+    assert.match(api.eventsUrl(), /stream=delta-v1/, "new browsers advertise checkpoint/delta support while old URLs remain legacy-compatible");
 
     resolveOldBootstrap(response({ requestToken: "token-a" }));
     await initialBootstrap;

@@ -143,6 +143,8 @@ const EVENT_TYPE_VALUES = new Set([
   "extension_ui_request",
   "message_start",
   "message_update",
+  "message_checkpoint",
+  "message_delta",
   "message_end",
   "tool_execution_start",
   "tool_execution_update",
@@ -240,6 +242,7 @@ const ENUM_DETAIL_VALUES: Record<string, ReadonlySet<string>> = {
     "stale-refresh-authority",
     "stale-run-epoch",
     "stale-run-generation",
+    "stream-sequence-gap",
     "unknown",
   ]),
   disconnectReason: new Set([
@@ -353,6 +356,7 @@ const STATE_DIAGNOSTIC_EVENT_PAIRS = new Set([
 
 const HIGH_FREQUENCY_EVENT_TYPES = new Set([
   "message_update",
+  "message_delta",
   "tool_execution_update",
   "pi_chat_heartbeat",
 ]);

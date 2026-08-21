@@ -3,7 +3,7 @@ import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MarkdownBody } from "../src/web/components/MarkdownBody";
-import { streamingMarkdownSegments } from "../src/web/lib/streaming-markdown";
+import { advanceStreamingMarkdown, streamingMarkdownSegments } from "../src/web/lib/streaming-markdown";
 
 test("streaming Markdown freezes completed regions and keeps only one growing tail", () => {
   const markdown = [
@@ -39,6 +39,86 @@ test("streaming Markdown freezes completed regions and keeps only one growing ta
   ].join("\n"));
   assert.equal(displayMath.stable.length, 1, "blank lines inside display math never split its Markdown region");
   assert.equal(displayMath.tail, "after");
+});
+
+test("append-only streaming rescans only the mutable tail and resets on corrections", () => {
+  let state = advanceStreamingMarkdown(undefined, "# Stable\n\nTail");
+  assert.deepEqual(state.stable, ["# Stable\n\n"]);
+  assert.equal(state.tail, "Tail");
+  assert.equal(state.scannedCharacters, 14);
+
+  state = advanceStreamingMarkdown(
+    state,
+    "# Stable\n\nTail grows",
+    { sequence: 1, append: " grows" },
+  );
+  assert.deepEqual(state.stable, ["# Stable\n\n"]);
+  assert.equal(state.tail, "Tail grows");
+  assert.equal(state.scannedCharacters, "Tail grows".length, "the immutable prefix is not scanned again");
+  assert.deepEqual(
+    { stable: state.stable, tail: state.tail },
+    streamingMarkdownSegments(state.source),
+    "incremental append produces the same segmentation as a full scan",
+  );
+
+  const corrected = advanceStreamingMarkdown(
+    state,
+    "# Corrected\n\nReplacement",
+    { sequence: 2, append: " impossible" },
+  );
+  assert.equal(corrected.scannedCharacters, corrected.source.length, "a non-prefix provider correction falls back to a full scan");
+  assert.deepEqual(
+    { stable: corrected.stable, tail: corrected.tail },
+    streamingMarkdownSegments(corrected.source),
+  );
+});
+
+test("incremental Markdown retains open fences and display math in the mutable tail", () => {
+  let state = advanceStreamingMarkdown(undefined, "before\n\n```ts\nconst a = 1;");
+  assert.deepEqual(state.stable, ["before\n\n"]);
+  assert.match(state.tail, /^```ts/);
+
+  state = advanceStreamingMarkdown(state, "before\n\n```ts\nconst a = 1;\n\nconst b = 2;\n```\n\nafter");
+  assert.deepEqual(state.stable, [
+    "before\n\n",
+    "```ts\nconst a = 1;\n\nconst b = 2;\n```\n\n",
+  ]);
+  assert.equal(state.tail, "after");
+
+  let math = advanceStreamingMarkdown(undefined, "$$\n\\frac{1}{2}");
+  math = advanceStreamingMarkdown(math, "$$\n\\frac{1}{2}\n\n+ 1\n$$\n\nafter");
+  assert.deepEqual(math.stable, ["$$\n\\frac{1}{2}\n\n+ 1\n$$\n\n"]);
+  assert.equal(math.tail, "after");
+});
+
+test("incremental segmentation matches a full scan at every chunk boundary", () => {
+  const fixtures = [
+    "# Heading\n\nparagraph\n\n> quote\n> continued\n\nend",
+    "Setext heading\n---\n\n- one\n- two\n\n[id]: https://example.com\n",
+    "```typescript\nconst value = `tick`;\n```\n\nafter",
+    "$$\n\\frac{1}{2}\n$$\n\n| a | b |\n| --- | --- |\n| 1 | 2 |",
+    "<div>\nhtml block\n</div>\n\nafter",
+  ];
+  for (const fixture of fixtures) {
+    let state: ReturnType<typeof advanceStreamingMarkdown> | undefined;
+    for (let length = 1; length <= fixture.length; length += 1) {
+      const prefix = fixture.slice(0, length);
+      state = advanceStreamingMarkdown(state, prefix);
+      assert.deepEqual(
+        { stable: state.stable, tail: state.tail },
+        streamingMarkdownSegments(prefix),
+        `segmentation diverged at prefix ${length} of ${JSON.stringify(fixture)}`,
+      );
+    }
+  }
+
+  const oversized = `${"word ".repeat(2_000)}tail`;
+  let state = advanceStreamingMarkdown(undefined, oversized.slice(0, 8_100));
+  state = advanceStreamingMarkdown(state, oversized);
+  assert.deepEqual(
+    { stable: state.stable, tail: state.tail },
+    streamingMarkdownSegments(oversized),
+  );
 });
 
 test("streaming Markdown renders GFM and KaTeX before the terminal pass", () => {

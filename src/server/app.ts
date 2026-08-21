@@ -5182,7 +5182,9 @@ export class PiChatApp {
         primaryStatus: this.primaryReadiness().status,
       });
       const pageId = requestPageId(request) || clientId;
-      this.sseHub.add(response, clientId);
+      this.sseHub.add(response, clientId, {
+        streamingDelta: url.searchParams.get("stream") === "delta-v1",
+      });
       this.ssePageByResponse.set(response, pageId);
       this.clientConnected(clientId, pageId);
       this.traceState("sse", "connected", this.activeSessionId, {

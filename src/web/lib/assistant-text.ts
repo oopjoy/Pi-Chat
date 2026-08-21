@@ -97,21 +97,32 @@ export function sanitizeAssistantText(value: string): string {
   return `${before}${after}`;
 }
 
-/** Content that ChatMessage can actually paint for an assistant response. */
-export function visibleAssistantBlocks(message: PiMessage): PiContentBlock[] {
+export interface VisibleAssistantBlock {
+  block: PiContentBlock;
+  sourceIndex: number;
+}
+
+/** Visible content plus its original contentIndex for stream-delta correlation. */
+export function visibleAssistantBlocksWithSourceIndex(message: PiMessage): VisibleAssistantBlock[] {
   const content = typeof message.content === "string"
     ? [{ type: "text", text: message.content }]
     : message.content || [];
-  const visible: PiContentBlock[] = [];
-  for (const block of content) {
+  const visible: VisibleAssistantBlock[] = [];
+  for (let sourceIndex = 0; sourceIndex < content.length; sourceIndex += 1) {
+    const block = content[sourceIndex];
     if (block.type === "text" && typeof block.text === "string") {
       const text = sanitizeAssistantText(block.text);
-      if (text.trim()) visible.push({ ...block, text });
+      if (text.trim()) visible.push({ block: { ...block, text }, sourceIndex });
     } else if (block.type === "image" && block.data && block.mimeType) {
-      visible.push(block);
+      visible.push({ block, sourceIndex });
     }
   }
   return visible;
+}
+
+/** Content that ChatMessage can actually paint for an assistant response. */
+export function visibleAssistantBlocks(message: PiMessage): PiContentBlock[] {
+  return visibleAssistantBlocksWithSourceIndex(message).map(({ block }) => block);
 }
 
 export function visibleAssistantMessage(message: PiMessage): PiMessage | undefined {

@@ -76,6 +76,127 @@ test("healthy sockets coalesce rapid assistant snapshots at the browser render c
   hub.closeAll();
 });
 
+test("delta-capable clients receive checkpoints and cadence-coalesced append deltas", async () => {
+  const hub = new SseHub(20);
+  const modern = stubClient();
+  const legacy = stubClient();
+  hub.add(modern as never, "modern", { streamingDelta: true });
+  hub.add(legacy as never, "legacy");
+  const base = {
+    piChatSessionId: "0123456789abcdefabcd",
+    piChatRunEpoch: "epoch-a",
+    piChatRunGeneration: 2,
+  };
+
+  hub.broadcast({
+    ...base,
+    type: "message_start",
+    message: { role: "assistant", content: "", piChatLiveMessageId: "live-1" },
+  });
+  assert.match(modern.frames[0], /"type":"message_checkpoint"/);
+  assert.match(modern.frames[0], /"piChatStreamStart":true/);
+  assert.match(legacy.frames[0], /"type":"message_start"/);
+
+  hub.broadcast({
+    ...base,
+    type: "message_update",
+    message: { role: "assistant", content: "A", piChatLiveMessageId: "live-1" },
+  });
+  hub.broadcast({
+    ...base,
+    type: "message_update",
+    message: { role: "assistant", content: "AB", piChatLiveMessageId: "live-1" },
+  });
+  hub.broadcast({
+    ...base,
+    type: "message_update",
+    message: { role: "assistant", content: "ABC", piChatLiveMessageId: "live-1" },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 35));
+  assert.match(modern.frames.at(-1) || "", /"type":"message_delta"/);
+  assert.match(modern.frames.at(-1) || "", /"append":"ABC"/);
+  assert.doesNotMatch(modern.frames.join("\n"), /"type":"message_update"/);
+  assert.match(legacy.frames.at(-1) || "", /"type":"message_update"/);
+  assert.match(legacy.frames.at(-1) || "", /"content":"ABC"/);
+  hub.closeAll();
+});
+
+test("modern stream corrections use a checkpoint and terminals retain ordering", () => {
+  const hub = new SseHub(0);
+  const client = stubClient();
+  hub.add(client as never, "modern", { streamingDelta: true });
+  const base = {
+    piChatSessionId: "0123456789abcdefabcd",
+    piChatRunEpoch: "epoch-a",
+    piChatRunGeneration: 2,
+  };
+  hub.broadcast({
+    ...base,
+    type: "message_update",
+    message: { role: "assistant", content: "draft", piChatLiveMessageId: "live-1" },
+  });
+  hub.broadcast({
+    ...base,
+    type: "message_update",
+    message: { role: "assistant", content: "corrected", piChatLiveMessageId: "live-1" },
+  });
+  hub.broadcast({
+    ...base,
+    type: "message_end",
+    piChatEventSchema: 1,
+    terminalKind: "assistant",
+    message: { role: "assistant", content: "corrected", piChatLiveMessageId: "live-1" },
+  });
+  assert.match(client.frames[0], /"type":"message_checkpoint"/);
+  assert.match(client.frames[1], /"type":"message_checkpoint"/);
+  assert.match(client.frames[2], /"type":"message_end"/);
+  hub.closeAll();
+});
+
+test("modern backpressure preserves dependent delta order and reconnects with a checkpoint", () => {
+  const hub = new SseHub(0);
+  const client = stubClient(false);
+  hub.add(client as never, "modern", { streamingDelta: true });
+  const base = {
+    piChatSessionId: "0123456789abcdefabcd",
+    piChatRunEpoch: "epoch-a",
+    piChatRunGeneration: 2,
+  };
+  const update = (content: string) => hub.broadcast({
+    ...base,
+    type: "message_update",
+    message: { role: "assistant", content, piChatLiveMessageId: "live-1" },
+  });
+  update("A");
+  update("AB");
+  update("ABC");
+  hub.broadcast({
+    ...base,
+    type: "message_end",
+    piChatEventSchema: 1,
+    terminalKind: "assistant",
+    message: { role: "assistant", content: "ABC", piChatLiveMessageId: "live-1" },
+  });
+  assert.equal(client.frames.length, 1);
+
+  client.write = (frame: string) => { client.frames.push(frame); return true; };
+  client.emit("drain");
+  assert.equal(client.frames.length, 4);
+  assert.match(client.frames[0], /"type":"message_checkpoint"/);
+  assert.match(client.frames[1], /"append":"B"/);
+  assert.match(client.frames[2], /"append":"C"/);
+  assert.match(client.frames[3], /"type":"message_end"/);
+
+  hub.remove(client as never);
+  const replacement = stubClient();
+  hub.add(replacement as never, "modern-replacement", { streamingDelta: true });
+  update("ABCD");
+  assert.match(replacement.frames[0], /"type":"message_checkpoint"/);
+  assert.match(replacement.frames[0], /"content":"ABCD"/);
+  hub.closeAll();
+});
+
 test("ordered Session events flush the latest throttled snapshot before themselves", () => {
   const hub = new SseHub(1_000);
   const client = stubClient();

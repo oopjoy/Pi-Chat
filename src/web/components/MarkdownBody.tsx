@@ -2,12 +2,17 @@ import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "reac
 import ReactMarkdown from "react-markdown";
 import { createMarkdownRehypePlugins, markdownRemarkPlugins } from "../lib/markdown";
 import { normalizeDisplayMathWithSourceMap, registerSourceCopyRoot } from "../lib/markdown-source-copy";
-import { streamingMarkdownSegments } from "../lib/streaming-markdown";
+import {
+  advanceStreamingMarkdown,
+  type StreamingMarkdownAppendHint,
+  type StreamingMarkdownState,
+} from "../lib/streaming-markdown";
 import { CheckIcon, CopyIcon } from "./Icons";
 
 interface MarkdownBodyProps {
   children: string;
   streaming?: boolean;
+  appendHint?: StreamingMarkdownAppendHint;
 }
 
 const markdownComponents = {
@@ -43,8 +48,16 @@ const StreamingMarkdownSegment = memo(function StreamingMarkdownSegment({ childr
   </ReactMarkdown>;
 });
 
-function StreamingMarkdownBody({ children }: { children: string }) {
-  const segments = useMemo(() => streamingMarkdownSegments(children), [children]);
+function StreamingMarkdownBody({ children, appendHint }: { children: string; appendHint?: StreamingMarkdownAppendHint }) {
+  const stateRef = useRef<StreamingMarkdownState | undefined>(undefined);
+  const segments = useMemo(() => {
+    // Concurrent React may abandon a render after this ref advances. A later
+    // non-prefix source deliberately triggers advanceStreamingMarkdown's full
+    // reset, so render-phase speculation can cost a rescan but not correctness.
+    const advanced = advanceStreamingMarkdown(stateRef.current, children, appendHint);
+    stateRef.current = advanced;
+    return advanced;
+  }, [appendHint, children]);
   return <div className="markdown-body markdown-streaming">
     {segments.stable.map((segment, index) => (
       <StreamingMarkdownSegment key={`stable-${index}`}>{segment}</StreamingMarkdownSegment>
@@ -97,9 +110,9 @@ function FinalMarkdownBody({ children }: { children: string }) {
   );
 }
 
-export const MarkdownBody = memo(function MarkdownBody({ children, streaming = false }: MarkdownBodyProps) {
+export const MarkdownBody = memo(function MarkdownBody({ children, streaming = false, appendHint }: MarkdownBodyProps) {
   return streaming
-    ? <StreamingMarkdownBody>{children}</StreamingMarkdownBody>
+    ? <StreamingMarkdownBody appendHint={appendHint}>{children}</StreamingMarkdownBody>
     : <FinalMarkdownBody>{children}</FinalMarkdownBody>;
 });
 
