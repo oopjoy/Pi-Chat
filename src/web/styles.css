@@ -487,7 +487,6 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .message-assistant .code-head { font-family: var(--app-font); }
 .working, .agent-status { color: var(--muted); font-size: 12px; }
 .agent-status { display: flex; align-items: center; gap: 8px; padding: 5px 0 16px; }
-.agent-status.is-compacting { padding: 9px 11px; border: 1px solid color-mix(in srgb, #d89318, transparent 55%); border-radius: 9px; background: color-mix(in srgb, #d89318, transparent 92%); color: #a66b08; }
 .loader { width: 16px; height: 16px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
 .loader.small { width: 12px; height: 12px; }
 
