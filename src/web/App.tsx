@@ -1993,18 +1993,20 @@ export function App() {
           decisionReason: "accepted",
         },
       });
-      // A compaction_end frame is terminal for this Session. Hot-memory views
-      // deliberately avoid a busy RPC probe and may therefore still contain the
-      // pre-end `isCompacting: true` snapshot; never let that stale view relock
-      // a composer after Pi has resumed the actual turn.
-      const normalizedView =
-        completedCompactionSessionIdsRef.current.has(view.session.id) &&
-        view.state.isCompacting
-          ? {
-              ...view,
-              state: { ...view.state, isCompacting: false },
-            }
-          : view;
+      // A compaction_end or settlement frame is terminal for the preceding UI
+      // phase. Hot-memory views may still contain both `isCompacting: true` and
+      // the pre-compaction tool's terminal label; neither may relock the composer
+      // or resurrect a misleading “bash completed” banner. A later agent/tool
+      // start clears this fence before its new status is admitted.
+      const normalizedView = completedCompactionSessionIdsRef.current.has(
+        view.session.id,
+      )
+        ? {
+            ...view,
+            toolStatus: "",
+            state: { ...view.state, isCompacting: false },
+          }
+        : view;
       // Cache the source view before adding local UI overlays. A cached overlay has
       // a synthetic turnTotal and must never confirm that its own user message was
       // persisted when the user switches away and returns.
@@ -3146,6 +3148,7 @@ export function App() {
         window.setTimeout(() => window.close(), 40);
       } else if (type === "agent_start") {
         if (eventSessionId) {
+          completedCompactionSessionIdsRef.current.delete(eventSessionId);
           releasePromptBusy(eventSessionId, eventRunGeneration, eventRunEpoch);
           sessionRunningOverridesRef.current.set(eventSessionId, true);
           setSessions((current) =>
@@ -3447,6 +3450,8 @@ export function App() {
       } else if (type === "tool_execution_start") {
         const toolName = String(event.toolName || "unknown");
         const status = `正在运行工具：${toolName}`;
+        if (eventSessionId)
+          completedCompactionSessionIdsRef.current.delete(eventSessionId);
         if (eventSessionId && toolName === "ask_user_question") {
           const questionnaire = parseAskQuestionnaire(event.toolCallId, event.args);
           if (questionnaire)
@@ -3488,6 +3493,14 @@ export function App() {
             toolCallId: String(event.toolCallId || ""),
           });
         const status = `${String(event.toolName || "工具")} ${event.isError ? "执行失败" : "已完成，Pi 正在继续…"}`;
+        // A terminal compaction frame invalidates the preceding tool phase. If
+        // its delayed tool terminal arrives afterward, retain the running fact
+        // but do not repaint that obsolete tool label. A genuine later tool has
+        // already cleared this fence in tool_execution_start.
+        const staleAcrossCompletedCompaction = Boolean(
+          eventSessionId &&
+            completedCompactionSessionIdsRef.current.has(eventSessionId),
+        );
         // Current servers attach a run generation. If that generation had
         // already settled, the event fence above returned before this branch;
         // otherwise this tool frame proves the turn is still active. Preserve
@@ -3518,14 +3531,21 @@ export function App() {
             // A preceding compaction_start owns the visible phase until its
             // matching terminal event; a delayed tool terminal is stale for
             // that field even though it still proves the turn remains active.
-            ...(cacheCompacting ? null : { toolStatus: status }),
+            ...(cacheCompacting || staleAcrossCompletedCompaction
+              ? null
+              : { toolStatus: status }),
             state: { isStreaming: true },
           });
         }
         const paneCompacting =
           viewedSessionIdRef.current === eventSessionId &&
           paneStateRef.current.isCompacting === true;
-        if (viewingEventSession && sessionStillRunning && !paneCompacting)
+        if (
+          viewingEventSession &&
+          sessionStillRunning &&
+          !paneCompacting &&
+          !staleAcrossCompletedCompaction
+        )
           dispatchPane({
             type: "TOOL_STATUS_UPDATED",
             sessionId: eventSessionId,

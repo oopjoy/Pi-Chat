@@ -77,7 +77,22 @@ export function transitionRuntimeEvent(
     effects.push({ type: "context-start" }, { type: "session-created" });
   }
   if (type === "message_start") effects.push({ type: "session-created" });
-  if (type === "compaction_end" && event.aborted === false) effects.push({ type: "context-pending" });
+  if (type === "compaction_start") {
+    state = {
+      ...state,
+      toolStatus:
+        String(event.reason || "") === "overflow"
+          ? "上下文溢出，正在自动压缩…"
+          : "正在压缩上下文…",
+    };
+  }
+  if (type === "compaction_end") {
+    // The pre-compaction tool is no longer the current phase. Keeping its
+    // terminal label here lets a subsequent hot Session View resurrect an old
+    // “bash completed” banner after the browser already observed compaction_end.
+    state = { ...state, toolStatus: "" };
+    if (event.aborted === false) effects.push({ type: "context-pending" });
+  }
   if (
     (type === "message_start" || type === "message_update")
     && event.message

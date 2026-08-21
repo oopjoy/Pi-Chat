@@ -494,7 +494,7 @@ test("a stale hot view cannot restore the composer compaction lock after compact
     state: { ...bootstrap.state, isStreaming: true, isCompacting: true },
     isStreaming: true,
     runtimeStatus: "active",
-    toolStatus: "Pi 正在思考…",
+    toolStatus: "bash 已完成，Pi 正在继续…",
   };
   Object.assign(api, {
     bootstrap: async () => ({
@@ -533,6 +533,11 @@ test("a stale hot view cannot restore the composer compaction lock after compact
       "a stale hot-memory view must not relock input after compaction completed",
     );
     assert.doesNotMatch(input.placeholder, /正在压缩上下文/);
+    assert.equal(
+      dom.window.document.querySelector(".agent-status"),
+      null,
+      "the stale pre-compaction tool label must not return with the hot view",
+    );
   } finally {
     await act(async () => root.unmount());
     restoreApi();
@@ -607,6 +612,50 @@ test("a tool completion preserves compaction only when Pi explicitly starts it",
       dom.window.document.querySelector(".agent-status")?.textContent || "",
       /上下文溢出，正在自动压缩…/,
       "a delayed tool terminal cannot clear an actual compaction_start",
+    );
+
+    await act(async () => {
+      source.emitPi({
+        type: "compaction_end",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 41,
+        aborted: false,
+      });
+      source.emitPi({
+        type: "tool_execution_end",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 41,
+        toolName: "bash",
+        isError: false,
+      });
+      await Promise.resolve();
+    });
+    assert.equal(
+      dom.window.document.querySelector(".agent-status"),
+      null,
+      "a delayed pre-compaction tool terminal must stay hidden after compaction_end",
+    );
+
+    await act(async () => {
+      source.emitPi({
+        type: "tool_execution_start",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 41,
+        toolName: "read",
+      });
+      source.emitPi({
+        type: "tool_execution_end",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 41,
+        toolName: "read",
+        isError: false,
+      });
+      await Promise.resolve();
+    });
+    assert.match(
+      dom.window.document.querySelector(".agent-status")?.textContent || "",
+      /read 已完成，Pi 正在继续…/,
+      "a genuinely later tool phase may publish its own completion status",
     );
   } finally {
     await act(async () => root.unmount());

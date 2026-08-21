@@ -43,6 +43,26 @@ test("shared Runtime transition derives lifecycle and streaming facts without mu
   assert.equal(terminal.state.pendingTerminalMessages.length, 1);
 });
 
+test("compaction replaces and then clears the preceding tool phase", () => {
+  const toolCompleted = {
+    ...base(),
+    running: true,
+    toolStatus: "bash 已完成，Pi 正在继续…",
+  };
+  const compacting = transitionRuntimeEvent("session-a", toolCompleted, {
+    type: "compaction_start",
+    reason: "overflow",
+  });
+  assert.equal(compacting.state.toolStatus, "上下文溢出，正在自动压缩…");
+
+  const completed = transitionRuntimeEvent("session-a", compacting.state, {
+    type: "compaction_end",
+    aborted: false,
+  });
+  assert.equal(completed.state.toolStatus, "");
+  assert.deepEqual(completed.effects, [{ type: "context-pending" }]);
+});
+
 test("delta-only Runtime updates become cumulative browser snapshots", () => {
   const started = transitionRuntimeEvent("session-a", base(), {
     type: "message_start",
