@@ -165,6 +165,7 @@ export function ComposerModelSelect({ value, models, disabled, onChange }: {
               className={`compact-select-option composer-model-option${isSelected ? " is-selected" : ""}${isActive ? " is-active" : ""}`}
               role="option"
               aria-selected={isSelected}
+              title={model.id}
               onMouseMove={() => setActiveIndex(index)}
               onMouseDown={(event) => event.preventDefault()}
               onClick={() => choose(model)}

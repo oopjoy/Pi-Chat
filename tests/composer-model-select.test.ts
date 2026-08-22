@@ -83,6 +83,7 @@ test("composer model picker keeps provider rows outside option navigation and sh
       ["Sol", "Terra CPA", "Terra"],
     );
     const modelOptions = [...listbox.querySelectorAll<HTMLElement>("[role='option']")];
+    assert.deepEqual(modelOptions.map((option) => option.title), ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-terra"]);
     assert.ok(modelOptions.every((option) => option.firstElementChild?.classList.contains("composer-model-option-name")));
     assert.ok(modelOptions.every((option) => option.lastElementChild?.classList.contains("compact-select-check")));
     assert.ok(modelOptions[0]!.lastElementChild?.querySelector("svg"));
