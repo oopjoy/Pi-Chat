@@ -658,13 +658,13 @@ details.conversation-process { display: block; padding: 0; }
 .composer-controls .compact-select-popover { top: auto; bottom: calc(100% + 7px); box-sizing: border-box; width: 100%; min-width: 100%; max-width: 100%; padding: 3px 2px; }
 .composer-controls .compact-select-option { min-height: 28px; gap: 5px; padding: 4px 3px; }
 .composer-controls .compact-select-check { width: 15px; flex-basis: 15px; }
-.composer-controls .composer-model-popover { width: min(320px, calc(100vw - 24px)); min-width: min(260px, calc(100vw - 24px)); max-width: min(320px, calc(100vw - 24px)); overflow: hidden; padding: 4px; }
+.composer-controls .composer-model-popover { width: min(192px, calc(100vw - 24px)); min-width: min(192px, calc(100vw - 24px)); max-width: min(192px, calc(100vw - 24px)); overflow: hidden; padding: 4px; }
 .composer-model-list { max-height: min(320px, 60dvh); overflow-y: auto; overscroll-behavior: contain; outline: 0; scrollbar-color: color-mix(in srgb, var(--line-strong), var(--text) 18%) var(--surface-soft); scrollbar-gutter: stable; scrollbar-width: thin; }
 .composer-model-list::-webkit-scrollbar { width: 10px; }
 .composer-model-list::-webkit-scrollbar-track { background: var(--surface-soft); }
 .composer-model-list::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 999px; background: color-mix(in srgb, var(--line-strong), var(--text) 18%); background-clip: content-box; }
 .composer-model-group + .composer-model-group { margin-top: 4px; }
-.composer-model-provider { display: flex; min-height: 25px; align-items: center; gap: 6px; padding: 4px 7px; color: var(--muted); font-size: 10.5px; font-weight: 650; }
+.composer-model-provider { display: flex; min-height: 25px; align-items: center; gap: 6px; margin: 2px; padding: 4px 7px; border-radius: 6px; background: color-mix(in srgb, var(--status-green), white 82%); color: #16251b; font-size: 10.5px; font-weight: 750; }
 .composer-model-provider > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .composer-model-provider > b { margin-left: auto; color: var(--muted); font-size: 9px; font-variant-numeric: tabular-nums; font-weight: 600; }
 .composer-controls .composer-model-option { min-height: 32px; justify-content: flex-start; gap: 7px; padding: 5px 7px; }
