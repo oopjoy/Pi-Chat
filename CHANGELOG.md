@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.4.5
+
+### Streaming and long-session performance
+
+- Cumulative assistant output now uses authoritative checkpoints and append-only deltas, stable projected message identities, progressive Markdown/GFM/KaTeX rendering, sequence-gap recovery, and a canonical terminal render without changing the production $50$ ms latest-wins cadence.
+- Large Session JSONL files now retain committed byte offsets and parse only verified append-only suffixes, with rewrite fallback and active-branch semantics. Session inventory scans also retain bounded negative results and avoid repeated cold-start work.
+- Provider terminal reconciliation prevents duplicate live/persisted replies without globally deduplicating independent assistant turns.
+
+### Session management and reliability
+
+- Cold or reclaimed Sessions can compact through their own restored RPC binding, and compaction completion clears stale tool state while returning to the normal blue running presentation.
+- Clone and Fork create independent cold Sessions through the source Session's single RPC writer. Both require confirmation; Fork previews its exact history boundary and restores the selected User message as an editable, unsent draft.
+- Fork provenance is stored atomically in a Pi Chat sidecar rather than either Pi JSONL. Forked conversations show a cold navigation link to their source, fail closed when the source is deleted, and retain duplicate-operation guards when a committed outcome needs recovery or index confirmation.
+
+### Workspace and Composer interface
+
+- The right-side Workspace Inspector now provides `Files` and `Changes`: Files lists the current Session's most recent successful Edit/Write targets with bounded fail-closed previews, while Changes retains the unified Edit projection.
+- The file list/preview split is keyboard and pointer resizable, and code previews support readable typography plus horizontal scrolling.
+- The Composer model selector is smaller and name-first while retaining model IDs on hover.
+
+### Verification and package scope
+
+- TypeScript checks, the isolated $964$-test unit suite ($960$ passed, $4$ platform-skipped), and all $19$ Playwright scenarios pass.
+- `pi-chat-windows-0.4.5.zip` is the runnable Windows package. GitHub-generated source archives are source-only development inputs.
+- Pi Chat remains loopback-only and local-first; this release does not add remote hosting, a desktop shell, or a replacement Pi agent loop.
+
 ## 0.4.4
 
 ### Conversation reliability
