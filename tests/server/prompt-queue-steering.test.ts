@@ -1238,3 +1238,62 @@ test("all opened sessions route prompts, events and aborts to independent RPC wo
     await app.close();
   }
 });
+
+test("native dequeue withdraws only the still-queued Steer suffix", async () => {
+  const path = "C:\\sessions\\native-dequeue.jsonl";
+  const sessionId = idForPath(path);
+  const primary = new FakeRpc(path, "native-dequeue");
+  primary.streaming = true;
+  const summary = { id: sessionId, sessionId: "native-dequeue", name: "Native dequeue", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true };
+  const sessions = {
+    list: async () => [summary],
+    pathForId: (candidate: string) => candidate === sessionId ? path : null,
+    summaryForId: () => summary,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const firstId = "11111111-1111-4111-8111-111111111111";
+  const secondId = "22222222-2222-4222-8222-222222222222";
+  const postSteer = (steerId: string) => fetch(`${origin}/api/chat/prompt`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sessionId, message: "same text", delivery: "steer", steerId }),
+  });
+  try {
+    await fetch(`${origin}/api/bootstrap`);
+    assert.equal((await postSteer(firstId)).status, 202);
+    assert.equal((await postSteer(secondId)).status, 202);
+    assert.deepEqual(primary.steeringQueue, ["same text", "same text"]);
+
+    primary.steeringQueue.shift();
+    primary.emit({ type: "queue_update", steering: [...primary.steeringQueue], followUp: [] });
+    primary.emit({ type: "message_start", message: { role: "user", content: "same text" } });
+
+    const response = await fetch(`${origin}/api/chat/steers/dequeue`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId }),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      items: [{ id: secondId, message: "same text" }],
+      count: 1,
+    });
+    assert.deepEqual(primary.steeringQueue, []);
+    assert.equal(primary.commands.filter((command) => command.type === "dequeue").length, 1);
+    const internals = app as unknown as {
+      nativeSteeringAdmissionsBySession: Map<string, unknown>;
+      pendingNativeSteeringBySession: Map<string, unknown>;
+    };
+    assert.equal(internals.nativeSteeringAdmissionsBySession.has(sessionId), false);
+    assert.equal(internals.pendingNativeSteeringBySession.has(sessionId), false);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});

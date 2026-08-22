@@ -103,3 +103,25 @@ test("Composer reducer fences cancelled-queue restoration by partition revision"
   assert.equal(composerPartition(state, key).draft.message, "newer work");
   assert.equal(composerPartition(state, session("B")).draft.message, "B cancellation");
 });
+
+test("Composer reducer prepends native dequeued Steers like Pi Alt+Up", () => {
+  const key = session("A");
+  let state = composerReducer(emptyComposerState(), {
+    type: "edit",
+    key,
+    message: "current editor text",
+  });
+  const revision = composerPartition(state, key).draft.revision;
+  state = composerReducer(state, {
+    type: "restore-cancelled",
+    key,
+    expectedRevision: revision - 1,
+    message: "first Steer\n\nsecond Steer",
+    images: [],
+    prepend: true,
+  });
+  assert.equal(
+    composerPartition(state, key).draft.message,
+    "first Steer\n\nsecond Steer\n\ncurrent editor text",
+  );
+});

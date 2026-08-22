@@ -17,6 +17,7 @@ export type ComposerRestoredDraft = {
   expectedDraftRevision: number;
   message: string;
   images: PromptImage[];
+  prepend?: boolean;
 };
 
 type ComposerControllerOptions = {
@@ -118,7 +119,10 @@ export function useComposerController({
     const token = `${composerDraftKeyId(restoredDraft.key)}:${restoredDraft.revision}`;
     if (appliedRestorationsRef.current.has(token)) return;
     const partition = composerPartition(stateRef.current, draftKey);
-    if (partition.draft.revision !== restoredDraft.expectedDraftRevision) return;
+    if (
+      !restoredDraft.prepend &&
+      partition.draft.revision !== restoredDraft.expectedDraftRevision
+    ) return;
     appliedRestorationsRef.current.add(token);
     commit({
       type: "restore-cancelled",
@@ -126,6 +130,7 @@ export function useComposerController({
       expectedRevision: restoredDraft.expectedDraftRevision,
       message: restoredDraft.message,
       images: restoredDraft.images,
+      prepend: restoredDraft.prepend,
     });
   }, [commit, draftKey, restoredDraft]);
 

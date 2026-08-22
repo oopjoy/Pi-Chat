@@ -652,6 +652,9 @@ details.conversation-process { display: block; padding: 0; }
 .pending-steers { box-sizing: border-box; width: min(calc(100% - var(--chat-column-gutter)), var(--reading-width), var(--chat-column-max)); max-height: 134px; margin: 0 auto 4px; overflow: hidden; border: 1px solid color-mix(in srgb, var(--accent), transparent 62%); border-radius: 10px; background: color-mix(in srgb, var(--accent-soft), var(--surface) 60%); box-shadow: 0 4px 16px rgba(27, 44, 70, .05); }
 .pending-steers > header { display: flex; min-height: 29px; align-items: center; gap: 7px; padding: 4px 9px; border-bottom: 1px solid color-mix(in srgb, var(--accent), transparent 76%); color: var(--muted); font-size: 10px; }
 .pending-steers > header strong { display: grid; width: 18px; height: 18px; place-items: center; border-radius: 50%; background: var(--accent-soft); color: var(--accent); font-size: 9px; }
+.pending-steers > header button { margin-left: auto; padding: 3px 7px; border: 1px solid color-mix(in srgb, var(--accent), transparent 58%); border-radius: 6px; background: var(--surface); color: var(--accent); font: inherit; cursor: pointer; }
+.pending-steers > header button:hover:not(:disabled) { background: var(--accent-soft); }
+.pending-steers > header button:disabled { cursor: wait; opacity: .58; }
 .pending-steers > div { max-height: 102px; overflow-y: auto; }
 .pending-steers article { display: flex; align-items: center; gap: 8px; padding: 6px 9px; border-bottom: 1px solid color-mix(in srgb, var(--accent), transparent 84%); }
 .pending-steers article:last-child { border-bottom: 0; }

@@ -104,6 +104,8 @@ export type ComposerAction =
       expectedRevision: number;
       message: string;
       images: PromptImage[];
+      /** Native Pi dequeue prepends restored queue text to the current editor. */
+      prepend?: boolean;
     };
 
 /**
@@ -182,12 +184,19 @@ export function composerReducer(
     });
   }
   if (action.type === "restore-cancelled") {
-    if (partition.draft.revision !== action.expectedRevision) return state;
+    if (!action.prepend && partition.draft.revision !== action.expectedRevision)
+      return state;
     return withPartition(state, action.key, {
       ...partition,
       draft: {
-        message: action.message,
-        images: [...action.images],
+        message: action.prepend
+          ? [action.message, partition.draft.message]
+              .filter((message) => message.trim())
+              .join("\n\n")
+          : action.message,
+        images: action.prepend
+          ? [...action.images, ...partition.draft.images]
+          : [...action.images],
         revision: partition.draft.revision,
       },
     });

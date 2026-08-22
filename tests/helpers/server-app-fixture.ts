@@ -175,6 +175,21 @@ export class FakeRpc {
       });
       return { type: "response", success: true };
     }
+    if (command.type === "dequeue") {
+      const steering = this.steeringQueue.splice(0);
+      this.emit({ type: "queue_update", steering: [], followUp: [] });
+      this.emit({
+        type: "pi_chat_queue_dequeued",
+        dequeueId: command.dequeueId,
+        steering,
+        followUp: [],
+      });
+      return {
+        type: "response",
+        success: true,
+        data: { steering, followUp: [] },
+      };
+    }
     if (command.type === "abort") {
       this.streaming = false;
       this.emit({ type: "agent_settled" });

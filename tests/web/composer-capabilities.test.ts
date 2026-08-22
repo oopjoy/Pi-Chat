@@ -1907,6 +1907,69 @@ test("App reveals a Steer turn only when Pi consumes it", async () => {
   }
 });
 
+test("App withdraws Pi-native Steers and prepends them back into the Composer", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  let steerId = "";
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true },
+      sessions: bootstrap.sessions.map((session) => ({ ...session, running: true })),
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    prompt: async (...args: unknown[]) => {
+      steerId = String(args[6] || "");
+      return { accepted: true, queued: false, steered: true, id: steerId };
+    },
+    dequeueSteers: async () => ({
+      items: [{ id: steerId, message: "withdraw me" }],
+      count: 1,
+    }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    const edit = async (value: string) => {
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(
+          dom.window.HTMLTextAreaElement.prototype,
+          "value",
+        )?.set?.call(textarea, value);
+        textarea.dispatchEvent(new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: value,
+        }));
+      });
+    };
+    await edit("withdraw me");
+    await act(async () => {
+      dom.window.document.querySelector<HTMLButtonElement>(".steer-submit-button")!.click();
+    });
+    assert.match(steerId, /^[a-f0-9-]{36}$/i);
+    await edit("current editor text");
+    await act(async () => {
+      dom.window.document.querySelector<HTMLButtonElement>(".pending-steers header button")!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(textarea.value, "withdraw me\n\ncurrent editor text");
+    assert.equal(dom.window.document.querySelector(".pending-steers"), null);
+    assert.equal(dom.window.document.querySelectorAll(".message-user").length, 0);
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("an authoritative stopped Steer rejection settles the stale Composer and refreshes persisted answer metadata", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");

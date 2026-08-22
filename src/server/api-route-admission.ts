@@ -13,6 +13,7 @@ export const PROMPT_BODY_LIMIT = MAX_PROMPT_HTTP_BODY_BYTES;
 
 const SESSION_BODY_MUTATIONS = new Set([
   "/api/chat/prompt",
+  "/api/chat/steers/dequeue",
   "/api/chat/queue/resume",
   "/api/chat/compact",
   "/api/chat/abort",

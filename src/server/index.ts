@@ -125,6 +125,9 @@ diagnostics.record({
   outcome: "started",
 });
 const agentDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
+const piRpcRegister = join(projectRoot, "resources", "runtime", "pi-chat-rpc-register.mjs");
+if (!existsSync(piRpcRegister))
+  throw new Error("Pi Chat RPC 能力适配器缺失；请重新构建完整安装包");
 const gateComponent = await ensurePiChatSystemGate({
   agentDir,
   sourcePath: join(projectRoot, "resources", "extensions", "pi-chat-file-permission-gate.ts"),
@@ -153,6 +156,7 @@ const rpc = new PiRpcClient({
   piEntry: piRuntimeLaunch.piEntry,
   startupProbe,
   startupBackend: piRuntimeLaunch.bundled ? "bundle" : "direct",
+  rpcRegister: piRuntimeLaunch.bundled ? undefined : piRpcRegister,
   childEnvironment: piRuntimeLaunch.childEnvironment,
   diagnostics,
   runtimeKind: "primary",
@@ -234,6 +238,7 @@ const app = new PiChatApp({
     piEntry: piRuntimeLaunch.piEntry,
     startupProbe,
     startupBackend: piRuntimeLaunch.bundled ? "bundle" : "direct",
+    rpcRegister: piRuntimeLaunch.bundled ? undefined : piRpcRegister,
     childEnvironment: piRuntimeLaunch.childEnvironment,
     diagnostics,
     runtimeKind: "secondary",

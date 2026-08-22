@@ -384,7 +384,7 @@ interface NativeSteeringSnapshot {
 /** Accepted native steers waiting for Pi consumption, scoped to one worker generation. */
 interface NativeSteeringAdmissions {
   generation: number;
-  items: Array<{ message: string; promptAt: number; imageChars: number }>;
+  items: Array<{ id: string; message: string; promptAt: number; imageChars: number }>;
 }
 
 interface ActivePromptDiagnostic {
@@ -524,6 +524,11 @@ export class PiChatApp {
   private readonly nativeSteeringAdmissionsBySession = new Map<
     string,
     NativeSteeringAdmissions
+  >();
+  /** Short-lived correlation from Pi's dequeue event to the initiating HTTP response. */
+  private readonly nativeSteeringDequeueResults = new Map<
+    string,
+    { sessionId: string; generation: number; createdAt: number; items: Array<{ id: string; message: string }> }
   >();
   /** Session → generation whose settlement deferred steering cleanup. */
   private readonly nativeSteeringResetAfterSettlement = new Map<string, number>();
@@ -1430,6 +1435,7 @@ export class PiChatApp {
     if (pathname === "/api/restart") return "lifecycle.restart";
     if (pathname === "/api/shutdown") return "lifecycle.shutdown";
     if (pathname === "/api/chat/prompt") return "prompt.send";
+    if (pathname === "/api/chat/steers/dequeue") return "prompt.abort";
     if (pathname === "/api/chat/abort") return "prompt.abort";
     if (pathname === "/api/extension/respond") return "extension.respond";
     if (/^\/api\/sessions\/[^/]+\/control$/.test(pathname)) return "control.takeover";
@@ -2136,6 +2142,69 @@ export class PiChatApp {
   }
 
   /**
+   * Pi's native Alt+Up action clears the whole remaining queue. The preceding
+   * queue_update looks identical to consumption, so this correlated event
+   * removes only the cleared suffix from both snapshot and admissions before a
+   * future message_start can mistake it for executed steering.
+   */
+  private settleNativeSteeringDequeue(
+    sessionId: string,
+    event: Record<string, unknown>,
+    generation: number,
+  ): Array<{ id: string; message: string }> {
+    const dequeueId = typeof event.dequeueId === "string" ? event.dequeueId : "";
+    const steering = Array.isArray(event.steering)
+      ? event.steering.filter((message): message is string => typeof message === "string")
+      : null;
+    if (!dequeueId || !steering) return [];
+    const admissions = this.nativeSteeringAdmissionsBySession.get(sessionId);
+    let items: Array<{ id: string; message: string }> = [];
+    if (admissions?.generation === generation && steering.length <= admissions.items.length) {
+      const candidate = admissions.items.slice(admissions.items.length - steering.length);
+      if (candidate.every((admission, index) => admission.message === steering[index])) {
+        items = candidate.map(({ id, message }) => ({ id, message }));
+        admissions.items.splice(admissions.items.length - steering.length, steering.length);
+        if (admissions.items.length)
+          this.nativeSteeringAdmissionsBySession.set(sessionId, admissions);
+        else this.nativeSteeringAdmissionsBySession.delete(sessionId);
+      }
+    }
+    const snapshot = this.pendingNativeSteeringBySession.get(sessionId);
+    if (snapshot?.generation === generation && steering.length <= snapshot.dequeued.length) {
+      const suffix = snapshot.dequeued.slice(snapshot.dequeued.length - steering.length);
+      if (suffix.every((message, index) => message === steering[index]))
+        snapshot.dequeued.splice(snapshot.dequeued.length - steering.length, steering.length);
+      if (snapshot.messages.length || snapshot.dequeued.length)
+        this.pendingNativeSteeringBySession.set(sessionId, snapshot);
+      else this.pendingNativeSteeringBySession.delete(sessionId);
+    }
+    const now = Date.now();
+    for (const [id, result] of this.nativeSteeringDequeueResults) {
+      if (now - result.createdAt > 5 * 60_000)
+        this.nativeSteeringDequeueResults.delete(id);
+    }
+    this.nativeSteeringDequeueResults.set(dequeueId, {
+      sessionId,
+      generation,
+      createdAt: now,
+      items,
+    });
+    while (this.nativeSteeringDequeueResults.size > 64) {
+      const oldest = this.nativeSteeringDequeueResults.keys().next().value;
+      if (typeof oldest !== "string") break;
+      this.nativeSteeringDequeueResults.delete(oldest);
+    }
+    if (items.length)
+      this.broadcast({
+        type: "pi_chat_native_steering_dequeued",
+        piChatRunEpoch: this.runEpoch,
+        piChatSessionId: sessionId,
+        ids: items.map((item) => item.id),
+      });
+    return items;
+  }
+
+  /**
    * Returns true when this user message_start is a *verified* native steer
    * consumption: Pi dequeued the matching steering message (queue_update
    * shrank) immediately before forwarding it. A text-only match without a
@@ -2296,6 +2365,10 @@ export class PiChatApp {
     const type = String(event.type || "");
     if (this.cancelInteractiveCopyHook(runtime.id, runtime.rpc, event)) return;
     const generation = runtime.rpcGeneration;
+    if (type === "pi_chat_queue_dequeued") {
+      this.settleNativeSteeringDequeue(runtime.id, event, generation);
+      return;
+    }
     const queuePausedBeforeEvent = runtime.queuePaused;
     this.traceState("rpc-event", "received", runtime.id, {
       eventType: type || "unknown",
@@ -2857,6 +2930,10 @@ export class PiChatApp {
     const type = String(event.type || "");
     if (this.cancelInteractiveCopyHook(sessionId, this.options.rpc, event)) return;
     const generation = this.primaryRpcGeneration;
+    if (type === "pi_chat_queue_dequeued") {
+      this.settleNativeSteeringDequeue(sessionId, event, generation);
+      return;
+    }
     const queuePausedBeforeEvent = this.queuePaused;
     this.traceState("rpc-event", "received", sessionId, {
       eventType: type || "unknown",
@@ -5747,6 +5824,73 @@ export class PiChatApp {
       }
     }
 
+    if (url.pathname === "/api/chat/steers/dequeue") {
+      if (request.method !== "POST") return methodNotAllowed(response);
+      const body = preparedBody || (await bodyJson(request));
+      const requestedSessionId = requiredSessionId(body);
+      const releasePromptAdmission = await this.beginPromptAdmission(requestedSessionId);
+      let releaseRuntimeAdmission: (() => void) | null = null;
+      const dequeueId = randomUUID();
+      try {
+        const requestedIsPrimary =
+          Boolean(this.activeSessionId) && requestedSessionId === this.activeSessionId;
+        const steeringRuntime = requestedIsPrimary
+          ? null
+          : this.runtimePool.get(requestedSessionId) || null;
+        if (!requestedIsPrimary && !steeringRuntime)
+          return json(response, 409, {
+            error: "当前对话没有可撤回的原生 Steer 队列",
+            code: "STEER_RUNTIME_NOT_HOT",
+          });
+        const targetRpc = steeringRuntime?.rpc || this.options.rpc;
+        const targetGeneration = requestedIsPrimary
+          ? this.primaryRpcGeneration
+          : (steeringRuntime?.rpcGeneration || 0);
+        if (targetRpc.isRunning?.() === false)
+          return json(response, 409, {
+            error: "Pi 已退出，无法撤回 Steer",
+            code: "STEER_RUNTIME_NOT_RUNNING",
+          });
+        releaseRuntimeAdmission = steeringRuntime
+          ? this.runtimePool.acquireOperation(steeringRuntime)
+          : this.primaryOperationAdmission.acquire().release;
+        let result: Record<string, unknown> | null = null;
+        try {
+          result = await targetRpc.send(
+            { type: "dequeue", dequeueId },
+            10_000,
+          );
+        } catch (error) {
+          const completed = this.nativeSteeringDequeueResults.get(dequeueId);
+          if (!(error instanceof RpcRequestTimeoutError && error.outcomeUnknown && completed))
+            throw error;
+        }
+        let completed = this.nativeSteeringDequeueResults.get(dequeueId);
+        if (!completed && result) {
+          const data = rpcData<{ steering?: unknown }>(result);
+          this.settleNativeSteeringDequeue(
+            requestedSessionId,
+            {
+              dequeueId,
+              steering: Array.isArray(data.steering) ? data.steering : [],
+            },
+            targetGeneration,
+          );
+          completed = this.nativeSteeringDequeueResults.get(dequeueId);
+        }
+        this.nativeSteeringDequeueResults.delete(dequeueId);
+        const items =
+          completed?.sessionId === requestedSessionId &&
+          completed.generation === targetGeneration
+            ? completed.items
+            : [];
+        return json(response, 200, { items, count: items.length });
+      } finally {
+        releaseRuntimeAdmission?.();
+        releasePromptAdmission();
+      }
+    }
+
     if (url.pathname === "/api/chat/prompt") {
       if (request.method !== "POST") return methodNotAllowed(response);
       const body = preparedBody || (await bodyJson(request, PROMPT_BODY_LIMIT));
@@ -5766,6 +5910,12 @@ export class PiChatApp {
         return json(response, 400, { error: "消息交付方式无效" });
       const delivery: PromptDelivery =
         body.delivery === "steer" ? "steer" : "queue";
+      const requestedSteerId = typeof body.steerId === "string" ? body.steerId : "";
+      if (
+        body.steerId !== undefined &&
+        (delivery !== "steer" || !/^[a-f0-9-]{36}$/i.test(requestedSteerId))
+      )
+        return json(response, 400, { error: "Steer 标识无效" });
       const images = promptImages(body.images);
       if (!message && !images.length)
         return json(response, 400, { error: "消息或图片不能为空" });
@@ -5847,7 +5997,9 @@ export class PiChatApp {
               error: "Steer 排队图片总量超限",
             });
           const steeringMessage = message || "请查看这些图片。";
+          const steerId = requestedSteerId || randomUUID();
           currentAdmissions.items.push({
+            id: steerId,
             message: steeringMessage,
             promptAt,
             imageChars: incomingImageChars,
@@ -5877,9 +6029,7 @@ export class PiChatApp {
                 this.nativeSteeringAdmissionsBySession.get(requestedSessionId);
               if (current && current.generation === targetGeneration) {
                 const index = current.items.findIndex(
-                  (admission) =>
-                    admission.message === steeringMessage &&
-                    admission.promptAt === promptAt,
+                  (admission) => admission.id === steerId,
                 );
                 if (index >= 0) current.items.splice(index, 1);
                 if (current.items.length)
@@ -5958,6 +6108,7 @@ export class PiChatApp {
             accepted: true,
             queued: false,
             steered: true,
+            ...(requestedSteerId ? { id: steerId } : null),
             ...(deliveryUncertain ? { deliveryUncertain: true } : null),
           });
           return;

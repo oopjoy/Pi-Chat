@@ -53,7 +53,7 @@ export interface ConversationPaneProps {
   onNavigate: (direction: NavigationDirection) => void;
   sessionControl: ComponentProps<typeof SessionControlBanner>;
   promptQueue: ComponentProps<typeof PromptQueue>;
-  pendingSteers: PendingSteer[];
+  pendingSteers: ComponentProps<typeof PendingSteers>;
   chatInput: ComponentProps<typeof ChatInput>;
 }
 
@@ -266,7 +266,7 @@ export function ConversationPane({
     </nav>
     <SessionControlBanner {...sessionControl} />
     <PromptQueue {...promptQueue} />
-    <PendingSteers items={pendingSteers} />
+    <PendingSteers {...pendingSteers} />
     <ChatInput {...chatInput} />
   </main>;
 }

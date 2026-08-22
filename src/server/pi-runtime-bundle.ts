@@ -7,7 +7,7 @@ import { resolvePiEntry } from "./rpc-client.js";
 const PI_PACKAGE_NAME = "@earendil-works/pi-coding-agent";
 const BUNDLE_SCHEMA_VERSION = 2;
 const BUNDLE_LAYOUT_VERSION = 1;
-const BUNDLE_RECIPE_VERSION = 2;
+const BUNDLE_RECIPE_VERSION = 3;
 const BUNDLE_ESBUILD_VERSION = "0.28.1";
 const BUNDLED_RUNTIME_DISABLED_ENV = "PI_CHAT_DISABLE_BUNDLED_PI_RUNTIME";
 

@@ -886,6 +886,8 @@ export function App() {
   const localUserTurnsRef = useRef(new Map<string, LocalUserTurn[]>());
   const draftRestorationIntentSequenceRef = useRef(0);
   const appliedDraftRestorationSequencesRef = useRef(new Map<string, number>());
+  const steerDequeueExpectedDraftRevisionRef = useRef(new Map<string, number>());
+  const [steerDequeueingBySession, setSteerDequeueingBySession] = useState<Record<string, boolean>>({});
   const queueMutationSequenceRef = useRef(new Map<string, number>());
   const appliedQueueMutationSequenceRef = useRef(new Map<string, number>());
   const cancelledQueueIdsRef = useRef(new Map<string, Set<string>>());
@@ -903,6 +905,7 @@ export function App() {
       expectedDraftRevision: number;
       message: string;
       images: PromptImage[];
+      prepend?: boolean;
     }>
   >({});
   /** A terminal compaction frame outranks a later stale hot-memory view until a new compaction begins. */
@@ -1610,6 +1613,92 @@ export function App() {
     return true;
   };
   paneAuthorityDispatchRef.current = commitPaneIfCurrent;
+
+  /**
+   * Settle only IDs confirmed by Pi's native dequeue event. The browser-local
+   * turns are a presentation cache; Pi's queue remains the authority for what
+   * was actually withdrawn.
+   */
+  const applyDequeuedSteers = (sessionId: string, ids: string[]) => {
+    if (!sessionId || !ids.length) return;
+    const withdrawnIds = new Set(ids);
+    const pending = localUserTurnsRef.current.get(sessionId) || [];
+    const withdrawn = ids.flatMap((id) => {
+      const turn = pending.find((candidate) => candidate.queueId === id);
+      return turn ? [turn] : [];
+    });
+    let remaining = pending;
+    for (const turn of withdrawn)
+      remaining = removeLocalTurnAndRebase(remaining, turn);
+    if (remaining.length) localUserTurnsRef.current.set(sessionId, remaining);
+    else localUserTurnsRef.current.delete(sessionId);
+    const pendingSteers = pendingSteersRef.current.get(sessionId) || [];
+    const pendingById = new Map(pendingSteers.map((item) => [item.id, item]));
+    syncPendingSteers(
+      sessionId,
+      pendingSteers.filter((item) => !withdrawnIds.has(item.id)),
+    );
+    setSteerDequeueingBySession((current) => {
+      if (!current[sessionId]) return current;
+      const next = { ...current };
+      delete next[sessionId];
+      return next;
+    });
+    if (!withdrawn.length) return;
+    const restoredTurnTotal = Math.max(
+      sourceTurnTotalsRef.current.get(sessionId) || 0,
+      ...remaining.map((turn) => turn.expectedTurnTotal),
+    );
+    setSessions((current) =>
+      current.map((session) =>
+        session.id === sessionId
+          ? { ...session, turnCount: restoredTurnTotal }
+          : session,
+      ),
+    );
+    if (viewedSessionIdRef.current === sessionId) {
+      const withdrawnMessages = new Set(withdrawn.map((turn) => turn.message));
+      commitPaneIfCurrent(capturePaneAuthority(sessionId), {
+        type: "PROMPT_ACKNOWLEDGED",
+        sessionId,
+        messages: (current) =>
+          current.filter((message) => !withdrawnMessages.has(message)),
+      });
+    }
+    const sequence = ++draftRestorationIntentSequenceRef.current;
+    const drafts = withdrawn.map((turn) =>
+      promptDraftFromMessage(
+        turn.message,
+        pendingById.get(turn.queueId || "")?.message || "",
+      ),
+    );
+    const expectedDraftRevision =
+      steerDequeueExpectedDraftRevisionRef.current.get(sessionId) ??
+      composerDraftRevisionsRef.current.get(
+        composerDraftKeyId({ kind: "session", sessionId }),
+      ) ??
+      0;
+    steerDequeueExpectedDraftRevisionRef.current.delete(sessionId);
+    const key: ComposerDraftKey = { kind: "session", sessionId };
+    const keyId = composerDraftKeyId(key);
+    if (
+      sequence >
+      (appliedDraftRestorationSequencesRef.current.get(keyId) || 0)
+    ) {
+      appliedDraftRestorationSequencesRef.current.set(keyId, sequence);
+      setRestoredComposerDrafts((current) => ({
+        ...current,
+        [keyId]: {
+          key,
+          revision: sequence,
+          expectedDraftRevision,
+          message: drafts.map((draft) => draft.message).filter(Boolean).join("\n\n"),
+          images: drafts.flatMap((draft) => draft.images),
+          prepend: true,
+        },
+      }));
+    }
+  };
 
   // Bootstrap owns application-wide metadata. Keep it separate from the selected
   // view so a refresh can restore a remembered cold Session without briefly
@@ -3187,6 +3276,15 @@ export function App() {
           navigationEpoch: navigationEpochRef.current,
         },
       });
+      if (type === "pi_chat_native_steering_dequeued") {
+        const ids = Array.isArray(event.ids)
+          ? event.ids.filter((id): id is string =>
+              typeof id === "string" && /^[a-f0-9-]{36}$/i.test(id),
+            )
+          : [];
+        if (eventSessionId && ids.length) applyDequeuedSteers(eventSessionId, ids);
+        return;
+      }
       if (eventSessionId && invalidatesSessionViewVersion(type)) {
         sessionEventVersionRef.current.set(
           eventSessionId,
@@ -5376,7 +5474,7 @@ export function App() {
       // Protect the prompt across every asynchronous refresh until a JSONL view
       // confirms the additional user turn. This also covers active Sessions,
       // which have no Runtime-start view to pass through above.
-      protectLocalPrompt();
+      const admittedLocalTurn = protectLocalPrompt();
       promptSubmitted = true;
       const requestedGateMode =
         pendingGateModesRef.current.get(targetSessionId) ??
@@ -5391,6 +5489,8 @@ export function App() {
               targetSessionId,
               requestedGateMode,
               "steer",
+              undefined,
+              admittedLocalTurn?.queueId,
             )
           : capturedPromptSettings
             ? await api.prompt(
@@ -7411,6 +7511,45 @@ export function App() {
   const observing = Boolean(
     effectiveControl.controlOwner && !effectiveControl.controlledByThisWindow,
   );
+  const dequeuePendingSteers = () => {
+    const operation = captureViewOperation();
+    const draftKey: ComposerDraftKey = {
+      kind: "session",
+      sessionId: operation.sessionId,
+    };
+    steerDequeueExpectedDraftRevisionRef.current.set(
+      operation.sessionId,
+      composerDraftRevisionsRef.current.get(composerDraftKeyId(draftKey)) || 0,
+    );
+    setSteerDequeueingBySession((current) => ({
+      ...current,
+      [operation.sessionId]: true,
+    }));
+    void api.dequeueSteers(operation.sessionId).then((result) => {
+      if (!viewOperationIsInCurrentRun(operation)) return;
+      applyDequeuedSteers(
+        operation.sessionId,
+        result.items.map((item) => item.id),
+      );
+      if (
+        result.count === 0 &&
+        (pendingSteersRef.current.get(operation.sessionId)?.length || 0) > 0 &&
+        viewOperationIsCurrent(operation)
+      )
+        setError("这些 Steer 已不在 Pi 的原生等待队列中，未伪装为撤回成功");
+    }).catch((cause) => {
+      if (viewOperationIsCurrent(operation))
+        setError(cause instanceof Error ? cause.message : String(cause));
+    }).finally(() => {
+      setSteerDequeueingBySession((current) => {
+        if (!current[operation.sessionId]) return current;
+        const next = { ...current };
+        delete next[operation.sessionId];
+        return next;
+      });
+    });
+  };
+
   const cancelQueuedPrompt = (item: QueuedPrompt) => {
     const operation = captureViewOperation();
     draftRestorationIntentSequenceRef.current += 1;
@@ -8061,7 +8200,11 @@ export function App() {
           onCancel: cancelQueuedPrompt,
           onResume: resumeQueuedPrompt,
         }}
-        pendingSteers={pendingSteersBySession[viewedSessionId] || []}
+        pendingSteers={{
+          items: pendingSteersBySession[viewedSessionId] || [],
+          dequeueing: steerDequeueingBySession[viewedSessionId] === true,
+          onDequeue: dequeuePendingSteers,
+        }}
         chatInput={{
           streaming: viewingSubagentSession ? false : composerQueueMode,
           activelyStreaming: viewingSubagentSession ? false : state.isStreaming,

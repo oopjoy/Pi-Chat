@@ -1,13 +1,13 @@
 import { createHash } from "node:crypto";
 import { cp, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { build, version as esbuildVersion } from "esbuild";
 
 const PI_PACKAGE_NAME = "@earendil-works/pi-coding-agent";
 const BUNDLE_SCHEMA_VERSION = 2;
 const BUNDLE_LAYOUT_VERSION = 1;
-const BUNDLE_RECIPE_VERSION = 2;
+const BUNDLE_RECIPE_VERSION = 3;
 
 function sha256(content) {
   return createHash("sha256").update(content).digest("hex");
@@ -67,7 +67,8 @@ if (typeof piVersion !== "string" || !piVersion) throw new Error("Bundled Pi pac
 
 const rpcEntry = resolve(sourcePackage.root, "dist", "rpc-entry.js");
 const extensionLoader = resolve(sourcePackage.root, "dist", "core", "extensions", "loader.js");
-if (!isInside(rpcEntry, sourcePackage.root) || !isInside(extensionLoader, sourcePackage.root)) {
+const rpcMode = resolve(sourcePackage.root, "dist", "modes", "rpc", "rpc-mode.js");
+if (!isInside(rpcEntry, sourcePackage.root) || !isInside(extensionLoader, sourcePackage.root) || !isInside(rpcMode, sourcePackage.root)) {
   throw new Error("Pi runtime source paths escaped the package root");
 }
 
@@ -75,13 +76,21 @@ await rm(runtimeRoot, { recursive: true, force: true });
 await mkdir(packageDist, { recursive: true });
 
 try {
+const { patchPiRpcModeSource } = await import(pathToFileURL(resolve("resources", "runtime", "pi-chat-rpc-loader.mjs")).href);
 const loaderMarker = `...(isBunBinary\n            ? { virtualModules: VIRTUAL_MODULES, tryNative: false }\n            : isTypeScriptSourceRuntime`;
 const bundledLoaderMarker = `...(isBunBinary || process.env.PI_CHAT_BUNDLED_RUNTIME === "1"\n            ? { virtualModules: VIRTUAL_MODULES, tryNative: false }\n            : isTypeScriptSourceRuntime`;
 let transformedLoader = false;
+let transformedRpcMode = false;
 const extensionLoaderPlugin = {
   name: "pi-chat-bundled-extension-loader",
   setup(context) {
-    context.onLoad({ filter: /loader\.js$/ }, async (args) => {
+    context.onLoad({ filter: /(?:loader|rpc-mode)\.js$/ }, async (args) => {
+      if (resolve(args.path) === rpcMode) {
+        const source = await readFile(args.path, "utf8");
+        const patched = patchPiRpcModeSource(source);
+        transformedRpcMode = patched !== source;
+        return { contents: patched, loader: "js" };
+      }
       if (resolve(args.path) !== extensionLoader) return undefined;
       const source = await readFile(args.path, "utf8");
       if (!source.includes(loaderMarker)) {
@@ -131,6 +140,7 @@ const mainBuild = await build({
   },
 });
 if (!transformedLoader) throw new Error("Pi extension loader was not included in the runtime bundle");
+if (!transformedRpcMode) throw new Error("Pi RPC mode was not included in the native Steer dequeue transform");
 const imageWorkerPath = resolve(packageDist, "image-resize-worker.js");
 const workerBuild = await build({
   ...sharedBuildOptions,

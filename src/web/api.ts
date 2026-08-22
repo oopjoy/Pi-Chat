@@ -308,7 +308,7 @@ export const api = {
   },
   shutdown: () => request<{ shuttingDown: true }>("/api/shutdown", { method: "POST" }),
   stateDiagnosticSnapshot: () => request<ServerStateDiagnosticSnapshot>("/api/diagnostics/snapshot"),
-  prompt: (message: string, images: PromptImage[] = [], sessionId: string, gateMode?: GateMode, delivery: PromptDelivery = "queue", settings?: PromptSettingsSnapshot) => request<{ accepted: boolean; queued: boolean; steered?: boolean; /** Pi received the JSONL command but its response timed out; final execution remains event-confirmed. */ deliveryUncertain?: boolean; extension?: boolean; command?: string; description?: string; isStreaming?: boolean; id?: string; queue?: QueuedPrompt[] }>("/api/chat/prompt", {
+  prompt: (message: string, images: PromptImage[] = [], sessionId: string, gateMode?: GateMode, delivery: PromptDelivery = "queue", settings?: PromptSettingsSnapshot, steerId?: string) => request<{ accepted: boolean; queued: boolean; steered?: boolean; /** Pi received the JSONL command but its response timed out; final execution remains event-confirmed. */ deliveryUncertain?: boolean; extension?: boolean; command?: string; description?: string; isStreaming?: boolean; id?: string; queue?: QueuedPrompt[] }>("/api/chat/prompt", {
     method: "POST",
     body: JSON.stringify({
       message,
@@ -317,6 +317,7 @@ export const api = {
       delivery,
       images: images.map(({ type, data, mimeType }) => ({ type, data, mimeType })),
       ...(settings ? { settings } : null),
+      ...(steerId ? { steerId } : null),
     }),
   }, PROMPT_PREPARE_TIMEOUT_MS),
   pickLocalFiles: () => request<{ paths: string[] }>("/api/local-files/pick", { method: "POST" }),
@@ -324,6 +325,7 @@ export const api = {
   pickDraftWorkspace: () => request<{ cancelled: boolean; cwd?: string }>("/api/workspace/draft-pick", { method: "POST" }),
   pickWorkspace: () => request<{ cancelled: boolean; workspaceName?: string; cwd?: string; workspaceEpoch?: string; workspaceRevision?: number; data?: BootstrapData }>("/api/workspace/pick", { method: "POST" }),
   abort: (sessionId: string) => request<{ ok: boolean; abortPending?: boolean; isStreaming: boolean; queuePaused: boolean }>("/api/chat/abort", { method: "POST", body: JSON.stringify({ sessionId }) }),
+  dequeueSteers: (sessionId: string) => request<{ items: Array<{ id: string; message: string }>; count: number }>("/api/chat/steers/dequeue", { method: "POST", body: JSON.stringify({ sessionId }) }),
   cancelQueued: (id: string, sessionId: string) => request<{ queue: QueuedPrompt[]; paused: boolean }>(`/api/chat/queue/${id}`, { method: "DELETE", body: JSON.stringify({ sessionId }) }),
   resumeQueue: (sessionId: string) => request<{ queue: QueuedPrompt[]; paused: boolean }>("/api/chat/queue/resume", { method: "POST", body: JSON.stringify({ sessionId }) }),
   compact: (customInstructions: string, sessionId: string) => request<{ result: Record<string, unknown> }>("/api/chat/compact", { method: "POST", body: JSON.stringify({ customInstructions, sessionId }) }, PROMPT_PREPARE_TIMEOUT_MS),

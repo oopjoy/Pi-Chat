@@ -86,6 +86,8 @@ export interface RpcClientOptions {
   cwd: string;
   /** Undefined keeps legacy discovery; null is a frozen unavailable launch plan. */
   piEntry?: string | null;
+  /** Process-local ESM registration that adds Pi Chat RPC capabilities without modifying global Pi. */
+  rpcRegister?: string;
   args?: string[];
   /** Fixed fail-open preload probe that marks child JS bootstrap on fd 3. */
   startupProbe?: string;
@@ -334,6 +336,7 @@ export class PiRpcClient {
     this.recordStartupPhase(startup, "spawn-invoked", "started");
     const nodeArgs = [
       ...(this.options.startupProbe ? ["--import", pathToFileURL(this.options.startupProbe).href] : []),
+      ...(this.options.rpcRegister ? ["--import", pathToFileURL(this.options.rpcRegister).href] : []),
       piEntry,
       ...(this.options.args ?? []),
       ...extraArgs,

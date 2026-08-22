@@ -47,11 +47,14 @@ test("Pi Runtime build emits a relocatable independent RPC artifact", { timeout:
     };
     assert.equal(manifest.schemaVersion, 2);
     assert.equal(manifest.piVersion, "0.84.2");
-    assert.equal(manifest.recipeVersion, 2);
+    assert.equal(manifest.recipeVersion, 3);
     assert.equal(manifest.esbuildVersion, "0.28.1");
     assert.ok((manifest.sourceInputs?.length ?? 0) > 1_000);
     assert.equal(manifest.bundleRelativePath, "package/dist/rpc-entry.bundle.mjs");
     for (const path of Object.keys(manifest.outputHashes ?? {})) await access(join(runtimeRoot, path));
+    const bundleSource = await readFile(join(runtimeRoot, "package", "dist", "rpc-entry.bundle.mjs"), "utf8");
+    assert.match(bundleSource, /case "dequeue"/);
+    assert.match(bundleSource, /pi_chat_queue_dequeued/);
     const imageWorkerPath = join(runtimeRoot, "package", "dist", "image-resize-worker.js");
     await access(imageWorkerPath);
     await access(join(runtimeRoot, "package", "node_modules", "@silvia-odwyer", "photon-node", "photon_rs_bg.wasm"));
@@ -136,6 +139,11 @@ export default function bundleParity(pi: any) {
       await client.start();
       const state = rpcData<{ isStreaming: boolean }>(await client.send({ type: "get_state" }));
       assert.equal(state.isStreaming, false);
+      const dequeued = rpcData<{ steering: string[]; followUp: string[] }>(await client.send({
+        type: "dequeue",
+        dequeueId: "44444444-4444-4444-8444-444444444444",
+      }));
+      assert.deepEqual(dequeued, { steering: [], followUp: [] });
       const commands = rpcData<{ commands: Array<{ name?: string }> }>(await client.send({ type: "get_commands" }));
       const commandNames = new Set(commands.commands.map((command) => command.name));
       assert.equal(commandNames.has("bundle_parity"), true);
