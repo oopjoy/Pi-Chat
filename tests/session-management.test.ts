@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFile, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -7,9 +7,145 @@ import { join } from "node:path";
 import test from "node:test";
 import { PiChatApp } from "../src/server/app";
 import { ModelManager } from "../src/server/model-manager";
-import type { PiRpcClient } from "../src/server/rpc-client";
+import { RpcRequestTimeoutError, type PiRpcClient } from "../src/server/rpc-client";
 import type { ResourceManager } from "../src/server/resource-manager";
 import { SessionIndex, idForPath } from "../src/server/session-index";
+
+class CopyWorker {
+  commands: Record<string, unknown>[] = [];
+  stopped = false;
+  protected activePath: string;
+
+  private copyCount = 0;
+
+  constructor(
+    protected readonly sourcePath: string,
+    private readonly destinationPaths: string[],
+  ) {
+    this.activePath = sourcePath;
+  }
+
+  currentPath() { return this.activePath; }
+  onEvent(_listener?: (event: Record<string, unknown>) => void) { return () => {}; }
+  setDiagnosticSessionId() {}
+  async start() { this.activePath = this.sourcePath; }
+  async restart(path = this.sourcePath) {
+    this.activePath = path;
+    this.stopped = false;
+  }
+  async stop() { this.stopped = true; }
+  async sendRaw() {}
+  async send(command: Record<string, unknown>) {
+    this.commands.push(command);
+    if (command.type === "clone" || command.type === "fork") {
+      const destinationPath = this.destinationPaths[this.copyCount++];
+      const source = await readFile(this.sourcePath, "utf8");
+      const entries = source.trim().split(/\r?\n/).map((line) => JSON.parse(line));
+      const selected = command.type === "fork"
+        ? entries.findIndex((entry) => entry.id === command.entryId)
+        : entries.length;
+      const retained = command.type === "fork"
+        ? entries.slice(0, Math.max(1, selected))
+        : entries;
+      retained[0] = {
+        ...retained[0],
+        id: `copied-${command.type}`,
+        parentSession: this.sourcePath,
+      };
+      await writeFile(
+        destinationPath,
+        `${retained.map(JSON.stringify).join("\n")}\n`,
+      );
+      this.activePath = destinationPath;
+      return {
+        type: "response",
+        success: true,
+        data: command.type === "fork"
+          ? { text: "second prompt", cancelled: false }
+          : { cancelled: false },
+      };
+    }
+    if (command.type === "get_state") {
+      const [headerLine] = (await readFile(this.activePath, "utf8")).split(/\r?\n/);
+      const header = JSON.parse(headerLine) as { id?: string };
+      return {
+        type: "response",
+        success: true,
+        data: {
+          model: null,
+          sessionFile: this.activePath,
+          sessionId: header.id || `pi-${idForPath(this.activePath)}`,
+          isStreaming: false,
+          isCompacting: false,
+        },
+      };
+    }
+    if (command.type === "get_messages")
+      return { type: "response", success: true, data: { messages: [] } };
+    if (command.type === "get_available_models")
+      return { type: "response", success: true, data: { models: [] } };
+    if (command.type === "get_commands")
+      return { type: "response", success: true, data: { commands: [] } };
+    if (command.type === "get_session_stats")
+      return { type: "response", success: true, data: { tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
+    throw new Error(`Unexpected copy command: ${String(command.type)}`);
+  }
+}
+
+class OutcomeUnknownCopyWorker extends CopyWorker {
+  constructor(sourcePath: string, destinationPaths: string[], private readonly switchBeforeTimeout: boolean) {
+    super(sourcePath, destinationPaths);
+  }
+
+  override async send(command: Record<string, unknown>) {
+    if (command.type === "clone") {
+      if (this.switchBeforeTimeout) await super.send(command);
+      throw new RpcRequestTimeoutError("clone", "written-outcome-unknown");
+    }
+    return super.send(command);
+  }
+}
+
+class ExistingDestinationCopyWorker extends CopyWorker {
+  constructor(sourcePath: string, private readonly existingPath: string) {
+    super(sourcePath, []);
+  }
+
+  override async send(command: Record<string, unknown>) {
+    if (command.type === "clone") {
+      this.activePath = this.existingPath;
+      return { type: "response", success: true, data: { cancelled: false } };
+    }
+    return super.send(command);
+  }
+}
+
+class HookCopyWorker extends CopyWorker {
+  readonly raw: Record<string, unknown>[] = [];
+  private listener?: (event: Record<string, unknown>) => void;
+
+  override onEvent(listener?: (event: Record<string, unknown>) => void) {
+    this.listener = listener;
+    return () => { this.listener = undefined; };
+  }
+
+  override async sendRaw(command: Record<string, unknown>) {
+    this.raw.push(command);
+  }
+
+  override async send(command: Record<string, unknown>) {
+    if (command.type === "clone") {
+      this.listener?.({
+        type: "extension_ui_request",
+        id: "copy-hook",
+        method: "confirm",
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      return { type: "response", success: true, data: { cancelled: true } };
+    }
+    return super.send(command);
+  }
+}
 
 class SessionWorker {
   commands: Record<string, unknown>[] = [];
@@ -66,6 +202,296 @@ test("cold history shows its own last model and thinking without starting a Runt
       assert.deepEqual(view.state.model, { provider: "saved", id: "history-model", name: "history-model" });
       assert.equal(view.state.thinkingLevel, "high");
       assert.equal((app as unknown as { runtimes: Map<string, unknown> }).runtimes.has(coldId), false);
+    } finally {
+      server.close();
+      await app.close();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("clone and persisted User fork create independent cold Sessions", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-session-copy-"));
+  try {
+    const sourcePath = join(root, "source.jsonl");
+    const clonePath = join(root, "clone.jsonl");
+    const forkPath = join(root, "fork.jsonl");
+    await writeFile(sourcePath, [
+      { type: "session", id: "source", cwd: process.cwd() },
+      { type: "message", id: "u1", parentId: null, message: { role: "user", content: "first prompt" } },
+      { type: "message", id: "a1", parentId: "u1", message: { role: "assistant", content: "first answer" } },
+      { type: "message", id: "u2", parentId: "a1", message: { role: "user", content: "second prompt" } },
+      { type: "message", id: "a2", parentId: "u2", message: { role: "assistant", content: "second answer" } },
+    ].map(JSON.stringify).join("\n") + "\n");
+    const primary = new CopyWorker(sourcePath, [clonePath, forkPath]);
+    const sessions = new SessionIndex(root, join(root, "cache.json"));
+    const app = new PiChatApp({
+      rpc: primary as unknown as PiRpcClient,
+      sessions,
+      resources: {} as ResourceManager,
+      cwd: process.cwd(),
+      webRoot: process.cwd(),
+    });
+    const server = createServer((request, response) => void app.handle(request, response));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const origin = `http://127.0.0.1:${address.port}`;
+    try {
+      await fetch(`${origin}/api/bootstrap`);
+      const sourceId = idForPath(sourcePath);
+      const clonedResponse = await fetch(`${origin}/api/sessions/${sourceId}/clone`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      const cloned = await clonedResponse.json() as { session: { id: string }; editorText?: string; error?: string };
+      assert.equal(clonedResponse.status, 200, cloned.error);
+      assert.equal(cloned.session.id, idForPath(clonePath));
+      assert.equal(cloned.editorText, undefined);
+
+      const malformedFork = await fetch(`${origin}/api/sessions/${sourceId}/fork`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      assert.equal(malformedFork.status, 400);
+      const assistantFork = await fetch(`${origin}/api/sessions/${sourceId}/fork`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ persistedMessageId: "a1:0" }),
+      });
+      assert.equal(assistantFork.status, 409);
+
+      const forkedResponse = await fetch(`${origin}/api/sessions/${sourceId}/fork`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ persistedMessageId: "u2:0" }),
+      });
+      assert.equal(forkedResponse.status, 200);
+      const forked = await forkedResponse.json() as { session: { id: string }; editorText?: string };
+      assert.equal(forked.session.id, idForPath(forkPath));
+      assert.equal(forked.editorText, "second prompt");
+      assert.equal(primary.stopped, false, "the source Primary is rebound after each copy");
+      assert.equal((app as unknown as { runtimes: Map<string, unknown> }).runtimes.size, 0);
+      assert.equal(existsSync(sourcePath), true, "copy operations never replace the source JSONL");
+    } finally {
+      server.close();
+      await app.close();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("cold Secondary copy uses its single attached writer and restores the source binding", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-secondary-copy-"));
+  try {
+    const primaryPath = join(root, "primary.jsonl");
+    const sourcePath = join(root, "secondary.jsonl");
+    const destinationPath = join(root, "secondary-clone.jsonl");
+    await writeFile(primaryPath, [
+      { type: "session", id: "primary", cwd: process.cwd() },
+      { type: "message", id: "p1", parentId: null, message: { role: "user", content: "primary" } },
+    ].map(JSON.stringify).join("\n") + "\n");
+    await writeFile(sourcePath, [
+      { type: "session", id: "secondary", cwd: process.cwd() },
+      { type: "message", id: "u1", parentId: null, message: { role: "user", content: "secondary prompt" } },
+    ].map(JSON.stringify).join("\n") + "\n");
+    const primary = new SessionWorker(primaryPath) as unknown as PiRpcClient;
+    const worker = new CopyWorker(sourcePath, [destinationPath]);
+    let starts = 0;
+    const sessions = new SessionIndex(root, join(root, "cache.json"));
+    const app = new PiChatApp({
+      rpc: primary,
+      createRpc: () => {
+        starts += 1;
+        return worker as unknown as PiRpcClient;
+      },
+      sessions,
+      resources: {} as ResourceManager,
+      cwd: process.cwd(),
+      webRoot: process.cwd(),
+    });
+    const server = createServer((request, response) => void app.handle(request, response));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const origin = `http://127.0.0.1:${address.port}`;
+    try {
+      await fetch(`${origin}/api/bootstrap`);
+      const sourceId = idForPath(sourcePath);
+      const response = await fetch(`${origin}/api/sessions/${sourceId}/clone`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      const body = await response.json() as { session?: { id: string }; error?: string };
+      assert.equal(response.status, 200, body.error);
+      assert.equal(body.session?.id, idForPath(destinationPath));
+      assert.equal(starts, 1, "the cold source is started once and reused for Clone");
+      assert.equal(worker.currentPath(), sourcePath);
+      assert.equal((app as unknown as { runtimes: Map<string, unknown> }).runtimes.size, 1);
+    } finally {
+      server.close();
+      await app.close();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("written-outcome-unknown Clone reconciles a switched destination and warns when unresolved", async () => {
+  const run = async (switchBeforeTimeout: boolean) => {
+    const root = await mkdtemp(join(tmpdir(), "pi-chat-copy-unknown-"));
+    const sourcePath = join(root, "source.jsonl");
+    const destinationPath = join(root, "clone.jsonl");
+    await writeFile(sourcePath, [
+      { type: "session", id: "source", cwd: process.cwd() },
+      { type: "message", id: "u1", parentId: null, message: { role: "user", content: "source prompt" } },
+    ].map(JSON.stringify).join("\n") + "\n");
+    const primary = new OutcomeUnknownCopyWorker(
+      sourcePath,
+      [destinationPath],
+      switchBeforeTimeout,
+    );
+    const sessions = new SessionIndex(root, join(root, "cache.json"));
+    const app = new PiChatApp({
+      rpc: primary as unknown as PiRpcClient,
+      sessions,
+      resources: {} as ResourceManager,
+      cwd: process.cwd(),
+      webRoot: process.cwd(),
+    });
+    const server = createServer((request, response) => void app.handle(request, response));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    try {
+      await fetch(`http://127.0.0.1:${address.port}/api/bootstrap`);
+      const response = await fetch(
+        `http://127.0.0.1:${address.port}/api/sessions/${idForPath(sourcePath)}/clone`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+        },
+      );
+      return {
+        status: response.status,
+        body: await response.json() as { session?: { id: string }; error?: string },
+        destinationPath,
+        sourcePath,
+        primary,
+      };
+    } finally {
+      server.close();
+      await app.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  };
+
+  const reconciled = await run(true);
+  assert.equal(reconciled.status, 200, reconciled.body.error);
+  assert.equal(reconciled.body.session?.id, idForPath(reconciled.destinationPath));
+  assert.equal(reconciled.primary.currentPath(), reconciled.sourcePath);
+
+  const unresolved = await run(false);
+  assert.equal(unresolved.status, 409);
+  assert.match(unresolved.body.error || "", /结果尚未确认.*不要重复操作/);
+  assert.equal(unresolved.primary.currentPath(), unresolved.sourcePath);
+});
+
+test("Clone cancels interactive extension hooks without publishing a second dialog", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-copy-hook-"));
+  try {
+    const sourcePath = join(root, "source.jsonl");
+    await writeFile(sourcePath, [
+      { type: "session", id: "source", cwd: process.cwd() },
+      { type: "message", id: "u1", parentId: null, message: { role: "user", content: "source prompt" } },
+    ].map(JSON.stringify).join("\n") + "\n");
+    const primary = new HookCopyWorker(sourcePath, []);
+    const sessions = new SessionIndex(root, join(root, "cache.json"));
+    const app = new PiChatApp({
+      rpc: primary as unknown as PiRpcClient,
+      sessions,
+      resources: {} as ResourceManager,
+      cwd: process.cwd(),
+      webRoot: process.cwd(),
+    });
+    const server = createServer((request, response) => void app.handle(request, response));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    try {
+      await fetch(`http://127.0.0.1:${address.port}/api/bootstrap`);
+      const response = await fetch(
+        `http://127.0.0.1:${address.port}/api/sessions/${idForPath(sourcePath)}/clone`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+        },
+      );
+      const body = await response.json() as { error?: string };
+      assert.equal(response.status, 409);
+      assert.match(body.error || "", /扩展取消了复制新对话/);
+      assert.deepEqual(primary.raw, [{
+        type: "extension_ui_response",
+        id: "copy-hook",
+        cancelled: true,
+      }]);
+      assert.equal(primary.currentPath(), sourcePath);
+    } finally {
+      server.close();
+      await app.close();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Clone rejects a pre-existing destination returned by stale Pi state", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-copy-existing-"));
+  try {
+    const sourcePath = join(root, "source.jsonl");
+    const existingPath = join(root, "existing.jsonl");
+    await writeFile(sourcePath, [
+      { type: "session", id: "source", cwd: process.cwd() },
+      { type: "message", id: "u1", parentId: null, message: { role: "user", content: "source prompt" } },
+    ].map(JSON.stringify).join("\n") + "\n");
+    await writeFile(existingPath, [
+      { type: "session", id: "existing", cwd: process.cwd() },
+      { type: "message", id: "e1", parentId: null, message: { role: "user", content: "existing prompt" } },
+    ].map(JSON.stringify).join("\n") + "\n");
+    const primary = new ExistingDestinationCopyWorker(sourcePath, existingPath);
+    const sessions = new SessionIndex(root, join(root, "cache.json"));
+    const app = new PiChatApp({
+      rpc: primary as unknown as PiRpcClient,
+      sessions,
+      resources: {} as ResourceManager,
+      cwd: process.cwd(),
+      webRoot: process.cwd(),
+    });
+    const server = createServer((request, response) => void app.handle(request, response));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    try {
+      await fetch(`http://127.0.0.1:${address.port}/api/bootstrap`);
+      const response = await fetch(
+        `http://127.0.0.1:${address.port}/api/sessions/${idForPath(sourcePath)}/clone`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+        },
+      );
+      const body = await response.json() as { error?: string };
+      assert.equal(response.status, 409);
+      assert.match(body.error || "", /现有会话冲突/);
+      assert.equal(primary.currentPath(), sourcePath);
     } finally {
       server.close();
       await app.close();

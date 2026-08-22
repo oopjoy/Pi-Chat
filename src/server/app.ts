@@ -31,6 +31,7 @@ import type {
   PromptSettingsSnapshot,
   QueuedPrompt,
   SessionActivityState,
+  SessionCopyData,
   SessionDirectorySummary,
   SessionRuntimeReadyData,
   SessionStats,
@@ -430,6 +431,8 @@ export class PiChatApp {
   private readonly claimingExtensionRequests = new Set<string>();
   /** FIFO admission per Session prevents simultaneous prompt requests bypassing the queue. */
   private readonly promptAdmissionTails = new Map<string, Promise<void>>();
+  /** Clone/Fork temporarily changes a bound Pi RPC identity before restoring its source binding. */
+  private readonly copyingSessionIds = new Set<string>();
   /** Observation-only prompt correlation; never consulted for scheduling or Runtime state. */
   private readonly activePromptDiagnostics = new Map<string, ActivePromptDiagnostic>();
   /** Serializes default-workspace commits after native pickers return. */
@@ -1448,6 +1451,27 @@ export class PiChatApp {
     this.runtimeIncidentIdsBySession.delete(sessionId);
   }
 
+  /** A copy operation has no second browser-dialog authority while the source RPC is rebound. */
+  private cancelInteractiveCopyHook(
+    sessionId: string,
+    rpc: PiRpcClient,
+    event: Record<string, unknown>,
+  ): boolean {
+    if (
+      !this.copyingSessionIds.has(sessionId) ||
+      event.type !== "extension_ui_request" ||
+      typeof event.id !== "string" ||
+      !["select", "confirm", "input", "editor"].includes(
+        String(event.method || ""),
+      )
+    )
+      return false;
+    void rpc
+      .sendRaw({ type: "extension_ui_response", id: event.id, cancelled: true })
+      .catch(() => undefined);
+    return true;
+  }
+
   /** Events are authoritative over a hot-memory get_state snapshot that may lag compaction lifecycle frames. */
   private updateHotCompactionState(
     runtime: SecondaryRuntime | undefined,
@@ -2249,6 +2273,7 @@ export class PiChatApp {
       return;
     }
     const type = String(event.type || "");
+    if (this.cancelInteractiveCopyHook(runtime.id, runtime.rpc, event)) return;
     const generation = runtime.rpcGeneration;
     const queuePausedBeforeEvent = runtime.queuePaused;
     this.traceState("rpc-event", "received", runtime.id, {
@@ -2809,6 +2834,7 @@ export class PiChatApp {
     }
     const sessionId = this.primaryBoundSessionId;
     const type = String(event.type || "");
+    if (this.cancelInteractiveCopyHook(sessionId, this.options.rpc, event)) return;
     const generation = this.primaryRpcGeneration;
     const queuePausedBeforeEvent = this.queuePaused;
     this.traceState("rpc-event", "received", sessionId, {
@@ -3843,6 +3869,205 @@ export class PiChatApp {
       sessionId: id,
     });
     return { id, name };
+  }
+
+  private async runBoundSessionCopy(input: {
+    id: string;
+    sourcePath: string;
+    mode: "clone" | "fork";
+    entryId?: string;
+    runtime?: SecondaryRuntime;
+    knownSessionIds: ReadonlySet<string>;
+  }): Promise<{ sessionId: string; sessionPath: string; piSessionId: string }> {
+    const rpc = input.runtime?.rpc || this.options.rpc;
+    let mutationOutcomeUnknown = false;
+    let cancelled = false;
+    this.copyingSessionIds.add(input.id);
+    try {
+      try {
+        const result = rpcData<{ cancelled?: boolean }>(
+          await rpc.send(
+            input.mode === "clone"
+              ? { type: "clone" }
+              : { type: "fork", entryId: input.entryId },
+            PROMPT_PREPARE_TIMEOUT_MS,
+          ),
+        );
+        cancelled = result.cancelled === true;
+      } catch (error) {
+        if (!(error instanceof RpcRequestTimeoutError) || !error.outcomeUnknown)
+          throw error;
+        mutationOutcomeUnknown = true;
+      }
+
+      let state: PiState;
+      try {
+        state = asState(
+          await rpc.send(
+            { type: "get_state" },
+            30_000,
+            { independentRead: true },
+          ),
+        );
+      } catch (error) {
+        if (mutationOutcomeUnknown)
+          throw new HttpRequestError(
+            409,
+            "复制结果尚未确认；请刷新对话列表核对，不要重复操作",
+          );
+        throw error;
+      }
+      const sourcePath = resolve(input.sourcePath);
+      const sessionPath = typeof state.sessionFile === "string"
+        ? resolve(state.sessionFile)
+        : "";
+      const sessionId = sessionPath ? idForPath(sessionPath) : "";
+      const switched = Boolean(
+        sessionPath &&
+        extname(sessionPath).toLowerCase() === ".jsonl" &&
+        sessionPath.toLowerCase() !== sourcePath.toLowerCase() &&
+        sessionId !== input.id,
+      );
+      if (cancelled) {
+        if (switched)
+          throw new Error("Pi 取消复制后仍切换了会话身份");
+        throw new HttpRequestError(
+          409,
+          input.mode === "clone"
+            ? "扩展取消了复制新对话"
+            : "扩展取消了分叉新对话",
+        );
+      }
+      if (!switched) {
+        if (mutationOutcomeUnknown)
+          throw new HttpRequestError(
+            409,
+            "复制结果尚未确认；请刷新对话列表核对，不要重复操作",
+          );
+        throw new Error("Pi 未返回有效的新会话文件");
+      }
+      if (
+        input.knownSessionIds.has(sessionId) ||
+        this.runtimePool.has(sessionId) ||
+        sessionId === this.activeSessionId ||
+        typeof state.sessionId !== "string" ||
+        !state.sessionId
+      )
+        throw new HttpRequestError(409, "Pi 返回的新会话身份与现有会话冲突");
+      return {
+        sessionId,
+        sessionPath,
+        piSessionId: state.sessionId,
+      };
+    } finally {
+      this.copyingSessionIds.delete(input.id);
+      if (input.runtime) {
+        input.runtime.failed = true;
+        await this.runtimePool.recover(input.runtime);
+      } else {
+        await this.restartPrimaryRuntime(input.sourcePath);
+      }
+    }
+  }
+
+  private async copySession(
+    id: string,
+    mode: "clone" | "fork",
+    persistedMessageId?: string,
+  ): Promise<SessionCopyData> {
+    const releasePromptAdmission = await this.beginPromptAdmission(id);
+    try {
+      const knownSessions = await this.options.sessions.list();
+      const knownSessionIds = new Set(knownSessions.map((session) => session.id));
+      let runtime = this.runtimePool.get(id);
+      const primary = id === this.activeSessionId && !runtime;
+      if (!primary && !runtime) runtime = await this.ensureRuntime(id);
+      if (runtime?.draftSession)
+        throw new HttpRequestError(409, "空白新对话发送第一条消息后才能复制");
+      const sourcePath = runtime?.sessionPath ||
+        this.options.sessions.pathForId(id) ||
+        (primary ? this.lastPrimaryState.sessionFile : undefined);
+      const summary = runtime?.summarySnapshot ||
+        this.options.sessions.summaryForId(id) ||
+        (primary ? this.primarySummarySnapshot || undefined : undefined);
+      if (!sourcePath || !summary)
+        throw new HttpRequestError(404, "会话不存在或尚未持久化");
+
+      if (primary) {
+        if (
+          this.primaryTurnActive() ||
+          this.dispatching ||
+          this.promptQueue.length > 0 ||
+          this.queuePaused ||
+          Boolean(this.pendingExtensionRequest) ||
+          this.lastPrimaryState.isCompacting === true
+        )
+          throw new HttpRequestError(
+            409,
+            "请等待当前生成、压缩、确认和队列全部结束后再复制会话",
+          );
+      } else if (runtime && (!this.runtimePool.isIdle(runtime) || runtime.failed)) {
+        throw new HttpRequestError(
+          409,
+          "请等待当前生成、压缩、确认和队列全部结束后再复制会话",
+        );
+      }
+
+      const target = mode === "fork"
+        ? await this.options.sessions.forkTargetForId(
+            id,
+            persistedMessageId || "",
+          )
+        : null;
+      if (mode === "fork" && !target)
+        throw new HttpRequestError(
+          409,
+          "只能从当前分支中已持久化的纯文字 User 消息创建新对话",
+        );
+
+      const operationAdmission = runtime
+        ? runtime.operationAdmission
+        : this.primaryOperationAdmission;
+      const operationGeneration = await operationAdmission.closeAndDrain();
+      if (operationGeneration === null)
+        throw new HttpRequestError(409, "该会话正在休眠或切换，请刷新后重试");
+      let copied;
+      try {
+        copied = await this.runBoundSessionCopy({
+          id,
+          sourcePath,
+          mode,
+          runtime,
+          knownSessionIds,
+          ...(target ? { entryId: target.entryId } : null),
+        });
+      } finally {
+        operationAdmission.reopen(operationGeneration);
+      }
+
+      await this.options.sessions.list();
+      const session = this.options.sessions.summaryForId(copied.sessionId);
+      const indexedPath = this.options.sessions.pathForId(copied.sessionId);
+      if (
+        !session ||
+        !indexedPath ||
+        resolve(indexedPath).toLowerCase() !== copied.sessionPath.toLowerCase() ||
+        session.sessionId !== copied.piSessionId
+      )
+        throw new Error("新会话已创建，但 Session Index 未能确认其身份；请刷新对话列表");
+      this.broadcast({
+        type: "pi_chat_sessions_changed",
+        action: mode === "clone" ? "cloned" : "forked",
+        sessionId: session.id,
+        sourceSessionId: id,
+      });
+      return {
+        session,
+        ...(target ? { editorText: target.text } : null),
+      };
+    } finally {
+      releasePromptAdmission();
+    }
   }
 
   private async deleteSession(id: string): Promise<BootstrapData> {
@@ -6150,6 +6375,32 @@ export class PiChatApp {
       }
     }
 
+    const copySessionMatch = /^\/api\/sessions\/([a-f0-9]{20})\/(clone|fork)$/.exec(
+      url.pathname,
+    );
+    if (copySessionMatch) {
+      if (request.method !== "POST") return methodNotAllowed(response);
+      const body = await bodyJson(request);
+      const persistedMessageId = typeof body.persistedMessageId === "string"
+        ? body.persistedMessageId
+        : undefined;
+      if (
+        copySessionMatch[2] === "fork" &&
+        (!persistedMessageId || persistedMessageId.length > 403)
+      )
+        return json(response, 400, { error: "分叉消息标识无效" });
+      json(
+        response,
+        200,
+        await this.copySession(
+          copySessionMatch[1],
+          copySessionMatch[2] as "clone" | "fork",
+          persistedMessageId,
+        ),
+      );
+      return;
+    }
+
     const manageSessionMatch = /^\/api\/sessions\/([a-f0-9]{20})$/.exec(
       url.pathname,
     );
@@ -6162,16 +6413,32 @@ export class PiChatApp {
           return json(response, 400, {
             error: "名称必须为 1 到 120 个有效字符",
           });
-        json(
-          response,
-          200,
-          await this.renameSession(manageSessionMatch[1], name),
+        const releaseSessionAdmission = await this.beginPromptAdmission(
+          manageSessionMatch[1],
         );
+        try {
+          this.requireSessionControl(manageSessionMatch[1], clientId);
+          json(
+            response,
+            200,
+            await this.renameSession(manageSessionMatch[1], name),
+          );
+        } finally {
+          releaseSessionAdmission();
+        }
         return;
       }
       if (request.method === "DELETE") {
         this.requireSessionControl(manageSessionMatch[1], clientId);
-        json(response, 200, await this.deleteSession(manageSessionMatch[1]));
+        const releaseSessionAdmission = await this.beginPromptAdmission(
+          manageSessionMatch[1],
+        );
+        try {
+          this.requireSessionControl(manageSessionMatch[1], clientId);
+          json(response, 200, await this.deleteSession(manageSessionMatch[1]));
+        } finally {
+          releaseSessionAdmission();
+        }
         return;
       }
       return methodNotAllowed(response);

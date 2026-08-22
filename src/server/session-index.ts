@@ -670,6 +670,28 @@ export class SessionIndex {
     finally { if (this.snapshotReads.get(id) === read) this.snapshotReads.delete(id); }
   }
 
+  /** Resolve one browser-visible persisted User message back to Pi's active-branch entry. */
+  async forkTargetForId(
+    id: string,
+    persistedMessageId: string,
+  ): Promise<{ entryId: string; text: string } | null> {
+    const match = /^(.{1,400}):0$/.exec(persistedMessageId);
+    if (!match) return null;
+    await this.snapshotForId(id);
+    const cached = this.snapshotCache.get(id);
+    if (!cached) return null;
+    const branch = activeSessionBranch([...cached.projection.entries]);
+    const entry = branch.find((candidate) => candidate.id === match[1]);
+    if (entry?.type !== "message" || entry.message?.role !== "user") return null;
+    if (
+      Array.isArray(entry.message.content) &&
+      entry.message.content.some((block) => block.type === "image")
+    )
+      return null;
+    const text = textFromContent(entry.message.content);
+    return text.trim() ? { entryId: match[1], text } : null;
+  }
+
   async messagesForId(id: string): Promise<PiMessage[] | null> {
     return (await this.snapshotForId(id))?.messages ?? null;
   }

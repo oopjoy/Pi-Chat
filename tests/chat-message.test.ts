@@ -15,6 +15,49 @@ test("user messages stay literal instead of rendering incomplete Markdown or mat
   assert.doesNotMatch(html, /markdown-body|katex|<strong>|<a /);
 });
 
+test("only persisted text User messages expose the new-session fork action", () => {
+  const persisted = renderToStaticMarkup(React.createElement(ChatMessage, {
+    message: {
+      role: "user",
+      content: "retry this",
+      piChatPersistedMessageId: "user-1:0",
+    },
+    onForkUserMessage: () => {},
+  }));
+  assert.match(persisted, /aria-label="在新对话中分叉"/);
+
+  const local = renderToStaticMarkup(React.createElement(ChatMessage, {
+    message: { role: "user", content: "not persisted" },
+    onForkUserMessage: () => {},
+  }));
+  assert.doesNotMatch(local, /在新对话中分叉/);
+
+  const withImage = renderToStaticMarkup(React.createElement(ChatMessage, {
+    message: {
+      role: "user",
+      content: [
+        { type: "text", text: "image prompt" },
+        { type: "image", data: "aGVsbG8=", mimeType: "image/png" },
+      ],
+      piChatPersistedMessageId: "user-image:0",
+    },
+    onForkUserMessage: () => {},
+  }));
+  assert.doesNotMatch(withImage, /在新对话中分叉/);
+
+  const disabled = renderToStaticMarkup(React.createElement(ChatMessage, {
+    message: {
+      role: "user",
+      content: "busy",
+      piChatPersistedMessageId: "user-2:0",
+    },
+    onForkUserMessage: () => {},
+    forkUserMessageDisabled: true,
+  }));
+  assert.match(disabled, /aria-label="在新对话中分叉"/);
+  assert.match(disabled, /disabled=""/);
+});
+
 test("long user text folds only after the explicit source-line threshold", () => {
   assert.equal(shouldFoldUserText("a".repeat(20_000)), false);
   assert.equal(shouldFoldUserText(Array.from({ length: USER_MESSAGE_FOLD_LINE_LIMIT }, (_, index) => String(index)).join("\n")), false);

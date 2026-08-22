@@ -462,6 +462,11 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .message-content { overflow-wrap: anywhere; font-family: var(--reading-font); font-size: var(--reading-font-size); line-height: var(--reading-line-height); }
 .message-user .message-content { display: flex; box-sizing: border-box; width: fit-content; max-width: 80%; margin-left: auto; padding: 10px 14px; flex-wrap: wrap; gap: 8px; border: 1px solid color-mix(in srgb, var(--accent), transparent 72%); border-radius: 14px 14px 4px 14px; background: var(--user); }
 .message-user.is-foldable .message-content { width: 80%; }
+.message-user-actions { display: flex; justify-content: flex-end; min-height: 25px; margin-top: 3px; }
+.message-user-actions button { display: grid; width: 25px; height: 25px; place-items: center; padding: 0; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; }
+.message-user-actions button:hover:not(:disabled) { border-color: var(--line); background: var(--surface-hover); color: var(--accent); }
+.message-user-actions button:disabled { cursor: default; opacity: .4; }
+.message-user-actions svg { width: 16px; height: 16px; }
 .user-plain-text { width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; }
 .user-plain-text.is-collapsed { position: relative; display: -webkit-box; max-height: calc(var(--reading-line-height) * 20em); overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 20; }
 .user-plain-text.is-collapsed::after { position: absolute; right: 0; bottom: 0; left: 0; height: calc(var(--reading-line-height) * 2em); background: linear-gradient(transparent, var(--user)); content: ""; pointer-events: none; }

@@ -173,6 +173,32 @@ test("session message reader follows only the current JSONL branch", async () =>
   }
 });
 
+test("fork targets resolve only persisted text User messages on the active branch", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-fork-target-"));
+  try {
+    const path = join(root, "fork-target.jsonl");
+    await writeFile(path, [
+      { type: "session", version: 3, id: "session-fork", cwd: root },
+      { type: "message", id: "u1", parentId: null, message: { role: "user", content: "kept prompt" } },
+      { type: "message", id: "abandoned", parentId: "u1", message: { role: "user", content: "old branch" } },
+      { type: "message", id: "a1", parentId: "u1", message: { role: "assistant", content: "current answer" } },
+      { type: "message", id: "u2", parentId: "a1", message: { role: "user", content: [{ type: "text", text: "  retry from here  " }] } },
+    ].map(JSON.stringify).join("\n") + "\n");
+    const index = new SessionIndex(root);
+    const [session] = await index.list();
+
+    assert.deepEqual(await index.forkTargetForId(session.id, "u2:0"), {
+      entryId: "u2",
+      text: "  retry from here  ",
+    });
+    assert.equal(await index.forkTargetForId(session.id, "abandoned:0"), null);
+    assert.equal(await index.forkTargetForId(session.id, "a1:0"), null);
+    assert.equal(await index.forkTargetForId(session.id, "u2:1"), null);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("an intercom custom message stays visible as a read-only timeline boundary", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-intercom-history-"));
   try {

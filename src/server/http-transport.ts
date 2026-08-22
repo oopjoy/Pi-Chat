@@ -53,7 +53,7 @@ export function requestPageId(request: IncomingMessage): string {
 }
 
 export class HttpRequestError extends Error {
-  constructor(readonly status: 400 | 413, message: string) { super(message); }
+  constructor(readonly status: 400 | 404 | 409 | 413, message: string) { super(message); }
 }
 
 export async function bodyJson(request: IncomingMessage, maximumBytes = 1_000_000): Promise<Record<string, unknown>> {

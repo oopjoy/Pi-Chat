@@ -3,7 +3,7 @@ import type { CSSProperties } from "react";
 import type { PiContentBlock, PiMessage } from "../../shared/types";
 import { visibleAssistantBlocksWithSourceIndex } from "../lib/assistant-text";
 import { streamingAppendHint } from "../lib/streaming-append";
-import { CheckIcon, CopyIcon } from "./Icons";
+import { CheckIcon, CopyIcon, ForkIcon } from "./Icons";
 import { MarkdownBody } from "./MarkdownBody";
 
 /** Fold only explicit source lines; visual wrapping stays device-dependent. */
@@ -105,7 +105,7 @@ export function AssistantMessageHeader({ message, fallback }: { message: PiMessa
   </header>;
 }
 
-export const ChatMessage = memo(function ChatMessage({ message, streaming = false, showAssistantMetadata = true, showGeneratedAt = true, assistantMetadataFallback }: { message: PiMessage; streaming?: boolean; showAssistantMetadata?: boolean; showGeneratedAt?: boolean; assistantMetadataFallback?: AssistantMetadataFallback }) {
+export const ChatMessage = memo(function ChatMessage({ message, streaming = false, showAssistantMetadata = true, showGeneratedAt = true, assistantMetadataFallback, onForkUserMessage, forkUserMessageDisabled = false }: { message: PiMessage; streaming?: boolean; showAssistantMetadata?: boolean; showGeneratedAt?: boolean; assistantMetadataFallback?: AssistantMetadataFallback; onForkUserMessage?: (message: PiMessage) => void; forkUserMessageDisabled?: boolean }) {
   const [copied, setCopied] = useState(false);
   const [expandedUserText, setExpandedUserText] = useState(false);
   const [previewImage, setPreviewImage] = useState<{ src: string; alt: string; width: number; height: number } | null>(null);
@@ -150,6 +150,11 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
   const userTextBlocks = message.role === "user" ? content.filter((block): block is PiContentBlock & { text: string } => block.type === "text" && typeof block.text === "string" && Boolean(block.text)) : [];
   const userImageBlocks = message.role === "user" ? content.filter((block): block is PiContentBlock & { data: string; mimeType: string } => block.type === "image" && typeof block.data === "string" && typeof block.mimeType === "string") : [];
   const userTextNeedsFolding = userTextBlocks.some((block) => shouldFoldUserText(block.text));
+  const forkableUserMessage = message.role === "user" &&
+    Boolean(message.piChatPersistedMessageId) &&
+    userTextBlocks.length > 0 &&
+    userImageBlocks.length === 0 &&
+    Boolean(onForkUserMessage);
   const generatedAt = message.role === "assistant" && !streaming && showGeneratedAt
     ? assistantGeneratedAt(message.timestamp)
     : null;
@@ -220,6 +225,15 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
           />
         </section>
       </div>}
+      {forkableUserMessage && <footer className="message-user-actions">
+        <button
+          type="button"
+          disabled={forkUserMessageDisabled}
+          onClick={() => onForkUserMessage?.(message)}
+          aria-label="在新对话中分叉"
+          title={forkUserMessageDisabled ? "等待当前生成、压缩、确认和队列结束后再分叉" : "在新对话中分叉"}
+        ><ForkIcon /></button>
+      </footer>}
       {message.role === "assistant" && (generatedAt || copyText) && <footer className="message-footer">
         {generatedAt && <time className="message-generated-at" dateTime={generatedAt.dateTime} title={generatedAt.title}>{generatedAt.label}</time>}
         {copyText && <button type="button" onClick={() => void copyAnswer()} aria-label={copied ? "回答已复制" : "复制整个回答"} title={copied ? "已复制" : "复制整个回答"}>

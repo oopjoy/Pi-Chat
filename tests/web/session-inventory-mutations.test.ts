@@ -15,6 +15,223 @@ beforeEach(() => {
 });
 
 
+test("Session menu clone opens the independently created cold conversation", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const copiedSession = {
+    ...bootstrap.sessions[0],
+    id: "11111111111111111111",
+    sessionId: "copied",
+    name: "Copied conversation",
+    active: false,
+  };
+  let clones = 0;
+  Object.assign(api, {
+    bootstrap: async () => bootstrap,
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async (id: string) => ({ viewing: id }),
+    sessions: async () => ({
+      sessions: [copiedSession, ...bootstrap.sessions],
+      total: bootstrap.sessions.length + 1,
+    }),
+    cloneSession: async () => {
+      clones += 1;
+      return { session: copiedSession };
+    },
+    viewSession: async () => ({
+      ...draftView,
+      session: copiedSession,
+      state: { ...draftView.state, sessionId: "copied" },
+      isActive: false,
+      runtimeStatus: "view-only" as const,
+    }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    await act(async () =>
+      dom.window.document.querySelector<HTMLButtonElement>(".session-menu-trigger")!.click(),
+    );
+    await act(async () => {
+      [...dom.window.document.querySelectorAll<HTMLButtonElement>("[role='menuitem']")]
+        .find((button) => button.textContent === "复制为新对话")!
+        .click();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(clones, 1);
+    assert.equal(
+      dom.window.document.querySelector(".topbar-title")?.textContent,
+      "Copied conversation",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
+test("a delayed Clone success cannot steal a newer Session selection", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const second = {
+    ...bootstrap.sessions[0],
+    id: "33333333333333333333",
+    sessionId: "second",
+    name: "Second conversation",
+    active: false,
+  };
+  const copied = {
+    ...bootstrap.sessions[0],
+    id: "44444444444444444444",
+    sessionId: "copied-late",
+    name: "Late copy",
+    active: false,
+  };
+  bootstrap = { ...bootstrap, sessions: [...bootstrap.sessions, second] };
+  let resolveClone!: (value: { session: typeof copied }) => void;
+  const pendingClone = new Promise<{ session: typeof copied }>((resolve) => {
+    resolveClone = resolve;
+  });
+  Object.assign(api, {
+    bootstrap: async () => bootstrap,
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async (id: string) => ({ viewing: id }),
+    sessions: async () => ({
+      sessions: [copied, ...bootstrap.sessions],
+      total: bootstrap.sessions.length + 1,
+    }),
+    cloneSession: async () => pendingClone,
+    viewSession: async (id: string) => ({
+      ...draftView,
+      session: id === second.id ? second : copied,
+      state: { ...draftView.state, sessionId: id },
+      isActive: false,
+      runtimeStatus: "view-only" as const,
+    }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    await act(async () =>
+      dom.window.document.querySelector<HTMLButtonElement>(".session-menu-trigger")!.click(),
+    );
+    await act(async () =>
+      [...dom.window.document.querySelectorAll<HTMLButtonElement>("[role='menuitem']")]
+        .find((button) => button.textContent === "复制为新对话")!
+        .click(),
+    );
+    const secondButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>(
+      ".session-item",
+    )].find((button) => button.textContent?.includes("Second conversation"))!;
+    await act(async () => {
+      secondButton.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(
+      dom.window.document.querySelector(".topbar-title")?.textContent,
+      "Second conversation",
+    );
+
+    await act(async () => {
+      resolveClone({ session: copied });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(
+      dom.window.document.querySelector(".topbar-title")?.textContent,
+      "Second conversation",
+      "the older Clone intent may update inventory but never repaint the newer pane",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
+test("persisted User fork opens the new Session with the selected text restored", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  bootstrap = {
+    ...bootstrap,
+    messages: [{
+      role: "user",
+      content: "revise this prompt",
+      piChatPersistedMessageId: "user-1:0",
+    }],
+    messageTotal: 1,
+    turnTotal: 1,
+    visibleTurnCount: 1,
+  };
+  const forkedSession = {
+    ...bootstrap.sessions[0],
+    id: "22222222222222222222",
+    sessionId: "forked",
+    name: "Forked conversation",
+    active: false,
+  };
+  let target = "";
+  Object.assign(api, {
+    bootstrap: async () => bootstrap,
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async (id: string) => ({ viewing: id }),
+    sessions: async () => ({
+      sessions: [forkedSession, ...bootstrap.sessions],
+      total: bootstrap.sessions.length + 1,
+    }),
+    forkSession: async (_id: string, persistedMessageId: string) => {
+      target = persistedMessageId;
+      return { session: forkedSession, editorText: "revise this prompt" };
+    },
+    viewSession: async () => ({
+      ...draftView,
+      session: forkedSession,
+      state: { ...draftView.state, sessionId: "forked" },
+      isActive: false,
+      runtimeStatus: "view-only" as const,
+    }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const fork = dom.window.document.querySelector<HTMLButtonElement>(
+      "button[aria-label='在新对话中分叉']",
+    )!;
+    assert.equal(fork.disabled, false);
+    await act(async () => {
+      fork.click();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(target, "user-1:0");
+    assert.equal(
+      dom.window.document.querySelector(".topbar-title")?.textContent,
+      "Forked conversation",
+    );
+    assert.equal(
+      dom.window.document.querySelector<HTMLTextAreaElement>(
+        "textarea[aria-label='消息输入']",
+      )?.value,
+      "revise this prompt",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("a definite rename rejection restores the authoritative name and unlocks management", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");

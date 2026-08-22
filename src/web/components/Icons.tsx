@@ -96,6 +96,10 @@ export function CopyIcon(props: IconProps) {
   return <LineIcon {...props}><rect x="8" y="8" width="11" height="11" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></LineIcon>;
 }
 
+export function ForkIcon(props: IconProps) {
+  return <LineIcon {...props}><circle cx="7" cy="5" r="2" /><circle cx="17" cy="7" r="2" /><circle cx="7" cy="19" r="2" /><path d="M7 7v10M9 11h3a5 5 0 0 0 5-2" /></LineIcon>;
+}
+
 export function AlertIcon(props: IconProps) {
   return <LineIcon {...props}><path d="M11 4.3 3.5 18a1.3 1.3 0 0 0 1.14 1.95h14.72A1.3 1.3 0 0 0 20.5 18L13 4.3a1.15 1.15 0 0 0-2 0Z" /><path d="M12 9v4.3M12 16.5v.1" /></LineIcon>;
 }

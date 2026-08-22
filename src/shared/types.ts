@@ -211,6 +211,13 @@ export interface SessionRuntimeReadyData {
   gateMode: GateMode;
 }
 
+/** A non-destructive copy/fork creates a new cold Session and never rebinds the source Runtime. */
+export interface SessionCopyData {
+  session: SessionSummary;
+  /** Fork returns the selected User text for the new Session Composer; Clone leaves it empty. */
+  editorText?: string;
+}
+
 export interface InitialPromptRequest {
   message: string;
   images?: PromptImage[];

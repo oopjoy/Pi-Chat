@@ -1,5 +1,5 @@
 import type { ServerStateDiagnosticSnapshot } from "../shared/state-diagnostics";
-import type { BackgroundSubagentSnapshot, BootstrapData, BootstrapHandshakeData, ExtensionResource, GateMode, InitialPromptData, ModelInfo, PackageResource, PromptDelivery, PromptImage, PromptSettingsSnapshot, QueuedPrompt, ResourceResponse, SessionDirectorySummary, SessionRuntimeReadyData, SessionSummary, SessionViewData, SkillResource, ThinkingLevel } from "../shared/types";
+import type { BackgroundSubagentSnapshot, BootstrapData, BootstrapHandshakeData, ExtensionResource, GateMode, InitialPromptData, ModelInfo, PackageResource, PromptDelivery, PromptImage, PromptSettingsSnapshot, QueuedPrompt, ResourceResponse, SessionCopyData, SessionDirectorySummary, SessionRuntimeReadyData, SessionSummary, SessionViewData, SkillResource, ThinkingLevel } from "../shared/types";
 import { recordBrowserStateDiagnostic } from "./lib/state-diagnostics";
 
 export type ExtensionResponseInput = {
@@ -355,6 +355,14 @@ export const api = {
     }>(
       `/api/sessions?${new URLSearchParams({ cwd, offset: "0", limit: String(limit) })}`,
     ),
+  cloneSession: (id: string) => request<SessionCopyData>(`/api/sessions/${id}/clone`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  }, PROMPT_PREPARE_TIMEOUT_MS),
+  forkSession: (id: string, persistedMessageId: string) => request<SessionCopyData>(`/api/sessions/${id}/fork`, {
+    method: "POST",
+    body: JSON.stringify({ persistedMessageId }),
+  }, PROMPT_PREPARE_TIMEOUT_MS),
   renameSession: (id: string, name: string) => request<{ id: string; name: string }>(`/api/sessions/${id}`, { method: "PATCH", body: JSON.stringify({ name }) }),
   deleteSession: (id: string) => request<BootstrapData>(`/api/sessions/${id}`, { method: "DELETE" }),
   setModel: (provider: string, modelId: string, sessionId: string) => request<{ model: BootstrapData["state"]["model"]; pending: boolean }>("/api/models/set", {

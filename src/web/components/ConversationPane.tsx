@@ -45,6 +45,8 @@ export interface ConversationPaneProps {
   onLoadEarlier: () => void;
   state: PiState;
   toolStatus: string;
+  onForkUserMessage: (message: PiMessage) => void;
+  forkUserMessageDisabled: boolean;
   onNavigate: (direction: NavigationDirection) => void;
   sessionControl: ComponentProps<typeof SessionControlBanner>;
   promptQueue: ComponentProps<typeof PromptQueue>;
@@ -85,6 +87,8 @@ export function ConversationPane({
   onLoadEarlier,
   state,
   toolStatus,
+  onForkUserMessage,
+  forkUserMessageDisabled,
   onNavigate,
   sessionControl,
   promptQueue,
@@ -216,6 +220,8 @@ export function ConversationPane({
                 streaming={messageStreaming}
                 showAssistantMetadata={!inActiveRunningTurn && !item.hideAssistantMetadata}
                 showGeneratedAt={!inActiveRunningTurn}
+                onForkUserMessage={onForkUserMessage}
+                forkUserMessageDisabled={forkUserMessageDisabled}
               />
             </Fragment>;
           })}

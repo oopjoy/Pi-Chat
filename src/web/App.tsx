@@ -588,6 +588,7 @@ export function App() {
     [],
   );
   const [mutatingSessionIds, setMutatingSessionIds] = useState<string[]>([]);
+  const [copyingSessionIds, setCopyingSessionIds] = useState<string[]>([]);
   // Passive history browsing must stay fast without consuming a Pi Runtime.
   // Keep enough data-only panes to cover normal archive hopping; the server's
   // target snapshot cache has the same entry bound.
@@ -844,8 +845,8 @@ export function App() {
   const navigationStartedAtRef = useRef(new Map<number, number>());
   /** Accepted local user turns remain visible until a JSONL-derived view includes them. */
   const localUserTurnsRef = useRef(new Map<string, LocalUserTurn[]>());
-  const queueCancellationSequenceRef = useRef(0);
-  const appliedCancelledDraftSequenceRef = useRef(0);
+  const draftRestorationIntentSequenceRef = useRef(0);
+  const appliedDraftRestorationSequencesRef = useRef(new Map<string, number>());
   const queueMutationSequenceRef = useRef(new Map<string, number>());
   const appliedQueueMutationSequenceRef = useRef(new Map<string, number>());
   const cancelledQueueIdsRef = useRef(new Map<string, Set<string>>());
@@ -856,13 +857,15 @@ export function App() {
   );
   /** Revision guards are partitioned with the same key as Composer drafts. */
   const composerDraftRevisionsRef = useRef(new Map<string, number>());
-  const [cancelledDraft, setCancelledDraft] = useState<{
-    key: ComposerDraftKey;
-    revision: number;
-    expectedDraftRevision: number;
-    message: string;
-    images: PromptImage[];
-  } | null>(null);
+  const [restoredComposerDrafts, setRestoredComposerDrafts] = useState<
+    Record<string, {
+      key: ComposerDraftKey;
+      revision: number;
+      expectedDraftRevision: number;
+      message: string;
+      images: PromptImage[];
+    }>
+  >({});
   /** A terminal compaction frame outranks a later stale hot-memory view until a new compaction begins. */
   const completedCompactionSessionIdsRef = useRef(new Set<string>());
   /** Background accepted Steers that were dropped remain explainable when their Session is opened. */
@@ -1051,6 +1054,7 @@ export function App() {
     optimisticRenamesRef.current.clear();
     optimisticDeletesRef.current.clear();
     syncMutatingSessionIds();
+    setCopyingSessionIds([]);
     busySessionCountsRef.current.clear();
     setBusySessionIds([]);
     for (const lease of promptBusyReleasesRef.current.values()) {
@@ -6698,6 +6702,98 @@ export function App() {
     }
   };
 
+  const copySessionToNew = (
+    source: SessionSummary,
+    persistedMessageId?: string,
+  ) => {
+    if (
+      buildIdentityMismatch ||
+      mutationBlocked ||
+      copyingSessionIds.includes(source.id) ||
+      optimisticRenamesRef.current.has(source.id) ||
+      optimisticDeletesRef.current.has(source.id)
+    )
+      return;
+    const runEpochGeneration = runEpochGenerationRef.current;
+    const navigationEpoch = navigationEpochRef.current;
+    const restorationSequence = persistedMessageId
+      ? ++draftRestorationIntentSequenceRef.current
+      : 0;
+    setCopyingSessionIds((current) => [...new Set([...current, source.id])]);
+    setError("");
+    setNotice(
+      persistedMessageId
+        ? "正在从该消息创建新对话…"
+        : "正在复制对话…",
+    );
+    const request = persistedMessageId
+      ? api.forkSession(source.id, persistedMessageId)
+      : api.cloneSession(source.id);
+    void request
+      .then((result) => {
+        if (runEpochGenerationRef.current !== runEpochGeneration) return;
+        setSessions((current) => [
+          result.session,
+          ...current.filter((session) => session.id !== result.session.id),
+        ]);
+        setSessionsTotal((current) =>
+          sessionsRef.current.some((session) => session.id === result.session.id)
+            ? current
+            : current + 1,
+        );
+        if (result.editorText) {
+          const key: ComposerDraftKey = {
+            kind: "session",
+            sessionId: result.session.id,
+          };
+          const keyId = composerDraftKeyId(key);
+          if (
+            restorationSequence >
+            (appliedDraftRestorationSequencesRef.current.get(keyId) || 0)
+          ) {
+            appliedDraftRestorationSequencesRef.current.set(
+              keyId,
+              restorationSequence,
+            );
+            setRestoredComposerDrafts((current) => ({
+              ...current,
+              [keyId]: {
+                key,
+                revision: restorationSequence,
+                expectedDraftRevision:
+                  composerDraftRevisionsRef.current.get(keyId) || 0,
+                message: result.editorText!,
+                images: [],
+              },
+            }));
+          }
+        }
+        setNotice(
+          persistedMessageId
+            ? "已在新对话中分叉，可修改原消息后发送"
+            : "已复制为新对话",
+        );
+        void refreshSidebarSessions().catch(reportBackgroundRefreshError);
+        if (navigationEpochRef.current === navigationEpoch)
+          void viewSession(result.session.id, result.session.name);
+      })
+      .catch((cause) => {
+        if (runEpochGenerationRef.current !== runEpochGeneration) return;
+        const message = cause instanceof Error ? cause.message : String(cause);
+        setError(
+          /结果尚未确认/.test(message)
+            ? message
+            : `${persistedMessageId ? "分叉" : "复制"}新对话失败：${message}`,
+        );
+      })
+      .finally(() => {
+        if (runEpochGenerationRef.current !== runEpochGeneration) return;
+        setCopyingSessionIds((current) =>
+          current.filter((sessionId) => sessionId !== source.id),
+        );
+      });
+  };
+
   const renameSession = (name: string) => {
     if (buildIdentityMismatch) return;
     const dialog = sessionDialog;
@@ -7231,8 +7327,8 @@ export function App() {
   );
   const cancelQueuedPrompt = (item: QueuedPrompt) => {
     const operation = captureViewOperation();
-    queueCancellationSequenceRef.current += 1;
-    const cancellationSequence = queueCancellationSequenceRef.current;
+    draftRestorationIntentSequenceRef.current += 1;
+    const cancellationSequence = draftRestorationIntentSequenceRef.current;
     const cancellationDraftKey: ComposerDraftKey = {
       kind: "session",
       sessionId: operation.sessionId,
@@ -7349,14 +7445,24 @@ export function App() {
         ) {
           // HTTP completions may arrive out of click order. The latest successful
           // cancellation wins the Composer, never whichever response finishes last.
-          if (cancellationSequence > appliedCancelledDraftSequenceRef.current) {
-            appliedCancelledDraftSequenceRef.current = cancellationSequence;
-            setCancelledDraft({
-              key: cancellationDraftKey,
-              revision: cancellationSequence,
-              expectedDraftRevision,
-              ...restored,
-            });
+          const restorationKeyId = composerDraftKeyId(cancellationDraftKey);
+          if (
+            cancellationSequence >
+            (appliedDraftRestorationSequencesRef.current.get(restorationKeyId) || 0)
+          ) {
+            appliedDraftRestorationSequencesRef.current.set(
+              restorationKeyId,
+              cancellationSequence,
+            );
+            setRestoredComposerDrafts((current) => ({
+              ...current,
+              [restorationKeyId]: {
+                key: cancellationDraftKey,
+                revision: cancellationSequence,
+                expectedDraftRevision,
+                ...restored,
+              },
+            }));
           }
         }
       })
@@ -7680,6 +7786,7 @@ export function App() {
             ? recoveryActionBlocked
             : globalMutationBlocked)
         }
+        copyDisabled={mutationBlocked}
         viewBusy={sidebarViewBlocked}
         refreshing={refreshing}
         pinnedSessionIds={sessionNavigation.pinnedSessionIds}
@@ -7688,7 +7795,9 @@ export function App() {
         expandedDirectoryKeys={sessionNavigation.expandedDirectoryKeys}
         failedSessionIds={failedSessionIds}
         unseenReplySessionIds={unseenReplySessionIds}
-        mutatingSessionIds={mutatingSessionIds}
+        mutatingSessionIds={[
+          ...new Set([...mutatingSessionIds, ...copyingSessionIds]),
+        ]}
         onClose={() => setSidebarOpen(false)}
         onCollapse={() => setSidebarOpen(false)}
         onNew={() => void createSession()}
@@ -7747,6 +7856,7 @@ export function App() {
                 };
           })
         }
+        onClone={(session) => copySessionToNew(session)}
         onRename={(session) => setSessionDialog({ mode: "rename", session })}
         onDelete={(session) => setSessionDialog({ mode: "delete", session })}
       />
@@ -7804,6 +7914,22 @@ export function App() {
         onLoadEarlier={() => void loadEarlierTurns()}
         state={state}
         toolStatus={toolStatus}
+        onForkUserMessage={(message) => {
+          if (!viewedSession || !message.piChatPersistedMessageId) return;
+          copySessionToNew(viewedSession, message.piChatPersistedMessageId);
+        }}
+        forkUserMessageDisabled={Boolean(
+          !viewedSession ||
+          localDraft ||
+          viewingSubagentSession ||
+          mutationBlocked ||
+          state.isStreaming ||
+          state.isCompacting ||
+          queue.length > 0 ||
+          queuePaused ||
+          extensionRequest ||
+          copyingSessionIds.includes(viewedSessionId),
+        )}
         onNavigate={navigateConversation}
         sessionControl={{
           observing: viewingSubagentSession ? false : observing,
@@ -7843,7 +7969,7 @@ export function App() {
             primaryRuntime.status === "ready" &&
             !localDraft &&
             runtimeStatus !== "active",
-          restoredDraft: cancelledDraft,
+          restoredDraft: restoredComposerDrafts[composerDraftKeyId(composerDraftKey)] || null,
           onDraftRevisionChange: (key, revision) => {
             composerDraftRevisionsRef.current.set(composerDraftKeyId(key), revision);
           },
