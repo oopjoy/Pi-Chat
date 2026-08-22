@@ -175,7 +175,10 @@ test("terminal, settlement, and failure transitions update their visible fields 
   assert.equal(terminalCommitted.messages.at(-1)?.model, "gpt-5.6-sol");
   assert.equal(terminalCommitted.messages.at(-1)?.thinkingLevel, "high");
 
-  const settled = conversationPaneReducer(terminalCommitted, {
+  const settled = conversationPaneReducer({
+    ...terminalCommitted,
+    queuePaused: true,
+  }, {
     type: "AGENT_SETTLED",
     sessionId: sessionA,
   });
@@ -183,6 +186,16 @@ test("terminal, settlement, and failure transitions update their visible fields 
   assert.equal(settled.piState.isCompacting, false);
   assert.equal(settled.toolStatus, "");
   assert.equal(settled.promptStarting, false);
+  assert.equal(settled.queuePaused, false);
+  const retainedPause = conversationPaneReducer({
+    ...terminalCommitted,
+    queue: [{ id: "q", message: "later", imageCount: 0, createdAt: 1 }],
+    queuePaused: true,
+  }, {
+    type: "AGENT_SETTLED",
+    sessionId: sessionA,
+  });
+  assert.equal(retainedPause.queuePaused, true);
 
   const failed = conversationPaneReducer({ ...settled, piState: { ...settled.piState, isStreaming: true }, toolStatus: "tool" }, {
     type: "PROCESS_FAILED",

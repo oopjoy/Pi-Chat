@@ -7,7 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { appendTerminalMessage } from "../shared/streaming-assistant";
+import { appendTerminalMessage, assistantMessageRequestsTool } from "../shared/streaming-assistant";
 import {
   applyStreamingDelta,
   decodeStreamingCheckpoint,
@@ -809,6 +809,7 @@ export function App() {
   const sessionEventVersionRef = useRef(new Map<string, number>());
   const lastSessionEventTypeRef = useRef(new Map<string, string>());
   const promptReconcileTimerRef = useRef<number | null>(null);
+  const requestPromptReconcileRef = useRef<(sessionId: string) => void>(() => undefined);
   const sseReconnectTimerRef = useRef<number | null>(null);
   const sseFloodCountRef = useRef(0);
   const clearViewedPromiseRef = useRef<Promise<unknown> | null>(null);
@@ -980,6 +981,12 @@ export function App() {
     latestQueueProjectionRef.current.set(sessionId, projection);
     advanceQueueProjectionRevision(sessionId);
     return projection;
+  };
+  const clearEmptyQueuePause = (sessionId: string): void => {
+    const projection = latestQueueProjectionRef.current.get(sessionId);
+    const queue = projection?.queue || viewCacheRef.current.get(sessionId)?.queue || [];
+    if (!queue.length && projection?.paused !== false)
+      acceptQueueProjection(sessionId, [], false);
   };
   const acceptQueueProjectionIfCurrent = (
     sessionId: string,
@@ -1169,6 +1176,7 @@ export function App() {
       session: settleSidebarActivity(view.session),
       isStreaming: false,
       liveMessage: undefined,
+      queuePaused: (view.queue?.length || 0) > 0 && view.queuePaused === true,
       toolStatus: "",
       state: { ...view.state, isStreaming: false },
     };
@@ -2070,8 +2078,10 @@ export function App() {
         session: applySidebarQueueProjection(
           normalizedView.session,
           filteredQueue,
+          filteredProjection.paused,
         ),
         queue: filteredQueue,
+        queuePaused: filteredProjection.paused,
       };
       const sourceView = viewCacheRef.current.remember(queueFilteredView);
       // A normalized view is stronger than an earlier local abort intent. Do
@@ -3475,6 +3485,12 @@ export function App() {
                 sessionId: eventSessionId,
                 runGeneration: eventRunGeneration,
               });
+            // A final assistant message normally precedes agent_settled by only
+            // one frame. If that lifecycle frame is lost, verify the hot
+            // Runtime after the normal grace instead of leaving Stop/Queue
+            // painted forever. Tool-call assistant terminals are not final.
+            if (!assistantMessageRequestsTool(terminal))
+              requestPromptReconcileRef.current(eventSessionId);
           }
         } else {
           // User message_end is a transport echo of the prompt. The sender's
@@ -3666,6 +3682,7 @@ export function App() {
           );
         }
         if (eventSessionId) {
+          clearEmptyQueuePause(eventSessionId);
           // Settlement is terminal even if the user navigated away before this
           // SSE frame arrived; always release the owning stop lease.
           completedCompactionSessionIdsRef.current.add(eventSessionId);
@@ -4217,7 +4234,10 @@ export function App() {
             );
           // `paused` means the follow-up queue is paused; the current Pi turn
           // may still be running while abort settles. It is not terminal proof.
-          if (terminalActivity) clearStoppingForSession(eventSessionId);
+          if (terminalActivity) {
+            clearStoppingForSession(eventSessionId);
+            clearEmptyQueuePause(eventSessionId);
+          }
           patchSessionCache(eventSessionId, terminalActivity
             ? {
                 isStreaming: false,
@@ -4282,7 +4302,10 @@ export function App() {
                 eventRunGeneration,
               ),
             );
-          if (!running) clearStoppingForSession(eventSessionId);
+          if (!running) {
+            clearStoppingForSession(eventSessionId);
+            clearEmptyQueuePause(eventSessionId);
+          }
           sessionRunningOverridesRef.current.set(eventSessionId, running);
           setSessions((current) =>
             current.map((session) =>
@@ -4964,6 +4987,8 @@ export function App() {
         });
     }, 4_000);
   };
+  requestPromptReconcileRef.current = (sessionId) =>
+    schedulePromptReconcile(sessionId);
 
   const send = async (
     message: string,

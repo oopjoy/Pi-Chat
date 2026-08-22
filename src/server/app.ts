@@ -5,6 +5,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { basename, dirname, extname, join, normalize, resolve } from "node:path";
 import {
   appendTerminalMessage,
+  assistantMessageRequestsTool,
   reconcilePersistedHistory,
 } from "../shared/streaming-assistant.js";
 import { compareSessionsByLastUserPrompt } from "../shared/session-order.js";
@@ -4604,7 +4605,14 @@ export class PiChatApp {
       let stateResponse: Record<string, unknown> | null = null;
       let statsResponse: Record<string, unknown> | null = null;
       let commandsResponse: Record<string, unknown> | null = null;
-      if (!busy) {
+      const terminalCandidate = terminalTail.at(-1);
+      const terminalIdleProbe = Boolean(
+        busy &&
+          !runtime.liveMessage &&
+          terminalCandidate?.role === "assistant" &&
+          !assistantMessageRequestsTool(terminalCandidate),
+      );
+      if (!busy || terminalIdleProbe) {
         try {
           const primaryAdopted =
             id === this.activeSessionId &&
@@ -4612,17 +4620,21 @@ export class PiChatApp {
             this.primaryRpcGeneration ===
               (this.options.rpc.currentGeneration?.() || 0);
           const probes = await Promise.all([
-            primaryAdopted
+            primaryAdopted && !terminalIdleProbe
               ? Promise.resolve(null)
               : runtime.rpc
                   .send({ type: "get_state" }, SHORT_RPC_MS)
                   .catch(() => null),
-            runtime.rpc
-              .send({ type: "get_session_stats" }, SHORT_RPC_MS)
-              .catch(() => null),
-            runtime.rpc
-              .send({ type: "get_commands" }, SHORT_RPC_MS)
-              .catch(() => null),
+            terminalIdleProbe
+              ? Promise.resolve(null)
+              : runtime.rpc
+                  .send({ type: "get_session_stats" }, SHORT_RPC_MS)
+                  .catch(() => null),
+            terminalIdleProbe
+              ? Promise.resolve(null)
+              : runtime.rpc
+                  .send({ type: "get_commands" }, SHORT_RPC_MS)
+                  .catch(() => null),
           ]);
           stateResponse = probes[0];
           statsResponse = probes[1];
@@ -4641,12 +4653,19 @@ export class PiChatApp {
             ...rememberedState,
             isStreaming: busy,
           } satisfies PiState);
+      const terminalProbeConfirmedIdle = Boolean(
+        terminalIdleProbe && stateResponse && !liveState.isStreaming,
+      );
       if (stateResponse && id === this.activeSessionId) {
         this.lastPrimaryState = liveState;
-        this.running = liveState.isStreaming;
+        // A missing agent_settled frame must not let a read route release the
+        // server's FIFO run authority. The browser may present the confirmed
+        // idle state, while the owner still queues writes until Pi's lifecycle
+        // frame (or recovery) closes the generation.
+        if (!terminalIdleProbe) this.running = liveState.isStreaming;
       } else if (stateResponse && secondaryRuntime) {
         secondaryRuntime.lastState = liveState;
-        secondaryRuntime.running = liveState.isStreaming;
+        if (!terminalIdleProbe) secondaryRuntime.running = liveState.isStreaming;
       }
       if (secondaryRuntime && commandsResponse) {
         secondaryRuntime.commands = asCommands(commandsResponse);
@@ -4680,10 +4699,18 @@ export class PiChatApp {
         if (id === this.activeSessionId) {
           this.lastPrimaryMessages = persistedMessages;
           this.lastPrimaryMessagesSessionId = id;
-          this.primaryPendingTerminalMessages = reconciled.pending;
+          // Keep the final terminal as bounded repair evidence while the server
+          // still awaits lifecycle settlement. Otherwise one transient state
+          // probe can reconcile it out of the tail and make every later view
+          // revive the stale Stop button permanently.
+          this.primaryPendingTerminalMessages = terminalIdleProbe
+            ? terminalTail
+            : reconciled.pending;
         } else if (secondaryRuntime) {
           secondaryRuntime.messageSnapshot = persistedMessages;
-          secondaryRuntime.pendingTerminalMessages = reconciled.pending;
+          secondaryRuntime.pendingTerminalMessages = terminalIdleProbe
+            ? terminalTail
+            : reconciled.pending;
         }
         messages = reconciled.messages;
       }
@@ -4706,9 +4733,22 @@ export class PiChatApp {
           Boolean(statsResponse) || secondaryRuntime.statsKnown;
       } else if (id === this.activeSessionId)
         this.primarySummarySnapshot = session;
+      const presentationBusy = terminalProbeConfirmedIdle ? false : busy;
+      const visibleQueue =
+        id === this.activeSessionId
+          ? this.publicQueue()
+          : this.publicQueue((runtime as SecondaryRuntime).promptQueue);
+      const visibleQueuePaused = visibleQueue.length > 0 && (
+        id === this.activeSessionId
+          ? this.queuePaused
+          : (runtime as SecondaryRuntime).queuePaused
+      );
       return {
-        session,
-        state: this.stateWithFastMode(id, liveState),
+        session: { ...session, running: presentationBusy },
+        state: this.stateWithFastMode(id, {
+          ...liveState,
+          isStreaming: presentationBusy || liveState.isStreaming,
+        }),
         messages: windowed.messages,
         messageTotal: windowed.total,
         turnTotal: windowed.turns,
@@ -4716,18 +4756,12 @@ export class PiChatApp {
         messagesTruncated: windowed.truncated,
         isActive: true,
         runtimeStatus: "active",
-        isStreaming: busy || liveState.isStreaming,
-        liveMessage: runtime.liveMessage,
-        toolStatus: runtime.toolStatus,
+        isStreaming: presentationBusy || liveState.isStreaming,
+        liveMessage: terminalProbeConfirmedIdle ? undefined : runtime.liveMessage,
+        toolStatus: terminalProbeConfirmedIdle ? "" : runtime.toolStatus,
         stats,
-        queue:
-          id === this.activeSessionId
-            ? this.publicQueue()
-            : this.publicQueue((runtime as SecondaryRuntime).promptQueue),
-        queuePaused:
-          id === this.activeSessionId
-            ? this.queuePaused
-            : (runtime as SecondaryRuntime).queuePaused,
+        queue: visibleQueue,
+        queuePaused: visibleQueuePaused,
         commands: commandsResponse
           ? [...BUILTIN_COMMANDS, ...asCommands(commandsResponse)]
           : rememberedCommands?.length

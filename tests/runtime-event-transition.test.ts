@@ -240,6 +240,33 @@ test("shared Runtime transition derives Fast status without treating it as an in
   assert.deepEqual(unrelated.effects, []);
 });
 
+test("settlement clears an empty paused queue without resuming retained follow-ups", () => {
+  const empty = transitionRuntimeEvent("session-a", {
+    ...base(),
+    running: true,
+    queueLength: 0,
+    queuePaused: true,
+  }, { type: "agent_settled" });
+  assert.equal(empty.state.queuePaused, false);
+  assert.deepEqual(empty.effects.map((effect) => effect.type), [
+    "context-complete",
+    "queue-changed",
+    "settled",
+  ]);
+
+  const retained = transitionRuntimeEvent("session-a", {
+    ...base(),
+    running: true,
+    queueLength: 1,
+    queuePaused: true,
+  }, { type: "agent_settled" });
+  assert.equal(retained.state.queuePaused, true);
+  assert.deepEqual(retained.effects.map((effect) => effect.type), [
+    "context-complete",
+    "settled",
+  ]);
+});
+
 test("shared Runtime transition derives extension, failure, and settlement effects", () => {
   const pending = transitionRuntimeEvent("session-a", base(), {
     type: "extension_ui_request",

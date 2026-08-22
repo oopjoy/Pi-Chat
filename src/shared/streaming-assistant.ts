@@ -47,6 +47,12 @@ export function normalizeStreamingAssistantMessage(message: PiMessage, assistant
   return { ...message, content: blocks };
 }
 
+export function assistantMessageRequestsTool(message: PiMessage | undefined): boolean {
+  return message?.role === "assistant"
+    && Array.isArray(message.content)
+    && message.content.some((block) => block.type === "toolCall");
+}
+
 function assistantBlocks(message: PiMessage | undefined): PiContentBlock[] {
   if (!message) return [];
   if (typeof message.content === "string")

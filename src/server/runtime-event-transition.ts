@@ -160,8 +160,18 @@ export function transitionRuntimeEvent(
     effects.push({ type: "clear-extension-request" }, { type: "queue-changed" }, { type: "session-status" });
   }
   if (type === "agent_settled") {
-    state = { ...state, running: false, liveMessage: undefined, toolStatus: "" };
-    effects.push({ type: "context-complete" }, { type: "settled" });
+    const queuePaused = state.queueLength > 0 && state.queuePaused;
+    const pauseChanged = queuePaused !== state.queuePaused;
+    state = {
+      ...state,
+      running: false,
+      queuePaused,
+      liveMessage: undefined,
+      toolStatus: "",
+    };
+    effects.push({ type: "context-complete" });
+    if (pauseChanged) effects.push({ type: "queue-changed" });
+    effects.push({ type: "settled" });
   }
   return { state, broadcastEvent, effects };
 }

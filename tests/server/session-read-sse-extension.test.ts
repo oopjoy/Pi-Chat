@@ -131,6 +131,107 @@ test("missing-cwd directory pagination uses the empty persisted key instead of t
   }
 });
 
+test("a hot view repairs stale Stop and empty Queue presentation after a final assistant terminal", async () => {
+  const path = "C:\\sessions\\missed-settlement.jsonl";
+  const activeId = idForPath(path);
+  const primary = new FakeRpc(path, "missed-settlement");
+  const summary: SessionSummary = {
+    id: activeId,
+    sessionId: "missed-settlement",
+    name: "Missed settlement",
+    preview: "done",
+    cwd: process.cwd(),
+    updatedAt: 1,
+    messageCount: 2,
+    active: true,
+  };
+  const sessions = {
+    list: async () => [summary],
+    summaryForId: () => summary,
+    pathForId: () => path,
+    messagesForId: async () => [{ role: "user", content: "question" }],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({
+    rpc: primary as unknown as PiRpcClient,
+    sessions,
+    resources: {} as ResourceManager,
+    cwd: process.cwd(),
+    webRoot: process.cwd(),
+  });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    assert.equal((await fetch(`${origin}/api/bootstrap`)).status, 200);
+    primary.streaming = true;
+    primary.emit({ type: "agent_start" });
+    primary.emit({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: {} }],
+      },
+    });
+    const readsBeforeToolView = primary.commands.filter((command) => command.type === "get_state").length;
+    const toolView = await fetch(`${origin}/api/sessions/${activeId}/view`);
+    assert.equal(toolView.status, 200);
+    assert.equal((await toolView.json() as { isStreaming: boolean }).isStreaming, true);
+    assert.equal(
+      primary.commands.filter((command) => command.type === "get_state").length,
+      readsBeforeToolView,
+      "an assistant tool call must not be mistaken for a final terminal",
+    );
+    primary.emit({
+      type: "tool_execution_end",
+      toolName: "bash",
+      isError: false,
+    });
+    primary.emit({
+      type: "message_end",
+      message: { role: "assistant", content: "done" },
+    });
+    primary.streaming = false;
+    (app as unknown as { queuePaused: boolean }).queuePaused = true;
+
+    const stateReadsBefore = primary.commands.filter((command) => command.type === "get_state").length;
+    const response = await fetch(`${origin}/api/sessions/${activeId}/view`);
+    assert.equal(response.status, 200);
+    const view = await response.json() as {
+      session: { running?: boolean };
+      state: { isStreaming: boolean };
+      isStreaming: boolean;
+      queuePaused?: boolean;
+      toolStatus?: string;
+    };
+    assert.equal(view.session.running, false);
+    assert.equal(view.state.isStreaming, false);
+    assert.equal(view.isStreaming, false);
+    assert.equal(view.queuePaused, false);
+    assert.equal(view.toolStatus, "");
+    assert.ok(
+      primary.commands.filter((command) => command.type === "get_state").length > stateReadsBefore,
+      "the final assistant terminal should allow one bounded idle probe",
+    );
+    assert.equal(
+      (app as unknown as { running: boolean }).running,
+      true,
+      "a read repair must not release the server's FIFO run authority before lifecycle settlement",
+    );
+    const repeated = await fetch(`${origin}/api/sessions/${activeId}/view`);
+    assert.equal(repeated.status, 200);
+    assert.equal((await repeated.json() as { isStreaming: boolean }).isStreaming, false);
+    assert.ok(
+      primary.commands.filter((command) => command.type === "get_state").length > stateReadsBefore + 1,
+      "repair evidence must survive persisted-tail reconciliation until lifecycle settlement",
+    );
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
 test("an explicit fresh Session inventory awaits the current JSONL index on the first click", async () => {
   const path = "C:\\sessions\\fresh-primary.jsonl";
   const primary = new FakeRpc(path, "fresh-primary");

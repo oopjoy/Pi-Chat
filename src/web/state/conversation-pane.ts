@@ -445,6 +445,7 @@ export function conversationPaneReducer(
             ...state,
             piState: { ...state.piState, isStreaming: false, isCompacting: false },
             liveMessage: null,
+            queuePaused: state.queue.length > 0 && state.queuePaused,
             toolStatus: "",
             promptStarting: false,
           }

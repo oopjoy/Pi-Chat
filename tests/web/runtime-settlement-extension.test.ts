@@ -110,6 +110,84 @@ test("a fresh idle view repairs a missed settlement spinner without F5", async (
   }
 });
 
+test("a final assistant terminal repairs stale Stop and empty Queue after a missed settlement", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const nativeSetTimeout = dom.window.setTimeout.bind(dom.window);
+  const originalSetTimeout = dom.window.setTimeout;
+  dom.window.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) =>
+    nativeSetTimeout(handler, timeout === 4_000 ? 100 : timeout, ...args)) as typeof dom.window.setTimeout;
+  const idleView: SessionViewData = {
+    ...draftView,
+    session: {
+      ...bootstrap.sessions[0],
+      running: false,
+      queued: false,
+      activity: { execution: "idle", awaitingConfirmation: false },
+    },
+    state: { ...bootstrap.state, isStreaming: false, isCompacting: false },
+    messages: [
+      { role: "user", content: "question" },
+      { role: "assistant", content: "done" },
+    ],
+    messageTotal: 2,
+    turnTotal: 1,
+    isStreaming: false,
+    liveMessage: undefined,
+    toolStatus: "",
+    queue: [],
+    queuePaused: false,
+  };
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true },
+      isStreaming: true,
+      queue: [],
+      queuePaused: true,
+      sessions: bootstrap.sessions.map((session) => ({
+        ...session,
+        running: true,
+        queued: false,
+        activity: { execution: "running" as const, awaitingConfirmation: false },
+      })),
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    viewSession: async () => idleView,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    assert.ok(dom.window.document.querySelector(".stop-button"));
+    assert.ok(dom.window.document.querySelector(".queue-submit-button"));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.emitPi({
+        type: "message_end",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        message: { role: "assistant", content: "done" },
+      });
+      await new Promise((resolve) => nativeSetTimeout(resolve, 180));
+    });
+    assert.equal(dom.window.document.querySelector(".stop-button"), null);
+    assert.equal(dom.window.document.querySelector(".queue-submit-button"), null);
+    assert.ok(dom.window.document.querySelector(".send-button"));
+    assert.doesNotMatch(
+      dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")?.placeholder || "",
+      /加入队列/,
+    );
+  } finally {
+    dom.window.setTimeout = originalSetTimeout;
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("idle activity clears a stale tool-completion wait even without agent_settled", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");
