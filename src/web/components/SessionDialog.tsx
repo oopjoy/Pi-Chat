@@ -2,14 +2,15 @@ import { useEffect, useRef, useState } from "react";
 import type { SessionSummary } from "../../shared/types";
 import { useModalFocus } from "../lib/modal-focus";
 
-export type SessionDialogState = { mode: "rename" | "delete"; session: SessionSummary } | null;
+export type SessionDialogState = { mode: "rename" | "clone" | "delete"; session: SessionSummary } | null;
 
-export function SessionDialog({ state, busy, disabled = false, onClose, onRename, onDelete }: {
+export function SessionDialog({ state, busy, disabled = false, onClose, onRename, onClone, onDelete }: {
   state: SessionDialogState;
   busy: boolean;
   disabled?: boolean;
   onClose: () => void;
   onRename: (name: string) => void;
+  onClone: () => void;
   onDelete: () => void;
 }) {
   const [name, setName] = useState("");
@@ -56,6 +57,14 @@ export function SessionDialog({ state, busy, disabled = false, onClose, onRename
         <footer>
           <button type="button" disabled={busy} onClick={onClose}>取消</button>
           <button type="button" className="primary" disabled={busy || disabled || !name.trim()} onClick={submitRename}>{busy ? "保存中…" : "确认"}</button>
+        </footer>
+      </> : state.mode === "clone" ? <>
+        <h2 id="session-dialog-title">复制为新对话</h2>
+        <p>将“<strong>{state.session.name}</strong>”的当前对话历史复制为一个独立的新对话。</p>
+        <p>原对话不会被修改；复制完成后会打开新对话，之后两个对话可以分别继续，不会互相影响。</p>
+        <footer>
+          <button type="button" disabled={busy} onClick={onClose}>取消</button>
+          <button type="button" className="primary" disabled={busy || disabled} onClick={onClone}>{busy ? "复制中…" : "确认复制"}</button>
         </footer>
       </> : <>
         <h2 id="session-dialog-title">删除对话</h2>

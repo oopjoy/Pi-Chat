@@ -60,6 +60,25 @@ test("Session menu clone opens the independently created cold conversation", asy
         .find((button) => button.textContent === "复制为新对话")!
         .click();
       await Promise.resolve();
+    });
+    assert.equal(clones, 0, "opening the confirmation must not clone immediately");
+    assert.match(dom.window.document.querySelector(".session-dialog")?.textContent || "", /原对话不会被修改/);
+    await act(async () => dom.window.document.querySelector<HTMLButtonElement>(".session-dialog footer button")!.click());
+    assert.equal(dom.window.document.querySelector(".session-dialog"), null);
+    assert.equal(clones, 0, "cancelling must leave the source unchanged");
+
+    await act(async () => dom.window.document.querySelector<HTMLButtonElement>(".session-menu-trigger")!.click());
+    await act(async () => {
+      [...dom.window.document.querySelectorAll<HTMLButtonElement>("[role='menuitem']")]
+        .find((button) => button.textContent === "复制为新对话")!
+        .click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-dialog footer button")]
+        .find((button) => button.textContent === "确认复制")!
+        .click();
+      await Promise.resolve();
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -125,6 +144,11 @@ test("a delayed Clone success cannot steal a newer Session selection", async () 
     await act(async () =>
       [...dom.window.document.querySelectorAll<HTMLButtonElement>("[role='menuitem']")]
         .find((button) => button.textContent === "复制为新对话")!
+        .click(),
+    );
+    await act(async () =>
+      [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-dialog footer button")]
+        .find((button) => button.textContent === "确认复制")!
         .click(),
     );
     const secondButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>(

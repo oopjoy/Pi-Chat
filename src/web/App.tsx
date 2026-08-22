@@ -6813,6 +6813,13 @@ export function App() {
       });
   };
 
+  const confirmCloneSession = () => {
+    const dialog = sessionDialog;
+    if (!dialog || dialog.mode !== "clone") return;
+    setSessionDialog(null);
+    copySessionToNew(dialog.session);
+  };
+
   const renameSession = (name: string) => {
     if (buildIdentityMismatch) return;
     const dialog = sessionDialog;
@@ -7878,7 +7885,7 @@ export function App() {
                 };
           })
         }
-        onClone={(session) => copySessionToNew(session)}
+        onClone={(session) => setSessionDialog({ mode: "clone", session })}
         onRename={(session) => setSessionDialog({ mode: "rename", session })}
         onDelete={(session) => setSessionDialog({ mode: "delete", session })}
       />
@@ -8048,9 +8055,10 @@ export function App() {
       <SessionDialog
         state={sessionDialog}
         busy={sessionActionBusy}
-        disabled={buildIdentityMismatch}
+        disabled={buildIdentityMismatch || (sessionDialog?.mode === "clone" && mutationBlocked)}
         onClose={() => setSessionDialog(null)}
         onRename={(name) => void renameSession(name)}
+        onClone={() => confirmCloneSession()}
         onDelete={() => void deleteSession()}
       />
       {!viewingSubagentSession && Object.entries(askQuestionnaires).map(([askSessionId, questionnaire]) => (
