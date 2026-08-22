@@ -1,11 +1,10 @@
 import type { Stats } from "node:fs";
-import { lstat, opendir, open, realpath } from "node:fs/promises";
+import { lstat, open, realpath } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
-import type { WorkspaceDirectoryData, WorkspaceFileData } from "../shared/types.js";
+import type { PiMessage, WorkspaceFileData, WorkspaceRecentFilesData } from "../shared/types.js";
 import { HttpRequestError } from "./http-transport.js";
 
-const MAX_DIRECTORY_ENTRIES = 500;
-const MAX_SCANNED_DIRECTORY_ENTRIES = 2_000;
+const MAX_RECENT_FILES = 50;
 const MAX_PREVIEW_BYTES = 256 * 1024;
 const MAX_RELATIVE_PATH_CHARS = 4_096;
 const FATAL_UTF8 = new TextDecoder("utf-8", { fatal: true });
@@ -55,13 +54,10 @@ function allowedName(name: string): boolean {
     && !/[\0-\x1f\x7f]/.test(name);
 }
 
-function normalizedRelativePath(value: string, allowEmpty: boolean): string {
+export function normalizeWorkspaceRelativePath(value: string): string {
   if (typeof value !== "string" || value.length > MAX_RELATIVE_PATH_CHARS)
     throw new HttpRequestError(400, "Workspace 路径无效");
-  if (!value) {
-    if (allowEmpty) return "";
-    throw new HttpRequestError(400, "文件路径不能为空");
-  }
+  if (!value) throw new HttpRequestError(400, "文件路径不能为空");
   if (isAbsolute(value) || value.includes("\\") || value.startsWith("/"))
     throw new HttpRequestError(400, "Workspace 路径必须是相对路径");
   const parts = value.split("/");
@@ -114,38 +110,63 @@ async function assertStableTarget(cwd: string, relativePath: string, expectedTar
     throw new HttpRequestError(409, "Workspace 路径在读取期间发生变化");
 }
 
-export async function listWorkspaceDirectory(cwd: string, rawDir = ""): Promise<WorkspaceDirectoryData> {
-  const dir = normalizedRelativePath(rawDir, true);
-  const { target, targetStat } = await workspaceTarget(cwd, dir);
-  if (!targetStat.isDirectory()) throw new HttpRequestError(404, "Workspace 目录不存在");
-  const entries: WorkspaceDirectoryData["entries"] = [];
-  let truncated = false;
-  let scanned = 0;
-  const directory = await opendir(target);
-  await assertStableTarget(cwd, dir, target, targetStat);
-  for await (const entry of directory) {
-    scanned += 1;
-    if (scanned > MAX_SCANNED_DIRECTORY_ENTRIES) {
-      truncated = true;
-      break;
+type MutationCall = { operation: "edit" | "write"; path: string };
+
+function toolPathRelativeToWorkspace(cwd: string, rawPath: string): string | null {
+  if (!rawPath || rawPath.length > MAX_RELATIVE_PATH_CHARS || /[\0-\x1f\x7f]/.test(rawPath)) return null;
+  const workspace = cwd.replace(/\\/g, "/").replace(/\/+$/, "");
+  const candidate = rawPath.replace(/\\/g, "/");
+  const caseInsensitive = /^[a-z]:\//i.test(workspace) || workspace.startsWith("//");
+  const comparedWorkspace = caseInsensitive ? workspace.toLowerCase() : workspace;
+  const comparedCandidate = caseInsensitive ? candidate.toLowerCase() : candidate;
+  let relativePath = candidate;
+  if (comparedCandidate.startsWith(`${comparedWorkspace}/`)) relativePath = candidate.slice(workspace.length + 1);
+  else if (isAbsolute(rawPath) || candidate.startsWith("/") || /^[a-z]:\//i.test(candidate) || candidate.startsWith("//")) return null;
+  try { return normalizeWorkspaceRelativePath(relativePath); }
+  catch { return null; }
+}
+
+export function recentModifiedWorkspaceFiles(messages: PiMessage[], cwd: string): WorkspaceRecentFilesData {
+  const calls = new Map<string, MutationCall>();
+  for (const message of messages) {
+    if (!Array.isArray(message.content)) continue;
+    for (const block of message.content) {
+      const operation = block.name?.toLowerCase();
+      if (block.type !== "toolCall" || !block.id || (operation !== "edit" && operation !== "write")) continue;
+      const input = block.arguments;
+      if (!input || typeof input !== "object" || typeof (input as Record<string, unknown>).path !== "string") continue;
+      calls.set(block.id, { operation, path: (input as Record<string, string>).path });
     }
-    if (!allowedName(entry.name) || entry.isSymbolicLink()) continue;
-    if (!entry.isDirectory() && !entry.isFile()) continue;
-    if (entries.length >= MAX_DIRECTORY_ENTRIES) {
-      truncated = true;
-      break;
-    }
-    entries.push({ name: entry.name, type: entry.isDirectory() ? "directory" : "file" });
   }
-  await assertStableTarget(cwd, dir, target, targetStat);
-  entries.sort((left, right) => left.type === right.type
-    ? left.name.localeCompare(right.name)
-    : left.type === "directory" ? -1 : 1);
-  return { dir, entries, truncated };
+  const files: WorkspaceRecentFilesData["files"] = [];
+  const seen = new Set<string>();
+  let truncated = false;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const result = messages[index]!;
+    if (result.role !== "toolResult" || result.isError || !result.toolCallId) continue;
+    const call = calls.get(result.toolCallId);
+    if (!call) continue;
+    const path = toolPathRelativeToWorkspace(cwd, call.path);
+    if (!path) continue;
+    const key = process.platform === "win32" ? path.toLowerCase() : path;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (files.length >= MAX_RECENT_FILES) {
+      truncated = true;
+      break;
+    }
+    files.push({
+      path,
+      name: basename(path),
+      operation: call.operation,
+      ...(typeof result.timestamp === "number" && Number.isFinite(result.timestamp) ? { modifiedAt: result.timestamp } : {}),
+    });
+  }
+  return { files, truncated };
 }
 
 export async function readWorkspaceFile(cwd: string, rawPath: string): Promise<WorkspaceFileData> {
-  const path = normalizedRelativePath(rawPath, false);
+  const path = normalizeWorkspaceRelativePath(rawPath);
   const { target, targetStat } = await workspaceTarget(cwd, path);
   if (!targetStat.isFile()) throw new HttpRequestError(404, "Workspace 文件不存在");
   const bytesToRead = Math.min(targetStat.size, MAX_PREVIEW_BYTES + 4);

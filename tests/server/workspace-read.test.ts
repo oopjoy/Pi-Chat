@@ -20,7 +20,11 @@ async function listen(app: PiChatApp) {
 
 function sessionContent(id: string, cwd: string, withTurn: boolean) {
   const entries: Record<string, unknown>[] = [{ type: "session", id, cwd }];
-  if (withTurn) entries.push({ type: "message", id: `${id}-user`, parentId: null, message: { role: "user", content: "hello" } });
+  if (withTurn) entries.push(
+    { type: "message", id: `${id}-user`, parentId: null, message: { role: "user", content: "hello" } },
+    { type: "message", id: `${id}-call`, parentId: `${id}-user`, message: { role: "assistant", content: [{ type: "toolCall", id: `${id}-edit`, name: "edit", arguments: { path: "README.md", edits: [{ oldText: "old", newText: "new" }] } }] } },
+    { type: "message", id: `${id}-result`, parentId: `${id}-call`, message: { role: "toolResult", toolCallId: `${id}-edit`, toolName: "edit", content: "ok" } },
+  );
   return `${entries.map(JSON.stringify).join("\n")}\n`;
 }
 
@@ -32,6 +36,7 @@ test("cold persisted Workspace reads never start or query a Runtime", async () =
     await mkdir(workspace, { recursive: true });
     await mkdir(sessionsRoot, { recursive: true });
     await writeFile(join(workspace, "README.md"), "# Cold workspace\n");
+    await writeFile(join(workspace, "notes.txt"), "not modified by this Session\n");
     const activePath = join(sessionsRoot, "active.jsonl");
     const coldPath = join(sessionsRoot, "cold.jsonl");
     await writeFile(activePath, sessionContent("active", workspace, true));
@@ -51,10 +56,11 @@ test("cold persisted Workspace reads never start or query a Runtime", async () =
       const coldId = idForPath(coldPath);
       const listing = await fetch(`${base}/api/sessions/${coldId}/workspace/files?dir=`);
       assert.equal(listing.status, 200);
-      assert.deepEqual((await listing.json() as { entries: unknown[] }).entries, [{ name: "README.md", type: "file" }]);
+      assert.deepEqual((await listing.json() as { files: unknown[] }).files, [{ path: "README.md", name: "README.md", operation: "edit" }]);
       const preview = await fetch(`${base}/api/sessions/${coldId}/workspace/file?path=README.md`);
       assert.equal(preview.status, 200);
       assert.match((await preview.json() as { text: string }).text, /Cold workspace/);
+      assert.equal((await fetch(`${base}/api/sessions/${coldId}/workspace/file?path=notes.txt`)).status, 404);
       assert.equal(rpc.commands.length, before, "cold Workspace reads must not send Pi RPC commands");
       assert.equal((await fetch(`${base}/api/sessions/ffffffffffffffffffff/workspace/files`)).status, 404);
       assert.equal((await fetch(`${base}/api/sessions/${coldId}/workspace/files`, { method: "POST" })).status, 405);

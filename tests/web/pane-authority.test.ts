@@ -25,15 +25,15 @@ test("slow A to B navigation binds TopBar Subagents to B before its view resolve
   const summaryB = { ...bootstrap.sessions[0], id: secondId, name: "Session B", cwd: "C:/work-b", active: false };
   const pendingView = new Promise<SessionViewData>(() => {});
   const subagentCalls: string[] = [];
-  const workspaceCalls: Array<{ id: string; dir: string }> = [];
+  const workspaceCalls: string[] = [];
   Object.assign(api, {
     bootstrap: async () => ({ ...bootstrap, sessions: [bootstrap.sessions[0], summaryB], sessionsTotal: 2 }),
     eventsUrl: () => "/api/events",
     markSessionViewed: async (id: string) => ({ viewing: id }),
     viewSession: async (id: string) => id === secondId ? pendingView : draftView,
-    workspaceFiles: async (id: string, dir: string) => {
-      workspaceCalls.push({ id, dir });
-      return { dir, entries: [], truncated: false };
+    workspaceFiles: async (id: string) => {
+      workspaceCalls.push(id);
+      return { files: [], truncated: false };
     },
     backgroundSubagents: async (id: string) => {
       subagentCalls.push(id);
@@ -72,7 +72,7 @@ test("slow A to B navigation binds TopBar Subagents to B before its view resolve
       dom.window.document.querySelector<HTMLButtonElement>(".diff-sidebar-toggle")!.click();
       await Promise.resolve();
     });
-    assert.deepEqual(workspaceCalls.at(-1), { id: secondId, dir: "" });
+    assert.equal(workspaceCalls.at(-1), secondId);
     assert.equal(dom.window.document.querySelector(".workspace-files-toolbar strong")?.getAttribute("title"), "C:/work-b");
   } finally {
     restoreApi();

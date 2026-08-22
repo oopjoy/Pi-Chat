@@ -1,7 +1,7 @@
 import { Fragment, useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
-import type { WorkspaceDirectoryData, WorkspaceFileData } from "../../shared/types";
+import type { WorkspaceFileData, WorkspaceRecentFilesData } from "../../shared/types";
 import { compactEditPath, type ToolEditDiff } from "../lib/tool-edit-diff";
-import { ChevronRightIcon, FileIcon, FolderIcon, RefreshIcon } from "./Icons";
+import { FileIcon, RefreshIcon } from "./Icons";
 
 const OPEN_DIFF_EVENT = "pi-chat-open-edit-diff";
 
@@ -22,73 +22,77 @@ export function EditToolDiff({ diff }: { diff: ToolEditDiff }) {
   </div>;
 }
 
-function joinWorkspacePath(dir: string, name: string): string {
-  return dir ? `${dir}/${name}` : name;
-}
-
 function formatFileSize(bytes: number): string {
   if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1).replace(/\.0$/, "")} MB`;
   if (bytes >= 1024) return `${(bytes / 1024).toFixed(1).replace(/\.0$/, "")} KB`;
   return `${bytes} B`;
 }
 
-function WorkspaceFiles({ sessionId, workspacePath, visible, listDirectory, readFile }: {
+function WorkspaceFiles({ sessionId, workspacePath, visible, activityRevision, listRecentFiles, readFile }: {
   sessionId: string;
   workspacePath: string;
   visible: boolean;
-  listDirectory: (sessionId: string, dir: string) => Promise<WorkspaceDirectoryData>;
+  activityRevision: string;
+  listRecentFiles: (sessionId: string, signal?: AbortSignal) => Promise<WorkspaceRecentFilesData>;
   readFile: (sessionId: string, path: string, signal?: AbortSignal) => Promise<WorkspaceFileData>;
 }) {
-  const [levels, setLevels] = useState<Map<string, WorkspaceDirectoryData>>(new Map());
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const [loadingDirs, setLoadingDirs] = useState<Set<string>>(new Set());
-  const [directoryError, setDirectoryError] = useState("");
+  const [recent, setRecent] = useState<WorkspaceRecentFilesData | null>(null);
+  const [recentLoading, setRecentLoading] = useState(false);
+  const [recentError, setRecentError] = useState("");
   const [selectedPath, setSelectedPath] = useState("");
   const [preview, setPreview] = useState<WorkspaceFileData | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState("");
+  const [listHeight, setListHeight] = useState<number | null>(null);
   const ownerRef = useRef(sessionId);
+  const selectedPathRef = useRef(selectedPath);
   const workspaceGenerationRef = useRef(0);
-  const pendingDirsRef = useRef(new Set<string>());
+  const recentRequestRef = useRef<AbortController | null>(null);
   const previewRequestRef = useRef<AbortController | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const splitResizeRef = useRef<{ pointerId: number; startY: number; startHeight: number } | null>(null);
   ownerRef.current = sessionId;
+  selectedPathRef.current = selectedPath;
 
-  const loadDirectory = useCallback(async (dir: string) => {
+  const loadRecent = useCallback(async () => {
     if (!/^[a-f0-9]{20}$/.test(sessionId)) return;
+    recentRequestRef.current?.abort();
+    const request = new AbortController();
     const generation = workspaceGenerationRef.current;
-    const pendingKey = `${generation}\u0000${dir}`;
-    if (pendingDirsRef.current.has(pendingKey)) return;
-    pendingDirsRef.current.add(pendingKey);
-    setLoadingDirs((current) => new Set(current).add(dir));
-    setDirectoryError("");
+    recentRequestRef.current = request;
+    setRecentLoading(true);
+    setRecentError("");
     try {
-      const result = await listDirectory(sessionId, dir);
-      if (ownerRef.current !== sessionId || workspaceGenerationRef.current !== generation) return;
-      setLevels((current) => new Map(current).set(dir, result));
+      const result = await listRecentFiles(sessionId, request.signal);
+      if (recentRequestRef.current !== request || ownerRef.current !== sessionId || workspaceGenerationRef.current !== generation) return;
+      setRecent(result);
+      if (selectedPathRef.current && !result.files.some((file) => file.path === selectedPathRef.current)) {
+        previewRequestRef.current?.abort();
+        setSelectedPath("");
+        setPreview(null);
+        setPreviewError("");
+      }
     } catch (error) {
-      if (ownerRef.current === sessionId && workspaceGenerationRef.current === generation)
-        setDirectoryError(error instanceof Error ? error.message : "无法读取 Workspace 文件");
+      if (!request.signal.aborted && recentRequestRef.current === request)
+        setRecentError(error instanceof Error ? error.message : "无法读取最近修改文件");
     } finally {
-      pendingDirsRef.current.delete(pendingKey);
-      if (ownerRef.current === sessionId && workspaceGenerationRef.current === generation) {
-        setLoadingDirs((current) => {
-          const next = new Set(current);
-          next.delete(dir);
-          return next;
-        });
+      if (recentRequestRef.current === request) {
+        recentRequestRef.current = null;
+        setRecentLoading(false);
       }
     }
-  }, [listDirectory, sessionId]);
+  }, [listRecentFiles, sessionId]);
 
   useEffect(() => {
     workspaceGenerationRef.current += 1;
+    recentRequestRef.current?.abort();
     previewRequestRef.current?.abort();
+    recentRequestRef.current = null;
     previewRequestRef.current = null;
-    pendingDirsRef.current.clear();
-    setLevels(new Map());
-    setExpanded(new Set());
-    setLoadingDirs(new Set());
-    setDirectoryError("");
+    setRecent(null);
+    setRecentLoading(false);
+    setRecentError("");
     setSelectedPath("");
     setPreview(null);
     setPreviewLoading(false);
@@ -96,25 +100,18 @@ function WorkspaceFiles({ sessionId, workspacePath, visible, listDirectory, read
   }, [sessionId, workspacePath]);
 
   useEffect(() => {
-    if (visible) void loadDirectory("");
-  }, [loadDirectory, visible]);
+    if (visible) void loadRecent();
+  }, [activityRevision, loadRecent, visible]);
 
-  useEffect(() => () => previewRequestRef.current?.abort(), []);
-
-  const toggleDirectory = (path: string) => {
-    const opening = !expanded.has(path);
-    setExpanded((current) => {
-      const next = new Set(current);
-      if (opening) next.add(path);
-      else next.delete(path);
-      return next;
-    });
-    if (opening && !levels.has(path)) void loadDirectory(path);
-  };
+  useEffect(() => () => {
+    recentRequestRef.current?.abort();
+    previewRequestRef.current?.abort();
+  }, []);
 
   const openFile = async (path: string) => {
     previewRequestRef.current?.abort();
     const request = new AbortController();
+    const generation = workspaceGenerationRef.current;
     previewRequestRef.current = request;
     setSelectedPath(path);
     setPreview(null);
@@ -122,10 +119,10 @@ function WorkspaceFiles({ sessionId, workspacePath, visible, listDirectory, read
     setPreviewError("");
     try {
       const result = await readFile(sessionId, path, request.signal);
-      if (previewRequestRef.current === request && ownerRef.current === sessionId) setPreview(result);
+      if (previewRequestRef.current === request && ownerRef.current === sessionId && workspaceGenerationRef.current === generation) setPreview(result);
     } catch (error) {
       if (request.signal.aborted) return;
-      if (previewRequestRef.current === request && ownerRef.current === sessionId)
+      if (previewRequestRef.current === request && ownerRef.current === sessionId && workspaceGenerationRef.current === generation)
         setPreviewError(error instanceof Error ? error.message : "无法预览文件");
     } finally {
       if (previewRequestRef.current === request) {
@@ -135,70 +132,83 @@ function WorkspaceFiles({ sessionId, workspacePath, visible, listDirectory, read
     }
   };
 
-  const renderLevel = (dir: string, depth: number): React.ReactNode => {
-    const level = levels.get(dir);
-    if (!level) {
-      return loadingDirs.has(dir) ? <p className="workspace-files-note" style={{ paddingLeft: `${14 + depth * 14}px` }}>正在加载…</p> : null;
-    }
-    if (!level.entries.length)
-      return <p className="workspace-files-note" style={{ paddingLeft: `${14 + depth * 14}px` }}>空目录</p>;
-    const rows = level.entries.map((entry) => {
-      const path = joinWorkspacePath(dir, entry.name);
-      const indent = { paddingLeft: `${8 + depth * 14}px` };
-      if (entry.type === "directory") {
-        const open = expanded.has(path);
-        return <Fragment key={path}>
-          <button type="button" className="workspace-file-row is-directory" style={indent} aria-expanded={open} title={path} onClick={() => toggleDirectory(path)}>
-            <ChevronRightIcon className={open ? "is-expanded" : ""} aria-hidden="true" />
-            <FolderIcon aria-hidden="true" />
-            <span>{entry.name}</span>
-          </button>
-          {open && renderLevel(path, depth + 1)}
-        </Fragment>;
-      }
-      return <button type="button" key={path} className={`workspace-file-row is-file${selectedPath === path ? " is-selected" : ""}`} style={indent} title={path} onClick={() => void openFile(path)}>
-        <span className="workspace-file-indent" aria-hidden="true" />
-        <FileIcon aria-hidden="true" />
-        <span>{entry.name}</span>
-      </button>;
-    });
-    return <>{rows}{level.truncated && <p className="workspace-files-note">目录内容较多，仅显示前 500 项。</p>}</>;
+  const clampListHeight = (height: number): number => {
+    const panelHeight = panelRef.current?.clientHeight || 500;
+    return Math.max(96, Math.min(Math.max(96, panelHeight - 96), height));
+  };
+  const startSplitResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    splitResizeRef.current = { pointerId: event.pointerId, startY: event.clientY, startHeight: listRef.current?.getBoundingClientRect().height || 180 };
   };
 
-  if (!/^[a-f0-9]{20}$/.test(sessionId))
-    return <div className="edit-diff-sidebar-empty">新对话保存后即可浏览 Workspace 文件。</div>;
+  useEffect(() => {
+    const move = (event: PointerEvent) => {
+      const resize = splitResizeRef.current;
+      if (!resize || resize.pointerId !== event.pointerId) return;
+      const panelHeight = panelRef.current?.clientHeight || 500;
+      const height = Math.max(96, Math.min(Math.max(96, panelHeight - 96), resize.startHeight + event.clientY - resize.startY));
+      setListHeight(height);
+    };
+    const end = (event: PointerEvent) => {
+      if (splitResizeRef.current?.pointerId === event.pointerId) splitResizeRef.current = null;
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
+    return () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+    };
+  }, []);
 
-  return <div className="workspace-files-panel">
+  if (!/^[a-f0-9]{20}$/.test(sessionId))
+    return <div className="edit-diff-sidebar-empty">新对话保存后即可查看最近修改文件。</div>;
+
+  return <div className="workspace-files-panel" ref={panelRef}>
     <div className="workspace-files-toolbar">
-      <strong title={workspacePath}>{workspacePath || "Workspace"}</strong>
-      <button type="button" aria-label="刷新 Workspace 文件" title="刷新文件" onClick={() => {
-        setLevels(new Map());
-        setExpanded(new Set());
-        void loadDirectory("");
-      }}><RefreshIcon /></button>
+      <strong title={workspacePath}>最近修改</strong>
+      <button type="button" aria-label="刷新最近修改文件" title="刷新文件" onClick={() => void loadRecent()}><RefreshIcon /></button>
     </div>
-    {directoryError && <p className="workspace-files-error" role="status">{directoryError}</p>}
-    <div className="workspace-files-tree" role="tree" aria-label="Workspace 文件">{renderLevel("", 0)}</div>
+    {recentError && <p className="workspace-files-error" role="status">{recentError}</p>}
+    <div className="workspace-files-list" ref={listRef} style={listHeight === null ? undefined : { height: `${listHeight}px`, flexBasis: `${listHeight}px` }} role="list" aria-label="当前对话最近修改的文件">
+      {recentLoading && !recent && <p className="workspace-files-note">正在读取最近修改…</p>}
+      {!recentLoading && recent && recent.files.length === 0 && <p className="workspace-files-note">当前对话还没有通过 Edit 或 Write 成功修改文件。</p>}
+      {recent?.files.map((file) => <button type="button" role="listitem" key={file.path} className={`workspace-file-row is-file${selectedPath === file.path ? " is-selected" : ""}`} title={file.path} onClick={() => void openFile(file.path)}>
+        <FileIcon aria-hidden="true" />
+        <span><strong>{file.name}</strong><small>{file.path}</small></span>
+        <em>{file.operation === "edit" ? "Edit" : "Write"}</em>
+      </button>)}
+      {recent?.truncated && <p className="workspace-files-note">仅显示最近修改的 50 个文件。</p>}
+    </div>
+    <div className="workspace-files-splitter" role="separator" aria-label="调整文件列表与预览高度" aria-orientation="horizontal" tabIndex={0}
+      onPointerDown={startSplitResize}
+      onKeyDown={(event) => {
+        if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+        event.preventDefault();
+        const current = listRef.current?.getBoundingClientRect().height || 180;
+        setListHeight(clampListHeight(current + (event.key === "ArrowDown" ? 20 : -20)));
+      }}><span aria-hidden="true" /></div>
     <section className="workspace-file-preview" aria-label="文件预览">
       {previewLoading && <p className="workspace-files-note">正在读取 {selectedPath}…</p>}
       {previewError && <p className="workspace-files-error" role="status">{previewError}</p>}
-      {!previewLoading && !previewError && !preview && <p className="workspace-files-note">选择文件即可在此只读预览。</p>}
+      {!previewLoading && !previewError && !preview && <p className="workspace-files-note">选择最近修改的文件即可在此只读预览。</p>}
       {preview && <>
         <header title={preview.path}><strong>{preview.path}</strong><span>{formatFileSize(preview.size)}</span></header>
-        {preview.encodingLossy && <p className="workspace-files-warning">部分文本不是有效 UTF-8，已使用替代字符显示。</p>}
-        <pre><code>{preview.text || " "}</code></pre>
+        <pre tabIndex={0}><code>{preview.text || " "}</code></pre>
         {preview.truncated && <p className="workspace-files-warning">文件较大，仅显示前 256 KB。</p>}
       </>}
     </section>
   </div>;
 }
 
-export function EditDiffSidebar({ open, width, sessionId, workspacePath, listWorkspaceFiles, readWorkspaceFile, onOpenChange, onWidthChange }: {
+export function EditDiffSidebar({ open, width, sessionId, workspacePath, workspaceActivityRevision, listWorkspaceFiles, readWorkspaceFile, onOpenChange, onWidthChange }: {
   open: boolean;
   width: number;
   sessionId: string;
   workspacePath: string;
-  listWorkspaceFiles: (sessionId: string, dir: string) => Promise<WorkspaceDirectoryData>;
+  workspaceActivityRevision: string;
+  listWorkspaceFiles: (sessionId: string, signal?: AbortSignal) => Promise<WorkspaceRecentFilesData>;
   readWorkspaceFile: (sessionId: string, path: string, signal?: AbortSignal) => Promise<WorkspaceFileData>;
   onOpenChange: (open: boolean) => void;
   onWidthChange: (width: number) => void;
@@ -249,7 +259,7 @@ export function EditDiffSidebar({ open, width, sessionId, workspacePath, listWor
       </nav>
       <button type="button" onClick={() => onOpenChange(false)} aria-label="收起文件与变更侧栏">×</button>
     </header>
-    {tab === "files" ? <WorkspaceFiles sessionId={sessionId} workspacePath={workspacePath} visible={open} listDirectory={listWorkspaceFiles} readFile={readWorkspaceFile} /> : <div className="workspace-changes-panel">
+    {tab === "files" ? <WorkspaceFiles sessionId={sessionId} workspacePath={workspacePath} visible={open} activityRevision={workspaceActivityRevision} listRecentFiles={listWorkspaceFiles} readFile={readWorkspaceFile} /> : <div className="workspace-changes-panel">
       {diff ? <>
         <header className="edit-diff-sidebar-header"><span title={diff.path}><strong>{compactEditPath(diff.path)}</strong><b>+{diff.additions}</b><i>-{diff.deletions}</i></span></header>
         <EditToolDiff diff={diff} />

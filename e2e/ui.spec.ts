@@ -392,15 +392,30 @@ test("directory groups collapse, search temporarily expands, and fixed state per
   await expect(restored.locator(".session-directory-toggle")).toHaveAttribute("aria-expanded", "false");
 });
 
-test("Files and Changes sidebar reads workspace files, shows Edit diffs, and remains inert while hidden", { tag: "@desktop-only" }, async ({ page }) => {
+test("Files and Changes sidebar previews recent mutations with a resizable split and horizontal code scrolling", { tag: "@desktop-only" }, async ({ page }) => {
   await openSecondSession(page);
   await page.getByRole("button", { name: "展开文件与变更侧栏" }).click();
   const diff = page.locator(".edit-diff-sidebar");
   await expect(diff).toHaveClass(/is-open/);
-  const readme = diff.locator(".workspace-file-row.is-file", { hasText: "README.md" });
-  await expect(readme).toBeVisible();
-  await readme.click();
-  await expect(diff.locator(".workspace-file-preview pre")).toContainText("Readable file preview");
+  const recentFile = diff.locator(".workspace-file-row.is-file", { hasText: "example.ts" });
+  await expect(recentFile).toBeVisible();
+  await expect(diff.locator(".workspace-file-row.is-file")).toHaveCount(1);
+  const list = diff.locator(".workspace-files-list");
+  const splitter = diff.locator(".workspace-files-splitter");
+  const viewportWidth = page.viewportSize()?.width || 1_360;
+  await expect.poll(async () => (await splitter.boundingBox())?.x || viewportWidth).toBeLessThan(viewportWidth);
+  const before = await list.boundingBox();
+  const grip = await splitter.boundingBox();
+  if (!before || !grip) throw new Error("Files split is not measurable");
+  await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2 + 70, { steps: 4 });
+  await page.mouse.up();
+  await expect.poll(async () => (await list.boundingBox())?.height || 0).toBeGreaterThan(before.height + 40);
+  await recentFile.click();
+  const preview = diff.locator(".workspace-file-preview pre");
+  await expect(preview).toContainText("export const example");
+  await expect.poll(() => preview.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
   await diff.locator(".workspace-inspector-header > button").click();
 
   const process = page.locator(".conversation-process");

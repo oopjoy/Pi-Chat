@@ -385,6 +385,21 @@ function newerPrimaryReadiness(
   return { ...current, ...incoming };
 }
 
+function workspaceFileActivityRevision(messages: PiMessage[]): string {
+  const parts: string[] = [];
+  for (const message of messages) {
+    if (message.role === "toolResult" && message.toolCallId)
+      parts.push(`result:${message.toolCallId}:${message.isError === true ? "error" : "ok"}`);
+    if (!Array.isArray(message.content)) continue;
+    for (const block of message.content) {
+      const name = block.name?.toLowerCase();
+      if (block.type === "toolCall" && block.id && (name === "edit" || name === "write"))
+        parts.push(`call:${block.id}`);
+    }
+  }
+  return parts.slice(-100).join("|");
+}
+
 /** A capability snapshot is usable only for this exact selected-model shape. */
 function modelCapabilityKey(model: ModelInfo | null | undefined): string {
   if (!model) return "";
@@ -436,6 +451,10 @@ export function App() {
   const [, setLoadingEarlierRevision] = useState(0);
   const { stats } = pane;
   const { liveMessage } = pane;
+  const workspaceActivityRevision = useMemo(
+    () => workspaceFileActivityRevision(liveMessage ? [...messages, liveMessage] : messages),
+    [liveMessage, messages],
+  );
   const streamDiagnosticsRef = useRef<BrowserStreamDiagnosticsAggregator | null>(null);
   streamDiagnosticsRef.current ||= new BrowserStreamDiagnosticsAggregator();
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
@@ -8063,6 +8082,7 @@ export function App() {
         width={diffSidebarWidth}
         sessionId={inspectorSessionId}
         workspacePath={conversationWorkspace}
+        workspaceActivityRevision={workspaceActivityRevision}
         listWorkspaceFiles={api.workspaceFiles}
         readWorkspaceFile={api.workspaceFile}
         onOpenChange={setDiffSidebarOpen}

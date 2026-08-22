@@ -152,7 +152,7 @@ import { handleSubagentsReadRoute } from "./routes/subagents-read.js";
 import { handleWorkspaceReadRoute } from "./routes/workspace-read.js";
 import { SubagentStatusProvider } from "./subagent-status-provider.js";
 import { apiRouteAdmission, PROMPT_BODY_LIMIT } from "./api-route-admission.js";
-import { listWorkspaceDirectory, readWorkspaceFile } from "./workspace-files.js";
+import { normalizeWorkspaceRelativePath, readWorkspaceFile, recentModifiedWorkspaceFiles } from "./workspace-files.js";
 
 export {
   messageWindow,
@@ -5238,14 +5238,22 @@ export class PiChatApp {
     return summary?.cwd ? resolve(summary.cwd) : null;
   }
 
-  private async workspaceDirectoryRoute(input: { sessionId: string; dir: string }): Promise<unknown | null> {
+  private async workspaceRecentFilesRoute(input: { sessionId: string }): Promise<unknown | null> {
     const cwd = await this.workspaceCwdForSession(input.sessionId);
-    return cwd ? listWorkspaceDirectory(cwd, input.dir) : null;
+    if (!cwd) return null;
+    const snapshot = await this.options.sessions.snapshotForId(input.sessionId);
+    return snapshot ? recentModifiedWorkspaceFiles(snapshot.messages, cwd) : null;
   }
 
   private async workspaceFileRoute(input: { sessionId: string; path: string }): Promise<unknown | null> {
     const cwd = await this.workspaceCwdForSession(input.sessionId);
-    return cwd ? readWorkspaceFile(cwd, input.path) : null;
+    if (!cwd) return null;
+    const snapshot = await this.options.sessions.snapshotForId(input.sessionId);
+    if (!snapshot) return null;
+    const path = normalizeWorkspaceRelativePath(input.path);
+    if (!recentModifiedWorkspaceFiles(snapshot.messages, cwd).files.some((file) => file.path === path))
+      throw new HttpRequestError(404, "文件不在当前对话的最近修改列表中");
+    return readWorkspaceFile(cwd, path);
   }
 
   private async readOnlySessionPath(sessionId: string): Promise<string | null> {
@@ -5390,7 +5398,7 @@ export class PiChatApp {
     if (
       await handleWorkspaceReadRoute(
         {
-          workspaceDirectory: (input) => this.workspaceDirectoryRoute(input),
+          workspaceRecentFiles: (input) => this.workspaceRecentFilesRoute(input),
           workspaceFile: (input) => this.workspaceFileRoute(input),
         },
         request,

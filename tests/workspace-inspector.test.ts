@@ -13,7 +13,7 @@ async function settle(predicate: () => boolean) {
   }
 }
 
-test("Files tab lazily expands workspace directories and previews text files", async () => {
+function installDom() {
   const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", { url: "http://127.0.0.1:30170/" });
   Object.assign(globalThis, {
     window: dom.window,
@@ -24,18 +24,26 @@ test("Files tab lazily expands workspace directories and previews text files", a
   });
   Object.defineProperty(dom.window.HTMLElement.prototype, "setPointerCapture", { value() {}, configurable: true });
   Object.defineProperty(dom.window.HTMLElement.prototype, "releasePointerCapture", { value() {}, configurable: true });
+  return dom;
+}
+
+test("Files tab lists recent Session mutations, previews text, and resizes its split", async () => {
+  const dom = installDom();
   const requests: string[] = [];
-  const listWorkspaceFiles = async (_sessionId: string, dir: string) => {
-    requests.push(`dir=${dir}`);
-    return dir === "src"
-      ? { dir, entries: [{ name: "app.ts", type: "file" as const }], truncated: false }
-      : { dir, entries: [{ name: "src", type: "directory" as const }, { name: "README.md", type: "file" as const }], truncated: false };
+  const listWorkspaceFiles = async (sessionId: string) => {
+    requests.push(`list=${sessionId}`);
+    return {
+      files: [
+        { path: "src/app.ts", name: "app.ts", operation: "edit" as const, modifiedAt: 20 },
+        { path: "docs/new.md", name: "new.md", operation: "write" as const, modifiedAt: 10 },
+      ],
+      truncated: false,
+    };
   };
   const readWorkspaceFile = async (_sessionId: string, path: string) => {
     requests.push(`path=${path}`);
-    return { path, name: "app.ts", size: 24, text: "export const value = 1;\n", truncated: false, encodingLossy: false };
+    return { path, name: "app.ts", size: 24, text: `export const value = "${"x".repeat(300)}";\n`, truncated: false, encodingLossy: false };
   };
-
   const root = createRoot(dom.window.document.querySelector<HTMLElement>("#root")!);
   try {
     await act(async () => root.render(createElement(EditDiffSidebar, {
@@ -43,46 +51,42 @@ test("Files tab lazily expands workspace directories and previews text files", a
       width: 460,
       sessionId: "0123456789abcdefabcd",
       workspacePath: "C:/work/demo",
+      workspaceActivityRevision: "edit-1",
       listWorkspaceFiles,
       readWorkspaceFile,
       onOpenChange() {},
       onWidthChange() {},
     })));
-    await settle(() => Boolean(dom.window.document.querySelector(".workspace-file-row.is-directory")));
-    assert.match(dom.window.document.querySelector(".workspace-files-toolbar")?.textContent || "", /C:\/work\/demo/);
-    const folder = dom.window.document.querySelector<HTMLButtonElement>(".workspace-file-row.is-directory")!;
-    await act(async () => folder.click());
-    await settle(() => Boolean(dom.window.document.querySelector(".workspace-file-row.is-file[title='src/app.ts']")));
-    const file = dom.window.document.querySelector<HTMLButtonElement>(".workspace-file-row.is-file[title='src/app.ts']")!;
-    await act(async () => file.click());
+    await settle(() => Boolean(dom.window.document.querySelector("[title='src/app.ts']")));
+    assert.match(dom.window.document.querySelector(".workspace-files-toolbar")?.textContent || "", /最近修改/);
+    assert.equal(dom.window.document.querySelector(".workspace-file-row.is-directory"), null);
+    assert.equal(dom.window.document.querySelector("[title='src/app.ts'] em")?.textContent, "Edit");
+    await act(async () => dom.window.document.querySelector<HTMLButtonElement>("[title='src/app.ts']")!.click());
     await settle(() => (dom.window.document.querySelector(".workspace-file-preview pre")?.textContent || "").includes("export const value"));
-    assert.ok(requests.includes("dir=src"));
     assert.ok(requests.includes("path=src/app.ts"));
+    const preview = dom.window.document.querySelector<HTMLPreElement>(".workspace-file-preview pre")!;
+    assert.equal(preview.tabIndex, 0);
+    const splitter = dom.window.document.querySelector<HTMLElement>(".workspace-files-splitter")!;
+    assert.equal(splitter.getAttribute("aria-orientation"), "horizontal");
+    await act(async () => splitter.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })));
+    assert.equal(dom.window.document.querySelector<HTMLElement>(".workspace-files-list")?.style.height, "200px");
     assert.equal(dom.window.document.querySelector(".workspace-inspector-header button.is-active")?.textContent, "Files");
   } finally {
     await act(async () => root.unmount());
   }
 });
 
-test("a delayed directory response cannot overwrite a later revisit to the same Session", async () => {
-  const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", { url: "http://127.0.0.1:30170/" });
-  Object.assign(globalThis, {
-    window: dom.window,
-    document: dom.window.document,
-    Node: dom.window.Node,
-    HTMLElement: dom.window.HTMLElement,
-    IS_REACT_ACT_ENVIRONMENT: true,
-  });
-  Object.defineProperty(dom.window.HTMLElement.prototype, "setPointerCapture", { value() {}, configurable: true });
-  Object.defineProperty(dom.window.HTMLElement.prototype, "releasePointerCapture", { value() {}, configurable: true });
+test("a delayed recent-file response cannot overwrite a later revisit to the same Session", async () => {
+  const dom = installDom();
   const sessionA = "aaaaaaaaaaaaaaaaaaaa";
   const sessionB = "bbbbbbbbbbbbbbbbbbbb";
   let aCalls = 0;
-  let resolveOldA!: (value: { dir: string; entries: Array<{ name: string; type: "file" }>; truncated: boolean }) => void;
-  const oldA = new Promise<{ dir: string; entries: Array<{ name: string; type: "file" }>; truncated: boolean }>((resolve) => { resolveOldA = resolve; });
-  const listWorkspaceFiles = async (sessionId: string, dir: string) => {
+  let resolveOldA!: (value: { files: Array<{ path: string; name: string; operation: "edit" }>; truncated: boolean }) => void;
+  const oldA = new Promise<{ files: Array<{ path: string; name: string; operation: "edit" }>; truncated: boolean }>((resolve) => { resolveOldA = resolve; });
+  const listWorkspaceFiles = async (sessionId: string) => {
     if (sessionId === sessionA && ++aCalls === 1) return oldA;
-    return { dir, entries: [{ name: sessionId === sessionA ? "new-a.txt" : "b.txt", type: "file" as const }], truncated: false };
+    const name = sessionId === sessionA ? "new-a.txt" : "b.txt";
+    return { files: [{ path: name, name, operation: "edit" as const }], truncated: false };
   };
   const root = createRoot(dom.window.document.querySelector<HTMLElement>("#root")!);
   const render = (sessionId: string) => root.render(createElement(EditDiffSidebar, {
@@ -90,6 +94,7 @@ test("a delayed directory response cannot overwrite a later revisit to the same 
     width: 460,
     sessionId,
     workspacePath: `C:/work/${sessionId}`,
+    workspaceActivityRevision: "revision",
     listWorkspaceFiles,
     readWorkspaceFile: async (_sessionId: string, path: string) => ({ path, name: path, size: 0, text: "", truncated: false, encodingLossy: false }),
     onOpenChange() {},
@@ -101,7 +106,7 @@ test("a delayed directory response cannot overwrite a later revisit to the same 
     await settle(() => Boolean(dom.window.document.querySelector("[title='b.txt']")));
     await act(async () => render(sessionA));
     await settle(() => Boolean(dom.window.document.querySelector("[title='new-a.txt']")));
-    await act(async () => resolveOldA({ dir: "", entries: [{ name: "old-a.txt", type: "file" }], truncated: false }));
+    await act(async () => resolveOldA({ files: [{ path: "old-a.txt", name: "old-a.txt", operation: "edit" }], truncated: false }));
     await act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
     assert.ok(dom.window.document.querySelector("[title='new-a.txt']"));
     assert.equal(dom.window.document.querySelector("[title='old-a.txt']"), null);
@@ -111,16 +116,7 @@ test("a delayed directory response cannot overwrite a later revisit to the same 
 });
 
 test("a delayed file preview cannot return after navigating away and revisiting", async () => {
-  const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", { url: "http://127.0.0.1:30170/" });
-  Object.assign(globalThis, {
-    window: dom.window,
-    document: dom.window.document,
-    Node: dom.window.Node,
-    HTMLElement: dom.window.HTMLElement,
-    IS_REACT_ACT_ENVIRONMENT: true,
-  });
-  Object.defineProperty(dom.window.HTMLElement.prototype, "setPointerCapture", { value() {}, configurable: true });
-  Object.defineProperty(dom.window.HTMLElement.prototype, "releasePointerCapture", { value() {}, configurable: true });
+  const dom = installDom();
   const sessionA = "aaaaaaaaaaaaaaaaaaaa";
   const sessionB = "bbbbbbbbbbbbbbbbbbbb";
   let resolveOld!: (value: { path: string; name: string; size: number; text: string; truncated: boolean; encodingLossy: boolean }) => void;
@@ -131,7 +127,11 @@ test("a delayed file preview cannot return after navigating away and revisiting"
     width: 460,
     sessionId,
     workspacePath: `C:/work/${sessionId}`,
-    listWorkspaceFiles: async (_sessionId: string, dir: string) => ({ dir, entries: [{ name: sessionId === sessionA ? "a.txt" : "b.txt", type: "file" }], truncated: false }),
+    workspaceActivityRevision: "revision",
+    listWorkspaceFiles: async () => {
+      const name = sessionId === sessionA ? "a.txt" : "b.txt";
+      return { files: [{ path: name, name, operation: "edit" }], truncated: false };
+    },
     readWorkspaceFile: async () => oldPreview,
     onOpenChange() {},
     onWidthChange() {},

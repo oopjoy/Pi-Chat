@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { json, methodNotAllowed } from "../http-transport.js";
 
 export type WorkspaceReadRouteHost = {
-  workspaceDirectory(input: { sessionId: string; dir: string }): Promise<unknown | null>;
+  workspaceRecentFiles(input: { sessionId: string }): Promise<unknown | null>;
   workspaceFile(input: { sessionId: string; path: string }): Promise<unknown | null>;
 };
 
@@ -23,7 +23,7 @@ export async function handleWorkspaceReadRoute(
   }
   const sessionId = match[1]!;
   const result = match[2] === "files"
-    ? await host.workspaceDirectory({ sessionId, dir: url.searchParams.get("dir") || "" })
+    ? await host.workspaceRecentFiles({ sessionId })
     : await host.workspaceFile({ sessionId, path: url.searchParams.get("path") || "" });
   if (!result) {
     json(response, 404, { error: "会话 Workspace 不可用" });

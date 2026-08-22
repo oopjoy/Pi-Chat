@@ -43,15 +43,16 @@ export interface SessionDirectorySummary {
   lastUserPromptAt: number;
 }
 
-/** One bounded, immediate child in the selected Session workspace. */
-export interface WorkspaceFileEntry {
+/** One successful file mutation projected from the selected Session transcript. */
+export interface WorkspaceRecentFile {
+  path: string;
   name: string;
-  type: "directory" | "file";
+  operation: "edit" | "write";
+  modifiedAt?: number;
 }
 
-export interface WorkspaceDirectoryData {
-  dir: string;
-  entries: WorkspaceFileEntry[];
+export interface WorkspaceRecentFilesData {
+  files: WorkspaceRecentFile[];
   truncated: boolean;
 }
 

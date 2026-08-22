@@ -612,7 +612,7 @@ test("a completed edit opens the diff sidebar while a failed edit does not", asy
   const sidebarRoot = createRoot(dom.window.document.body.appendChild(dom.window.document.createElement("div")));
   let sidebarOpen = false;
   let sidebarWidth = 460;
-  const renderSidebar = () => void sidebarRoot.render(createElement(EditDiffSidebar, { open: sidebarOpen, width: sidebarWidth, sessionId: "", workspacePath: "C:/work", listWorkspaceFiles: async () => ({ dir: "", entries: [], truncated: false }), readWorkspaceFile: async () => { throw new Error("unused"); }, onWidthChange: (next: number) => { sidebarWidth = next; renderSidebar(); }, onOpenChange: (next: boolean) => { sidebarOpen = next; renderSidebar(); } }));
+  const renderSidebar = () => void sidebarRoot.render(createElement(EditDiffSidebar, { open: sidebarOpen, width: sidebarWidth, sessionId: "", workspacePath: "C:/work", workspaceActivityRevision: "", listWorkspaceFiles: async () => ({ files: [], truncated: false }), readWorkspaceFile: async () => { throw new Error("unused"); }, onWidthChange: (next: number) => { sidebarWidth = next; renderSidebar(); }, onOpenChange: (next: boolean) => { sidebarOpen = next; renderSidebar(); } }));
   await act(async () => renderSidebar());
   await act(async () => summary.click());
   assert.equal(sidebarOpen, true);
