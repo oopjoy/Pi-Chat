@@ -2,13 +2,10 @@ import type { CSSProperties } from "react";
 import type { ModelInfo, PiState, SessionStats, ThinkingLevel } from "../../shared/types";
 import { contextUsageTone } from "../lib/context-usage";
 import type { GateMode } from "../lib/gate-mode";
-import { ChipIcon, LightbulbIcon, LightningIcon } from "./Icons";
+import { LightbulbIcon, LightningIcon } from "./Icons";
 import { CompactSelect } from "./CompactSelect";
+import { ComposerModelSelect } from "./ComposerModelSelect";
 import { GateControl } from "./GateControl";
-
-function modelValue(model: Pick<ModelInfo, "provider" | "id">): string {
-  return `${model.provider}\u0000${model.id}`;
-}
 
 function compactTokens(value: number | undefined | null): string {
   if (typeof value !== "number" || !Number.isFinite(value)) return "—";
@@ -71,22 +68,13 @@ export function ComposerControls({ state, models, stats, disabled, gateAvailable
   onModel: (provider: string, id: string) => void;
   onThinking: (level: ThinkingLevel) => void;
 }) {
-  const current = state.model ? modelValue(state.model) : "";
   // A setting request may still be in flight, but the next choice is a new
   // local preference snapshot rather than a reason to freeze the controls.
   const controlsDisabled = disabled || primaryUnavailable;
-  const modelOptions = models.map((model) => ({
-    value: modelValue(model),
-    label: model.name || model.id,
-    title: model.provider,
-  }));
   const unavailableTitle = "Pi Runtime 尚未就绪；历史仍可阅读，Runtime 恢复后可修改此设置";
 
   return <div className="composer-controls" title={primaryUnavailable ? unavailableTitle : undefined}>
-    <CompactSelect value={current} options={modelOptions} disabled={controlsDisabled || !models.length} ariaLabel="模型" title="模型" align="left" icon={<ChipIcon className="model-icon" />} checkPosition="start" className="composer-model-select" fallbackLabel={state.model?.name || state.model?.id || "未选择模型"} onChange={(value) => {
-      const model = models.find((candidate) => modelValue(candidate) === value);
-      if (model) onModel(model.provider, model.id);
-    }} />
+    <ComposerModelSelect value={state.model} models={models} disabled={controlsDisabled} onChange={onModel} />
     <CompactSelect value={(state.thinkingLevel || "off") as ThinkingLevel} options={THINKING_LEVELS} disabled={controlsDisabled || !state.model || state.model.reasoning === false} ariaLabel="思考强度" title="思考强度" align="left" icon={<LightbulbIcon className={`thinking-icon${state.thinkingLevel && state.thinkingLevel !== "off" ? " is-active" : ""}`} />} checkPosition="start" className="thinking-control thinking-select" onChange={onThinking} />
     {gateAvailable && <GateControl mode={gateMode} disabled={controlsDisabled} onChange={onGate} />}
     <UsageStats stats={stats} isCompacting={state.isCompacting} fastModeActive={state.fastModeActive} />

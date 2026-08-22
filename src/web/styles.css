@@ -658,6 +658,17 @@ details.conversation-process { display: block; padding: 0; }
 .composer-controls .compact-select-popover { top: auto; bottom: calc(100% + 7px); box-sizing: border-box; width: 100%; min-width: 100%; max-width: 100%; padding: 3px 2px; }
 .composer-controls .compact-select-option { min-height: 28px; gap: 5px; padding: 4px 3px; }
 .composer-controls .compact-select-check { width: 15px; flex-basis: 15px; }
+.composer-controls .composer-model-popover { width: min(320px, calc(100vw - 24px)); min-width: min(260px, calc(100vw - 24px)); max-width: min(320px, calc(100vw - 24px)); overflow: hidden; padding: 4px; }
+.composer-model-list { max-height: min(320px, 60dvh); overflow-y: auto; overscroll-behavior: contain; outline: 0; scrollbar-color: color-mix(in srgb, var(--line-strong), var(--text) 18%) var(--surface-soft); scrollbar-gutter: stable; scrollbar-width: thin; }
+.composer-model-list::-webkit-scrollbar { width: 10px; }
+.composer-model-list::-webkit-scrollbar-track { background: var(--surface-soft); }
+.composer-model-list::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 999px; background: color-mix(in srgb, var(--line-strong), var(--text) 18%); background-clip: content-box; }
+.composer-model-group + .composer-model-group { margin-top: 4px; }
+.composer-model-provider { display: flex; min-height: 25px; align-items: center; gap: 6px; padding: 4px 7px; color: var(--muted); font-size: 10.5px; font-weight: 650; }
+.composer-model-provider > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer-model-provider > b { margin-left: auto; color: var(--muted); font-size: 9px; font-variant-numeric: tabular-nums; font-weight: 600; }
+.composer-controls .composer-model-option { min-height: 32px; justify-content: flex-start; gap: 7px; padding: 5px 7px; }
+.composer-model-option-name { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .composer-usage { width: auto; min-width: 76px; height: 28px; justify-content: center; padding: 2px 8px; border-radius: 7px; }
 .composer-usage > span { min-width: 0; flex: 0 1 auto; }
 .composer-usage .fast-mode-indicator { display: grid; width: 15px; height: 15px; min-width: 15px; flex: 0 0 15px; place-items: center; }
