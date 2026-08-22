@@ -392,16 +392,24 @@ test("directory groups collapse, search temporarily expands, and fixed state per
   await expect(restored.locator(".session-directory-toggle")).toHaveAttribute("aria-expanded", "false");
 });
 
-test("Diff sidebar slides, remains inert while hidden, and process collapses from the footer", { tag: "@desktop-only" }, async ({ page }) => {
+test("Files and Changes sidebar reads workspace files, shows Edit diffs, and remains inert while hidden", { tag: "@desktop-only" }, async ({ page }) => {
   await openSecondSession(page);
+  await page.getByRole("button", { name: "展开文件与变更侧栏" }).click();
+  const diff = page.locator(".edit-diff-sidebar");
+  await expect(diff).toHaveClass(/is-open/);
+  const readme = diff.locator(".workspace-file-row.is-file", { hasText: "README.md" });
+  await expect(readme).toBeVisible();
+  await readme.click();
+  await expect(diff.locator(".workspace-file-preview pre")).toContainText("Readable file preview");
+  await diff.locator(".workspace-inspector-header > button").click();
+
   const process = page.locator(".conversation-process");
   await process.locator(":scope > summary").click();
   await expect(process).toHaveAttribute("open", "");
   await process.locator(".process-edit-entry button").click();
-  const diff = page.locator(".edit-diff-sidebar");
   await expect(diff).toHaveClass(/is-open/);
   await expect(diff.getByText("const newValue = 2;")).toBeVisible();
-  await diff.locator(".edit-diff-sidebar-header > button").click();
+  await diff.locator(".workspace-inspector-header > button").click();
   await expect(diff).not.toHaveClass(/is-open/);
   await expect(diff).toHaveAttribute("aria-hidden", "true");
   await expect(diff).toHaveAttribute("inert", "");

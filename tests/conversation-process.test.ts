@@ -612,7 +612,7 @@ test("a completed edit opens the diff sidebar while a failed edit does not", asy
   const sidebarRoot = createRoot(dom.window.document.body.appendChild(dom.window.document.createElement("div")));
   let sidebarOpen = false;
   let sidebarWidth = 460;
-  const renderSidebar = () => void sidebarRoot.render(createElement(EditDiffSidebar, { open: sidebarOpen, width: sidebarWidth, onWidthChange: (next: number) => { sidebarWidth = next; renderSidebar(); }, onOpenChange: (next: boolean) => { sidebarOpen = next; renderSidebar(); } }));
+  const renderSidebar = () => void sidebarRoot.render(createElement(EditDiffSidebar, { open: sidebarOpen, width: sidebarWidth, sessionId: "", workspacePath: "C:/work", listWorkspaceFiles: async () => ({ dir: "", entries: [], truncated: false }), readWorkspaceFile: async () => { throw new Error("unused"); }, onWidthChange: (next: number) => { sidebarWidth = next; renderSidebar(); }, onOpenChange: (next: boolean) => { sidebarOpen = next; renderSidebar(); } }));
   await act(async () => renderSidebar());
   await act(async () => summary.click());
   assert.equal(sidebarOpen, true);
@@ -644,7 +644,7 @@ test("a completed edit opens the diff sidebar while a failed edit does not", asy
   await act(async () => resize.dispatchEvent(pointer("pointermove", 50)));
   await act(async () => resize.dispatchEvent(pointer("pointerup", 50)));
   assert.ok(Number.parseFloat(panel.style.getPropertyValue("--edit-diff-width")) > initialWidth);
-  const close = dom.window.document.querySelector<HTMLButtonElement>(".edit-diff-sidebar-header > button");
+  const close = dom.window.document.querySelector<HTMLButtonElement>(".workspace-inspector-header > button");
   assert.ok(close);
   await act(async () => close.click());
   assert.equal(sidebarOpen, false);

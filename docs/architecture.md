@@ -54,6 +54,8 @@ The status of each current capability is tracked in [`feature-surface.md`](featu
 
 The Settings panel exposes `POST /api/workspace/pick` as the sole browser control for choosing the persisted default cwd for future drafts. New-draft UI also exposes `POST /api/workspace/draft-pick` for one draft only. `POST /api/workspace/set` remains a **local automation** API for scripts or a future local CLI, with no browser wrapper. All global/default paths affect only future drafts and directory indexing; they never stop, restart, rebind, or change the cwd of a live Runtime. Do not document `workspace/set` as a remote client entry.
 
+The right-hand Files / Changes inspector is read-only. Files lists one bounded directory level at a time for the selected persisted Session and previews bounded UTF-8 text without starting a Runtime. Hidden, generated, dependency, credential-like, symlink, binary, and out-of-workspace paths fail closed. Changes retains the existing browser-derived Edit patch projection; it is not repository-wide Git status.
+
 ## Server module map
 
 Current ownership still centers on `src/server/app.ts` (`PiChatApp`), with progressive state extraction. Already extracted:
@@ -81,6 +83,7 @@ Current ownership still centers on `src/server/app.ts` (`PiChatApp`), with progr
 | `routes/bootstrap.ts` | Health, handshake, bootstrap HTTP parsing/serialization through explicit App capabilities |
 | `routes/sessions-read.ts` | Read-only Session list/view HTTP parsing/serialization through explicit App capabilities |
 | `routes/subagents-read.ts` | GET-only background-Subagent catalog plus parent-addressed child-history reads; both remain JSONL-only with no control or Runtime capability |
+| `workspace-files.ts` / `routes/workspace-read.ts` | Session-addressed, bounded, read-only Workspace directory and text-preview projection; no Runtime activation and no arbitrary absolute-path authority |
 | `subagent-status-provider.ts` | Fail-closed, bounded parser/provider for the installed package user-temp status contract; exact parent JSONL path scoping, canonical realpath/dev/ino revalidation, and safe process-local aliases only. Active steps remain visible; terminal-only steps expire from this projection after 24 hours. |
 | `api-route-admission.ts` | Pure lifecycle admission classification and prompt body-size policy |
 

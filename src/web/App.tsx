@@ -7230,6 +7230,9 @@ export function App() {
   ]);
   const displayedConversationName = paneLoading?.name || conversationName;
   const topBarSessionId = paneLoading?.sessionId || viewedSessionId;
+  // Files must bind one coherent Session/cwd pair during navigation. A local
+  // draft or addressed Subagent view has no persisted Workspace authority.
+  const inspectorSessionId = localDraft || viewingSubagentSession ? "" : topBarSessionId;
   /** Build a bounded root-to-leaf child path exclusively from verified parent edges. */
   const subagentBreadcrumb = (() => {
     if (!topBarSessionId || !subagentAddressesRef.current.has(topBarSessionId))
@@ -8058,6 +8061,10 @@ export function App() {
       <EditDiffSidebar
         open={diffSidebarOpen}
         width={diffSidebarWidth}
+        sessionId={inspectorSessionId}
+        workspacePath={conversationWorkspace}
+        listWorkspaceFiles={api.workspaceFiles}
+        readWorkspaceFile={api.workspaceFile}
         onOpenChange={setDiffSidebarOpen}
         onWidthChange={setDiffSidebarWidth}
       />

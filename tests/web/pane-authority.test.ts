@@ -22,14 +22,19 @@ test("slow A to B navigation binds TopBar Subagents to B before its view resolve
   const { App } = await import("../../src/web/App");
   const restoreApi = captureApiSnapshot(api);
   const secondId = "bbbbbbbbbbbbbbbbbbbb";
-  const summaryB = { ...bootstrap.sessions[0], id: secondId, name: "Session B", active: false };
+  const summaryB = { ...bootstrap.sessions[0], id: secondId, name: "Session B", cwd: "C:/work-b", active: false };
   const pendingView = new Promise<SessionViewData>(() => {});
   const subagentCalls: string[] = [];
+  const workspaceCalls: Array<{ id: string; dir: string }> = [];
   Object.assign(api, {
     bootstrap: async () => ({ ...bootstrap, sessions: [bootstrap.sessions[0], summaryB], sessionsTotal: 2 }),
     eventsUrl: () => "/api/events",
     markSessionViewed: async (id: string) => ({ viewing: id }),
     viewSession: async (id: string) => id === secondId ? pendingView : draftView,
+    workspaceFiles: async (id: string, dir: string) => {
+      workspaceCalls.push({ id, dir });
+      return { dir, entries: [], truncated: false };
+    },
     backgroundSubagents: async (id: string) => {
       subagentCalls.push(id);
       if (id !== activeId) return new Promise(() => {});
@@ -50,13 +55,25 @@ test("slow A to B navigation binds TopBar Subagents to B before its view resolve
     assert.ok(initialTrigger);
     await act(async () => initialTrigger.click());
     assert.match(dom.window.document.body.textContent || "", /实施子代理 1/);
+    const groupB = [...dom.window.document.querySelectorAll<HTMLElement>(".session-directory")]
+      .find((group) => group.getAttribute("aria-label")?.includes("work-b"));
+    const groupToggle = groupB?.querySelector<HTMLButtonElement>(".session-directory-toggle");
+    if (groupToggle?.getAttribute("aria-expanded") === "false")
+      await act(async () => groupToggle.click());
     const buttonB = [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
       .find((button) => button.textContent?.includes("Session B"))!;
+    assert.ok(buttonB);
     await act(async () => { buttonB.click(); await Promise.resolve(); });
     assert.equal(dom.window.document.querySelector(".topbar-title")?.textContent, "Session B");
     assert.equal(dom.window.document.body.textContent?.includes("实施子代理 1"), false);
     assert.equal(dom.window.document.querySelector(".subagent-status-popover"), null);
     assert.equal(subagentCalls.at(-1), secondId);
+    await act(async () => {
+      dom.window.document.querySelector<HTMLButtonElement>(".diff-sidebar-toggle")!.click();
+      await Promise.resolve();
+    });
+    assert.deepEqual(workspaceCalls.at(-1), { id: secondId, dir: "" });
+    assert.equal(dom.window.document.querySelector(".workspace-files-toolbar strong")?.getAttribute("title"), "C:/work-b");
   } finally {
     restoreApi();
     await act(async () => root.unmount());

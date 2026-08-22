@@ -59,7 +59,7 @@ export function TopBar({ sessionId, conversationName, workspacePath, buildIdenti
         <SubagentStatusControl key={sessionId || "draft"} sessionId={sessionId} onOpenSession={onOpenSubagentSession} />
       </div>
       <div className="topbar-controls">
-        <button type="button" className={`diff-sidebar-toggle${diffSidebarOpen ? " is-open" : ""}`} onClick={onToggleDiffSidebar} aria-label={diffSidebarOpen ? "收起 Diff 侧栏" : "展开 Diff 侧栏"} aria-pressed={diffSidebarOpen} title={diffSidebarOpen ? "收起修改对比侧栏" : "展开修改对比侧栏"}>
+        <button type="button" className={`diff-sidebar-toggle${diffSidebarOpen ? " is-open" : ""}`} onClick={onToggleDiffSidebar} aria-label={diffSidebarOpen ? "收起文件与变更侧栏" : "展开文件与变更侧栏"} aria-pressed={diffSidebarOpen} title={diffSidebarOpen ? "收起 Files / Changes" : "展开 Files / Changes"}>
           <PanelRightIcon aria-hidden="true" />
         </button>
         <button type="button" className={`topbar-settings${settingsOpen ? " is-open" : ""}`} onClick={onOpenSettings} aria-label={settingsOpen ? "关闭设置" : "打开设置"} aria-expanded={settingsOpen} aria-controls="pi-chat-settings-dialog" title={settingsOpen ? "关闭设置" : "设置"}>

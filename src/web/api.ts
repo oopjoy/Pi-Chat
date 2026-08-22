@@ -1,5 +1,5 @@
 import type { ServerStateDiagnosticSnapshot } from "../shared/state-diagnostics";
-import type { BackgroundSubagentSnapshot, BootstrapData, BootstrapHandshakeData, ExtensionResource, GateMode, InitialPromptData, ModelInfo, PackageResource, PromptDelivery, PromptImage, PromptSettingsSnapshot, QueuedPrompt, ResourceResponse, SessionCopyData, SessionDirectorySummary, SessionRuntimeReadyData, SessionSummary, SessionViewData, SkillResource, ThinkingLevel } from "../shared/types";
+import type { BackgroundSubagentSnapshot, BootstrapData, BootstrapHandshakeData, ExtensionResource, GateMode, InitialPromptData, ModelInfo, PackageResource, PromptDelivery, PromptImage, PromptSettingsSnapshot, QueuedPrompt, ResourceResponse, SessionCopyData, SessionDirectorySummary, SessionRuntimeReadyData, SessionSummary, SessionViewData, SkillResource, ThinkingLevel, WorkspaceDirectoryData, WorkspaceFileData } from "../shared/types";
 import { recordBrowserStateDiagnostic } from "./lib/state-diagnostics";
 
 export type ExtensionResponseInput = {
@@ -313,6 +313,16 @@ export const api = {
       { signal },
     );
   },
+  workspaceFiles: (id: string, dir = "", signal?: AbortSignal) =>
+    request<WorkspaceDirectoryData>(
+      `/api/sessions/${id}/workspace/files?${new URLSearchParams({ dir })}`,
+      { signal },
+    ),
+  workspaceFile: (id: string, path: string, signal?: AbortSignal) =>
+    request<WorkspaceFileData>(
+      `/api/sessions/${id}/workspace/file?${new URLSearchParams({ path })}`,
+      { signal },
+    ),
   viewSession: (id: string, turns?: number, options: { fast?: boolean; signal?: AbortSignal } = {}) => {
     const query = new URLSearchParams();
     if (turns) query.set("turns", String(turns));

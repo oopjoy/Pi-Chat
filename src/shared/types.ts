@@ -43,6 +43,27 @@ export interface SessionDirectorySummary {
   lastUserPromptAt: number;
 }
 
+/** One bounded, immediate child in the selected Session workspace. */
+export interface WorkspaceFileEntry {
+  name: string;
+  type: "directory" | "file";
+}
+
+export interface WorkspaceDirectoryData {
+  dir: string;
+  entries: WorkspaceFileEntry[];
+  truncated: boolean;
+}
+
+export interface WorkspaceFileData {
+  path: string;
+  name: string;
+  size: number;
+  text: string;
+  truncated: boolean;
+  encodingLossy: boolean;
+}
+
 export interface SessionSummary {
   id: string;
   sessionId: string;

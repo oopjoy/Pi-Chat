@@ -68,6 +68,10 @@ export function FolderIcon(props: IconProps) {
   return <LineIcon {...props}><path d="M3.5 7.5A2.5 2.5 0 0 1 6 5h4.1l2 2.2H18A2.5 2.5 0 0 1 20.5 9.7v7.8A2.5 2.5 0 0 1 18 20H6a2.5 2.5 0 0 1-2.5-2.5Z" /><path d="M3.8 9.3h16.4" /></LineIcon>;
 }
 
+export function FileIcon(props: IconProps) {
+  return <LineIcon {...props}><path d="M6 3.5h7l5 5V20.5H6Z" /><path d="M13 3.5v5h5" /></LineIcon>;
+}
+
 export function ChevronRightIcon(props: IconProps) {
   return <LineIcon {...props}><path d="m9 5 7 7-7 7" /></LineIcon>;
 }

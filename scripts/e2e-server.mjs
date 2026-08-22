@@ -31,6 +31,9 @@ const agentDir = join(root, "agent");
 const rpcEntry = join(root, "fake-rpc.mjs");
 await mkdir(sessions, { recursive: true });
 await mkdir(agentDir, { recursive: true });
+await mkdir(join(root, "src"), { recursive: true });
+await writeFile(join(root, "README.md"), "# E2E Workspace\n\nReadable file preview.\n", "utf8");
+await writeFile(join(root, "src", "example.ts"), "export const example = 1;\n", "utf8");
 
 const session = (path, id, name, prompt, answer, model = "gpt-test") => writeFile(path, [
   { type: "session", version: 3, id, timestamp: "2026-01-01T00:00:00Z", cwd: root },

@@ -149,8 +149,10 @@ import {
 import { handleBootstrapRoute } from "./routes/bootstrap.js";
 import { handleSessionsReadRoute } from "./routes/sessions-read.js";
 import { handleSubagentsReadRoute } from "./routes/subagents-read.js";
+import { handleWorkspaceReadRoute } from "./routes/workspace-read.js";
 import { SubagentStatusProvider } from "./subagent-status-provider.js";
 import { apiRouteAdmission, PROMPT_BODY_LIMIT } from "./api-route-admission.js";
+import { listWorkspaceDirectory, readWorkspaceFile } from "./workspace-files.js";
 
 export {
   messageWindow,
@@ -5227,6 +5229,25 @@ export class PiChatApp {
     return { ...result, applicationLifecycle: this.applicationLifecycle };
   }
 
+  private async workspaceCwdForSession(sessionId: string): Promise<string | null> {
+    // Files is a cold persisted-Session surface. Runtime membership alone is
+    // not persistence proof: an empty Primary or Secondary draft must remain
+    // unavailable until SessionIndex observes its first durable turn.
+    const summary = this.options.sessions.summaryForId?.(sessionId)
+      || await this.options.sessions.cachedSummaryForId(sessionId);
+    return summary?.cwd ? resolve(summary.cwd) : null;
+  }
+
+  private async workspaceDirectoryRoute(input: { sessionId: string; dir: string }): Promise<unknown | null> {
+    const cwd = await this.workspaceCwdForSession(input.sessionId);
+    return cwd ? listWorkspaceDirectory(cwd, input.dir) : null;
+  }
+
+  private async workspaceFileRoute(input: { sessionId: string; path: string }): Promise<unknown | null> {
+    const cwd = await this.workspaceCwdForSession(input.sessionId);
+    return cwd ? readWorkspaceFile(cwd, input.path) : null;
+  }
+
   private async readOnlySessionPath(sessionId: string): Promise<string | null> {
     const runtime = this.runtimePool.get(sessionId);
     const regular = (sessionId === this.activeSessionId
@@ -5363,6 +5384,18 @@ export class PiChatApp {
           maxTurns: MAX_TURN_WINDOW_SIZE,
           turnIncrement: TURN_WINDOW_INCREMENT,
         },
+      )
+    )
+      return;
+    if (
+      await handleWorkspaceReadRoute(
+        {
+          workspaceDirectory: (input) => this.workspaceDirectoryRoute(input),
+          workspaceFile: (input) => this.workspaceFileRoute(input),
+        },
+        request,
+        response,
+        url,
       )
     )
       return;
