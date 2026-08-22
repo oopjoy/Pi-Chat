@@ -162,15 +162,15 @@ export function ComposerModelSelect({ value, models, disabled, onChange }: {
               key={key}
               ref={(element) => { optionRefs.current[index] = element; }}
               data-compact-select-option-index={index}
-              className={`compact-select-option composer-model-option has-leading-check${isSelected ? " is-selected" : ""}${isActive ? " is-active" : ""}`}
+              className={`compact-select-option composer-model-option${isSelected ? " is-selected" : ""}${isActive ? " is-active" : ""}`}
               role="option"
               aria-selected={isSelected}
               onMouseMove={() => setActiveIndex(index)}
               onMouseDown={(event) => event.preventDefault()}
               onClick={() => choose(model)}
             >
-              <span className="compact-select-check" aria-hidden="true">{isSelected && <CheckIcon />}</span>
               <span className="composer-model-option-name">{model.name || model.id}</span>
+              <span className="compact-select-check" aria-hidden="true">{isSelected && <CheckIcon />}</span>
             </div>;
           })}
         </div>)}

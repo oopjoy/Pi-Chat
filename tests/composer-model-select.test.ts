@@ -82,6 +82,10 @@ test("composer model picker keeps provider rows outside option navigation and sh
       [...listbox.querySelectorAll<HTMLElement>(".composer-model-option-name")].map((element) => element.textContent),
       ["Sol", "Terra CPA", "Terra"],
     );
+    const modelOptions = [...listbox.querySelectorAll<HTMLElement>("[role='option']")];
+    assert.ok(modelOptions.every((option) => option.firstElementChild?.classList.contains("composer-model-option-name")));
+    assert.ok(modelOptions.every((option) => option.lastElementChild?.classList.contains("compact-select-check")));
+    assert.ok(modelOptions[0]!.lastElementChild?.querySelector("svg"));
 
     const xwillOption = listbox.querySelectorAll<HTMLElement>("[role='group']")[1]!.querySelector<HTMLElement>("[role='option']")!;
     await act(async () => xwillOption.click());
@@ -103,4 +107,6 @@ test("composer model picker CSS keeps a compact bounded list without search or p
   assert.match(css, /\.composer-controls \.composer-model-popover\s*{[^}]*width:\s*min\(192px,[^}]*max-width:\s*min\(192px,/s);
   assert.match(css, /\.composer-model-provider\s*{[^}]*background:\s*color-mix\(in srgb,\s*var\(--status-green\),\s*white 82%\)[^}]*color:\s*#16251b[^}]*font-weight:\s*750/s);
   assert.match(css, /\.composer-controls \.composer-model-option\s*{[^}]*min-height:\s*32px/s);
+  assert.match(css, /\.composer-model-option-name\s*{[^}]*flex:\s*1[^}]*text-align:\s*left/s);
+  assert.match(css, /\.composer-model-option \.compact-select-check\s*{[^}]*margin-left:\s*auto/s);
 });
