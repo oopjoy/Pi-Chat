@@ -107,7 +107,7 @@ test("composer model picker CSS keeps a compact bounded list without search or p
   assert.doesNotMatch(css, /\.composer-model-provider\s*>\s*i/);
   assert.match(css, /\.composer-controls \.composer-model-popover\s*{[^}]*width:\s*min\(192px,[^}]*max-width:\s*min\(192px,/s);
   assert.match(css, /\.composer-model-provider\s*{[^}]*background:\s*color-mix\(in srgb,\s*var\(--status-green\),\s*white 82%\)[^}]*color:\s*#16251b[^}]*font-weight:\s*750/s);
-  assert.match(css, /\.composer-controls \.composer-model-option\s*{[^}]*min-height:\s*32px/s);
+  assert.match(css, /\.composer-controls \.composer-model-option\s*{[^}]*min-height:\s*32px[^}]*padding:\s*5px 7px 5px 15px/s);
   assert.match(css, /\.composer-model-option-name\s*{[^}]*flex:\s*1[^}]*text-align:\s*left/s);
   assert.match(css, /\.composer-model-option \.compact-select-check\s*{[^}]*margin-left:\s*auto/s);
 });

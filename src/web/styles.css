@@ -667,7 +667,7 @@ details.conversation-process { display: block; padding: 0; }
 .composer-model-provider { display: flex; min-height: 25px; align-items: center; gap: 6px; margin: 2px; padding: 4px 7px; border-radius: 6px; background: color-mix(in srgb, var(--status-green), white 82%); color: #16251b; font-size: 10.5px; font-weight: 750; }
 .composer-model-provider > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .composer-model-provider > b { margin-left: auto; color: var(--muted); font-size: 9px; font-variant-numeric: tabular-nums; font-weight: 600; }
-.composer-controls .composer-model-option { min-height: 32px; justify-content: flex-start; gap: 7px; padding: 5px 7px; }
+.composer-controls .composer-model-option { min-height: 32px; justify-content: flex-start; gap: 7px; padding: 5px 7px 5px 15px; }
 .composer-model-option-name { min-width: 0; flex: 1; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
 .composer-model-option .compact-select-check { margin-left: auto; }
 .composer-usage { width: auto; min-width: 76px; height: 28px; justify-content: center; padding: 2px 8px; border-radius: 7px; }
