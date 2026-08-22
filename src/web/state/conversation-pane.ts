@@ -4,6 +4,7 @@ import type {
   PiMessage,
   PiState,
   QueuedPrompt,
+  SessionForkOrigin,
   SessionStats,
   SlashCommand,
 } from "../../shared/types";
@@ -23,6 +24,7 @@ export interface ConversationPaneState {
   identity: ConversationPaneIdentity;
   piState: PiState;
   messages: PiMessage[];
+  forkOrigin?: SessionForkOrigin;
   pendingUserMessage: PiMessage | null;
   messageTotal: number;
   turnTotal: number;
@@ -188,6 +190,7 @@ export function emptyConversationPane(): ConversationPaneState {
     identity: { kind: "none", sessionId: "" },
     piState: EMPTY_PI_STATE,
     messages: [],
+    forkOrigin: undefined,
     pendingUserMessage: null,
     messageTotal: 0,
     turnTotal: 0,

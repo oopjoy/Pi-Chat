@@ -205,6 +205,13 @@ test("persisted User fork opens the new Session with the selected text restored"
     name: "Forked conversation",
     active: false,
   };
+  const forkOrigin = {
+    sourceSessionId: activeId,
+    sourceName: bootstrap.sessions[0].name,
+    sourcePersistedMessageId: "user-1:0",
+    createdAt: 123,
+    sourceAvailable: true,
+  };
   let target = "";
   Object.assign(api, {
     bootstrap: async () => bootstrap,
@@ -216,14 +223,21 @@ test("persisted User fork opens the new Session with the selected text restored"
     }),
     forkSession: async (_id: string, persistedMessageId: string) => {
       target = persistedMessageId;
-      return { session: forkedSession, editorText: "revise this prompt" };
+      return { session: forkedSession, editorText: "revise this prompt", forkOrigin };
     },
-    viewSession: async () => ({
+    viewSession: async (id: string) => id === forkedSession.id ? ({
       ...draftView,
       session: forkedSession,
       state: { ...draftView.state, sessionId: "forked" },
+      forkOrigin,
       isActive: false,
       runtimeStatus: "view-only" as const,
+    }) : ({
+      ...draftView,
+      session: bootstrap.sessions[0],
+      state: { ...bootstrap.state },
+      isActive: true,
+      runtimeStatus: "active" as const,
     }),
   });
   const root = createRoot(dom.window.document.querySelector("#root")!);
@@ -235,6 +249,19 @@ test("persisted User fork opens the new Session with the selected text restored"
     assert.equal(fork.disabled, false);
     await act(async () => {
       fork.click();
+      await Promise.resolve();
+    });
+    assert.equal(target, "", "opening the Fork preview must not mutate immediately");
+    assert.match(dom.window.document.querySelector(".session-dialog")?.textContent || "", /这条 User 消息之前的对话历史/);
+    assert.match(dom.window.document.querySelector(".session-fork-preview")?.textContent || "", /revise this prompt/);
+    await act(async () => dom.window.document.querySelector<HTMLButtonElement>(".session-dialog footer button")!.click());
+    assert.equal(target, "", "cancelling the Fork preview must not create a Session");
+
+    await act(async () => fork.click());
+    await act(async () => {
+      [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-dialog footer button")]
+        .find((button) => button.textContent === "创建分叉")!
+        .click();
       await Promise.resolve();
       await Promise.resolve();
       await Promise.resolve();
@@ -250,6 +277,61 @@ test("persisted User fork opens the new Session with the selected text restored"
       )?.value,
       "revise this prompt",
     );
+    assert.match(dom.window.document.querySelector(".session-fork-banner")?.textContent || "", new RegExp(bootstrap.sessions[0].name));
+    await act(async () => {
+      dom.window.document.querySelector<HTMLButtonElement>(".session-fork-banner button")!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(dom.window.document.querySelector(".topbar-title")?.textContent, bootstrap.sessions[0].name);
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
+test("a committed-or-uncertain Fork keeps its duplicate guard until page refresh", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api, ApiRequestError } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  bootstrap = {
+    ...bootstrap,
+    messages: [{ role: "user", content: "fork me", piChatPersistedMessageId: "user-2:0" }],
+    messageTotal: 1,
+    turnTotal: 1,
+    visibleTurnCount: 1,
+  };
+  let refreshes = 0;
+  Object.assign(api, {
+    bootstrap: async () => bootstrap,
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async (id: string) => ({ viewing: id }),
+    sessions: async () => {
+      refreshes += 1;
+      return { sessions: bootstrap.sessions, total: bootstrap.sessions.length };
+    },
+    forkSession: async () => {
+      throw new ApiRequestError("新对话已创建，但列表索引尚未确认；请刷新页面核对，不要重复操作", 409, "SESSION_COPY_COMMITTED");
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const fork = dom.window.document.querySelector<HTMLButtonElement>("button[aria-label='在新对话中分叉']")!;
+    await act(async () => fork.click());
+    await act(async () => {
+      [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-dialog footer button")]
+        .find((button) => button.textContent === "创建分叉")!
+        .click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.match(dom.window.document.querySelector(".app-toast")?.textContent || "", /不要重复操作/);
+    assert.doesNotMatch(dom.window.document.querySelector(".app-toast")?.textContent || "", /分叉新对话失败/);
+    assert.equal(fork.disabled, true);
+    assert.ok(refreshes > 0);
   } finally {
     await act(async () => root.unmount());
     restoreApi();

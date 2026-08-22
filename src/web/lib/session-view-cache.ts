@@ -163,6 +163,7 @@ export class SessionViewCache {
     const snapshot: SessionViewSnapshot = {
       ...previous,
       ...view,
+      forkOrigin: view.forkOrigin,
       messages: reconciled.messages,
       messageTotal: Math.max(view.messageTotal + reconciled.pending.length, reconciled.messages.length),
       turnTotal: Math.max(view.turnTotal || 0, userTurnCount(persisted)) + pendingUserTurns,

@@ -10,6 +10,7 @@ import { ModelManager } from "../src/server/model-manager";
 import { RpcRequestTimeoutError, type PiRpcClient } from "../src/server/rpc-client";
 import type { ResourceManager } from "../src/server/resource-manager";
 import { SessionIndex, idForPath } from "../src/server/session-index";
+import { SessionRelationStore } from "../src/server/session-relations";
 
 class CopyWorker {
   commands: Record<string, unknown>[] = [];
@@ -89,6 +90,12 @@ class CopyWorker {
     if (command.type === "get_session_stats")
       return { type: "response", success: true, data: { tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
     throw new Error(`Unexpected copy command: ${String(command.type)}`);
+  }
+}
+
+class RecoveryFailCopyWorker extends CopyWorker {
+  override async restart() {
+    throw new Error("simulated source recovery failure");
   }
 }
 
@@ -270,12 +277,289 @@ test("clone and persisted User fork create independent cold Sessions", async () 
         body: JSON.stringify({ persistedMessageId: "u2:0" }),
       });
       assert.equal(forkedResponse.status, 200);
-      const forked = await forkedResponse.json() as { session: { id: string }; editorText?: string };
-      assert.equal(forked.session.id, idForPath(forkPath));
+      const forked = await forkedResponse.json() as {
+        session: { id: string };
+        editorText?: string;
+        forkOrigin?: { sourceSessionId: string; sourceName: string; sourcePersistedMessageId: string; createdAt: number; sourceAvailable: boolean };
+      };
+      const forkedId = idForPath(forkPath);
+      assert.equal(forked.session.id, forkedId);
       assert.equal(forked.editorText, "second prompt");
+      assert.deepEqual(forked.forkOrigin, {
+        sourceSessionId: sourceId,
+        sourceName: "first prompt",
+        sourcePersistedMessageId: "u2:0",
+        createdAt: forked.forkOrigin?.createdAt,
+        sourceAvailable: true,
+      });
+      assert.equal(typeof forked.forkOrigin?.createdAt, "number");
+      assert.deepEqual(
+        await new SessionRelationStore(join(root, "pi-chat-session-relations.json")).getForkOrigin(forkedId),
+        {
+          sourceSessionId: sourceId,
+          sourceName: "first prompt",
+          sourcePersistedMessageId: "u2:0",
+          createdAt: forked.forkOrigin?.createdAt,
+        },
+      );
+      const forkedViewResponse = await fetch(`${origin}/api/sessions/${forkedId}/view`);
+      assert.equal(forkedViewResponse.status, 200);
+      const forkedView = await forkedViewResponse.json() as { forkOrigin?: typeof forked.forkOrigin };
+      assert.deepEqual(forkedView.forkOrigin, forked.forkOrigin);
       assert.equal(primary.stopped, false, "the source Primary is rebound after each copy");
       assert.equal((app as unknown as { runtimes: Map<string, unknown> }).runtimes.size, 0);
       assert.equal(existsSync(sourcePath), true, "copy operations never replace the source JSONL");
+    } finally {
+      server.close();
+      await app.close();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a verified Fork stays committed when source recovery fails", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-fork-recovery-failure-"));
+  try {
+    const sourcePath = join(root, "source.jsonl");
+    const forkPath = join(root, "fork.jsonl");
+    await writeFile(sourcePath, [
+      { type: "session", id: "source", cwd: process.cwd() },
+      { type: "message", id: "u1", parentId: null, message: { role: "user", content: "first prompt" } },
+      { type: "message", id: "u2", parentId: "u1", message: { role: "user", content: "second prompt" } },
+    ].map(JSON.stringify).join("\n") + "\n");
+    const app = new PiChatApp({
+      rpc: new RecoveryFailCopyWorker(sourcePath, [forkPath]) as unknown as PiRpcClient,
+      sessions: new SessionIndex(root, join(root, "cache.json")),
+      resources: {} as ResourceManager,
+      cwd: process.cwd(),
+      webRoot: process.cwd(),
+    });
+    const server = createServer((request, response) => void app.handle(request, response));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const origin = `http://127.0.0.1:${address.port}`;
+    try {
+      await fetch(`${origin}/api/bootstrap`);
+      const response = await fetch(`${origin}/api/sessions/${idForPath(sourcePath)}/fork`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ persistedMessageId: "u2:0" }),
+      });
+      assert.equal(response.status, 200);
+      const result = await response.json() as { session: { id: string }; warning?: string };
+      assert.equal(result.session.id, idForPath(forkPath));
+      assert.match(result.warning || "", /新对话已创建.*请勿重复操作/);
+      assert.equal(existsSync(forkPath), true);
+      const repeated = await fetch(`${origin}/api/sessions/${idForPath(sourcePath)}/fork`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ persistedMessageId: "u2:0" }),
+      });
+      assert.equal(repeated.status, 409);
+      assert.match((await repeated.json() as { error?: string }).error || "", /请勿重复操作/);
+    } finally {
+      server.close();
+      await app.close();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a committed Fork reports index uncertainty without inviting a retry", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-fork-index-failure-"));
+  try {
+    const sourcePath = join(root, "source.jsonl");
+    const forkPath = join(root, "fork.jsonl");
+    await writeFile(sourcePath, [
+      { type: "session", id: "source", cwd: process.cwd() },
+      { type: "message", id: "u1", parentId: null, message: { role: "user", content: "first prompt" } },
+      { type: "message", id: "u2", parentId: "u1", message: { role: "user", content: "second prompt" } },
+    ].map(JSON.stringify).join("\n") + "\n");
+    const sessions = new SessionIndex(root, join(root, "cache.json"));
+    const list = sessions.list.bind(sessions);
+    sessions.list = async (...args: Parameters<SessionIndex["list"]>) => {
+      if (existsSync(forkPath)) throw new Error("simulated post-copy index failure");
+      return list(...args);
+    };
+    const app = new PiChatApp({
+      rpc: new CopyWorker(sourcePath, [forkPath]) as unknown as PiRpcClient,
+      sessions,
+      resources: {} as ResourceManager,
+      cwd: process.cwd(),
+      webRoot: process.cwd(),
+    });
+    const server = createServer((request, response) => void app.handle(request, response));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const origin = `http://127.0.0.1:${address.port}`;
+    try {
+      await fetch(`${origin}/api/bootstrap`);
+      const response = await fetch(`${origin}/api/sessions/${idForPath(sourcePath)}/fork`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ persistedMessageId: "u2:0" }),
+      });
+      assert.equal(response.status, 409);
+      const result = await response.json() as { error?: string };
+      assert.match(result.error || "", /新对话已创建.*不要重复操作/);
+      assert.equal(existsSync(forkPath), true);
+      assert.ok(await new SessionRelationStore(join(root, "pi-chat-session-relations.json")).getForkOrigin(idForPath(forkPath)));
+      const repeated = await fetch(`${origin}/api/sessions/${idForPath(sourcePath)}/fork`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ persistedMessageId: "u2:0" }),
+      });
+      assert.equal(repeated.status, 409);
+      assert.match((await repeated.json() as { error?: string }).error || "", /请勿重复操作/);
+    } finally {
+      server.close();
+      await app.close();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a committed Fork exposes a provenance warning when sidecar persistence fails", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-fork-sidecar-failure-"));
+  try {
+    const sourcePath = join(root, "source.jsonl");
+    const forkPath = join(root, "fork.jsonl");
+    await writeFile(sourcePath, [
+      { type: "session", id: "source", cwd: process.cwd() },
+      { type: "message", id: "u1", parentId: null, message: { role: "user", content: "first prompt" } },
+      { type: "message", id: "u2", parentId: "u1", message: { role: "user", content: "second prompt" } },
+    ].map(JSON.stringify).join("\n") + "\n");
+    const relationPath = join(root, "pi-chat-session-relations.json");
+    const relations = new SessionRelationStore(relationPath, {
+      writeAtomic: async () => { throw new Error("simulated sidecar failure"); },
+    });
+    const app = new PiChatApp({
+      rpc: new CopyWorker(sourcePath, [forkPath]) as unknown as PiRpcClient,
+      sessions: new SessionIndex(root, join(root, "cache.json")),
+      sessionRelations: relations,
+      resources: {} as ResourceManager,
+      cwd: process.cwd(),
+      webRoot: process.cwd(),
+    });
+    const server = createServer((request, response) => void app.handle(request, response));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const origin = `http://127.0.0.1:${address.port}`;
+    try {
+      await fetch(`${origin}/api/bootstrap`);
+      const response = await fetch(`${origin}/api/sessions/${idForPath(sourcePath)}/fork`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ persistedMessageId: "u2:0" }),
+      });
+      assert.equal(response.status, 200);
+      const result = await response.json() as { forkOrigin?: unknown; warning?: string };
+      assert.equal(result.forkOrigin, undefined);
+      assert.match(result.warning || "", /来源关系尚未保存.*请勿重复操作/);
+      assert.equal(await relations.getForkOrigin(idForPath(forkPath)), null);
+      assert.equal(existsSync(relationPath), false);
+    } finally {
+      server.close();
+      await app.close();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Fork provenance survives restart and marks a deleted source unavailable", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-fork-provenance-"));
+  try {
+    const destinationPath = join(root, "fork.jsonl");
+    await writeFile(destinationPath, [
+      { type: "session", id: "fork", cwd: process.cwd() },
+      { type: "message", id: "u1", parentId: null, message: { role: "user", content: "retained history" } },
+    ].map(JSON.stringify).join("\n") + "\n");
+    const destinationId = idForPath(destinationPath);
+    const relationPath = join(root, "pi-chat-session-relations.json");
+    await new SessionRelationStore(relationPath).recordFork(destinationId, {
+      sourceSessionId: "aaaaaaaaaaaaaaaaaaaa",
+      sourceName: "Deleted source",
+      sourcePersistedMessageId: "user-2:0",
+      createdAt: 123,
+    });
+    const app = new PiChatApp({
+      rpc: new SessionWorker(destinationPath) as unknown as PiRpcClient,
+      sessions: new SessionIndex(root, join(root, "cache.json")),
+      sessionRelations: new SessionRelationStore(relationPath),
+      resources: {} as ResourceManager,
+      cwd: process.cwd(),
+      webRoot: process.cwd(),
+    });
+    const server = createServer((request, response) => void app.handle(request, response));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const origin = `http://127.0.0.1:${address.port}`;
+    try {
+      const bootstrapResponse = await fetch(`${origin}/api/bootstrap`);
+      const bootstrapData = await bootstrapResponse.json() as { forkOrigin?: { sourceName: string; sourceAvailable: boolean } };
+      assert.deepEqual(bootstrapData.forkOrigin, { sourceSessionId: "aaaaaaaaaaaaaaaaaaaa", sourceName: "Deleted source", sourcePersistedMessageId: "user-2:0", createdAt: 123, sourceAvailable: false });
+      const viewResponse = await fetch(`${origin}/api/sessions/${destinationId}/view`);
+      const view = await viewResponse.json() as { forkOrigin?: typeof bootstrapData.forkOrigin };
+      assert.deepEqual(view.forkOrigin, bootstrapData.forkOrigin);
+    } finally {
+      server.close();
+      await app.close();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("destination deletion does not unlink JSONL when provenance removal cannot commit", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-fork-delete-sidecar-failure-"));
+  try {
+    const primaryPath = join(root, "primary.jsonl");
+    const destinationPath = join(root, "fork.jsonl");
+    await writeFile(primaryPath, [
+      { type: "session", id: "primary", cwd: process.cwd() },
+      { type: "message", id: "p1", parentId: null, message: { role: "user", content: "primary" } },
+    ].map(JSON.stringify).join("\n") + "\n");
+    await writeFile(destinationPath, [
+      { type: "session", id: "fork", cwd: process.cwd() },
+      { type: "message", id: "f1", parentId: null, message: { role: "user", content: "fork" } },
+    ].map(JSON.stringify).join("\n") + "\n");
+    const destinationId = idForPath(destinationPath);
+    const relationPath = join(root, "pi-chat-session-relations.json");
+    await new SessionRelationStore(relationPath).recordFork(destinationId, {
+      sourceSessionId: idForPath(primaryPath),
+      sourceName: "primary",
+      sourcePersistedMessageId: "p1:0",
+      createdAt: 1,
+    });
+    const app = new PiChatApp({
+      rpc: new SessionWorker(primaryPath) as unknown as PiRpcClient,
+      sessions: new SessionIndex(root, join(root, "cache.json")),
+      sessionRelations: new SessionRelationStore(relationPath, {
+        writeAtomic: async () => { throw new Error("simulated relation removal failure"); },
+      }),
+      resources: {} as ResourceManager,
+      cwd: process.cwd(),
+      webRoot: process.cwd(),
+    });
+    const server = createServer((request, response) => void app.handle(request, response));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const origin = `http://127.0.0.1:${address.port}`;
+    try {
+      await fetch(`${origin}/api/bootstrap`);
+      const deleted = await fetch(`${origin}/api/sessions/${destinationId}`, { method: "DELETE" });
+      assert.equal(deleted.status, 500);
+      assert.equal(existsSync(destinationPath), true);
+      assert.ok(await new SessionRelationStore(relationPath).getForkOrigin(destinationId));
     } finally {
       server.close();
       await app.close();

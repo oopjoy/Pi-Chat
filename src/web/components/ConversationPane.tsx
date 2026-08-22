@@ -1,5 +1,5 @@
 import { Fragment, type ComponentProps, type RefObject } from "react";
-import type { PendingSteer, PiMessage, PiState } from "../../shared/types";
+import type { PendingSteer, PiMessage, PiState, SessionForkOrigin } from "../../shared/types";
 import { appendPendingUserMessage } from "../lib/local-user-turn";
 import { groupConversation } from "../lib/conversation-process";
 import { ChatInput } from "./ChatInput";
@@ -11,6 +11,7 @@ import { FolderIcon, PiMarkIcon } from "./Icons";
 import { PendingSteers } from "./PendingSteers";
 import { PromptQueue } from "./PromptQueue";
 import { SessionControlBanner } from "./SessionControlBanner";
+import { SessionForkBanner } from "./SessionForkBanner";
 import { TopBar } from "./TopBar";
 
 type NavigationDirection = "top" | "previous" | "next" | "bottom";
@@ -25,6 +26,8 @@ export interface ConversationPaneProps {
   viewedSessionId: string;
   paneLoading: PaneLoading;
   messages: PiMessage[];
+  forkOrigin?: SessionForkOrigin;
+  onOpenForkSource: () => void;
   pendingUserMessage: PiMessage | null;
   liveMessage: PiMessage | null;
   localDraft: boolean;
@@ -68,6 +71,8 @@ export function ConversationPane({
   viewedSessionId,
   paneLoading,
   messages,
+  forkOrigin,
+  onOpenForkSource,
   pendingUserMessage,
   liveMessage,
   localDraft,
@@ -144,6 +149,7 @@ export function ConversationPane({
       onPointerDown={onClearNavigation}
     >
       <div className="timeline-inner">
+        {!loading && !paneLoading && forkOrigin && <SessionForkBanner origin={forkOrigin} onOpenSource={onOpenForkSource} />}
         {loading && !viewedSessionId ? (
           <div className="center-state">
             <span className="loader" />

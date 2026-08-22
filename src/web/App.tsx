@@ -385,6 +385,22 @@ function newerPrimaryReadiness(
   return { ...current, ...incoming };
 }
 
+function forkableUserMessageText(message: PiMessage): string {
+  const text = typeof message.content === "string"
+    ? message.content
+    : Array.isArray(message.content)
+      ? message.content
+          .filter((block) => block.type === "text" && typeof block.text === "string")
+          .map((block) => block.text || "")
+          .join("\n")
+      : "";
+  return text.trim();
+}
+
+function forkMessagePreview(text: string, limit = 600): string {
+  return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
+}
+
 function workspaceFileActivityRevision(messages: PiMessage[]): string {
   const parts: string[] = [];
   for (const message of messages) {
@@ -1784,6 +1800,7 @@ export function App() {
             session: activeViewSession,
             state: data.state,
             messages: data.messages,
+            forkOrigin: data.forkOrigin,
             messageTotal: data.messageTotal ?? data.messages.length,
             turnTotal: data.turnTotal,
             visibleTurnCount: data.visibleTurnCount,
@@ -1853,6 +1870,7 @@ export function App() {
           // as if an unsubmitted Model/Thinking choice had already run.
           piState: data.state,
           messages: protectedTranscript.messages,
+          forkOrigin: data.forkOrigin,
           messageTotal: protectedTranscript.messageTotal,
           turnTotal: protectedTranscript.turnTotal,
           visibleTurnCount:
@@ -2128,6 +2146,7 @@ export function App() {
             sessionName: resolvedView.session.name,
           },
           messages: resolvedView.messages,
+          forkOrigin: resolvedView.forkOrigin,
           messageTotal: resolvedView.messageTotal,
           turnTotal:
             resolvedView.turnTotal ??
@@ -6748,6 +6767,7 @@ export function App() {
     const request = persistedMessageId
       ? api.forkSession(source.id, persistedMessageId)
       : api.cloneSession(source.id);
+    let retainCopyGuard = false;
     void request
       .then((result) => {
         if (runEpochGenerationRef.current !== runEpochGeneration) return;
@@ -6787,11 +6807,11 @@ export function App() {
             }));
           }
         }
-        setNotice(
+        setNotice(result.warning || (
           persistedMessageId
             ? "已在新对话中分叉，可修改原消息后发送"
-            : "已复制为新对话",
-        );
+            : "已复制为新对话"
+        ));
         void refreshSidebarSessions().catch(reportBackgroundRefreshError);
         if (navigationEpochRef.current === navigationEpoch)
           void viewSession(result.session.id, result.session.name);
@@ -6799,15 +6819,16 @@ export function App() {
       .catch((cause) => {
         if (runEpochGenerationRef.current !== runEpochGeneration) return;
         const message = cause instanceof Error ? cause.message : String(cause);
-        setError(
-          /结果尚未确认/.test(message)
-            ? message
-            : `${persistedMessageId ? "分叉" : "复制"}新对话失败：${message}`,
-        );
+        const committedOrUncertain = /结果尚未确认|新对话已创建|请勿重复|不要重复/.test(message);
+        retainCopyGuard = committedOrUncertain;
+        setError(committedOrUncertain
+          ? message
+          : `${persistedMessageId ? "分叉" : "复制"}新对话失败：${message}`);
+        if (committedOrUncertain) void refreshSidebarSessions().catch(reportBackgroundRefreshError);
       })
       .finally(() => {
         if (runEpochGenerationRef.current !== runEpochGeneration) return;
-        setCopyingSessionIds((current) =>
+        if (!retainCopyGuard) setCopyingSessionIds((current) =>
           current.filter((sessionId) => sessionId !== source.id),
         );
       });
@@ -6818,6 +6839,13 @@ export function App() {
     if (!dialog || dialog.mode !== "clone") return;
     setSessionDialog(null);
     copySessionToNew(dialog.session);
+  };
+
+  const confirmForkSession = () => {
+    const dialog = sessionDialog;
+    if (!dialog || dialog.mode !== "fork") return;
+    setSessionDialog(null);
+    copySessionToNew(dialog.session, dialog.persistedMessageId);
   };
 
   const renameSession = (name: string) => {
@@ -7786,6 +7814,20 @@ export function App() {
     );
   }
 
+  const sessionDialogSource = sessionDialog
+    ? sessions.find((session) => session.id === sessionDialog.session.id) || sessionDialog.session
+    : null;
+  const sessionDialogCopyBlocked = Boolean(
+    sessionDialog &&
+    (sessionDialog.mode === "clone" || sessionDialog.mode === "fork") &&
+    (mutationBlocked ||
+      copyingSessionIds.includes(sessionDialog.session.id) ||
+      sessionDialogSource?.running ||
+      sessionDialogSource?.queued ||
+      sessionDialogSource?.pendingConfirmation ||
+      sessionDialogSource?.messageCount === 0),
+  );
+
   return (
     <AppShell
       diffSidebarOpen={diffSidebarOpen}
@@ -7924,6 +7966,12 @@ export function App() {
         viewedSessionId={viewedSessionId}
         paneLoading={paneLoading}
         messages={messages}
+        forkOrigin={pane.forkOrigin}
+        onOpenForkSource={() => {
+          const origin = pane.forkOrigin;
+          if (!origin?.sourceAvailable || viewSwitching) return;
+          void viewSession(origin.sourceSessionId, origin.sourceName);
+        }}
         pendingUserMessage={pendingUserMessage}
         liveMessage={liveMessage}
         localDraft={localDraft}
@@ -7945,7 +7993,14 @@ export function App() {
         toolStatus={toolStatus}
         onForkUserMessage={(message) => {
           if (!viewedSession || !message.piChatPersistedMessageId) return;
-          copySessionToNew(viewedSession, message.piChatPersistedMessageId);
+          const text = forkableUserMessageText(message);
+          if (!text) return;
+          setSessionDialog({
+            mode: "fork",
+            session: viewedSession,
+            persistedMessageId: message.piChatPersistedMessageId,
+            messagePreview: forkMessagePreview(text),
+          });
         }}
         forkUserMessageDisabled={Boolean(
           !viewedSession ||
@@ -8055,10 +8110,11 @@ export function App() {
       <SessionDialog
         state={sessionDialog}
         busy={sessionActionBusy}
-        disabled={buildIdentityMismatch || (sessionDialog?.mode === "clone" && mutationBlocked)}
+        disabled={buildIdentityMismatch || sessionDialogCopyBlocked}
         onClose={() => setSessionDialog(null)}
         onRename={(name) => void renameSession(name)}
         onClone={() => confirmCloneSession()}
+        onFork={() => confirmForkSession()}
         onDelete={() => void deleteSession()}
       />
       {!viewingSubagentSession && Object.entries(askQuestionnaires).map(([askSessionId, questionnaire]) => (

@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { createReadStream, existsSync, readFileSync } from "node:fs";
 import { stat, unlink } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { basename, extname, join, normalize, resolve } from "node:path";
+import { basename, dirname, extname, join, normalize, resolve } from "node:path";
 import {
   appendTerminalMessage,
   reconcilePersistedHistory,
@@ -33,6 +33,7 @@ import type {
   SessionActivityState,
   SessionCopyData,
   SessionDirectorySummary,
+  SessionForkOrigin,
   SessionRuntimeReadyData,
   SessionStats,
   SessionSummary,
@@ -139,6 +140,7 @@ import { SseHub } from "./sse-hub.js";
 import { PromptEvidenceLedger } from "./prompt-evidence-ledger.js";
 import { StateDiagnosticsRecorder } from "./state-diagnostics.js";
 import { ServerStreamDiagnosticsAggregator } from "./stream-observability.js";
+import { SessionRelationStore } from "./session-relations.js";
 import { saveWorkspace } from "./workspace-state.js";
 import { requestGuardError } from "./request-guard.js";
 import {
@@ -309,6 +311,8 @@ export interface PiChatAppOptions {
   rpc: PiRpcClient;
   createRpc?: (cwd: string) => PiRpcClient;
   sessions: SessionIndex;
+  /** Pi Chat-only Fork provenance sidecar; never writes into Pi JSONL. */
+  sessionRelations?: SessionRelationStore;
   webRoot: string;
   cwd: string;
   resources: ResourceManager;
@@ -412,6 +416,7 @@ export class PiChatApp {
   /** Primary's true process cwd never follows mutable future-draft defaults. */
   private readonly primaryRuntimeCwd: string;
   private readonly subagentStatuses = new SubagentStatusProvider();
+  private readonly sessionRelations: SessionRelationStore;
   private activeSessionId = "";
   private activeSessionPath: string | undefined;
   /** A Primary event is usable only after get_state bound this specific child to this Session. */
@@ -435,6 +440,10 @@ export class PiChatApp {
   private readonly promptAdmissionTails = new Map<string, Promise<void>>();
   /** Clone/Fork temporarily changes a bound Pi RPC identity before restoring its source binding. */
   private readonly copyingSessionIds = new Set<string>();
+  /** A verified destination exists, but the immutable source writer has not yet recovered. */
+  private readonly copyRecoveryPendingSessionIds = new Set<string>();
+  /** A verified destination exists, but Session Index has not confirmed its browser projection. */
+  private readonly copyProjectionPendingSessionIds = new Set<string>();
   /** Observation-only prompt correlation; never consulted for scheduling or Runtime state. */
   private readonly activePromptDiagnostics = new Map<string, ActivePromptDiagnostic>();
   /** Serializes default-workspace commits after native pickers return. */
@@ -566,6 +575,12 @@ export class PiChatApp {
 
   constructor(private readonly options: PiChatAppOptions) {
     this.runEpoch = options.runEpoch || randomBytes(16).toString("base64url");
+    const sessionCachePath = typeof options.sessions.cachePath === "string"
+      ? options.sessions.cachePath
+      : join(options.cwd, ".pi-chat-session-index.json");
+    this.sessionRelations = options.sessionRelations || new SessionRelationStore(
+      join(dirname(sessionCachePath), "pi-chat-session-relations.json"),
+    );
     this.currentCwd = resolve(options.cwd);
     this.primaryRuntimeCwd = this.currentCwd;
     this.startupModels = this.readStartupModels();
@@ -1451,6 +1466,7 @@ export class PiChatApp {
     if (!sessionId) return;
     this.runtimeFailureReasonsBySession.delete(sessionId);
     this.runtimeIncidentIdsBySession.delete(sessionId);
+    this.copyRecoveryPendingSessionIds.delete(sessionId);
   }
 
   /** A copy operation has no second browser-dialog authority while the source RPC is rebound. */
@@ -3873,6 +3889,33 @@ export class PiChatApp {
     return { id, name };
   }
 
+  private reportSessionRelationFailure(operation: string, error: unknown): void {
+    console.error(`[Pi Chat] Session relation ${operation} failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  private async forkOriginForSession(destinationSessionId: string): Promise<SessionForkOrigin | undefined> {
+    let relation;
+    try { relation = await this.sessionRelations.getForkOrigin(destinationSessionId); }
+    catch (error) {
+      this.reportSessionRelationFailure("read", error);
+      return undefined;
+    }
+    if (!relation) return undefined;
+    const runtime = this.runtimePool.get(relation.sourceSessionId);
+    let source = runtime?.summarySnapshot
+      || (relation.sourceSessionId === this.activeSessionId ? this.primarySummarySnapshot : undefined)
+      || this.options.sessions.summaryForId(relation.sourceSessionId);
+    if (!source) {
+      try { source = await this.options.sessions.cachedSummaryForId(relation.sourceSessionId); }
+      catch { /* An unavailable source is still valid Fork provenance. */ }
+    }
+    return {
+      ...relation,
+      sourceName: source?.name || relation.sourceName,
+      sourceAvailable: Boolean(source),
+    };
+  }
+
   private async runBoundSessionCopy(input: {
     id: string;
     sourcePath: string;
@@ -3880,10 +3923,11 @@ export class PiChatApp {
     entryId?: string;
     runtime?: SecondaryRuntime;
     knownSessionIds: ReadonlySet<string>;
-  }): Promise<{ sessionId: string; sessionPath: string; piSessionId: string }> {
+  }): Promise<{ sessionId: string; sessionPath: string; piSessionId: string; warning?: string }> {
     const rpc = input.runtime?.rpc || this.options.rpc;
     let mutationOutcomeUnknown = false;
     let cancelled = false;
+    let committed: { sessionId: string; sessionPath: string; piSessionId: string; warning?: string } | null = null;
     this.copyingSessionIds.add(input.id);
     try {
       try {
@@ -3956,18 +4000,28 @@ export class PiChatApp {
         !state.sessionId
       )
         throw new HttpRequestError(409, "Pi 返回的新会话身份与现有会话冲突");
-      return {
+      committed = {
         sessionId,
         sessionPath,
         piSessionId: state.sessionId,
       };
+      return committed;
     } finally {
       this.copyingSessionIds.delete(input.id);
-      if (input.runtime) {
-        input.runtime.failed = true;
-        await this.runtimePool.recover(input.runtime);
-      } else {
-        await this.restartPrimaryRuntime(input.sourcePath);
+      try {
+        if (input.runtime) {
+          input.runtime.failed = true;
+          await this.runtimePool.recover(input.runtime);
+        } else {
+          await this.restartPrimaryRuntime(input.sourcePath);
+        }
+      } catch (error) {
+        if (!committed) throw error;
+        if (!input.runtime) this.primaryFailed = true;
+        this.copyRecoveryPendingSessionIds.add(input.id);
+        this.recordRuntimeFailure(input.id, error);
+        console.error(`[Pi Chat] Session copy source recovery failed: ${error instanceof Error ? error.message : String(error)}`);
+        committed.warning = "新对话已创建，但原对话恢复尚未确认；请勿重复操作";
       }
     }
   }
@@ -3977,6 +4031,8 @@ export class PiChatApp {
     mode: "clone" | "fork",
     persistedMessageId?: string,
   ): Promise<SessionCopyData> {
+    if (this.copyRecoveryPendingSessionIds.has(id) || this.copyProjectionPendingSessionIds.has(id))
+      throw new HttpRequestError(409, "上次新对话已创建，但恢复或列表投影尚未确认；请勿重复操作");
     const releasePromptAdmission = await this.beginPromptAdmission(id);
     try {
       const knownSessions = await this.options.sessions.list();
@@ -4047,7 +4103,28 @@ export class PiChatApp {
         operationAdmission.reopen(operationGeneration);
       }
 
-      await this.options.sessions.list();
+      let forkOrigin: SessionForkOrigin | undefined;
+      let copyWarning = copied.warning || "";
+      if (target && persistedMessageId) {
+        const storedOrigin = {
+          sourceSessionId: id,
+          sourceName: summary.name,
+          sourcePersistedMessageId: persistedMessageId,
+          createdAt: this.now(),
+        };
+        try {
+          await this.sessionRelations.recordFork(copied.sessionId, storedOrigin);
+          forkOrigin = { ...storedOrigin, sourceAvailable: true };
+        } catch (error) {
+          this.reportSessionRelationFailure("write", error);
+          copyWarning ||= "新对话已创建，但分叉来源关系尚未保存；请勿重复操作";
+        }
+      }
+      try { await this.options.sessions.list(); }
+      catch {
+        this.copyProjectionPendingSessionIds.add(id);
+        throw new HttpRequestError(409, "新对话已创建，但列表索引尚未确认；请刷新页面核对，不要重复操作");
+      }
       const session = this.options.sessions.summaryForId(copied.sessionId);
       const indexedPath = this.options.sessions.pathForId(copied.sessionId);
       if (
@@ -4055,8 +4132,10 @@ export class PiChatApp {
         !indexedPath ||
         resolve(indexedPath).toLowerCase() !== copied.sessionPath.toLowerCase() ||
         session.sessionId !== copied.piSessionId
-      )
-        throw new Error("新会话已创建，但 Session Index 未能确认其身份；请刷新对话列表");
+      ) {
+        this.copyProjectionPendingSessionIds.add(id);
+        throw new HttpRequestError(409, "新对话已创建，但列表索引尚未确认；请刷新页面核对，不要重复操作");
+      }
       this.broadcast({
         type: "pi_chat_sessions_changed",
         action: mode === "clone" ? "cloned" : "forked",
@@ -4066,6 +4145,8 @@ export class PiChatApp {
       return {
         session,
         ...(target ? { editorText: target.text } : null),
+        ...(forkOrigin ? { forkOrigin } : null),
+        ...(copyWarning ? { warning: copyWarning } : null),
       };
     } finally {
       releasePromptAdmission();
@@ -4115,11 +4196,22 @@ export class PiChatApp {
       const released = await this.runtimePool.releaseForDeletion(id);
       if (!released) throw new Error("该会话正在执行其他操作，请稍后重试删除");
     }
-    if (path && existsSync(path)) await unlink(path);
+    const removedForkOrigin = await this.sessionRelations.getForkOrigin(id);
+    await this.sessionRelations.removeDestination(id);
+    try {
+      if (path && existsSync(path)) await unlink(path);
+    } catch (error) {
+      if (removedForkOrigin) {
+        try { await this.sessionRelations.recordFork(id, removedForkOrigin); }
+        catch (restoreError) { this.reportSessionRelationFailure("delete-rollback", restoreError); }
+      }
+      throw error;
+    }
     this.lastUserPromptAtBySession.delete(id);
     this.gateModesBySession.delete(id);
     this.fastModeBySession.delete(id);
     this.clearRuntimeFailure(id);
+    this.copyProjectionPendingSessionIds.delete(id);
     this.clearNativeSteeringState(id, "deleted");
     this.sessionControl.clearSession(id);
     await this.options.sessions.list(this.activeSessionPath, this.currentCwd);
@@ -4912,8 +5004,12 @@ export class PiChatApp {
       // does not send another get_state for a controller-owned Primary.
       return this.bootstrap(clientId, coherenceRetry + 1);
     }
+    const forkOrigin = this.activeSessionId
+      ? await this.forkOriginForSession(this.activeSessionId)
+      : undefined;
     return {
       buildIdentity: this.buildIdentity,
+      ...(forkOrigin ? { forkOrigin } : null),
       state: this.stateWithFastMode(this.activeSessionId, state),
       messages: windowedMessages.messages,
       messageTotal: windowedMessages.total,
@@ -5315,12 +5411,15 @@ export class PiChatApp {
     const view = input.fast
       ? this.hotMemoryView(input.sessionId, input.turns, input.clientId)
       : await this.sessionView(input.sessionId, input.turns, input.clientId);
+    const projected = view
+      ? { ...view, forkOrigin: await this.forkOriginForSession(input.sessionId) }
+      : null;
     this.traceViewProjection(
       input.fast ? "session-view-fast" : "session-view",
       input.sessionId,
-      view,
+      projected,
     );
-    return view;
+    return projected;
   }
 
   private async handleApiCore(

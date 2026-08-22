@@ -233,11 +233,23 @@ export interface SessionRuntimeReadyData {
   gateMode: GateMode;
 }
 
+export interface SessionForkOrigin {
+  sourceSessionId: string;
+  sourceName: string;
+  sourcePersistedMessageId: string;
+  createdAt: number;
+  sourceAvailable: boolean;
+}
+
 /** A non-destructive copy/fork creates a new cold Session and never rebinds the source Runtime. */
 export interface SessionCopyData {
   session: SessionSummary;
   /** Fork returns the selected User text for the new Session Composer; Clone leaves it empty. */
   editorText?: string;
+  /** Pi Chat sidecar provenance; never written into either Pi JSONL. */
+  forkOrigin?: SessionForkOrigin;
+  /** The destination committed, but a non-authoritative recovery/provenance step needs attention. */
+  warning?: string;
 }
 
 export interface InitialPromptRequest {
@@ -265,6 +277,7 @@ export interface InitialPromptData extends SessionRuntimeReadyData {
 
 export interface SessionViewData {
   session: SessionSummary;
+  forkOrigin?: SessionForkOrigin;
   state: PiState;
   messages: PiMessage[];
   messageTotal: number;
@@ -343,6 +356,7 @@ export interface BootstrapHandshakeData {
 
 export interface BootstrapData {
   buildIdentity: BuildIdentity;
+  forkOrigin?: SessionForkOrigin;
   state: PiState;
   messages: PiMessage[];
   sessions: SessionSummary[];

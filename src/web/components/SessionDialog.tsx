@@ -2,15 +2,19 @@ import { useEffect, useRef, useState } from "react";
 import type { SessionSummary } from "../../shared/types";
 import { useModalFocus } from "../lib/modal-focus";
 
-export type SessionDialogState = { mode: "rename" | "clone" | "delete"; session: SessionSummary } | null;
+export type SessionDialogState =
+  | { mode: "rename" | "clone" | "delete"; session: SessionSummary }
+  | { mode: "fork"; session: SessionSummary; persistedMessageId: string; messagePreview: string }
+  | null;
 
-export function SessionDialog({ state, busy, disabled = false, onClose, onRename, onClone, onDelete }: {
+export function SessionDialog({ state, busy, disabled = false, onClose, onRename, onClone, onFork, onDelete }: {
   state: SessionDialogState;
   busy: boolean;
   disabled?: boolean;
   onClose: () => void;
   onRename: (name: string) => void;
   onClone: () => void;
+  onFork: () => void;
   onDelete: () => void;
 }) {
   const [name, setName] = useState("");
@@ -65,6 +69,15 @@ export function SessionDialog({ state, busy, disabled = false, onClose, onRename
         <footer>
           <button type="button" disabled={busy} onClick={onClose}>取消</button>
           <button type="button" className="primary" disabled={busy || disabled} onClick={onClone}>{busy ? "复制中…" : "确认复制"}</button>
+        </footer>
+      </> : state.mode === "fork" ? <>
+        <h2 id="session-dialog-title">在新对话中分叉</h2>
+        <p>将复制“<strong>{state.session.name}</strong>”中这条 User 消息之前的对话历史：</p>
+        <blockquote className="session-fork-preview">{state.messagePreview}</blockquote>
+        <p>这条消息不会立即发送，而是放入新对话的输入框供你修改。原对话不会被修改，两个对话之后互不影响。</p>
+        <footer>
+          <button type="button" disabled={busy} onClick={onClose}>取消</button>
+          <button type="button" className="primary" disabled={busy || disabled} onClick={onFork}>{busy ? "创建中…" : "创建分叉"}</button>
         </footer>
       </> : <>
         <h2 id="session-dialog-title">删除对话</h2>
