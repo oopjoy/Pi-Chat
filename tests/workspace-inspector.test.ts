@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
@@ -12,6 +13,12 @@ async function settle(predicate: () => boolean) {
     await act(async () => new Promise((resolve) => setTimeout(resolve, 5)));
   }
 }
+
+test("workspace code preview matches the file-name scale with regular weight and roomier lines", () => {
+  const css = readFileSync(new URL("../src/web/styles.css", import.meta.url), "utf8");
+  assert.match(css, /\.workspace-file-row > span strong \{[^}]*font-size: 12px;/);
+  assert.match(css, /\.workspace-file-preview code \{[^}]*font: 400 12px\/1\.7 ui-monospace/);
+});
 
 function installDom() {
   const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", { url: "http://127.0.0.1:30170/" });

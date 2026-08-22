@@ -610,7 +610,7 @@ details.conversation-process { display: block; padding: 0; }
 .workspace-file-preview > header span { flex: 0 0 auto; color: var(--muted); font-size: 10px; }
 .workspace-file-preview pre { box-sizing: border-box; min-width: 0; min-height: 0; flex: 1; margin: 0; overflow: auto; padding: 10px 12px; background: color-mix(in srgb, var(--surface-soft), var(--chat-bg) 35%); white-space: pre; }
 .workspace-file-preview pre:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.workspace-file-preview code { display: block; width: max-content; min-width: 100%; font: 11px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; tab-size: 2; }
+.workspace-file-preview code { display: block; width: max-content; min-width: 100%; font: 400 12px/1.7 ui-monospace, SFMono-Regular, Consolas, monospace; tab-size: 2; }
 .diff-sidebar-toggle, .topbar-settings { display: grid; width: 32px; height: 32px; flex: 0 0 auto; place-items: center; padding: 0; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--muted); cursor: pointer; line-height: 1; }
 .diff-sidebar-toggle > svg, .topbar-settings > svg { display: block; width: 17px; height: 17px; flex-shrink: 0; }
 .diff-sidebar-toggle:hover, .diff-sidebar-toggle.is-open, .topbar-settings:hover, .topbar-settings.is-open { border-color: var(--line); background: var(--surface-hover); color: var(--text); }
