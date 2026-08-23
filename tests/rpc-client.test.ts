@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { MAX_RPC_INBOUND_LINE_BYTES, MAX_RPC_OUTBOUND_LINE_BYTES } from "../src/shared/rpc-contracts";
 import type { IncidentDiagnostics, IncidentFields } from "../src/server/incident-diagnostics";
 import {
@@ -677,9 +678,12 @@ test("process-exit fanout isolates synchronous and asynchronous listeners", asyn
 
 test("global Pi RPC starts and answers state requests",  { skip: !piEntry, timeout: 75_000 }, async () => {
   assert.ok(piEntry);
+  const incidents = incidentCollector();
   const client = new PiRpcClient({
     cwd: process.cwd(),
     piEntry,
+    startupProbe: fileURLToPath(new URL("../resources/runtime/pi-chat-startup-probe.mjs", import.meta.url)),
+    diagnostics: incidents.diagnostics,
     args: ["--no-session", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files"],
   });
   try {
@@ -688,6 +692,24 @@ test("global Pi RPC starts and answers state requests",  { skip: !piEntry, timeo
     assert.equal(state.isStreaming, false);
     const models = rpcData<{ models: unknown[] }>(await client.send({ type: "get_available_models" }));
     assert.ok(Array.isArray(models.models));
+    const startup = incidents.records.filter((record) => record.startupPhase);
+    const phases = new Set(startup.map((record) => record.startupPhase));
+    for (const phase of [
+      "spawn-invoked",
+      "spawn-returned",
+      "ready-request-allocated",
+      "ready-request-written",
+      "child-spawn-event",
+      "child-pre-entry",
+      "first-stdout-byte",
+      "transport-ready",
+    ]) assert.equal(phases.has(phase), true, `missing startup phase ${phase}`);
+    assert.equal(startup[0]?.startupPhase, "spawn-invoked");
+    assert.equal(startup.at(-1)?.startupPhase, "transport-ready");
+    assert.equal(new Set(startup.map((record) => record.startupSpanId)).size, 1);
+    assert.equal(startup.at(-1)?.outcome, "succeeded");
+    for (let index = 1; index < startup.length; index += 1)
+      assert.ok((startup[index].durationMs ?? 0) >= (startup[index - 1].durationMs ?? 0));
   } finally {
     await client.stop();
   }

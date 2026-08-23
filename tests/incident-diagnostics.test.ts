@@ -14,7 +14,8 @@ const expectedKeys = [
   "sessionHash", "browserHash", "pageHash", "runtimeKind",
   "rpcGeneration", "rpcRequestId", "childPid", "operation",
   "lifecycle", "queueLength", "controlState", "outcome",
-  "durationMs", "errorCode",
+  "durationMs", "errorCode", "startupSpanId", "startupAttempt",
+  "startupMode", "startupPhase",
 ].sort();
 
 async function fixture(maximumBytes = 5 * 1024 * 1024) {
@@ -51,6 +52,10 @@ test("incident diagnostics writes fixed metadata-only JSONL", async () => {
       outcome: "written-outcome-unknown",
       durationMs: 10003,
       errorCode: "PI_RPC_REQUEST_TIMEOUT",
+      startupSpanId: "PS-START001",
+      startupAttempt: 2,
+      startupMode: "recovery",
+      startupPhase: "transport-ready",
     });
     diagnostics.record({
       sessionId: session,
@@ -73,6 +78,10 @@ test("incident diagnostics writes fixed metadata-only JSONL", async () => {
     assert.equal(records[0].sessionHash, records[1].sessionHash);
     assert.equal(records[0].browserHash, records[1].browserHash);
     assert.notEqual(records[0].sessionHash, records[0].browserHash);
+    assert.equal(records[0].startupSpanId, "PS-START001");
+    assert.equal(records[0].startupAttempt, 2);
+    assert.equal(records[0].startupMode, "recovery");
+    assert.equal(records[0].startupPhase, "transport-ready");
   } finally {
     await diagnostics.close();
     await rm(root, { recursive: true, force: true });

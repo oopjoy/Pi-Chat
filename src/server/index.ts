@@ -10,6 +10,7 @@ import { PrimaryRuntimeReadinessController } from "./primary-runtime-readiness.j
 import { ModelManager } from "./model-manager.js";
 import { ResourceManager } from "./resource-manager.js";
 import { PiRpcClient } from "./rpc-client.js";
+import { resolvePiRuntimeLaunch } from "./pi-runtime-bundle.js";
 import {
   DEFAULT_MAX_IDLE_SECONDARY_RUNTIMES,
   DEFAULT_MAX_SECONDARY_RUNTIMES,
@@ -134,8 +135,24 @@ if (gateComponent.status === "conflict" || gateComponent.status === "source-miss
   throw new Error(`[Pi Chat] ${gateComponent.diagnostic || "内置文件权限安全执行组件不可用。"}`);
 }
 let lifecycleForDiagnostics: import("../shared/types.js").ApplicationLifecycle = "idle";
+const resolvedPiRuntimeLaunch = await resolvePiRuntimeLaunch({ runtimeDist });
+const piRuntimeLaunch = Object.freeze({
+  ...resolvedPiRuntimeLaunch,
+  childEnvironment: Object.freeze({ ...resolvedPiRuntimeLaunch.childEnvironment }),
+});
+console.log(`[Pi Chat] Pi Runtime：${piRuntimeLaunch.diagnostic}`);
+const builtStartupProbe = resolve(runtimeDist, "resources", "runtime", "pi-chat-startup-probe.mjs");
+const sourceStartupProbe = resolve(projectRoot, "resources", "runtime", "pi-chat-startup-probe.mjs");
+const startupProbe = existsSync(builtStartupProbe)
+  ? builtStartupProbe
+  : existsSync(sourceStartupProbe)
+    ? sourceStartupProbe
+    : undefined;
 const rpc = new PiRpcClient({
   cwd: options.cwd,
+  piEntry: piRuntimeLaunch.piEntry,
+  startupProbe,
+  childEnvironment: piRuntimeLaunch.childEnvironment,
   diagnostics,
   runtimeKind: "primary",
   lifecycle: () => lifecycleForDiagnostics,
@@ -213,6 +230,9 @@ const app = new PiChatApp({
   maxIdleSecondaryRuntimes: DEFAULT_MAX_IDLE_SECONDARY_RUNTIMES,
   createRpc: (cwd) => new PiRpcClient({
     cwd,
+    piEntry: piRuntimeLaunch.piEntry,
+    startupProbe,
+    childEnvironment: piRuntimeLaunch.childEnvironment,
     diagnostics,
     runtimeKind: "secondary",
     lifecycle: () => lifecycleForDiagnostics,

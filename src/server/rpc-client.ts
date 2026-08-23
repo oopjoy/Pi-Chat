@@ -1,7 +1,10 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { existsSync, realpathSync, statSync } from "node:fs";
+import { performance } from "node:perf_hooks";
 import { delimiter, dirname, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
+import { pathToFileURL } from "node:url";
 import {
   MAX_RPC_INBOUND_LINE_BYTES,
   MAX_RPC_OUTBOUND_LINE_BYTES,
@@ -14,6 +17,8 @@ import {
   type IncidentDiagnostics,
   type IncidentOperation,
   type IncidentRuntimeKind,
+  type IncidentStartupMode,
+  type IncidentStartupPhase,
 } from "./incident-diagnostics.js";
 
 interface PendingRequest {
@@ -78,8 +83,13 @@ function encodeOutboundFrame(value: Record<string, unknown>): string {
 
 export interface RpcClientOptions {
   cwd: string;
-  piEntry?: string;
+  /** Undefined keeps legacy discovery; null is a frozen unavailable launch plan. */
+  piEntry?: string | null;
   args?: string[];
+  /** Fixed fail-open preload probe that marks child JS bootstrap on fd 3. */
+  startupProbe?: string;
+  /** Frozen per-host Runtime launch environment; shared by Primary and every Secondary. */
+  childEnvironment?: Readonly<Record<string, string>>;
   diagnostics?: IncidentDiagnostics;
   runtimeKind?: Exclude<IncidentRuntimeKind, "host">;
   sessionId?: () => string;
@@ -128,14 +138,33 @@ export interface RpcEventSource {
   childPid?: number;
 }
 
+interface RpcChildSource extends RpcEventSource {
+  child: ChildProcessWithoutNullStreams;
+  stderrTail: string;
+  startupStartedAt: number;
+  startupSpanId: string;
+  startupAttempt: number;
+  startupMode: IncidentStartupMode;
+  firstStdoutObserved: boolean;
+  preEntryObserved: boolean;
+}
+
 type EventListener = (
   event: Record<string, unknown>,
   source?: RpcEventSource,
 ) => void | Promise<void>;
 
 export function resolvePiEntry(env: NodeJS.ProcessEnv = process.env): string | null {
-  const configured = env.PI_CHAT_PI_ENTRY;
-  if (configured && existsSync(configured)) return configured;
+  const configured = env.PI_CHAT_PI_ENTRY?.trim();
+  if (configured) {
+    try {
+      const canonical = realpathSync(configured);
+      if (!statSync(canonical).isFile()) throw new Error("not a regular file");
+      return canonical;
+    } catch {
+      throw new Error(`PI_CHAT_PI_ENTRY 指向的 Pi RPC 入口不可用：${configured}`);
+    }
+  }
 
   const candidates: string[] = [
     "/usr/local/lib/node_modules/@earendil-works/pi-coding-agent/dist/rpc-entry.js",
@@ -159,12 +188,18 @@ export function resolvePiEntry(env: NodeJS.ProcessEnv = process.env): string | n
       }
     }
   }
-  return candidates.find(existsSync) ?? null;
+  for (const candidate of candidates) {
+    try {
+      const canonical = realpathSync(candidate);
+      if (statSync(canonical).isFile()) return canonical;
+    } catch {}
+  }
+  return null;
 }
 
 export class PiRpcClient {
   private child: ChildProcessWithoutNullStreams | null = null;
-  private source: (RpcEventSource & { child: ChildProcessWithoutNullStreams; stderrTail: string }) | null = null;
+  private source: RpcChildSource | null = null;
   private sourceGeneration = 0;
   private listeners = new Set<EventListener>();
   private pending = new Map<string, PendingRequest>();
@@ -190,6 +225,39 @@ export class PiRpcClient {
   currentPid(): number | null {
     const pid = this.child?.pid || this.unconfirmedSource?.childPid || this.unconfirmedChild?.pid;
     return typeof pid === "number" ? pid : null;
+  }
+
+  private startupMode(extraArgs: string[]): IncidentStartupMode {
+    if (this.sourceGeneration > 0) return "recovery";
+    if ((this.options.runtimeKind || "primary") === "primary") return "primary";
+    return extraArgs.includes("--session") ? "persisted-session" : "new-draft";
+  }
+
+  private recordStartupPhase(
+    source: Pick<RpcChildSource, "generation" | "childPid" | "startupStartedAt" | "startupSpanId" | "startupAttempt" | "startupMode">,
+    phase: IncidentStartupPhase,
+    outcome: "started" | "observed" | "succeeded" | "failed" = "observed",
+    errorCode?: string,
+  ): void {
+    try {
+      this.options.diagnostics?.record({
+        sessionId: this.diagnosticSessionId || this.options.sessionId?.(),
+        runtimeKind: this.options.runtimeKind || "primary",
+        rpcGeneration: source.generation,
+        childPid: source.childPid,
+        operation: "runtime.start",
+        lifecycle: this.options.lifecycle?.() || "idle",
+        outcome,
+        durationMs: performance.now() - source.startupStartedAt,
+        errorCode,
+        startupSpanId: source.startupSpanId,
+        startupAttempt: source.startupAttempt,
+        startupMode: source.startupMode,
+        startupPhase: phase,
+      });
+    } catch {
+      // Startup diagnostics are metadata-only and can never affect Runtime authority.
+    }
   }
 
   private operationForType(type: string): IncidentOperation {
@@ -241,41 +309,75 @@ export class PiRpcClient {
       });
       throw error;
     }
-    const piEntry = this.options.piEntry ?? resolvePiEntry();
+    const piEntry = this.options.piEntry === undefined
+      ? resolvePiEntry()
+      : this.options.piEntry;
     if (!piEntry) {
       throw new Error("找不到全局 Pi。请先安装 Pi，或设置 PI_CHAT_PI_ENTRY 指向 dist/rpc-entry.js。");
     }
 
-    const child = spawn(process.execPath, [piEntry, ...(this.options.args ?? []), ...extraArgs], {
-      cwd: this.options.cwd,
-      // RPC mode has no interactive update prompt. Disable the unrelated
-      // version lookup as well so every dedicated child avoids its startup I/O.
-      env: { ...process.env, FORCE_COLOR: "0", PI_SKIP_VERSION_CHECK: "1" },
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true,
-    });
-    const source = {
-      generation: ++this.sourceGeneration,
+    const startupStartedAt = performance.now();
+    const startupAttempt = this.sourceGeneration + 1;
+    const startup = {
+      generation: startupAttempt,
+      childPid: undefined,
+      startupStartedAt,
+      startupSpanId: `PS-${randomBytes(6).toString("base64url").toUpperCase().slice(0, 8)}`,
+      startupAttempt,
+      startupMode: this.startupMode(extraArgs),
+    };
+    this.recordStartupPhase(startup, "spawn-invoked", "started");
+    const nodeArgs = [
+      ...(this.options.startupProbe ? ["--import", pathToFileURL(this.options.startupProbe).href] : []),
+      piEntry,
+      ...(this.options.args ?? []),
+      ...extraArgs,
+    ];
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      child = spawn(process.execPath, nodeArgs, {
+        cwd: this.options.cwd,
+        // RPC mode has no interactive update prompt. Disable the unrelated
+        // version lookup as well so every dedicated child avoids its startup I/O.
+        env: {
+          ...process.env,
+          ...this.options.childEnvironment,
+          FORCE_COLOR: "0",
+          PI_SKIP_VERSION_CHECK: "1",
+        },
+        stdio: this.options.startupProbe
+          ? ["pipe", "pipe", "pipe", "pipe"]
+          : ["pipe", "pipe", "pipe"],
+        windowsHide: true,
+      }) as ChildProcessWithoutNullStreams;
+    } catch (error) {
+      this.recordStartupPhase(startup, "failed", "failed", "RPC_SPAWN_THROW");
+      throw error;
+    }
+    const source: RpcChildSource = {
+      ...startup,
       childPid: child.pid,
       child,
       stderrTail: "",
+      firstStdoutObserved: false,
+      preEntryObserved: false,
     };
-    this.options.diagnostics?.record({
-      sessionId: this.diagnosticSessionId || this.options.sessionId?.(),
-      runtimeKind: this.options.runtimeKind || "primary",
-      rpcGeneration: source.generation,
-      childPid: child.pid,
-      operation: "runtime.start",
-      lifecycle: this.options.lifecycle?.() || "idle",
-      outcome: "started",
-    });
+    this.sourceGeneration = source.generation;
+    this.recordStartupPhase(source, "spawn-returned");
     this.child = child;
     this.source = source;
 
+    child.once("spawn", () => this.recordStartupPhase(source, "child-spawn-event"));
     child.stderr.on("data", (chunk: Buffer) => {
       if (this.source !== source) return;
       source.stderrTail = `${source.stderrTail}${chunk.toString("utf8")}`.slice(-8_000);
       this.stderrTail = source.stderrTail;
+    });
+    const probe = (child as ChildProcessWithoutNullStreams & { stdio?: Array<NodeJS.ReadableStream | NodeJS.WritableStream | null> }).stdio?.[3];
+    probe?.once("data", () => {
+      if (this.source !== source || source.preEntryObserved) return;
+      source.preEntryObserved = true;
+      this.recordStartupPhase(source, "child-pre-entry");
     });
     child.once("error", (error) => this.handleExit(source, new Error(`Pi RPC 启动失败：${error.message}`)));
     child.once("exit", (code, signal) => {
@@ -284,8 +386,14 @@ export class PiRpcClient {
     this.attachJsonlReader(child.stdout, source);
 
     try {
-      return await this.waitUntilReady();
+      return await this.waitUntilReady(source);
     } catch (error) {
+      this.recordStartupPhase(
+        source,
+        "failed",
+        "failed",
+        error instanceof RpcRequestTimeoutError ? error.code : "RPC_START_FAILED",
+      );
       // A protocol/startup failure must not leave an untracked Pi child keeping
       // the server process alive or holding a Session JSONL open.
       await this.stop();
@@ -293,7 +401,7 @@ export class PiRpcClient {
     }
   }
 
-  private async waitUntilReady(): Promise<Record<string, unknown>> {
+  private async waitUntilReady(source: RpcChildSource): Promise<Record<string, unknown>> {
     // RPC has no cancellation protocol. A short per-attempt timeout therefore
     // leaves an in-flight get_state behind and makes the nominal retry loop
     // reject every following attempt with "still processing". Use one request
@@ -303,7 +411,21 @@ export class PiRpcClient {
     if (!this.child || this.child.exitCode !== null) {
       throw new Error(`Pi RPC 在初始化期间退出。${this.stderrTail}`);
     }
-    return this.send({ type: "get_state" }, startupTimeoutMs);
+    const response = await this.send(
+      { type: "get_state" },
+      startupTimeoutMs,
+      {
+        observe: (observation) => {
+          if (this.source !== source) return;
+          if (observation.phase === "allocated")
+            this.recordStartupPhase(source, "ready-request-allocated");
+          else if (observation.phase === "written")
+            this.recordStartupPhase(source, "ready-request-written");
+        },
+      },
+    );
+    this.recordStartupPhase(source, "transport-ready", "succeeded");
+    return response;
   }
 
   private logRpcError(kind: string, error: unknown): void {
@@ -327,7 +449,7 @@ export class PiRpcClient {
     }
   }
 
-  private attachJsonlReader(stream: NodeJS.ReadableStream, source?: RpcEventSource): void {
+  private attachJsonlReader(stream: NodeJS.ReadableStream, source?: RpcChildSource): void {
     let decoder = new StringDecoder("utf8");
     let parts: string[] = [];
     let lineBytes = 0;
@@ -388,6 +510,10 @@ export class PiRpcClient {
 
     stream.on("data", (value: Buffer | string) => {
       if (failed) return;
+      if (source?.startupSpanId && this.source === source && !source.firstStdoutObserved) {
+        source.firstStdoutObserved = true;
+        this.recordStartupPhase(source, "first-stdout-byte");
+      }
       try {
         const chunk = typeof value === "string" ? Buffer.from(value, "utf8") : value;
         let start = 0;

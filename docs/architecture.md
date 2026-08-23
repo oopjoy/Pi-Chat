@@ -68,7 +68,8 @@ Current ownership still centers on `src/server/app.ts` (`PiChatApp`), with progr
 | `file-transaction.ts` | Atomic write + snapshot restore |
 | `session-index.ts` / `session-projection.ts` | JSONL index and cold snapshot semantics over an incremental physical projection: committed LF byte offset, bounded first/tail prefix fingerprint, suffix-only append parsing, canonical rewrite fallback, active-branch reconstruction, usage, stable persisted message IDs, and server revalidation of text-only active-branch User targets for non-destructive Fork; raw JSONL is never mutated |
 | `application-restart.ts` | Staging build, promote, handoff |
-| `rpc-client.ts` | Global Pi process transport + capability probe |
+| `rpc-client.ts` | Independent Pi child transport, startup phase observation, and capability probe |
+| `pi-runtime-bundle.ts` | One immutable per-host Pi launch plan: canonical direct entry, exact-version/source/output fingerprint gate, bundled-entry selection, and direct fallback. It never owns a Runtime or Session writer. |
 | `primary-runtime-readiness.ts` | Primary start/recovery, compatibility gate, readiness generations |
 | `runtime-pool.ts` | Secondary Runtime maps, capacity mutex, ensure/draft/recover/reclaim/sweep/stopAll |
 | `session-control.ts` | Multi-window presence, exclusive control owner, delayed release timers |
@@ -147,7 +148,10 @@ Prefer small hooks and pure libs over growing `App.tsx` further.
 
 - **Session view is the navigation authority.** A persisted JSONL Session can be opened and read while no corresponding Pi Runtime exists, while Primary is starting, or after Primary compatibility has failed.
 - Primary readiness is explicit (`starting` / `ready` / `failed`), not inferred from a spawned child process. Starting/failed read projections must issue zero Primary RPC requests.
-- Compatibility is a process-wide capability of the configured local Pi entrypoint: Primary is the single probe owner. A new or recovered Secondary therefore requires a ready Primary capability, but an already healthy Secondary remains independently usable if Primary later fails; Secondary startup still verifies its own `get_state` response.
+- Compatibility is a process-wide capability of the configured local Pi launch plan: Primary is the single probe owner. The selected canonical entry path, backend, and child environment are resolved and frozen once per Pi Chat host, so Primary, Secondary, draft, and recovery clients never independently rediscover a different path or switch backend while the service remains alive. Replacing files inside a globally installed direct Pi path still requires a normal Pi Chat restart and is outside hot-update authority. A new or recovered Secondary therefore requires a ready Primary capability, but an already healthy Secondary remains independently usable if Primary later fails; Secondary startup still verifies its own `get_state` response.
+- Runtime acceleration never changes process ownership: every executing Session still has its own Node/Pi RPC child and its own confirmed-exit/duplicate-writer boundary. Pi Chat does not use Pi Web's in-process multi-Session SDK registry or a shared Runtime broker.
+- A bundled RPC entry is selected only when the installed Pi version, fixed build recipe/esbuild version, every esbuild bundled-input hash, and every generated output hash match the staged artifact. The transformed Extension loader uses Pi's bundled `VIRTUAL_MODULES` graph, so Extension imports share the active kernel rather than loading a second Pi API graph. Package-relative assets remain authoritative through the verified global `PI_PACKAGE_DIR`; image resize keeps a separately bundled worker and external Photon/WASM package. Any mismatch falls back to the frozen direct entry before a child starts.
+- `PI_CHAT_PI_ENTRY` is fail-closed and direct-only. `PI_CHAT_DISABLE_BUNDLED_PI_RUNTIME=1` disables acceleration without changing Session or Runtime semantics.
 - Primary writes and crash recovery pass the readiness controller; every restart re-runs compatibility probing, so a failed probe cannot be bypassed by an implicit restart.
 - Cold history view: JSONL is returned first with gray/view-only status. Browsing, scrolling, search, pagination and cache navigation never start a Secondary Runtime.
 - Runtime preparation is a Session-scoped single-flight capability upgrade for explicit write/control intent. It never creates a blank Runtime or rebinds a process between Sessions.
@@ -184,6 +188,8 @@ Prefer **RPC capability probe** over a hard Pi version allowlist.
 | Minimum practical | Recent Pi with full RPC surface above |
 
 Missing required capabilities → fail startup clearly.
+
+Spawn-to-ready diagnostics are observation-only metadata. Each child attempt receives an opaque startup span and cumulative monotonic phases covering parent `spawn`, child preload, startup `get_state`, first stdout, and transport readiness. These records contain no cwd, entry path, command line, Session content, prompt, tool output, extension name, raw stderr, or error stack, and are never consulted by readiness, retry, admission, Queue, reclaim, or writer authority.
 
 ## Application restart (0.3.1+)
 

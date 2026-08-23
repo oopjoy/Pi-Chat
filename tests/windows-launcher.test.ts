@@ -25,7 +25,7 @@ test("Windows launcher assets are packaged and project shortcuts are ignored", a
   assert.equal(pkg.scripts["verify:unit"], "node scripts/run-staged-verification.mjs unit");
   assert.equal(pkg.scripts["verify:e2e"], "node scripts/run-staged-verification.mjs e2e");
   assert.equal(pkg.scripts.verify, "node scripts/run-staged-verification.mjs all");
-  for (const script of ["preclean", "prebuild", "prebuild:identity", "prebuild:web", "prebuild:server", "precopy:resources"]) {
+  for (const script of ["preclean", "prebuild", "prebuild:identity", "prebuild:web", "prebuild:server", "precopy:resources", "prebuild:pi-runtime"]) {
     assert.equal(pkg.scripts[script], "node scripts/assert-safe-live-dist.mjs", `${script} must protect live dist`);
   }
   assert.match(wrapper, /pi-chat-launch\.cmd" web/i);

@@ -5,6 +5,17 @@ import { dirname, join, resolve } from "node:path";
 import type { ApplicationLifecycle } from "../shared/types.js";
 
 export type IncidentRuntimeKind = "host" | "primary" | "secondary";
+export type IncidentStartupMode = "primary" | "persisted-session" | "new-draft" | "recovery";
+export type IncidentStartupPhase =
+  | "spawn-invoked"
+  | "spawn-returned"
+  | "child-spawn-event"
+  | "child-pre-entry"
+  | "ready-request-allocated"
+  | "ready-request-written"
+  | "first-stdout-byte"
+  | "transport-ready"
+  | "failed";
 export type IncidentControlState =
   | "unowned"
   | "owned-by-this-window"
@@ -13,6 +24,7 @@ export type IncidentControlState =
   | "no-browser-identity";
 export type IncidentOutcome =
   | "started"
+  | "observed"
   | "succeeded"
   | "failed"
   | "rejected"
@@ -64,6 +76,10 @@ export interface IncidentFields {
   outcome: IncidentOutcome;
   durationMs?: number;
   errorCode?: string;
+  startupSpanId?: string;
+  startupAttempt?: number;
+  startupMode?: IncidentStartupMode;
+  startupPhase?: IncidentStartupPhase;
 }
 
 export interface IncidentReference { incidentId: string }
@@ -89,6 +105,7 @@ export interface IncidentDiagnosticsOptions {
 const INCIDENT_ID_PATTERN = /^PC-[A-Z0-9_-]{8}$/;
 const ERROR_CODE_PATTERN = /^[A-Z0-9_]{1,64}$/;
 const REQUEST_ID_PATTERN = /^pi-chat-[0-9]{1,20}$/;
+const STARTUP_SPAN_PATTERN = /^PS-[A-Z0-9_-]{8}$/;
 const DEFAULT_MAXIMUM_BYTES = 5 * 1024 * 1024;
 const DEFAULT_ARCHIVE_COUNT = 4;
 
@@ -231,6 +248,12 @@ class FileIncidentDiagnostics implements IncidentDiagnostics {
       errorCode: fields.errorCode && ERROR_CODE_PATTERN.test(fields.errorCode)
         ? fields.errorCode
         : null,
+      startupSpanId: fields.startupSpanId && STARTUP_SPAN_PATTERN.test(fields.startupSpanId)
+        ? fields.startupSpanId
+        : null,
+      startupAttempt: integer(fields.startupAttempt),
+      startupMode: fields.startupMode || null,
+      startupPhase: fields.startupPhase || null,
     };
     const line = `${JSON.stringify(record)}\n`;
     this.tail = this.tail.then(() => this.append(line)).catch((error) => {

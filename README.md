@@ -1,6 +1,6 @@
 # Pi Chat
 
-Pi Chat 是一个连接本机 Pi RPC 的 local-first Web/PWA 客户端。它提供浏览器中的聊天、会话管理与本地运行协调，不替代 Pi 的 agent、模型、工具或扩展内核。服务启动全局安装的 `pi --mode rpc`，通过本地 HTTP API 与 SSE 连接浏览器；不捆绑 Electron/Chromium，也不嵌入完整 Pi SDK。
+Pi Chat 是一个连接本机 Pi RPC 的 local-first Web/PWA 客户端。它提供浏览器中的聊天、会话管理与本地运行协调，不替代 Pi 的 agent、模型、工具或扩展内核。每个执行对话仍由独立 Node/Pi RPC 进程拥有；服务通过本地 HTTP API 与 SSE 连接浏览器，不捆绑 Electron/Chromium，也不把多个 Session 托管进同一个 Pi SDK 进程。Windows 构建包含一个与已验证 Pi 版本、构建配方及全部 Bundle 输入指纹严格匹配的 RPC 启动加速 Bundle；全局 Pi 仍是配置、资源、CLI 和兼容性 authority，任何版本、源码或产物不匹配都会在启动前回退原始全局 `rpc-entry.js`。
 
 ## 当前基础版
 
@@ -37,7 +37,7 @@ Pi Chat 是一个连接本机 Pi RPC 的 local-first Web/PWA 客户端。它提�
 
 - **Node.js** 22.19 或更高版本（用来运行 Pi Chat 本地服务）
 - **已全局安装并完成模型认证的 Pi**：`pi --version`  
-  Pi Chat **不会**内置 Pi 内核；服务会在后台拉起本机全局的 `pi --mode rpc`。Pi 尚未就绪时，已保存的 Session JSONL 仍可浏览；发送或其他需要 Pi 的操作会提示 Runtime 不可用。
+  Pi Chat **不会**用进程内共享 Pi 内核托管多个 Session；服务仍会为每个执行对话拉起独立 Pi RPC。已验证构建可选择 fingerprint-gated 启动 Bundle 来减少 Node/Defender 冷模块加载，但仍要求本机安装匹配的全局 Pi，并继续从该安装读取配置、Extension、Package、CLI 与 package-relative 资源。Pi 尚未就绪时，已保存的 Session JSONL 仍可浏览；发送或其他需要 Pi 的操作会提示 Runtime 不可用。
 - Windows 桌面快捷方式可选；Edge PWA 仅影响独立窗口体验，不是硬性依赖
 
 ### 没有安装 Pi 时会发生什么？
@@ -45,7 +45,7 @@ Pi Chat 是一个连接本机 Pi RPC 的 local-first Web/PWA 客户端。它提�
 双击或运行 `start-pi-chat.cmd`、`pi-chat-launch.cmd`、桌面 **Pi Chat / Pi Chat Web** 时：
 
 1. 启动器先尝试用 **Node** 启动本机 `http://127.0.0.1:30170` 服务；
-2. 服务先开放 Session JSONL 浏览，再在后台查找全局 Pi 的 `rpc-entry.js`、启动 RPC 并验证协议能力；
+2. 服务先开放 Session JSONL 浏览，再在启动时一次性解析并冻结全局 Pi identity；若内置 RPC Bundle 的 Pi 版本、构建配方、全部 Bundle 输入和全部输出 hash 精确匹配，则 Primary 与所有 Secondary 共用该 immutable 启动计划，否则统一使用全局 `rpc-entry.js`；随后启动独立 RPC 并验证协议能力；
 3. **找不到 Pi 或兼容性验证失败**时，已保存的历史仍可查看，但发送、运行指令和其他 Runtime 操作会稳定返回“Pi Runtime 不可用”，不会通过隐式重启绕过兼容性验证。找不到 Pi 时会显示：
    `找不到全局 Pi。请先安装 Pi，或设置 PI_CHAT_PI_ENTRY 指向 dist/rpc-entry.js。`
 4. 表现：
@@ -96,6 +96,14 @@ npm run verify:e2e
 # typecheck → unit → e2e → git diff HEAD --check，全部串行
 npm run verify
 ```
+
+冷 Runtime 基准使用显式离线 Session 副本，不会向源 JSONL 写入 Prompt：
+
+```bash
+npm run benchmark:pi-runtime-startup -- --session <offline-session.jsonl> --iterations 5 --backend both --profile core --runtime-dist <staged-dist>
+```
+
+`core` 隔离 Pi/Session 核心启动；`installed-profile` 显式加载当前安装的 Extension/Profile。该基准保证 fresh process，但不会声称已经清空 Windows 文件缓存或 Defender 缓存。
 
 Harness 会递归发现 `tests/**/*.test.ts`，不会跟随测试目录中的符号链接；`--file` 同时接受 `/` 和 Windows `\\` 分隔符。使用 `--test-name-pattern` 时，Harness 会先确认所选文件中至少有一个可静态解析的具体测试名匹配，拼错名称会以状态码 `2` 失败。对于 `for...of` 字面量数组生成的模板名称，Harness 会展开为具体名称；其他无法静态解析的动态名称应先重写为明确测试声明。Harness 固定单文件并发、`45` 秒 Node test timeout 与 `2 GiB` V8 old-space；Windows 还会在创建任何 Node 后代前，将整个测试树加入 `3 GiB` Job Object，超限会明确输出 `PI_CHAT_TEST_MEMORY_LIMIT_EXCEEDED` 并终止测试树。`--test-concurrency` 与 `--test-timeout` 不能由调用方覆盖；调用方仅可使用 `--test-name-pattern`、`--test-shard`、`--test-skip-pattern` 与无值的 `--test-only` 选择测试，reporter、coverage、snapshot mutation 和 force-exit 参数不会转发。这些限制仅属于开发验证测试树，不会施加给生产 Pi Chat server 或 Pi RPC。不要绕过 `scripts/run-tests.mjs` 直接调用 `node --test`。需要保留指定构建产物的发布验证仍应显式设置独立 `PI_CHAT_DIST_DIR`；普通贡献者验证优先使用上述 wrapper。少数安全边界测试需要 `NODE_ENV=test` 才能使用仅限 JSDOM 的 identity override；生产 Web artifact 不存在该 override。
 
@@ -178,7 +186,7 @@ Skills 可以向模型注入指令，Plugins/Packages 可以用当前用户的�
 ## 兼容的 Pi 版本
 
 - **已验证：** Pi `0.84.2`（全局 `@earendil-works/pi-coding-agent`；包含 `ask_user_question` RPC dialog fallback 冒烟验证）
-- **探测方式：** Primary 在后台执行一次针对当前本机 Pi entrypoint 的 RPC 能力探测（`get_state` / `get_messages` / `get_available_models` / `get_commands` / `get_session_stats`）。不兼容时 Session 浏览继续可用，而新的或需要恢复的 Runtime 写操作返回明确的不可用状态；已经健康的 Secondary 保持可用。任何 Primary 恢复都会重新探测
+- **探测方式：** 服务启动时冻结一个 Primary/Secondary 共用的 Pi launch plan。Bundle 选择先验证 Pi `0.84.2`、固定 esbuild/配方、全部 Bundle 输入 hash、全部 Runtime 输出 hash 和 Node/平台要求；显式 `PI_CHAT_PI_ENTRY` 保持 direct-only authority，`PI_CHAT_DISABLE_BUNDLED_PI_RUNTIME=1` 可强制使用原始入口。Primary 随后执行 RPC 能力探测（`get_state` / `get_messages` / `get_available_models` / `get_commands` / `get_session_stats`）。不兼容时 Session 浏览继续可用，而新的或需要恢复的 Runtime 写操作返回明确的不可用状态；已经健康的 Secondary 保持可用。任何 Primary 恢复都会重新探测
 - 升级 Pi 后若启动失败，请先 `pi --version`，再确认 Pi Chat 是否为最新 0.4.x
 
 更完整的模块边界与拆分优先级见 `docs/architecture.md`；日常维护入口见 [`docs/change-map.md`](docs/change-map.md)。

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Windows cold Runtime startup
+
+- Primary, Secondary, draft, and recovery clients now share one immutable per-host launch plan while retaining one independent Node/Pi RPC process per executing Session; no shared SDK host, broker, or process rebinding is introduced.
+- Windows builds include a Pi `0.84.2` RPC acceleration Bundle. It is selected only when the installed Pi version, the fixed build recipe, every bundled-input hash, platform tuple, and every generated Runtime artifact hash match; explicit/custom or mismatched Pi installations remain direct, and missing Pi still permits JSONL-only browsing.
+- The bundled Extension loader uses Pi's `VIRTUAL_MODULES` graph to preserve one kernel/API identity, while image resizing retains a separate worker and external Photon/WASM package. Package-relative resources and CLI authority remain with the verified global Pi installation.
+- Spawn-to-ready diagnostics now distinguish parent spawn, child preload, startup request allocation/write, first stdout, and transport readiness without entering RPC payloads, JSONL, SSE, scheduling, or writer authority.
+- Added a fresh-process, copied-Session startup benchmark. On the investigated Windows machine, a representative installed-profile sample improved from about `9.1s` direct to `3.3s` bundled; a core-only sample improved from about `1.8s` to `0.6s`. These figures do not claim an OS- or Defender-cold cache.
+
 ## 0.4.5
 
 ### Streaming and long-session performance
