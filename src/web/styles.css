@@ -930,6 +930,8 @@ details.conversation-process { display: block; padding: 0; }
 .about-primary-action { border-color: color-mix(in srgb, var(--accent), transparent 46%); color: var(--accent); font: inherit; font-size: 11px; font-weight: 700; }
 .about-primary-action:disabled, .about-link-button:disabled { cursor: default; opacity: .45; }
 .about-footnote { margin: 13px 0 0; color: var(--muted); font-size: 10px; line-height: 1.55; }
+.about-diagnostics-section { margin-top: 21px; padding-top: 18px; border-top: 1px solid var(--line); }
+.about-diagnostics-section .diagnostics-panel { min-height: 0; padding: 0; }
 @media (max-width: 560px) { .about-grid { grid-template-columns: 1fr; } .about-hero > code { display: none; } }
 .resource-source { border: 1px solid var(--line); border-radius: 8px; background: var(--surface-soft); }
 .resource-source summary { padding: 9px 11px; cursor: pointer; font-size: 11px; }

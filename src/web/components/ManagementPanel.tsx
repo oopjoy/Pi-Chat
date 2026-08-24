@@ -7,16 +7,15 @@ import { CompactSelect, type CompactSelectOption } from "./CompactSelect";
 import { CloseIcon, FolderIcon, MinusIcon, PlusIcon } from "./Icons";
 
 export type ManagementSection = "settings" | "models";
-type SettingsTab = "appearance" | "models" | "skills" | "extensions" | "packages" | "diagnostics" | "about";
+type SettingsTab = "appearance" | "models" | "skills" | "extensions" | "packages" | "about";
 
 const SETTINGS_TABS: Array<{ id: SettingsTab; label: string }> = [
-  { id: "about", label: "关于" },
   { id: "appearance", label: "外观" },
   { id: "models", label: "Models" },
   { id: "skills", label: "Skills" },
   { id: "extensions", label: "Extensions" },
   { id: "packages", label: "Packages" },
-  { id: "diagnostics", label: "诊断" },
+  { id: "about", label: "关于" },
 ];
 
 const THEME_OPTIONS: Array<CompactSelectOption<ThemePreference>> = [
@@ -180,10 +179,6 @@ export function ManagementPanel({ section, appearance, workspaceCwd, workspacePi
                 onBrowseRoot={() => void browseResource("packages-root")}
                 rootLabel="打开 Packages 目录"
               />}
-              {settingsTab === "diagnostics" && <DiagnosticsPanel
-                busy={diagnosticsBusy}
-                onExport={onExportDiagnostics}
-              />}
             </div>
           </div>
         )}
@@ -255,9 +250,11 @@ function AboutPanel({ buildIdentity, webBuildIdentity, piVersion, applicationLif
     <div className="about-actions">
       <button type="button" className="about-primary-action" disabled={checking} onClick={() => void check()}>{checking ? "正在检查…" : "检查更新"}</button>
       <a className="about-link-button" href={PI_CHAT_RELEASES_URL} target="_blank" rel="noreferrer">打开 GitHub Releases</a>
-      <button type="button" className="about-link-button" disabled={diagnosticsBusy} onClick={() => void onExportDiagnostics()}>{diagnosticsBusy ? "正在导出…" : "导出诊断"}</button>
     </div>
     <p className="about-footnote">检查更新仅在你主动点击后访问 GitHub Release API；不会自动安装、重启或部署。</p>
+    <div className="about-diagnostics-section">
+      <DiagnosticsPanel busy={diagnosticsBusy} onExport={onExportDiagnostics} />
+    </div>
   </div>;
 }
 

@@ -37,7 +37,8 @@ test("Settings exposes one export-only diagnostic action", async () => {
     const button = (label: string) => [...dom.window.document.querySelectorAll("button")]
       .find((candidate) => candidate.textContent?.trim() === label) as HTMLButtonElement | undefined;
 
-    await act(async () => button("诊断")?.click());
+    await act(async () => button("关于")?.click());
+    assert.equal(button("诊断"), undefined);
     assert.match(dom.window.document.body.textContent || "", /自动保留最近五分钟/);
     assert.match(dom.window.document.body.textContent || "", /稳定 Session ID/);
     assert.equal(button("开始录制"), undefined);
