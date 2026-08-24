@@ -601,6 +601,7 @@ export function App() {
   const [buildIdentityMismatch, setBuildIdentityMismatch] = useState(false);
   const [serverBuildIdentity, setServerBuildIdentity] =
     useState(webBuildIdentity);
+  const [piVersion, setPiVersion] = useState<string | undefined>();
   /** Global Primary capability; separate from the Session/JSONL first-paint state. */
   const [primaryRuntime, setPrimaryRuntime] = useState<PrimaryRuntimeReadiness>(
     { status: "starting", generation: 0 },
@@ -1725,6 +1726,7 @@ export function App() {
       }
       const identity = data.buildIdentity || webBuildIdentity;
       setServerBuildIdentity(identity);
+      if (data.piVersion) setPiVersion(data.piVersion);
       setBuildIdentityMismatch(!buildIdentityMatches(identity));
       const readiness = data.primaryRuntime || {
         status: "starting" as const,
@@ -8125,6 +8127,11 @@ export function App() {
             : globalMutationBlocked)
         }
         diagnosticsBusy={diagnosticsBusy}
+        buildIdentity={serverBuildIdentity}
+        webBuildIdentity={webBuildIdentity}
+        piVersion={piVersion}
+        applicationLifecycle={applicationLifecycle}
+        primaryRuntime={primaryRuntime}
         onClose={() => setManagementSection(null)}
         onAppearance={setAppearance}
         onPickWorkspace={() => void pickDefaultWorkspace()}

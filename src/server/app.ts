@@ -352,6 +352,8 @@ export interface PiChatAppOptions {
   requestToken?: string;
   /** Identity shared by this Node process and the Web bundle in its runtime dist. */
   buildIdentity?: BuildIdentity;
+  /** Pi package version frozen by the process-wide Runtime launch plan. */
+  piVersion?: string;
   /** Process-wide incident identity shared with RPC and the private JSONL sink. */
   runEpoch?: string;
   diagnostics?: IncidentDiagnostics;
@@ -5043,6 +5045,7 @@ export class PiChatApp {
       : undefined;
     return {
       buildIdentity: this.buildIdentity,
+      ...(this.options.piVersion ? { piVersion: this.options.piVersion } : null),
       ...(forkOrigin ? { forkOrigin } : null),
       state: this.stateWithFastMode(this.activeSessionId, state),
       messages: windowedMessages.messages,

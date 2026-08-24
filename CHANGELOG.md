@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Settings and supportability
+
+- Settings now includes a `关于` panel with Pi Chat/Pi Runtime versions, build revision/fingerprint, Web/service consistency, Primary Runtime state, explicit diagnostic export, and on-demand GitHub Release checks. Update checks never download, install, restart, or deploy.
+
 ### Windows cold Runtime startup
 
 - Primary, Secondary, draft, and recovery clients now share one immutable per-host launch plan while retaining one independent Node/Pi RPC process per executing Session; no shared SDK host, broker, or process rebinding is introduced.

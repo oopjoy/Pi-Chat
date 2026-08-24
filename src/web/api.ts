@@ -11,6 +11,57 @@ export type ExtensionResponseInput = {
 };
 
 const API_TIMEOUT_MS = 65_000;
+export const PI_CHAT_RELEASES_URL = "https://github.com/oopjoy/Pi-Chat/releases";
+const PI_CHAT_LATEST_RELEASE_API = "https://api.github.com/repos/oopjoy/Pi-Chat/releases/latest";
+
+export interface UpdateCheckResult {
+  currentVersion: string;
+  latestVersion: string;
+  tagName: string;
+  releaseUrl: string;
+  publishedAt?: string;
+  updateAvailable: boolean | null;
+}
+
+function normalizedVersion(value: string): number[] | null {
+  const match = value.trim().replace(/^v/i, "").match(/^(\d+)(?:\.(\d+))?(?:\.(\d+))?/);
+  return match ? [Number(match[1]), Number(match[2] || 0), Number(match[3] || 0)] : null;
+}
+
+function compareVersions(left: string, right: string): number | null {
+  const a = normalizedVersion(left);
+  const b = normalizedVersion(right);
+  if (!a || !b) return null;
+  for (let index = 0; index < 3; index += 1) {
+    if (a[index] !== b[index]) return a[index] > b[index] ? 1 : -1;
+  }
+  return 0;
+}
+
+async function checkForUpdates(currentVersion: string): Promise<UpdateCheckResult> {
+  const response = await fetch(PI_CHAT_LATEST_RELEASE_API, {
+    headers: { Accept: "application/vnd.github+json" },
+    cache: "no-store",
+    signal: AbortSignal.timeout(8_000),
+  });
+  const value = await response.json().catch(() => ({})) as {
+    tag_name?: unknown;
+    html_url?: unknown;
+    published_at?: unknown;
+    message?: unknown;
+  };
+  if (!response.ok || typeof value.tag_name !== "string" || typeof value.html_url !== "string")
+    throw new Error(typeof value.message === "string" ? value.message : `检查更新失败（${response.status}）`);
+  const comparison = compareVersions(value.tag_name, currentVersion);
+  return {
+    currentVersion,
+    latestVersion: value.tag_name.replace(/^v/i, ""),
+    tagName: value.tag_name,
+    releaseUrl: value.html_url,
+    ...(typeof value.published_at === "string" ? { publishedAt: value.published_at } : null),
+    updateAvailable: comparison === null ? null : comparison > 0,
+  };
+}
 // Pi acknowledges a prompt only after preflight. Auto-compaction runs in that
 // preflight, and summarizing a long high-reasoning session can legitimately
 // exceed the normal request budget.
@@ -241,6 +292,7 @@ export const api = {
     body: JSON.stringify({ foreground: false, revision: nextPresenceRevision() }),
   }, 10_000),
   restart: () => request<{ restarting: true }>("/api/restart", { method: "POST" }, APPLICATION_RESTART_TIMEOUT_MS),
+  checkForUpdates,
   waitForApplicationHandoff,
   recoverConnection,
   closeWindow: () => request<{ shuttingDown: boolean; closeWindow: true; sessionId?: string; rested?: boolean; remainingWindows: number; autoShutdownPending?: boolean }>("/api/window/close", { method: "POST" }),

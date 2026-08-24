@@ -1,15 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ExtensionResource, ModelInfo, PackageResource, PiState, SkillResource } from "../../shared/types";
+import type { ApplicationLifecycle, BuildIdentity, ExtensionResource, ModelInfo, PackageResource, PiState, PrimaryRuntimeReadiness, SkillResource } from "../../shared/types";
 import { useModalFocus } from "../lib/modal-focus";
-import { api } from "../api";
+import { api, PI_CHAT_RELEASES_URL, type UpdateCheckResult } from "../api";
 import { DEFAULT_APPEARANCE, snapToStep, type AppearancePreferences, type FontPreference, type ThemePreference } from "../lib/preferences";
 import { CompactSelect, type CompactSelectOption } from "./CompactSelect";
 import { CloseIcon, FolderIcon, MinusIcon, PlusIcon } from "./Icons";
 
 export type ManagementSection = "settings" | "models";
-type SettingsTab = "appearance" | "models" | "skills" | "extensions" | "packages" | "diagnostics";
+type SettingsTab = "appearance" | "models" | "skills" | "extensions" | "packages" | "diagnostics" | "about";
 
 const SETTINGS_TABS: Array<{ id: SettingsTab; label: string }> = [
+  { id: "about", label: "关于" },
   { id: "appearance", label: "外观" },
   { id: "models", label: "Models" },
   { id: "skills", label: "Skills" },
@@ -30,7 +31,7 @@ const FONT_OPTIONS: Array<CompactSelectOption<FontPreference>> = [
   { value: "mono", label: "等宽字体" },
 ];
 
-export function ManagementPanel({ section, appearance, workspaceCwd, workspacePicking, workspaceDisabled, models, state, busy, shutdownBlocked, diagnosticsBusy, onClose, onAppearance, onPickWorkspace, onModel, onExportDiagnostics, onShutdown }: {
+export function ManagementPanel({ section, appearance, workspaceCwd, workspacePicking, workspaceDisabled, models, state, busy, shutdownBlocked, diagnosticsBusy, buildIdentity, webBuildIdentity, piVersion, applicationLifecycle, primaryRuntime, onClose, onAppearance, onPickWorkspace, onModel, onExportDiagnostics, onShutdown }: {
   section: ManagementSection | null;
   appearance: AppearancePreferences;
   /** Persisted default for future drafts; existing Session cwd values stay immutable. */
@@ -43,6 +44,11 @@ export function ManagementPanel({ section, appearance, workspaceCwd, workspacePi
   /** Identity mismatch blocks ordinary settings, not the guarded shutdown recovery. */
   shutdownBlocked: boolean;
   diagnosticsBusy: boolean;
+  buildIdentity: BuildIdentity;
+  webBuildIdentity: BuildIdentity;
+  piVersion?: string;
+  applicationLifecycle: ApplicationLifecycle;
+  primaryRuntime: PrimaryRuntimeReadiness;
   onClose: () => void;
   onAppearance: (value: AppearancePreferences) => void;
   onPickWorkspace: () => void;
@@ -127,6 +133,15 @@ export function ManagementPanel({ section, appearance, workspaceCwd, workspacePi
               <button type="button" className="settings-shutdown" disabled={shutdownBlocked} onClick={onShutdown} title="检查全部对话后，关闭所有 Pi Chat 窗口、服务和会话进程">关闭 Pi Chat</button>
             </nav>
             <div className="settings-content">
+              {settingsTab === "about" && <AboutPanel
+                buildIdentity={buildIdentity}
+                webBuildIdentity={webBuildIdentity}
+                piVersion={piVersion}
+                applicationLifecycle={applicationLifecycle}
+                primaryRuntime={primaryRuntime}
+                diagnosticsBusy={diagnosticsBusy}
+                onExportDiagnostics={onExportDiagnostics}
+              />}
               {settingsTab === "appearance" && <AppearancePanel value={appearance} workspaceCwd={workspaceCwd} workspacePicking={workspacePicking} workspaceDisabled={workspaceDisabled} onChange={onAppearance} onPickWorkspace={onPickWorkspace} />}
               {settingsTab === "models" && <ModelsPanel models={models} state={state} busy={busy} browseBusy={resourceBusy} onModel={onModel} onBrowseModels={() => void browseResource("models-root")} />}
               {settingsTab === "skills" && <SettingsResourceList
@@ -176,6 +191,78 @@ export function ManagementPanel({ section, appearance, workspaceCwd, workspacePi
       </section>
     </div>
   );
+}
+
+function AboutPanel({ buildIdentity, webBuildIdentity, piVersion, applicationLifecycle, primaryRuntime, diagnosticsBusy, onExportDiagnostics }: {
+  buildIdentity: BuildIdentity;
+  webBuildIdentity: BuildIdentity;
+  piVersion?: string;
+  applicationLifecycle: ApplicationLifecycle;
+  primaryRuntime: PrimaryRuntimeReadiness;
+  diagnosticsBusy: boolean;
+  onExportDiagnostics: () => Promise<void>;
+}) {
+  const [checking, setChecking] = useState(false);
+  const [update, setUpdate] = useState<UpdateCheckResult | null>(null);
+  const [error, setError] = useState("");
+  const check = async () => {
+    setChecking(true);
+    setError("");
+    try {
+      setUpdate(await api.checkForUpdates(buildIdentity.packageVersion));
+    } catch (cause) {
+      setUpdate(null);
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setChecking(false);
+    }
+  };
+  const version = buildIdentity.packageVersion || "unknown";
+  const identityMismatch = webBuildIdentity.fingerprint !== "unknown"
+    && buildIdentity.fingerprint !== "unknown"
+    && webBuildIdentity.fingerprint !== buildIdentity.fingerprint;
+  const formatBuiltAt = (value: string) => {
+    if (!value || value === "unknown") return "unknown";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+  };
+  return <div className="settings-resource-panel about-panel">
+    <div className="settings-resource-heading">
+      <div className="settings-resource-title"><h3>关于 Pi Chat</h3><p>版本、运行环境与本地诊断信息。这里不会自动下载或替换任何文件。</p></div>
+    </div>
+    <div className="about-hero">
+      <div className="about-mark">π</div>
+      <div><strong>Pi Chat</strong><span>Local-first Web client for Pi RPC</span></div>
+      <code>v{version}</code>
+    </div>
+    <div className="about-grid">
+      <AboutValue label="Pi Chat 版本" value={`v${version}`} />
+      <AboutValue label="Pi Runtime" value={piVersion ? `v${piVersion}` : "未发现 / 未就绪"} />
+      <AboutValue label="服务生命周期" value={applicationLifecycle} />
+      <AboutValue label="Primary Runtime" value={primaryRuntime.status === "ready" ? "ready" : primaryRuntime.status === "failed" ? "failed" : "starting"} />
+      <AboutValue label="Build Revision" value={buildIdentity.revision} mono />
+      <AboutValue label="Build Fingerprint" value={buildIdentity.fingerprint} mono title={buildIdentity.fingerprint} />
+      <AboutValue label="构建时间" value={formatBuiltAt(buildIdentity.builtAt)} />
+      <AboutValue label="Web / 服务一致性" value={identityMismatch ? "不一致：请完整重启" : "一致"} tone={identityMismatch ? "warning" : "ok"} />
+    </div>
+    {primaryRuntime.status === "failed" && <div className="about-notice is-warning">Primary Runtime 暂不可用，但历史 Session 与 JSONL 浏览仍可继续。{primaryRuntime.error ? ` ${primaryRuntime.error}` : ""}</div>}
+    {error && <div className="resource-error">{error}</div>}
+    {update && <div className={`about-update ${update.updateAvailable ? "is-update" : "is-current"}`}>
+      <strong>{update.updateAvailable ? `发现新版本 v${update.latestVersion}` : update.updateAvailable === false ? "当前已是最新版本" : `已找到最新版本 v${update.latestVersion}`}</strong>
+      <span>当前 v{version} · {update.publishedAt ? new Date(update.publishedAt).toLocaleDateString() : ""}</span>
+      <a href={update.releaseUrl || PI_CHAT_RELEASES_URL} target="_blank" rel="noreferrer">查看 Release</a>
+    </div>}
+    <div className="about-actions">
+      <button type="button" className="about-primary-action" disabled={checking} onClick={() => void check()}>{checking ? "正在检查…" : "检查更新"}</button>
+      <a className="about-link-button" href={PI_CHAT_RELEASES_URL} target="_blank" rel="noreferrer">打开 GitHub Releases</a>
+      <button type="button" className="about-link-button" disabled={diagnosticsBusy} onClick={() => void onExportDiagnostics()}>{diagnosticsBusy ? "正在导出…" : "导出诊断"}</button>
+    </div>
+    <p className="about-footnote">检查更新仅在你主动点击后访问 GitHub Release API；不会自动安装、重启或部署。</p>
+  </div>;
+}
+
+function AboutValue({ label, value, mono, title, tone }: { label: string; value: string; mono?: boolean; title?: string; tone?: "ok" | "warning" }) {
+  return <div className="about-value"><small>{label}</small><code className={`${mono ? "is-mono " : ""}${tone ? `is-${tone}` : ""}`} title={title || value}>{value}</code></div>;
 }
 
 function DiagnosticsPanel({ busy, onExport }: {

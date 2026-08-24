@@ -256,6 +256,7 @@ const app = new PiChatApp({
   ), 0),
   primaryRuntime,
   buildIdentity,
+  piVersion: piRuntimeLaunch.piVersion,
   runEpoch,
   diagnostics,
   sseSnapshotIntervalMs: benchmarkSseSnapshotIntervalMs,
