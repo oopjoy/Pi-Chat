@@ -910,7 +910,7 @@ details.conversation-process { display: block; padding: 0; }
 .diagnostics-panel .resource-loading { padding: 18px 0 0; text-align: left; line-height: 1.55; }
 .about-panel { padding: 18px 22px 24px; }
 .about-hero { display: flex; align-items: center; gap: 11px; margin: 2px 0 18px; padding: 15px; border: 1px solid var(--line); border-radius: 10px; background: linear-gradient(135deg, color-mix(in srgb, var(--accent-soft), var(--surface) 38%), var(--surface)); }
-.about-mark { display: grid; width: 38px; height: 38px; place-items: center; border-radius: 10px; background: var(--accent); color: var(--accent-contrast, white); font-size: 23px; font-weight: 800; }
+.about-mark { display: block; width: 38px; height: 38px; flex: 0 0 38px; }
 .about-hero div:nth-child(2) { display: grid; gap: 2px; min-width: 0; flex: 1; }
 .about-hero strong { font-size: 16px; }
 .about-hero span { color: var(--muted); font-size: 11px; }

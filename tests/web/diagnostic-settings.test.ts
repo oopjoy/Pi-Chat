@@ -25,7 +25,6 @@ test("Settings exposes one export-only diagnostic action", async () => {
       buildIdentity: { schemaVersion: 1, packageVersion: "0.4.5", revision: "abc123", fingerprint: "a".repeat(64), builtAt: "2026-01-01T00:00:00.000Z" },
       webBuildIdentity: { schemaVersion: 1, packageVersion: "0.4.5", revision: "abc123", fingerprint: "a".repeat(64), builtAt: "2026-01-01T00:00:00.000Z" },
       piVersion: "0.84.2",
-      applicationLifecycle: "idle",
       primaryRuntime: { status: "ready", generation: 1 },
       onClose: () => {},
       onAppearance: () => {},
@@ -41,6 +40,9 @@ test("Settings exposes one export-only diagnostic action", async () => {
     assert.equal(button("诊断"), undefined);
     assert.match(dom.window.document.body.textContent || "", /自动保留最近五分钟/);
     assert.match(dom.window.document.body.textContent || "", /稳定 Session ID/);
+    assert.equal(dom.window.document.querySelector(".about-mark")?.tagName, "svg");
+    assert.doesNotMatch(dom.window.document.body.textContent || "", /服务生命周期/);
+    assert.doesNotMatch(dom.window.document.body.textContent || "", /Primary Runtime/);
     assert.equal(button("开始录制"), undefined);
     assert.equal(button("停止录制"), undefined);
     await act(async () => button("导出最近五分钟诊断")?.click());
@@ -76,7 +78,6 @@ test("Settings About panel shows build diagnostics and checks GitHub releases on
       buildIdentity: { schemaVersion: 1, packageVersion: "0.4.5", revision: "abc123", fingerprint: "a".repeat(64), builtAt: "2026-01-01T00:00:00.000Z" },
       webBuildIdentity: { schemaVersion: 1, packageVersion: "0.4.5", revision: "abc123", fingerprint: "a".repeat(64), builtAt: "2026-01-01T00:00:00.000Z" },
       piVersion: "0.84.2",
-      applicationLifecycle: "idle",
       primaryRuntime: { status: "ready", generation: 1 },
       onClose: () => {},
       onAppearance: () => {},
@@ -91,6 +92,9 @@ test("Settings About panel shows build diagnostics and checks GitHub releases on
     assert.match(dom.window.document.body.textContent || "", /v0\.4\.5/);
     assert.match(dom.window.document.body.textContent || "", /v0\.84\.2/);
     assert.match(dom.window.document.body.textContent || "", /Build Fingerprint/);
+    assert.equal(dom.window.document.querySelector(".about-mark")?.tagName, "svg");
+    assert.doesNotMatch(dom.window.document.body.textContent || "", /服务生命周期/);
+    assert.doesNotMatch(dom.window.document.body.textContent || "", /Primary Runtime/);
     await act(async () => button("检查更新")?.click());
     assert.match(dom.window.document.body.textContent || "", /发现新版本 v0\.4\.6/);
   } finally {

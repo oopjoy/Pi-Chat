@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ApplicationLifecycle, BuildIdentity, ExtensionResource, ModelInfo, PackageResource, PiState, PrimaryRuntimeReadiness, SkillResource } from "../../shared/types";
+import type { BuildIdentity, ExtensionResource, ModelInfo, PackageResource, PiState, PrimaryRuntimeReadiness, SkillResource } from "../../shared/types";
 import { useModalFocus } from "../lib/modal-focus";
 import { api, PI_CHAT_RELEASES_URL, type UpdateCheckResult } from "../api";
 import { DEFAULT_APPEARANCE, snapToStep, type AppearancePreferences, type FontPreference, type ThemePreference } from "../lib/preferences";
 import { CompactSelect, type CompactSelectOption } from "./CompactSelect";
-import { CloseIcon, FolderIcon, MinusIcon, PlusIcon } from "./Icons";
+import { CloseIcon, FolderIcon, MinusIcon, PiMarkIcon, PlusIcon } from "./Icons";
 
 export type ManagementSection = "settings" | "models";
 type SettingsTab = "appearance" | "models" | "skills" | "extensions" | "packages" | "about";
@@ -30,7 +30,7 @@ const FONT_OPTIONS: Array<CompactSelectOption<FontPreference>> = [
   { value: "mono", label: "等宽字体" },
 ];
 
-export function ManagementPanel({ section, appearance, workspaceCwd, workspacePicking, workspaceDisabled, models, state, busy, shutdownBlocked, diagnosticsBusy, buildIdentity, webBuildIdentity, piVersion, applicationLifecycle, primaryRuntime, onClose, onAppearance, onPickWorkspace, onModel, onExportDiagnostics, onShutdown }: {
+export function ManagementPanel({ section, appearance, workspaceCwd, workspacePicking, workspaceDisabled, models, state, busy, shutdownBlocked, diagnosticsBusy, buildIdentity, webBuildIdentity, piVersion, primaryRuntime, onClose, onAppearance, onPickWorkspace, onModel, onExportDiagnostics, onShutdown }: {
   section: ManagementSection | null;
   appearance: AppearancePreferences;
   /** Persisted default for future drafts; existing Session cwd values stay immutable. */
@@ -46,7 +46,6 @@ export function ManagementPanel({ section, appearance, workspaceCwd, workspacePi
   buildIdentity: BuildIdentity;
   webBuildIdentity: BuildIdentity;
   piVersion?: string;
-  applicationLifecycle: ApplicationLifecycle;
   primaryRuntime: PrimaryRuntimeReadiness;
   onClose: () => void;
   onAppearance: (value: AppearancePreferences) => void;
@@ -136,7 +135,6 @@ export function ManagementPanel({ section, appearance, workspaceCwd, workspacePi
                 buildIdentity={buildIdentity}
                 webBuildIdentity={webBuildIdentity}
                 piVersion={piVersion}
-                applicationLifecycle={applicationLifecycle}
                 primaryRuntime={primaryRuntime}
                 diagnosticsBusy={diagnosticsBusy}
                 onExportDiagnostics={onExportDiagnostics}
@@ -188,11 +186,10 @@ export function ManagementPanel({ section, appearance, workspaceCwd, workspacePi
   );
 }
 
-function AboutPanel({ buildIdentity, webBuildIdentity, piVersion, applicationLifecycle, primaryRuntime, diagnosticsBusy, onExportDiagnostics }: {
+function AboutPanel({ buildIdentity, webBuildIdentity, piVersion, primaryRuntime, diagnosticsBusy, onExportDiagnostics }: {
   buildIdentity: BuildIdentity;
   webBuildIdentity: BuildIdentity;
   piVersion?: string;
-  applicationLifecycle: ApplicationLifecycle;
   primaryRuntime: PrimaryRuntimeReadiness;
   diagnosticsBusy: boolean;
   onExportDiagnostics: () => Promise<void>;
@@ -226,15 +223,13 @@ function AboutPanel({ buildIdentity, webBuildIdentity, piVersion, applicationLif
       <div className="settings-resource-title"><h3>关于 Pi Chat</h3><p>版本、运行环境与本地诊断信息。这里不会自动下载或替换任何文件。</p></div>
     </div>
     <div className="about-hero">
-      <div className="about-mark">π</div>
+      <PiMarkIcon className="about-mark" />
       <div><strong>Pi Chat</strong><span>Local-first Web client for Pi RPC</span></div>
       <code>v{version}</code>
     </div>
     <div className="about-grid">
       <AboutValue label="Pi Chat 版本" value={`v${version}`} />
       <AboutValue label="Pi Runtime" value={piVersion ? `v${piVersion}` : "未发现 / 未就绪"} />
-      <AboutValue label="服务生命周期" value={applicationLifecycle} />
-      <AboutValue label="Primary Runtime" value={primaryRuntime.status === "ready" ? "ready" : primaryRuntime.status === "failed" ? "failed" : "starting"} />
       <AboutValue label="Build Revision" value={buildIdentity.revision} mono />
       <AboutValue label="Build Fingerprint" value={buildIdentity.fingerprint} mono title={buildIdentity.fingerprint} />
       <AboutValue label="构建时间" value={formatBuiltAt(buildIdentity.builtAt)} />

@@ -8278,7 +8278,6 @@ export function App() {
         buildIdentity={serverBuildIdentity}
         webBuildIdentity={webBuildIdentity}
         piVersion={piVersion}
-        applicationLifecycle={applicationLifecycle}
         primaryRuntime={primaryRuntime}
         onClose={() => setManagementSection(null)}
         onAppearance={setAppearance}
