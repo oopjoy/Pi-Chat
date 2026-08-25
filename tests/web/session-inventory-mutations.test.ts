@@ -191,7 +191,10 @@ test("persisted User fork opens the new Session with the selected text restored"
     ...bootstrap,
     messages: [{
       role: "user",
-      content: "revise this prompt",
+      content: [
+        { type: "text", text: "revise this prompt" },
+        { type: "image", data: "aGVsbG8=", mimeType: "image/png" },
+      ],
       piChatPersistedMessageId: "user-1:0",
     }],
     messageTotal: 1,
@@ -223,7 +226,12 @@ test("persisted User fork opens the new Session with the selected text restored"
     }),
     forkSession: async (_id: string, persistedMessageId: string) => {
       target = persistedMessageId;
-      return { session: forkedSession, editorText: "revise this prompt", forkOrigin };
+      return {
+        session: forkedSession,
+        editorText: "revise this prompt",
+        editorImages: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }],
+        forkOrigin,
+      };
     },
     viewSession: async (id: string) => id === forkedSession.id ? ({
       ...draftView,
@@ -277,6 +285,7 @@ test("persisted User fork opens the new Session with the selected text restored"
       )?.value,
       "revise this prompt",
     );
+    assert.equal(dom.window.document.querySelectorAll(".image-preview").length, 1);
     assert.match(dom.window.document.querySelector(".session-fork-banner")?.textContent || "", new RegExp(bootstrap.sessions[0].name));
     await act(async () => {
       dom.window.document.querySelector<HTMLButtonElement>(".session-fork-banner button")!.click();

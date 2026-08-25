@@ -149,18 +149,26 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
   const copyText = message.role === "assistant" ? assistantCopyText(content) : "";
   const userTextBlocks = message.role === "user" ? content.filter((block): block is PiContentBlock & { text: string } => block.type === "text" && typeof block.text === "string" && Boolean(block.text)) : [];
   const userImageBlocks = message.role === "user" ? content.filter((block): block is PiContentBlock & { data: string; mimeType: string } => block.type === "image" && typeof block.data === "string" && typeof block.mimeType === "string") : [];
+  const userCopyText = userTextBlocks.map((block) => block.text).join("\n\n");
   const userTextNeedsFolding = userTextBlocks.some((block) => shouldFoldUserText(block.text));
   const forkableUserMessage = message.role === "user" &&
     Boolean(message.piChatPersistedMessageId) &&
-    userTextBlocks.length > 0 &&
-    userImageBlocks.length === 0 &&
+    (userTextBlocks.length > 0 || userImageBlocks.length > 0) &&
     Boolean(onForkUserMessage);
+  const copyableUserMessage = message.role === "user" && Boolean(userCopyText);
   const generatedAt = message.role === "assistant" && !streaming && showGeneratedAt
     ? assistantGeneratedAt(message.timestamp)
     : null;
   const copyAnswer = async () => {
     if (!copyText) return;
     await navigator.clipboard.writeText(copyText);
+    if (copyTimerRef.current) window.clearTimeout(copyTimerRef.current);
+    setCopied(true);
+    copyTimerRef.current = window.setTimeout(() => setCopied(false), 1_600);
+  };
+  const copyUserMessage = async () => {
+    if (!userCopyText) return;
+    await navigator.clipboard.writeText(userCopyText);
     if (copyTimerRef.current) window.clearTimeout(copyTimerRef.current);
     setCopied(true);
     copyTimerRef.current = window.setTimeout(() => setCopied(false), 1_600);
@@ -225,14 +233,20 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
           />
         </section>
       </div>}
-      {forkableUserMessage && <footer className="message-user-actions">
-        <button
+      {(forkableUserMessage || copyableUserMessage) && <footer className="message-user-actions">
+        {copyableUserMessage && <button
+          type="button"
+          onClick={() => void copyUserMessage()}
+          aria-label={copied ? "用户消息已复制" : "复制用户消息"}
+          title={copied ? "已复制用户消息文本" : userImageBlocks.length ? "复制用户消息文本（不含图片）" : "复制用户消息"}
+        >{copied ? <CheckIcon /> : <CopyIcon />}</button>}
+        {forkableUserMessage && <button
           type="button"
           disabled={forkUserMessageDisabled}
           onClick={() => onForkUserMessage?.(message)}
           aria-label="在新对话中分叉"
           title={forkUserMessageDisabled ? "等待当前生成、压缩、确认和队列结束后再分叉" : "在新对话中分叉"}
-        ><ForkIcon /></button>
+        ><ForkIcon /></button>}
       </footer>}
       {message.role === "assistant" && (generatedAt || copyText) && <footer className="message-footer">
         {generatedAt && <time className="message-generated-at" dateTime={generatedAt.dateTime} title={generatedAt.title}>{generatedAt.label}</time>}

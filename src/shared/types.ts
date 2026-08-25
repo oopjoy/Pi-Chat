@@ -246,6 +246,8 @@ export interface SessionCopyData {
   session: SessionSummary;
   /** Fork returns the selected User text for the new Session Composer; Clone leaves it empty. */
   editorText?: string;
+  /** Fork restores the selected User message's persisted images alongside its text. */
+  editorImages?: PromptImage[];
   /** Pi Chat sidecar provenance; never written into either Pi JSONL. */
   forkOrigin?: SessionForkOrigin;
   /** The destination committed, but a non-authoritative recovery/provenance step needs attention. */

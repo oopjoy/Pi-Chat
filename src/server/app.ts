@@ -4083,7 +4083,7 @@ export class PiChatApp {
       if (mode === "fork" && !target)
         throw new HttpRequestError(
           409,
-          "只能从当前分支中已持久化的纯文字 User 消息创建新对话",
+          "只能从当前分支中已持久化的文字或图片 User 消息创建新对话",
         );
 
       const operationAdmission = runtime
@@ -4147,7 +4147,7 @@ export class PiChatApp {
       });
       return {
         session,
-        ...(target ? { editorText: target.text } : null),
+        ...(target ? { editorText: target.text, editorImages: target.images } : null),
         ...(forkOrigin ? { forkOrigin } : null),
         ...(copyWarning ? { warning: copyWarning } : null),
       };

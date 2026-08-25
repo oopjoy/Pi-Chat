@@ -15,7 +15,7 @@ test("user messages stay literal instead of rendering incomplete Markdown or mat
   assert.doesNotMatch(html, /markdown-body|katex|<strong>|<a /);
 });
 
-test("only persisted text User messages expose the new-session fork action", () => {
+test("persisted User messages expose Fork, including image prompts, and all user text exposes Copy", () => {
   const persisted = renderToStaticMarkup(React.createElement(ChatMessage, {
     message: {
       role: "user",
@@ -31,6 +31,7 @@ test("only persisted text User messages expose the new-session fork action", () 
     onForkUserMessage: () => {},
   }));
   assert.doesNotMatch(local, /在新对话中分叉/);
+  assert.match(local, /复制用户消息/);
 
   const withImage = renderToStaticMarkup(React.createElement(ChatMessage, {
     message: {
@@ -43,7 +44,8 @@ test("only persisted text User messages expose the new-session fork action", () 
     },
     onForkUserMessage: () => {},
   }));
-  assert.doesNotMatch(withImage, /在新对话中分叉/);
+  assert.match(withImage, /在新对话中分叉/);
+  assert.match(withImage, /复制用户消息/);
 
   const disabled = renderToStaticMarkup(React.createElement(ChatMessage, {
     message: {
@@ -55,6 +57,7 @@ test("only persisted text User messages expose the new-session fork action", () 
     forkUserMessageDisabled: true,
   }));
   assert.match(disabled, /aria-label="在新对话中分叉"/);
+  assert.match(disabled, /aria-label="复制用户消息"/);
   assert.match(disabled, /disabled=""/);
 });
 

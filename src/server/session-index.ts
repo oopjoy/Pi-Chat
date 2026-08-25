@@ -4,10 +4,11 @@ import { readdir, stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { homedir } from "node:os";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
-import { LOCAL_COORDINATION_ROLE, type PiMessage, type SessionSummary, type ThinkingLevel } from "../shared/types.js";
+import { LOCAL_COORDINATION_ROLE, type PiMessage, type PromptImage, type SessionSummary, type ThinkingLevel } from "../shared/types.js";
 import { compareSessionsByLastUserPrompt } from "../shared/session-order.js";
 import { loadSessionCache, saveSessionCache, type SessionCacheEntry } from "./session-index-cache.js";
 import { SessionProjection } from "./session-projection.js";
+import { promptImages } from "./pi-data.js";
 
 interface SessionHeader {
   type?: string;
@@ -674,7 +675,7 @@ export class SessionIndex {
   async forkTargetForId(
     id: string,
     persistedMessageId: string,
-  ): Promise<{ entryId: string; text: string } | null> {
+  ): Promise<{ entryId: string; text: string; images: PromptImage[] } | null> {
     const match = /^(.{1,400}):0$/.exec(persistedMessageId);
     if (!match) return null;
     await this.snapshotForId(id);
@@ -683,13 +684,18 @@ export class SessionIndex {
     const branch = activeSessionBranch([...cached.projection.entries]);
     const entry = branch.find((candidate) => candidate.id === match[1]);
     if (entry?.type !== "message" || entry.message?.role !== "user") return null;
-    if (
-      Array.isArray(entry.message.content) &&
-      entry.message.content.some((block) => block.type === "image")
-    )
-      return null;
     const text = textFromContent(entry.message.content);
-    return text.trim() ? { entryId: match[1], text } : null;
+    let images: PromptImage[];
+    try {
+      images = promptImages(
+        Array.isArray(entry.message.content)
+          ? entry.message.content.filter((block) => block.type === "image")
+          : [],
+      );
+    } catch {
+      return null;
+    }
+    return text.trim() || images.length ? { entryId: match[1], text, images } : null;
   }
 
   async messagesForId(id: string): Promise<PiMessage[] | null> {

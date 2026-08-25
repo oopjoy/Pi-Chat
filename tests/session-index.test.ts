@@ -173,7 +173,7 @@ test("session message reader follows only the current JSONL branch", async () =>
   }
 });
 
-test("fork targets resolve only persisted text User messages on the active branch", async () => {
+test("fork targets resolve persisted text and image User messages on the active branch", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-fork-target-"));
   try {
     const path = join(root, "fork-target.jsonl");
@@ -183,6 +183,7 @@ test("fork targets resolve only persisted text User messages on the active branc
       { type: "message", id: "abandoned", parentId: "u1", message: { role: "user", content: "old branch" } },
       { type: "message", id: "a1", parentId: "u1", message: { role: "assistant", content: "current answer" } },
       { type: "message", id: "u2", parentId: "a1", message: { role: "user", content: [{ type: "text", text: "  retry from here  " }] } },
+      { type: "message", id: "u3", parentId: "u2", message: { role: "user", content: [{ type: "text", text: "with screenshot" }, { type: "image", data: "aGVsbG8=", mimeType: "image/png" }] } },
     ].map(JSON.stringify).join("\n") + "\n");
     const index = new SessionIndex(root);
     const [session] = await index.list();
@@ -190,6 +191,12 @@ test("fork targets resolve only persisted text User messages on the active branc
     assert.deepEqual(await index.forkTargetForId(session.id, "u2:0"), {
       entryId: "u2",
       text: "  retry from here  ",
+      images: [],
+    });
+    assert.deepEqual(await index.forkTargetForId(session.id, "u3:0"), {
+      entryId: "u3",
+      text: "with screenshot",
+      images: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }],
     });
     assert.equal(await index.forkTargetForId(session.id, "abandoned:0"), null);
     assert.equal(await index.forkTargetForId(session.id, "a1:0"), null);

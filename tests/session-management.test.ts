@@ -228,7 +228,7 @@ test("clone and persisted User fork create independent cold Sessions", async () 
       { type: "session", id: "source", cwd: process.cwd() },
       { type: "message", id: "u1", parentId: null, message: { role: "user", content: "first prompt" } },
       { type: "message", id: "a1", parentId: "u1", message: { role: "assistant", content: "first answer" } },
-      { type: "message", id: "u2", parentId: "a1", message: { role: "user", content: "second prompt" } },
+      { type: "message", id: "u2", parentId: "a1", message: { role: "user", content: [{ type: "text", text: "second prompt" }, { type: "image", data: "aGVsbG8=", mimeType: "image/png" }] } },
       { type: "message", id: "a2", parentId: "u2", message: { role: "assistant", content: "second answer" } },
     ].map(JSON.stringify).join("\n") + "\n");
     const primary = new CopyWorker(sourcePath, [clonePath, forkPath]);
@@ -280,11 +280,13 @@ test("clone and persisted User fork create independent cold Sessions", async () 
       const forked = await forkedResponse.json() as {
         session: { id: string };
         editorText?: string;
+        editorImages?: Array<{ type: "image"; data: string; mimeType: string }>;
         forkOrigin?: { sourceSessionId: string; sourceName: string; sourcePersistedMessageId: string; createdAt: number; sourceAvailable: boolean };
       };
       const forkedId = idForPath(forkPath);
       assert.equal(forked.session.id, forkedId);
       assert.equal(forked.editorText, "second prompt");
+      assert.deepEqual(forked.editorImages, [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }]);
       assert.deepEqual(forked.forkOrigin, {
         sourceSessionId: sourceId,
         sourceName: "first prompt",

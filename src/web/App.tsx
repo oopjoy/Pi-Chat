@@ -397,8 +397,10 @@ function forkableUserMessageText(message: PiMessage): string {
   return text.trim();
 }
 
-function forkMessagePreview(text: string, limit = 600): string {
-  return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
+function forkMessagePreview(text: string, imageCount = 0, limit = 600): string {
+  const preview = text || "（无文字内容）";
+  const truncated = preview.length > limit ? `${preview.slice(0, limit - 1)}…` : preview;
+  return imageCount ? `${truncated}\n\n[含 ${imageCount} 张图片]` : truncated;
 }
 
 function workspaceFileActivityRevision(messages: PiMessage[]): string {
@@ -6807,7 +6809,7 @@ export function App() {
             ? current
             : current + 1,
         );
-        if (result.editorText) {
+        if (result.editorText !== undefined || result.editorImages?.length) {
           const key: ComposerDraftKey = {
             kind: "session",
             sessionId: result.session.id,
@@ -6828,8 +6830,8 @@ export function App() {
                 revision: restorationSequence,
                 expectedDraftRevision:
                   composerDraftRevisionsRef.current.get(keyId) || 0,
-                message: result.editorText!,
-                images: [],
+                message: result.editorText || "",
+                images: result.editorImages || [],
               },
             }));
           }
@@ -8021,12 +8023,15 @@ export function App() {
         onForkUserMessage={(message) => {
           if (!viewedSession || !message.piChatPersistedMessageId) return;
           const text = forkableUserMessageText(message);
-          if (!text) return;
+          const imageCount = Array.isArray(message.content)
+            ? message.content.filter((block) => block.type === "image").length
+            : 0;
+          if (!text && imageCount === 0) return;
           setSessionDialog({
             mode: "fork",
             session: viewedSession,
             persistedMessageId: message.piChatPersistedMessageId,
-            messagePreview: forkMessagePreview(text),
+            messagePreview: forkMessagePreview(text, imageCount),
           });
         }}
         forkUserMessageDisabled={Boolean(
