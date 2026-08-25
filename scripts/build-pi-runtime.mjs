@@ -7,7 +7,7 @@ import { build, version as esbuildVersion } from "esbuild";
 const PI_PACKAGE_NAME = "@earendil-works/pi-coding-agent";
 const BUNDLE_SCHEMA_VERSION = 2;
 const BUNDLE_LAYOUT_VERSION = 1;
-const BUNDLE_RECIPE_VERSION = 1;
+const BUNDLE_RECIPE_VERSION = 2;
 
 function sha256(content) {
   return createHash("sha256").update(content).digest("hex");
@@ -88,8 +88,18 @@ const extensionLoaderPlugin = {
         throw new Error("Installed Pi extension loader is incompatible with the bundled-runtime transform");
       }
       transformedLoader = true;
+      const tracedSource = source
+        .replace(loaderMarker, bundledLoaderMarker)
+        .replace(
+          "const module = await jiti.import(extensionPath, { default: true });",
+          "globalThis.__piChatStartupMark?.(\"X\");\n    const module = await jiti.import(extensionPath, { default: true });\n    globalThis.__piChatStartupMark?.(\"Y\");",
+        )
+        .replace(
+          "await factory(api);",
+          "globalThis.__piChatStartupMark?.(\"F\");\n        await factory(api);\n        globalThis.__piChatStartupMark?.(\"G\");",
+        );
       return {
-        contents: source.replace(loaderMarker, bundledLoaderMarker),
+        contents: tracedSource,
         loader: "js",
       };
     });
@@ -117,7 +127,7 @@ const mainBuild = await build({
   metafile: true,
   plugins: [extensionLoaderPlugin],
   banner: {
-    js: "import { createRequire as __piChatCreateRequire } from 'node:module'; const require = __piChatCreateRequire(import.meta.url);",
+    js: "import { createRequire as __piChatCreateRequire } from 'node:module'; import { writeSync as __piChatWriteStartupMarker } from 'node:fs'; const require = __piChatCreateRequire(import.meta.url); globalThis.__piChatStartupMark = (marker) => { try { __piChatWriteStartupMarker(3, marker + '\\n'); } catch {} }; globalThis.__piChatStartupMark('B');",
   },
 });
 if (!transformedLoader) throw new Error("Pi extension loader was not included in the runtime bundle");

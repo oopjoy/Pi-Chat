@@ -47,7 +47,7 @@ test("Pi Runtime build emits a relocatable independent RPC artifact", { timeout:
     };
     assert.equal(manifest.schemaVersion, 2);
     assert.equal(manifest.piVersion, "0.84.2");
-    assert.equal(manifest.recipeVersion, 1);
+    assert.equal(manifest.recipeVersion, 2);
     assert.equal(manifest.esbuildVersion, "0.28.1");
     assert.ok((manifest.sourceInputs?.length ?? 0) > 1_000);
     assert.equal(manifest.bundleRelativePath, "package/dist/rpc-entry.bundle.mjs");

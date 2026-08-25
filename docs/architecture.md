@@ -189,7 +189,7 @@ Prefer **RPC capability probe** over a hard Pi version allowlist.
 
 Missing required capabilities → fail startup clearly.
 
-Spawn-to-ready diagnostics are observation-only metadata. Each child attempt receives an opaque startup span and cumulative monotonic phases covering parent `spawn`, child preload, startup `get_state`, first stdout, and transport readiness. These records contain no cwd, entry path, command line, Session content, prompt, tool output, extension name, raw stderr, or error stack, and are never consulted by readiness, retry, admission, Queue, reclaim, or writer authority.
+Spawn-to-ready diagnostics are observation-only metadata. Each child attempt receives an opaque startup span and cumulative monotonic phases covering parent `spawn`, selected Bundle/direct backend, child preload, entry evaluation, Bundle entry, metadata-only Extension import/factory boundaries, startup `get_state`, first stdout, and transport readiness. These records contain no cwd, entry path, command line, Session content, prompt, tool output, extension name, raw stderr, or error stack, and are never consulted by readiness, retry, admission, Queue, reclaim, or writer authority.
 
 ## Application restart (0.3.1+)
 

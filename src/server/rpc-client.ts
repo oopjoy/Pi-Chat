@@ -17,6 +17,7 @@ import {
   type IncidentDiagnostics,
   type IncidentOperation,
   type IncidentRuntimeKind,
+  type IncidentStartupBackend,
   type IncidentStartupMode,
   type IncidentStartupPhase,
 } from "./incident-diagnostics.js";
@@ -88,6 +89,8 @@ export interface RpcClientOptions {
   args?: string[];
   /** Fixed fail-open preload probe that marks child JS bootstrap on fd 3. */
   startupProbe?: string;
+  /** Metadata-only backend identity selected by the frozen host launch plan. */
+  startupBackend?: IncidentStartupBackend;
   /** Frozen per-host Runtime launch environment; shared by Primary and every Secondary. */
   childEnvironment?: Readonly<Record<string, string>>;
   diagnostics?: IncidentDiagnostics;
@@ -147,6 +150,7 @@ interface RpcChildSource extends RpcEventSource {
   startupMode: IncidentStartupMode;
   firstStdoutObserved: boolean;
   preEntryObserved: boolean;
+  entryEvaluatedObserved: boolean;
 }
 
 type EventListener = (
@@ -253,6 +257,7 @@ export class PiRpcClient {
         startupSpanId: source.startupSpanId,
         startupAttempt: source.startupAttempt,
         startupMode: source.startupMode,
+        startupBackend: this.options.startupBackend || "unknown",
         startupPhase: phase,
       });
     } catch {
@@ -361,6 +366,7 @@ export class PiRpcClient {
       stderrTail: "",
       firstStdoutObserved: false,
       preEntryObserved: false,
+      entryEvaluatedObserved: false,
     };
     this.sourceGeneration = source.generation;
     this.recordStartupPhase(source, "spawn-returned");
@@ -374,10 +380,33 @@ export class PiRpcClient {
       this.stderrTail = source.stderrTail;
     });
     const probe = (child as ChildProcessWithoutNullStreams & { stdio?: Array<NodeJS.ReadableStream | NodeJS.WritableStream | null> }).stdio?.[3];
-    probe?.once("data", () => {
-      if (this.source !== source || source.preEntryObserved) return;
-      source.preEntryObserved = true;
-      this.recordStartupPhase(source, "child-pre-entry");
+    let probeBuffer = "";
+    probe?.on("data", (chunk: Buffer | string) => {
+      if (this.source !== source) return;
+      probeBuffer += chunk.toString();
+      let newline = probeBuffer.indexOf("\n");
+      while (newline >= 0) {
+        const marker = probeBuffer.slice(0, newline).trim();
+        probeBuffer = probeBuffer.slice(newline + 1);
+        if (marker === "P" && !source.preEntryObserved) {
+          source.preEntryObserved = true;
+          this.recordStartupPhase(source, "child-pre-entry");
+        } else if (marker === "I" && !source.entryEvaluatedObserved) {
+          source.entryEvaluatedObserved = true;
+          this.recordStartupPhase(source, "child-entry-evaluated");
+        } else if (marker === "B") {
+          this.recordStartupPhase(source, "bundle-entry");
+        } else if (marker === "X") {
+          this.recordStartupPhase(source, "extension-import-start");
+        } else if (marker === "Y") {
+          this.recordStartupPhase(source, "extension-import-end");
+        } else if (marker === "F") {
+          this.recordStartupPhase(source, "extension-factory-start");
+        } else if (marker === "G") {
+          this.recordStartupPhase(source, "extension-factory-end");
+        }
+        newline = probeBuffer.indexOf("\n");
+      }
     });
     child.once("error", (error) => this.handleExit(source, new Error(`Pi RPC 启动失败：${error.message}`)));
     child.once("exit", (code, signal) => {

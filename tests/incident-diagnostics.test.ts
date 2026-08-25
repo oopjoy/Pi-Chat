@@ -15,7 +15,7 @@ const expectedKeys = [
   "rpcGeneration", "rpcRequestId", "childPid", "operation",
   "lifecycle", "queueLength", "controlState", "outcome",
   "durationMs", "errorCode", "startupSpanId", "startupAttempt",
-  "startupMode", "startupPhase",
+  "startupMode", "startupBackend", "startupPhase",
 ].sort();
 
 async function fixture(maximumBytes = 5 * 1024 * 1024) {
@@ -55,6 +55,7 @@ test("incident diagnostics writes fixed metadata-only JSONL", async () => {
       startupSpanId: "PS-START001",
       startupAttempt: 2,
       startupMode: "recovery",
+      startupBackend: "bundle",
       startupPhase: "transport-ready",
     });
     diagnostics.record({
@@ -81,6 +82,7 @@ test("incident diagnostics writes fixed metadata-only JSONL", async () => {
     assert.equal(records[0].startupSpanId, "PS-START001");
     assert.equal(records[0].startupAttempt, 2);
     assert.equal(records[0].startupMode, "recovery");
+    assert.equal(records[0].startupBackend, "bundle");
     assert.equal(records[0].startupPhase, "transport-ready");
   } finally {
     await diagnostics.close();

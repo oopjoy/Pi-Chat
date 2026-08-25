@@ -71,7 +71,7 @@ async function fixture() {
     bundleRelativePath: "package/dist/rpc-entry.bundle.mjs",
     bundleSha256: outputHashes["package/dist/rpc-entry.bundle.mjs"],
     originalCliRelativePath: "dist/cli.js",
-    recipeVersion: 1,
+    recipeVersion: 2,
     esbuildVersion: "0.28.1",
     sourceInputs,
     outputHashes,

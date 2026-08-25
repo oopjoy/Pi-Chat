@@ -5,6 +5,7 @@
 ### Settings and supportability
 
 - Settings now includes a `关于` panel with Pi Chat/Pi Runtime versions, build revision/fingerprint, Web/service consistency, Primary Runtime state, explicit diagnostic export, and on-demand GitHub Release checks. Update checks never download, install, restart, or deploy.
+- Startup diagnostics now retain the selected Bundle/direct backend and metadata-only child-entry, Bundle, Extension import, and Extension factory timing phases.
 
 ### Windows cold Runtime startup
 

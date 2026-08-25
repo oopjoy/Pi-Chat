@@ -6,11 +6,18 @@ import type { ApplicationLifecycle } from "../shared/types.js";
 
 export type IncidentRuntimeKind = "host" | "primary" | "secondary";
 export type IncidentStartupMode = "primary" | "persisted-session" | "new-draft" | "recovery";
+export type IncidentStartupBackend = "bundle" | "direct" | "unknown";
 export type IncidentStartupPhase =
   | "spawn-invoked"
   | "spawn-returned"
   | "child-spawn-event"
   | "child-pre-entry"
+  | "child-entry-evaluated"
+  | "bundle-entry"
+  | "extension-import-start"
+  | "extension-import-end"
+  | "extension-factory-start"
+  | "extension-factory-end"
   | "ready-request-allocated"
   | "ready-request-written"
   | "first-stdout-byte"
@@ -79,6 +86,7 @@ export interface IncidentFields {
   startupSpanId?: string;
   startupAttempt?: number;
   startupMode?: IncidentStartupMode;
+  startupBackend?: IncidentStartupBackend;
   startupPhase?: IncidentStartupPhase;
 }
 
@@ -253,6 +261,7 @@ class FileIncidentDiagnostics implements IncidentDiagnostics {
         : null,
       startupAttempt: integer(fields.startupAttempt),
       startupMode: fields.startupMode || null,
+      startupBackend: fields.startupBackend || "unknown",
       startupPhase: fields.startupPhase || null,
     };
     const line = `${JSON.stringify(record)}\n`;
