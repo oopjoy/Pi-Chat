@@ -2171,6 +2171,71 @@ test("transient SSE recovery keeps an active turn visible until fresh bootstrap 
   }
 });
 
+test("SSE recovery settles a retained turn when fresh bootstrap proves it stopped", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  let bootstrapCalls = 0;
+  let releaseBootstrap!: () => void;
+  const heldBootstrap = new Promise<void>((resolve) => { releaseBootstrap = resolve; });
+  const activeBootstrap = {
+    ...bootstrap,
+    state: { ...bootstrap.state, isStreaming: true },
+    sessions: bootstrap.sessions.map((session) => ({
+      ...session,
+      running: true,
+      activity: { execution: "running" as const, awaitingConfirmation: false },
+    })),
+  };
+  const stoppedBootstrap = {
+    ...bootstrap,
+    state: { ...bootstrap.state, isStreaming: false },
+    sessions: bootstrap.sessions.map((session) => ({
+      ...session,
+      running: false,
+      activity: { execution: "idle" as const, awaitingConfirmation: false },
+    })),
+  };
+  Object.assign(api, {
+    bootstrap: async () => {
+      bootstrapCalls += 1;
+      if (bootstrapCalls > 1) await heldBootstrap;
+      return bootstrapCalls === 1 ? activeBootstrap : stoppedBootstrap;
+    },
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    recoverConnection: async () => undefined,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.onerror?.(new dom.window.Event("error"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.ok(dom.window.document.querySelector(".stop-button"));
+    assert.ok(dom.window.document.querySelector(".queue-submit-button"));
+    assert.ok(dom.window.document.querySelector(".steer-submit-button"));
+
+    await act(async () => releaseBootstrap());
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(dom.window.document.querySelector(".stop-button"), null);
+    assert.equal(dom.window.document.querySelector(".queue-submit-button"), null);
+    assert.equal(dom.window.document.querySelector(".steer-submit-button"), null);
+    assert.equal(dom.window.document.querySelector(".session-status.is-running"), null);
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("token recovery clears a stale ask questionnaire owned by the prior process", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");
