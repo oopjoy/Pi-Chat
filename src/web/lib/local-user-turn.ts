@@ -10,6 +10,8 @@ export interface LocalUserTurn {
   queueId?: string;
   /** Queued turns stay out of the transcript until the scheduler dispatches them. */
   queueState?: "waiting" | "dispatched";
+  /** A queue_error requeued this prompt; an active sibling turn must not make it look dispatched. */
+  queueRetryPending?: boolean;
   /** Native Pi steering stays hidden until Pi consumes it at message_start. */
   revealOnMessageStart?: boolean;
   /** Observer queue events omit image bytes, so only the authoritative turn slot can confirm them. */
@@ -55,14 +57,20 @@ function bindQueuedTurn(turns: LocalUserTurn[], queueId: string, message: string
 /** Bind queue admission that beat its HTTP acknowledgement. */
 export function bindQueuedAdmission(turns: LocalUserTurn[], queueId: string, message: string, imageCount: number): LocalUserTurn | undefined {
   const turn = bindQueuedTurn(turns, queueId, message, imageCount);
-  if (turn && turn.queueState !== "dispatched") turn.queueState = "waiting";
+  if (turn) {
+    turn.queueRetryPending = false;
+    if (turn.queueState !== "dispatched") turn.queueState = "waiting";
+  }
   return turn;
 }
 
 /** Bind a dispatch that beat its HTTP acknowledgement to the existing local turn. */
 export function bindQueuedDispatch(turns: LocalUserTurn[], queueId: string, message: string, imageCount: number): LocalUserTurn | undefined {
   const turn = bindQueuedTurn(turns, queueId, message, imageCount);
-  if (turn) turn.queueState = "dispatched";
+  if (turn) {
+    turn.queueRetryPending = false;
+    turn.queueState = "dispatched";
+  }
   return turn;
 }
 
@@ -82,6 +90,7 @@ export function appendLocalTurnOnce(messages: PiMessage[], turn: LocalUserTurn |
 
 export function markLocalTurnQueued(turn: LocalUserTurn, queueId: string): void {
   turn.queueId = queueId;
+  turn.queueRetryPending = false;
   if (turn.queueState !== "dispatched") turn.queueState = "waiting";
 }
 
@@ -93,12 +102,17 @@ export function markLocalTurnQueued(turn: LocalUserTurn, queueId: string): void 
  */
 export function promoteTurnsAbsentFromQueue(
   turns: LocalUserTurn[],
-  queueIds: ReadonlySet<string>,
+  queueIds: ReadonlySet<string> | undefined,
   runtimeActive: boolean,
 ): void {
-  if (!runtimeActive) return;
+  if (!runtimeActive || !queueIds) return;
   for (const turn of turns) {
-    if (turn.queueState === "waiting" && turn.queueId && !queueIds.has(turn.queueId))
+    if (
+      turn.queueState === "waiting"
+      && !turn.queueRetryPending
+      && turn.queueId
+      && !queueIds.has(turn.queueId)
+    )
       turn.queueState = "dispatched";
   }
 }

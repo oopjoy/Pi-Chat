@@ -2224,17 +2224,21 @@ export function App() {
       );
       reconcileQueuedAdmissions(sourceView.session.id, sourceView.queue);
       const viewLocalTurns = localUserTurnsRef.current.get(sourceView.session.id) || [];
-      promoteTurnsAbsentFromQueue(
-        viewLocalTurns,
-        new Set((sourceView.queue || []).map((item) => item.id)),
-        Boolean(
-          sourceView.isStreaming
-          || sourceView.state.isStreaming
-          || sourceView.session.running
-          || sourceView.liveMessage
-          || sourceView.toolStatus,
-        ),
-      );
+      // `queue` is optional on historical/read-only views. Missing means
+      // unknown, not an authoritative empty queue; only an explicit array may
+      // promote a locally admitted turn after a missed dispatch event.
+      if (Array.isArray(sourceView.queue))
+        promoteTurnsAbsentFromQueue(
+          viewLocalTurns,
+          new Set(sourceView.queue.map((item) => item.id)),
+          Boolean(
+            sourceView.isStreaming
+            || sourceView.state.isStreaming
+            || sourceView.session.running
+            || sourceView.liveMessage
+            || sourceView.toolStatus,
+          ),
+        );
       const protectedTranscript = protectTranscriptWithLocalTurns(
         localUserTurnsRef.current.get(sourceView.session.id),
         sourceView.messages,
@@ -4188,6 +4192,7 @@ export function App() {
         for (const turn of localTurns) {
           if (!turn.queueId || !queuedIds.has(turn.queueId)) continue;
           turn.queueState = "waiting";
+          if (turn.queueId === failedId) turn.queueRetryPending = true;
           if (turn.renderedInTranscript) failedRenderedTurns.add(turn.message);
           turn.renderedInTranscript = false;
         }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { appendPendingUserMessage, bindQueuedAdmission, bindQueuedDispatch, consumeLocalSteeringTurn, markLocalTurnQueued, nextLocalTurnTotal, protectTranscriptWithLocalTurns, removeLocalTurnAndRebase, removePendingSteeringTurns, transcriptConfirmsLocalTurn, transcriptTurnTotal, type LocalUserTurn } from "../src/web/lib/local-user-turn";
+import { appendPendingUserMessage, bindQueuedAdmission, bindQueuedDispatch, consumeLocalSteeringTurn, markLocalTurnQueued, nextLocalTurnTotal, promoteTurnsAbsentFromQueue, protectTranscriptWithLocalTurns, removeLocalTurnAndRebase, removePendingSteeringTurns, transcriptConfirmsLocalTurn, transcriptTurnTotal, type LocalUserTurn } from "../src/web/lib/local-user-turn";
 import { SessionViewCache } from "../src/web/lib/session-view-cache";
 import type { PiMessage, SessionViewData } from "../src/shared/types";
 
@@ -224,7 +224,6 @@ test("cache navigation never mistakes its own local overlay for persisted histor
 });
 
 test("a view after a missed queue dispatch reveals a local turn no longer in Pi's queue", async () => {
-  const { promoteTurnsAbsentFromQueue } = await import("../src/web/lib/local-user-turn");
   const turn: LocalUserTurn = {
     sessionId: "session-a",
     message: local,
@@ -238,6 +237,23 @@ test("a view after a missed queue dispatch reveals a local turn no longer in Pi'
   const stillQueued: LocalUserTurn = { ...turn, queueState: "waiting", queueId: "queue-2" };
   promoteTurnsAbsentFromQueue([stillQueued], new Set(["queue-2"]), true);
   assert.equal(stillQueued.queueState, "waiting");
+
+  const retrying: LocalUserTurn = {
+    ...turn,
+    queueState: "waiting",
+    queueId: "queue-error",
+    queueRetryPending: true,
+  };
+  promoteTurnsAbsentFromQueue([retrying], new Set<string>(), true);
+  assert.equal(retrying.queueState, "waiting");
+
+  const unknownQueue: LocalUserTurn = {
+    ...turn,
+    queueState: "waiting",
+    queueId: "queue-unknown",
+  };
+  promoteTurnsAbsentFromQueue([unknownQueue], undefined, true);
+  assert.equal(unknownQueue.queueState, "waiting");
 });
 
 test("a late prompt acknowledgement cannot reappend a local turn already confirmed by a view", async () => {
