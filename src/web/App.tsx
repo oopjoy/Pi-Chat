@@ -117,6 +117,7 @@ import {
   localTurnBelongsInTranscript,
   markLocalTurnQueued,
   nextLocalTurnTotal,
+  promoteTurnsAbsentFromQueue,
   protectTranscriptWithLocalTurns,
   removeLocalTurnAndRebase,
   removePendingSteeringTurns,
@@ -956,6 +957,8 @@ export function App() {
   const streamGapRecoveriesRef = useRef(new Map<string, { at: number; count: number }>());
   /** SSE lifecycle is newer than a delayed sidebar/bootstrap summary. */
   const sessionRunningOverridesRef = useRef(new Map<string, boolean>());
+  /** Token-only SSE recovery must not erase a still-visible live turn before fresh authority arrives. */
+  const transportRecoveryPendingRef = useRef(false);
   const normalizeSessionRunning = (session: SessionSummary): SessionSummary => {
     const running = sessionRunningOverridesRef.current.get(session.id);
     return running === undefined
@@ -1084,10 +1087,11 @@ export function App() {
   /**
    * Drop UI facts whose producer is the previous Pi Chat process. Persistent
    * session data, Pane authority, and local draft state deliberately remain
-   * outside this boundary. Both an observed epoch replacement and token-only
-   * transport recovery must run this exact reset before B bootstraps.
+   * outside this boundary. An observed process-epoch replacement runs this
+   * exact reset before the replacement bootstrap.
    */
   const resetProcessOwnedUiState = useCallback(() => {
+    transportRecoveryPendingRef.current = false;
     sessionRunningOverridesRef.current.clear();
     setFailedSessionIds([]);
     setConfirmedCommands([]);
@@ -1721,7 +1725,16 @@ export function App() {
         )
           recordSourceTurnTotal(session.id, session.turnCount);
       }
-      commitSidebarSessions(data.sessions, { kind: "base" });
+      const replaceAfterTransportRecovery = transportRecoveryPendingRef.current;
+      if (replaceAfterTransportRecovery) {
+        transportRecoveryPendingRef.current = false;
+        // A token may belong to a replacement service. Replace the base page
+        // atomically instead of merging process-A rows into process-B.
+        sessionRunningOverridesRef.current.clear();
+        setSessions(reconcileOptimisticSessions(data.sessions));
+      } else {
+        commitSidebarSessions(data.sessions, { kind: "base" });
+      }
       setSessionsTotal(
         optimisticSessionsTotal(
           data.sessions,
@@ -1919,6 +1932,18 @@ export function App() {
           })
         : null;
       reconcileQueuedAdmissions(activeViewId, sourceView?.queue || bootstrapQueue);
+      const bootstrapLocalTurns = localUserTurnsRef.current.get(activeViewId) || [];
+      promoteTurnsAbsentFromQueue(
+        bootstrapLocalTurns,
+        new Set(bootstrapQueue.map((item) => item.id)),
+        Boolean(
+          sourceView?.isStreaming
+          || sourceView?.state.isStreaming
+          || sourceView?.session.running
+          || sourceView?.liveMessage
+          || sourceView?.toolStatus,
+        ),
+      );
       const protectedTranscript = protectTranscriptWithLocalTurns(
         localUserTurnsRef.current.get(activeViewId),
         sourceView?.messages || data.messages,
@@ -2198,6 +2223,18 @@ export function App() {
             .length,
       );
       reconcileQueuedAdmissions(sourceView.session.id, sourceView.queue);
+      const viewLocalTurns = localUserTurnsRef.current.get(sourceView.session.id) || [];
+      promoteTurnsAbsentFromQueue(
+        viewLocalTurns,
+        new Set((sourceView.queue || []).map((item) => item.id)),
+        Boolean(
+          sourceView.isStreaming
+          || sourceView.state.isStreaming
+          || sourceView.session.running
+          || sourceView.liveMessage
+          || sourceView.toolStatus,
+        ),
+      );
       const protectedTranscript = protectTranscriptWithLocalTurns(
         localUserTurnsRef.current.get(sourceView.session.id),
         sourceView.messages,
@@ -2997,6 +3034,10 @@ export function App() {
         bootstrapCompletedRef.current = false;
         initialReadyRecoveryRequestedRef.current = false;
         replacementBootstrapPendingRef.current = true;
+        // The new ready frame proves this is a real process epoch change. A
+        // transient token/SSE recovery below must not clear this live state until
+        // that proof arrives; now it is safe to discard process-A projections.
+        resetProcessOwnedUiState();
         // All pre-handoff reads carry the old process token and metadata. They
         // remain uncancelled, but cannot be reused or commit into this epoch.
         runEpochGenerationRef.current += 1;
@@ -4623,7 +4664,15 @@ export function App() {
           });
         return;
       }
-      setError("与 Pi Chat 服务的事件连接已断开，正在重新连接…");
+      setError("与 Pi Chat 服务的事件连接已断开，正在重新连接；当前任务状态待确认…");
+      const retainedSessionId = viewedSessionIdRef.current || desiredSessionIdRef.current;
+      const retainedSession = retainedSessionId
+        ? sessionsRef.current.find((session) => session.id === retainedSessionId)
+        : undefined;
+      const retainedTurnActive = Boolean(
+        retainedSession?.running
+        || paneStateRef.current.isStreaming,
+      );
       recoveringConnectionRef.current ||= api
         .recoverConnection()
         .then(() => {
@@ -4653,19 +4702,24 @@ export function App() {
           setLoadingDirectoryKeys([]);
           sidebarInventoryReadyRef.current = false;
           setSidebarInventoryReady(false);
-          setSessions([]);
-          setSessionsTotal(0);
+          transportRecoveryPendingRef.current = true;
+          // Keep the last visible turn while the replacement token is being
+          // verified. If the turn really ended, fresh bootstrap authority will
+          // replace this temporary row and clear the pane normally.
+          setSessions(retainedSession ? [
+            retainedTurnActive
+              ? applySidebarRunningOverride(retainedSession, true)
+              : retainedSession,
+          ] : []);
+          setSessionsTotal(retainedSession ? 1 : 0);
           setSessionDirectories([]);
-          // Drop every process-derived authority before bootstrapping that token.
-          resetProcessOwnedUiState();
-          const recoveredReadiness = {
-            status: "starting" as const,
-            generation: 0,
-          };
-          primaryRuntimeRef.current = recoveredReadiness;
-          primaryCapabilitySnapshotRef.current = null;
-          setPrimaryRuntime(recoveredReadiness);
-          setPrimaryCapabilitySnapshot(null);
+          // Drop only the transient interactive question. Streaming wire,
+          // queue, local-turn and pane activity remain usable until a new ready
+          // frame proves a process-epoch replacement.
+          dispatchAskQuestionnaire({ type: "RESET" });
+          if (retainedSession && retainedTurnActive)
+            sessionRunningOverridesRef.current.set(retainedSession.id, true);
+          setError("");
           bootstrapInFlightRef.current = null;
           handshakeInFlightRef.current = null;
           initialHistoryRef.current = null;
@@ -4684,7 +4738,7 @@ export function App() {
           recoveringConnectionRef.current = null;
         });
     },
-    [clearStoppingForSession, refresh, reportBackgroundRefreshError, resetProcessOwnedUiState],
+    [clearStoppingForSession, refresh, reportBackgroundRefreshError],
   );
 
   const handleOversizedEventSourceFrame = useCallback(

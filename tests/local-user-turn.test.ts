@@ -223,6 +223,23 @@ test("cache navigation never mistakes its own local overlay for persisted histor
   assert.deepEqual(returnedPaint.pendingTurns, [pending]);
 });
 
+test("a view after a missed queue dispatch reveals a local turn no longer in Pi's queue", async () => {
+  const { promoteTurnsAbsentFromQueue } = await import("../src/web/lib/local-user-turn");
+  const turn: LocalUserTurn = {
+    sessionId: "session-a",
+    message: local,
+    expectedTurnTotal: 2,
+    queueId: "queue-1",
+    queueState: "waiting",
+  };
+  promoteTurnsAbsentFromQueue([turn], new Set<string>(), true);
+  assert.equal(turn.queueState, "dispatched");
+
+  const stillQueued: LocalUserTurn = { ...turn, queueState: "waiting", queueId: "queue-2" };
+  promoteTurnsAbsentFromQueue([stillQueued], new Set(["queue-2"]), true);
+  assert.equal(stillQueued.queueState, "waiting");
+});
+
 test("a late prompt acknowledgement cannot reappend a local turn already confirmed by a view", async () => {
   const { appendLocalTurnOnce } = await import("../src/web/lib/local-user-turn");
   const localTurn: LocalUserTurn = { sessionId: "session-a", message: local, expectedTurnTotal: 2 };

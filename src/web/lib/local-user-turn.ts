@@ -85,6 +85,24 @@ export function markLocalTurnQueued(turn: LocalUserTurn, queueId: string): void 
   if (turn.queueState !== "dispatched") turn.queueState = "waiting";
 }
 
+/**
+ * A reconnect can miss both queue_dispatch and message_start. A fresh hot view
+ * whose explicit queue no longer contains an admitted ID proves that Pi moved
+ * that turn out of its waiting queue; reveal it instead of leaving the user
+ * message hidden forever.
+ */
+export function promoteTurnsAbsentFromQueue(
+  turns: LocalUserTurn[],
+  queueIds: ReadonlySet<string>,
+  runtimeActive: boolean,
+): void {
+  if (!runtimeActive) return;
+  for (const turn of turns) {
+    if (turn.queueState === "waiting" && turn.queueId && !queueIds.has(turn.queueId))
+      turn.queueState = "dispatched";
+  }
+}
+
 /** Reveal the first matching native steering turn when Pi actually consumes it. */
 export function consumeLocalSteeringTurn(turns: LocalUserTurn[], message: PiMessage): LocalUserTurn | undefined {
   const incoming = textAndImageCount(message);

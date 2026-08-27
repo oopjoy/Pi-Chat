@@ -7,6 +7,11 @@
 - Settings now includes a `关于` panel with Pi Chat/Pi Runtime versions, build revision/fingerprint, Web/service consistency, Primary Runtime state, explicit diagnostic export, and on-demand GitHub Release checks. Update checks never download, install, restart, or deploy.
 - Startup diagnostics now retain the selected Bundle/direct backend and metadata-only child-entry, Bundle, Extension import, and Extension factory timing phases.
 
+### Runtime/SSE continuity
+
+- A transient EventSource/token reconnect no longer clears the visible running turn, Queue, Steer, or streaming wire before fresh bootstrap authority arrives. A real process-epoch replacement still performs the full process-owned reset after the replacement `ready` frame.
+- Hot Session views now reveal an accepted local queued turn when an authoritative active queue no longer contains its ID, covering a missed `queue_dispatch`/`message_start` pair without synthesizing a persisted Pi record.
+
 ### Windows cold Runtime startup
 
 - Primary, Secondary, draft, and recovery clients now share one immutable per-host launch plan while retaining one independent Node/Pi RPC process per executing Session; no shared SDK host, broker, or process rebinding is introduced.
