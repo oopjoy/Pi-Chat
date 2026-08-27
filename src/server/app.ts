@@ -1301,43 +1301,64 @@ export class PiChatApp {
     });
   }
 
-  private broadcast(event: Record<string, unknown>): void {
+  private browserEventAuthority(
+    event: Record<string, unknown>,
+  ): Record<string, unknown> {
     const sessionId =
-      typeof event.piChatSessionId === "string"
-        ? event.piChatSessionId
-        : typeof event.sessionId === "string"
-          ? event.sessionId
+      typeof event.piChatSessionId === "string" ? event.piChatSessionId : "";
+    const withEpoch = typeof event.piChatRunEpoch === "string"
+      ? event
+      : { ...event, piChatRunEpoch: this.runEpoch };
+    if (!sessionId || typeof withEpoch.piChatRunGeneration === "number")
+      return withEpoch;
+    // Generation zero is meaningful before the first agent_start. The browser
+    // tracks explicit zero separately from an unknown generation, so even
+    // queue/gate events emitted before the first turn participate in the same
+    // stale-event fence without being mistaken for a terminal snapshot.
+    return {
+      ...withEpoch,
+      piChatRunGeneration: this.runGenerationsBySession.get(sessionId) || 0,
+    };
+  }
+
+  private broadcast(event: Record<string, unknown>): void {
+    const outboundEvent = this.browserEventAuthority(event);
+    const sessionId =
+      typeof outboundEvent.piChatSessionId === "string"
+        ? outboundEvent.piChatSessionId
+        : typeof outboundEvent.sessionId === "string"
+          ? outboundEvent.sessionId
           : "";
     this.traceState(
       "sse",
       "broadcast-intent",
       sessionId,
       {
-        eventType: typeof event.type === "string" ? event.type : "unknown",
+        eventType: typeof outboundEvent.type === "string" ? outboundEvent.type : "unknown",
         transportClients: this.sseHub.size,
-        eventRunning: event.running === true,
-        eventQueuePaused: event.paused === true,
-        eventQueueLength: Array.isArray(event.queue) ? event.queue.length : 0,
+        eventRunning: outboundEvent.running === true,
+        eventQueuePaused: outboundEvent.paused === true,
+        eventQueueLength: Array.isArray(outboundEvent.queue) ? outboundEvent.queue.length : 0,
         eventExecution:
-          event.activity && typeof event.activity === "object" &&
-          typeof (event.activity as { execution?: unknown }).execution === "string"
-            ? (event.activity as { execution: string }).execution
+          outboundEvent.activity && typeof outboundEvent.activity === "object" &&
+          typeof (outboundEvent.activity as { execution?: unknown }).execution === "string"
+            ? (outboundEvent.activity as { execution: string }).execution
             : "none",
       },
       undefined,
-      typeof event.piChatRunGeneration === "number"
-        ? event.piChatRunGeneration
+      typeof outboundEvent.piChatRunGeneration === "number"
+        ? outboundEvent.piChatRunGeneration
         : undefined,
     );
-    this.sseHub.broadcast(event);
-    const eventType = typeof event.type === "string" ? event.type : "";
+    this.sseHub.broadcast(outboundEvent);
+    const eventType = typeof outboundEvent.type === "string" ? outboundEvent.type : "";
     const runGeneration =
-      typeof event.piChatRunGeneration === "number"
-        ? event.piChatRunGeneration
+      typeof outboundEvent.piChatRunGeneration === "number"
+        ? outboundEvent.piChatRunGeneration
         : undefined;
     const activityExecution =
-      event.activity && typeof event.activity === "object"
-        ? (event.activity as { execution?: unknown }).execution
+      outboundEvent.activity && typeof outboundEvent.activity === "object"
+        ? (outboundEvent.activity as { execution?: unknown }).execution
         : undefined;
     const terminalActivity =
       eventType === "pi_chat_session_status"
@@ -1395,6 +1416,8 @@ export class PiChatApp {
     this.sseHub.broadcastEach((clientId) => ({
       type: "pi_chat_session_control_changed",
       sessionId,
+      piChatRunEpoch: this.runEpoch,
+      piChatRunGeneration: this.runGenerationsBySession.get(sessionId) || 0,
       ...this.sessionControl.controlState(sessionId, clientId),
     }));
   }
@@ -5348,11 +5371,13 @@ export class PiChatApp {
             value: sessionId,
           });
         }
-        const releaseMutation = this.beginMutation();
+        const releaseMutation = admission.acquireMutationLeaseAfterBody === false
+          ? null
+          : this.beginMutation();
         try {
           await this.handleApiCore(request, response, url, body);
         } finally {
-          releaseMutation();
+          releaseMutation?.();
         }
         return;
       }
@@ -6708,7 +6733,7 @@ export class PiChatApp {
     );
     if (copySessionMatch) {
       if (request.method !== "POST") return methodNotAllowed(response);
-      const body = await bodyJson(request);
+      const body = preparedBody || (await bodyJson(request));
       const persistedMessageId = typeof body.persistedMessageId === "string"
         ? body.persistedMessageId
         : undefined;
@@ -6735,7 +6760,7 @@ export class PiChatApp {
     if (manageSessionMatch) {
       if (request.method === "PATCH") {
         this.requireSessionControl(manageSessionMatch[1], clientId);
-        const body = await bodyJson(request);
+        const body = preparedBody || (await bodyJson(request));
         const name = typeof body.name === "string" ? body.name.trim() : "";
         if (!name || name.length > 120 || /[\u0000-\u001f\u007f]/.test(name))
           return json(response, 400, {
@@ -7105,7 +7130,7 @@ export class PiChatApp {
           "resources-reloading",
           "更新模型配置",
           async () => {
-            const body = await bodyJson(request);
+            const body = preparedBody || (await bodyJson(request));
             const state = asState(
               await this.options.rpc.send({ type: "get_state" }),
             );
@@ -7153,7 +7178,7 @@ export class PiChatApp {
         "resources-reloading",
         "更新模型配置",
         async () => {
-          const body = await bodyJson(request);
+          const body = preparedBody || (await bodyJson(request));
           const snapshot = await snapshotFile(this.options.modelManager!.path);
           if (request.method === "POST") {
             await this.applyResourceFileTransaction([snapshot], () =>

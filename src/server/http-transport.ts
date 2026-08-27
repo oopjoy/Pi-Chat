@@ -7,6 +7,8 @@ export const SECURITY_HEADERS = {
   "content-security-policy": "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'",
 };
 const JSON_HEADERS = { ...SECURITY_HEADERS, "content-type": "application/json; charset=utf-8", "cache-control": "no-store" };
+/** Request bodies must not hold a lifecycle/mutation admission indefinitely. */
+export const DEFAULT_HTTP_BODY_TIMEOUT_MS = 120_000;
 
 export const MIME_TYPES: Record<string, string> = {
   ".css": "text/css; charset=utf-8",
@@ -53,29 +55,50 @@ export function requestPageId(request: IncomingMessage): string {
 }
 
 export class HttpRequestError extends Error {
-  constructor(readonly status: 400 | 404 | 409 | 413, message: string) { super(message); }
+  constructor(readonly status: 400 | 404 | 408 | 409 | 413, message: string) { super(message); }
 }
 
-export async function bodyJson(request: IncomingMessage, maximumBytes = 1_000_000): Promise<Record<string, unknown>> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  let tooLarge = false;
-  for await (const chunk of request) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    size += buffer.length;
-    if (size > maximumBytes) {
-      // Keep draining the local request instead of destroying its socket, so
-      // the browser reliably receives 413 rather than ECONNRESET.
-      tooLarge = true;
-      continue;
+export async function bodyJson(
+  request: IncomingMessage,
+  maximumBytes = 1_000_000,
+  timeoutMs = DEFAULT_HTTP_BODY_TIMEOUT_MS,
+): Promise<Record<string, unknown>> {
+  const read = (async () => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let tooLarge = false;
+    for await (const chunk of request) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += buffer.length;
+      if (size > maximumBytes) {
+        // Keep draining the local request instead of destroying its socket, so
+        // the browser reliably receives 413 rather than ECONNRESET.
+        tooLarge = true;
+        continue;
+      }
+      chunks.push(buffer);
     }
-    chunks.push(buffer);
+    if (tooLarge) throw new HttpRequestError(413, `请求内容超过 ${Math.round(maximumBytes / 1_000_000)} MB`);
+    if (!chunks.length) return {};
+    let value: unknown;
+    try { value = JSON.parse(Buffer.concat(chunks).toString("utf8")); }
+    catch { throw new HttpRequestError(400, "请求内容不是有效 JSON"); }
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new HttpRequestError(400, "请求必须是 JSON 对象");
+    return value as Record<string, unknown>;
+  })();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new HttpRequestError(408, "请求体接收超时，请重新提交")),
+      Math.max(1, timeoutMs),
+    );
+  });
+  try {
+    return await Promise.race([read, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    // If the deadline won, continue draining the request in the background so
+    // the server can still send a clean 408 instead of resetting the socket.
+    void read.catch(() => undefined);
   }
-  if (tooLarge) throw new HttpRequestError(413, `请求内容超过 ${Math.round(maximumBytes / 1_000_000)} MB`);
-  if (!chunks.length) return {};
-  let value: unknown;
-  try { value = JSON.parse(Buffer.concat(chunks).toString("utf8")); }
-  catch { throw new HttpRequestError(400, "请求内容不是有效 JSON"); }
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new HttpRequestError(400, "请求必须是 JSON 对象");
-  return value as Record<string, unknown>;
 }

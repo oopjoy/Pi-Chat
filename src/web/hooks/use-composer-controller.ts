@@ -56,7 +56,10 @@ export function useComposerController({
   const onSendRef = useRef(onSend);
   const onRevisionRef = useRef(onDraftRevisionChange);
   const onPendingRef = useRef(onSubmissionPendingChange);
-  const drainingRef = useRef(false);
+  // Delivery is serialized per draft target, not per mounted Composer. A long
+  // preparation/Prompt request for Session A must never block a newly accepted
+  // snapshot for Session B after navigation.
+  const drainingKeysRef = useRef(new Set<string>());
   const mountedRef = useRef(true);
   const appliedRestorationsRef = useRef(new Set<string>());
   keyRef.current = draftKey;
@@ -85,14 +88,16 @@ export function useComposerController({
   }, [publish]);
 
   const drain = useCallback(function drainActivePartition(): void {
-    if (drainingRef.current || disabledRef.current || pausedRef.current) return;
+    if (disabledRef.current || pausedRef.current) return;
     const key = keyRef.current;
+    const keyId = composerDraftKeyId(key);
+    if (drainingKeysRef.current.has(keyId)) return;
     const partition = composerPartition(stateRef.current, key);
     if (partition.blocked || partition.inFlight || !partition.pending.length) return;
     const next = commit({ type: "start-delivery", key });
     const snapshot = composerPartition(next, key).inFlight;
     if (!snapshot) return;
-    drainingRef.current = true;
+    drainingKeysRef.current.add(keyId);
     void onSendRef.current(
       snapshot.message,
       snapshot.images,
@@ -102,8 +107,12 @@ export function useComposerController({
       .then(() => commit({ type: "delivery-accepted", key: snapshot.key }))
       .catch(() => commit({ type: "delivery-rejected", key: snapshot.key }))
       .finally(() => {
-        drainingRef.current = false;
-        if (mountedRef.current) drainActivePartition();
+        drainingKeysRef.current.delete(keyId);
+        // Only the currently painted partition is eligible for this hook's
+        // disabled/paused guards. A later navigation effect will drain other
+        // partitions without allowing them to share this lock.
+        if (mountedRef.current && composerDraftKeyId(keyRef.current) === keyId)
+          drainActivePartition();
       });
   }, [commit]);
 

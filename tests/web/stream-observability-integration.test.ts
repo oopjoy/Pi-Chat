@@ -780,7 +780,7 @@ test("diagnostic export checkpoints an active browser stream only once per count
       dom.window.document.querySelector<HTMLButtonElement>('[aria-label="打开设置"]')?.click();
       await Promise.resolve();
     });
-    await act(async () => button("诊断")?.click());
+    await act(async () => button("关于")?.click());
     await act(async () => {
       button("导出最近五分钟诊断")?.click();
       await Promise.resolve();

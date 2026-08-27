@@ -2025,6 +2025,92 @@ test("late stop and queue actions from A do not overwrite Session B", async () =
   }
 });
 
+test("a historical view with unknown queue authority cannot erase a newer Queue projection", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const secondId = "33333333333333333333";
+  const queued = {
+    id: "queue-unknown-view",
+    message: "must remain visible",
+    imageCount: 0,
+    createdAt: 3,
+  };
+  const sessionA = {
+    ...bootstrap.sessions[0],
+    running: true,
+    queued: true,
+    activity: { execution: "running" as const, awaitingConfirmation: false },
+  };
+  const sessionB = {
+    ...bootstrap.sessions[0],
+    id: secondId,
+    sessionId: "second",
+    name: "Session B",
+    active: false,
+    running: false,
+    activity: { execution: "idle" as const, awaitingConfirmation: false },
+  };
+  const viewA: SessionViewData = {
+    ...draftView,
+    session: sessionA,
+    state: { ...bootstrap.state, sessionId: "active", isStreaming: true },
+    isActive: true,
+    isStreaming: true,
+    queue: [queued],
+    queuePaused: true,
+  };
+  const viewB: SessionViewData = {
+    ...draftView,
+    session: sessionB,
+    state: { ...bootstrap.state, sessionId: "second", isStreaming: false },
+    isActive: false,
+    isStreaming: false,
+    queue: [],
+    queuePaused: false,
+  };
+  const { queue: _queue, queuePaused: _queuePaused, ...viewAWithoutQueue } = viewA;
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true },
+      sessions: [sessionA, sessionB],
+      queue: [queued],
+      queuePaused: true,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async (id: string) => ({ viewing: id }),
+    viewSession: async (id: string) => id === secondId ? viewB : viewAWithoutQueue,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  const clickSession = async (label: string) => {
+    const button = [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
+      .find((candidate) => candidate.textContent?.includes(label));
+    assert.ok(button);
+    await act(async () => {
+      button.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await Promise.resolve();
+    });
+  };
+  try {
+    await act(async () => root.render(createElement(App)));
+    assert.match(dom.window.document.querySelector(".prompt-queue")?.textContent || "", /must remain visible/);
+    await clickSession("Session B");
+    await clickSession("Active");
+    assert.match(
+      dom.window.document.querySelector(".prompt-queue")?.textContent || "",
+      /must remain visible/,
+      "an omitted queue field is unknown, not an authoritative empty queue",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("token recovery clears full inventory retained by the previous process", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");

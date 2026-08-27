@@ -4,6 +4,7 @@ import test from "node:test";
 import { PiChatApp } from "../src/server/app";
 import { requestGuardError } from "../src/server/request-guard";
 import { requestClientId, requestPageId } from "../src/server/http-transport";
+import { apiRouteAdmission } from "../src/server/api-route-admission";
 import type { PiRpcClient } from "../src/server/rpc-client";
 import type { SessionIndex } from "../src/server/session-index";
 import type { ResourceManager } from "../src/server/resource-manager";
@@ -44,6 +45,26 @@ async function withServer<T>(token: string, run: (origin: string) => Promise<T>)
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 }
+
+test("body-bearing mutations parse before lifecycle admission", () => {
+  const routes = [
+    ["PATCH", "/api/sessions/0123456789abcdefabcd"],
+    ["DELETE", "/api/sessions/0123456789abcdefabcd"],
+    ["POST", "/api/sessions/0123456789abcdefabcd/clone"],
+    ["POST", "/api/sessions/0123456789abcdefabcd/fork"],
+    ["PUT", "/api/models/provider/model"],
+    ["POST", "/api/models"],
+    ["DELETE", "/api/models"],
+  ] as const;
+  for (const [method, pathname] of routes) {
+    const admission = apiRouteAdmission(
+      { method, url: pathname } as unknown as import("node:http").IncomingMessage,
+      new URL(`http://127.0.0.1${pathname}`),
+    );
+    assert.equal(admission.bodyBeforeMutationLease, true, `${method} ${pathname}`);
+    assert.equal(admission.ordinaryMutation, false, `${method} ${pathname}`);
+  }
+});
 
 test("browser API requests require exact localhost host, origin, and startup token", async () => {
   await withServer("current-token", async (origin) => {

@@ -249,6 +249,12 @@ type ScheduledLiveMessage = {
   authority: PaneAuthoritySnapshot;
   runGeneration: number;
 };
+type QueueAuthorityProjection = {
+  queue: QueuedPrompt[];
+  paused: boolean;
+  known: boolean;
+  accepted?: boolean;
+};
 
 /** SSE events whose state can make an in-flight SessionViewData snapshot stale. */
 const GLOBAL_SSE_EVENT_TYPES = new Set([
@@ -639,10 +645,10 @@ export function App() {
   const rememberSessionView = (view: SessionViewData) => {
     if (confirmedDeletedSessionIdsRef.current.has(view.session.id))
       return undefined;
-    const filteredQueue = filterCancelledQueue(
-      view.session.id,
-      view.queue || [],
-    );
+    // Historical/read-only views may intentionally omit queue authority. Do not
+    // turn an unknown queue into an authoritative empty array while caching.
+    if (!Array.isArray(view.queue)) return viewCacheRef.current.remember(view);
+    const filteredQueue = filterCancelledQueue(view.session.id, view.queue);
     if (!latestQueueProjectionRef.current.has(view.session.id)) {
       latestQueueProjectionRef.current.set(view.session.id, {
         queue: filteredQueue,
@@ -1015,6 +1021,31 @@ export function App() {
       };
     }
     return { ...acceptQueueProjection(sessionId, incoming, paused), accepted: true };
+  };
+  const queueProjectionForView = (
+    sessionId: string,
+    incoming: QueuedPrompt[] | undefined,
+    paused: boolean,
+    requestRevision?: number,
+  ): QueueAuthorityProjection => {
+    if (!Array.isArray(incoming)) {
+      const cached = latestQueueProjectionRef.current.get(sessionId)
+        || (() => {
+          const view = viewCacheRef.current.get(sessionId);
+          return view && Array.isArray(view.queue)
+            ? { queue: view.queue, paused: view.queuePaused === true }
+            : undefined;
+        })();
+      return {
+        queue: cached?.queue || [],
+        paused: cached?.paused ?? paused,
+        known: false,
+      };
+    }
+    const projection = requestRevision === undefined
+      ? acceptQueueProjection(sessionId, incoming, paused)
+      : acceptQueueProjectionIfCurrent(sessionId, requestRevision, incoming, paused);
+    return { ...projection, known: true };
   };
   const busySessionCountsRef = useRef(new Map<string, number>());
   /** Prompt preparation may finish authoritatively via a newer SSE run. */
@@ -2177,30 +2208,36 @@ export function App() {
       // Cache the source view before adding local UI overlays. A cached overlay has
       // a synthetic turnTotal and must never confirm that its own user message was
       // persisted when the user switches away and returns.
-      const filteredProjection =
-        queueRequestRevision === undefined
-          ? acceptQueueProjection(
-              normalizedView.session.id,
-              normalizedView.queue || [],
-              normalizedView.queuePaused === true,
-            )
-          : acceptQueueProjectionIfCurrent(
-              normalizedView.session.id,
-              queueRequestRevision,
-              normalizedView.queue || [],
-              normalizedView.queuePaused === true,
-            );
-      const filteredQueue = filteredProjection.queue;
-      const queueFilteredView = {
-        ...normalizedView,
-        session: applySidebarQueueProjection(
-          normalizedView.session,
-          filteredQueue,
-          filteredProjection.paused,
-        ),
-        queue: filteredQueue,
-        queuePaused: filteredProjection.paused,
-      };
+      const queueProjection = queueProjectionForView(
+        normalizedView.session.id,
+        normalizedView.queue,
+        normalizedView.queuePaused === true,
+        queueRequestRevision,
+      );
+      const filteredQueue = queueProjection.queue;
+      const queueFilteredView = queueProjection.known
+        ? {
+            ...normalizedView,
+            session: applySidebarQueueProjection(
+              normalizedView.session,
+              filteredQueue,
+              queueProjection.paused,
+            ),
+            queue: filteredQueue,
+            queuePaused: queueProjection.paused,
+          }
+        : filteredQueue.length || queueProjection.paused
+          ? {
+              ...normalizedView,
+              session: applySidebarQueueProjection(
+                normalizedView.session,
+                filteredQueue,
+                queueProjection.paused,
+              ),
+              queue: filteredQueue,
+              queuePaused: queueProjection.paused,
+            }
+          : normalizedView;
       const sourceView = viewCacheRef.current.remember(queueFilteredView);
       // A normalized view is stronger than an earlier local abort intent. Do
       // not leave a completed Session with a stale stop lease.
@@ -2227,10 +2264,10 @@ export function App() {
       // `queue` is optional on historical/read-only views. Missing means
       // unknown, not an authoritative empty queue; only an explicit array may
       // promote a locally admitted turn after a missed dispatch event.
-      if (Array.isArray(sourceView.queue))
+      if (queueProjection.known)
         promoteTurnsAbsentFromQueue(
           viewLocalTurns,
-          new Set(sourceView.queue.map((item) => item.id)),
+          new Set(filteredQueue.map((item) => item.id)),
           Boolean(
             sourceView.isStreaming
             || sourceView.state.isStreaming
@@ -2316,7 +2353,7 @@ export function App() {
                 ? committedPaneCommandsRef.current
                 : [],
           queue: resolvedView.queue || [],
-          queuePaused: filteredProjection.paused,
+          queuePaused: queueProjection.paused,
           toolStatus: resolvedView.toolStatus || "",
           extensionRequest,
           runtimeStatus: nextRuntimeStatus,
@@ -2346,7 +2383,7 @@ export function App() {
           sessionRunning: resolvedView.session.running === true,
           hasLive: Boolean(resolvedView.liveMessage),
           toolActive: Boolean(resolvedView.toolStatus),
-          queuePaused: filteredProjection.paused,
+          queuePaused: queueProjection.paused,
           queueLength: resolvedView.queue?.length || 0,
           runtimeStatus: nextRuntimeStatus,
         },
@@ -3258,15 +3295,13 @@ export function App() {
           ? event.piChatRunGeneration
           : undefined);
       if (eventSessionId && typeof eventRunGeneration === "number") {
-        const latest =
-          sessionRunGenerationsRef.current.get(eventSessionId) || 0;
-        const settled =
-          settledRunGenerationsRef.current.get(eventSessionId) || 0;
+        const latest = sessionRunGenerationsRef.current.get(eventSessionId);
+        const settled = settledRunGenerationsRef.current.get(eventSessionId);
         // A Pi turn is a monotonic lifecycle. Once a generation settles, every
         // non-terminal frame from it is stale, even if SSE/backpressure makes
-        // it arrive after settlement. This prevents a late tool completion or
-        // activity snapshot from reviving an already-cleared spinner.
-        if (eventRunGeneration < latest) {
+        // it arrive after settlement. Explicit generation zero is valid before
+        // the first agent_start; undefined means that no authority is known yet.
+        if (latest !== undefined && eventRunGeneration < latest) {
           recordSseRejectionDiagnostic({
             sessionId: eventSessionId,
             runGeneration: eventRunGeneration,
@@ -3275,7 +3310,11 @@ export function App() {
           });
           return;
         }
-        if (eventRunGeneration <= settled && type !== "agent_settled") {
+        if (
+          settled !== undefined
+          && eventRunGeneration <= settled
+          && type !== "agent_settled"
+        ) {
           recordSseRejectionDiagnostic({
             sessionId: eventSessionId,
             runGeneration: eventRunGeneration,
@@ -3286,12 +3325,12 @@ export function App() {
         }
         sessionRunGenerationsRef.current.set(
           eventSessionId,
-          Math.max(latest, eventRunGeneration),
+          Math.max(latest ?? -1, eventRunGeneration),
         );
         if (type === "agent_settled")
           settledRunGenerationsRef.current.set(
             eventSessionId,
-            Math.max(settled, eventRunGeneration),
+            Math.max(settled ?? -1, eventRunGeneration),
           );
       }
       // Only explicitly global frames may omit a Session ID. A malformed
@@ -5283,17 +5322,21 @@ export function App() {
           if (viewOperationIsCurrent(authority))
             applySessionView(view, authority, queueRequestRevision);
           else {
-            const projection = acceptQueueProjectionIfCurrent(
+            const projection = queueProjectionForView(
               view.session.id,
-              queueRequestRevision,
-              view.queue || [],
+              view.queue,
               view.queuePaused === true,
+              queueRequestRevision,
             );
-            rememberSessionView({
-              ...view,
-              queue: projection.queue,
-              queuePaused: projection.paused,
-            });
+            rememberSessionView(
+              projection.known || projection.queue.length || projection.paused
+                ? {
+                    ...view,
+                    queue: projection.queue,
+                    queuePaused: projection.paused,
+                  }
+                : view,
+            );
           }
         }
         await api.compact(command[2] || "", authority.sessionId);
@@ -6049,17 +6092,21 @@ export function App() {
             )
               applySessionView(view, operation, queueRequestRevision);
             else {
-              const projection = acceptQueueProjectionIfCurrent(
+              const projection = queueProjectionForView(
                 operation.sessionId,
-                queueRequestRevision,
-                view.queue || [],
+                view.queue,
                 view.queuePaused === true,
+                queueRequestRevision,
               );
-              rememberSessionView({
-                ...view,
-                queue: projection.queue,
-                queuePaused: projection.paused,
-              });
+              rememberSessionView(
+                projection.known || projection.queue.length || projection.paused
+                  ? {
+                      ...view,
+                      queue: projection.queue,
+                      queuePaused: projection.paused,
+                    }
+                  : view,
+              );
             }
           })
           .catch(() => undefined);

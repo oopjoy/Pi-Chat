@@ -55,7 +55,9 @@ export function usePiEventSource({ enabled, generation = 0, url, onReady, onPi, 
   useEffect(() => {
     if (!enabled) return;
     const source = new EventSource(url());
+    let active = true;
     const ready = (event: Event) => {
+      if (!active) return;
       const frame = diagnosticFrame((event as MessageEvent<unknown>).data);
       recordBrowserStateDiagnostic("sse", "received", {
         sessionId: frame.sessionId,
@@ -65,6 +67,7 @@ export function usePiEventSource({ enabled, generation = 0, url, onReady, onPi, 
       onReady(event, source);
     };
     const pi = (event: Event) => {
+      if (!active) return;
       const data = (event as MessageEvent<unknown>).data;
       const frame = diagnosticFrame(data);
       if (!isHighFrequencyStateDiagnosticEventType(frame.eventType))
@@ -80,14 +83,17 @@ export function usePiEventSource({ enabled, generation = 0, url, onReady, onPi, 
     source.addEventListener("ready", ready);
     source.addEventListener("pi", pi);
     source.onerror = () => {
+      if (!active) return;
       recordBrowserStateDiagnostic("sse", "error", {
         details: { readyState: source.readyState },
       });
       onError(source);
     };
     return () => {
+      active = false;
       source.removeEventListener("ready", ready);
       source.removeEventListener("pi", pi);
+      source.onerror = null;
       source.close();
     };
   }, [enabled, generation, onError, onOversized, onPi, onReady, url]);

@@ -1338,12 +1338,16 @@ test("ChatInput pauses undrained snapshots when navigation changes submission sc
 
     await act(async () => root.render(render("b")));
     await typeAndSend("three");
+    assert.deepEqual(
+      calls,
+      ["a:one", "b:three"],
+      "a long in-flight send for the old pane must not block the new Session",
+    );
     await act(async () => {
       resolvers.get("a:one")?.();
       await Promise.resolve();
       await Promise.resolve();
     });
-    assert.deepEqual(calls, ["a:one", "b:three"], "the old pane's second snapshot remains paused");
     await act(async () => {
       resolvers.get("b:three")?.();
       await Promise.resolve();

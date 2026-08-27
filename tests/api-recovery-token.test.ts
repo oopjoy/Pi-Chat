@@ -20,6 +20,30 @@ function response(value: unknown, ok = true): Response {
   } as Response;
 }
 
+test("request deadlines preserve both caller abort and timeout cancellation", async () => {
+  const sessionStorage = new MemoryStorage();
+  Object.assign(globalThis, {
+    window: { sessionStorage, setTimeout, clearTimeout },
+    sessionStorage,
+  });
+  const { createRequestDeadline, RUNTIME_OPERATION_TIMEOUT_MS } = await import("../src/web/api");
+  assert.equal(RUNTIME_OPERATION_TIMEOUT_MS, 210_000);
+
+  const caller = new AbortController();
+  const callerReason = new Error("navigation changed");
+  const combined = createRequestDeadline(caller.signal, 1_000);
+  caller.abort(callerReason);
+  assert.equal(combined.signal.aborted, true);
+  assert.equal(combined.signal.reason, callerReason);
+  combined.cleanup();
+
+  const timed = createRequestDeadline(undefined, 5);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(timed.signal.aborted, true);
+  assert.equal((timed.signal.reason as DOMException).name, "TimeoutError");
+  timed.cleanup();
+});
+
 test("reconnect token acceptance prevents an older response from restoring its token", async () => {
   const sessionStorage = new MemoryStorage();
   Object.assign(globalThis, {

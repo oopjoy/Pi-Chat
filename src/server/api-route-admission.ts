@@ -6,10 +6,13 @@ export type ApiRouteAdmission = {
   /** Existing-session mutations validate sessionId before admission; New does not. */
   validateSessionId: boolean;
   bodyLimit?: number;
+  /** Resource-model routes enter their own exclusive lifecycle after parsing. */
+  acquireMutationLeaseAfterBody?: boolean;
   ordinaryMutation: boolean;
 };
 
 export const PROMPT_BODY_LIMIT = MAX_PROMPT_HTTP_BODY_BYTES;
+export const DEFAULT_MUTATION_BODY_LIMIT = 1_000_000;
 
 const SESSION_BODY_MUTATIONS = new Set([
   "/api/chat/prompt",
@@ -36,6 +39,31 @@ export function apiRouteAdmission(request: IncomingMessage, url: URL): ApiRouteA
   }
   if (request.method === "POST" && url.pathname === "/api/sessions/new")
     return { bodyBeforeMutationLease: true, validateSessionId: false, bodyLimit: PROMPT_BODY_LIMIT, ordinaryMutation: false };
+  const sessionManagementMutation =
+    (request.method === "PATCH" || request.method === "DELETE")
+    && /^\/api\/sessions\/[a-f0-9]{20}$/.test(url.pathname);
+  const sessionCopyMutation =
+    request.method === "POST" && /^\/api\/sessions\/[a-f0-9]{20}\/(clone|fork)$/.test(url.pathname);
+  const customModelMutation =
+    request.method === "PUT" && /^\/api\/models\/[A-Za-z0-9._-]{1,80}\/[^/]{1,200}$/.test(url.pathname);
+  const modelCatalogueMutation =
+    (request.method === "POST" || request.method === "DELETE")
+    && url.pathname === "/api/models";
+  if (sessionManagementMutation || sessionCopyMutation)
+    return {
+      bodyBeforeMutationLease: true,
+      validateSessionId: false,
+      bodyLimit: DEFAULT_MUTATION_BODY_LIMIT,
+      ordinaryMutation: false,
+    };
+  if (customModelMutation || modelCatalogueMutation)
+    return {
+      bodyBeforeMutationLease: true,
+      validateSessionId: false,
+      bodyLimit: DEFAULT_MUTATION_BODY_LIMIT,
+      acquireMutationLeaseAfterBody: false,
+      ordinaryMutation: false,
+    };
   if (request.method === "GET" || request.method === "HEAD")
     return { bodyBeforeMutationLease: false, validateSessionId: false, ordinaryMutation: false };
   const excluded = [

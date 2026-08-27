@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { IncomingMessage } from "node:http";
-import { apiRouteAdmission, PROMPT_BODY_LIMIT } from "../src/server/api-route-admission";
+import { apiRouteAdmission, DEFAULT_MUTATION_BODY_LIMIT, PROMPT_BODY_LIMIT } from "../src/server/api-route-admission";
 import {
   MAX_PROMPT_HTTP_BODY_BYTES,
   MAX_PROMPT_IMAGES_ENCODED_BYTES,
@@ -38,5 +38,17 @@ test("route admission preserves lifecycle and read exclusions", () => {
   assert.deepEqual(route("POST", "/api/workspace/set"), { bodyBeforeMutationLease: false, validateSessionId: false, ordinaryMutation: false });
   assert.deepEqual(route("POST", "/api/resources/browse"), { bodyBeforeMutationLease: false, validateSessionId: false, ordinaryMutation: false });
   assert.deepEqual(route("GET", "/api/diagnostics/snapshot"), { bodyBeforeMutationLease: false, validateSessionId: false, ordinaryMutation: false });
-  assert.deepEqual(route("PATCH", "/api/sessions/0123456789abcdefabcd"), { bodyBeforeMutationLease: false, validateSessionId: false, ordinaryMutation: true });
+  assert.deepEqual(route("PATCH", "/api/sessions/0123456789abcdefabcd"), {
+    bodyBeforeMutationLease: true,
+    validateSessionId: false,
+    bodyLimit: DEFAULT_MUTATION_BODY_LIMIT,
+    ordinaryMutation: false,
+  });
+  assert.deepEqual(route("PUT", "/api/models/provider/model"), {
+    bodyBeforeMutationLease: true,
+    validateSessionId: false,
+    bodyLimit: DEFAULT_MUTATION_BODY_LIMIT,
+    acquireMutationLeaseAfterBody: false,
+    ordinaryMutation: false,
+  });
 });

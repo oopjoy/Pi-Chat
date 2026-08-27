@@ -10,7 +10,39 @@ export type ExtensionResponseInput = {
   value?: string;
 };
 
-const API_TIMEOUT_MS = 65_000;
+export const API_TIMEOUT_MS = 65_000;
+/** Runtime startup/preparation may include a full cold-process retry. */
+export const RUNTIME_OPERATION_TIMEOUT_MS = 210_000;
+
+export type RequestDeadline = {
+  signal: AbortSignal;
+  cleanup: () => void;
+};
+
+/** Combine caller cancellation with a hard request deadline without losing either. */
+export function createRequestDeadline(
+  callerSignal: AbortSignal | null | undefined,
+  timeoutMs: number,
+): RequestDeadline {
+  const controller = new AbortController();
+  const timeout = Math.max(1, timeoutMs);
+  const timer = window.setTimeout(() => {
+    controller.abort(new DOMException("请求超时", "TimeoutError"));
+  }, timeout);
+  const onCallerAbort = () => controller.abort(callerSignal?.reason);
+  if (callerSignal) {
+    if (callerSignal.aborted) onCallerAbort();
+    else callerSignal.addEventListener("abort", onCallerAbort, { once: true });
+  }
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      window.clearTimeout(timer);
+      callerSignal?.removeEventListener("abort", onCallerAbort);
+    },
+  };
+}
+
 export const PI_CHAT_RELEASES_URL = "https://github.com/oopjoy/Pi-Chat/releases";
 const PI_CHAT_LATEST_RELEASE_API = "https://api.github.com/repos/oopjoy/Pi-Chat/releases/latest";
 
@@ -65,7 +97,7 @@ async function checkForUpdates(currentVersion: string): Promise<UpdateCheckResul
 // Pi acknowledges a prompt only after preflight. Auto-compaction runs in that
 // preflight, and summarizing a long high-reasoning session can legitimately
 // exceed the normal request budget.
-const PROMPT_PREPARE_TIMEOUT_MS = 210_000;
+const PROMPT_PREPARE_TIMEOUT_MS = RUNTIME_OPERATION_TIMEOUT_MS;
 const APPLICATION_RESTART_TIMEOUT_MS = 10 * 60_000;
 const APPLICATION_HANDOFF_TIMEOUT_MS = 90_000;
 let requestToken = "";
@@ -179,19 +211,49 @@ async function request<T>(
   if (traceDiagnostic) recordBrowserStateDiagnostic("http", "request-start", {
     details: { method: options?.method || "GET", route: diagnosticRoute },
   });
+  const deadline = createRequestDeadline(options?.signal, timeoutMs);
   let response: Response;
   try {
     response = await fetch(path, {
       ...options,
-      signal: options?.signal || AbortSignal.timeout(timeoutMs),
-    headers: {
-      ...(options?.body ? { "content-type": "application/json" } : {}),
-      ...(requestToken ? { "x-pi-chat-token": requestToken } : {}),
-      "x-pi-chat-client": clientId,
-      "x-pi-chat-page": pageId,
-      ...options?.headers,
+      signal: deadline.signal,
+      headers: {
+        ...(options?.body ? { "content-type": "application/json" } : {}),
+        ...(requestToken ? { "x-pi-chat-token": requestToken } : {}),
+        "x-pi-chat-client": clientId,
+        "x-pi-chat-page": pageId,
+        ...options?.headers,
       },
     });
+    let value: T & { error?: string; requestToken?: string; code?: string; incidentId?: string };
+    try {
+      value = await response.json() as T & { error?: string; requestToken?: string; code?: string; incidentId?: string };
+    } catch (cause) {
+      // A timeout/caller abort while reading the response body must not be
+      // converted into an empty JSON object and reported as an HTTP error.
+      if (deadline.signal.aborted) throw deadline.signal.reason || cause;
+      value = {} as T & { error?: string; requestToken?: string; code?: string; incidentId?: string };
+    }
+    // A maintenance-state bootstrap may return 503 while still granting the
+    // guarded startup token required to subscribe to lifecycle SSE.
+    if (acceptResponseToken && requestGeneration === connectionGeneration)
+      storeRequestToken(value.requestToken);
+    if (traceDiagnostic) recordBrowserStateDiagnostic("http", "request-end", {
+      details: {
+        method: options?.method || "GET",
+        route: diagnosticRoute,
+        status: response.status,
+        durationMs: Math.round(performance.now() - diagnosticStartedAt),
+      },
+    });
+    if (!response.ok)
+      throw new ApiRequestError(
+        value.error || `请求失败：${response.status}`,
+        response.status,
+        value.code,
+        value.incidentId,
+      );
+    return value;
   } catch (cause) {
     if (traceDiagnostic) recordBrowserStateDiagnostic("http", "request-error", {
       details: {
@@ -206,28 +268,9 @@ async function request<T>(
       throw new Error(`Pi Chat 请求超时（${seconds} 秒）。Pi 可能正在压缩上下文或模型服务没有响应；请查看界面状态，必要时重启 Pi RPC 后再试。`);
     }
     throw cause;
+  } finally {
+    deadline.cleanup();
   }
-  const value = await response.json().catch(() => ({})) as T & { error?: string; requestToken?: string; code?: string; incidentId?: string };
-  // A maintenance-state bootstrap may return 503 while still granting the
-  // guarded startup token required to subscribe to lifecycle SSE.
-  if (acceptResponseToken && requestGeneration === connectionGeneration)
-    storeRequestToken(value.requestToken);
-  if (traceDiagnostic) recordBrowserStateDiagnostic("http", "request-end", {
-    details: {
-      method: options?.method || "GET",
-      route: diagnosticRoute,
-      status: response.status,
-      durationMs: Math.round(performance.now() - diagnosticStartedAt),
-    },
-  });
-  if (!response.ok)
-    throw new ApiRequestError(
-      value.error || `请求失败：${response.status}`,
-      response.status,
-      value.code,
-      value.incidentId,
-    );
-  return value;
 }
 
 function handshake(): Promise<BootstrapHandshakeData> {
@@ -329,7 +372,7 @@ export const api = {
   cancelQueued: (id: string, sessionId: string) => request<{ queue: QueuedPrompt[]; paused: boolean }>(`/api/chat/queue/${id}`, { method: "DELETE", body: JSON.stringify({ sessionId }) }),
   resumeQueue: (sessionId: string) => request<{ queue: QueuedPrompt[]; paused: boolean }>("/api/chat/queue/resume", { method: "POST", body: JSON.stringify({ sessionId }) }),
   compact: (customInstructions: string, sessionId: string) => request<{ result: Record<string, unknown> }>("/api/chat/compact", { method: "POST", body: JSON.stringify({ customInstructions, sessionId }) }, PROMPT_PREPARE_TIMEOUT_MS),
-  newSession: (cwd?: string) => request<SessionViewData>("/api/sessions/new", { method: "POST", body: JSON.stringify(cwd ? { cwd } : {}) }),
+  newSession: (cwd?: string) => request<SessionViewData>("/api/sessions/new", { method: "POST", body: JSON.stringify(cwd ? { cwd } : {}) }, RUNTIME_OPERATION_TIMEOUT_MS),
   submitNewSession: (input: { cwd?: string; message: string; images: PromptImage[]; model?: ModelInfo | null; thinkingLevel?: ThinkingLevel; gateMode?: GateMode }) => request<InitialPromptData>("/api/sessions/new", {
     method: "POST",
     body: JSON.stringify({
@@ -383,7 +426,7 @@ export const api = {
   },
   markSessionViewed: (id: string) => request<{ viewing: string }>(`/api/sessions/${id}/viewing`, { method: "POST" }),
   clearSessionViewed: (sessionId: string) => request<{ viewing: string }>("/api/sessions/viewing/clear", { method: "POST", body: JSON.stringify({ sessionId }) }),
-  activateSession: (id: string) => request<SessionViewData>(`/api/sessions/${id}/activate`, { method: "POST" }),
+  activateSession: (id: string) => request<SessionViewData>(`/api/sessions/${id}/activate`, { method: "POST" }, RUNTIME_OPERATION_TIMEOUT_MS),
   sessions: (
     all = false,
     includeIds: string[] = [],
@@ -424,16 +467,16 @@ export const api = {
     method: "POST",
     body: JSON.stringify({ persistedMessageId }),
   }, PROMPT_PREPARE_TIMEOUT_MS),
-  renameSession: (id: string, name: string) => request<{ id: string; name: string }>(`/api/sessions/${id}`, { method: "PATCH", body: JSON.stringify({ name }) }),
-  deleteSession: (id: string) => request<BootstrapData>(`/api/sessions/${id}`, { method: "DELETE" }),
+  renameSession: (id: string, name: string) => request<{ id: string; name: string }>(`/api/sessions/${id}`, { method: "PATCH", body: JSON.stringify({ name }) }, RUNTIME_OPERATION_TIMEOUT_MS),
+  deleteSession: (id: string) => request<BootstrapData>(`/api/sessions/${id}`, { method: "DELETE" }, RUNTIME_OPERATION_TIMEOUT_MS),
   setModel: (provider: string, modelId: string, sessionId: string) => request<{ model: BootstrapData["state"]["model"]; pending: boolean }>("/api/models/set", {
     method: "POST",
     body: JSON.stringify({ provider, modelId, sessionId }),
-  }),
+  }, RUNTIME_OPERATION_TIMEOUT_MS),
   setThinking: (level: ThinkingLevel, sessionId: string) => request<{ level: ThinkingLevel; pending: boolean }>("/api/thinking/set", {
     method: "POST",
     body: JSON.stringify({ level, sessionId }),
-  }),
+  }, RUNTIME_OPERATION_TIMEOUT_MS),
   skills: () => request<ResourceResponse<SkillResource>>("/api/resources/skills"),
   extensions: () => request<ResourceResponse<ExtensionResource>>("/api/resources/extensions"),
   packages: () => request<ResourceResponse<PackageResource>>("/api/resources/packages"),
