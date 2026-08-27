@@ -3036,8 +3036,7 @@ export function App() {
         replacementBootstrapPendingRef.current = true;
         // The new ready frame proves this is a real process epoch change. A
         // transient token/SSE recovery below must not clear this live state until
-        // that proof arrives; now it is safe to discard process-A projections.
-        resetProcessOwnedUiState();
+        // that proof arrives; the full process-owned reset below is now safe.
         // All pre-handoff reads carry the old process token and metadata. They
         // remain uncancelled, but cannot be reused or commit into this epoch.
         runEpochGenerationRef.current += 1;
