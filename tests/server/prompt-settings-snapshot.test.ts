@@ -2,11 +2,29 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import test from "node:test";
 import { PiChatApp } from "../../src/server/app";
-import type { PiRpcClient } from "../../src/server/rpc-client";
+import { RpcRequestTimeoutError, type PiRpcClient } from "../../src/server/rpc-client";
 import { idForPath } from "../../src/server/session-index";
 import type { SessionIndex } from "../../src/server/session-index";
 import type { ResourceManager } from "../../src/server/resource-manager";
 import { FakeRpc } from "../helpers/server-app-fixture";
+
+class UnknownSettingRpc extends FakeRpc {
+  constructor(
+    path: string,
+    sessionId: string,
+    private readonly unknownType: "set_model" | "set_thinking_level",
+  ) {
+    super(path, sessionId);
+  }
+
+  override async send(command: Record<string, unknown>, timeoutMs?: number, options?: Parameters<FakeRpc["send"]>[2]) {
+    if (command.type === this.unknownType) {
+      this.commands.push(command);
+      throw new RpcRequestTimeoutError(this.unknownType);
+    }
+    return super.send(command, timeoutMs, options);
+  }
+}
 
 test("ordinary prompt applies its captured Model and Thinking snapshot immediately before Pi prompt", async () => {
   const path = "C:\\sessions\\prompt-settings.jsonl";
@@ -77,6 +95,42 @@ test("ordinary prompt applies its captured Model and Thinking snapshot immediate
         { type: "prompt", provider: undefined, modelId: undefined, level: undefined, message: "use captured selection" },
       ],
     );
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("an unknown prompt Model write fences later mutations as RESULT_PENDING", async () => {
+  const path = "C:\\sessions\\unknown-prompt-model.jsonl";
+  const sessionId = idForPath(path);
+  const rpc = new UnknownSettingRpc(path, "unknown-prompt-model", "set_model");
+  const sessions = {
+    list: async () => [{ id: sessionId, sessionId: "unknown-prompt-model", name: "Unknown model", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+    pathForId: (id: string) => (id === sessionId ? path : null),
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: rpc as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const post = (message: string) => fetch(`${origin}/api/chat/prompt`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sessionId, message, settings: { model: { provider: "test", modelId: "next" } } }),
+  });
+  try {
+    assert.equal((await fetch(`${origin}/api/bootstrap`)).status, 200);
+    const first = await post("uncertain model prompt");
+    assert.equal(first.status, 409);
+    assert.equal((await first.json() as { code?: string }).code, "RESULT_PENDING");
+    const second = await post("must not overtake model write");
+    assert.equal(second.status, 409);
+    assert.equal((await second.json() as { code?: string }).code, "RESULT_PENDING");
+    assert.equal(rpc.commands.filter((command) => command.type === "set_model").length, 1);
+    assert.equal(rpc.commands.some((command) => command.type === "prompt"), false);
   } finally {
     server.close();
     await app.close();

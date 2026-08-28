@@ -3,7 +3,7 @@ import type { ExtensionUiRequest, GateMode, ModelInfo, PiMessage, PiState, Promp
 import { asMessages, asState } from "./pi-data.js";
 import { idForPath, readSessionMessages } from "./session-index.js";
 import { OperationAdmission } from "./operation-admission.js";
-import { RpcRequestTimeoutError, type PiRpcClient, type RpcEventSource } from "./rpc-client.js";
+import { RpcProcessExitUnconfirmedError, RpcRequestTimeoutError, type PiRpcClient, type RpcEventSource } from "./rpc-client.js";
 
 const DEFAULT_SECONDARY_RUNTIME_IDLE_MS = 40 * 60 * 1_000;
 /** Primary + six Secondary workers = seven hot conversations total. */
@@ -804,6 +804,10 @@ export class RuntimePool {
       runtime.unsubscribe();
       return runtime;
     } catch (error) {
+      // An unconfirmed child exit still owns this Session's writer. Keep the
+      // operation admission closed so a retry cannot race a possibly-live
+      // process; the App maps this boundary to RESULT_PENDING.
+      if (error instanceof RpcProcessExitUnconfirmedError) throw error;
       runtime.operationAdmission.reopen(generation);
       throw error;
     }

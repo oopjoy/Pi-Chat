@@ -625,6 +625,47 @@ test("an abandoned Gate confirmation is safely cancelled after its timeout", asy
   }
 });
 
+test("an uncertain Extension response keeps the confirmation pending and fences retries", async () => {
+  const path = "C:\\sessions\\uncertain-extension-response.jsonl";
+  const id = idForPath(path);
+  class UncertainResponseRpc extends FakeRpc {
+    override sendRaw(command: Record<string, unknown>): void {
+      this.commands.push(command);
+      throw new RpcRequestTimeoutError("extension_ui_response");
+    }
+  }
+  const primary = new UncertainResponseRpc(path, "uncertain-extension-response");
+  const sessions = {
+    list: async () => [{ id, sessionId: "uncertain-extension-response", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+    pathForId: () => path,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    assert.equal((await fetch(`${origin}/api/bootstrap`)).status, 200);
+    primary.emit({ type: "extension_ui_request", id: "uncertain-gate", method: "select", title: "Write file?", options: ["Allow", "Block"] });
+    const response = await fetch(`${origin}/api/extension-ui/respond`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "uncertain-gate", value: "Allow", sessionId: id }),
+    });
+    assert.equal(response.status, 409);
+    assert.equal((await response.json() as { code?: string }).code, "RESULT_PENDING");
+    const view = await (await fetch(`${origin}/api/sessions/${id}/view`)).json() as { pendingExtensionRequest?: { id: string }; session: { pendingConfirmation?: boolean } };
+    assert.equal(view.pendingExtensionRequest?.id, "uncertain-gate");
+    assert.equal(view.session.pendingConfirmation, true);
+    assert.equal(primary.commands.filter((command) => command.type === "extension_ui_response").length, 1);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
 test("a pending extension confirmation belongs to one Session and only its first response is forwarded", async () => {
   const path = "C:\\sessions\\primary.jsonl";
   const id = idForPath(path);

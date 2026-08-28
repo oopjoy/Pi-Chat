@@ -7,7 +7,7 @@ import {
   RuntimePool,
   type SecondaryRuntime,
 } from "../src/server/runtime-pool";
-import { RpcRequestTimeoutError } from "../src/server/rpc-client";
+import { RpcProcessExitUnconfirmedError, RpcRequestTimeoutError } from "../src/server/rpc-client";
 import { idForPath } from "../src/server/session-index";
 
 function runtime(stop: () => Promise<void>): SecondaryRuntime {
@@ -151,6 +151,18 @@ test("deletion waits for an admitted operation and stop failure reopens dedicate
   await assert.rejects(() => failedPool.releaseForDeletion(failed.id), /locked/);
   assert.equal(failedPool.get(failed.id), failed, "a failed stop leaves the Session process owned by its Runtime");
   assert.equal(failed.operationAdmission.isClosed, false, "a failed stop reopens admission");
+
+  const unconfirmed = runtime(async () => {
+    throw new RpcProcessExitUnconfirmedError(1234);
+  });
+  const unconfirmedPool = pool();
+  unconfirmedPool.runtimes.set(unconfirmed.id, unconfirmed);
+  await assert.rejects(
+    () => unconfirmedPool.releaseForDeletion(unconfirmed.id),
+    (error) => error instanceof RpcProcessExitUnconfirmedError,
+  );
+  assert.equal(unconfirmedPool.get(unconfirmed.id), unconfirmed, "an unconfirmed child remains owned by its Runtime");
+  assert.equal(unconfirmed.operationAdmission.isClosed, true, "an unconfirmed child keeps deletion admission closed");
 });
 
 test("four reserved cold starts run concurrently without exceeding the Secondary cap", async () => {

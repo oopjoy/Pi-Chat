@@ -52,6 +52,7 @@ export interface PromptPreparationPort {
     pending: PendingTurnSettings,
     settings?: PromptSettingsSnapshot,
     consumeSupersededLegacy?: boolean,
+    sessionId?: string,
   ): Promise<AppliedTurnSettings>;
   onPrimaryPromptSettingsApplied?(settings: AppliedTurnSettings): void;
   onRuntimePromptSettingsApplied?(
@@ -262,6 +263,7 @@ export class PromptScheduler {
     try {
       await this.runtime.ensurePrimaryRuntime();
       const generation = this.primaryAbortGeneration;
+      const sessionId = this.runtime.activeSessionId();
       let appliedSettings: AppliedTurnSettings;
       try {
         appliedSettings = this.preparation.applyPromptSettings
@@ -270,6 +272,7 @@ export class PromptScheduler {
               this.primaryPendingTurnSettings,
               settings,
               consumeSupersededLegacy,
+              sessionId,
             )
           : (await this.preparation.applyPendingTurnSettings(
               this.runtime.primaryRpc(),
@@ -283,8 +286,8 @@ export class PromptScheduler {
       this.preparation.onPrimaryPromptSettingsApplied?.(appliedSettings);
       if (generation !== this.primaryAbortGeneration || this.runtime.isClosed() || !this.runtime.isLifecycleIdle()) throw new Error("消息发送已取消");
       const rpc = this.runtime.primaryRpc();
-      const sessionId = this.runtime.activeSessionId();
       await this.preparation.syncGateMode(rpc, sessionId, gateMode);
+      if (generation !== this.primaryAbortGeneration || this.runtime.isClosed() || !this.runtime.isLifecycleIdle()) throw new Error("消息发送已取消");
       this.primaryRunning = true;
       this.publication.publishSessionActivity?.(sessionId);
       const observe = this.promptRpcObserver(rpc, sessionId, promptId);
@@ -455,6 +458,8 @@ export class PromptScheduler {
               runtime.rpc,
               runtime.pendingTurnSettings,
               next.settings,
+              false,
+              runtime.id,
             )
           : (await this.preparation.applyPendingTurnSettings(
               runtime.rpc,
@@ -468,6 +473,7 @@ export class PromptScheduler {
       this.preparation.onRuntimePromptSettingsApplied?.(runtime, appliedSettings);
       if (generation !== runtime.abortGeneration || this.runtime.isClosed() || !this.runtime.isLifecycleIdle()) throw new Error("消息发送已取消");
       await this.preparation.syncGateMode(runtime.rpc, runtime.id, next.gateMode);
+      if (generation !== runtime.abortGeneration || this.runtime.isClosed() || !this.runtime.isLifecycleIdle()) throw new Error("消息发送已取消");
       runtime.running = true;
       this.publication.publishSessionActivity?.(runtime.id);
       const observe = this.promptRpcObserver(runtime.rpc, runtime.id, next.id);

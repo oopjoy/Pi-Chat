@@ -357,6 +357,45 @@ test("Gate mode is synchronized immediately before the next Primary prompt", asy
   assert.deepEqual(commands, ["/gate strict", "next turn"]);
 });
 
+test("a Primary abort during Gate preflight prevents the stale prompt write", async () => {
+  const commands: string[] = [];
+  let releaseGate!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    releaseGate = resolve;
+  });
+  const rpc = {
+    send: async (command: { type: string; message?: string }) => {
+      commands.push(command.message || command.type);
+      return { type: "response", success: true };
+    },
+  };
+  let scheduler!: PromptScheduler;
+  scheduler = new PromptScheduler(promptSchedulerHost({
+    isClosed: () => false,
+    isLifecycleIdle: () => true,
+    primaryRpc: () => rpc as never,
+    activeSessionId: () => "primary",
+    ensurePrimaryRuntime: async () => {},
+    recoverRuntime: async () => {},
+    acquirePrimaryOperation: () => () => {},
+    acquireRuntimeOperation: () => () => {},
+    touchRuntime: () => {},
+    applyPendingTurnSettings: async () => {},
+    syncGateMode: async () => {
+      await gate;
+      scheduler.primaryAbortGeneration += 1;
+    },
+    broadcast: () => {},
+    onPrimaryPromptAccepted: () => {},
+    onSecondaryPromptAccepted: () => {},
+  }));
+  const pending = scheduler.sendPrimaryPrompt("must not send", [], 1, "open");
+  await Promise.resolve();
+  releaseGate();
+  await assert.rejects(pending, /消息发送已取消/);
+  assert.deepEqual(commands, [], "the prompt must not be written after abort invalidates preflight");
+});
+
 test("queued Secondary turns retain Gate mode until actual dispatch", async () => {
   const commands: string[] = [];
   const rpc = { send: async (command: { type: string; message?: string }) => { commands.push(command.message || command.type); return { type: "response", success: true }; }, isRunning: () => true };
