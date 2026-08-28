@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { appendPendingUserMessage, bindQueuedAdmission, bindQueuedDispatch, consumeLocalSteeringTurn, markLocalTurnQueued, nextLocalTurnTotal, promoteTurnsAbsentFromQueue, protectTranscriptWithLocalTurns, removeLocalTurnAndRebase, removePendingSteeringTurns, transcriptConfirmsLocalTurn, transcriptTurnTotal, type LocalUserTurn } from "../src/web/lib/local-user-turn";
+import { appendLocalTurnOnce, appendPendingUserMessage, bindQueuedAdmission, bindQueuedDispatch, consumeLocalSteeringTurn, markLocalTurnQueued, nextLocalTurnTotal, promoteTurnsAbsentFromQueue, protectTranscriptWithLocalTurns, removeLocalTurnAndRebase, removePendingSteeringTurns, transcriptConfirmsLocalTurn, transcriptTurnTotal, type LocalUserTurn } from "../src/web/lib/local-user-turn";
 import { SessionViewCache } from "../src/web/lib/session-view-cache";
 import type { PiMessage, SessionViewData } from "../src/shared/types";
 
@@ -35,6 +35,60 @@ test("the authoritative transcript replaces the local turn exactly once when per
   assert.equal(protectedTranscript.pendingTurns.length, 0);
   assert.equal(protectedTranscript.messages, authoritative);
   assert.equal(transcriptTurnTotal(protectedTranscript.messages, protectedTranscript.turnTotal), 2);
+});
+
+test("a persisted user row confirms a local turn even when its window watermark is stale", () => {
+  const persisted = {
+    role: "user" as const,
+    content: [{ type: "text" as const, text: "submitted just now" }],
+    timestamp: 99,
+    piChatPersistedMessageId: "entry-2:0",
+  };
+  const timedPending = { ...pending, message: { ...pending.message, timestamp: 98 } };
+  const protectedTranscript = protectTranscriptWithLocalTurns(
+    [timedPending],
+    [persisted],
+    1,
+    1,
+  );
+  assert.equal(protectedTranscript.pendingTurns.length, 0);
+  assert.deepEqual(protectedTranscript.messages, [persisted]);
+});
+
+test("a late acknowledgement does not append an equivalent persisted user row", () => {
+  const persisted = {
+    role: "user" as const,
+    content: [{ type: "text" as const, text: "submitted just now" }],
+    timestamp: 99,
+    piChatPersistedMessageId: "entry-2:0",
+  };
+  const turn = { ...pending };
+  assert.deepEqual(
+    appendLocalTurnOnce([previous, persisted], turn),
+    [previous, persisted],
+  );
+});
+
+test("two distinct identical prompts remain two user turns", () => {
+  const first = { ...pending, expectedTurnTotal: 2 };
+  const second: LocalUserTurn = {
+    sessionId: "session-a",
+    message: { role: "user", content: "submitted just now", timestamp: 43 },
+    expectedTurnTotal: 3,
+  };
+  const persisted = [
+    { role: "user" as const, content: [{ type: "text" as const, text: "submitted just now" }], timestamp: 42, piChatPersistedMessageId: "entry-2:0" },
+    { role: "user" as const, content: [{ type: "text" as const, text: "submitted just now" }], timestamp: 44, piChatPersistedMessageId: "entry-3:0" },
+  ];
+  const protectedTranscript = protectTranscriptWithLocalTurns(
+    [first, second],
+    persisted,
+    2,
+    3,
+  );
+  assert.equal(protectedTranscript.pendingTurns.length, 0);
+  assert.equal(protectedTranscript.messages.length, 2);
+  assert.equal(appendLocalTurnOnce([persisted[0]], second).length, 2);
 });
 
 test("a turn-count watermark cannot hide a local message before its content reaches the authoritative window", () => {

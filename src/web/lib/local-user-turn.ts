@@ -20,16 +20,70 @@ export interface LocalUserTurn {
   renderedInTranscript?: boolean;
 }
 
-function contentIdentity(message: PiMessage): string {
-  const content = typeof message.content === "string"
-    ? [{ type: "text", text: message.content }]
-    : message.content;
+/** Compare only the user-visible payload across local, Runtime, and JSONL forms. */
+function userInstructionIdentity(message: PiMessage): string {
+  type UserPayload =
+    | { type: "text"; text: string }
+    | { type: "image"; data: string; mimeType: string };
+  const content: UserPayload[] = [];
+  if (typeof message.content === "string") {
+    content.push({
+      type: "text",
+      text: message.content.split(String.fromCharCode(13) + String.fromCharCode(10)).join(String.fromCharCode(10)),
+    });
+  } else if (Array.isArray(message.content)) {
+    for (const block of message.content) {
+      if (block.type === "text")
+        content.push({
+          type: "text",
+          text: (block.text || "").split(String.fromCharCode(13) + String.fromCharCode(10)).join(String.fromCharCode(10)),
+        });
+      else if (block.type === "image")
+        content.push({ type: "image", data: block.data || "", mimeType: block.mimeType || "" });
+    }
+  }
   try { return JSON.stringify(content); }
   catch { return String(content); }
 }
 
 function sameUserInstruction(left: PiMessage, right: PiMessage): boolean {
-  return left.role === "user" && right.role === "user" && contentIdentity(left) === contentIdentity(right);
+  return left.role === "user" && right.role === "user" && userInstructionIdentity(left) === userInstructionIdentity(right);
+}
+
+function authoritativeUserMatch(turn: LocalUserTurn, messages: PiMessage[], turnTotal?: number): PiMessage | undefined {
+  const visibleUsers = messages.filter((message) => message.role === "user");
+  const authoritativeTotal = transcriptTurnTotal(messages, turnTotal);
+  const firstVisibleTurn = authoritativeTotal - visibleUsers.length + 1;
+  const expectedIndex = turn.expectedTurnTotal - firstVisibleTurn;
+  const positional = visibleUsers[expectedIndex];
+  if (positional && sameUserInstruction(positional, turn.message)) return positional;
+
+  const matches = visibleUsers.filter((message) => sameUserInstruction(message, turn.message));
+  const localTime = typeof turn.message.timestamp === "number" && Number.isFinite(turn.message.timestamp)
+    ? turn.message.timestamp
+    : undefined;
+  const singleTimestampCorrelates = matches.length === 1
+    && localTime !== undefined
+    && typeof matches[0].timestamp === "number"
+    && Number.isFinite(matches[0].timestamp)
+    && Math.abs(matches[0].timestamp - localTime) <= 10 * 60 * 1_000;
+  if (matches.length === 1 && turnTotal !== undefined && singleTimestampCorrelates)
+    return matches[0];
+  // When a stale/windowed view contains repeated prompts, timestamps provide a
+  // safe local correlation without collapsing two real identical turns.
+  if (localTime === undefined || matches.length < 2) return undefined;
+  const ranked = matches
+    .map((message) => ({
+      message,
+      distance: typeof message.timestamp === "number" && Number.isFinite(message.timestamp)
+        ? Math.abs(message.timestamp - localTime)
+        : Number.POSITIVE_INFINITY,
+    }))
+    .sort((left, right) => left.distance - right.distance);
+  return ranked[0].distance < ranked[1].distance
+    && Boolean(ranked[0].message.piChatPersistedMessageId) !== Boolean(ranked[1].message.piChatPersistedMessageId)
+    ? ranked[0].message
+    : undefined;
 }
 
 function textAndImageCount(message: PiMessage): { text: string; imageCount: number } {
@@ -84,6 +138,11 @@ export function localTurnBelongsInTranscript(turn: LocalUserTurn): boolean {
  */
 export function appendLocalTurnOnce(messages: PiMessage[], turn: LocalUserTurn | undefined): PiMessage[] {
   if (!turn || turn.renderedInTranscript) return messages;
+  const authoritativeMatch = authoritativeUserMatch(turn, messages);
+  if (authoritativeMatch) {
+    turn.renderedInTranscript = true;
+    return messages;
+  }
   turn.renderedInTranscript = true;
   return messages.includes(turn.message) ? messages : [...messages, turn.message];
 }
@@ -163,14 +222,20 @@ export function nextLocalTurnTotal(messages: PiMessage[], total: number | undefi
 
 export function transcriptConfirmsLocalTurn(turn: LocalUserTurn, messages: PiMessage[], total?: number): boolean {
   const authoritativeTotal = transcriptTurnTotal(messages, total);
-  if (authoritativeTotal < turn.expectedTurnTotal) return false;
+  if (authoritativeTotal < turn.expectedTurnTotal) {
+    // A stale/windowed response can carry fewer turns than the local watermark.
+    // If it contains the one authoritative representation of this turn, prefer
+    // that row and do not render a second local copy beside it.
+    return Boolean(authoritativeUserMatch(turn, messages, total)?.piChatPersistedMessageId);
+  }
   const visibleUsers = messages.filter((message) => message.role === "user");
   const firstVisibleTurn = authoritativeTotal - visibleUsers.length + 1;
   // The authoritative suffix has advanced beyond this old local turn. It can no
   // longer be visible, but the later turn watermark proves it was persisted.
   if (turn.expectedTurnTotal < firstVisibleTurn) return true;
   const candidate = visibleUsers[turn.expectedTurnTotal - firstVisibleTurn];
-  return Boolean(candidate && (turn.confirmByPosition || sameUserInstruction(candidate, turn.message)));
+  return Boolean(candidate && (turn.confirmByPosition || sameUserInstruction(candidate, turn.message)))
+    || Boolean(authoritativeUserMatch(turn, messages, total)?.piChatPersistedMessageId);
 }
 
 export interface ProtectedTranscript {
