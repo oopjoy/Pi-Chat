@@ -1048,6 +1048,10 @@ export class PiChatApp {
       clearTimeout(timer);
     this.draftPersistenceRetryTimers.clear();
     this.unsubscribe();
+    // A settlement barrier may already be resetting native Steer state. Wait
+    // for those resets before stopping workers, while the closed fence below
+    // prevents a later barrier from starting a new recovery/restart.
+    await Promise.allSettled([...this.nativeSteeringResets.values()]);
     // Distinct Session workers can stop concurrently. Sequential forced-stop
     // windows made shutdown/restart scale by roughly three seconds per worker.
     // Preserve a failed worker's ownership, but still release SSE/HTTP-facing
@@ -2507,10 +2511,18 @@ export class PiChatApp {
     runtime?: SecondaryRuntime,
     reason = "settled-before-consumption",
   ): Promise<void> {
+    if (this.closed) {
+      this.clearNativeSteeringState(sessionId, "application-close");
+      return;
+    }
     const existing = this.nativeSteeringResets.get(sessionId);
     if (existing) return existing;
     const reset = (async () => {
       try {
+        if (this.closed) {
+          this.clearNativeSteeringState(sessionId, "application-close");
+          return;
+        }
         if (runtime) {
           await this.runtimePool.recover(runtime);
           this.clearRuntimeFailure(runtime.id);

@@ -411,9 +411,9 @@ export class PiRpcClient {
         newline = probeBuffer.indexOf("\n");
       }
     });
-    child.once("error", (error) => this.handleExit(source, new Error(`Pi RPC 启动失败：${error.message}`)));
+    child.once("error", (error) => this.handleExit(source, new Error(`Pi RPC 启动失败：${error.message}`), false));
     child.once("exit", (code, signal) => {
-      this.handleExit(source, new Error(`Pi RPC 已退出（code=${code}, signal=${signal}）。${source.stderrTail}`));
+      this.handleExit(source, new Error(`Pi RPC 已退出（code=${code}, signal=${signal}）。${source.stderrTail}`), true);
     });
     this.attachJsonlReader(child.stdout, source);
 
@@ -657,8 +657,9 @@ export class PiRpcClient {
     this.outstandingReadQueryIds.clear();
   }
 
-  private handleExit(source: RpcEventSource, error: Error): void {
+  private handleExit(source: RpcEventSource, error: Error, exitConfirmed = false): void {
     if (!this.source || this.source.generation !== source.generation) return;
+    const activeChild = this.source.child;
     const incident = this.recordTransportIncident(error, {
       operation: "rpc.child-exit",
       outcome: "failed",
@@ -667,9 +668,20 @@ export class PiRpcClient {
       childPid: source.childPid,
     });
     this.child = null;
-    if (this.unconfirmedChild === this.source.child) {
-      this.unconfirmedChild = null;
-      this.unconfirmedSource = null;
+    if (exitConfirmed) {
+      if (this.unconfirmedChild === activeChild) {
+        this.unconfirmedChild = null;
+        this.unconfirmedSource = null;
+      }
+    } else {
+      // A ChildProcess error is not proof that the process has exited. Retain
+      // the writer until stop() observes exit/close, so recovery cannot spawn a
+      // second process against the same Session JSONL.
+      this.unconfirmedChild = activeChild;
+      this.unconfirmedSource = {
+        generation: source.generation,
+        childPid: source.childPid,
+      };
     }
     this.source = null;
     this.rejectPending(error, true);

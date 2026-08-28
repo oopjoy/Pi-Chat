@@ -70,6 +70,38 @@ test("resource reload clears transient Primary state while retaining the Gate pr
   }
 });
 
+test("app close waits for an in-flight native Steer reset before stopping workers", async () => {
+  const app = appForTest();
+  let release!: () => void;
+  const reset = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const internals = app as unknown as {
+    nativeSteeringResets: Map<string, Promise<void>>;
+  };
+  internals.nativeSteeringResets.set(SESSION_ID, reset);
+  let closed = false;
+  const closing = app.close().then(() => {
+    closed = true;
+  });
+  await Promise.resolve();
+  assert.equal(closed, false);
+  release();
+  await closing;
+  assert.equal(closed, true);
+});
+
+test("a closed app refuses to start a native Steer reset", async () => {
+  const app = appForTest();
+  const internals = app as unknown as {
+    closed: boolean;
+    resetNativeSteering: (sessionId: string) => Promise<void>;
+  };
+  internals.closed = true;
+  await internals.resetNativeSteering(SESSION_ID);
+  await app.close();
+});
+
 test("Session deletion cleanup removes every server-owned per-Session projection", async () => {
   const app = appForTest();
   const timer = setTimeout(() => undefined, 60_000);

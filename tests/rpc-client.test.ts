@@ -186,12 +186,12 @@ test("an unexpected child exit reports a written mutation as outcome unknown", a
   const internals = client as unknown as {
     child: typeof child | null;
     source: typeof source | null;
-    handleExit(source: typeof source, error: Error): void;
+    handleExit(source: typeof source, error: Error, exitConfirmed?: boolean): void;
   };
   internals.child = child;
   internals.source = source;
   const pending = client.send({ type: "never_answers" }, 60_000);
-  internals.handleExit(source, new Error("child crashed"));
+  internals.handleExit(source, new Error("child crashed"), true);
   await assert.rejects(
     pending,
     (error) => error instanceof RpcRequestTimeoutError
@@ -203,6 +203,29 @@ test("an unexpected child exit reports a written mutation as outcome unknown", a
   assert.equal(incidents.records[0].operation, "rpc.child-exit");
   assert.equal(incidents.records[0].sessionId, "canonical-session");
   assert.equal(incidents.records[0].rpcGeneration, 3);
+});
+
+test("a child error retains writer ownership until exit is confirmed", async () => {
+  const { child } = fakeChild();
+  const client = new PiRpcClient({ cwd: process.cwd() });
+  const source = { generation: 4, child, stderrTail: "" };
+  const internals = client as unknown as {
+    child: typeof child | null;
+    source: typeof source | null;
+    unconfirmedChild: typeof child | null;
+    handleExit(source: typeof source, error: Error, exitConfirmed?: boolean): void;
+  };
+  internals.child = child;
+  internals.source = source;
+  internals.handleExit(source, new Error("child emitted error"));
+  assert.equal(internals.child, null);
+  assert.equal(internals.unconfirmedChild, child);
+  await assert.rejects(
+    client.start(),
+    /未确认退出的进程，拒绝启动重复 Session writer/,
+  );
+  await client.stop();
+  assert.equal(internals.unconfirmedChild, null);
 });
 
 test("RPC rejects an oversized outbound frame before writing it", async () => {
