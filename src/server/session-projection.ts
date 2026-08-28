@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Stats } from "node:fs";
-import { open, type FileHandle } from "node:fs/promises";
+import { open, stat as statPath, type FileHandle } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const READ_CHUNK_BYTES = 256 * 1024;
@@ -46,6 +46,7 @@ function sameVersion(left: Stats, right: Stats): boolean {
   return left.size === right.size
     && left.mtimeMs === right.mtimeMs
     && left.ctimeMs === right.ctimeMs
+    && left.birthtimeMs === right.birthtimeMs
     && sourceIdentity(left) === sourceIdentity(right);
 }
 
@@ -86,20 +87,74 @@ async function committedFingerprint(
   handle: FileHandle,
   committedBytes: number,
 ): Promise<{ value: string; bytesRead: number }> {
-  const firstLength = Math.min(committedBytes, FINGERPRINT_WINDOW_BYTES);
-  const tailStart = Math.max(firstLength, committedBytes - FINGERPRINT_WINDOW_BYTES);
+  const window = FINGERPRINT_WINDOW_BYTES;
+  const firstLength = Math.min(committedBytes, window);
+  const tailStart = Math.max(firstLength, committedBytes - window);
   const tailLength = Math.max(0, committedBytes - tailStart);
+  // Keep a bounded sample in the largest gap as well. A first/tail-only key
+  // misses an in-place rewrite of a long middle section when all stat anchors
+  // are preserved (a common test-double and some editor-save failure mode).
+  const middleGap = Math.max(0, tailStart - firstLength);
+  const middleLength = Math.min(window, middleGap);
+  const middleStart = firstLength + Math.floor((middleGap - middleLength) / 2);
   const first = await readExact(handle, 0, firstLength);
+  const middle = await readExact(handle, middleStart, middleLength);
   const tail = await readExact(handle, tailStart, tailLength);
   const hash = createHash("sha256");
+  const add = (offset: number, value: Buffer) => {
+    hash.update(String(offset));
+    hash.update("\0");
+    hash.update(String(value.length));
+    hash.update("\0");
+    hash.update(value);
+    hash.update("\0");
+  };
   hash.update(String(committedBytes));
   hash.update("\0");
-  hash.update(first);
-  hash.update("\0");
-  hash.update(String(tailStart));
-  hash.update("\0");
-  hash.update(tail);
-  return { value: hash.digest("hex"), bytesRead: first.length + tail.length };
+  add(0, first);
+  add(middleStart, middle);
+  add(tailStart, tail);
+  return {
+    value: hash.digest("hex"),
+    bytesRead: first.length + middle.length + tail.length,
+  };
+}
+
+/**
+ * Read a bounded content fingerprint without parsing JSONL. The caller still
+ * compares filesystem identity anchors; this extra content check catches a
+ * same-size rewrite whose timestamp precision or mocked Stats hide the change.
+ */
+export async function sessionFileFingerprint(path: string): Promise<string> {
+  const normalized = resolve(path);
+  let lastError: unknown;
+  let fallbackFingerprint: string | undefined;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let handle: FileHandle | undefined;
+    try {
+      handle = await open(normalized, "r");
+      const opened = await handle.stat();
+      const fingerprint = await committedFingerprint(handle, opened.size);
+      fallbackFingerprint = fingerprint.value;
+      // A path can be atomically replaced while the fingerprint is being read.
+      // Verify that the pathname still names the same version before returning
+      // the key; otherwise the caller would combine metadata from two files.
+      const current = await statPath(normalized);
+      if (sameVersion(opened, current)) return fingerprint.value;
+      lastError = new Error("Session JSONL changed while its fingerprint was read");
+    } catch (error) {
+      lastError = error;
+    } finally {
+      await handle?.close().catch(() => undefined);
+    }
+  }
+  // Active Pi writers may append between the handle stat and pathname check.
+  // Returning the bounded sample from the opened handle keeps inventory refresh
+  // fail-open; the next pass will compare it against the new pathname version.
+  if (fallbackFingerprint) return fallbackFingerprint;
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Session JSONL changed while its fingerprint was read");
 }
 
 async function decodeRange<Entry>(
@@ -200,8 +255,14 @@ export class SessionProjection<Entry> {
       // The open handle is authoritative if the caller's earlier inventory
       // stat raced an append, truncation, or atomic replacement.
       const targetBytes = current.size;
-      if (this.version && sameVersion(this.version, current))
-        return this.result("none", 0);
+      if (this.version && sameVersion(this.version, current)) {
+        // Filesystems (and test doubles) may retain all stat anchors across an
+        // in-place rewrite. Verify the bounded content key before returning a
+        // no-op; an incomplete tail is always re-read so it cannot stay stale.
+        const verified = await committedFingerprint(handle, targetBytes);
+        if (this.committedBytes === targetBytes && verified.value === this.prefixFingerprint)
+          return this.result("none", verified.bytesRead);
+      }
 
       let kind: Exclude<SessionProjectionKind, "none"> = "rewrite";
       let verificationBytes = 0;

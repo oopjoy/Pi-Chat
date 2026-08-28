@@ -55,7 +55,12 @@ export function requestPageId(request: IncomingMessage): string {
 }
 
 export class HttpRequestError extends Error {
-  constructor(readonly status: 400 | 404 | 408 | 409 | 413, message: string) { super(message); }
+  constructor(
+    readonly status: 400 | 404 | 408 | 409 | 413,
+    message: string,
+    readonly code = "HTTP_REQUEST_REJECTED",
+    readonly retryable = false,
+  ) { super(message); }
 }
 
 export async function bodyJson(

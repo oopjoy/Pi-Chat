@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  composerAcceptError,
   composerDraftKeyId,
   composerPartition,
+  composerPendingUsage,
   composerReducer,
   emptyComposerState,
   type ComposerDraftKey,
@@ -28,6 +30,50 @@ test("Composer reducer partitions existing Sessions and New generations", () => 
   assert.equal(composerPartition(state, fresh(1)).draft.message, "first New");
   assert.equal(composerPartition(state, fresh(2)).draft.message, "second New");
   assert.notEqual(composerDraftKeyId(fresh(1)), composerDraftKeyId(fresh(2)));
+});
+
+test("Composer pending usage rejects an image backlog before it enters local state", () => {
+  const key = session("A");
+  const image = { type: "image" as const, data: "YQ==", mimeType: "image/png", size: 40 * 1024 * 1024 };
+  let state = composerReducer(emptyComposerState(), { type: "replace", key, message: "first", images: [image] });
+  const first = { key, message: "first", images: [image], revision: 1, delivery: "queue" as const };
+  assert.equal(composerAcceptError(state, first, false), null);
+  state = composerReducer(state, { type: "accept", snapshot: first, retry: false });
+  const second = { key, message: "second", images: [image], revision: 2, delivery: "queue" as const };
+  assert.equal(composerAcceptError(state, second, false), null);
+  state = composerReducer(state, { type: "accept", snapshot: second, retry: false });
+  const third = { key, message: "third", images: [image], revision: 3, delivery: "queue" as const };
+  assert.match(composerAcceptError(state, third, false) || "", /图片总量超过 80 MB/);
+  assert.equal(composerPendingUsage(state).snapshots, 2);
+});
+
+test("Composer pending usage bounds snapshots across independent Session partitions", () => {
+  let state = emptyComposerState();
+  for (let index = 0; index < 64; index += 1) {
+    const key = session(`session-${index}`);
+    state = composerReducer(state, { type: "accept", snapshot: snapshot(key, `message-${index}`), retry: false });
+  }
+  assert.match(composerAcceptError(state, snapshot(session("overflow"), "overflow"), false) || "", /待发送消息过多/);
+});
+
+test("Composer forget removes deleted Session drafts and image payloads", () => {
+  const key = session("deleted");
+  const image = { type: "image" as const, data: "YQ==", mimeType: "image/png", size: 10 };
+  let state = composerReducer(emptyComposerState(), {
+    type: "replace",
+    key,
+    message: "retained text",
+    images: [image],
+  });
+  state = composerReducer(state, {
+    type: "accept",
+    snapshot: { key, message: "retained text", images: [image], revision: 1, delivery: "queue" },
+    retry: false,
+  });
+  assert.ok(composerPendingUsage(state).payloadBytes > 0);
+  state = composerReducer(state, { type: "forget", key });
+  assert.equal(state.partitions[composerDraftKeyId(key)], undefined);
+  assert.deepEqual(composerPendingUsage(state), { snapshots: 0, imageBytes: 0, payloadBytes: 0 });
 });
 
 test("Composer reducer retains an immutable accepted snapshot across later edits", () => {

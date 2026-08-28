@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFile, mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -488,7 +488,8 @@ test("session index persists negative results and rechecks them only after file 
       version: number;
       entries: Record<string, { summary: unknown }>;
     };
-    assert.equal(stored.version, 4);
+    assert.equal(stored.version, 5);
+    assert.equal(typeof (stored.entries[empty] as { fingerprint?: unknown })?.fingerprint, "string");
     assert.equal(stored.entries[empty]?.summary, null);
 
     await new Promise((resolve) => setTimeout(resolve, 15));
@@ -561,6 +562,120 @@ test("session index persists metadata and refreshes only changed session files",
   }
 });
 
+test("SessionIndex invalidates same-size content rewrites even when stat anchors stay unchanged", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-session-same-stat-"));
+  try {
+    const path = join(root, "same-stat.jsonl");
+    const content = (title: string) => [
+      { type: "session", id: "same-stat", cwd: root },
+      { type: "message", id: "u1", message: { role: "user", content: title } },
+      { type: "session_info", name: title },
+    ].map(JSON.stringify).join("\n") + "\n";
+    await writeFile(path, content("Old title"));
+    const anchored = await stat(path);
+    const fixedStat = async () => anchored;
+    const index = new SessionIndex(root, join(root, "cache.json"), fixedStat);
+    const [first] = await index.list();
+    assert.equal(first.name, "Old title");
+    await writeFile(path, content("New title"));
+    assert.equal((await stat(path)).size, anchored.size, "the fixture must preserve file size");
+    const [updated] = await index.list();
+    assert.equal(updated.name, "New title");
+    assert.equal(updated.preview, "New title");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("SessionIndex invalidates an atomic same-size replacement and persisted cache", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-session-atomic-replace-"));
+  try {
+    const path = join(root, "atomic.jsonl");
+    const cachePath = join(root, "cache.json");
+    const content = (title: string) => [
+      { type: "session", id: "atomic-replace", cwd: root },
+      { type: "message", id: "u1", message: { role: "user", content: title } },
+      { type: "session_info", name: title },
+    ].map(JSON.stringify).join("\n") + "\n";
+    await writeFile(path, content("old title"));
+    const index = new SessionIndex(root, cachePath);
+    const [oldSummary] = await index.list();
+    await writeFile(join(root, "replacement.tmp"), content("new title"));
+    await rename(join(root, "replacement.tmp"), path);
+    const [newSummary] = await index.list();
+    assert.equal(newSummary.name, "new title");
+    const restarted = new SessionIndex(root, cachePath);
+    const [restartedSummary] = await restarted.list();
+    assert.equal(restartedSummary.name, "new title");
+    assert.equal(restartedSummary.id, oldSummary.id, "path-derived Session identity remains stable");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("SessionIndex snapshot cache invalidates a same-size rewrite", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-snapshot-same-stat-"));
+  try {
+    const path = join(root, "same-stat-snapshot.jsonl");
+    const content = (answer: string) => [
+      { type: "session", id: "same-stat-snapshot", cwd: root },
+      { type: "message", id: "u1", parentId: null, message: { role: "user", content: "question" } },
+      { type: "message", id: "a1", parentId: "u1", message: { role: "assistant", content: answer } },
+    ].map(JSON.stringify).join("\n") + "\n";
+    await writeFile(path, content("old answer"));
+    const anchored = await stat(path);
+    const fixedStat = async () => anchored;
+    const index = new SessionIndex(root, join(root, "cache.json"), fixedStat);
+    const [session] = await index.list();
+    const first = await index.snapshotForId(session.id);
+    await writeFile(path, content("new answer"));
+    assert.equal((await stat(path)).size, anchored.size, "the fixture must preserve file size");
+    const updated = await index.snapshotForId(session.id);
+    assert.notEqual(updated, first);
+    assert.equal(updated?.messages.at(-1)?.content, "new answer");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("SessionIndex fingerprint samples the middle of a long same-size rewrite", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-session-middle-rewrite-"));
+  try {
+    const path = join(root, "middle.jsonl");
+    const records = [
+      { type: "session", id: "middle-rewrite", cwd: root },
+      ...Array.from({ length: 320 }, (_, index) => ({
+        type: "message",
+        id: `m-${index}`,
+        parentId: index === 0 ? null : `m-${index - 1}`,
+        message: {
+          role: index % 2 === 0 ? "user" : "assistant",
+          content: `${index % 2 === 0 ? "question" : "answer"}-${index}-` + "x".repeat(700),
+        },
+      })),
+    ];
+    const serialize = (middleText: string) => records.map((record, index) =>
+      index === 161
+        ? JSON.stringify({ ...record, message: { ...(record as { message: Record<string, unknown> }).message, content: middleText } })
+        : JSON.stringify(record),
+    ).join("\n") + "\n";
+    const oldContent = serialize("answer-160-" + "x".repeat(700));
+    const newContent = serialize("answer-new-" + "x".repeat(700));
+    assert.equal(Buffer.byteLength(oldContent), Buffer.byteLength(newContent));
+    await writeFile(path, oldContent);
+    const anchored = await stat(path);
+    const index = new SessionIndex(root, join(root, "cache.json"), async () => anchored);
+    const [summary] = await index.list();
+    const first = await index.snapshotForId(summary.id);
+    await writeFile(path, newContent);
+    const updated = await index.snapshotForId(summary.id);
+    assert.notEqual(updated, first);
+    assert.equal(updated?.messages[160]?.content, "answer-new-" + "x".repeat(700));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("session refresh tolerates a JSONL deleted after enumeration", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-delete-race-"));
   try {
@@ -606,6 +721,27 @@ test("a persisted metadata cache restores one cold target before any global inve
     assert.equal(summary?.id, session.id);
     assert.equal(second.pathForId(session.id), path);
     assert.deepEqual(statPaths, [path]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("known target cache entries are revalidated without a global inventory scan", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-session-index-known-target-"));
+  try {
+    const path = join(root, "known.jsonl");
+    const content = (name: string) => [
+      { type: "session", id: "known-target", cwd: root },
+      { type: "message", id: "1", message: { role: "user", content: name } },
+      { type: "session_info", name },
+    ].map(JSON.stringify).join("\n") + "\n";
+    await writeFile(path, content("old"));
+    const index = new SessionIndex(root, join(root, "index.json"));
+    const [initial] = await index.list();
+    await writeFile(path, content("new"));
+    const refreshed = await index.cachedSummaryForId(initial.id);
+    assert.equal(refreshed?.name, "new");
+    assert.equal(index.pathForId(initial.id), path);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

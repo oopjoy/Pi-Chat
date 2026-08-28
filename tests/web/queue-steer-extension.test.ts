@@ -217,6 +217,67 @@ test("cancelling an admitted queued prompt restores its text over the current Co
   }
 });
 
+test("queue cancellation restores the Composer after its post-cancel SSE advances the Pane", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const queued = {
+    id: "00000000-0000-4000-8000-000000000026",
+    message: "restore after queue SSE",
+    imageCount: 0,
+    createdAt: 3,
+  };
+  let resolveCancel!: (value: { queue: never[]; paused: boolean }) => void;
+  const pendingCancel = new Promise<{ queue: never[]; paused: boolean }>((resolve) => {
+    resolveCancel = resolve;
+  });
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true },
+      queue: [queued],
+      queuePaused: true,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    cancelQueued: async () => pendingCancel,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      dom.window.document
+        .querySelector<HTMLButtonElement>(".prompt-queue article button")!
+        .click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      source.emitPi({
+        type: "pi_chat_queue_update",
+        piChatSessionId: activeId,
+        queue: [],
+        paused: false,
+      });
+      await Promise.resolve();
+    });
+    await act(async () => {
+      resolveCancel({ queue: [], paused: false });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(textarea.value, queued.message);
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("cancelling the last queued prompt clears stale running and tool state after an idle Runtime snapshot", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");

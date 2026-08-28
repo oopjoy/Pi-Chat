@@ -195,9 +195,33 @@ function inspectPackageDirectory(
   } catch { return null; }
 }
 
+const BUNDLE_HASH_CONCURRENCY = 4;
+
 async function fileMatches(path: string, expectedHash: string): Promise<boolean> {
   try { return sha256(await readFile(path)) === expectedHash; }
   catch { return false; }
+}
+
+/** Hash bundle inputs with bounded parallelism; never fan out one task per file. */
+async function boundedFileMatches(
+  files: Array<{ path: string; expectedHash: string }>,
+): Promise<boolean[]> {
+  const results = Array<boolean>(files.length).fill(false);
+  let next = 0;
+  const worker = async () => {
+    while (true) {
+      const index = next++;
+      if (index >= files.length) return;
+      results[index] = await fileMatches(files[index].path, files[index].expectedHash);
+    }
+  };
+  await Promise.all(
+    Array.from(
+      { length: Math.min(BUNDLE_HASH_CONCURRENCY, files.length) },
+      () => worker(),
+    ),
+  );
+  return results;
 }
 
 export async function resolvePiRuntimeLaunch(options: {
@@ -316,6 +340,7 @@ export async function resolvePiRuntimeLaunch(options: {
     };
   }
   const packageRoots = new Map<string, string>();
+  const sourceChecks: Array<{ path: string; expectedHash: string; label: string }> = [];
   for (const input of manifest.sourceInputs) {
     const packageKey = `${input.packageName}@${input.packageVersion}:${input.packageLocator}`;
     let packageRoot = packageRoots.get(packageKey);
@@ -336,7 +361,7 @@ export async function resolvePiRuntimeLaunch(options: {
       packageRoots.set(packageKey, packageRoot);
     }
     const sourcePath = resolve(packageRoot, input.relativePath);
-    if (!isInside(sourcePath, packageRoot) || !await fileMatches(sourcePath, input.sha256)) {
+    if (!isInside(sourcePath, packageRoot)) {
       return {
         piEntry: originalEntry,
         childEnvironment: {},
@@ -345,10 +370,27 @@ export async function resolvePiRuntimeLaunch(options: {
         diagnostic: `Pi source fingerprint 不匹配：${packageKey}/${input.relativePath}`,
       };
     }
+    sourceChecks.push({
+      path: sourcePath,
+      expectedHash: input.sha256,
+      label: `${packageKey}/${input.relativePath}`,
+    });
   }
+  const sourceResults = await boundedFileMatches(sourceChecks);
+  const failedSource = sourceResults.findIndex((matched) => !matched);
+  if (failedSource >= 0) {
+    return {
+      piEntry: originalEntry,
+      childEnvironment: {},
+      bundled: false,
+      piVersion: installed.version,
+      diagnostic: `Pi source fingerprint 不匹配：${sourceChecks[failedSource].label}`,
+    };
+  }
+  const outputChecks: Array<{ path: string; expectedHash: string; label: string }> = [];
   for (const [output, expectedHash] of Object.entries(manifest.outputHashes)) {
     const outputPath = resolve(runtimeRoot, output);
-    if (!isInside(outputPath, runtimeRoot) || !await fileMatches(outputPath, expectedHash)) {
+    if (!isInside(outputPath, runtimeRoot)) {
       return {
         piEntry: originalEntry,
         childEnvironment: {},
@@ -357,6 +399,18 @@ export async function resolvePiRuntimeLaunch(options: {
         diagnostic: `Pi Runtime Bundle output fingerprint 不匹配：${output}`,
       };
     }
+    outputChecks.push({ path: outputPath, expectedHash, label: output });
+  }
+  const outputResults = await boundedFileMatches(outputChecks);
+  const failedOutput = outputResults.findIndex((matched) => !matched);
+  if (failedOutput >= 0) {
+    return {
+      piEntry: originalEntry,
+      childEnvironment: {},
+      bundled: false,
+      piVersion: installed.version,
+      diagnostic: `Pi Runtime Bundle output fingerprint 不匹配：${outputChecks[failedOutput].label}`,
+    };
   }
   const bundlePath = resolve(runtimeRoot, manifest.bundleRelativePath);
   if (!isInside(bundlePath, runtimeRoot) || manifest.outputHashes[manifest.bundleRelativePath] !== manifest.bundleSha256) {

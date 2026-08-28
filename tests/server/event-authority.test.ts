@@ -11,6 +11,53 @@ function payload(frame: string): Record<string, unknown> {
   return JSON.parse(frame.split("data: ")[1]?.trim() || "{}");
 }
 
+test("App preserves server-owned run timing through terminal SSE and activity snapshots", async () => {
+  let now = 10_000;
+  const rpc = {
+    onEvent: () => () => undefined,
+    send: async () => ({
+      type: "response",
+      success: true,
+      data: { model: null, isStreaming: false },
+    }),
+  } as unknown as PiRpcClient;
+  const app = new PiChatApp({
+    rpc,
+    sessions: {} as SessionIndex,
+    resources: {} as ResourceManager,
+    cwd: process.cwd(),
+    webRoot: process.cwd(),
+    runEpoch: "epoch-timing",
+    now: () => now,
+  });
+  const frames: string[] = [];
+  const clients = (app as unknown as {
+    sseClients: Map<{ write: (frame: string) => boolean }, string>;
+  }).sseClients;
+  clients.set({ write: (frame) => { frames.push(frame); return true; } }, "client");
+  const internals = app as unknown as {
+    beginSessionRunTiming(sessionId: string, generation: number): void;
+    finishSessionRunTiming(sessionId: string, generation: number): void;
+    sessionActivity(sessionId: string): { runStartedAt?: number; lastRunDurationMs?: number };
+    broadcastRpcEvent(event: Record<string, unknown>, sessionId: string, generation: number): void;
+  };
+  try {
+    internals.beginSessionRunTiming(SESSION_ID, 2);
+    assert.equal(internals.sessionActivity(SESSION_ID).runStartedAt, 10_000);
+    now = 11_234;
+    internals.finishSessionRunTiming(SESSION_ID, 2);
+    assert.equal(internals.sessionActivity(SESSION_ID).lastRunDurationMs, 1_234);
+    internals.broadcastRpcEvent({ type: "agent_settled" }, SESSION_ID, 2);
+    const settled = payload(frames.at(-1) || "");
+    assert.equal(settled.piChatRunStartedAt, 10_000);
+    assert.equal(settled.piChatRunDurationMs, 1_234);
+    assert.equal(settled.piChatRunEndedAt, 11_234);
+  } finally {
+    clients.clear();
+    await app.close();
+  }
+});
+
 test("App stamps browser SSE events with process epoch and Session generation", async () => {
   const rpc = {
     onEvent: () => () => undefined,

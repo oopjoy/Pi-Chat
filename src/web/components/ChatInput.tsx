@@ -97,7 +97,7 @@ export function commandMatches(value: string, commands: SlashCommand[]): SlashCo
   }).sort((a, b) => a.rank - b.rank || a.score - b.score || a.command.name.localeCompare(b.command.name)).slice(0, 9).map(({ command }) => command);
 }
 
-export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, placeholder, acceptsImages, imageInputPending = false, imageInputPendingMessage = "模型图片能力尚未确认", resolveImageCapabilityOnSend = false, restoredDraft, onDraftRevisionChange, draftKey, submissionScope, submissionTargetSessionId, allowFollowupSubmissions = true, submissionPaused = false, onSubmissionPendingChange, commands, controls, notices, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles, onError }: {
+export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, placeholder, acceptsImages, imageInputPending = false, imageInputPendingMessage = "模型图片能力尚未确认", resolveImageCapabilityOnSend = false, restoredDraft, onDraftRevisionChange, draftKey, forgottenComposerKeys = [], submissionScope, submissionTargetSessionId, allowFollowupSubmissions = true, submissionPaused = false, onSubmissionPendingChange, commands, controls, notices, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles, onError }: {
   /** True when a submission will enter the local queue. */
   streaming: boolean;
   /** True only while Pi is actively generating and can be stopped. */
@@ -118,6 +118,8 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   onDraftRevisionChange?: (key: ComposerDraftKey, revision: number) => void;
   /** Typed partition for an existing prompt target or one New draft generation. */
   draftKey?: ComposerDraftKey;
+  /** Session-keyed Composer partitions to forget after structural deletion. */
+  forgottenComposerKeys?: string[];
   /** Stable pane identity used only for App-owned pending projections. */
   submissionScope: string;
   /** Immutable normal-session prompt target, never inferred again after navigation. */
@@ -156,6 +158,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   );
   const composer = useComposerController({
     draftKey: resolvedDraftKey,
+    forgottenKeys: forgottenComposerKeys,
     targetSessionId: submissionTargetSessionId,
     disabled,
     paused: submissionPaused,
@@ -163,6 +166,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     restoredDraft,
     onDraftRevisionChange,
     onSubmissionPendingChange,
+    onError,
     onSend,
   });
   const value = composer.draft.message;

@@ -142,6 +142,9 @@ export class SseHub {
   private readonly pendingFrames = new Map<ServerResponse, PendingFrames>();
   private readonly scheduledSnapshots = new Map<ServerResponse, Map<string, ScheduledSnapshot>>();
   private readonly lastSnapshotWrites = new Map<ServerResponse, Map<string, number>>();
+  /** Async ServerResponse errors must be consumed before Node treats them as uncaught. */
+  private readonly responseErrorHandlers = new Map<ServerResponse, () => void>();
+  private readonly lastResponseMetadata = new Map<ServerResponse, FrameMetadata>();
   private readonly disconnectListeners = new Set<(response: ServerResponse, clientId: string, info: SseDisconnectInfo) => void>();
   private diagnosticObserver?: (event: SseTransportDiagnostic) => void;
 
@@ -166,7 +169,17 @@ export class SseHub {
   }
 
   add(response: ServerResponse, clientId: string, options: SseClientOptions = {}): void {
+    const previousErrorHandler = this.responseErrorHandlers.get(response);
+    if (previousErrorHandler) response.removeListener("error", previousErrorHandler);
+    const onError = () => {
+      if (!this.clients.has(response)) return;
+      const metadata = this.lastResponseMetadata.get(response) || { eventType: "unknown" };
+      this.observe("write-error", metadata);
+      this.disconnect(response, { reason: "write-error" });
+    };
     this.clients.set(response, clientId);
+    this.responseErrorHandlers.set(response, onError);
+    response.on("error", onError);
     if (options.streamingDelta) this.streamingDeltaClients.add(response);
   }
 
@@ -175,13 +188,23 @@ export class SseHub {
   }
 
   /** Report a transport-only departure without conflating it with app lifecycle. */
-  disconnect(response: ServerResponse, info: SseDisconnectInfo): string {
+  disconnect(
+    response: ServerResponse,
+    info: SseDisconnectInfo,
+    options: { retainResponseErrorHandler?: boolean } = {},
+  ): string {
     const clientId = this.clients.get(response) || "";
     if (!this.clients.delete(response)) return "";
     this.streamingDeltaClients.delete(response);
     this.streamProjections.delete(response);
     this.backpressured.delete(response);
     this.pendingFrames.delete(response);
+    const errorHandler = this.responseErrorHandlers.get(response);
+    if (errorHandler && !options.retainResponseErrorHandler)
+      response.removeListener("error", errorHandler);
+    if (!options.retainResponseErrorHandler)
+      this.responseErrorHandlers.delete(response);
+    this.lastResponseMetadata.delete(response);
     const scheduled = this.scheduledSnapshots.get(response);
     if (scheduled) for (const snapshot of scheduled.values()) clearTimeout(snapshot.timer);
     this.scheduledSnapshots.delete(response);
@@ -268,11 +291,30 @@ export class SseHub {
   }
 
   closeAll(): void {
-    for (const client of this.clients.keys()) {
-      this.disconnect(client, { reason: "shutdown" });
+    for (const client of [...this.clients.keys()]) {
+      // `end()` may emit an asynchronous error after the client leaves the
+      // hub. Keep the per-response error listener alive until the stream emits
+      // close/finish so shutdown cannot reintroduce an uncaught EventEmitter
+      // error. The listener is a no-op once `clients` no longer contains it.
+      const errorHandler = this.responseErrorHandlers.get(client);
+      this.disconnect(
+        client,
+        { reason: "shutdown" },
+        { retainResponseErrorHandler: Boolean(errorHandler) },
+      );
+      const cleanup = () => {
+        if (errorHandler) client.removeListener("error", errorHandler);
+        if (this.responseErrorHandlers.get(client) === errorHandler)
+          this.responseErrorHandlers.delete(client);
+        client.removeListener("close", cleanup);
+        client.removeListener("finish", cleanup);
+      };
+      client.once("close", cleanup);
+      client.once("finish", cleanup);
       try {
         client.end();
       } catch {
+        cleanup();
         // Shutdown path must not throw.
       }
     }
@@ -372,8 +414,13 @@ export class SseHub {
       this.enqueue(client, framed, snapshotKey);
       return;
     }
+    this.lastResponseMetadata.set(client, framed.metadata);
     try {
-      if (client.write(framed.frame) !== false) {
+      const accepted = client.write(framed.frame);
+      // A test double or Node stream may emit `error` synchronously from write;
+      // its handler has already removed the client in that case.
+      if (!this.clients.has(client)) return;
+      if (accepted !== false) {
         this.observe("written", framed.metadata);
         return;
       }

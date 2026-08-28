@@ -28,6 +28,14 @@ export class LiveMessageIdentityRegistry {
 
   constructor(private readonly createId: () => string = randomUUID) {}
 
+  clear(sessionId: string): void {
+    if (sessionId) this.activeBySession.delete(sessionId);
+  }
+
+  clearAll(): void {
+    this.activeBySession.clear();
+  }
+
   project(sessionId: string, event: Record<string, unknown>): Record<string, unknown> {
     const type = event.type;
     if (type === "agent_settled" || type === "pi_chat_process_error") {

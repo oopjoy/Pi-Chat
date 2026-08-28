@@ -528,6 +528,44 @@ test("a replacement process workspace epoch accepts its fresh default after an o
   }
 });
 
+test("resource reload clears Runtime overlays without discarding the New Composer draft", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  Object.assign(api, {
+    bootstrap: async () => bootstrap,
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    clearSessionViewed: async () => ({ viewing: "" }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const newButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.trim() === "New");
+    assert.ok(newButton);
+    await act(async () => newButton.click());
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set;
+    await act(async () => {
+      setter?.call(textarea, "draft survives resource reload");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "draft survives resource reload" }));
+    });
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => source.emitPi({ type: "pi_chat_application_lifecycle", lifecycle: "resources-reloading" }));
+    assert.equal(textarea.value, "draft survives resource reload");
+    assert.match(dom.window.document.body.textContent || "", /正在更新配置并重载 Runtime/);
+    await act(async () => source.emitPi({ type: "pi_chat_application_lifecycle", lifecycle: "idle" }));
+    assert.equal(textarea.value, "draft survives resource reload");
+    assert.equal(dom.window.document.querySelector(".welcome"), null);
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("lifecycle idle consumes replacement bootstrap accounting before a later ready", async () => {
   for (const outcome of ["success", "failure"] as const) {
     const { dom, FakeEventSource } = installDom();

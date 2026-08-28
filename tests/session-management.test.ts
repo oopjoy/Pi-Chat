@@ -1198,6 +1198,58 @@ test("a running Session rename acknowledges without waiting for the SessionIndex
   }
 });
 
+test("an uncertain Primary new_session fences a destructive delete retry", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-delete-uncertain-"));
+  try {
+    const primaryPath = join(root, "primary.jsonl");
+    await writeFile(primaryPath, [
+      { type: "session", id: "primary", cwd: process.cwd() },
+      { type: "message", id: "u1", parentId: null, message: { role: "user", content: "keep me" } },
+    ].map(JSON.stringify).join("\n") + "\n");
+    class UncertainDeleteWorker extends SessionWorker {
+      override async send(command: Record<string, unknown>) {
+        if (command.type === "new_session") {
+          this.commands.push(command);
+          throw new RpcRequestTimeoutError("new_session");
+        }
+        return super.send(command);
+      }
+    }
+    const worker = new UncertainDeleteWorker(primaryPath);
+    const sessions = new SessionIndex(root, join(root, "cache.json"));
+    const app = new PiChatApp({
+      rpc: worker as unknown as PiRpcClient,
+      sessions,
+      resources: {} as ResourceManager,
+      cwd: process.cwd(),
+      webRoot: process.cwd(),
+    });
+    const server = createServer((request, response) => void app.handle(request, response));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const origin = `http://127.0.0.1:${address.port}`;
+    const id = idForPath(primaryPath);
+    try {
+      await fetch(`${origin}/api/bootstrap`);
+      const first = await fetch(`${origin}/api/sessions/${id}`, { method: "DELETE" });
+      assert.equal(first.status, 409);
+      assert.equal((await first.json() as { code?: string }).code, "RESULT_PENDING");
+      assert.equal(existsSync(primaryPath), true);
+      const second = await fetch(`${origin}/api/sessions/${id}`, { method: "DELETE" });
+      assert.equal(second.status, 409);
+      assert.equal((await second.json() as { code?: string }).code, "RESULT_PENDING");
+      assert.equal(worker.commands.filter((command) => command.type === "new_session").length, 1);
+      assert.equal(existsSync(primaryPath), true);
+    } finally {
+      server.close();
+      await app.close();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("cold view keeps reasoning/input for a configured catalogue model", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-cold-catalog-"));
   try {

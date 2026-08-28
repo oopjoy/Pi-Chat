@@ -50,3 +50,27 @@ test("resource manager exposes a read-only inventory with real Pi ownership", as
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("resource inventories share a short cache, invalidate explicitly, and bound skill reads", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-resource-cache-"));
+  try {
+    const skillPath = join(root, "skills", "large", "SKILL.md");
+    await mkdir(join(root, "skills", "large"), { recursive: true });
+    await writeFile(skillPath, `---\nname: first-name\ndescription: first\n---\n\n${"x".repeat(300_000)}`);
+    await writeFile(join(root, "settings.json"), "{}\n");
+    const manager = new ResourceManager(root);
+    const first = await manager.listSkills(root);
+    const firstSkill = first.resources.find((resource) => resource.name === "first-name");
+    assert.equal(firstSkill?.name, "first-name");
+    assert.ok((firstSkill?.content || "").length <= 200_000);
+
+    await writeFile(skillPath, `---\nname: second-name\ndescription: second\n---\n\nupdated\n`);
+    const cached = await manager.listSkills(root);
+    assert.equal(cached.resources.find((resource) => resource.name === "first-name")?.name, "first-name");
+    manager.invalidate();
+    const refreshed = await manager.listSkills(root);
+    assert.equal(refreshed.resources.find((resource) => resource.name === "second-name")?.name, "second-name");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

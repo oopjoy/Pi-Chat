@@ -302,7 +302,7 @@ test("a real sole SSE transport drop leaves health, bootstrap, and a replacement
 });
 
 test("foreground presence expiry pushes a control-state SSE frame that clears an observing banner", async () => {
-  const fixture = await startApp({ presenceTtlMs: 40 });
+  const fixture = await startApp({ presenceTtlMs: 100 });
   const appInternals = fixture.app as unknown as {
     sseClients: Map<object, string>;
     sessionControl: {
@@ -316,20 +316,24 @@ test("foreground presence expiry pushes a control-state SSE frame that clears an
   const observer = "22222222-2222-4222-8222-222222222222";
   const ownerFrames: string[] = [];
   const observerFrames: string[] = [];
-  const ownerSocket = {
-    write: (frame: string) => {
-      ownerFrames.push(frame);
-      return true;
-    },
-    end() {},
+  const ownerSocket = new EventEmitter() as EventEmitter & {
+    write: (frame: string) => boolean;
+    end: () => void;
   };
-  const observerSocket = {
-    write: (frame: string) => {
-      observerFrames.push(frame);
-      return true;
-    },
-    end() {},
+  ownerSocket.write = (frame: string) => {
+    ownerFrames.push(frame);
+    return true;
   };
+  ownerSocket.end = () => ownerSocket.emit("close");
+  const observerSocket = new EventEmitter() as EventEmitter & {
+    write: (frame: string) => boolean;
+    end: () => void;
+  };
+  observerSocket.write = (frame: string) => {
+    observerFrames.push(frame);
+    return true;
+  };
+  observerSocket.end = () => observerSocket.emit("close");
   appInternals.sseClients.set(ownerSocket, owner);
   appInternals.sseClients.set(observerSocket, observer);
   appInternals.sessionControl.clientConnected(owner);
@@ -340,9 +344,9 @@ test("foreground presence expiry pushes a control-state SSE frame that clears an
   ownerFrames.length = 0;
   observerFrames.length = 0;
   try {
-    await sleep(20);
-    appInternals.sessionControl.noteClientPresence(observer);
     await sleep(30);
+    appInternals.sessionControl.noteClientPresence(observer);
+    await sleep(90);
     const observerFrame = observerFrames.at(-1) || "";
     assert.match(observerFrame, /"type":"pi_chat_session_control_changed"/);
     assert.match(observerFrame, /"sessionId":"aaaaaaaaaaaaaaaaaaaa"/);
@@ -364,7 +368,12 @@ test("application close leaves no SessionControl release timer after closing SSE
     };
   };
   const clientId = "close-cleanup-client";
-  const client = { write: () => true, end() {} };
+  const client = new EventEmitter() as EventEmitter & {
+    write: () => boolean;
+    end: () => void;
+  };
+  client.write = () => true;
+  client.end = () => client.emit("close");
   appInternals.sseClients.set(client, clientId);
   appInternals.sessionControl.clientConnected(clientId);
   try {

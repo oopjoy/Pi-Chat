@@ -74,7 +74,7 @@ test("a lost prompt acknowledgement cannot remove a user turn after SSE proves a
       "the accepted prompt keeps exactly one protected user row",
     );
     assert.equal(
-      dom.window.document.querySelector(".message-user")?.textContent,
+      dom.window.document.querySelector(".message-user .message-content")?.textContent,
       "must remain visible",
     );
     assert.equal(
@@ -147,7 +147,7 @@ test("a lost prompt acknowledgement after a same-session refresh keeps its user 
       "a same-session refresh must not strand an unknown accepted turn",
     );
     assert.equal(
-      dom.window.document.querySelector(".message-user")?.textContent,
+      dom.window.document.querySelector(".message-user .message-content")?.textContent,
       "survive refresh and lost ack",
     );
   } finally {
@@ -475,6 +475,62 @@ test("a view that confirms a pending prompt before its acknowledgement leaves on
     assert.equal(
       dom.window.document.querySelector(".message-user")?.textContent,
       "acknowledgement race",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
+test("a prompt submitted during compaction remains visible while its delivery waits", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const pendingPrompt = new Promise<never>(() => undefined);
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true, isCompacting: true },
+      sessions: [{ ...bootstrap.sessions[0], running: true }],
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    prompt: async () => pendingPrompt,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "keep this during compaction");
+      textarea.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: "keep this during compaction",
+        }),
+      );
+      dom.window.document
+        .querySelector<HTMLButtonElement>(".queue-submit-button")!
+        .click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(
+      dom.window.document.querySelector(".message-user .message-content")?.textContent,
+      "keep this during compaction",
+      "a waiting prompt must not disappear between Composer admission and queue acknowledgement",
+    );
+    assert.match(
+      dom.window.document.body.textContent || "",
+      /正在压缩上下文；消息已保存，压缩完成后自动发送/,
     );
   } finally {
     await act(async () => root.unmount());

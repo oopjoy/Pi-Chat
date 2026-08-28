@@ -2,11 +2,23 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import test from "node:test";
 import { PiChatApp } from "../../src/server/app";
-import type { PiRpcClient } from "../../src/server/rpc-client";
+import { RpcRequestTimeoutError, type PiRpcClient } from "../../src/server/rpc-client";
 import { idForPath } from "../../src/server/session-index";
 import type { SessionIndex } from "../../src/server/session-index";
 import type { ResourceManager } from "../../src/server/resource-manager";
 import { FakeRpc } from "../helpers/server-app-fixture";
+
+class UncertainCompactRpc extends FakeRpc {
+  override async send(...args: Parameters<FakeRpc["send"]>) {
+    const [command] = args;
+    if (command.type === "compact") {
+      this.commands.push(command);
+      this.emit({ type: "compaction_start" });
+      throw new RpcRequestTimeoutError("compact");
+    }
+    return super.send(...args);
+  }
+}
 
 class BlockingCompactRpc extends FakeRpc {
   private resolveCompactStarted!: () => void;
@@ -31,6 +43,138 @@ class BlockingCompactRpc extends FakeRpc {
     return { type: "response", success: true, data: {} };
   }
 }
+
+test("an uncertain compact result fences duplicate compact and prompt writes until settlement", async () => {
+  const primaryPath = "C:\\sessions\\uncertain-compact-primary.jsonl";
+  const primaryId = idForPath(primaryPath);
+  const primary = new UncertainCompactRpc(primaryPath, "uncertain-compact-primary");
+  const sessions = {
+    list: async () => [{
+      id: primaryId,
+      sessionId: "uncertain-compact-primary",
+      name: "Primary",
+      preview: "",
+      cwd: process.cwd(),
+      updatedAt: 1,
+      messageCount: 1,
+      active: true,
+    }],
+    pathForId: (id: string) => id === primaryId ? primaryPath : null,
+    summaryForId: (id: string) => id === primaryId ? {
+      id: primaryId,
+      sessionId: "uncertain-compact-primary",
+      name: "Primary",
+      preview: "",
+      cwd: process.cwd(),
+      updatedAt: 1,
+      messageCount: 1,
+      active: true,
+    } : null,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({
+    rpc: primary as unknown as PiRpcClient,
+    sessions,
+    resources: {} as ResourceManager,
+    cwd: process.cwd(),
+    webRoot: process.cwd(),
+  });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const body = (message: string) => ({
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sessionId: primaryId, message }),
+  });
+  try {
+    assert.equal((await fetch(`${origin}/api/bootstrap`)).status, 200);
+    const compact = await fetch(`${origin}/api/chat/compact`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: primaryId }),
+    });
+    assert.equal(compact.status, 409);
+    assert.equal((await compact.json() as { code?: string }).code, "RESULT_PENDING");
+    assert.equal(primary.commands.filter((command) => command.type === "compact").length, 1);
+
+    const duplicate = await fetch(`${origin}/api/chat/compact`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: primaryId }),
+    });
+    assert.equal(duplicate.status, 409);
+    assert.equal(primary.commands.filter((command) => command.type === "compact").length, 1);
+    const prompt = await fetch(`${origin}/api/chat/prompt`, body("must wait for compact"));
+    assert.equal(prompt.status, 409);
+    assert.equal(primary.commands.some((command) => command.type === "prompt"), false);
+
+    primary.emit({ type: "compaction_end", aborted: false });
+    const afterSettlement = await fetch(`${origin}/api/chat/prompt`, body("after compact"));
+    assert.equal(afterSettlement.status, 202);
+    assert.equal(primary.commands.filter((command) => command.type === "prompt").length, 1);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("a prompt admitted during known compaction enters the FIFO instead of disappearing", async () => {
+  const primaryPath = "C:\\sessions\\compaction-queue-primary.jsonl";
+  const primaryId = idForPath(primaryPath);
+  const primary = new FakeRpc(primaryPath, "compaction-queue-primary");
+  const summary = {
+    id: primaryId,
+    sessionId: "compaction-queue-primary",
+    name: "Primary",
+    preview: "",
+    cwd: process.cwd(),
+    updatedAt: 1,
+    messageCount: 1,
+    active: true,
+  };
+  const sessions = {
+    list: async () => [summary],
+    pathForId: (id: string) => (id === primaryId ? primaryPath : null),
+    summaryForId: (id: string) => (id === primaryId ? summary : null),
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({
+    rpc: primary as unknown as PiRpcClient,
+    sessions,
+    resources: {} as ResourceManager,
+    cwd: process.cwd(),
+    webRoot: process.cwd(),
+  });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    assert.equal((await fetch(`${origin}/api/bootstrap`)).status, 200);
+    primary.emit({ type: "compaction_start" });
+    const prompt = await fetch(`${origin}/api/chat/prompt`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: primaryId, message: "after compaction" }),
+    });
+    assert.equal(prompt.status, 202);
+    const data = await prompt.json() as {
+      queued?: boolean;
+      id?: string;
+      queue?: Array<{ id: string; message: string }>;
+    };
+    assert.equal(data.queued, true);
+    assert.equal(data.queue?.[0]?.message, "after compaction");
+    assert.equal(primary.commands.some((command) => command.type === "prompt"), false);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
 
 test("compact restores a cold secondary Session without bypassing its queue", async () => {
   const primaryPath = "C:\\sessions\\compact-primary.jsonl";

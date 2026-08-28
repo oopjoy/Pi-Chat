@@ -1,4 +1,5 @@
 import { memo, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { CSSProperties } from "react";
 import type { PiContentBlock, PiMessage } from "../../shared/types";
 import { visibleAssistantBlocksWithSourceIndex } from "../lib/assistant-text";
@@ -44,6 +45,12 @@ export interface AssistantGeneratedAt {
   title: string;
 }
 
+export interface UserSentAt {
+  label: string;
+  dateTime: string;
+  title: string;
+}
+
 const replyTimeFormatter = new Intl.DateTimeFormat("zh-CN", {
   hour: "2-digit",
   minute: "2-digit",
@@ -63,25 +70,43 @@ const replyFullFormatter = new Intl.DateTimeFormat("zh-CN", {
   hour12: false,
 });
 
-export function assistantGeneratedAt(timestamp: number | undefined, now = Date.now()): AssistantGeneratedAt | null {
-  if (typeof timestamp !== "number" || !Number.isFinite(timestamp)) return null;
-  const generated = new Date(timestamp);
-  if (Number.isNaN(generated.getTime())) return null;
+function compactMessageTime(timestamp: number, now: number): { compact: string; dateTime: string; full: string } | null {
+  if (!Number.isFinite(timestamp)) return null;
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return null;
   const current = new Date(now);
-  const sameYear = generated.getFullYear() === current.getFullYear();
+  const sameYear = date.getFullYear() === current.getFullYear();
   const sameDay = sameYear
-    && generated.getMonth() === current.getMonth()
-    && generated.getDate() === current.getDate();
-  const time = replyTimeFormatter.format(generated);
+    && date.getMonth() === current.getMonth()
+    && date.getDate() === current.getDate();
+  const time = replyTimeFormatter.format(date);
   const compact = sameDay
     ? time
     : sameYear
-      ? `${replyMonthDayFormatter.format(generated)} ${time}`
-      : `${generated.getFullYear()}/${replyMonthDayFormatter.format(generated)} ${time}`;
+      ? `${replyMonthDayFormatter.format(date)} ${time}`
+      : `${date.getFullYear()}/${replyMonthDayFormatter.format(date)} ${time}`;
+  return { compact, dateTime: date.toISOString(), full: replyFullFormatter.format(date) };
+}
+
+export function userSentAt(timestamp: number | undefined, now = Date.now()): UserSentAt | null {
+  if (typeof timestamp !== "number") return null;
+  const formatted = compactMessageTime(timestamp, now);
+  if (!formatted) return null;
   return {
-    label: `生成于 ${compact}`,
-    dateTime: generated.toISOString(),
-    title: `回复生成时间：${replyFullFormatter.format(generated)}`,
+    label: `发送于 ${formatted.compact}`,
+    dateTime: formatted.dateTime,
+    title: `用户消息发送时间：${formatted.full}`,
+  };
+}
+
+export function assistantGeneratedAt(timestamp: number | undefined, now = Date.now()): AssistantGeneratedAt | null {
+  if (typeof timestamp !== "number") return null;
+  const formatted = compactMessageTime(timestamp, now);
+  if (!formatted) return null;
+  return {
+    label: `生成于 ${formatted.compact}`,
+    dateTime: formatted.dateTime,
+    title: `回复生成时间：${formatted.full}`,
   };
 }
 
@@ -156,6 +181,7 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
     (userTextBlocks.length > 0 || userImageBlocks.length > 0) &&
     Boolean(onForkUserMessage);
   const copyableUserMessage = message.role === "user" && Boolean(userCopyText);
+  const sentAt = message.role === "user" ? userSentAt(message.timestamp) : null;
   const generatedAt = message.role === "assistant" && !streaming && showGeneratedAt
     ? assistantGeneratedAt(message.timestamp)
     : null;
@@ -212,7 +238,7 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
           onClick={() => setExpandedUserText((current) => !current)}
         >{expandedUserText ? "收起" : "展开全部"}</button>}
       </div>}
-      {previewImage && <div
+      {previewImage && createPortal(<div
         className="image-preview-backdrop"
         role="presentation"
         onClick={(event) => { if (event.target === event.currentTarget) setPreviewImage(null); }}
@@ -232,8 +258,9 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
             alt={previewImage.alt}
           />
         </section>
-      </div>}
-      {(forkableUserMessage || copyableUserMessage) && <footer className="message-user-actions">
+      </div>, document.body)}
+      {(sentAt || forkableUserMessage || copyableUserMessage) && <footer className="message-user-actions">
+        {sentAt && <time className="message-sent-at" dateTime={sentAt.dateTime} title={sentAt.title}>{sentAt.label}</time>}
         {copyableUserMessage && <button
           type="button"
           onClick={() => void copyUserMessage()}

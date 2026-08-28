@@ -29,6 +29,9 @@ export interface ConversationPaneState {
   messageTotal: number;
   turnTotal: number;
   visibleTurnCount: number;
+  /** Server-owned active turn anchor and latest frozen duration for the process card. */
+  runStartedAt: number | null;
+  lastRunDurationMs: number | null;
   messagesTruncated: boolean;
   stats?: SessionStats;
   liveMessage: PiMessage | null;
@@ -120,6 +123,12 @@ export type ConversationPaneAction =
       status: ConversationRuntimeStatus;
     }
   | {
+      type: "RUN_TIMING_UPDATED";
+      sessionId: string;
+      runStartedAt?: number | null;
+      lastRunDurationMs?: number | null;
+    }
+  | {
       type: "PROMPT_STARTED";
       target: ConversationPaneTarget;
       pendingUserMessage: PiMessage | null;
@@ -154,9 +163,9 @@ export type ConversationPaneAction =
       toolStatus?: string;
     }
   | { type: "DRAFT_PROMPT_REJECTED" }
-  | { type: "AGENT_STARTED"; sessionId: string; toolStatus: string }
+  | { type: "AGENT_STARTED"; sessionId: string; toolStatus: string; runStartedAt?: number }
   | { type: "TERMINAL_MESSAGE_COMMITTED"; sessionId: string; message: PiMessage }
-  | { type: "AGENT_SETTLED"; sessionId: string }
+  | { type: "AGENT_SETTLED"; sessionId: string; runDurationMs?: number }
   | {
       type: "QUEUE_UPDATED";
       sessionId: string;
@@ -180,7 +189,7 @@ export type ConversationPaneAction =
       messages?: PiMessage[] | ((current: PiMessage[]) => PiMessage[]);
       pendingUserMessage?: PiMessage | null | ((current: PiMessage | null) => PiMessage | null);
     }
-  | { type: "PROCESS_FAILED"; sessionId: string }
+  | { type: "PROCESS_FAILED"; sessionId: string; runDurationMs?: number }
   | { type: "STOP_COMPLETED"; sessionId: string; isStreaming: boolean; queuePaused: boolean };
 
 const EMPTY_PI_STATE: PiState = { model: null, isStreaming: false };
@@ -195,6 +204,8 @@ export function emptyConversationPane(): ConversationPaneState {
     messageTotal: 0,
     turnTotal: 0,
     visibleTurnCount: 0,
+    runStartedAt: null,
+    lastRunDurationMs: null,
     messagesTruncated: false,
     stats: undefined,
     liveMessage: null,
@@ -356,6 +367,14 @@ export function conversationPaneReducer(
       return visibleSession(state, action.sessionId)
         ? { ...state, runtimeStatus: action.status }
         : state;
+    case "RUN_TIMING_UPDATED":
+      return visibleSession(state, action.sessionId)
+        ? {
+            ...state,
+            ...(action.runStartedAt !== undefined ? { runStartedAt: action.runStartedAt } : null),
+            ...(action.lastRunDurationMs !== undefined ? { lastRunDurationMs: action.lastRunDurationMs } : null),
+          }
+        : state;
     case "PROMPT_STARTED":
       return matchesTarget(state, action.target)
         ? {
@@ -424,6 +443,8 @@ export function conversationPaneReducer(
             piState: { ...state.piState, isStreaming: true, isCompacting: false },
             runtimeStatus: "active",
             toolStatus: action.toolStatus,
+            runStartedAt: action.runStartedAt ?? state.runStartedAt,
+            lastRunDurationMs: null,
             promptStarting: false,
           }
         : state;
@@ -445,6 +466,8 @@ export function conversationPaneReducer(
             ...state,
             piState: { ...state.piState, isStreaming: false, isCompacting: false },
             liveMessage: null,
+            runStartedAt: null,
+            ...(action.runDurationMs !== undefined ? { lastRunDurationMs: action.runDurationMs } : null),
             queuePaused: state.queue.length > 0 && state.queuePaused,
             toolStatus: "",
             promptStarting: false,
@@ -489,6 +512,8 @@ export function conversationPaneReducer(
             ...state,
             piState: { ...state.piState, isStreaming: false, isCompacting: false },
             liveMessage: null,
+            runStartedAt: null,
+            ...(action.runDurationMs !== undefined ? { lastRunDurationMs: action.runDurationMs } : null),
             toolStatus: "",
             promptStarting: false,
             runtimeStatus: "view-only",

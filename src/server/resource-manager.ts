@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { readFile, readdir, stat } from "node:fs/promises";
+import { open, readFile, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import type { ExtensionResource, PackageResource, PluginResourceItem, ResourceResponse, SkillResource } from "../shared/types.js";
@@ -26,6 +26,10 @@ interface PiSettings {
 const RESOURCE_KEYS = ["extensions", "skills", "prompts", "themes"] as const;
 const EXTENSION_PATTERN = /\.(?:ts|js|mts|mjs|cts|cjs)$/i;
 const PI_CHAT_SYSTEM_EXTENSION_NAMES = new Set(["pi-chat-file-permission-gate"]);
+const MAX_RESOURCE_TEXT_BYTES = 256 * 1024;
+const MAX_SETTINGS_BYTES = 4 * 1024 * 1024;
+const RESOURCE_CACHE_TTL_MS = 2_000;
+const MAX_WALK_FILES = 20_000;
 
 function hashId(value: string): string {
   return createHash("sha256").update(value.toLowerCase()).digest("hex").slice(0, 20);
@@ -58,18 +62,49 @@ function parseFrontmatter(content: string): { name: string; description: string;
   };
 }
 
-async function readSettings(path: string): Promise<PiSettings> {
-  try { return JSON.parse(await readFile(path, "utf8")) as PiSettings; } catch { return {}; }
+async function readBoundedText(path: string, maxBytes: number): Promise<string> {
+  const handle = await open(path, "r");
+  try {
+    const info = await handle.stat();
+    const length = Math.min(Math.max(0, info.size), maxBytes);
+    const buffer = Buffer.allocUnsafe(length);
+    let offset = 0;
+    while (offset < length) {
+      const result = await handle.read(buffer, offset, length - offset, offset);
+      if (!result.bytesRead) break;
+      offset += result.bytesRead;
+    }
+    return buffer.subarray(0, offset).toString("utf8");
+  } finally {
+    await handle.close();
+  }
 }
 
-async function walkFiles(root: string, predicate: (path: string) => boolean, depth = 8): Promise<string[]> {
-  if (!existsSync(root) || depth < 0) return [];
+async function readSettings(path: string): Promise<PiSettings> {
+  try {
+    const content = await readBoundedText(path, MAX_SETTINGS_BYTES);
+    return JSON.parse(content) as PiSettings;
+  } catch { return {}; }
+}
+
+async function walkFiles(
+  root: string,
+  predicate: (path: string) => boolean,
+  depth = 8,
+  budget: { remaining: number } = { remaining: MAX_WALK_FILES },
+): Promise<string[]> {
+  if (!existsSync(root) || depth < 0 || budget.remaining <= 0) return [];
   const result: string[] = [];
   for (const entry of await readdir(root, { withFileTypes: true })) {
+    if (budget.remaining <= 0) break;
     if (["node_modules", ".git"].includes(entry.name)) continue;
     const path = join(root, entry.name);
-    if (entry.isDirectory()) result.push(...await walkFiles(path, predicate, depth - 1));
-    else if (entry.isFile() && predicate(path)) result.push(path);
+    if (entry.isDirectory()) {
+      result.push(...await walkFiles(path, predicate, depth - 1, budget));
+    } else if (entry.isFile()) {
+      budget.remaining -= 1;
+      if (predicate(path)) result.push(path);
+    }
   }
   return result;
 }
@@ -100,7 +135,7 @@ function resolvePackagePath(source: string, agentDir: string, cwd: string): stri
 
 async function manifestResources(packageRoot: string): Promise<Array<{ key: typeof RESOURCE_KEYS[number]; path: string }>> {
   let manifest: Record<string, unknown> = {};
-  try { manifest = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8")) as Record<string, unknown>; } catch {}
+  try { manifest = JSON.parse(await readBoundedText(join(packageRoot, "package.json"), MAX_SETTINGS_BYTES)) as Record<string, unknown>; } catch {}
   const pi = manifest.pi && typeof manifest.pi === "object" ? manifest.pi as Record<string, unknown> : {};
   const result: Array<{ key: typeof RESOURCE_KEYS[number]; path: string }> = [];
   for (const key of RESOURCE_KEYS) {
@@ -114,7 +149,7 @@ async function manifestResources(packageRoot: string): Promise<Array<{ key: type
 
 async function packageMetadata(root: string): Promise<{ name?: string; version?: string; description?: string }> {
   try {
-    const value = JSON.parse(await readFile(join(root, "package.json"), "utf8")) as Record<string, unknown>;
+    const value = JSON.parse(await readBoundedText(join(root, "package.json"), MAX_SETTINGS_BYTES)) as Record<string, unknown>;
     return {
       name: typeof value.name === "string" ? value.name : undefined,
       version: typeof value.version === "string" ? value.version : undefined,
@@ -142,13 +177,43 @@ async function resourceItems(root: string, key: typeof RESOURCE_KEYS[number]): P
 export class ResourceManager {
   readonly agentDir: string;
   readonly settingsPath: string;
+  private readonly inventoryCache = new Map<string, { expiresAt: number; value: unknown }>();
+  private readonly inventoryInFlight = new Map<string, Promise<unknown>>();
+  private inventoryGeneration = 0;
 
   constructor(agentDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent")) {
     this.agentDir = agentDir;
     this.settingsPath = join(agentDir, "settings.json");
   }
 
-  async listSkills(cwd: string): Promise<ResourceResponse<SkillResource>> {
+  /** Invalidate read-only resource inventories after a managed file transaction. */
+  invalidate(): void {
+    this.inventoryGeneration += 1;
+    this.inventoryCache.clear();
+    // Existing filesystem walks cannot be cancelled, but detaching their
+    // promises prevents a post-invalidation caller from joining stale work.
+    this.inventoryInFlight.clear();
+  }
+
+  private cached<T>(key: string, loader: () => Promise<T>): Promise<T> {
+    const now = Date.now();
+    const hit = this.inventoryCache.get(key);
+    if (hit && hit.expiresAt > now) return Promise.resolve(hit.value as T);
+    const pending = this.inventoryInFlight.get(key);
+    if (pending) return pending as Promise<T>;
+    const generation = this.inventoryGeneration;
+    const request = loader().then((value) => {
+      if (this.inventoryGeneration === generation)
+        this.inventoryCache.set(key, { expiresAt: Date.now() + RESOURCE_CACHE_TTL_MS, value });
+      return value;
+    }).finally(() => {
+      if (this.inventoryInFlight.get(key) === request) this.inventoryInFlight.delete(key);
+    });
+    this.inventoryInFlight.set(key, request);
+    return request;
+  }
+
+  private async loadSkills(cwd: string): Promise<ResourceResponse<SkillResource>> {
     const settings = await readSettings(this.settingsPath);
     const candidates: Array<{ path: string; source: SkillResource["source"]; packageSource?: string; enabled: boolean }> = [];
     const userSkills = join(this.agentDir, "skills");
@@ -181,7 +246,9 @@ export class ResourceManager {
     for (const candidate of candidates) {
       const normalized = resolve(candidate.path);
       if (unique.has(normalized.toLowerCase())) continue;
-      const content = await readFile(normalized, "utf8");
+      // Frontmatter and the browser preview only need a bounded prefix. Avoid
+      // loading an arbitrarily large SKILL.md into the Node heap on every scan.
+      const content = await readBoundedText(normalized, MAX_RESOURCE_TEXT_BYTES);
       const frontmatter = parseFrontmatter(content);
       const id = hashId(normalized);
       unique.set(normalized.toLowerCase(), {
@@ -198,7 +265,7 @@ export class ResourceManager {
     return { resources: [...unique.values()].sort((a, b) => a.name.localeCompare(b.name)), diagnostics: [] };
   }
 
-  async listPackages(cwd: string): Promise<ResourceResponse<PackageResource>> {
+  private async loadPackages(cwd: string): Promise<ResourceResponse<PackageResource>> {
     const settings = await readSettings(this.settingsPath);
     const resources: PackageResource[] = [];
     const diagnostics: string[] = [];
@@ -219,7 +286,7 @@ export class ResourceManager {
     return { resources: resources.sort((a, b) => a.name.localeCompare(b.name)), diagnostics };
   }
 
-  async listExtensions(cwd: string): Promise<ResourceResponse<ExtensionResource>> {
+  private async loadExtensions(cwd: string): Promise<ResourceResponse<ExtensionResource>> {
     const settings = await readSettings(this.settingsPath);
     const resources: ExtensionResource[] = [];
     const diagnostics: string[] = [];
@@ -259,6 +326,18 @@ export class ResourceManager {
     return { resources: resources.sort((a, b) => a.name.localeCompare(b.name)), diagnostics };
   }
 
+  listSkills(cwd: string): Promise<ResourceResponse<SkillResource>> {
+    return this.cached(`skills\0${resolve(cwd)}`, () => this.loadSkills(cwd));
+  }
+
+  listPackages(cwd: string): Promise<ResourceResponse<PackageResource>> {
+    return this.cached(`packages\0${resolve(cwd)}`, () => this.loadPackages(cwd));
+  }
+
+  listExtensions(cwd: string): Promise<ResourceResponse<ExtensionResource>> {
+    return this.cached(`extensions\0${resolve(cwd)}`, () => this.loadExtensions(cwd));
+  }
+
   /** Managed local root folder used by the read-only resource inventory. */
   resolveBrowsePath(kind: ResourceBrowseKind): string {
     if (kind === "models-root") return this.agentDir;
@@ -267,13 +346,17 @@ export class ResourceManager {
     return join(this.agentDir, "npm", "node_modules");
   }
 
-  async systemGateEnabled(): Promise<boolean> {
+  private async loadSystemGateEnabled(): Promise<boolean> {
     const path = join(this.agentDir, "extensions", "pi-chat-file-permission-gate.ts");
     if (!existsSync(path)) return false;
     const settings = await readSettings(this.settingsPath);
     const pattern = relative(this.agentDir, path).replace(/\\/g, "/");
     const override = (settings.extensions ?? []).find((entry) => entry.replace(/^[+\-!]/, "").replace(/\\/g, "/") === pattern);
     return !override?.startsWith("-") && !override?.startsWith("!");
+  }
+
+  systemGateEnabled(): Promise<boolean> {
+    return this.cached("system-gate", () => this.loadSystemGateEnabled());
   }
 
 }

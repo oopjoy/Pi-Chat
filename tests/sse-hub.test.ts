@@ -12,6 +12,31 @@ function stubClient(writeResult = true) {
   return client;
 }
 
+test("asynchronous ServerResponse errors disconnect the client without an uncaught error", async () => {
+  const diagnostics: SseTransportDiagnostic[] = [];
+  const hub = new SseHub(0, (event) => diagnostics.push(event));
+  const client = stubClient();
+  hub.add(client as never, "client-a");
+  hub.broadcast({ type: "agent_start", piChatSessionId: "0123456789abcdefabcd" });
+  queueMicrotask(() => client.emit("error", new Error("socket failed")));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(hub.size, 0);
+  assert.ok(diagnostics.some((event) => event.outcome === "write-error" && event.eventType === "agent_start"));
+  assert.ok(diagnostics.some((event) => event.outcome === "disconnected" && event.disconnectReason === "write-error"));
+});
+
+test("closeAll absorbs an asynchronous end error after disconnecting", async () => {
+  const hub = new SseHub();
+  const client = stubClient();
+  client.end = () => queueMicrotask(() => client.emit("error", new Error("late close failure")));
+  hub.add(client as never, "client-a");
+  assert.doesNotThrow(() => hub.closeAll());
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(hub.size, 0);
+  client.emit("close");
+  assert.equal(client.listenerCount("error"), 0);
+});
+
 test("diagnostic observer failures never perturb SSE delivery", () => {
   const hub = new SseHub(0, () => { throw new Error("diagnostic failure"); });
   const client = stubClient();

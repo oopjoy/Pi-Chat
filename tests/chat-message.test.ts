@@ -4,7 +4,8 @@ import React, { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { JSDOM } from "jsdom";
-import { assistantCopyText, assistantGeneratedAt, assistantModelLabel, assistantThinkingLabel, ChatMessage, shouldFoldUserText, USER_MESSAGE_FOLD_LINE_LIMIT } from "../src/web/components/ChatMessage";
+import { ConversationProcess, formatRunDuration } from "../src/web/components/ConversationProcess";
+import { assistantCopyText, assistantGeneratedAt, assistantModelLabel, assistantThinkingLabel, ChatMessage, shouldFoldUserText, userSentAt, USER_MESSAGE_FOLD_LINE_LIMIT } from "../src/web/components/ChatMessage";
 
 test("user messages stay literal instead of rendering incomplete Markdown or math", () => {
   const source = "**unfinished $x + [link](\\\\server\\share";
@@ -13,6 +14,26 @@ test("user messages stay literal instead of rendering incomplete Markdown or mat
   assert.match(html, /class="user-plain-text"/);
   assert.match(html, /\*\*unfinished \$x \+ \[link\]\(\\\\server\\share/);
   assert.doesNotMatch(html, /markdown-body|katex|<strong>|<a /);
+});
+
+test("user messages place their send time before Copy and Fork", () => {
+  const timestamp = Date.now();
+  const expected = userSentAt(timestamp)!;
+  const html = renderToStaticMarkup(React.createElement(ChatMessage, {
+    message: {
+      role: "user",
+      content: "send time",
+      timestamp,
+      piChatPersistedMessageId: "user-time:0",
+    },
+    onForkUserMessage: () => {},
+  }));
+  assert.match(html, new RegExp(`class="message-sent-at"[^>]*>${expected.label}<\\/time>`));
+  assert.ok(html.indexOf("message-sent-at") < html.indexOf("复制用户消息"));
+  assert.ok(html.indexOf("复制用户消息") < html.indexOf("在新对话中分叉"));
+  assert.equal(userSentAt(timestamp, new Date(2026, 7, 11, 23, 0).getTime())?.dateTime, new Date(timestamp).toISOString());
+  assert.equal(userSentAt(undefined), null);
+  assert.equal(userSentAt(Number.NaN), null);
 });
 
 test("persisted User messages expose Fork, including image prompts, and all user text exposes Copy", () => {
@@ -159,6 +180,24 @@ test("user folding toggle expands and restores the collapsed text", async () => 
     await act(async () => root.unmount());
     dom.window.close();
   }
+});
+
+test("process cards show a frozen run duration and format long runs", () => {
+  assert.equal(formatRunDuration(0), "00:00");
+  assert.equal(formatRunDuration(65_000), "01:05");
+  assert.equal(formatRunDuration(3_725_000), "01:02:05");
+  const html = renderToStaticMarkup(React.createElement(ConversationProcess, {
+    entries: [{ kind: "thinking", text: "working" }],
+    runDurationMs: 65_000,
+  }));
+  assert.match(html, /class="conversation-process-duration"[^>]*>运行 · 01:05<\/time>/);
+  assert.match(html, /dateTime="PT65S"/);
+  const running = renderToStaticMarkup(React.createElement(ConversationProcess, {
+    entries: [{ kind: "thinking", text: "working" }],
+    streaming: true,
+    runStartedAt: Date.now() - 10_000,
+  }));
+  assert.match(running, /class="conversation-process-duration"[^>]*>运行中 · 00:10<\/time>/);
 });
 
 test("assistant images retain their full non-previewable rendering", async () => {

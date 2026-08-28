@@ -7,13 +7,46 @@ import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { LOCAL_COORDINATION_ROLE, type PiMessage, type PromptImage, type SessionSummary, type ThinkingLevel } from "../shared/types.js";
 import { compareSessionsByLastUserPrompt } from "../shared/session-order.js";
 import { loadSessionCache, saveSessionCache, type SessionCacheEntry } from "./session-index-cache.js";
-import { SessionProjection } from "./session-projection.js";
+import { SessionProjection, sessionFileFingerprint } from "./session-projection.js";
 import { promptImages } from "./pi-data.js";
 
 interface SessionHeader {
   type?: string;
   id?: string;
   cwd?: string;
+}
+
+export type SessionFileVersion = Pick<SessionCacheEntry, "mtimeMs" | "ctimeMs" | "birthtimeMs" | "size" | "dev" | "ino" | "fingerprint">;
+
+export function sessionFileVersion(fileStat: Stats, fingerprint: string): SessionFileVersion {
+  return {
+    mtimeMs: fileStat.mtimeMs,
+    ctimeMs: fileStat.ctimeMs,
+    birthtimeMs: fileStat.birthtimeMs,
+    size: fileStat.size,
+    // Node exposes these as Numbers by default, but Windows can report inode
+    // values beyond MAX_SAFE_INTEGER. Persist decimal strings so JSON round
+    // trips do not silently change the identity anchor.
+    dev: String(fileStat.dev),
+    ino: String(fileStat.ino),
+    fingerprint,
+  };
+}
+
+function sameSessionFileVersion(
+  cached: Partial<SessionFileVersion> | undefined,
+  current: SessionFileVersion,
+): boolean {
+  return Boolean(
+    cached
+    && cached.mtimeMs === current.mtimeMs
+    && cached.ctimeMs === current.ctimeMs
+    && cached.birthtimeMs === current.birthtimeMs
+    && cached.size === current.size
+    && cached.dev === current.dev
+    && cached.ino === current.ino
+    && cached.fingerprint === current.fingerprint,
+  );
 }
 
 interface SessionEntry {
@@ -401,9 +434,7 @@ export class SessionIndex {
   private readonly parseFile: typeof parseSession;
   private readonly incrementalProjectionEnabled: boolean;
   private readonly outlineProjections = new Map<string, SessionProjection<SessionEntry>>();
-  private readonly snapshotCache = new Map<string, {
-    mtimeMs: number;
-    size: number;
+  private readonly snapshotCache = new Map<string, SessionFileVersion & {
     snapshot: SessionFileSnapshot;
     bytes: number;
     projection: SessionProjection<SessionEntry>;
@@ -524,16 +555,27 @@ export class SessionIndex {
         if (this.cache.delete(normalized)) cacheChanged = true;
         continue;
       }
+      let fingerprint: string;
+      try {
+        fingerprint = await sessionFileFingerprint(normalized);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        if (this.cache.delete(normalized)) cacheChanged = true;
+        continue;
+      }
+      const currentVersion = sessionFileVersion(fileStat, fingerprint);
       let cached = this.cache.get(normalized);
-      if (!cached || cached.mtimeMs !== fileStat.mtimeMs || cached.size !== fileStat.size) {
+      if (!sameSessionFileVersion(cached, currentVersion)) {
         const summary = await this.projectSummary(normalized, fileStat);
-        cached = { mtimeMs: fileStat.mtimeMs, size: fileStat.size, summary };
+        cached = { ...currentVersion, summary };
         this.cache.set(normalized, cached);
         cacheChanged = true;
       }
       // Null is a durable negative cache entry. Unchanged empty drafts,
       // generated Subagent histories, and malformed/non-session JSONL are
-      // statted but never reparsed on subsequent inventory refreshes.
+      // statted and fingerprinted but never reparsed on subsequent inventory
+      // refreshes.
+      if (!cached) continue;
       if (!cached.summary) continue;
       nextPathsById.set(cached.summary.id, normalized);
       summaries.push({ ...cached.summary, active: false });
@@ -570,8 +612,9 @@ export class SessionIndex {
    * full inventory refresh continues independently.
    */
   async cachedSummaryForId(id: string): Promise<SessionSummary | null> {
-    const known = this.summaryForId(id);
-    if (known) return known;
+    // Even an already-known ID must pass the target-only stat/fingerprint gate.
+    // Returning summaryForId() directly would reintroduce the same-size rewrite
+    // bug after the first inventory scan. This path never enumerates the tree.
     if (!this.cache) this.cache = await loadSessionCache(this.cachePath);
     for (const [path, entry] of this.cache) {
       if (!entry.summary || entry.summary.id !== id) continue;
@@ -595,10 +638,20 @@ export class SessionIndex {
         await saveSessionCache(this.cachePath, this.cache);
         return null;
       }
+      let fingerprint: string;
+      try {
+        fingerprint = await sessionFileFingerprint(normalized);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        this.cache.delete(path);
+        await saveSessionCache(this.cachePath, this.cache);
+        return null;
+      }
+      const currentVersion = sessionFileVersion(fileStat, fingerprint);
       let summary = entry.summary;
-      if (entry.mtimeMs !== fileStat.mtimeMs || entry.size !== fileStat.size) {
+      if (!sameSessionFileVersion(entry, currentVersion)) {
         const refreshed = await this.projectSummary(normalized, fileStat);
-        this.cache.set(normalized, { mtimeMs: fileStat.mtimeMs, size: fileStat.size, summary: refreshed });
+        this.cache.set(normalized, { ...currentVersion, summary: refreshed });
         if (normalized !== path) this.cache.delete(path);
         await saveSessionCache(this.cachePath, this.cache);
         if (!refreshed || refreshed.id !== id) return null;
@@ -620,7 +673,13 @@ export class SessionIndex {
   }
 
   async snapshotForId(id: string): Promise<SessionFileSnapshot | null> {
-    const path = this.pathForId(id);
+    let path = this.pathForId(id);
+    if (!path) {
+      // A cold caller may know only the stable Session ID restored from the
+      // persisted metadata cache. Resolve that one target without a global scan.
+      await this.cachedSummaryForId(id);
+      path = this.pathForId(id);
+    }
     if (!path) return null;
     const inFlight = this.snapshotReads.get(id);
     if (inFlight) return inFlight;
@@ -636,7 +695,19 @@ export class SessionIndex {
         return null;
       }
       const cached = this.snapshotCache.get(id);
-      if (cached && cached.mtimeMs === fileStat.mtimeMs && cached.size === fileStat.size) return cached.snapshot;
+      let fingerprint: string;
+      try {
+        fingerprint = await sessionFileFingerprint(path);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          if (cached) this.snapshotCacheBytes = Math.max(0, this.snapshotCacheBytes - cached.bytes);
+          this.snapshotCache.delete(id);
+          return null;
+        }
+        throw error;
+      }
+      const currentVersion = sessionFileVersion(fileStat, fingerprint);
+      if (cached && sameSessionFileVersion(cached, currentVersion)) return cached.snapshot;
       const projection = cached?.projection || new SessionProjection<SessionEntry>(path, {
         retain: (value) => value as SessionEntry,
       });
@@ -650,8 +721,7 @@ export class SessionIndex {
       if (previous) this.snapshotCacheBytes -= previous.bytes;
       this.snapshotCache.delete(id);
       this.snapshotCache.set(id, {
-        mtimeMs: fileStat.mtimeMs,
-        size: fileStat.size,
+        ...currentVersion,
         snapshot,
         bytes,
         projection,

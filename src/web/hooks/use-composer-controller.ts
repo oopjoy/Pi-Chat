@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef } from "react";
 import type { PromptDelivery, PromptImage } from "../../shared/types";
 import {
+  composerAcceptError,
   composerDraftKeyId,
   composerPartition,
   composerReducer,
@@ -22,6 +23,8 @@ export type ComposerRestoredDraft = {
 
 type ComposerControllerOptions = {
   draftKey: ComposerDraftKey;
+  /** Stable IDs whose Composer partitions were structurally deleted. */
+  forgottenKeys?: string[];
   targetSessionId?: string;
   disabled: boolean;
   paused: boolean;
@@ -29,6 +32,7 @@ type ComposerControllerOptions = {
   restoredDraft?: ComposerRestoredDraft | null;
   onDraftRevisionChange?: (key: ComposerDraftKey, revision: number) => void;
   onSubmissionPendingChange?: (scope: string, count: number) => void;
+  onError?: (message: string) => void;
   onSend: (message: string, images: PromptImage[], delivery?: PromptDelivery, targetSessionId?: string) => Promise<void>;
 };
 
@@ -37,8 +41,23 @@ type ComposerControllerOptions = {
  * A rejection is definite because App resolves written-outcome-unknown calls;
  * therefore only rejected promises restore a draft for retry.
  */
+function composerKeyFromId(keyId: string): ComposerDraftKey | null {
+  if (keyId.startsWith("session:")) {
+    const sessionId = keyId.slice("session:".length);
+    return sessionId ? { kind: "session", sessionId } : null;
+  }
+  if (keyId.startsWith("draft:")) {
+    const generation = Number(keyId.slice("draft:".length));
+    return Number.isSafeInteger(generation) && generation >= 0
+      ? { kind: "new", generation }
+      : null;
+  }
+  return null;
+}
+
 export function useComposerController({
   draftKey,
+  forgottenKeys = [],
   targetSessionId,
   disabled,
   paused,
@@ -46,6 +65,7 @@ export function useComposerController({
   restoredDraft,
   onDraftRevisionChange,
   onSubmissionPendingChange,
+  onError,
   onSend,
 }: ComposerControllerOptions) {
   const [state, dispatch] = useReducer(composerReducer, undefined, emptyComposerState);
@@ -56,18 +76,21 @@ export function useComposerController({
   const onSendRef = useRef(onSend);
   const onRevisionRef = useRef(onDraftRevisionChange);
   const onPendingRef = useRef(onSubmissionPendingChange);
+  const onErrorRef = useRef(onError);
   // Delivery is serialized per draft target, not per mounted Composer. A long
   // preparation/Prompt request for Session A must never block a newly accepted
   // snapshot for Session B after navigation.
   const drainingKeysRef = useRef(new Set<string>());
   const mountedRef = useRef(true);
   const appliedRestorationsRef = useRef(new Set<string>());
+  const forgottenKeysRef = useRef(new Set<string>());
   keyRef.current = draftKey;
   disabledRef.current = disabled;
   pausedRef.current = paused;
   onSendRef.current = onSend;
   onRevisionRef.current = onDraftRevisionChange;
   onPendingRef.current = onSubmissionPendingChange;
+  onErrorRef.current = onError;
 
   const publish = useCallback((next: ComposerState, key: ComposerDraftKey) => {
     const partition = composerPartition(next, key);
@@ -79,6 +102,10 @@ export function useComposerController({
   }, []);
 
   const commit = useCallback((action: ComposerAction) => {
+    const actionKey = action.type === "accept" ? action.snapshot.key : action.key;
+    const actionKeyId = composerDraftKeyId(actionKey);
+    if (action.type !== "forget" && forgottenKeysRef.current.has(actionKeyId))
+      return stateRef.current;
     const next = composerReducer(stateRef.current, action);
     stateRef.current = next;
     dispatch(action);
@@ -91,7 +118,7 @@ export function useComposerController({
     if (disabledRef.current || pausedRef.current) return;
     const key = keyRef.current;
     const keyId = composerDraftKeyId(key);
-    if (drainingKeysRef.current.has(keyId)) return;
+    if (drainingKeysRef.current.has(keyId) || forgottenKeysRef.current.has(keyId)) return;
     const partition = composerPartition(stateRef.current, key);
     if (partition.blocked || partition.inFlight || !partition.pending.length) return;
     const next = commit({ type: "start-delivery", key });
@@ -122,6 +149,16 @@ export function useComposerController({
   }, []);
 
   useEffect(() => { drain(); }, [draftKey, disabled, paused, drain]);
+
+  useEffect(() => {
+    for (const keyId of forgottenKeys) {
+      if (forgottenKeysRef.current.has(keyId)) continue;
+      forgottenKeysRef.current.add(keyId);
+      drainingKeysRef.current.delete(keyId);
+      const key = composerKeyFromId(keyId);
+      if (key) commit({ type: "forget", key });
+    }
+  }, [commit, forgottenKeys]);
 
   useEffect(() => {
     if (!restoredDraft || composerDraftKeyId(restoredDraft.key) !== composerDraftKeyId(draftKey)) return;
@@ -169,7 +206,13 @@ export function useComposerController({
       revision: current.draft.revision,
       delivery,
     };
-    commit({ type: "accept", snapshot, retry: Boolean(current.blocked) });
+    const retry = Boolean(current.blocked);
+    const budgetError = composerAcceptError(stateRef.current, snapshot, retry);
+    if (budgetError) {
+      onErrorRef.current?.(budgetError);
+      return false;
+    }
+    commit({ type: "accept", snapshot, retry });
     drain();
     return true;
   }, [allowFollowupSubmissions, commit, drain, targetSessionId]);

@@ -5,6 +5,8 @@ import {
   useMemo,
   useReducer,
   useRef,
+  lazy,
+  Suspense,
   useState,
 } from "react";
 import { appendTerminalMessage, assistantMessageRequestsTool } from "../shared/streaming-assistant";
@@ -43,16 +45,12 @@ import { AskQuestionnaireDialog } from "./components/AskQuestionnaireDialog";
 import { ConversationPane } from "./components/ConversationPane";
 import { composerDraftKeyId, type ComposerDraftKey } from "./state/composer";
 import { ComposerControls } from "./components/ComposerControls";
-import { EditDiffSidebar } from "./components/EditToolDiff";
 import {
   describeGateRequest,
   ExtensionDialog,
 } from "./components/ExtensionDialog";
 import { ChevronRightIcon, PiMarkIcon } from "./components/Icons";
-import {
-  ManagementPanel,
-  type ManagementSection,
-} from "./components/ManagementPanel";
+import type { ManagementSection } from "./components/ManagementPanel";
 import {
   SessionDialog,
   type SessionDialogState,
@@ -163,6 +161,11 @@ import {
   emptyAskQuestionnaireState,
 } from "./state/ask-questionnaire";
 
+// Settings and the workspace inspector are never needed for the first New
+// paint. Keep them out of the initial chunk and load them on explicit opening.
+const ManagementPanel = lazy(() => import("./components/ManagementPanel").then((module) => ({ default: module.ManagementPanel })));
+const EditDiffSidebar = lazy(() => import("./components/EditToolDiff").then((module) => ({ default: module.EditDiffSidebar })));
+
 const LOCAL_DRAFT_BUSY_ID = "__local_draft_busy__";
 const WAITING_FOR_PI_STATUS = "正在等待 Pi 处理…";
 /** Let the lightweight bootstrap establish the active Session before racing a cold JSONL view. */
@@ -192,6 +195,14 @@ function promptDraftFromMessage(
 }
 
 /** User-facing reason an accepted Steer was cleared before Pi consumed it. */
+function resultPendingError(cause: unknown): boolean {
+  return cause instanceof ApiRequestError && cause.code === "RESULT_PENDING";
+}
+
+function finiteRunMetric(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
 function authoritativeStoppedSteerRejection(
   cause: unknown,
   steering: boolean,
@@ -471,7 +482,7 @@ export function App() {
   /** Refresh continuations read the newest pane model without recreating their bootstrap effect. */
   const paneModelRef = useRef(state.model);
   paneModelRef.current = state.model;
-  const { messageTotal, turnTotal, visibleTurnCount, messagesTruncated } = pane;
+  const { messageTotal, turnTotal, visibleTurnCount, messagesTruncated, runStartedAt, lastRunDurationMs } = pane;
   /** Pagination request authority stays in the coordinator map, not the pane reducer. */
   const [, setLoadingEarlierRevision] = useState(0);
   const { stats } = pane;
@@ -554,6 +565,15 @@ export function App() {
   const [busySessionIds, setBusySessionIds] = useState<string[]>([]);
   /** Editor-owned snapshots waiting to enter App's existing single-flight send path. */
   const [composerPendingByScope, setComposerPendingByScope] = useState<Record<string, number>>({});
+  /** Tombstones keep a late in-flight editor promise from resurrecting deleted data. */
+  const [forgottenComposerKeys, setForgottenComposerKeys] = useState<string[]>([]);
+  const forgetComposerKey = useCallback((keyId: string) => {
+    if (!keyId) return;
+    setForgottenComposerKeys((current) => {
+      if (current.includes(keyId)) return current;
+      return [...current, keyId].slice(-512);
+    });
+  }, []);
   const updateComposerPending = useCallback((scope: string, count: number) => {
     setComposerPendingByScope((current) => {
       if ((current[scope] || 0) === count) return current;
@@ -824,6 +844,7 @@ export function App() {
   const sseFloodCountRef = useRef(0);
   const clearViewedPromiseRef = useRef<Promise<unknown> | null>(null);
   const applicationLifecycleRef = useRef<ApplicationLifecycle>("idle");
+  const resourceReloadActiveRef = useRef(false);
   const handoffWaitRef = useRef<Promise<void> | null>(null);
   const sessionRefreshTimerRef = useRef<number | null>(null);
   const sessionRefreshInFlightRef = useRef(false);
@@ -1154,6 +1175,86 @@ export function App() {
     terminalAssistantStreamGenerationsRef.current.clear();
     streamingWireProjectionsRef.current.clear();
     streamGapRecoveriesRef.current.clear();
+  }, [syncMutatingSessionIds]);
+
+  /**
+   * Resource reload is an in-process Runtime replacement, not a new Pi Chat
+   * epoch. Invalidate only process/runtime projections while preserving the
+   * user's unsent Composer partitions and local user-authored drafts.
+   */
+  const resetResourceReloadTransientState = useCallback(() => {
+    transportRecoveryPendingRef.current = false;
+    refreshEpochRef.current += 1;
+    navigationEpochRef.current += 1;
+    sessionRunningOverridesRef.current.clear();
+    completedCompactionSessionIdsRef.current.clear();
+    cancelledQueueIdsRef.current.clear();
+    queueProjectionRevisionRef.current.clear();
+    latestQueueProjectionRef.current.clear();
+    queueMutationSequenceRef.current.clear();
+    appliedQueueMutationSequenceRef.current.clear();
+    sessionEventVersionRef.current.clear();
+    lastSessionEventTypeRef.current.clear();
+    const runtimeIds = new Set([
+      ...sessionRunGenerationsRef.current.keys(),
+      ...settledRunGenerationsRef.current.keys(),
+      ...sessionsRef.current.map((session) => session.id),
+    ]);
+    const generationFences = new Map<string, number>();
+    for (const id of runtimeIds) {
+      generationFences.set(
+        id,
+        Math.max(
+          1,
+          Math.max(
+            sessionRunGenerationsRef.current.get(id) ?? -1,
+            settledRunGenerationsRef.current.get(id) ?? -1,
+          ) + 1,
+        ),
+      );
+    }
+    sessionRunGenerationsRef.current.clear();
+    for (const [id, generation] of generationFences)
+      sessionRunGenerationsRef.current.set(id, generation);
+    settledRunGenerationsRef.current.clear();
+    terminalAssistantSessionIdsRef.current.clear();
+    terminalAssistantStreamGenerationsRef.current.clear();
+    streamingWireProjectionsRef.current.clear();
+    streamGapRecoveriesRef.current.clear();
+    streamDiagnosticsRef.current?.clear();
+    directoryLoadGenerationsRef.current.clear();
+    directorySessionCoverageRef.current.clear();
+    pendingSteersRef.current.clear();
+    setPendingSteersBySession({});
+    setSteerDequeueingBySession({});
+    setFailedSessionIds([]);
+    setConfirmedCommands([]);
+    gateModesRef.current = {};
+    setGateModes({});
+    viewCacheRef.current.clear();
+    optimisticRenamesRef.current.clear();
+    optimisticDeletesRef.current.clear();
+    setCopyingSessionIds([]);
+    syncMutatingSessionIds();
+    for (const lease of promptBusyReleasesRef.current.values()) {
+      lease.markTerminal();
+      lease.release();
+    }
+    promptBusyReleasesRef.current.clear();
+    warmingRuntimeStartsRef.current.clear();
+    warmingSessionIdsRef.current.clear();
+    setWarmingSessionIds([]);
+    busySessionCountsRef.current.clear();
+    setBusySessionIds([]);
+    const currentReadiness = primaryRuntimeRef.current;
+    const starting: PrimaryRuntimeReadiness = {
+      status: "starting",
+      generation: currentReadiness.generation,
+    };
+    primaryRuntimeRef.current = starting;
+    primaryCapabilitySnapshotRef.current = null;
+    setPrimaryRuntime(starting);
+    setPrimaryCapabilitySnapshot(null);
   }, [syncMutatingSessionIds]);
   const recordSourceTurnTotal = (sessionId: string, total: number): void => {
     if (!Number.isFinite(total)) return;
@@ -2030,6 +2131,8 @@ export function App() {
           forkOrigin: data.forkOrigin,
           messageTotal: protectedTranscript.messageTotal,
           turnTotal: protectedTranscript.turnTotal,
+          runStartedAt: activeViewSession?.activity?.runStartedAt ?? null,
+          lastRunDurationMs: activeViewSession?.activity?.lastRunDurationMs ?? null,
           visibleTurnCount:
             data.visibleTurnCount ??
             protectedTranscript.messages.filter(
@@ -2338,6 +2441,8 @@ export function App() {
             resolvedView.messages.filter((message) => message.role === "user")
               .length,
           messagesTruncated: resolvedView.messagesTruncated,
+          runStartedAt: resolvedView.session.activity?.runStartedAt ?? null,
+          lastRunDurationMs: resolvedView.session.activity?.lastRunDurationMs ?? null,
           stats: resolvedView.stats,
           liveMessage: resolvedView.liveMessage || null,
           // A partial refresh of the *currently committed* Session may omit
@@ -3294,6 +3399,8 @@ export function App() {
         Number.isFinite(event.piChatRunGeneration)
           ? event.piChatRunGeneration
           : undefined);
+      const eventRunStartedAt = finiteRunMetric(event.piChatRunStartedAt);
+      const eventRunDurationMs = finiteRunMetric(event.piChatRunDurationMs);
       if (eventSessionId && typeof eventRunGeneration === "number") {
         const latest = sessionRunGenerationsRef.current.get(eventSessionId);
         const settled = settledRunGenerationsRef.current.get(eventSessionId);
@@ -3407,6 +3514,7 @@ export function App() {
             type: "AGENT_STARTED",
             sessionId: eventSessionId,
             toolStatus: WAITING_FOR_PI_STATUS,
+            ...(eventRunStartedAt !== undefined ? { runStartedAt: eventRunStartedAt } : null),
           });
         }
       } else if (type === "compaction_start") {
@@ -3727,6 +3835,7 @@ export function App() {
             type: "AGENT_STARTED",
             sessionId: eventSessionId,
             toolStatus: status,
+            ...(eventRunStartedAt !== undefined ? { runStartedAt: eventRunStartedAt } : null),
           });
       } else if (type === "tool_execution_end") {
         if (eventSessionId && String(event.toolName || "") === "ask_user_question")
@@ -3896,7 +4005,11 @@ export function App() {
           if (promptReconcileTimerRef.current !== null)
             window.clearTimeout(promptReconcileTimerRef.current);
           promptReconcileTimerRef.current = null;
-          dispatchPane({ type: "AGENT_SETTLED", sessionId: eventSessionId });
+          dispatchPane({
+            type: "AGENT_SETTLED",
+            sessionId: eventSessionId,
+            ...(eventRunDurationMs !== undefined ? { runDurationMs: eventRunDurationMs } : null),
+          });
           // A post-compaction turn has now persisted its new usage snapshot.
           const requestVersion =
             sessionEventVersionRef.current.get(eventSessionId) || 0;
@@ -4007,6 +4120,12 @@ export function App() {
           event.lifecycle || "idle",
         ) as ApplicationLifecycle;
         if (lifecycle !== "idle") cancelPendingNavigation();
+        if (lifecycle === "resources-reloading" && !resourceReloadActiveRef.current) {
+          resourceReloadActiveRef.current = true;
+          resetResourceReloadTransientState();
+        } else if (lifecycle === "idle") {
+          resourceReloadActiveRef.current = false;
+        }
         applicationLifecycleRef.current = lifecycle;
         setApplicationLifecycle(lifecycle);
         if (lifecycle === "restarting")
@@ -4018,6 +4137,14 @@ export function App() {
         else if (lifecycle === "idle") {
           startIdleRecovery(false, true);
         }
+      } else if (type === "pi_chat_reloaded") {
+        // Older servers may emit the reload marker without a preceding
+        // lifecycle frame. Treat it as the same Runtime replacement boundary.
+        if (!resourceReloadActiveRef.current) {
+          resourceReloadActiveRef.current = true;
+          resetResourceReloadTransientState();
+        }
+        setNotice("配置已更新，正在确认新的 Pi Runtime…");
       } else if (type === "pi_chat_sessions_changed") {
         // Prompt admission and streaming creation events are frequent. Retain the
         // old snapshot so returning to a running Session paints immediately; its
@@ -4404,6 +4531,20 @@ export function App() {
         ) {
           const next = activity as SessionActivityState;
           applySessionActivity(eventSessionId, next);
+          if (viewingEventSession) {
+            dispatchPane({
+              type: "RUN_TIMING_UPDATED",
+              sessionId: eventSessionId,
+              ...(finiteRunMetric(next.runStartedAt) !== undefined
+                ? { runStartedAt: finiteRunMetric(next.runStartedAt) }
+                : ["idle", "queued", "failed"].includes(String(next.execution))
+                  ? { runStartedAt: null }
+                  : null),
+              ...(finiteRunMetric(next.lastRunDurationMs) !== undefined
+                ? { lastRunDurationMs: finiteRunMetric(next.lastRunDurationMs) }
+                : null),
+            });
+          }
           const streaming =
             next.execution === "running" || next.execution === "dispatching";
           const terminalActivity =
@@ -4450,6 +4591,7 @@ export function App() {
             dispatchPane({
               type: "AGENT_SETTLED",
               sessionId: eventSessionId,
+              ...(eventRunDurationMs !== undefined ? { runDurationMs: eventRunDurationMs } : null),
             });
             // This activity fallback is used when message_end/agent_settled was
             // missed. Reconcile persisted history through the same generation
@@ -4525,6 +4667,7 @@ export function App() {
             dispatchPane({
               type: "AGENT_SETTLED",
               sessionId: eventSessionId,
+              ...(eventRunDurationMs !== undefined ? { runDurationMs: eventRunDurationMs } : null),
             });
             const requestVersion =
               sessionEventVersionRef.current.get(eventSessionId) || 0;
@@ -4627,6 +4770,7 @@ export function App() {
           const activity: SessionActivityState = {
             execution: "failed",
             awaitingConfirmation: false,
+            ...(eventRunDurationMs !== undefined ? { lastRunDurationMs: eventRunDurationMs } : null),
             ...(error ? { error } : null),
           };
           setSessions((current) =>
@@ -4659,7 +4803,11 @@ export function App() {
           if (promptReconcileTimerRef.current !== null)
             window.clearTimeout(promptReconcileTimerRef.current);
           promptReconcileTimerRef.current = null;
-          dispatchPane({ type: "PROCESS_FAILED", sessionId: eventSessionId });
+          dispatchPane({
+            type: "PROCESS_FAILED",
+            sessionId: eventSessionId,
+            ...(eventRunDurationMs !== undefined ? { runDurationMs: eventRunDurationMs } : null),
+          });
           const message =
             Number(event.nativeSteeringDroppedCount || 0) > 0
               ? steeringClearedMessage("process-error")
@@ -4691,6 +4839,7 @@ export function App() {
       tryAutoAllowGate,
       updateGateMode,
       clearStoppingForSession,
+      resetResourceReloadTransientState,
     ],
   );
 
@@ -5220,9 +5369,10 @@ export function App() {
       !steering && (alreadyStreaming || queuePaused || queue.length > 0);
     const previousToolStatus = toolStatus;
     const optimisticMessage =
-      willQueueLocally || message.startsWith("/")
-        ? null
-        : userMessage(message, images);
+      !message.startsWith("/") &&
+      (Boolean(state.isCompacting) || !willQueueLocally)
+        ? userMessage(message, images)
+        : null;
     const localTurn = optimisticMessage || userMessage(message, images);
     let targetSessionId = requestedTargetSessionId || viewedSessionIdRef.current;
     let promptQueueProjectionRevision = targetSessionId
@@ -5886,19 +6036,22 @@ export function App() {
       // belongs to a particular pane revision. Never strand a running-turn
       // admission as hidden `waiting` merely because its old pane token expired.
       const localEntry = localTurnEntry();
+      const resultPending = resultPendingError(cause);
       const explicitClientRejection =
         cause instanceof ApiRequestError &&
         cause.status >= 400 &&
-        cause.status < 500;
+        cause.status < 500 &&
+        !resultPending;
       const stoppedSteerRejection = authoritativeStoppedSteerRejection(
         cause,
         steering,
       );
       const outcomeUnknown =
-        promptSubmitted &&
-        (promptAcceptedByEvent ||
-          promptTerminalByEvent ||
-          !explicitClientRejection);
+        resultPending ||
+        (promptSubmitted &&
+          (promptAcceptedByEvent ||
+            promptTerminalByEvent ||
+            !explicitClientRejection));
       let rejectionMessages:
         PiMessage[] | ((current: PiMessage[]) => PiMessage[]) | undefined;
       if (localEntry && outcomeUnknown) {
@@ -5978,7 +6131,8 @@ export function App() {
       if (visibleFailure) {
         const messageText =
           cause instanceof Error ? cause.message : String(cause);
-        setError(messageText);
+        if (resultPending) setNotice(messageText);
+        else setError(messageText);
       }
       if (visibleFailure && stoppedSteerRejection) {
         clearPendingLiveMessage();
@@ -6740,8 +6894,80 @@ export function App() {
   /**
    * Delete terminal state is stronger than an ordinary list refresh: once an
    * authoritative source says a Session is gone, no older request may restore
-   * its row or cached pane.
+   * its row or cached pane. Keep every Session-keyed projection cleanup here;
+   * otherwise a long-lived tab retains image payloads, promises, generations,
+   * and stale recovery markers forever after repeated deletes.
    */
+  const clearDeletedSessionProjection = (sessionId: string): void => {
+    if (!sessionId) return;
+    const keyId = composerDraftKeyId({ kind: "session", sessionId });
+    localUserTurnsRef.current.delete(sessionId);
+    pendingSteersRef.current.delete(sessionId);
+    gateModesRef.current = Object.fromEntries(
+      Object.entries(gateModesRef.current).filter(([id]) => id !== sessionId),
+    );
+    pendingGateModesRef.current.delete(sessionId);
+    pendingSessionPrefsRef.current.delete(sessionId);
+    composerDraftRevisionsRef.current.delete(keyId);
+    appliedDraftRestorationSequencesRef.current.delete(keyId);
+    steerDequeueExpectedDraftRevisionRef.current.delete(sessionId);
+    cancelledQueueIdsRef.current.delete(sessionId);
+    queueProjectionRevisionRef.current.delete(sessionId);
+    latestQueueProjectionRef.current.delete(sessionId);
+    queueMutationSequenceRef.current.delete(sessionId);
+    appliedQueueMutationSequenceRef.current.delete(sessionId);
+    sessionEventVersionRef.current.delete(sessionId);
+    lastSessionEventTypeRef.current.delete(sessionId);
+    sourceTurnTotalsRef.current.delete(sessionId);
+    sessionRunningOverridesRef.current.delete(sessionId);
+    terminalAssistantSessionIdsRef.current.delete(sessionId);
+    terminalAssistantStreamGenerationsRef.current.delete(sessionId);
+    streamingWireProjectionsRef.current.delete(sessionId);
+    streamGapRecoveriesRef.current.delete(sessionId);
+    unreadSteeringDropMessagesRef.current.delete(sessionId);
+    diagnosticSidebarRowsRef.current.delete(sessionId);
+    for (const key of diagnosticSseRejectionAtRef.current.keys())
+      if (key.startsWith(`${sessionId}:`)) diagnosticSseRejectionAtRef.current.delete(key);
+    warmingSessionIdsRef.current.delete(sessionId);
+    busySessionCountsRef.current.delete(sessionId);
+    stoppingOperationTokensRef.current.delete(sessionId);
+    for (const childId of [...subagentAddressesRef.current.keys()]) {
+      if (childId === sessionId || subagentAddressesRef.current.get(childId)?.parentSessionId === sessionId)
+        subagentAddressesRef.current.delete(childId);
+    }
+    viewCacheRef.current.forget(sessionId);
+    scrollMemoryRef.current.forget(sessionId);
+    streamDiagnosticsRef.current?.deleteSession(sessionId);
+    setPendingSteersBySession(Object.fromEntries(pendingSteersRef.current));
+    setGateModes({ ...gateModesRef.current });
+    setPendingGateModes(Object.fromEntries(pendingGateModesRef.current));
+    setSteerDequeueingBySession((current) => {
+      if (!current[sessionId]) return current;
+      const next = { ...current };
+      delete next[sessionId];
+      return next;
+    });
+    setComposerPendingByScope((current) => {
+      if (!(keyId in current)) return current;
+      const next = { ...current };
+      delete next[keyId];
+      return next;
+    });
+    setWarmingSessionIds([...warmingSessionIdsRef.current]);
+    setBusySessionIds([...busySessionCountsRef.current.keys()]);
+    setStoppingSessionIds((current) => current.filter((id) => id !== sessionId));
+    setFailedSessionIds((current) => current.filter((id) => id !== sessionId));
+    setUnseenReplySessionIds((current) => current.filter((id) => id !== sessionId));
+    setActiveSessionIds((current) => current.filter((id) => id !== sessionId));
+    setCopyingSessionIds((current) => current.filter((id) => id !== sessionId));
+    setRestoredComposerDrafts((current) => {
+      if (!(keyId in current)) return current;
+      const next = { ...current };
+      delete next[keyId];
+      return next;
+    });
+  };
+
   const finalizeDeletedSession = (sessionId: string) => {
     const wasVisible = sessionId === viewedSessionIdRef.current;
     const desiredSessionId = desiredSessionIdRef.current;
@@ -6760,17 +6986,15 @@ export function App() {
     optimisticRenamesRef.current.delete(sessionId);
     optimisticDeletesRef.current.delete(sessionId);
     confirmedDeletedSessionIdsRef.current.add(sessionId);
-    scrollMemoryRef.current.forget(sessionId);
-    viewCacheRef.current.forget(sessionId);
-    localUserTurnsRef.current.delete(sessionId);
-    syncPendingSteers(sessionId, []);
-    sourceTurnTotalsRef.current.delete(sessionId);
-    terminalAssistantStreamGenerationsRef.current.delete(sessionId);
-    cancelledQueueIdsRef.current.delete(sessionId);
-    queueProjectionRevisionRef.current.delete(sessionId);
-    latestQueueProjectionRef.current.delete(sessionId);
-    queueMutationSequenceRef.current.delete(sessionId);
-    appliedQueueMutationSequenceRef.current.delete(sessionId);
+    // Keep a bounded tombstone set for already-resolved late continuations;
+    // process-epoch invalidation remains the stronger long-term fence.
+    while (confirmedDeletedSessionIdsRef.current.size > 512) {
+      const oldest = confirmedDeletedSessionIdsRef.current.values().next().value;
+      if (typeof oldest !== "string") break;
+      confirmedDeletedSessionIdsRef.current.delete(oldest);
+    }
+    clearDeletedSessionProjection(sessionId);
+    forgetComposerKey(composerDraftKeyId({ kind: "session", sessionId }));
     setSessionNavigation((current) => ({
       ...current,
       pinnedSessionIds: current.pinnedSessionIds.filter(
@@ -7160,7 +7384,8 @@ export function App() {
             const definiteRejection =
               cause instanceof ApiRequestError &&
               cause.status >= 400 &&
-              cause.status < 500;
+              cause.status < 500 &&
+              !resultPendingError(cause);
             if (definiteRejection) {
               optimisticRenamesRef.current.delete(sessionId);
               syncMutatingSessionIds();
@@ -7277,7 +7502,8 @@ export function App() {
             const definiteRejection =
               cause instanceof ApiRequestError &&
               cause.status >= 400 &&
-              cause.status < 500;
+              cause.status < 500 &&
+              !resultPendingError(cause);
             if (definiteRejection) {
               optimisticDeletesRef.current.delete(deletingId);
               syncMutatingSessionIds();
@@ -7469,7 +7695,6 @@ export function App() {
     !mutationBlocked &&
     (viewSwitching ||
       currentSessionPreparing ||
-      Boolean(state.isCompacting) ||
       (viewingSubagentSession && !composerTargetSessionId));
   const waitingForPiMessage = composerWaitStatus({
     isStreaming: state.isStreaming,
@@ -7480,14 +7705,14 @@ export function App() {
     subagentTargetUnavailable:
       viewingSubagentSession && !composerTargetSessionId,
   });
-  // The server intentionally keeps an empty active Primary out of the indexed
-  // sidebar until its first user turn. Preserve its real Session authority, but
-  // present the same New-conversation shell instead of the legacy saved fallback.
+  // An empty active Primary (indexed or not) is still the New presentation.
+  // Preserve its real Session authority, but never fall through to a saved
+  // conversation empty-state layout.
   const emptyPrimaryDraftPresentation = Boolean(
     viewedSessionId &&
       viewedSessionId === activeSessionId &&
       sidebarInventoryReady &&
-      !viewedSession &&
+      (viewedSession?.messageCount || 0) === 0 &&
       messages.length === 0 &&
       messageTotal === 0 &&
       turnTotal === 0 &&
@@ -7761,39 +7986,42 @@ export function App() {
         const restored = cancelled
           ? promptDraftFromMessage(cancelled.message, item.message)
           : { message: item.message, images: [] };
+        commitPaneIfCurrent(operation, {
+          type: "QUEUE_UPDATED",
+          sessionId: operation.sessionId,
+          queue: authoritativeQueue,
+          paused: authoritativeProjection.paused,
+          messages: cancelled?.renderedInTranscript
+            ? (current) =>
+                current.filter((message) => message !== cancelled.message)
+            : undefined,
+        });
+        // Composer restoration is Session-keyed state. The server normally
+        // broadcasts the post-cancel queue before the DELETE response arrives,
+        // which advances the Pane revision and makes the click's old authority
+        // stale. Do not lose the user's message merely because that truthful
+        // queue frame won the race; a newer editor revision still wins in the
+        // Composer reducer below.
+        // HTTP completions may arrive out of click order. The latest successful
+        // cancellation wins the Composer, never whichever response finishes last.
+        const restorationKeyId = composerDraftKeyId(cancellationDraftKey);
         if (
-          commitPaneIfCurrent(operation, {
-            type: "QUEUE_UPDATED",
-            sessionId: operation.sessionId,
-            queue: authoritativeQueue,
-            paused: authoritativeProjection.paused,
-            messages: cancelled?.renderedInTranscript
-              ? (current) =>
-                  current.filter((message) => message !== cancelled.message)
-              : undefined,
-          })
+          cancellationSequence >
+          (appliedDraftRestorationSequencesRef.current.get(restorationKeyId) || 0)
         ) {
-          // HTTP completions may arrive out of click order. The latest successful
-          // cancellation wins the Composer, never whichever response finishes last.
-          const restorationKeyId = composerDraftKeyId(cancellationDraftKey);
-          if (
-            cancellationSequence >
-            (appliedDraftRestorationSequencesRef.current.get(restorationKeyId) || 0)
-          ) {
-            appliedDraftRestorationSequencesRef.current.set(
-              restorationKeyId,
-              cancellationSequence,
-            );
-            setRestoredComposerDrafts((current) => ({
-              ...current,
-              [restorationKeyId]: {
-                key: cancellationDraftKey,
-                revision: cancellationSequence,
-                expectedDraftRevision,
-                ...restored,
-              },
-            }));
-          }
+          appliedDraftRestorationSequencesRef.current.set(
+            restorationKeyId,
+            cancellationSequence,
+          );
+          setRestoredComposerDrafts((current) => ({
+            ...current,
+            [restorationKeyId]: {
+              key: cancellationDraftKey,
+              revision: cancellationSequence,
+              expectedDraftRevision,
+              ...restored,
+            },
+          }));
         }
       })
       .catch((cause) => {
@@ -8260,6 +8488,8 @@ export function App() {
         visibleTurnCount={visibleTurnCount}
         turnTotal={turnTotal}
         messageTotal={messageTotal}
+        runStartedAt={runStartedAt}
+        lastRunDurationMs={lastRunDurationMs}
         loadingEarlier={loadingEarlier}
         onLoadEarlier={() => void loadEarlierTurns()}
         state={state}
@@ -8338,6 +8568,7 @@ export function App() {
             composerDraftRevisionsRef.current.set(composerDraftKeyId(key), revision);
           },
           draftKey: composerDraftKey,
+          forgottenComposerKeys,
           submissionScope: composerSubmissionScope,
           submissionTargetSessionId: composerTargetSessionId || undefined,
           allowFollowupSubmissions: true,
@@ -8364,6 +8595,7 @@ export function App() {
           onAbort: stopGeneration,
         }}
       />
+      {managementSection && <Suspense fallback={null}>
       <ManagementPanel
         section={managementSection}
         appearance={appearance}
@@ -8391,6 +8623,7 @@ export function App() {
         onExportDiagnostics={exportStateDiagnostics}
         onShutdown={() => void shutdownPiChat()}
       />
+      </Suspense>}
       <SessionDialog
         state={sessionDialog}
         busy={sessionActionBusy}
@@ -8425,6 +8658,7 @@ export function App() {
           onRespond={(body) => void respondToExtension(body)}
         />
       )}
+      <Suspense fallback={null}>
       <EditDiffSidebar
         open={diffSidebarOpen}
         width={diffSidebarWidth}
@@ -8436,6 +8670,7 @@ export function App() {
         onOpenChange={setDiffSidebarOpen}
         onWidthChange={setDiffSidebarWidth}
       />
+      </Suspense>
     </AppShell>
   );
 }
