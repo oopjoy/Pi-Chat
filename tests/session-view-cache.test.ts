@@ -67,6 +67,23 @@ test("authoritative Gate updates survive cached session navigation", () => {
   assert.equal(cache.get("gate")?.gateMode, "strict");
 });
 
+test("a terminal activity patch retains the frozen duration for cached panes", () => {
+  const cache = new SessionViewCache();
+  cache.remember({
+    ...view("timing"),
+    session: { ...view("timing").session, activity: { execution: "running", awaitingConfirmation: false } },
+    isStreaming: true,
+    state: { model: null, isStreaming: true },
+  });
+  const patched = cache.patch("timing", {
+    isStreaming: false,
+    state: { isStreaming: false },
+    sessionActivity: { execution: "idle", awaitingConfirmation: false, lastRunDurationMs: 2_345 },
+  });
+  assert.equal(patched?.session.activity?.lastRunDurationMs, 2_345);
+  assert.equal(patched?.session.activity?.execution, "idle");
+});
+
 test("pinned hot panes survive cold LRU eviction and retain sparse live updates", () => {
   const cache = new SessionViewCache(1);
   cache.setPinned(["hot"]);

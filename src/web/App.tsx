@@ -379,6 +379,23 @@ function settleSidebarActivity(session: SessionSummary): SessionSummary {
   return applySidebarRunningOverride(session, false);
 }
 
+/** Preserve a terminal duration in the browser cache for instant off-screen returns. */
+function settledPaneActivity(
+  previous: SessionActivityState | undefined,
+  durationMs: number | undefined,
+): SessionActivityState {
+  const { runStartedAt: _runStartedAt, ...withoutRunStart } = previous || {};
+  const execution = previous?.execution === "queued" || previous?.execution === "paused"
+    ? previous.execution
+    : "idle";
+  return {
+    ...withoutRunStart,
+    execution,
+    awaitingConfirmation: false,
+    ...(durationMs !== undefined ? { lastRunDurationMs: durationMs } : null),
+  };
+}
+
 /** A fresh target view can repair a missed terminal SSE only when every live fact is idle. */
 export function sessionViewConfirmsIdle(view: SessionViewData): boolean {
   return view.isStreaming !== true
@@ -3993,6 +4010,10 @@ export function App() {
             isStreaming: false,
             liveMessage: undefined,
             toolStatus: "",
+            sessionActivity: settledPaneActivity(
+              viewCacheRef.current.get(eventSessionId)?.session.activity,
+              eventRunDurationMs,
+            ),
             state: { isStreaming: false, isCompacting: false },
           });
         }
@@ -4662,6 +4683,14 @@ export function App() {
               eventRunEpoch,
               true,
             );
+          if (!running) {
+            patchSessionCache(eventSessionId, {
+              sessionActivity: settledPaneActivity(
+                viewCacheRef.current.get(eventSessionId)?.session.activity,
+                eventRunDurationMs,
+              ),
+            });
+          }
           if (viewingEventSession && !running) {
             clearPendingLiveMessage();
             dispatchPane({

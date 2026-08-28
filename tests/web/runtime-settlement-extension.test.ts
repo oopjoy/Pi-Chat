@@ -14,6 +14,76 @@ beforeEach(() => {
   draftView = createSessionViewFixture();
 });
 
+test("a settled process card keeps the server-confirmed run duration", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const messages = [
+    { role: "user" as const, content: "run" },
+    { role: "assistant" as const, timestamp: 1, content: [{ type: "thinking" as const, thinking: "working" }] },
+  ];
+  bootstrap = {
+    ...bootstrap,
+    messages,
+    messageTotal: messages.length,
+    turnTotal: 1,
+    visibleTurnCount: 1,
+  };
+  const settledView: SessionViewData = {
+    ...draftView,
+    session: {
+      ...bootstrap.sessions[0],
+      id: activeId,
+      sessionId: "active",
+      running: false,
+      activity: { execution: "idle", awaitingConfirmation: false, lastRunDurationMs: 2_345 },
+    },
+    state: { ...bootstrap.state, isStreaming: false, isCompacting: false },
+    messages,
+    messageTotal: messages.length,
+    turnTotal: 1,
+    visibleTurnCount: 1,
+    isActive: true,
+    runtimeStatus: "active",
+    isStreaming: false,
+    liveMessage: undefined,
+    toolStatus: "",
+  };
+  Object.assign(api, {
+    bootstrap: async () => bootstrap,
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    viewSession: async () => settledView,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.emitPi({ type: "agent_start", piChatSessionId: activeId, piChatRunGeneration: 1, piChatRunStartedAt: 1_000 });
+    });
+    assert.match(dom.window.document.querySelector(".conversation-process-duration")?.textContent || "", /运行中 ·/);
+    await act(async () => {
+      source.emitPi({
+        type: "pi_chat_session_status",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        activity: { execution: "idle", awaitingConfirmation: false, lastRunDurationMs: 2_345 },
+      });
+      await Promise.resolve();
+    });
+    assert.equal(
+      dom.window.document.querySelector(".conversation-process-duration")?.textContent,
+      "运行 · 00:02",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("a fresh idle view repairs a missed settlement spinner without F5", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");
