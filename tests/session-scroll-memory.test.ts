@@ -30,6 +30,17 @@ test("remembered turn counts always use a Session view API window", () => {
   assert.equal(memory.turns("short-hot-session"), 10);
 });
 
+test("a nearby reading position is not mistaken for the bottom", () => {
+  const memory = new SessionScrollMemory();
+  // scrollHeight - top - clientHeight = 25px: this is visibly above the
+  // newest reply and must be restored as an exact reading position.
+  memory.remember("near-bottom", 975, 2_000, 1_000, 10);
+  assert.deepEqual(memory.target("near-bottom", 2_000, 1_000), { top: 975, stickToBottom: false });
+
+  memory.remember("at-bottom", 999, 2_000, 1_000, 10);
+  assert.deepEqual(memory.target("at-bottom", 2_000, 1_000), { top: 2_000, stickToBottom: true });
+});
+
 test("restoration clamps positions after content shrinks and unknown sessions start at the bottom", () => {
   const memory = new SessionScrollMemory();
   memory.remember("session-a", 3_500, 5_000, 800, 30);

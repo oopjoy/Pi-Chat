@@ -9,7 +9,10 @@ export interface SessionScrollTarget {
   stickToBottom: boolean;
 }
 
-const BOTTOM_THRESHOLD = 120;
+// Only a small rounding/layout remainder counts as "at bottom". Treating a
+// full message-sized gap as bottom makes a nearby remembered reading position
+// jump to the newest reply when the user returns to the Session.
+const BOTTOM_THRESHOLD = 24;
 const INITIAL_TURN_WINDOW = 10;
 const TURN_WINDOW_STEP = 10;
 const MAX_TURN_WINDOW = 10_000;

@@ -5223,11 +5223,13 @@ export function App() {
 
   const rememberCurrentScroll = () => {
     const element = scrollRef.current;
-    // Scroll DOM and visibleTurnCount belong to the last committed React view.
-    // The routing ref can already point at the destination while the old view
-    // is still painted, which would save the cold Session position under the
-    // hot Session ID during a fast switch.
-    const sessionId = viewedSessionId;
+    // Scroll DOM and visibleTurnCount belong to the pane currently committed
+    // to the DOM. Use the synchronous identity mirror rather than the routing
+    // target or a render closure: during A → B, B can already be desired while
+    // A is still the painted timeline. This also keeps late scroll events tied
+    // to the pane whose geometry they actually describe.
+    const identity = committedPaneIdentityRef.current;
+    const sessionId = identity.kind === "session" ? identity.sessionId : "";
     if (!element || !sessionId) return;
     scrollMemoryRef.current.remember(
       sessionId,
