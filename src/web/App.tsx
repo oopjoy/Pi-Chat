@@ -485,6 +485,8 @@ export function App() {
   const committedPaneIdentityRef = useRef<ConversationPaneIdentity>(
     pane.identity,
   );
+  /** Identity of the pane whose geometry is actually painted in the timeline DOM. */
+  const paintedPaneIdentityRef = useRef<ConversationPaneIdentity>(pane.identity);
   /** Commands are part of the committed projection, not a render-closure fallback. */
   const committedPaneCommandsRef = useRef<SlashCommand[]>(pane.commands);
   const paneCommitRevisionRef = useRef(0);
@@ -5107,6 +5109,11 @@ export function App() {
   useLayoutEffect(() => {
     const timeline = scrollRef.current;
     if (!timeline) return;
+    // React has now committed this pane to the same timeline element. Keep a
+    // separate painted identity because commitPane updates the synchronous
+    // authority mirror before the old DOM is replaced; late scroll events in
+    // that interval still belong to the old pane.
+    paintedPaneIdentityRef.current = pane.identity;
     // RESET_DRAFT can replace one blank pane with another while both have the
     // same Session ID (`""`) and the same message arrays. Treat the committed
     // pane identity as a real navigation boundary so New never inherits the
@@ -5273,12 +5280,11 @@ export function App() {
 
   const rememberCurrentScroll = () => {
     const element = scrollRef.current;
-    // Scroll DOM and visibleTurnCount belong to the pane currently committed
-    // to the DOM. Use the synchronous identity mirror rather than the routing
-    // target or a render closure: during A → B, B can already be desired while
-    // A is still the painted timeline. This also keeps late scroll events tied
-    // to the pane whose geometry they actually describe.
-    const identity = committedPaneIdentityRef.current;
+    // Scroll DOM and visibleTurnCount belong to the pane currently painted in
+    // the DOM. Do not use the synchronous authority mirror here: during A → B,
+    // that mirror already points to B while A can still be the painted
+    // timeline. This keeps late scroll events tied to the actual pane geometry.
+    const identity = paintedPaneIdentityRef.current;
     const sessionId = identity.kind === "session" ? identity.sessionId : "";
     if (!element || !sessionId) return;
     scrollMemoryRef.current.remember(

@@ -96,6 +96,68 @@ test("opening New resets a reused timeline to the latest bottom", async () => {
   }
 });
 
+test("switching A to B and back restores A's last reading position", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const messages = activeMessages();
+  const sessionA = { ...bootstrap.sessions[0], messageCount: messages.length, preview: "A latest answer" };
+  const sessionB = {
+    ...bootstrap.sessions[0],
+    id: "fedcba9876543210abcd",
+    sessionId: "history-b",
+    name: "History B",
+    messageCount: messages.length,
+    preview: "B latest answer",
+    active: false,
+  };
+  const viewA = viewFor(sessionA, messages);
+  const viewB = viewFor(sessionB, messages.map((message) => ({
+    ...message,
+    content: typeof message.content === "string" ? `${message.content} B` : message.content,
+  })));
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      sessions: [sessionA, sessionB],
+      messages,
+      messageTotal: messages.length,
+      turnTotal: 2,
+      visibleTurnCount: 2,
+      state: { ...bootstrap.state, messageCount: messages.length },
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async (id: string) => ({ viewing: id }),
+    viewSession: async (id: string) => (id === sessionB.id ? viewB : viewA),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const timeline = dom.window.document.querySelector<HTMLElement>(".timeline")!;
+    withGeometry(timeline, 2_400, 600);
+    timeline.scrollTop = 420;
+    timeline.dispatchEvent(new dom.window.Event("scroll", { bubbles: true }));
+    const sessionButton = (name: string) => [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
+      .find((button) => button.textContent?.includes(name))!;
+    await act(async () => {
+      sessionButton("History B").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      sessionButton("Active").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(timeline.scrollTop, 420, "A → B → A must restore A's remembered reading position");
+  } finally {
+    restoreApi();
+    await act(async () => root.unmount());
+  }
+});
+
 test("returning to a hot Session restores its remembered reading position", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");
