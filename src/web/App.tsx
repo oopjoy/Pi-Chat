@@ -129,7 +129,7 @@ import {
   recoverableRefreshError,
   surfaceAutomaticRefreshError,
 } from "./lib/refresh-error-policy";
-import { SessionScrollMemory } from "./lib/session-scroll-memory";
+import { isAtBottom, SessionScrollMemory } from "./lib/session-scroll-memory";
 import { withStreamingAppendHints } from "./lib/streaming-append";
 import { SessionViewCache } from "./lib/session-view-cache";
 import {
@@ -5095,10 +5095,21 @@ export function App() {
   }, [loading, viewedSessionId]);
 
   useLayoutEffect(() => {
-    const sessionId = pendingScrollRestoreRef.current;
-    if (!sessionId || sessionId !== viewedSessionId) return;
     const timeline = scrollRef.current;
     if (!timeline) return;
+    // RESET_DRAFT can replace one blank pane with another while both have the
+    // same Session ID (`""`) and the same message arrays. Treat the committed
+    // pane identity as a real navigation boundary so New never inherits the
+    // previous Session's scrollTop.
+    if (pane.identity.kind === "draft") {
+      timeline.scrollTop = timeline.scrollHeight;
+      stickToBottomRef.current = true;
+      pendingScrollRestoreRef.current = "";
+      return;
+    }
+    const sessionId = pendingScrollRestoreRef.current;
+    if (pane.identity.kind !== "session" || !sessionId || sessionId !== viewedSessionId)
+      return;
     const target = scrollMemoryRef.current.target(
       sessionId,
       timeline.scrollHeight,
@@ -5107,7 +5118,7 @@ export function App() {
     timeline.scrollTop = target.top;
     stickToBottomRef.current = target.stickToBottom;
     pendingScrollRestoreRef.current = "";
-  }, [viewedSessionId, messages]);
+  }, [pane.identity, viewedSessionId, messages]);
 
   useEffect(() => {
     if (!stickToBottomRef.current) return;
@@ -5119,7 +5130,7 @@ export function App() {
       if (!timeline || !stickToBottomRef.current) return;
       timeline.scrollTo({ top: timeline.scrollHeight, behavior: "auto" });
     });
-  }, [messages, liveMessage]);
+  }, [pane.identity, messages, liveMessage]);
 
   useEffect(() => {
     if (!error && !notice) return;
@@ -5273,8 +5284,11 @@ export function App() {
     const element = scrollRef.current;
     if (!element) return;
     if (pendingScrollRestoreRef.current === viewedSessionIdRef.current) return;
-    stickToBottomRef.current =
-      element.scrollHeight - element.scrollTop - element.clientHeight < 120;
+    stickToBottomRef.current = isAtBottom(
+      element.scrollTop,
+      element.scrollHeight,
+      element.clientHeight,
+    );
     rememberCurrentScroll();
   };
 

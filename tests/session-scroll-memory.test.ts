@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { SessionScrollMemory, sessionTurnWindow } from "../src/web/lib/session-scroll-memory";
+import { isAtBottom, SessionScrollMemory, sessionTurnWindow } from "../src/web/lib/session-scroll-memory";
 
 test("a conversation restores its previous reading position inside one window", () => {
   const memory = new SessionScrollMemory();
@@ -28,6 +28,11 @@ test("remembered turn counts always use a Session view API window", () => {
   const memory = new SessionScrollMemory();
   memory.remember("short-hot-session", 0, 800, 800, 4);
   assert.equal(memory.turns("short-hot-session"), 10);
+});
+
+test("bottom detection uses the same tight tolerance as restoration", () => {
+  assert.equal(isAtBottom(975, 2_000, 1_000), false);
+  assert.equal(isAtBottom(999, 2_000, 1_000), true);
 });
 
 test("a nearby reading position is not mistaken for the bottom", () => {
