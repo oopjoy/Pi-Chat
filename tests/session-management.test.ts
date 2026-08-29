@@ -36,7 +36,7 @@ class CopyWorker {
   }
   async stop() { this.stopped = true; }
   async sendRaw() {}
-  async send(command: Record<string, unknown>) {
+  async send(command: Record<string, unknown>, _timeoutMs?: number, _options?: unknown) {
     this.commands.push(command);
     if (command.type === "clone" || command.type === "fork") {
       const destinationPath = this.destinationPaths[this.copyCount++];
@@ -100,17 +100,24 @@ class RecoveryFailCopyWorker extends CopyWorker {
 }
 
 class OutcomeUnknownCopyWorker extends CopyWorker {
+  lateResponse?: (response: Record<string, unknown>, requestId: string) => void;
+
   constructor(sourcePath: string, destinationPaths: string[], private readonly switchBeforeTimeout: boolean) {
     super(sourcePath, destinationPaths);
   }
 
-  override async send(command: Record<string, unknown>) {
+  override async send(command: Record<string, unknown>, timeoutMs?: number, options?: unknown) {
     if (command.type === "clone") {
-      if (this.switchBeforeTimeout) await super.send(command);
+      this.lateResponse = (options as { onLateResponse?: (response: Record<string, unknown>, requestId: string) => void } | undefined)?.onLateResponse;
+      if (this.switchBeforeTimeout) await super.send(command, timeoutMs, options);
       else this.commands.push(command);
       throw new RpcRequestTimeoutError("clone", "written-outcome-unknown");
     }
-    return super.send(command);
+    return super.send(command, timeoutMs, options);
+  }
+
+  resolveLate(): void {
+    this.lateResponse?.({ type: "response", success: true }, "late-copy");
   }
 }
 
@@ -746,6 +753,9 @@ test("written-outcome-unknown Clone reconciles a switched destination and warns 
         retryStatus: undefined as number | undefined,
       };
       if (!switchBeforeTimeout) {
+        // Even a late successful clone response does not prove the destination
+        // has been indexed; keep the duplicate-copy fence in place.
+        primary.resolveLate();
         const retry = await fetch(copyUrl, {
           method: "POST",
           headers: { "content-type": "application/json" },

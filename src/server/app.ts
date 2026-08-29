@@ -1591,8 +1591,11 @@ export class PiChatApp {
       } else if (kind === "delete") {
         this.deletionOutcomePendingBySession.delete(sessionId);
       } else if (kind === "copy") {
-        // A late copy response only resolves transport uncertainty. The copy
-        // guard remains until the destination/index projection is verified.
+        // A successful late copy response may have created a destination, so
+        // retain the duplicate guard until its SessionIndex projection is
+        // verified. An explicit RPC failure proves no copy was committed.
+        if (response.success === false)
+          this.copyOutcomePendingSessionIds.delete(sessionId);
       } else if (kind === "extension" && requestId) {
         const pending = this.pendingRequestForSession(sessionId);
         if (pending?.id === requestId)
@@ -1618,16 +1621,21 @@ export class PiChatApp {
     );
   }
 
+  private installRpcOutcomeFence(sessionId: string, token?: string): void {
+    if (!sessionId) return;
+    this.rpcOutcomePendingBySession.add(sessionId);
+    if (!this.rpcOutcomeTokensBySession.has(sessionId))
+      this.rpcOutcomeTokensBySession.set(sessionId, token || randomUUID());
+    this.broadcastSessionActivity(sessionId);
+  }
+
   private markRpcOutcomePending(
     sessionId: string,
     error: unknown,
     token?: string,
   ): void {
     if (!sessionId || !this.rpcOutcomeUnknown(error)) return;
-    this.rpcOutcomePendingBySession.add(sessionId);
-    if (!this.rpcOutcomeTokensBySession.has(sessionId))
-      this.rpcOutcomeTokensBySession.set(sessionId, token || randomUUID());
-    this.broadcastSessionActivity(sessionId);
+    this.installRpcOutcomeFence(sessionId, token);
   }
 
   /** Convert an acknowledged-but-unresolved RPC mutation into one retry-safe HTTP outcome. */
@@ -4607,6 +4615,7 @@ export class PiChatApp {
     const rpc = input.runtime?.rpc || this.options.rpc;
     const outcomeToken = randomUUID();
     let mutationOutcomeUnknown = false;
+    let copyMayHaveCommitted = false;
     let cancelled = false;
     let committed: { sessionId: string; sessionPath: string; piSessionId: string; warning?: string } | null = null;
     this.copyingSessionIds.add(input.id);
@@ -4628,6 +4637,7 @@ export class PiChatApp {
           ),
         );
         cancelled = result.cancelled === true;
+        copyMayHaveCommitted = !cancelled;
       } catch (error) {
         if (!(error instanceof RpcRequestTimeoutError) || !error.outcomeUnknown)
           throw error;
@@ -4646,7 +4656,9 @@ export class PiChatApp {
           ),
         );
       } catch (error) {
-        if (mutationOutcomeUnknown)
+        if (mutationOutcomeUnknown || copyMayHaveCommitted) {
+          if (!mutationOutcomeUnknown)
+            this.installRpcOutcomeFence(input.id, outcomeToken);
           throw new HttpRequestError(
             409,
             "复制结果尚未确认；请刷新对话列表核对，不要重复操作",
@@ -4654,6 +4666,7 @@ export class PiChatApp {
             true,
             true,
           );
+        }
         throw error;
       }
       const sourcePath = resolve(input.sourcePath);
@@ -4678,7 +4691,9 @@ export class PiChatApp {
         );
       }
       if (!switched) {
-        if (mutationOutcomeUnknown)
+        if (mutationOutcomeUnknown || copyMayHaveCommitted) {
+          if (!mutationOutcomeUnknown)
+            this.installRpcOutcomeFence(input.id, outcomeToken);
           throw new HttpRequestError(
             409,
             "复制结果尚未确认；请刷新对话列表核对，不要重复操作",
@@ -4686,6 +4701,7 @@ export class PiChatApp {
             true,
             true,
           );
+        }
         throw new Error("Pi 未返回有效的新会话文件");
       }
       if (

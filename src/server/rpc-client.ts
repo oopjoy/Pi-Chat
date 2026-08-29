@@ -1012,6 +1012,8 @@ export class PiRpcClient {
               : "not-written",
             durationMs: Date.now() - startedAt,
           });
+          if (rejection instanceof RpcRequestTimeoutError && pending.onLateResponse)
+            this.retainLateResponse(id, pending.onLateResponse);
           reject(rejection);
         });
         // A non-throwing write transfers the frame to Node's stream buffer. From
