@@ -530,13 +530,13 @@ test("same-generation initial ready adopts its model without waiting for Bootstr
   }
 });
 
-test("Primary ready preserves a staged draft model and keeps its capability unconfirmed", async () => {
+test("Primary ready forwards a staged draft image without capability confirmation", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../../src/web/api");
   const { App } = await import("../../src/web/App");
   const restoreApi = captureApiSnapshot(api);
-  let newSessionCalls = 0;
+  const submittedInitialPrompts: Array<{ message: string; images: unknown[] }> = [];
   const runtimeModel = {
     provider: "test",
     id: "runtime-model",
@@ -550,6 +550,22 @@ test("Primary ready preserves a staged draft model and keeps its capability unco
     name: "Staged model",
     input: ["text"],
     reasoning: true,
+  };
+  const createdSession = createSessionViewFixture();
+  createdSession.session = {
+    ...createdSession.session,
+    id: "new-image-session-123456",
+    sessionId: "new-image-session-123456",
+    name: "New image",
+    active: true,
+    writable: true,
+  };
+  createdSession.state = {
+    ...createdSession.state,
+    sessionId: createdSession.session.id,
+    sessionFile: "C:/sessions/new-image-session.jsonl",
+    model: stagedModel,
+    isStreaming: true,
   };
   Object.assign(api, {
     bootstrap: async () => ({
@@ -568,9 +584,17 @@ test("Primary ready preserves a staged draft model and keeps its capability unco
     }),
     eventsUrl: () => "/api/events",
     markSessionViewed: async () => ({ viewing: "" }),
-    newSession: async () => {
-      newSessionCalls += 1;
-      throw new Error("unconfirmed New-draft image must not reach newSession");
+    submitNewSession: async (input: { message: string; images: unknown[] }) => {
+      submittedInitialPrompts.push(input);
+      return {
+        sessionId: createdSession.session.id,
+        session: createdSession.session,
+        state: createdSession.state,
+        gateMode: "strict" as const,
+        accepted: true as const,
+        queued: false as const,
+        isStreaming: true,
+      };
     },
   });
   const root = createRoot(dom.window.document.querySelector("#root")!);
@@ -611,7 +635,7 @@ test("Primary ready preserves a staged draft model and keeps its capability unco
       dom.window.document.querySelector<HTMLButtonElement>(".attachment-button")!
         .disabled,
       false,
-      "a ready Composer may stage attachments before capability-sensitive submission",
+      "a ready Composer may stage attachments before the upstream handles the prompt",
     );
     await act(async () =>
       dom.window.document.querySelector<HTMLButtonElement>(".attachment-button")!.click(),
@@ -621,8 +645,8 @@ test("Primary ready preserves a staged draft model and keeps its capability unco
     )].find((item) => item.textContent?.includes("图片"))!;
     assert.match(
       imageMenuItem.textContent || "",
-      /发送前等待模型能力同步/,
-      "a New draft never claims that its atomic create call will confirm staged image capability",
+      /仍会直接发送给上游模型/,
+      "a New draft explains that unknown image capability does not block forwarding",
     );
     Object.assign(globalThis, { FileReader: dom.window.FileReader });
     const fileInput = dom.window.document.querySelector<HTMLInputElement>(
@@ -662,15 +686,17 @@ test("Primary ready preserves a staged draft model and keeps its capability unco
       );
       dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
     });
-    assert.match(
-      dom.window.document.querySelector(".app-toast.error")?.textContent || "",
-      /模型图片能力尚未确认/,
+    assert.equal(
+      submittedInitialPrompts.length,
+      1,
+      "the New-draft transaction receives the image without a client capability gate",
     );
-    assert.ok(
-      dom.window.document.querySelector(".image-preview"),
-      "the rejected New-draft image remains staged",
+    assert.equal(submittedInitialPrompts[0]?.images.length, 1);
+    assert.equal(
+      dom.window.document.querySelector(".app-toast.error"),
+      null,
+      "unknown image capability is not surfaced as a client-side error",
     );
-    assert.equal(newSessionCalls, 0);
   } finally {
     await act(async () => root.unmount());
     restoreApi();
@@ -747,7 +773,7 @@ test("Primary startup keeps editor and attachments available while capability is
   }
 });
 
-test("a legacy ready without adopted capability allows text while image capability waits for refresh", async () => {
+test("a legacy ready without adopted capability still forwards an image prompt", async () => {
   const { dom, FakeEventSource } = installDom();
   Object.assign(globalThis, { FileReader: dom.window.FileReader });
   const { createRoot } = await import("react-dom/client");
@@ -755,15 +781,7 @@ test("a legacy ready without adopted capability allows text while image capabili
   const { App } = await import("../../src/web/App");
   const restoreApi = captureApiSnapshot(api);
   let requests = 0;
-  let resolveRefresh: ((data: BootstrapData) => void) | undefined;
   const promptCalls: unknown[][] = [];
-  const imageModel = {
-    provider: "test",
-    id: "image-ready",
-    name: "Image ready",
-    input: ["text", "image"],
-    reasoning: true,
-  };
   Object.assign(api, {
     bootstrap: async () => {
       requests += 1;
@@ -774,9 +792,7 @@ test("a legacy ready without adopted capability allows text while image capabili
           models: [],
           primaryRuntime: { status: "starting" as const, generation: 1 },
         };
-      return new Promise<BootstrapData>((resolve) => {
-        resolveRefresh = resolve;
-      });
+      return { ...bootstrap, primaryRuntime: { status: "ready" as const, generation: 1 } };
     },
     eventsUrl: () => "/api/events",
     markSessionViewed: async () => ({ viewing: activeId }),
@@ -819,7 +835,7 @@ test("a legacy ready without adopted capability allows text while image capabili
     await act(async () =>
       dom.window.document.querySelector<HTMLButtonElement>(".attachment-button")!.click(),
     );
-    assert.match(imageMenuItem().textContent || "", /发送前等待模型能力同步/);
+    assert.match(imageMenuItem().textContent || "", /是否支持由上游模型返回结果/);
     const fileInput = dom.window.document.querySelector<HTMLInputElement>(
       "input[type='file']",
     )!;
@@ -857,34 +873,17 @@ test("a legacy ready without adopted capability allows text while image capabili
       );
       dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
     });
-    assert.equal(promptCalls.length, 0, "pending image capability blocks image submission");
-    assert.match(
-      dom.window.document.querySelector(".app-toast.error")?.textContent || "",
-      /模型图片能力尚未确认/,
-    );
-    assert.ok(
-      dom.window.document.querySelector(".image-preview"),
-      "a capability-rejected image remains in the draft",
-    );
-    await act(async () => {
-      resolveRefresh!({
-        ...bootstrap,
-        state: { ...bootstrap.state, model: imageModel },
-        models: [imageModel],
-        primaryRuntime: { status: "ready", generation: 1 },
-      });
-      await Promise.resolve();
-    });
+    assert.equal(promptCalls.length, 1, "unknown image capability does not block submission");
     assert.equal(
-      dom.window.document.querySelector<HTMLTextAreaElement>(".composer textarea")!.disabled,
-      false,
+      dom.window.document.querySelector(".app-toast.error"),
+      null,
+      "unknown image capability is not surfaced as a client-side error",
     );
-    assert.equal(imageMenuItem().disabled, false);
-    assert.match(imageMenuItem().textContent || "", /直接解析/);
-    await act(async () =>
-      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click(),
+    assert.equal(
+      (promptCalls[0]?.[1] as unknown[])?.length,
+      1,
+      "the image is forwarded with the prompt",
     );
-    assert.equal(promptCalls.length, 1, "confirmed image capability permits submission");
   } finally {
     await act(async () => root.unmount());
     restoreApi();
@@ -992,13 +991,19 @@ test("a new Primary generation keeps prior image capability pending until its re
       dom.window.document.querySelector<HTMLButtonElement>(".attachment-button")!.click(),
     );
     assert.equal(imageMenuItem().disabled, false);
-    assert.match(imageMenuItem().textContent || "", /直接解析/);
+    assert.match(
+      imageMenuItem().textContent || "",
+      /图片将随消息交给上游模型处理/,
+    );
     assert.equal(
       dom.window.document.querySelector<HTMLTextAreaElement>(".composer textarea")!.disabled,
       false,
     );
     assert.equal(imageMenuItem().disabled, false);
-    assert.match(imageMenuItem().textContent || "", /直接解析/);
+    assert.match(
+      imageMenuItem().textContent || "",
+      /图片将随消息交给上游模型处理/,
+    );
   } finally {
     await act(async () => root.unmount());
     restoreApi();
@@ -1050,7 +1055,7 @@ test("Primary failure keeps cached image capability unconfirmed without locking 
   }
 });
 
-test("ChatInput accepts an image draft and checks model support only at submit time", async () => {
+test("ChatInput forwards an image draft without a client model-capability gate", async () => {
   const { dom } = installDom();
   Object.assign(globalThis, { FileReader: dom.window.FileReader });
   const { createRoot } = await import("react-dom/client");
@@ -1089,7 +1094,7 @@ test("ChatInput accepts an image draft and checks model support only at submit t
     });
     assert.ok(
       dom.window.document.querySelector(".image-preview"),
-      "a ready composer accepts an image before capability validation",
+      "a Composer accepts an image before upstream handling",
     );
     const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
       "textarea[aria-label='消息输入']",
@@ -1106,9 +1111,11 @@ test("ChatInput accepts an image draft and checks model support only at submit t
       }));
       dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
     });
-    assert.deepEqual(sent, []);
-    assert.equal(errors.at(-1), "当前模型不支持图片输入");
-    assert.ok(dom.window.document.querySelector(".image-preview"), "rejected images remain removable");
+    assert.equal(sent.length, 1, "an image is forwarded even when model metadata omits image input");
+    assert.equal(sent[0]?.[0], "send retained image");
+    assert.equal((sent[0]?.[1] as unknown[])?.length, 1);
+    assert.deepEqual(errors, [], "model capability metadata does not create a client error");
+    assert.equal(dom.window.document.querySelector(".image-preview"), null, "the forwarded image leaves the draft");
   } finally {
     await act(async () => root.unmount());
   }

@@ -8,6 +8,7 @@
 - Completed process rows retain their frozen final run duration after settlement, SSE recovery, and Session navigation.
 - Scroll restoration is bound to the Pane identity actually committed to the DOM, with a tighter bottom tolerance to avoid restoring the wrong Session position; bottom-pinned timelines remain anchored through delayed image, font, and post-paint layout shifts.
 - Fork/clone-created Sessions receive a durable `（Fork）` display suffix from Pi's `parentSession` metadata, so copied conversations remain distinguishable after refresh and restart.
+- Image attachments are no longer blocked by provisional or unsupported model metadata in the browser; local size/format limits remain, while the upstream model decides whether it can interpret the images.
 
 ## Runtime, SSE, and recovery reliability
 

@@ -10,6 +10,7 @@
 - Completed process rows retain their frozen final run duration after settlement, SSE recovery, and Session navigation.
 - Scroll restoration is bound to the Pane identity actually committed to the DOM, with a tighter bottom tolerance to avoid restoring the wrong Session position; bottom-pinned timelines remain anchored through delayed image, font, and post-paint layout shifts.
 - Fork/clone-created Sessions now receive a durable `（Fork）` display suffix from Pi's `parentSession` metadata, so copied conversations remain distinguishable after refresh and restart.
+- Image attachments are no longer blocked by provisional or unsupported `ModelInfo.input` metadata in the browser; only local payload safety limits are checked before forwarding, and the upstream model decides whether it can interpret the images.
 
 ### Settings and supportability
 
@@ -92,7 +93,7 @@
 ### Streaming and Composer behavior
 
 - Healthy SSE connections coalesce cumulative assistant snapshots per client and Session at the browser render cadence before JSON serialization; terminal/tool/lifecycle frames flush the newest snapshot first, reducing bursty catch-up when several conversations stream in parallel.
-- Primary-relevant Composer editing is disabled until Runtime readiness, while healthy Secondary panes remain independent. Ready drafts accept image attachments immediately and validate pending/unsupported model image capability only at submission without losing text or previews.
+- Primary-relevant Composer editing is disabled until Runtime readiness, while healthy Secondary panes remain independent. Ready drafts accept image attachments immediately and forward them without a client-side model-capability gate, while preserving text and previews on genuine transport/runtime failures.
 - Confirmed slash-command inventories survive transient empty Runtime refreshes, and capability snapshots are scoped to the exact Primary generation and model shape.
 
 ### Conversation and workspace interface

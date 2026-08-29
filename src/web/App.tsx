@@ -5647,12 +5647,9 @@ export function App() {
         return;
       }
 
-      const assertImageCapability = (model: ModelInfo | null | undefined) => {
-        if (!images.length || model?.input?.includes("image")) return;
-        if (!model || !Array.isArray(model.input))
-          throw new Error("模型图片能力尚未确认；请刷新后重试或先发送文字消息");
-        throw new Error("当前模型不支持图片输入");
-      };
+      // ModelInfo.input is advisory metadata only. Prompt delivery owns the
+      // transport boundary; upstream Pi/model handling decides whether the
+      // selected provider can interpret attached images.
 
       // Capture one immutable selection with the send operation. The visible
       // Composer may change while a cold Runtime warms, but that later choice
@@ -5670,33 +5667,9 @@ export function App() {
       const capturedPromptSettings = promptSettingsForSelection(
         capturedSelection,
       );
-      // A child JSONL's historical settings describe the child only. They must
-      // never silently reconfigure its parent merely because this composer
-      // routes an ordinary message to that verified parent.
-      const sendingFromChildView =
-        Boolean(targetSessionId) &&
-        targetSessionId !== viewedSessionIdRef.current;
-      const preferredModel =
-        capturedSelection?.model !== undefined
-          ? capturedSelection.model
-          : sendingFromChildView
-            ? undefined
-            : state.model;
-      const preferredThinking =
-        capturedSelection?.thinkingLevel !== undefined
-          ? capturedSelection.thinkingLevel
-          : sendingFromChildView
-            ? undefined
-            : (state.thinkingLevel as ThinkingLevel | undefined);
-      // A child transcript's model describes only that child. It is never
-      // capability evidence for a parent-targeted ordinary prompt.
-      let confirmedPromptModel = sendingFromChildView
-        ? undefined
-        : preferredModel || state.model;
       let initialPromptResult: Awaited<ReturnType<typeof api.prompt>> | null =
         null;
       if (localDraftRef.current) {
-        assertImageCapability(preferredModel);
         const draftAuthority = captureDraftPaneAuthority();
         dispatchPane({
           type: "PROMPT_PREPARING",
@@ -5826,7 +5799,6 @@ export function App() {
         // selection is applied by the server together with this prompt.
         const ready = await warmSessionRuntime(targetSessionId);
         if (!promptOperationIsInCurrentRun()) return;
-        confirmedPromptModel = preferredModel || ready.state.model;
         const activationIsCurrent = applyWarmReadiness(
           targetSessionId,
           ready,
@@ -5848,8 +5820,6 @@ export function App() {
           status: WAITING_FOR_PI_STATUS,
         });
       }
-
-      if (!initialPromptResult) assertImageCapability(confirmedPromptModel);
 
       promptBusyRelease = () => {
         finishSessionBusy();
@@ -7944,10 +7914,9 @@ export function App() {
   // single-flight recovery trigger, so do not leave the UI permanently locked.
   const primarySettingsUnavailable =
     viewedSessionId === activeSessionId && primaryRuntime.status === "starting";
-  // An existing Secondary can keep working while Primary starts or recovers,
-  // but a Primary pane, cold history, or local New draft needs both a ready
-  // Runtime and a committed same-model Bootstrap snapshot before image input is
-  // authoritative. A ready SSE alone carries no ModelInfo.input capability.
+  // An existing Secondary can keep working while Primary starts or recovers.
+  // ModelInfo.input is retained as advisory UI metadata only: a ready SSE or
+  // Bootstrap snapshot may be incomplete, but neither may block prompt delivery.
   const primaryCapabilityRelevant =
     localDraft ||
     viewedSessionId === activeSessionId ||
@@ -7974,16 +7943,6 @@ export function App() {
     primaryCapabilityRelevant && primaryRuntime.status !== "ready";
   const primaryCapabilityPending =
     primaryCapabilityRelevant && !primaryCapabilityConfirmed;
-  const primaryRuntimeDisabledPlaceholder =
-    primaryRuntime.status === "failed"
-      ? "Pi Runtime 当前不可用；恢复 ready 后才能输入"
-      : "Pi 正在准备；Runtime ready 后才能输入";
-  const imageInputPendingMessage =
-    primaryRuntime.status === "failed"
-      ? "Pi 当前不可用，模型图片能力尚未确认"
-      : primaryRuntime.status === "ready"
-        ? "模型图片能力尚未确认；文字消息仍可发送"
-        : "Pi 正在准备，模型图片能力尚未确认";
   const primarySessionFailed = false;
   const gateAvailable = gateAvailableOverride ?? true;
   // A staged value can describe the next prompt in a cold history pane, but
@@ -8715,12 +8674,6 @@ export function App() {
             composerState.model?.input?.includes("image") === true,
           imageInputPending:
             !viewingSubagentSession && primaryCapabilityPending,
-          imageInputPendingMessage,
-          resolveImageCapabilityOnSend:
-            !viewingSubagentSession &&
-            primaryRuntime.status === "ready" &&
-            !localDraft &&
-            runtimeStatus !== "active",
           restoredDraft: restoredComposerDrafts[composerDraftKeyId(composerDraftKey)] || null,
           onDraftRevisionChange: (key, revision, hasContent) => {
             const keyId = composerDraftKeyId(key);

@@ -1055,7 +1055,7 @@ test("opening a cold conversation paints JSONL without starting a dedicated Runt
   }
 });
 
-test("a cold image prompt prepares its Runtime before validating model support", async () => {
+test("a cold image prompt prepares its Runtime before forwarding the prompt", async () => {
   const { dom } = installDom();
   Object.assign(globalThis, { FileReader: dom.window.FileReader });
   const { createRoot } = await import("react-dom/client");

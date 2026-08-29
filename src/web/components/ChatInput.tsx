@@ -97,7 +97,7 @@ export function commandMatches(value: string, commands: SlashCommand[]): SlashCo
   }).sort((a, b) => a.rank - b.rank || a.score - b.score || a.command.name.localeCompare(b.command.name)).slice(0, 9).map(({ command }) => command);
 }
 
-export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, placeholder, acceptsImages, imageInputPending = false, imageInputPendingMessage = "模型图片能力尚未确认", resolveImageCapabilityOnSend = false, restoredDraft, onDraftRevisionChange, draftKey, forgottenComposerKeys = [], submissionScope, submissionTargetSessionId, allowFollowupSubmissions = true, submissionPaused = false, onSubmissionPendingChange, commands, controls, notices, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles, onError }: {
+export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, placeholder, acceptsImages, imageInputPending = false, restoredDraft, onDraftRevisionChange, draftKey, forgottenComposerKeys = [], submissionScope, submissionTargetSessionId, allowFollowupSubmissions = true, submissionPaused = false, onSubmissionPendingChange, commands, controls, notices, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles, onError }: {
   /** True when a submission will enter the local queue. */
   streaming: boolean;
   /** True only while Pi is actively generating and can be stopped. */
@@ -106,13 +106,10 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   disabled: boolean;
   disabledPlaceholder?: string;
   placeholder?: string;
+  /** Advisory model metadata used only for the attachment hint; it never gates forwarding. */
   acceptsImages: boolean;
-  /** The selected model is provisional until the current Runtime confirms it. */
+  /** The selected model metadata is provisional; unknown support never blocks forwarding. */
   imageInputPending?: boolean;
-  /** Explains whether preparation, metadata synchronization, or recovery owns the wait. */
-  imageInputPendingMessage?: string;
-  /** A cold/draft send can prepare its Runtime before validating image support. */
-  resolveImageCapabilityOnSend?: boolean;
   /** A cancelled queued prompt replaces the current Composer draft. */
   restoredDraft?: ComposerRestoredDraft | null;
   onDraftRevisionChange?: (key: ComposerDraftKey, revision: number, hasContent: boolean) => void;
@@ -219,6 +216,11 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   const imageAttachmentLimitReached =
     images.length >= MAX_PROMPT_IMAGES ||
     promptImagesByteLength(images) >= MAX_PROMPT_IMAGES_TOTAL_BYTES;
+  const imageAttachmentHint = imageInputPending
+    ? "最多 10 张，单张 8 MB / 总计 40 MB；能力未知，仍会直接发送给上游模型"
+    : acceptsImages
+      ? "最多 10 张，单张 8 MB / 总计 40 MB；图片将随消息交给上游模型处理"
+      : "最多 10 张，单张 8 MB / 总计 40 MB；是否支持由上游模型返回结果";
 
   const closeAttachmentMenu = (restoreFocus = false) => {
     setAttachmentOpen(false);
@@ -291,14 +293,9 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
       onError("Slash 指令不能作为 Steer 消息发送");
       return;
     }
-    if (
-      current.images.length &&
-      !resolveImageCapabilityOnSend &&
-      (imageInputPending || !acceptsImages)
-    ) {
-      onError(imageInputPending ? imageInputPendingMessage : "当前模型不支持图片输入");
-      return;
-    }
+    // ModelInfo.input is advisory metadata, not a client-side admission gate.
+    // Forward the complete prompt and let the upstream model/API decide whether
+    // it can interpret the attached images and return an ordinary response.
     composer.submit(delivery);
   };
 
@@ -410,7 +407,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
             <div className="attachment-control" ref={attachmentRef}>
               <button ref={attachmentButtonRef} type="button" className={`attachment-button ${attachmentOpen ? "is-open" : ""}`} disabled={editorDisabled || pickingFiles} onClick={() => attachmentOpen ? closeAttachmentMenu(true) : setAttachmentOpen(true)} title="添加附件" aria-label="添加附件" aria-haspopup="menu" aria-expanded={attachmentOpen}><PaperclipIcon /></button>
               {attachmentOpen && <div ref={attachmentMenuRef} className="attachment-menu" role="menu">
-                <button type="button" role="menuitem" disabled={imageAttachmentLimitReached} onClick={() => { setAttachmentOpen(false); composer.edit(composer.currentDraft().message); imageInputRef.current?.click(); }}><ImageIcon className="attachment-menu-icon" /><strong>图片</strong><small>{resolveImageCapabilityOnSend ? "最多 10 张，单张 8 MB / 总计 40 MB；发送时准备 Runtime 并检查支持" : imageInputPending ? "最多 10 张，单张 8 MB / 总计 40 MB；发送前等待模型能力同步" : acceptsImages ? "最多 10 张，单张 8 MB / 总计 40 MB；直接解析，可粘贴或拖入" : "最多 10 张，单张 8 MB / 总计 40 MB；发送时检查模型支持"}</small></button>
+                <button type="button" role="menuitem" disabled={imageAttachmentLimitReached} onClick={() => { setAttachmentOpen(false); composer.edit(composer.currentDraft().message); imageInputRef.current?.click(); }}><ImageIcon className="attachment-menu-icon" /><strong>图片</strong><small>{imageAttachmentHint}</small></button>
                 <button type="button" role="menuitem" disabled={pickingFiles} onClick={() => void pickFiles()}><FileSearchIcon className="attachment-menu-icon" /><strong>{pickingFiles ? "选择中…" : "本地文件"}</strong><small>引用 Windows 绝对路径</small></button>
               </div>}
               <input ref={imageInputRef} className="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple onChange={(event) => { void addImages([...event.target.files || []]); event.target.value = ""; }} />

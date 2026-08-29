@@ -248,8 +248,8 @@ test("clicking a verified Subagent row opens its read-only transcript without wa
     await act(async () => attachment.click());
     assert.match(
       dom.window.document.querySelector(".attachment-menu")?.textContent || "",
-      /发送时检查模型支持/,
-      "child historical image capability never authorizes a parent-targeted attachment",
+      /是否支持由上游模型返回结果/,
+      "child historical image capability is advisory and never blocks a parent-targeted attachment",
     );
     const parentBreadcrumb = dom.window.document.querySelector<HTMLButtonElement>(
       '.topbar-breadcrumb-link[aria-label="返回父对话：Active"]',
