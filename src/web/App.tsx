@@ -3600,17 +3600,24 @@ export function App() {
           event.message && typeof event.message === "object"
             ? (event.message as PiMessage)
             : null;
+        const nativeSteeringConsumed =
+          (event as { nativeSteeringConsumed?: boolean }).nativeSteeringConsumed === true;
+        const nativeSteeringId =
+          typeof (event as { nativeSteeringId?: unknown }).nativeSteeringId === "string" &&
+          /^[a-f0-9-]{36}$/i.test((event as { nativeSteeringId: string }).nativeSteeringId)
+            ? (event as { nativeSteeringId: string }).nativeSteeringId
+            : undefined;
+        if (type === "message_start" && eventSessionId)
+          streamingWireProjectionsRef.current.delete(eventSessionId);
         if (type === "message_start" && rawMessage?.role === "user" && eventSessionId) {
           const localTurns = localUserTurnsRef.current.get(eventSessionId) || [];
           // Only a server-verified native steer consumption may reveal a hidden
           // local Steer turn. Pi dequeues the steering message before forwarding
           // this message_start, so an ordinary prompt sharing the same text can
           // never be mistaken for a consumed Steer.
-          const consumed =
-            (event as { nativeSteeringConsumed?: boolean })
-              .nativeSteeringConsumed === true
-              ? consumeLocalSteeringTurn(localTurns, rawMessage)
-              : undefined;
+          const consumed = nativeSteeringConsumed
+            ? consumeLocalSteeringTurn(localTurns, rawMessage, nativeSteeringId)
+            : undefined;
           if (consumed) {
             const acceptedTurnTotal = consumed.expectedTurnTotal;
             setSessions((current) =>
@@ -3622,12 +3629,15 @@ export function App() {
               ),
             );
           }
-          if (consumed) {
+          if (consumed || nativeSteeringId) {
+            const consumedId = consumed?.queueId || nativeSteeringId;
             syncPendingSteers(
               eventSessionId,
-              (pendingSteersRef.current.get(eventSessionId) || []).filter(
-                (item) => item.id !== consumed.queueId,
-              ),
+              consumedId
+                ? (pendingSteersRef.current.get(eventSessionId) || []).filter(
+                    (item) => item.id !== consumedId,
+                  )
+                : [],
             );
           }
           if (consumed && viewingEventSession) {

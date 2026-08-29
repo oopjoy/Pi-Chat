@@ -176,11 +176,16 @@ export function promoteTurnsAbsentFromQueue(
   }
 }
 
-/** Reveal the first matching native steering turn when Pi actually consumes it. */
-export function consumeLocalSteeringTurn(turns: LocalUserTurn[], message: PiMessage): LocalUserTurn | undefined {
+/** Reveal the native steering turn Pi actually consumes. */
+export function consumeLocalSteeringTurn(
+  turns: LocalUserTurn[],
+  message: PiMessage,
+  queueId?: string,
+): LocalUserTurn | undefined {
   const incoming = textAndImageCount(message);
   const turn = turns.find((candidate) => {
     if (!candidate.revealOnMessageStart || candidate.queueState !== "waiting") return false;
+    if (queueId) return candidate.queueId === queueId;
     const shape = textAndImageCount(candidate.message);
     const sameText =
       shape.text === incoming.text ||

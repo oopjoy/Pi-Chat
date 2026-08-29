@@ -2464,23 +2464,23 @@ export class PiChatApp {
     sessionId: string,
     event: Record<string, unknown>,
     generation: number,
-  ): boolean {
-    if (event.type !== "message_start") return false;
+  ): string | undefined {
+    if (event.type !== "message_start") return undefined;
     const text = this.nativeSteeringMessageText(event);
     const snapshot = this.pendingNativeSteeringBySession.get(sessionId);
     const admissions = this.nativeSteeringAdmissionsBySession.get(sessionId);
-    if (!text || !snapshot || !admissions) return false;
+    if (!text || !snapshot || !admissions) return undefined;
     if (
       snapshot.generation !== generation ||
       admissions.generation !== generation
     )
-      return false;
+      return undefined;
     const dequeuedIndex = snapshot.dequeued.indexOf(text);
-    if (dequeuedIndex < 0) return false;
+    if (dequeuedIndex < 0) return undefined;
     const index = admissions.items.findIndex(
       (admission) => admission.message === text,
     );
-    if (index < 0) return false;
+    if (index < 0) return undefined;
     snapshot.dequeued.splice(dequeuedIndex, 1);
     const [consumed] = admissions.items.splice(index, 1);
     if (admissions.items.length)
@@ -2491,7 +2491,7 @@ export class PiChatApp {
     else this.pendingNativeSteeringBySession.delete(sessionId);
     this.nativeSteeringResetAfterSettlement.delete(sessionId);
     this.noteUserPrompt(sessionId, consumed.promptAt);
-    return true;
+    return consumed.id;
   }
 
   private updateNativeSteeringSnapshot(
@@ -2700,7 +2700,9 @@ export class PiChatApp {
     if (consumedSteering || droppedNativeSteering > 0)
       transition.broadcastEvent = {
         ...transition.broadcastEvent,
-        ...(consumedSteering ? { nativeSteeringConsumed: true } : null),
+        ...(consumedSteering
+          ? { nativeSteeringConsumed: true, nativeSteeringId: consumedSteering }
+          : null),
         ...(droppedNativeSteering > 0
           ? { nativeSteeringDroppedCount: droppedNativeSteering }
           : null),
@@ -3277,7 +3279,9 @@ export class PiChatApp {
     if (consumedSteering || droppedNativeSteering > 0)
       transition.broadcastEvent = {
         ...transition.broadcastEvent,
-        ...(consumedSteering ? { nativeSteeringConsumed: true } : null),
+        ...(consumedSteering
+          ? { nativeSteeringConsumed: true, nativeSteeringId: consumedSteering }
+          : null),
         ...(droppedNativeSteering > 0
           ? { nativeSteeringDroppedCount: droppedNativeSteering }
           : null),

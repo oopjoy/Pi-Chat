@@ -119,6 +119,22 @@ test("delta-only Runtime updates become cumulative browser snapshots", () => {
   ]);
 });
 
+test("each assistant message_start resets the prior cumulative tool projection", () => {
+  const previous = {
+    ...base(),
+    liveMessage: {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "old-edit", name: "edit", arguments: {} }],
+    },
+  };
+  const next = transitionRuntimeEvent("session-a", previous, {
+    type: "message_start",
+    message: { role: "assistant", content: [] },
+    assistantMessageEvent: { type: "thinking_start", contentIndex: 0 },
+  });
+  assert.deepEqual(next.state.liveMessage?.content, [{ type: "thinking", thinking: "" }]);
+});
+
 test("malformed huge content indexes cannot expand the live projection", () => {
   const previous = {
     ...base(),

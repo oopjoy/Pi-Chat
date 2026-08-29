@@ -1831,6 +1831,7 @@ test("App reveals a Steer turn only when Pi consumes it", async () => {
   const { App } = await import("../../src/web/App");
   const restoreApi = captureApiSnapshot(api);
   const promptCalls: unknown[][] = [];
+  let steerId = "";
   Object.assign(api, {
     bootstrap: async () => ({
       ...bootstrap,
@@ -1844,6 +1845,7 @@ test("App reveals a Steer turn only when Pi consumes it", async () => {
     markSessionViewed: async () => ({ viewing: activeId }),
     prompt: async (...args: unknown[]) => {
       promptCalls.push(args);
+      steerId = String(args[6] || "");
       return { accepted: true, queued: false, steered: true };
     },
   });
@@ -1896,7 +1898,8 @@ test("App reveals a Steer turn only when Pi consumes it", async () => {
         type: "message_start",
         piChatSessionId: activeId,
         nativeSteeringConsumed: true,
-        message: { role: "user", content: "redirect consumed later" },
+        nativeSteeringId: steerId,
+        message: { role: "user", content: "provider-normalized" },
       }),
     );
     assert.equal(

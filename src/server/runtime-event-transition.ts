@@ -76,7 +76,14 @@ export function transitionRuntimeEvent(
     state = { ...state, runGeneration: state.runGeneration + 1, running: true, dispatching: false, toolStatus: "Pi 正在思考…" };
     effects.push({ type: "context-start" }, { type: "session-created" });
   }
-  if (type === "message_start") effects.push({ type: "session-created" });
+  if (type === "message_start") {
+    effects.push({ type: "session-created" });
+    // A user message_start is the boundary before the next assistant message;
+    // clear any stale live projection even when the provider omits the next
+    // assistant start payload.
+    if (!event.message || (event.message as PiMessage).role !== "assistant")
+      state = { ...state, liveMessage: undefined };
+  }
   if (type === "compaction_start") {
     state = {
       ...state,
@@ -99,8 +106,11 @@ export function transitionRuntimeEvent(
     && typeof event.message === "object"
     && (event.message as PiMessage).role === "assistant"
   ) {
+    // Every assistant message_start opens a new provider message. A delta-only
+    // start may omit its payload, so never carry the previous assistant's
+    // cumulative tool/thinking blocks into the next model call.
     const liveMessage = accumulateStreamingAssistantMessage(
-      state.liveMessage,
+      type === "message_start" ? undefined : state.liveMessage,
       event.message as PiMessage,
       event.assistantMessageEvent,
     );
