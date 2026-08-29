@@ -13,8 +13,18 @@ beforeEach(() => {
 });
 
 function withGeometry(element: HTMLElement, scrollHeight: number, clientHeight: number): void {
+  let top = 0;
   Object.defineProperty(element, "scrollHeight", { configurable: true, value: scrollHeight });
   Object.defineProperty(element, "clientHeight", { configurable: true, value: clientHeight });
+  // Browsers clamp scrollTop to scrollHeight - clientHeight; model that here
+  // instead of allowing jsdom to accept an impossible scrollTop.
+  Object.defineProperty(element, "scrollTop", {
+    configurable: true,
+    get: () => top,
+    set: (value: number) => {
+      top = Math.min(Math.max(0, value), Math.max(0, scrollHeight - clientHeight));
+    },
+  });
 }
 
 function activeMessages(): PiMessage[] {
@@ -79,7 +89,7 @@ test("opening New resets a reused timeline to the latest bottom", async () => {
       newButton.click();
       await Promise.resolve();
     });
-    assert.equal(timeline.scrollTop, 2_400, "New must not inherit the previous Session reading position");
+    assert.equal(timeline.scrollTop, 1_800, "New must not inherit the previous Session reading position");
   } finally {
     restoreApi();
     await act(async () => root.unmount());
@@ -121,7 +131,7 @@ test("returning to a hot Session restores its remembered reading position", asyn
       newButton.click();
       await Promise.resolve();
     });
-    assert.equal(timeline.scrollTop, 2_400, "New must move the old timeline to the latest position");
+    assert.equal(timeline.scrollTop, 1_800, "New must move the old timeline to the latest position");
     const sessionAButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
       .find((button) => button.textContent?.includes("Active"));
     assert.ok(sessionAButton);
