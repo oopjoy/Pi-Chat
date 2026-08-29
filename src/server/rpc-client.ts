@@ -626,6 +626,13 @@ export class PiRpcClient {
     this.lateResponses.set(requestId, { handler, timer });
   }
 
+  private clearLateResponse(requestId: string): void {
+    const entry = this.lateResponses.get(requestId);
+    if (!entry) return;
+    clearTimeout(entry.timer);
+    this.lateResponses.delete(requestId);
+  }
+
   private clearLateResponses(): void {
     for (const entry of this.lateResponses.values()) clearTimeout(entry.timer);
     this.lateResponses.clear();
@@ -962,7 +969,16 @@ export class PiRpcClient {
       this.pending.set(id, pending);
       try {
         child.stdin.write(frame, (error) => {
-          if (!error || this.pending.get(id) !== pending) return;
+          if (!error) return;
+          if (this.pending.get(id) !== pending) {
+            // A timed-out shared read remains in outstandingReadQueryIds until
+            // its response arrives, but a later stdin error proves that no
+            // response can arrive from this write. Release that read slot.
+            if (sharedRead && this.outstandingReadQueryIds.get(type) === id)
+              this.outstandingReadQueryIds.delete(type);
+            this.clearLateResponse(id);
+            return;
+          }
           clearTimeout(pending.timer);
           this.pending.delete(id);
           if (sharedRead && this.outstandingReadQueryIds.get(type) === id)

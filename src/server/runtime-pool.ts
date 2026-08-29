@@ -646,11 +646,14 @@ export class RuntimePool {
     }
   }
 
-  async recover(runtime: SecondaryRuntime): Promise<void> {
+  async recover(
+    runtime: SecondaryRuntime,
+    allowClosedAdmission = false,
+  ): Promise<void> {
     if (runtime.recovery) return runtime.recovery;
     if (this.options.isClosed())
       throw new OperationAdmissionClosedError("Pi Chat 正在关闭，请稍后重试");
-    if (runtime.operationAdmission.isClosed)
+    if (runtime.operationAdmission.isClosed && !allowClosedAdmission)
       throw new OperationAdmissionClosedError("会话运行时正在确认退出，请稍后重试");
     // Existing healthy Secondary workers remain independent from later Primary
     // loss. A crashed worker is a fresh capability acquisition and therefore

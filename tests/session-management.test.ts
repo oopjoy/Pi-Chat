@@ -107,6 +107,7 @@ class OutcomeUnknownCopyWorker extends CopyWorker {
   override async send(command: Record<string, unknown>) {
     if (command.type === "clone") {
       if (this.switchBeforeTimeout) await super.send(command);
+      else this.commands.push(command);
       throw new RpcRequestTimeoutError("clone", "written-outcome-unknown");
     }
     return super.send(command);
@@ -157,11 +158,11 @@ class HookCopyWorker extends CopyWorker {
 class SessionWorker {
   commands: Record<string, unknown>[] = [];
   stopped = false;
-  constructor(private readonly path: string) {}
+  constructor(protected readonly path: string) {}
   onEvent() { return () => {}; }
   async start() {}
   async stop() { this.stopped = true; }
-  async send(command: Record<string, unknown>) {
+  async send(command: Record<string, unknown>, _timeoutMs?: number, _options?: unknown) {
     this.commands.push(command);
     if (command.type === "get_state") return { type: "response", success: true, data: { model: null, sessionFile: this.path, sessionId: "history", isStreaming: false } };
     if (command.type === "get_messages") return { type: "response", success: true, data: { messages: [] } };
@@ -173,6 +174,25 @@ class SessionWorker {
       return { type: "response", success: true };
     }
     throw new Error(`Unexpected command: ${String(command.type)}`);
+  }
+}
+
+class UnknownRenameWorker extends SessionWorker {
+  private unresolved = true;
+  lateResponse?: (response: Record<string, unknown>, requestId: string) => void;
+
+  override async send(command: Record<string, unknown>, timeoutMs?: number, options?: unknown) {
+    if (command.type === "set_session_name" && this.unresolved) {
+      this.lateResponse = (options as { onLateResponse?: (response: Record<string, unknown>, requestId: string) => void } | undefined)?.onLateResponse;
+      this.commands.push(command);
+      throw new RpcRequestTimeoutError("set_session_name");
+    }
+    return super.send(command, timeoutMs, options as never);
+  }
+
+  resolveLate(): void {
+    this.unresolved = false;
+    this.lateResponse?.({ type: "response", success: true }, "late-rename");
   }
 }
 
@@ -628,6 +648,61 @@ test("cold Secondary copy uses its single attached writer and restores the sourc
   }
 });
 
+test("an uncertain cold Secondary rename remains fenced until its late response", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-rename-unknown-"));
+  try {
+    const primaryPath = join(root, "primary.jsonl");
+    const sourcePath = join(root, "source.jsonl");
+    await writeFile(primaryPath, JSON.stringify({ type: "session", id: "primary", cwd: process.cwd() }) + "\n");
+    await writeFile(sourcePath, [
+      { type: "session", id: "source", cwd: process.cwd() },
+      { type: "message", id: "u1", parentId: null, message: { role: "user", content: "source" } },
+    ].map(JSON.stringify).join("\n") + "\n");
+    const primary = new SessionWorker(primaryPath);
+    const worker = new UnknownRenameWorker(sourcePath);
+    const sessions = new SessionIndex(root, join(root, "cache.json"));
+    const app = new PiChatApp({
+      rpc: primary as unknown as PiRpcClient,
+      createRpc: () => worker as unknown as PiRpcClient,
+      sessions,
+      resources: {} as ResourceManager,
+      cwd: process.cwd(),
+      webRoot: process.cwd(),
+    });
+    const server = createServer((request, response) => void app.handle(request, response));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const origin = `http://127.0.0.1:${address.port}`;
+    const id = idForPath(sourcePath);
+    const patch = (name: string) => fetch(`${origin}/api/sessions/${id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    try {
+      await fetch(`${origin}/api/bootstrap`);
+      const first = await patch("first name");
+      const firstBody = await first.json() as { code?: string; error?: string };
+      assert.equal(first.status, 409, JSON.stringify(firstBody));
+      assert.equal(firstBody.code, "RESULT_PENDING");
+      const second = await patch("second name");
+      assert.equal(second.status, 409);
+      assert.equal((await second.json() as { code?: string }).code, "RESULT_PENDING");
+      assert.equal(worker.commands.filter((command) => command.type === "set_session_name").length, 1);
+      worker.resolveLate();
+      const third = await patch("confirmed name");
+      assert.equal(third.status, 200);
+      assert.equal(worker.commands.filter((command) => command.type === "set_session_name").length, 2);
+    } finally {
+      server.close();
+      await app.close();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("written-outcome-unknown Clone reconciles a switched destination and warns when unresolved", async () => {
   const run = async (switchBeforeTimeout: boolean) => {
     const root = await mkdtemp(join(tmpdir(), "pi-chat-copy-unknown-"));
@@ -656,21 +731,30 @@ test("written-outcome-unknown Clone reconciles a switched destination and warns 
     assert.ok(address && typeof address === "object");
     try {
       await fetch(`http://127.0.0.1:${address.port}/api/bootstrap`);
-      const response = await fetch(
-        `http://127.0.0.1:${address.port}/api/sessions/${idForPath(sourcePath)}/clone`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: "{}",
-        },
-      );
-      return {
+      const copyUrl = `http://127.0.0.1:${address.port}/api/sessions/${idForPath(sourcePath)}/clone`;
+      const response = await fetch(copyUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      const result = {
         status: response.status,
         body: await response.json() as { session?: { id: string }; error?: string },
         destinationPath,
         sourcePath,
         primary,
+        retryStatus: undefined as number | undefined,
       };
+      if (!switchBeforeTimeout) {
+        const retry = await fetch(copyUrl, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+        });
+        result.retryStatus = retry.status;
+        await retry.arrayBuffer();
+      }
+      return result;
     } finally {
       server.close();
       await app.close();
@@ -686,6 +770,8 @@ test("written-outcome-unknown Clone reconciles a switched destination and warns 
   const unresolved = await run(false);
   assert.equal(unresolved.status, 409);
   assert.match(unresolved.body.error || "", /结果尚未确认.*不要重复操作/);
+  assert.equal(unresolved.retryStatus, 409, "an ambiguous copy remains fenced against a duplicate retry");
+  assert.equal(unresolved.primary.commands.filter((command) => command.type === "clone").length, 1);
   assert.equal(unresolved.primary.currentPath(), unresolved.sourcePath);
 });
 
@@ -1207,12 +1293,19 @@ test("an uncertain Primary new_session fences a destructive delete retry", async
       { type: "message", id: "u1", parentId: null, message: { role: "user", content: "keep me" } },
     ].map(JSON.stringify).join("\n") + "\n");
     class UncertainDeleteWorker extends SessionWorker {
-      override async send(command: Record<string, unknown>) {
+      lateResponse?: (response: Record<string, unknown>, requestId: string) => void;
+
+      override async send(command: Record<string, unknown>, timeoutMs?: number, options?: unknown) {
         if (command.type === "new_session") {
+          this.lateResponse = (options as { onLateResponse?: (response: Record<string, unknown>, requestId: string) => void } | undefined)?.onLateResponse;
           this.commands.push(command);
           throw new RpcRequestTimeoutError("new_session");
         }
-        return super.send(command);
+        return super.send(command, timeoutMs, options);
+      }
+
+      resolveLate(): void {
+        this.lateResponse?.({ type: "response", success: true }, "late-delete");
       }
     }
     const worker = new UncertainDeleteWorker(primaryPath);
@@ -1241,6 +1334,8 @@ test("an uncertain Primary new_session fences a destructive delete retry", async
       assert.equal((await second.json() as { code?: string }).code, "RESULT_PENDING");
       assert.equal(worker.commands.filter((command) => command.type === "new_session").length, 1);
       assert.equal(existsSync(primaryPath), true);
+      worker.resolveLate();
+      assert.equal((app as unknown as { deletionOutcomePendingBySession: Set<string> }).deletionOutcomePendingBySession.has(id), false, "a matching late new_session response releases the retry fence");
     } finally {
       server.close();
       await app.close();

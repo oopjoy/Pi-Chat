@@ -634,6 +634,29 @@ test("timed-out read queries reject duplicates until their late response is cons
   await client.stop();
 });
 
+test("a delayed stdin error releases a timed-out shared read slot", async () => {
+  const { child, writes } = fakeChild();
+  let writeCallback: ((error?: Error | null) => void) | undefined;
+  child.stdin.write = (value, callback) => {
+    writes.push(value);
+    writeCallback = callback;
+    return true;
+  };
+  const client = new PiRpcClient({ cwd: process.cwd() });
+  const internals = client as unknown as {
+    child: typeof child | null;
+    outstandingReadQueryIds: Map<string, string>;
+  };
+  internals.child = child;
+  const pending = client.send({ type: "get_state" }, 5);
+  await assert.rejects(pending, /请求超时/);
+  assert.equal(internals.outstandingReadQueryIds.has("get_state"), true);
+  writeCallback?.(new Error("stdin closed after timeout"));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(internals.outstandingReadQueryIds.has("get_state"), false);
+  await client.stop();
+});
+
 test("startup get_state uses one long budget instead of retrying an orphan query", async () => {
   const { child, writes } = fakeChild();
   const client = new PiRpcClient({ cwd: process.cwd() });
