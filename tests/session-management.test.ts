@@ -305,13 +305,14 @@ test("clone and persisted User fork create independent cold Sessions", async () 
       });
       assert.equal(forkedResponse.status, 200);
       const forked = await forkedResponse.json() as {
-        session: { id: string };
+        session: { id: string; name: string };
         editorText?: string;
         editorImages?: Array<{ type: "image"; data: string; mimeType: string }>;
         forkOrigin?: { sourceSessionId: string; sourceName: string; sourcePersistedMessageId: string; createdAt: number; sourceAvailable: boolean };
       };
       const forkedId = idForPath(forkPath);
       assert.equal(forked.session.id, forkedId);
+      assert.equal(forked.session.name, "first prompt（Fork）");
       assert.equal(forked.editorText, "second prompt");
       assert.deepEqual(forked.editorImages, [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }]);
       assert.deepEqual(forked.forkOrigin, {

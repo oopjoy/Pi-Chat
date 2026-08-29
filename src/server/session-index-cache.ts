@@ -65,10 +65,10 @@ function validEntry(value: unknown): value is SessionCacheEntry {
 export async function loadSessionCache(path: string): Promise<Map<string, SessionCacheEntry>> {
   try {
     const value = JSON.parse(await readFile(path, "utf8")) as Partial<SessionCacheFile>;
-    // v5 adds filesystem identity and content fingerprint anchors. Older cache
-    // entries are intentionally discarded once so a restart cannot trust the
-    // historical mtime+size-only key.
-    if (value.version !== 5 || !value.entries || typeof value.entries !== "object") return new Map();
+    // v6 also invalidates summaries produced before derived fork names were
+    // projected. Older cache entries are intentionally discarded once so a
+    // restart cannot retain an indistinguishable copied-session title.
+    if (value.version !== 6 || !value.entries || typeof value.entries !== "object") return new Map();
     return new Map(Object.entries(value.entries).filter((entry): entry is [string, SessionCacheEntry] => validEntry(entry[1])));
   } catch {
     return new Map();
@@ -78,7 +78,7 @@ export async function loadSessionCache(path: string): Promise<Map<string, Sessio
 export async function saveSessionCache(path: string, entries: Map<string, SessionCacheEntry>): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
-  const data: SessionCacheFile = { version: 5, entries: Object.fromEntries(entries) };
+  const data: SessionCacheFile = { version: 6, entries: Object.fromEntries(entries) };
   await writeFile(temporary, `${JSON.stringify(data)}\n`, "utf8");
   await rename(temporary, path);
 }

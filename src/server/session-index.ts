@@ -14,6 +14,8 @@ interface SessionHeader {
   type?: string;
   id?: string;
   cwd?: string;
+  /** Pi writes this on sessions created by fork/clone. */
+  parentSession?: string;
 }
 
 export type SessionFileVersion = Pick<SessionCacheEntry, "mtimeMs" | "ctimeMs" | "birthtimeMs" | "size" | "dev" | "ino" | "fingerprint">;
@@ -56,6 +58,8 @@ interface SessionEntry {
   parentId?: string | null;
   timestamp?: string | number;
   cwd?: string;
+  /** Present on a durable child session created from another session. */
+  parentSession?: string;
   name?: string;
   provider?: string;
   modelId?: string;
@@ -81,6 +85,15 @@ function textFromContent(content: unknown): string {
 function cleanPreview(value: string, limit = 90): string {
   const clean = value.replace(/\s+/g, " ").trim();
   return clean.length > limit ? `${clean.slice(0, limit - 1)}…` : clean;
+}
+
+const DERIVED_SESSION_SUFFIX = "（Fork）";
+
+/** Keep copied/forked sessions distinguishable after a restart and cache hit. */
+function derivedSessionDisplayName(name: string): string {
+  if (name.endsWith(DERIVED_SESSION_SUFFIX)) return name;
+  const baseLimit = Math.max(1, 120 - DERIVED_SESSION_SUFFIX.length);
+  return `${cleanPreview(name, baseLimit)}${DERIVED_SESSION_SUFFIX}`;
 }
 
 /**
@@ -178,7 +191,14 @@ async function readSessionEntries(path: string): Promise<SessionEntry[]> {
 
 /** Sidebar scans retain branch identity and compact user facts, never full replies/tool payloads. */
 function outlineSessionEntry(entry: SessionEntry): SessionEntry | null {
-  if (entry.type === "session") return { type: entry.type, id: entry.id, cwd: entry.cwd };
+  if (entry.type === "session") {
+    return {
+      type: entry.type,
+      id: entry.id,
+      cwd: entry.cwd,
+      ...(typeof entry.parentSession === "string" ? { parentSession: entry.parentSession } : null),
+    };
+  }
   if (entry.type === "session_info") return { type: entry.type, name: entry.name };
   if (entry.type !== "message") return entry.id || entry.parentId
     ? { type: entry.type, id: entry.id, parentId: entry.parentId, timestamp: entry.timestamp }
@@ -390,7 +410,13 @@ function sessionSummaryFromEntries(
   // A Pi process creates an empty JSONL before the user actually starts a conversation.
   // Those draft files belong to the composer, not to the persisted sidebar history.
   if (messageCount === 0) return null;
-  const displayName = cleanPreview(options.displayName || name || preview || "新会话", 120);
+  const baseDisplayName = cleanPreview(options.displayName || name || preview || "新会话", 120);
+  const isDerivedSession = !options.displayName
+    && typeof header.parentSession === "string"
+    && header.parentSession.trim().length > 0;
+  const displayName = isDerivedSession
+    ? derivedSessionDisplayName(baseDisplayName)
+    : baseDisplayName;
   if (!options.includeSubagents && isSubagentSession(path, displayName)) return null;
   return {
     id: idForPath(path),

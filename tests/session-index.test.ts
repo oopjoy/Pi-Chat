@@ -38,6 +38,28 @@ test("session index extracts header, title, preview, message count and user turn
   }
 });
 
+test("session index marks a persisted fork/clone with a distinguishable suffix", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-derived-session-name-"));
+  try {
+    const path = join(root, "fork.jsonl");
+    const sourceName = "A session title that is intentionally long enough to exercise the bounded derived-name projection ".repeat(3);
+    await writeFile(path, [
+      { type: "session", version: 3, id: "forked", cwd: root, parentSession: join(root, "source.jsonl") },
+      { type: "message", id: "u1", message: { role: "user", content: "fork prompt" } },
+      { type: "session_info", id: "name", name: sourceName },
+    ].map(JSON.stringify).join("\n") + "\n");
+    const cachePath = join(root, "index.json");
+    const [first] = await new SessionIndex(root, cachePath).list();
+    assert.equal(first.name.endsWith("（Fork）"), true);
+    assert.equal(first.name.includes(sourceName), false, "the suffix stays within the display-name bound");
+    assert.equal(first.name.length <= 120, true);
+    const [restarted] = await new SessionIndex(root, cachePath).list();
+    assert.equal(restarted.name, first.name, "the derived title survives an index restart/cache hit");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("session index orders active streams by their last user instruction rather than JSONL mtime", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-session-prompt-order-"));
   try {
@@ -488,7 +510,7 @@ test("session index persists negative results and rechecks them only after file 
       version: number;
       entries: Record<string, { summary: unknown }>;
     };
-    assert.equal(stored.version, 5);
+    assert.equal(stored.version, 6);
     assert.equal(typeof (stored.entries[empty] as { fingerprint?: unknown })?.fingerprint, "string");
     assert.equal(stored.entries[empty]?.summary, null);
 
