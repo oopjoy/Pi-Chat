@@ -224,7 +224,10 @@ test("a child error retains writer ownership until exit is confirmed", async () 
     client.start(),
     /未确认退出的进程，拒绝启动重复 Session writer/,
   );
-  await client.stop();
+  // Node can emit the matching exit after the initial error. That confirmation
+  // must release the retained ownership barrier without requiring another stop.
+  child.exitCode = 0;
+  internals.handleExit(source, new Error("child exited after error"), true);
   assert.equal(internals.unconfirmedChild, null);
 });
 
@@ -239,6 +242,29 @@ test("RPC rejects an oversized outbound frame before writing it", async () => {
       && error.status === 413,
   );
   assert.equal(writes.length, 0);
+});
+
+test("a matching late RPC response invokes its bounded mutation callback", async () => {
+  const { child, writes } = fakeChild();
+  const client = new PiRpcClient({ cwd: process.cwd() });
+  const responses: Array<{ id: string; success: unknown }> = [];
+  const internals = client as unknown as {
+    child: typeof child | null;
+    handleLine(line: string): void;
+  };
+  internals.child = child;
+  const pending = client.send(
+    { type: "set_model", provider: "test", modelId: "next" },
+    5,
+    { onLateResponse: (response, id) => responses.push({ id, success: response.success }) },
+  );
+  const written = JSON.parse(writes[0]) as { id: string };
+  await assert.rejects(
+    pending,
+    (error) => error instanceof RpcRequestTimeoutError && error.outcomeUnknown,
+  );
+  internals.handleLine(JSON.stringify({ type: "response", id: written.id, success: true }));
+  assert.deepEqual(responses, [{ id: written.id, success: true }]);
 });
 
 test("RPC reports a written mutation timeout as outcome unknown", async () => {

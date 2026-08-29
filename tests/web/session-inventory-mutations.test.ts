@@ -15,6 +15,36 @@ beforeEach(() => {
 });
 
 
+test("Escape closes the Session menu and restores focus to its trigger", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  Object.assign(api, {
+    bootstrap: async () => bootstrap,
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async (id: string) => ({ viewing: id }),
+    sessions: async () => ({ sessions: bootstrap.sessions, total: bootstrap.sessions.length }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const trigger = dom.window.document.querySelector<HTMLButtonElement>(".session-menu-trigger")!;
+    await act(async () => trigger.click());
+    assert.ok(dom.window.document.querySelector(".session-item-menu"));
+    await act(async () => {
+      dom.window.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      await new Promise<void>((resolve) => dom.window.setTimeout(resolve, 0));
+    });
+    assert.equal(dom.window.document.querySelector(".session-item-menu"), null);
+    assert.equal(dom.window.document.activeElement, trigger);
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("Session menu clone opens the independently created cold conversation", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");
@@ -52,9 +82,8 @@ test("Session menu clone opens the independently created cold conversation", asy
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {
     await act(async () => root.render(createElement(App)));
-    await act(async () =>
-      dom.window.document.querySelector<HTMLButtonElement>(".session-menu-trigger")!.click(),
-    );
+    const trigger = dom.window.document.querySelector<HTMLButtonElement>(".session-menu-trigger")!;
+    await act(async () => trigger.click());
     await act(async () => {
       [...dom.window.document.querySelectorAll<HTMLButtonElement>("[role='menuitem']")]
         .find((button) => button.textContent === "复制为新对话")!
@@ -65,9 +94,10 @@ test("Session menu clone opens the independently created cold conversation", asy
     assert.match(dom.window.document.querySelector(".session-dialog")?.textContent || "", /原对话不会被修改/);
     await act(async () => dom.window.document.querySelector<HTMLButtonElement>(".session-dialog footer button")!.click());
     assert.equal(dom.window.document.querySelector(".session-dialog"), null);
+    assert.equal(dom.window.document.activeElement, trigger, "dialog dismissal returns focus to the Session menu trigger");
     assert.equal(clones, 0, "cancelling must leave the source unchanged");
 
-    await act(async () => dom.window.document.querySelector<HTMLButtonElement>(".session-menu-trigger")!.click());
+    await act(async () => trigger.click());
     await act(async () => {
       [...dom.window.document.querySelectorAll<HTMLButtonElement>("[role='menuitem']")]
         .find((button) => button.textContent === "复制为新对话")!

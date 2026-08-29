@@ -34,6 +34,19 @@ export class OperationAdmission {
     };
   }
 
+  /**
+   * Close admission immediately when a process-ownership proof is missing.
+   * Unlike closeAndDrain(), this never waits on active operations; their
+   * releases remain valid while all new operations fail closed.
+   */
+  fence(): number {
+    if (!this.closed) {
+      this.closed = true;
+      this.generationValue += 1;
+    }
+    return this.generationValue;
+  }
+
   async closeAndDrain(): Promise<number | null> {
     if (this.closed) return null;
     this.closed = true;

@@ -36,6 +36,70 @@ test("production capacity defaults to Primary plus six Secondary Runtimes", () =
   assert.equal(DEFAULT_MAX_IDLE_SECONDARY_RUNTIMES, 6);
 });
 
+test("a failed cold start retains its unconfirmed writer before retrying the Session", async () => {
+  const path = "C:\\sessions\\orphaned-cold-start.jsonl";
+  const id = idForPath(path);
+  let createCount = 0;
+  let confirmed = false;
+  const orphanRpc = {
+    onEvent: () => () => {},
+    start: async () => { throw new Error("startup timed out"); },
+    stop: async () => { throw new RpcProcessExitUnconfirmedError(5511); },
+    isRunning: () => false,
+    isExitConfirmed: () => confirmed,
+    currentPid: () => 5511,
+  } as never;
+  const replacementRpc = {
+    onEvent: () => () => {},
+    start: async () => ({
+      type: "response",
+      success: true,
+      data: {
+        model: null,
+        sessionFile: path,
+        sessionId: "replacement",
+        isStreaming: false,
+      },
+    }),
+    stop: async () => {},
+    isRunning: () => true,
+    isExitConfirmed: () => false,
+    currentGeneration: () => 1,
+  } as never;
+  const targetPool = new RuntimePool({
+    now: () => 1,
+    cwd: () => process.cwd(),
+    refreshSessions: async () => {},
+    pathForId: (candidate) => candidate === id ? path : null,
+    summaryForId: () => undefined,
+    isClosed: () => false,
+    canSweep: () => true,
+    onSecondaryEvent: () => {},
+    activeSessionIds: () => [],
+    broadcast: () => {},
+    createRpc: () => {
+      createCount += 1;
+      return createCount === 1 ? orphanRpc : replacementRpc;
+    },
+  });
+  await assert.rejects(
+    () => targetPool.ensure(id),
+    (error) => error instanceof RpcProcessExitUnconfirmedError,
+  );
+  assert.equal(createCount, 1);
+  assert.equal(targetPool.transitioningCount, 1);
+  await assert.rejects(
+    () => targetPool.ensure(id),
+    /旧进程退出/,
+    "a second cold start must not lose sight of the orphaned writer",
+  );
+  confirmed = true;
+  const replacement = await targetPool.ensure(id);
+  assert.equal(createCount, 2);
+  assert.equal(replacement.id, id);
+  assert.equal(targetPool.transitioningCount, 0);
+});
+
 function deferred<T = void>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => { resolve = done; });
@@ -73,17 +137,62 @@ test("stopAll retains ownership and rejects when a child exit is unconfirmed", a
   const healthy = runtime(async () => {});
   healthy.id = "healthy";
   healthy.unsubscribe = () => { healthyUnsubscribed += 1; };
-  const failed = runtime(async () => { throw new Error("exit unconfirmed"); });
+  const failed = runtime(async () => { throw new RpcProcessExitUnconfirmedError(1235); });
   failed.id = "failed";
   failed.unsubscribe = () => { failedUnsubscribed += 1; };
   const targetPool = pool();
   targetPool.runtimes.set(healthy.id, healthy);
   targetPool.runtimes.set(failed.id, failed);
-  await assert.rejects(() => targetPool.stopAll(), /exit unconfirmed/);
+  await assert.rejects(() => targetPool.stopAll(), /退出无法确认|exit unconfirmed/);
   assert.equal(targetPool.get(healthy.id), undefined);
   assert.equal(targetPool.get(failed.id), failed);
   assert.equal(healthyUnsubscribed, 1);
   assert.equal(failedUnsubscribed, 0);
+  assert.equal(failed.operationAdmission.isClosed, true, "stopAll must keep an unconfirmed writer admission fenced");
+});
+
+test("unconfirmed Secondary recovery fences admission until the old child exits", async () => {
+  let confirmed = false;
+  const target = runtime(async () => {
+    throw new RpcProcessExitUnconfirmedError(4401);
+  });
+  target.failed = true;
+  target.sessionPath = "C:\\sessions\\unconfirmed-recovery.jsonl";
+  target.rpc = {
+    ...target.rpc,
+    isRunning: () => false,
+    isExitConfirmed: () => confirmed,
+    restart: async () => {
+      throw new RpcProcessExitUnconfirmedError(4401);
+    },
+  } as never;
+  const targetPool = pool();
+  targetPool.runtimes.set(target.id, target);
+  await assert.rejects(
+    () => targetPool.recover(target),
+    (error) => error instanceof RpcProcessExitUnconfirmedError,
+  );
+  assert.equal(target.operationAdmission.isClosed, true);
+  assert.throws(() => targetPool.acquireOperation(target), /休眠|closed/i);
+  confirmed = true;
+  assert.equal(await targetPool.reclaim(target.id, "idle"), true);
+  assert.equal(targetPool.get(target.id), undefined);
+});
+
+test("stopAll fences Secondary admission before draining an active operation", async () => {
+  let stopCount = 0;
+  const target = runtime(async () => { stopCount += 1; });
+  const targetPool = pool();
+  targetPool.runtimes.set(target.id, target);
+  const operation = targetPool.acquireOperation(target);
+  const stopping = targetPool.stopAll();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(stopCount, 0, "stopAll waits for an admitted operation before stopping its child");
+  assert.throws(() => targetPool.acquireOperation(target), /休眠|closed/i);
+  operation();
+  await stopping;
+  assert.equal(stopCount, 1);
+  assert.equal(targetPool.get(target.id), undefined);
 });
 
 test("draft handoff lease blocks reclaim while an empty draft probe is pending", async () => {
@@ -122,6 +231,42 @@ test("draft handoff lease blocks reclaim while an empty draft probe is pending",
   assert.equal(target.operationLeases, 0);
   assert.equal(await targetPool.reclaim(target.id, "capacity"), true);
   assert.equal(stopCount, 1);
+});
+
+test("an unconfirmed reclaim keeps Runtime ownership closed until exit is confirmed", async () => {
+  const target = runtime(async () => {
+    throw new RpcProcessExitUnconfirmedError(4321);
+  });
+  const targetPool = pool();
+  targetPool.runtimes.set(target.id, target);
+  await assert.rejects(
+    () => targetPool.reclaim(target.id, "idle"),
+    (error) => error instanceof RpcProcessExitUnconfirmedError,
+  );
+  assert.equal(targetPool.get(target.id), target);
+  assert.equal(target.operationAdmission.isClosed, true);
+  assert.throws(
+    () => targetPool.acquireOperation(target),
+    /休眠|closed/i,
+    "a possibly-live old child must block all replacement mutations",
+  );
+});
+
+test("a later confirmed exit permits the deferred Runtime deletion retry", async () => {
+  let confirmed = false;
+  const target = runtime(async () => {
+    if (!confirmed) throw new RpcProcessExitUnconfirmedError(4322);
+  });
+  target.rpc = {
+    ...target.rpc,
+    isExitConfirmed: () => confirmed,
+  } as never;
+  const targetPool = pool();
+  targetPool.runtimes.set(target.id, target);
+  await assert.rejects(() => targetPool.releaseForDeletion(target.id), RpcProcessExitUnconfirmedError);
+  confirmed = true;
+  assert.equal(await targetPool.releaseForDeletion(target.id), target);
+  assert.equal(targetPool.get(target.id), undefined);
 });
 
 test("deletion waits for an admitted operation and stop failure reopens dedicated Runtime admission", async () => {

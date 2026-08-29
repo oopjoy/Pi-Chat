@@ -2,8 +2,8 @@ import { unlink } from "node:fs/promises";
 import type { ExtensionUiRequest, GateMode, ModelInfo, PiMessage, PiState, PromptImage, PromptSettingsSnapshot, SessionStats, SessionSummary, SlashCommand, ThinkingLevel } from "../shared/types.js";
 import { asMessages, asState } from "./pi-data.js";
 import { idForPath, readSessionMessages } from "./session-index.js";
-import { OperationAdmission } from "./operation-admission.js";
-import { RpcProcessExitUnconfirmedError, RpcRequestTimeoutError, type PiRpcClient, type RpcEventSource } from "./rpc-client.js";
+import { OperationAdmission, OperationAdmissionClosedError } from "./operation-admission.js";
+import { RpcProcessExitUnconfirmedError, RpcRequestTimeoutError, isRpcOutcomeUnknown, type PiRpcClient, type RpcEventSource } from "./rpc-client.js";
 
 const DEFAULT_SECONDARY_RUNTIME_IDLE_MS = 40 * 60 * 1_000;
 /** Primary + six Secondary workers = seven hot conversations total. */
@@ -80,6 +80,8 @@ export interface SecondaryRuntime {
   operationLeases: number;
   /** Atomically blocks new operations while rest/reclaim drains existing work. */
   operationAdmission: OperationAdmission;
+  /** Why admission was fenced when a child exit could not be confirmed. */
+  admissionFenceReason?: "reclaim" | "recovery" | "deletion" | "startup" | "stop-all";
   /** Incremented by abort to cancel dispatch preflight before prompt is sent. */
   abortGeneration: number;
   lastUsedAt: number;
@@ -163,6 +165,8 @@ export class RuntimePool {
   /** Exposed for tests and PiChatApp routing that still read the map by reference. */
   readonly runtimes = new Map<string, SecondaryRuntime>();
   private readonly runtimeStarts = new Map<string, Promise<SecondaryRuntime>>();
+  /** Failed cold starts retain their RPC owner until exit is proven. */
+  private readonly orphanedStarts = new Set<SecondaryRuntime>();
   private readonly runtimeStops = new Map<string, Promise<void>>();
   private readonly draftStarts = new Map<string, Promise<DraftRuntimeLease>>();
   private runtimeCapacityTail: Promise<void> = Promise.resolve();
@@ -181,11 +185,23 @@ export class RuntimePool {
   get size(): number { return this.runtimes.size; }
   get startingCount(): number { return this.runtimeStarts.size; }
   get stoppingCount(): number { return this.runtimeStops.size; }
-  get transitioningCount(): number { return this.runtimeStarts.size + this.runtimeStops.size; }
+  get transitioningCount(): number { return this.runtimeStarts.size + this.runtimeStops.size + this.orphanedStarts.size; }
   get reservedStartCount(): number { return this.reservedStarts; }
 
   get(id: string): SecondaryRuntime | undefined { return this.runtimes.get(id); }
   has(id: string): boolean { return this.runtimes.has(id); }
+  orphanedStart(id: string): SecondaryRuntime | undefined {
+    return this.orphanedStartFor(id);
+  }
+
+  async releaseOrphanedStart(id: string): Promise<boolean> {
+    const runtime = this.orphanedStartFor(id);
+    if (!runtime) return false;
+    if (!runtime.rpc.isExitConfirmed?.())
+      throw new RpcProcessExitUnconfirmedError(runtime.rpc.currentPid?.() || undefined);
+    this.forgetOrphanedStart(runtime);
+    return true;
+  }
   values(): IterableIterator<SecondaryRuntime> { return this.runtimes.values(); }
   entries(): IterableIterator<[string, SecondaryRuntime]> { return this.runtimes.entries(); }
 
@@ -227,8 +243,22 @@ export class RuntimePool {
     }
     try {
       await runtime.rpc.stop();
+      if (runtime.rpc.isExitConfirmed?.() === false) {
+        runtime.admissionFenceReason = "reclaim";
+        throw new RpcProcessExitUnconfirmedError(runtime.rpc.currentPid?.() || undefined);
+      }
       return true;
     } catch (error) {
+      // An unconfirmed child may still own the Session JSONL. Keep admission
+      // closed until a later exit confirmation proves that a replacement writer
+      // is safe; reopening here would allow a reclaim/recovery race.
+      if (
+        error instanceof RpcProcessExitUnconfirmedError ||
+        runtime.rpc.isExitConfirmed?.() === false
+      ) {
+        runtime.admissionFenceReason = "reclaim";
+        throw error;
+      }
       runtime.operationAdmission.reopen(generation);
       throw error;
     }
@@ -251,7 +281,7 @@ export class RuntimePool {
   }
 
   busyCount(): number {
-    return [...this.runtimes.values()].filter((runtime) =>
+    return this.orphanedStarts.size + [...this.runtimes.values()].filter((runtime) =>
       runtime.running || runtime.dispatching || Boolean(runtime.liveMessage) || Boolean(runtime.toolStatus) || runtime.operationLeases > 0 || runtime.queuePaused || runtime.promptQueue.length > 0 || runtime.extensionUiPending || Boolean(runtime.recovery)
     ).length;
   }
@@ -274,6 +304,22 @@ export class RuntimePool {
     }
   }
 
+  private orphanedStartFor(id: string): SecondaryRuntime | undefined {
+    return [...this.orphanedStarts].find((runtime) => runtime.id === id);
+  }
+
+  private retainOrphanedStart(runtime: SecondaryRuntime): void {
+    runtime.admissionFenceReason = "startup";
+    runtime.operationAdmission.fence();
+    this.orphanedStarts.add(runtime);
+  }
+
+  private forgetOrphanedStart(runtime: SecondaryRuntime): void {
+    this.orphanedStarts.delete(runtime);
+    runtime.admissionFenceReason = undefined;
+    runtime.unsubscribe();
+  }
+
   private async cleanupEmptyDraft(runtime: SecondaryRuntime): Promise<void> {
     if (!runtime.draftSessionPath) return;
     let messages: PiMessage[];
@@ -291,6 +337,31 @@ export class RuntimePool {
     });
   }
 
+  private async detachConfirmedRuntime(
+    runtime: SecondaryRuntime,
+    reason: RuntimeReclaimReason,
+  ): Promise<boolean> {
+    if (
+      !runtime.operationAdmission.isClosed ||
+      !runtime.rpc.isExitConfirmed?.() ||
+      this.runtimes.get(runtime.id) !== runtime
+    )
+      return false;
+    this.runtimes.delete(runtime.id);
+    runtime.admissionFenceReason = undefined;
+    runtime.unsubscribe();
+    await this.cleanupEmptyDraft(runtime);
+    this.options.onReclaimed?.(runtime, reason);
+    this.options.broadcast({
+      type: "pi_chat_active_session_changed",
+      sessionId: runtime.id,
+      activeSessionIds: this.options.activeSessionIds(),
+      reclaimed: true,
+      reason,
+    });
+    return true;
+  }
+
   async reclaim(id: string, reason: RuntimeReclaimReason): Promise<boolean> {
     // All concurrent reclaim paths for one Runtime share the first stop owner.
     // In particular, a second sweep must never overwrite/delete the marker that
@@ -298,10 +369,16 @@ export class RuntimePool {
     const alreadyStopping = this.runtimeStops.get(id);
     if (alreadyStopping) {
       await alreadyStopping;
-      return this.runtimes.has(id) ? false : true;
+      if (!this.runtimes.has(id)) return true;
+      return this.reclaim(id, reason);
     }
     const runtime = this.runtimes.get(id);
-    if (!runtime || !this.canReclaim(runtime)) return false;
+    if (!runtime) return false;
+    // A prior fail-closed stop may have received its exit confirmation after
+    // the original reclaim returned. Complete that deferred detach now.
+    if (runtime.operationAdmission.isClosed)
+      return this.detachConfirmedRuntime(runtime, reason);
+    if (!this.canReclaim(runtime)) return false;
     const stopping = (async () => {
       const stopped = await this.stopReclaimable(runtime);
       if (!stopped || this.runtimes.get(id) !== runtime) return false;
@@ -375,25 +452,50 @@ export class RuntimePool {
     // Live workers plus starts already promised a slot are the authoritative
     // cap. The latter start outside this mutex, so independent cold Sessions
     // can spawn in parallel without exceeding capacity.
-    while (this.runtimes.size + this.reservedStarts >= this.maxSecondaryRuntimes) {
+    while (
+      this.runtimes.size + this.orphanedStarts.size + this.reservedStarts >=
+      this.maxSecondaryRuntimes
+    ) {
       if (!await this.reclaimOldestAvailable()) throw this.capacityError();
     }
   }
 
   async sweep(): Promise<void> {
     if (this.options.isClosed() || !this.options.canSweep()) return;
+    for (const orphan of [...this.orphanedStarts]) {
+      if (!orphan.rpc.isExitConfirmed?.()) continue;
+      this.forgetOrphanedStart(orphan);
+      await this.cleanupEmptyDraft(orphan);
+    }
     const now = this.options.now();
+    const initialIdle = [...this.runtimes.values()].filter((runtime) => this.isIdle(runtime));
+    for (const runtime of initialIdle.filter((candidate) =>
+      candidate.operationAdmission.isClosed &&
+      candidate.admissionFenceReason !== "deletion"
+    )) await this.detachConfirmedRuntime(runtime, "idle");
     const allIdle = [...this.runtimes.values()].filter((runtime) => this.isIdle(runtime));
     const reclaimable = allIdle.filter((runtime) => this.canReclaim(runtime)).sort((left, right) => left.lastUsedAt - right.lastUsedAt);
     const expired = reclaimable.filter((runtime) => now - runtime.lastUsedAt >= this.secondaryRuntimeIdleMs);
     const reclaim = new Map<string, RuntimeReclaimReason>(expired.map((runtime) => [runtime.id, "idle"]));
     const retainedIdleCount = allIdle.length - expired.length;
     const idleExcess = Math.max(0, retainedIdleCount - this.maxIdleSecondaryRuntimes);
-    const retainedRuntimeCount = this.runtimes.size - expired.length;
+    const retainedRuntimeCount =
+      this.runtimes.size + this.orphanedStarts.size - expired.length;
     const hardCapExcess = Math.max(0, retainedRuntimeCount - this.maxSecondaryRuntimes);
     const excess = Math.max(idleExcess, hardCapExcess);
     for (const runtime of reclaimable.filter((runtime) => !reclaim.has(runtime.id)).slice(0, excess)) reclaim.set(runtime.id, "capacity");
-    for (const [id, reason] of reclaim) await this.reclaim(id, reason);
+    for (const [id, reason] of reclaim) {
+      try {
+        await this.reclaim(id, reason);
+      } catch (error) {
+        // Sweeps are detached background maintenance. A failed/unconfirmed
+        // stop must remain fail-closed, but must never become an unhandled
+        // rejection that destabilizes the service process.
+        console.warn(
+          `[Pi Chat] 无法回收 Secondary Runtime ${id}：${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
   }
 
   /**
@@ -419,6 +521,14 @@ export class RuntimePool {
   }
 
   async ensure(id: string): Promise<SecondaryRuntime> {
+    const orphaned = this.orphanedStartFor(id);
+    if (orphaned) {
+      if (!orphaned.rpc.isExitConfirmed?.())
+        throw new OperationAdmissionClosedError("会话运行时启动失败，正在确认旧进程退出，请稍后重试");
+      this.forgetOrphanedStart(orphaned);
+    }
+    if (this.options.isClosed())
+      throw new OperationAdmissionClosedError("Pi Chat 正在关闭，请稍后重试");
     // Primary owns the one compatibility probe for this local Pi entrypoint.
     // Do not turn cold Session browsing into duplicate capability RPC traffic.
     this.options.assertPrimaryCompatible?.();
@@ -430,8 +540,21 @@ export class RuntimePool {
     const existing = this.runtimes.get(id);
     if (existing) {
       this.touch(existing);
-      if (existing.failed || existing.rpc.isRunning?.() === false) await this.recover(existing);
-      return existing;
+      if (existing.operationAdmission.isClosed) {
+        // A failed reclaim/recovery retains ownership until the child exit is
+        // proven. Deletion-fenced Runtimes stay attached so the App can retry
+        // the delete operation after that proof instead of losing its guard.
+        if (
+          existing.admissionFenceReason === "deletion" ||
+          !existing.rpc.isExitConfirmed?.()
+        )
+          throw new OperationAdmissionClosedError("会话运行时正在确认退出，请稍后重试");
+        if (!await this.detachConfirmedRuntime(existing, "idle"))
+          return this.ensure(id);
+      } else {
+        if (existing.failed || existing.rpc.isRunning?.() === false) await this.recover(existing);
+        return existing;
+      }
     }
     const starting = this.runtimeStarts.get(id);
     if (starting) return starting;
@@ -493,8 +616,23 @@ export class RuntimePool {
         });
         return runtime;
       } catch (error) {
+        let stopError: unknown;
+        try {
+          await rpc.stop();
+        } catch (cause) {
+          stopError = cause;
+        }
+        const exitConfirmed = rpc.isExitConfirmed?.();
+        const retainOwnership =
+          stopError !== undefined &&
+          (stopError instanceof RpcProcessExitUnconfirmedError || exitConfirmed !== true);
         runtime.unsubscribe();
-        await rpc.stop();
+        if (retainOwnership) this.retainOrphanedStart(runtime);
+        if (stopError !== undefined) throw stopError;
+        if (exitConfirmed === false) {
+          this.retainOrphanedStart(runtime);
+          throw new RpcProcessExitUnconfirmedError(rpc.currentPid?.() || undefined);
+        }
         throw error;
       } finally {
         await reservation.release();
@@ -510,6 +648,10 @@ export class RuntimePool {
 
   async recover(runtime: SecondaryRuntime): Promise<void> {
     if (runtime.recovery) return runtime.recovery;
+    if (this.options.isClosed())
+      throw new OperationAdmissionClosedError("Pi Chat 正在关闭，请稍后重试");
+    if (runtime.operationAdmission.isClosed)
+      throw new OperationAdmissionClosedError("会话运行时正在确认退出，请稍后重试");
     // Existing healthy Secondary workers remain independent from later Primary
     // loss. A crashed worker is a fresh capability acquisition and therefore
     // requires the globally verified local Pi implementation again.
@@ -520,8 +662,10 @@ export class RuntimePool {
     const recovery = (async () => {
       try {
         const restartResult = await runtime.rpc.restart(runtime.sessionPath, runtime.cwd);
+        if (this.options.isClosed()) return;
         runtime.rpcGeneration = runtime.rpc.currentGeneration?.() || 0;
         const state = asState(restartResult || await runtime.rpc.send({ type: "get_state" }));
+        if (this.options.isClosed()) return;
         runtime.lastState = state;
         runtime.running = state.isStreaming;
         runtime.failed = false;
@@ -535,13 +679,34 @@ export class RuntimePool {
           runtime.queuePaused = false;
         else if (runtime.promptQueue.length) runtime.queuePaused = true;
         if (desiredGateMode !== "strict") {
-          await runtime.rpc.send({ type: "prompt", message: `/gate ${desiredGateMode}` });
+          try {
+            await runtime.rpc.send({ type: "prompt", message: `/gate ${desiredGateMode}` });
+          } catch (error) {
+            if (isRpcOutcomeUnknown(error) || error instanceof RpcProcessExitUnconfirmedError)
+              runtime.operationAdmission.fence();
+            throw error;
+          }
+          if (this.options.isClosed()) return;
         }
         runtime.gateMode = desiredGateMode;
-        this.options.broadcast({ type: "pi_chat_process_recovered", piChatSessionId: runtime.id });
+        if (!this.options.isClosed())
+          this.options.broadcast({ type: "pi_chat_process_recovered", piChatSessionId: runtime.id });
       } catch (error) {
+        if (this.options.isClosed()) return;
         runtime.failed = true;
-        throw new Error(`Pi RPC 恢复失败：${error instanceof Error ? error.message : String(error)}`);
+        if (
+          isRpcOutcomeUnknown(error) ||
+          error instanceof RpcProcessExitUnconfirmedError ||
+          runtime.rpc.isExitConfirmed?.() === false
+        ) {
+          // restart() or the recovery Gate write could not prove that its
+          // mutation was resolved. Keep this Runtime fenced so no later
+          // operation can race the still-owned Session JSONL.
+          runtime.admissionFenceReason = "recovery";
+          runtime.operationAdmission.fence();
+          throw error;
+        }
+        throw new Error(`Pi RPC 恢复失败：${error instanceof Error ? error.message : String(error)}`, { cause: error });
       }
     })();
     runtime.recovery = recovery;
@@ -737,8 +902,23 @@ export class RuntimePool {
         });
         return { runtime, created: true, release };
       } catch (error) {
+        let stopError: unknown;
+        try {
+          await reservedRpc.stop();
+        } catch (cause) {
+          stopError = cause;
+        }
+        const exitConfirmed = reservedRpc.isExitConfirmed?.();
         runtime.unsubscribe();
-        await reservedRpc.stop();
+        const retainOwnership =
+          stopError !== undefined &&
+          (stopError instanceof RpcProcessExitUnconfirmedError || exitConfirmed !== true);
+        if (retainOwnership) this.retainOrphanedStart(runtime);
+        if (stopError !== undefined) throw stopError;
+        if (exitConfirmed === false) {
+          this.retainOrphanedStart(runtime);
+          throw new RpcProcessExitUnconfirmedError(reservedRpc.currentPid?.() || undefined);
+        }
         throw error;
       } finally {
         await reservation.release();
@@ -763,7 +943,14 @@ export class RuntimePool {
   async stopAll(options?: { cleanupDrafts?: boolean }): Promise<void> {
     await Promise.allSettled(this.runtimeStarts.values());
     await Promise.allSettled(this.runtimeStops.values());
-    const runtimes = [...this.runtimes.values()];
+    const runtimes = [
+      ...new Set([...this.runtimes.values(), ...this.orphanedStarts]),
+    ];
+    const closedAdmissions = new Map<SecondaryRuntime, number>();
+    await Promise.all(runtimes.map(async (runtime) => {
+      const generation = await runtime.operationAdmission.closeAndDrain();
+      if (generation !== null) closedAdmissions.set(runtime, generation);
+    }));
     await Promise.allSettled(runtimes.map((runtime) => runtime.recovery).filter((recovery): recovery is Promise<void> => Boolean(recovery)));
     const results = await Promise.allSettled(runtimes.map((runtime) => runtime.rpc.stop()));
     let failure: unknown;
@@ -772,10 +959,28 @@ export class RuntimePool {
       const result = results[index];
       if (result.status === "rejected") {
         failure ??= result.reason;
+        if (
+          result.reason instanceof RpcProcessExitUnconfirmedError ||
+          runtime.rpc.isExitConfirmed?.() === false
+        ) {
+          runtime.admissionFenceReason = "stop-all";
+          runtime.operationAdmission.fence();
+        } else {
+          const generation = closedAdmissions.get(runtime);
+          if (generation !== undefined) runtime.operationAdmission.reopen(generation);
+        }
+        continue;
+      }
+      if (runtime.rpc.isExitConfirmed?.() === false) {
+        const error = new RpcProcessExitUnconfirmedError(runtime.rpc.currentPid?.() || undefined);
+        failure ??= error;
+        runtime.admissionFenceReason = "stop-all";
+        runtime.operationAdmission.fence();
         continue;
       }
       if (this.runtimes.get(runtime.id) === runtime) this.runtimes.delete(runtime.id);
-      runtime.unsubscribe();
+      const wasOrphaned = this.orphanedStarts.delete(runtime);
+      if (!wasOrphaned) runtime.unsubscribe();
       if (options?.cleanupDrafts) await this.cleanupEmptyDraft(runtime);
     }
     // A Runtime whose child exit was not proved remains owned and blocks a
@@ -793,13 +998,24 @@ export class RuntimePool {
     const runtime = this.runtimes.get(id);
     if (!runtime) return undefined;
     const generation = await runtime.operationAdmission.closeAndDrain();
-    if (generation === null) return undefined;
+    if (generation === null) {
+      // A previous unconfirmed stop may have completed asynchronously between
+      // retries. Re-open only after the RPC client proves no child ownership
+      // remains, then run the normal close-and-drain path once more.
+      if (!runtime.rpc.isExitConfirmed?.()) return undefined;
+      runtime.operationAdmission.reopen(runtime.operationAdmission.generation);
+      return this.releaseForDeletion(id);
+    }
     if (this.runtimes.get(id) !== runtime || !this.isIdle(runtime)) {
       runtime.operationAdmission.reopen(generation);
       return undefined;
     }
     try {
       await runtime.rpc.stop();
+      if (runtime.rpc.isExitConfirmed?.() === false) {
+        runtime.admissionFenceReason = "deletion";
+        throw new RpcProcessExitUnconfirmedError(runtime.rpc.currentPid?.() || undefined);
+      }
       this.runtimes.delete(id);
       runtime.unsubscribe();
       return runtime;
@@ -807,7 +1023,13 @@ export class RuntimePool {
       // An unconfirmed child exit still owns this Session's writer. Keep the
       // operation admission closed so a retry cannot race a possibly-live
       // process; the App maps this boundary to RESULT_PENDING.
-      if (error instanceof RpcProcessExitUnconfirmedError) throw error;
+      if (
+        error instanceof RpcProcessExitUnconfirmedError ||
+        runtime.rpc.isExitConfirmed?.() === false
+      ) {
+        runtime.admissionFenceReason = "deletion";
+        throw error;
+      }
       runtime.operationAdmission.reopen(generation);
       throw error;
     }

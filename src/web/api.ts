@@ -118,6 +118,7 @@ export class ApiRequestError extends Error {
     readonly status: number,
     readonly code?: string,
     readonly incidentId?: string,
+    readonly outcomeUnknown = false,
   ) {
     super(incidentMessage(message, incidentId));
     this.name = "ApiRequestError";
@@ -225,14 +226,14 @@ async function request<T>(
         ...options?.headers,
       },
     });
-    let value: T & { error?: string; requestToken?: string; code?: string; incidentId?: string };
+    let value: T & { error?: string; requestToken?: string; code?: string; incidentId?: string; outcomeUnknown?: boolean };
     try {
-      value = await response.json() as T & { error?: string; requestToken?: string; code?: string; incidentId?: string };
+      value = await response.json() as T & { error?: string; requestToken?: string; code?: string; incidentId?: string; outcomeUnknown?: boolean };
     } catch (cause) {
       // A timeout/caller abort while reading the response body must not be
       // converted into an empty JSON object and reported as an HTTP error.
       if (deadline.signal.aborted) throw deadline.signal.reason || cause;
-      value = {} as T & { error?: string; requestToken?: string; code?: string; incidentId?: string };
+      value = {} as T & { error?: string; requestToken?: string; code?: string; incidentId?: string; outcomeUnknown?: boolean };
     }
     // A maintenance-state bootstrap may return 503 while still granting the
     // guarded startup token required to subscribe to lifecycle SSE.
@@ -252,6 +253,7 @@ async function request<T>(
         response.status,
         value.code,
         value.incidentId,
+        value.outcomeUnknown === true,
       );
     return value;
   } catch (cause) {

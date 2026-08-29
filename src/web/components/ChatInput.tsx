@@ -147,6 +147,8 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const attachmentRef = useRef<HTMLDivElement>(null);
+  const attachmentButtonRef = useRef<HTMLButtonElement>(null);
+  const attachmentMenuRef = useRef<HTMLDivElement>(null);
   const composingRef = useRef(false);
   const lastCompositionEndAtRef = useRef(0);
   // Legacy unit fixtures may provide only a scope. Production App always
@@ -218,6 +220,12 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     images.length >= MAX_PROMPT_IMAGES ||
     promptImagesByteLength(images) >= MAX_PROMPT_IMAGES_TOTAL_BYTES;
 
+  const closeAttachmentMenu = (restoreFocus = false) => {
+    setAttachmentOpen(false);
+    if (restoreFocus)
+      window.setTimeout(() => attachmentButtonRef.current?.focus(), 0);
+  };
+
   useEffect(() => {
     if (editorDisabled) {
       setAttachmentOpen(false);
@@ -228,8 +236,22 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     const close = (event: PointerEvent) => {
       if (!attachmentRef.current?.contains(event.target as Node)) setAttachmentOpen(false);
     };
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      closeAttachmentMenu(true);
+    };
     document.addEventListener("pointerdown", close);
-    return () => document.removeEventListener("pointerdown", close);
+    window.addEventListener("keydown", closeOnEscape);
+    const focusTimer = window.setTimeout(() => {
+      attachmentMenuRef.current?.querySelector<HTMLButtonElement>("[role='menuitem']")?.focus();
+    }, 0);
+    return () => {
+      document.removeEventListener("pointerdown", close);
+      window.removeEventListener("keydown", closeOnEscape);
+      window.clearTimeout(focusTimer);
+    };
   }, [attachmentOpen, editorDisabled]);
 
   const addImages = async (files: File[]) => {
@@ -386,8 +408,8 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
             {streaming && <button type="button" className="queue-submit-button" disabled={(!value.trim() && !images.length) || editorDisabled || stopping} onClick={() => submit("queue")}>{isExtensionCommand ? "执行" : "排队"}</button>}
             {activelyStreaming && !value.trimStart().startsWith("/") && <button type="button" className="steer-submit-button" disabled={(!value.trim() && !images.length) || editorDisabled || stopping} onClick={() => submit("steer")} title="在当前 assistant turn 的工具调用结束后、下一次模型调用前优先送达">Steer</button>}
             <div className="attachment-control" ref={attachmentRef}>
-              <button type="button" className={`attachment-button ${attachmentOpen ? "is-open" : ""}`} disabled={editorDisabled || pickingFiles} onClick={() => setAttachmentOpen((open) => !open)} title="添加附件" aria-label="添加附件" aria-haspopup="menu" aria-expanded={attachmentOpen}><PaperclipIcon /></button>
-              {attachmentOpen && <div className="attachment-menu" role="menu">
+              <button ref={attachmentButtonRef} type="button" className={`attachment-button ${attachmentOpen ? "is-open" : ""}`} disabled={editorDisabled || pickingFiles} onClick={() => attachmentOpen ? closeAttachmentMenu(true) : setAttachmentOpen(true)} title="添加附件" aria-label="添加附件" aria-haspopup="menu" aria-expanded={attachmentOpen}><PaperclipIcon /></button>
+              {attachmentOpen && <div ref={attachmentMenuRef} className="attachment-menu" role="menu">
                 <button type="button" role="menuitem" disabled={imageAttachmentLimitReached} onClick={() => { setAttachmentOpen(false); composer.edit(composer.currentDraft().message); imageInputRef.current?.click(); }}><ImageIcon className="attachment-menu-icon" /><strong>图片</strong><small>{resolveImageCapabilityOnSend ? "最多 10 张，单张 8 MB / 总计 40 MB；发送时准备 Runtime 并检查支持" : imageInputPending ? "最多 10 张，单张 8 MB / 总计 40 MB；发送前等待模型能力同步" : acceptsImages ? "最多 10 张，单张 8 MB / 总计 40 MB；直接解析，可粘贴或拖入" : "最多 10 张，单张 8 MB / 总计 40 MB；发送时检查模型支持"}</small></button>
                 <button type="button" role="menuitem" disabled={pickingFiles} onClick={() => void pickFiles()}><FileSearchIcon className="attachment-menu-icon" /><strong>{pickingFiles ? "选择中…" : "本地文件"}</strong><small>引用 Windows 绝对路径</small></button>
               </div>}

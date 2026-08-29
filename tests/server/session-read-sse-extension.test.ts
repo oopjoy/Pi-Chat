@@ -659,7 +659,88 @@ test("an uncertain Extension response keeps the confirmation pending and fences 
     const view = await (await fetch(`${origin}/api/sessions/${id}/view`)).json() as { pendingExtensionRequest?: { id: string }; session: { pendingConfirmation?: boolean } };
     assert.equal(view.pendingExtensionRequest?.id, "uncertain-gate");
     assert.equal(view.session.pendingConfirmation, true);
+    const retryWhileUncertain = await fetch(`${origin}/api/extension-ui/respond`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "uncertain-gate", value: "Allow", sessionId: id }),
+    });
+    assert.equal(retryWhileUncertain.status, 409);
+    assert.equal((await retryWhileUncertain.json() as { code?: string }).code, "RESULT_PENDING");
     assert.equal(primary.commands.filter((command) => command.type === "extension_ui_response").length, 1);
+
+    // An authoritative lifecycle settlement resolves the uncertain answer. It
+    // must clear both the fence and the visible pending dialog; a later retry
+    // must not send a second raw response frame.
+    primary.emit({ type: "agent_settled" });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const settledView = await (await fetch(`${origin}/api/sessions/${id}/view`)).json() as { pendingExtensionRequest?: unknown; session: { pendingConfirmation?: boolean } };
+    assert.equal(settledView.pendingExtensionRequest, undefined);
+    assert.equal(settledView.session.pendingConfirmation, false);
+    const retryAfterSettlement = await fetch(`${origin}/api/extension-ui/respond`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "uncertain-gate", value: "Allow", sessionId: id }),
+    });
+    assert.equal(retryAfterSettlement.status, 409);
+    assert.equal(primary.commands.filter((command) => command.type === "extension_ui_response").length, 1);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("a read-only Extension confirmation timeout does not fence later prompts", async () => {
+  class ExtensionReadTimeoutRpc extends FakeRpc {
+    private promptAccepted = false;
+    private failConfirmation = true;
+
+    override async send(command: Record<string, unknown>, timeoutMs?: number, options?: Parameters<FakeRpc["send"]>[2]) {
+      if (command.type === "get_commands")
+        return { type: "response", success: true, data: { commands: [{ name: "ask", description: "Extension ask", source: "extension" }] } };
+      if (command.type === "prompt" && command.message === "/ask") {
+        const result = await super.send(command, timeoutMs, options);
+        this.promptAccepted = true;
+        return result;
+      }
+      if (command.type === "get_state" && this.promptAccepted && this.failConfirmation) {
+        this.failConfirmation = false;
+        throw new RpcRequestTimeoutError("get_state");
+      }
+      return super.send(command, timeoutMs, options);
+    }
+  }
+  const path = "C:\\sessions\\extension-read-timeout.jsonl";
+  const id = idForPath(path);
+  const primary = new ExtensionReadTimeoutRpc(path, "extension-read-timeout");
+  const sessions = {
+    list: async () => [{ id, sessionId: "extension-read-timeout", name: "Extension read timeout", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+    pathForId: () => path,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    assert.equal((await fetch(`${origin}/api/bootstrap`)).status, 200);
+    const extension = await fetch(`${origin}/api/chat/prompt`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: id, message: "/ask" }),
+    });
+    assert.equal(extension.status, 409);
+    assert.equal((await extension.json() as { code?: string; outcomeUnknown?: boolean }).outcomeUnknown, undefined);
+    assert.equal((app as unknown as { rpcOutcomePendingBySession: Set<string> }).rpcOutcomePendingBySession.has(id), false);
+    primary.emit({ type: "agent_settled" });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const prompt = await fetch(`${origin}/api/chat/prompt`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: id, message: "after extension read timeout" }),
+    });
+    assert.equal(prompt.status, 202);
   } finally {
     server.close();
     await app.close();

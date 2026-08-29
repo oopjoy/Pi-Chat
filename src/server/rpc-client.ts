@@ -22,6 +22,11 @@ import {
   type IncidentStartupPhase,
 } from "./incident-diagnostics.js";
 
+export type RpcLateResponseHandler = (
+  response: Record<string, unknown>,
+  requestId: string,
+) => void;
+
 interface PendingRequest {
   resolve: (value: Record<string, unknown>) => void;
   reject: (error: Error) => void;
@@ -33,6 +38,12 @@ interface PendingRequest {
   startedAt: number;
   generation: number;
   observe?: RpcRequestObserver;
+  onLateResponse?: RpcLateResponseHandler;
+}
+
+interface LateRpcResponse {
+  handler: RpcLateResponseHandler;
+  timer: NodeJS.Timeout;
 }
 
 export type RpcWriteOutcome = "not-written" | "written-outcome-unknown";
@@ -73,6 +84,9 @@ export class RpcProcessExitUnconfirmedError extends Error {
     this.name = "RpcProcessExitUnconfirmedError";
   }
 }
+
+const MAX_RPC_LATE_RESPONSES = 256;
+const RPC_LATE_RESPONSE_RETENTION_MS = 120_000;
 
 function encodeOutboundFrame(value: Record<string, unknown>): string {
   const frame = `${JSON.stringify(value)}\n`;
@@ -134,6 +148,8 @@ export interface RpcSendOptions {
   independentRead?: boolean;
   /** Metadata-only observer. Failures are swallowed and cannot affect RPC behavior. */
   observe?: RpcRequestObserver;
+  /** Observe a matching response that arrives after a mutation timed out. */
+  onLateResponse?: RpcLateResponseHandler;
 }
 
 export interface RpcEventSource {
@@ -209,6 +225,8 @@ export class PiRpcClient {
   private sourceGeneration = 0;
   private listeners = new Set<EventListener>();
   private pending = new Map<string, PendingRequest>();
+  /** Bounded callbacks for mutation responses that arrive after their caller timed out. */
+  private readonly lateResponses = new Map<string, LateRpcResponse>();
   private readonly readQueries = new Map<string, Promise<Record<string, unknown>>>();
   /** Read queries can outlive the caller timeout because the RPC protocol has no cancellation. */
   private readonly outstandingReadQueryIds = new Map<string, string>();
@@ -591,6 +609,28 @@ export class PiRpcClient {
     }
   }
 
+  private retainLateResponse(requestId: string, handler: RpcLateResponseHandler): void {
+    while (this.lateResponses.size >= MAX_RPC_LATE_RESPONSES) {
+      const oldest = this.lateResponses.keys().next().value;
+      if (typeof oldest !== "string") break;
+      const entry = this.lateResponses.get(oldest);
+      if (entry) clearTimeout(entry.timer);
+      this.lateResponses.delete(oldest);
+    }
+    const timer = setTimeout(() => {
+      const current = this.lateResponses.get(requestId);
+      if (!current || current.timer !== timer) return;
+      this.lateResponses.delete(requestId);
+    }, RPC_LATE_RESPONSE_RETENTION_MS);
+    timer.unref?.();
+    this.lateResponses.set(requestId, { handler, timer });
+  }
+
+  private clearLateResponses(): void {
+    for (const entry of this.lateResponses.values()) clearTimeout(entry.timer);
+    this.lateResponses.clear();
+  }
+
   private handleLine(line: string, source?: RpcEventSource): void {
     // Streams remain readable briefly after SIGTERM on Windows. Do not let an
     // old child resolve current requests or publish unsolicited lifecycle data.
@@ -622,6 +662,14 @@ export class PiRpcClient {
           });
           if (failed) pending.reject(new Error(String(data.error || "Pi RPC 请求失败")));
           else pending.resolve(data);
+        } else {
+          const late = this.lateResponses.get(data.id);
+          if (late) {
+            clearTimeout(late.timer);
+            this.lateResponses.delete(data.id);
+            try { late.handler(data, data.id); }
+            catch (error) { this.logRpcError("延迟 RPC 响应处理错误", error); }
+          }
         }
       }
       // A response can arrive after its caller timed out. It remains an RPC
@@ -653,12 +701,26 @@ export class PiRpcClient {
       pending.reject(rejection);
     }
     this.pending.clear();
+    this.clearLateResponses();
     this.readQueries.clear();
     this.outstandingReadQueryIds.clear();
   }
 
   private handleExit(source: RpcEventSource, error: Error, exitConfirmed = false): void {
-    if (!this.source || this.source.generation !== source.generation) return;
+    // Node may report `error` before the matching `exit`/`close`. The error path
+    // deliberately clears `source` while retaining the child as an ownership
+    // barrier; let the later confirmed callback release that exact child without
+    // emitting a duplicate process failure.
+    if (!this.source || this.source.generation !== source.generation) {
+      if (
+        exitConfirmed &&
+        this.unconfirmedSource?.generation === source.generation
+      ) {
+        this.unconfirmedChild = null;
+        this.unconfirmedSource = null;
+      }
+      return;
+    }
     const activeChild = this.source.child;
     const incident = this.recordTransportIncident(error, {
       operation: "rpc.child-exit",
@@ -703,6 +765,11 @@ export class PiRpcClient {
 
   isRunning(): boolean {
     return Boolean(this.child && this.child.exitCode === null && !this.child.killed);
+  }
+
+  /** True only when this client has no active or unconfirmed child ownership. */
+  isExitConfirmed(): boolean {
+    return !this.child && !this.unconfirmedChild;
   }
 
   async sendRaw(command: Record<string, unknown>, timeoutMs = 10_000): Promise<void> {
@@ -862,6 +929,7 @@ export class PiRpcClient {
         startedAt,
         generation: this.currentGeneration(),
         observe: options.observe,
+        onLateResponse: options.onLateResponse,
       };
       pending.timer = setTimeout(() => {
         if (this.pending.get(id) !== pending) return;
@@ -887,6 +955,8 @@ export class PiRpcClient {
           outcome: error.outcome,
           durationMs: Date.now() - startedAt,
         });
+        if (pending.written && pending.onLateResponse)
+          this.retainLateResponse(id, pending.onLateResponse);
         reject(error);
       }, timeoutMs);
       this.pending.set(id, pending);

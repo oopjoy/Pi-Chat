@@ -2,13 +2,17 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import test from "node:test";
 import { PiChatApp } from "../../src/server/app";
-import { RpcRequestTimeoutError, type PiRpcClient } from "../../src/server/rpc-client";
+import { RpcProcessExitUnconfirmedError, RpcRequestTimeoutError, type PiRpcClient } from "../../src/server/rpc-client";
 import { idForPath } from "../../src/server/session-index";
 import type { SessionIndex } from "../../src/server/session-index";
 import type { ResourceManager } from "../../src/server/resource-manager";
 import { FakeRpc } from "../helpers/server-app-fixture";
+import { PartialTurnSettingsError } from "../../src/server/runtime-pool";
 
 class UnknownSettingRpc extends FakeRpc {
+  private unresolved = true;
+  lateResponse?: (response: Record<string, unknown>, requestId: string) => void;
+
   constructor(
     path: string,
     sessionId: string,
@@ -18,13 +22,59 @@ class UnknownSettingRpc extends FakeRpc {
   }
 
   override async send(command: Record<string, unknown>, timeoutMs?: number, options?: Parameters<FakeRpc["send"]>[2]) {
-    if (command.type === this.unknownType) {
+    if (command.type === this.unknownType && this.unresolved) {
+      this.lateResponse = (options as unknown as { onLateResponse?: (response: Record<string, unknown>, requestId: string) => void })?.onLateResponse;
       this.commands.push(command);
       throw new RpcRequestTimeoutError(this.unknownType);
     }
     return super.send(command, timeoutMs, options);
   }
+
+  resolveLate(): void {
+    this.unresolved = false;
+    this.lateResponse?.({ type: "response", success: true }, "late-setting");
+  }
 }
+
+test("nested unconfirmed setting failures map to RESULT_PENDING", async () => {
+  const path = "C:\\sessions\\nested-unknown-setting.jsonl";
+  const app = new PiChatApp({
+    rpc: new FakeRpc(path, "nested-unknown-setting") as unknown as PiRpcClient,
+    sessions: {} as SessionIndex,
+    resources: {} as ResourceManager,
+    cwd: process.cwd(),
+    webRoot: process.cwd(),
+  });
+  const internals = app as unknown as {
+    rethrowResultPending(error: unknown, operation: string): never;
+    rpcOutcomePendingBySession: Set<string>;
+    rpcOutcomeTokensBySession: Map<string, string>;
+    lateRpcOutcomeHandler(sessionId: string, token: string, kind: "generic" | "compact" | "extension", requestId?: string): (response: Record<string, unknown>) => void;
+  };
+  try {
+    assert.throws(
+      () => internals.rethrowResultPending(
+        new PartialTurnSettingsError(
+          { model: { provider: "test", id: "next", name: "Next" } },
+          new RpcProcessExitUnconfirmedError(9876),
+        ),
+        "准备 Prompt 设置",
+      ),
+      (error) => error instanceof Error && (error as { code?: string }).code === "RESULT_PENDING",
+    );
+    const oldToken = "late-setting-old-token";
+    const newToken = "late-setting-new-token";
+    internals.rpcOutcomePendingBySession.add("session");
+    internals.rpcOutcomeTokensBySession.set("session", newToken);
+    internals.lateRpcOutcomeHandler("session", oldToken, "generic")({ type: "response", success: true });
+    assert.equal(internals.rpcOutcomePendingBySession.has("session"), true, "an old late response cannot clear a newer fence");
+    internals.lateRpcOutcomeHandler("session", newToken, "generic")({ type: "response", success: true });
+    assert.equal(internals.rpcOutcomePendingBySession.has("session"), false);
+    assert.equal(internals.rpcOutcomeTokensBySession.has("session"), false);
+  } finally {
+    await app.close();
+  }
+});
 
 test("ordinary prompt applies its captured Model and Thinking snapshot immediately before Pi prompt", async () => {
   const path = "C:\\sessions\\prompt-settings.jsonl";
@@ -125,13 +175,323 @@ test("an unknown prompt Model write fences later mutations as RESULT_PENDING", a
     assert.equal((await fetch(`${origin}/api/bootstrap`)).status, 200);
     const first = await post("uncertain model prompt");
     assert.equal(first.status, 409);
-    assert.equal((await first.json() as { code?: string }).code, "RESULT_PENDING");
+    const firstBody = await first.json() as { code?: string; outcomeUnknown?: boolean };
+    assert.equal(firstBody.code, "RESULT_PENDING");
+    assert.equal(firstBody.outcomeUnknown, undefined, "the user prompt itself was never written; only preflight is uncertain");
     const second = await post("must not overtake model write");
     assert.equal(second.status, 409);
-    assert.equal((await second.json() as { code?: string }).code, "RESULT_PENDING");
+    const secondBody = await second.json() as { code?: string; outcomeUnknown?: boolean };
+    assert.equal(secondBody.code, "RESULT_PENDING");
+    assert.equal(secondBody.outcomeUnknown, undefined);
     assert.equal(rpc.commands.filter((command) => command.type === "set_model").length, 1);
     assert.equal(rpc.commands.some((command) => command.type === "prompt"), false);
   } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("an unknown direct Model write fences every competing Session mutation", async () => {
+  const path = "C:\\sessions\\unknown-direct-model.jsonl";
+  const sessionId = idForPath(path);
+  const rpc = new UnknownSettingRpc(path, "unknown-direct-model", "set_model");
+  const sessions = {
+    list: async () => [{ id: sessionId, sessionId: "unknown-direct-model", name: "Unknown direct model", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+    pathForId: (id: string) => (id === sessionId ? path : null),
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: rpc as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const post = (route: string, body: Record<string, unknown>) => fetch(`${origin}${route}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sessionId, ...body }),
+  });
+  try {
+    assert.equal((await fetch(`${origin}/api/bootstrap`)).status, 200);
+    const first = await post("/api/models/set", { provider: "test", modelId: "next" });
+    assert.equal(first.status, 409);
+    assert.equal((await first.json() as { code?: string }).code, "RESULT_PENDING");
+    for (const [route, body] of [
+      ["/api/models/set", { provider: "test", modelId: "next" }],
+      ["/api/thinking/set", { level: "high" }],
+      ["/api/chat/compact", {}],
+      ["/api/chat/prompt", { message: "must not overtake the setting" }],
+    ] as const) {
+      const response = await post(route, body);
+      assert.equal(response.status, 409, `${route} must be fenced after an uncertain Model write`);
+      assert.equal((await response.json() as { code?: string }).code, "RESULT_PENDING");
+    }
+    assert.equal(rpc.commands.filter((command) => command.type === "set_model").length, 1);
+    assert.equal(rpc.commands.some((command) => command.type === "set_thinking_level" || command.type === "compact" || command.message === "must not overtake the setting"), false);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("a read-only model catalogue timeout does not create a mutation fence", async () => {
+  class CatalogueTimeoutRpc extends FakeRpc {
+    override async send(command: Record<string, unknown>, timeoutMs?: number, options?: Parameters<FakeRpc["send"]>[2]) {
+      if (command.type === "get_available_models")
+        throw new RpcRequestTimeoutError("get_available_models");
+      return super.send(command, timeoutMs, options);
+    }
+  }
+  const path = "C:\\sessions\\catalogue-read-timeout.jsonl";
+  const sessionId = idForPath(path);
+  const rpc = new CatalogueTimeoutRpc(path, "catalogue-read-timeout");
+  const sessions = {
+    list: async () => [{ id: sessionId, sessionId: "catalogue-read-timeout", name: "Catalogue timeout", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+    pathForId: (id: string) => (id === sessionId ? path : null),
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: rpc as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    assert.equal((await fetch(`http://127.0.0.1:${address.port}/api/bootstrap`)).status, 200);
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/chat/prompt`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId, message: "catalogue is unavailable", settings: { model: { provider: "test", modelId: "next" } } }),
+    });
+    assert.equal(response.status, 409);
+    const body = await response.json() as { code?: string; outcomeUnknown?: boolean };
+    assert.equal(body.code, "RESULT_PENDING");
+    assert.equal(body.outcomeUnknown, undefined, "the user prompt was not written");
+    assert.equal((app as unknown as { rpcOutcomePendingBySession: Set<string> }).rpcOutcomePendingBySession.has(sessionId), false);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("a late successful Model response releases only its matching outcome fence", async () => {
+  const path = "C:\\sessions\\late-model-response.jsonl";
+  const sessionId = idForPath(path);
+  const rpc = new UnknownSettingRpc(path, "late-model-response", "set_model");
+  const sessions = {
+    list: async () => [{ id: sessionId, sessionId: "late-model-response", name: "Late model", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+    pathForId: (id: string) => (id === sessionId ? path : null),
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: rpc as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const post = (route: string, body: Record<string, unknown>) => fetch(`${origin}${route}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sessionId, ...body }),
+  });
+  try {
+    assert.equal((await fetch(`${origin}/api/bootstrap`)).status, 200);
+    const first = await post("/api/models/set", { provider: "test", modelId: "next" });
+    assert.equal(first.status, 409);
+    rpc.resolveLate();
+    const second = await post("/api/models/set", { provider: "test", modelId: "next" });
+    assert.equal(second.status, 200, "a matching late response releases its own fence");
+    assert.equal(rpc.commands.filter((command) => command.type === "set_model").length, 2);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("an unknown direct Thinking write fences later Model and prompt mutations", async () => {
+  const path = "C:\\sessions\\unknown-direct-thinking.jsonl";
+  const sessionId = idForPath(path);
+  const rpc = new UnknownSettingRpc(path, "unknown-direct-thinking", "set_thinking_level");
+  const sessions = {
+    list: async () => [{ id: sessionId, sessionId: "unknown-direct-thinking", name: "Unknown direct thinking", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+    pathForId: (id: string) => (id === sessionId ? path : null),
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: rpc as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const post = (route: string, body: Record<string, unknown>) => fetch(`${origin}${route}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sessionId, ...body }),
+  });
+  try {
+    assert.equal((await fetch(`${origin}/api/bootstrap`)).status, 200);
+    const first = await post("/api/thinking/set", { level: "high" });
+    assert.equal(first.status, 409);
+    assert.equal((await first.json() as { code?: string }).code, "RESULT_PENDING");
+    const model = await post("/api/models/set", { provider: "test", modelId: "next" });
+    assert.equal(model.status, 409);
+    assert.equal((await model.json() as { code?: string }).code, "RESULT_PENDING");
+    const prompt = await post("/api/chat/prompt", { message: "must remain fenced" });
+    assert.equal(prompt.status, 409);
+    assert.equal((await prompt.json() as { code?: string }).code, "RESULT_PENDING");
+    assert.equal(rpc.commands.filter((command) => command.type === "set_thinking_level").length, 1);
+    assert.equal(rpc.commands.some((command) => command.type === "set_model" || command.message === "must remain fenced"), false);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("a post-setting read timeout does not fence a later prompt", async () => {
+  class ThinkingReadTimeoutRpc extends FakeRpc {
+    private settingApplied = false;
+    private failConfirmation = true;
+
+    override async send(command: Record<string, unknown>, timeoutMs?: number, options?: Parameters<FakeRpc["send"]>[2]) {
+      if (command.type === "set_thinking_level") {
+        const result = await super.send(command, timeoutMs, options);
+        this.settingApplied = true;
+        return result;
+      }
+      if (command.type === "get_state" && this.settingApplied && this.failConfirmation) {
+        this.failConfirmation = false;
+        throw new RpcRequestTimeoutError("get_state");
+      }
+      return super.send(command, timeoutMs, options);
+    }
+  }
+  const path = "C:\\sessions\\thinking-read-timeout.jsonl";
+  const sessionId = idForPath(path);
+  const rpc = new ThinkingReadTimeoutRpc(path, "thinking-read-timeout");
+  const sessions = {
+    list: async () => [{ id: sessionId, sessionId: "thinking-read-timeout", name: "Thinking read timeout", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+    pathForId: (id: string) => (id === sessionId ? path : null),
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: rpc as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    assert.equal((await fetch(`http://127.0.0.1:${address.port}/api/bootstrap`)).status, 200);
+    const setting = await fetch(`http://127.0.0.1:${address.port}/api/thinking/set`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId, level: "high" }),
+    });
+    assert.equal(setting.status, 409);
+    assert.equal((app as unknown as { rpcOutcomePendingBySession: Set<string> }).rpcOutcomePendingBySession.has(sessionId), false);
+    const prompt = await fetch(`http://127.0.0.1:${address.port}/api/chat/prompt`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId, message: "send after read timeout" }),
+    });
+    assert.equal(prompt.status, 202);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("an unknown Gate preflight write fences the following Session mutations", async () => {
+  class UnknownGateRpc extends FakeRpc {
+    override async send(command: Record<string, unknown>, timeoutMs?: number, options?: Parameters<FakeRpc["send"]>[2]) {
+      if (command.type === "prompt" && command.message === "/gate open") {
+        this.commands.push(command);
+        throw new RpcRequestTimeoutError("prompt");
+      }
+      return super.send(command, timeoutMs, options);
+    }
+  }
+  const path = "C:\\sessions\\unknown-gate-preflight.jsonl";
+  const sessionId = idForPath(path);
+  const rpc = new UnknownGateRpc(path, "unknown-gate-preflight");
+  const sessions = {
+    list: async () => [{ id: sessionId, sessionId: "unknown-gate-preflight", name: "Unknown Gate", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+    pathForId: (id: string) => (id === sessionId ? path : null),
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: rpc as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    assert.equal((await fetch(`${origin}/api/bootstrap`)).status, 200);
+    const first = await fetch(`${origin}/api/chat/prompt`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId, message: "gate preflight", gateMode: "open" }),
+    });
+    assert.equal(first.status, 409);
+    assert.equal((await first.json() as { code?: string }).code, "RESULT_PENDING");
+    const model = await fetch(`${origin}/api/models/set`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId, provider: "test", modelId: "next" }),
+    });
+    assert.equal(model.status, 409);
+    assert.equal((await model.json() as { code?: string }).code, "RESULT_PENDING");
+    assert.equal(rpc.commands.filter((command) => command.message === "/gate open").length, 1);
+    assert.equal(rpc.commands.some((command) => command.type === "set_model"), false);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("HTTP abort invalidates an in-flight Primary Gate preflight before prompt dispatch", async () => {
+  let releaseGate!: () => void;
+  let gateEntered!: () => void;
+  const gateReady = new Promise<void>((resolve) => { gateEntered = resolve; });
+  const gateRelease = new Promise<void>((resolve) => { releaseGate = resolve; });
+  class BlockingGateRpc extends FakeRpc {
+    override async send(command: Record<string, unknown>, timeoutMs?: number, options?: Parameters<FakeRpc["send"]>[2]) {
+      if (command.type === "prompt" && command.message === "/gate open") {
+        gateEntered();
+        await gateRelease;
+      }
+      return super.send(command, timeoutMs, options);
+    }
+  }
+  const path = "C:\\sessions\\abort-during-gate.jsonl";
+  const sessionId = idForPath(path);
+  const rpc = new BlockingGateRpc(path, "abort-during-gate");
+  const sessions = {
+    list: async () => [{ id: sessionId, sessionId: "abort-during-gate", name: "Abort during Gate", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+    pathForId: (id: string) => (id === sessionId ? path : null),
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: rpc as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const post = (route: string, body: Record<string, unknown>) => fetch(`${origin}${route}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sessionId, ...body }),
+  });
+  try {
+    assert.equal((await fetch(`${origin}/api/bootstrap`)).status, 200);
+    const prompt = post("/api/chat/prompt", { message: "must not dispatch", gateMode: "open" });
+    await gateReady;
+    const abort = await post("/api/chat/abort", {});
+    assert.equal(abort.status, 200);
+    releaseGate();
+    const promptResponse = await prompt;
+    assert.notEqual(promptResponse.status, 202, "an invalidated preflight cannot report prompt acceptance");
+    assert.equal(rpc.commands.some((command) => command.message === "must not dispatch"), false);
+    assert.equal(rpc.commands.some((command) => command.type === "abort"), true);
+  } finally {
+    releaseGate();
     server.close();
     await app.close();
   }

@@ -1,4 +1,4 @@
-import { useEffect, type RefObject } from "react";
+import { useEffect, useRef, type RefObject } from "react";
 
 const FOCUSABLE = [
   "a[href]",
@@ -14,10 +14,12 @@ const FOCUSABLE = [
  * focus enters the dialog, Tab stays inside it, and focus returns to its opener.
  */
 export function useModalFocus(active: boolean, dialogRef: RefObject<HTMLElement | null>, initialFocus?: () => HTMLElement | null) {
+  const initialFocusRef = useRef(initialFocus);
+  initialFocusRef.current = initialFocus;
   useEffect(() => {
     if (!active) return;
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const focusInitial = () => (initialFocus?.() || dialogRef.current?.querySelector<HTMLElement>(FOCUSABLE))?.focus();
+    const focusInitial = () => (initialFocusRef.current?.() || dialogRef.current?.querySelector<HTMLElement>(FOCUSABLE))?.focus();
     const schedule = window.requestAnimationFrame || ((callback: FrameRequestCallback) => window.setTimeout(() => callback(Date.now()), 0));
     const cancel = window.cancelAnimationFrame || window.clearTimeout;
     const frame = schedule(focusInitial);
@@ -46,5 +48,5 @@ export function useModalFocus(active: boolean, dialogRef: RefObject<HTMLElement 
       document.removeEventListener("keydown", trap);
       if (opener?.isConnected) opener.focus();
     };
-  }, [active, dialogRef, initialFocus]);
+  }, [active, dialogRef]);
 }

@@ -9,6 +9,8 @@ export const SECURITY_HEADERS = {
 const JSON_HEADERS = { ...SECURITY_HEADERS, "content-type": "application/json; charset=utf-8", "cache-control": "no-store" };
 /** Request bodies must not hold a lifecycle/mutation admission indefinitely. */
 export const DEFAULT_HTTP_BODY_TIMEOUT_MS = 120_000;
+/** After returning a clean 408, give a peer a short grace period before closing its transport. */
+export const DEFAULT_HTTP_BODY_DRAIN_TIMEOUT_MS = 5_000;
 
 export const MIME_TYPES: Record<string, string> = {
   ".css": "text/css; charset=utf-8",
@@ -60,6 +62,7 @@ export class HttpRequestError extends Error {
     message: string,
     readonly code = "HTTP_REQUEST_REJECTED",
     readonly retryable = false,
+    readonly outcomeUnknown = false,
   ) { super(message); }
 }
 
@@ -67,6 +70,7 @@ export async function bodyJson(
   request: IncomingMessage,
   maximumBytes = 1_000_000,
   timeoutMs = DEFAULT_HTTP_BODY_TIMEOUT_MS,
+  drainTimeoutMs = DEFAULT_HTTP_BODY_DRAIN_TIMEOUT_MS,
 ): Promise<Record<string, unknown>> {
   const read = (async () => {
     const chunks: Buffer[] = [];
@@ -92,9 +96,13 @@ export async function bodyJson(
     return value as Record<string, unknown>;
   })();
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(
-      () => reject(new HttpRequestError(408, "请求体接收超时，请重新提交")),
+      () => {
+        timedOut = true;
+        reject(new HttpRequestError(408, "请求体接收超时，请重新提交"));
+      },
       Math.max(1, timeoutMs),
     );
   });
@@ -102,8 +110,25 @@ export async function bodyJson(
     return await Promise.race([read, timeout]);
   } finally {
     if (timer) clearTimeout(timer);
-    // If the deadline won, continue draining the request in the background so
-    // the server can still send a clean 408 instead of resetting the socket.
-    void read.catch(() => undefined);
+    if (!timedOut) {
+      void read.catch(() => undefined);
+    } else {
+      // Continue draining briefly so the caller can send a clean 408 rather than
+      // resetting the socket immediately. A peer that drips bytes forever must
+      // still lose its transport after this second, bounded deadline.
+      let drainTimer: ReturnType<typeof setTimeout> | undefined;
+      const clearDrainTimer = () => {
+        if (drainTimer) clearTimeout(drainTimer);
+        drainTimer = undefined;
+      };
+      drainTimer = setTimeout(() => {
+        if (request.complete || request.destroyed) return;
+        try { request.destroy(); } catch { /* transport cleanup is best effort */ }
+      }, Math.max(1, drainTimeoutMs));
+      drainTimer.unref?.();
+      void read
+        .catch(() => undefined)
+        .then(clearDrainTimer, clearDrainTimer);
+    }
   }
 }

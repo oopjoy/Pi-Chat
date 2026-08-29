@@ -135,12 +135,25 @@ export function SessionSidebar({ sessions, sessionsTotal, sessionDirectories, in
   const [sessionMenuId, setSessionMenuId] = useState("");
   const [sessionMenuPosition, setSessionMenuPosition] = useState({ top: 0, left: 0 });
   const sessionMenuRef = useRef<HTMLDivElement>(null);
+  const sessionMenuTriggerRefs = useRef(new Map<string, HTMLButtonElement>());
   const searchInputRef = useRef<HTMLInputElement>(null);
   const previousWorkspaceAuthorityRef = useRef({
     cwd: workspaceCwd,
     epoch: workspaceEpoch,
     revision: workspaceRevision,
   });
+  const restoreSessionMenuFocus = (sessionId: string) => {
+    // Focus the opener before removing the portal. Dialog focus hooks can then
+    // capture this trigger as their opener, and the trigger remains connected
+    // even when the menu item itself is about to be unmounted.
+    const trigger = sessionMenuTriggerRefs.current.get(sessionId);
+    if (trigger?.isConnected) trigger.focus();
+  };
+  const closeSessionMenu = (restoreFocus = false) => {
+    const sessionId = sessionMenuId;
+    setSessionMenuId("");
+    if (restoreFocus && sessionId) restoreSessionMenuFocus(sessionId);
+  };
   useEffect(() => {
     if (!sessionMenuId) return;
     const closeOnOutside = (event: PointerEvent) => {
@@ -148,9 +161,17 @@ export function SessionSidebar({ sessions, sessionsTotal, sessionDirectories, in
       if (!sessionMenuRef.current?.contains(target) && !target.closest(".session-menu-trigger")) setSessionMenuId("");
     };
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setSessionMenuId("");
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      const sessionId = sessionMenuId;
+      setSessionMenuId("");
+      if (sessionId) restoreSessionMenuFocus(sessionId);
     };
-    const closeOnLayoutChange = () => setSessionMenuId("");
+    const closeOnLayoutChange = () => {
+      const sessionId = sessionMenuId;
+      setSessionMenuId("");
+      if (sessionId) restoreSessionMenuFocus(sessionId);
+    };
     document.addEventListener("pointerdown", closeOnOutside);
     window.addEventListener("keydown", closeOnEscape);
     window.addEventListener("resize", closeOnLayoutChange);
@@ -286,8 +307,11 @@ export function SessionSidebar({ sessions, sessionsTotal, sessionDirectories, in
                     </button>
                     <div className={`session-item-actions${sessionMenuId === session.id ? " is-open" : ""}`}>
                       <span className={`session-status is-${status.kind}`} role="img" aria-label={status.label} title={status.label} />
-                      <button type="button" className="session-menu-trigger" disabled={mutating} onClick={(event) => {
-                        if (sessionMenuId === session.id) return setSessionMenuId("");
+                      <button type="button" className="session-menu-trigger" ref={(element) => {
+                        if (element) sessionMenuTriggerRefs.current.set(session.id, element);
+                        else sessionMenuTriggerRefs.current.delete(session.id);
+                      }} disabled={mutating} onClick={(event) => {
+                        if (sessionMenuId === session.id) return closeSessionMenu(true);
                         const rect = event.currentTarget.getBoundingClientRect();
                         const menuHeight = 144;
                         setSessionMenuPosition({
@@ -314,10 +338,10 @@ export function SessionSidebar({ sessions, sessionsTotal, sessionDirectories, in
         <ResizeHandle width={width} onWidthChange={onWidthChange} />
       </aside>
       {menuSession && visibleSessionIds.has(menuSession.id) && createPortal(<div className="session-item-menu" ref={sessionMenuRef} role="menu" style={sessionMenuPosition}>
-        <button type="button" role="menuitem" onClick={() => { setSessionMenuId(""); onTogglePin(menuSession.id); }}>{pinnedIds.has(menuSession.id) ? "取消置顶" : "置顶"}</button>
-        <button type="button" role="menuitem" disabled={copyDisabled || mutatingSessionIds.includes(menuSession.id) || menuSession.running || menuSession.queued || menuSession.pendingConfirmation || menuSession.messageCount === 0} onClick={() => { setSessionMenuId(""); onClone(menuSession); }} title={copyDisabled ? "当前正在执行全局操作，暂时不能复制" : menuSession.running ? "该对话正在生成，完成后才能复制" : menuSession.queued ? "该对话有待发送消息，清空队列后才能复制" : menuSession.pendingConfirmation ? "该对话正在等待确认，处理后才能复制" : menuSession.messageCount === 0 ? "空白对话发送消息后才能复制" : undefined}>复制为新对话</button>
-        <button type="button" role="menuitem" disabled={mutatingSessionIds.includes(menuSession.id)} onClick={() => { setSessionMenuId(""); onRename(menuSession); }}>重命名</button>
-        <button type="button" role="menuitem" className="is-danger" disabled={mutatingSessionIds.includes(menuSession.id) || menuSession.running || menuSession.queued || menuSession.pendingConfirmation} onClick={() => { setSessionMenuId(""); onDelete(menuSession); }} title={mutatingSessionIds.includes(menuSession.id) ? "该对话的管理操作尚未确认" : menuSession.running ? "该对话正在生成，停止后才能删除" : menuSession.queued ? "该对话有待发送消息，清空队列后才能删除" : menuSession.pendingConfirmation ? "该对话正在等待确认，处理后才能删除" : undefined}>删除</button>
+        <button type="button" role="menuitem" onClick={() => { closeSessionMenu(true); onTogglePin(menuSession.id); }}>{pinnedIds.has(menuSession.id) ? "取消置顶" : "置顶"}</button>
+        <button type="button" role="menuitem" disabled={copyDisabled || mutatingSessionIds.includes(menuSession.id) || menuSession.running || menuSession.queued || menuSession.pendingConfirmation || menuSession.messageCount === 0} onClick={() => { closeSessionMenu(true); onClone(menuSession); }} title={copyDisabled ? "当前正在执行全局操作，暂时不能复制" : menuSession.running ? "该对话正在生成，完成后才能复制" : menuSession.queued ? "该对话有待发送消息，清空队列后才能复制" : menuSession.pendingConfirmation ? "该对话正在等待确认，处理后才能复制" : menuSession.messageCount === 0 ? "空白对话发送消息后才能复制" : undefined}>复制为新对话</button>
+        <button type="button" role="menuitem" disabled={mutatingSessionIds.includes(menuSession.id)} onClick={() => { closeSessionMenu(true); onRename(menuSession); }}>重命名</button>
+        <button type="button" role="menuitem" className="is-danger" disabled={mutatingSessionIds.includes(menuSession.id) || menuSession.running || menuSession.queued || menuSession.pendingConfirmation} onClick={() => { closeSessionMenu(true); onDelete(menuSession); }} title={mutatingSessionIds.includes(menuSession.id) ? "该对话的管理操作尚未确认" : menuSession.running ? "该对话正在生成，停止后才能删除" : menuSession.queued ? "该对话有待发送消息，清空队列后才能删除" : menuSession.pendingConfirmation ? "该对话正在等待确认，处理后才能删除" : undefined}>删除</button>
       </div>, document.body)}
     </>
   );

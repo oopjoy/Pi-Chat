@@ -10,6 +10,7 @@ import { idForPath } from "../../src/server/session-index";
 import type { SessionIndex } from "../../src/server/session-index";
 import type { ResourceManager } from "../../src/server/resource-manager";
 import { ModelManager } from "../../src/server/model-manager";
+import { OperationAdmission } from "../../src/server/operation-admission";
 import type { SessionSummary } from "../../src/shared/types";
 import { FakeRpc } from "../helpers/server-app-fixture";
 
@@ -212,6 +213,8 @@ test("app close releases browser resources but preserves an unconfirmed Runtime 
     id: "secondary",
     rpc: secondary,
     recovery: null,
+    operationAdmission: new OperationAdmission(),
+    operationLeases: 0,
     unsubscribe: () => undefined,
     draftSession: false,
     prompted: true,

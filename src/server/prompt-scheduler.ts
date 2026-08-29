@@ -258,11 +258,12 @@ export class PromptScheduler {
     promptId: string = randomUUID(),
     settings?: PromptSettingsSnapshot,
     consumeSupersededLegacy = false,
+    expectedAbortGeneration?: number,
   ): Promise<PromptAcceptance> {
     const releaseOperation = this.runtime.acquirePrimaryOperation();
+    const generation = expectedAbortGeneration ?? this.primaryAbortGeneration;
     try {
       await this.runtime.ensurePrimaryRuntime();
-      const generation = this.primaryAbortGeneration;
       const sessionId = this.runtime.activeSessionId();
       let appliedSettings: AppliedTurnSettings;
       try {

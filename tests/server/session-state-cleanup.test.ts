@@ -102,6 +102,87 @@ test("a closed app refuses to start a native Steer reset", async () => {
   await app.close();
 });
 
+test("app close fences and drains already-admitted Primary operations", async () => {
+  const app = appForTest();
+  const internals = app as unknown as {
+    primaryOperationAdmission: { acquire(): { release(): void }; isClosed: boolean };
+  };
+  const operation = internals.primaryOperationAdmission.acquire();
+  let closed = false;
+  const closing = app.close().then(() => { closed = true; });
+  await Promise.resolve();
+  assert.equal(closed, false);
+  assert.equal(internals.primaryOperationAdmission.isClosed, true);
+  operation.release();
+  await closing;
+  assert.equal(closed, true);
+});
+
+test("late Primary settlement work and buffered events are inert after app close", async () => {
+  const rpc = new FakeRpc("C:\\sessions\\close-settlement.jsonl", "close-settlement");
+  const app = new PiChatApp({
+    rpc: rpc as unknown as PiRpcClient,
+    sessions: {} as SessionIndex,
+    resources: {} as ResourceManager,
+    cwd: process.cwd(),
+    webRoot: process.cwd(),
+  });
+  const internals = app as unknown as {
+    ensurePrimaryIdentity: () => Promise<void>;
+    drainPrimaryAfterSettlement: (sessionId: string, generation: number) => Promise<void>;
+    primaryBoundSessionId: string;
+    primaryRpcGeneration: number;
+    running: boolean;
+    lastPrimaryState: { isStreaming?: boolean };
+  };
+  let releaseBarrier!: () => void;
+  let barrierStarted!: () => void;
+  const barrierReady = new Promise<void>((resolve) => { barrierStarted = resolve; });
+  const barrier = new Promise<void>((resolve) => { releaseBarrier = resolve; });
+  const originalSend = rpc.send.bind(rpc);
+  rpc.send = async (command, timeoutMs, options) => {
+    if (command.type === "get_state" && options?.independentRead) {
+      barrierStarted();
+      await barrier;
+      return {
+        type: "response",
+        success: true,
+        data: {
+          model: null,
+          sessionFile: rpc.path,
+          sessionId: rpc.sessionId,
+          isStreaming: true,
+        },
+      };
+    }
+    return originalSend(command, timeoutMs, options);
+  };
+  try {
+    await internals.ensurePrimaryIdentity();
+    rpc.commands.length = 0;
+    const lateDrain = internals.drainPrimaryAfterSettlement(
+      internals.primaryBoundSessionId,
+      internals.primaryRpcGeneration,
+    );
+    await barrierReady;
+    await app.close();
+    rpc.emitLate({ type: "agent_settled" });
+    releaseBarrier();
+    await lateDrain;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(internals.running, false, "a closed app must not accept a late settlement state");
+    assert.equal(internals.lastPrimaryState.isStreaming, false, "late settlement cannot repaint closed state");
+    assert.equal(
+      rpc.commands.some((command) => command.type === "get_state"),
+      false,
+      "a buffered post-close event must not start another settlement barrier",
+    );
+  } finally {
+    releaseBarrier();
+    await app.close();
+  }
+});
+
 test("Session deletion cleanup removes every server-owned per-Session projection", async () => {
   const app = appForTest();
   const timer = setTimeout(() => undefined, 60_000);

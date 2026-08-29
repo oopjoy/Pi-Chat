@@ -74,6 +74,28 @@ test("ChatInput accepts ten images and rejects the eleventh without losing the f
   }
 });
 
+test("Escape closes the attachment menu and restores focus to its trigger", async () => {
+  const { dom } = installAppDom();
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(
+      ChatInput,
+      chatInputProps(() => {}),
+    )));
+    const trigger = dom.window.document.querySelector<HTMLButtonElement>(".attachment-button")!;
+    await act(async () => trigger.click());
+    assert.ok(dom.window.document.querySelector(".attachment-menu"));
+    await act(async () => {
+      dom.window.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      await new Promise<void>((resolve) => dom.window.setTimeout(resolve, 0));
+    });
+    assert.equal(dom.window.document.querySelector(".attachment-menu"), null);
+    assert.equal(dom.window.document.activeElement, trigger);
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
 test("overlapping image additions recheck the latest attachment count before commit", async () => {
   const { dom } = installAppDom();
   Object.assign(globalThis, { FileReader: dom.window.FileReader });

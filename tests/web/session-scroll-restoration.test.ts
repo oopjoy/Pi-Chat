@@ -25,6 +25,11 @@ test("timeline rows keep real browser geometry for initial-bottom and restoratio
     /contain-intrinsic-size\s*:/,
     "intrinsic placeholders must not replace real timeline row heights",
   );
+  assert.doesNotMatch(
+    css,
+    /var\(--border\)/,
+    "Primary status styling must use the declared --line token",
+  );
 });
 
 function withGeometry(element: HTMLElement, scrollHeight: number, clientHeight: number): void {

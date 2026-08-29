@@ -23,6 +23,18 @@ test("closing admission blocks new operations and waits for admitted work", asyn
   admission.acquire().release();
 });
 
+test("fence closes immediately without waiting and remains idempotent", () => {
+  const admission = new OperationAdmission();
+  const first = admission.acquire();
+  const generation = admission.fence();
+  assert.equal(admission.isClosed, true);
+  assert.throws(() => admission.acquire(), OperationAdmissionClosedError);
+  assert.equal(admission.fence(), generation);
+  first.release();
+  admission.reopen(generation);
+  assert.equal(admission.isClosed, false);
+});
+
 test("only the matching close generation can reopen admission", async () => {
   const admission = new OperationAdmission();
   const generation = await admission.closeAndDrain();

@@ -196,7 +196,12 @@ function promptDraftFromMessage(
 
 /** User-facing reason an accepted Steer was cleared before Pi consumed it. */
 function resultPendingError(cause: unknown): boolean {
-  return cause instanceof ApiRequestError && cause.code === "RESULT_PENDING";
+  // A pre-existing RESULT_PENDING response definitely rejected this new prompt;
+  // only the server's explicit outcomeUnknown marker may retain it as a local
+  // possibly-accepted turn.
+  return cause instanceof ApiRequestError &&
+    cause.code === "RESULT_PENDING" &&
+    cause.outcomeUnknown;
 }
 
 function finiteRunMetric(value: unknown): number | undefined {

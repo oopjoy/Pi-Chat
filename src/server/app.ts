@@ -497,6 +497,8 @@ export class PiChatApp {
   private readonly uncertainExtensionResponseBySession = new Set<string>();
   /** Non-idempotent RPC writes whose acknowledgement was lost. */
   private readonly rpcOutcomePendingBySession = new Set<string>();
+  /** Tokenizes uncertain writes so a late response cannot clear a newer fence. */
+  private readonly rpcOutcomeTokensBySession = new Map<string, string>();
   /** Primary new_session may have switched identity before DELETE was acknowledged. */
   private readonly deletionOutcomePendingBySession = new Set<string>();
   private readonly modelContextWindows = new Map<string, number>();
@@ -1058,10 +1060,19 @@ export class PiChatApp {
       clearTimeout(timer);
     this.draftPersistenceRetryTimers.clear();
     this.unsubscribe();
-    // A settlement barrier may already be resetting native Steer state. Wait
-    // for those resets before stopping workers, while the closed fence below
-    // prevents a later barrier from starting a new recovery/restart.
-    await Promise.allSettled([...this.nativeSteeringResets.values()]);
+    // Stop admitting Primary operations before waiting for in-flight resets.
+    // Existing leases are allowed to drain, while every late caller fails
+    // closed at the application boundary.
+    const primaryAdmissionDrain = this.primaryOperationAdmission.closeAndDrain();
+    // A settlement barrier or Primary recovery may already be changing child
+    // ownership. Wait for those in-flight continuations before stopping
+    // workers; the closed fence below prevents any new recovery/restart.
+    const primaryRecovery = this.primaryRecovery;
+    await Promise.allSettled([
+      ...this.nativeSteeringResets.values(),
+      ...(primaryRecovery ? [primaryRecovery] : []),
+      primaryAdmissionDrain,
+    ]);
     // Distinct Session workers can stop concurrently. Sequential forced-stop
     // windows made shutdown/restart scale by roughly three seconds per worker.
     // Preserve a failed worker's ownership, but still release SSE/HTTP-facing
@@ -1550,27 +1561,79 @@ export class PiChatApp {
   }
 
   private rpcOutcomeUnknown(error: unknown): boolean {
-    return isRpcOutcomeUnknown(error) ||
-      (error instanceof PartialTurnSettingsError && isRpcOutcomeUnknown(error.cause));
+    if (error instanceof RpcProcessExitUnconfirmedError || isRpcOutcomeUnknown(error))
+      return true;
+    if (error instanceof Error && "cause" in error)
+      return this.rpcOutcomeUnknown(error.cause);
+    return false;
   }
 
-  private markRpcOutcomePending(sessionId: string, error: unknown): void {
+  private lateRpcOutcomeHandler(
+    sessionId: string,
+    token: string,
+    kind: "generic" | "compact" | "extension",
+    requestId?: string,
+  ) {
+    return (response: Record<string, unknown>) => {
+      if (this.closed) return;
+      if (
+        response.type !== "response" ||
+        this.rpcOutcomeTokensBySession.get(sessionId) !== token
+      )
+        return;
+      this.rpcOutcomeTokensBySession.delete(sessionId);
+      this.rpcOutcomePendingBySession.delete(sessionId);
+      if (kind === "compact") {
+        this.compactionPendingBySession.delete(sessionId);
+        this.uncertainCompactionBySession.delete(sessionId);
+      } else if (kind === "extension" && requestId) {
+        const pending = this.pendingRequestForSession(sessionId);
+        if (pending?.id === requestId)
+          this.clearPendingRequest(sessionId, requestId);
+      }
+      this.broadcastSessionActivity(sessionId);
+    };
+  }
+
+  private sessionMutationOutcomePending(sessionId: string): boolean {
+    return Boolean(
+      sessionId && (
+        this.rpcOutcomePendingBySession.has(sessionId) ||
+        this.uncertainExtensionResponseBySession.has(sessionId) ||
+        this.uncertainCompactionBySession.has(sessionId) ||
+        (
+          this.compactionPendingBySession.has(sessionId) &&
+          !this.compactionIsActive(sessionId)
+        )
+      ),
+    );
+  }
+
+  private markRpcOutcomePending(
+    sessionId: string,
+    error: unknown,
+    token?: string,
+  ): void {
     if (!sessionId || !this.rpcOutcomeUnknown(error)) return;
     this.rpcOutcomePendingBySession.add(sessionId);
+    if (!this.rpcOutcomeTokensBySession.has(sessionId))
+      this.rpcOutcomeTokensBySession.set(sessionId, token || randomUUID());
     this.broadcastSessionActivity(sessionId);
   }
 
   /** Convert an acknowledged-but-unresolved RPC mutation into one retry-safe HTTP outcome. */
-  private rethrowResultPending(error: unknown, operation: string): never {
-    if (
-      this.rpcOutcomeUnknown(error) ||
-      error instanceof RpcProcessExitUnconfirmedError
-    )
+  private rethrowResultPending(
+    error: unknown,
+    operation: string,
+    operationOutcomeUnknown = true,
+  ): never {
+    if (this.rpcOutcomeUnknown(error))
       throw new HttpRequestError(
         409,
         `${operation}结果尚未确认；请刷新页面核对，不要重复操作`,
         "RESULT_PENDING",
         true,
+        operationOutcomeUnknown,
       );
     throw error;
   }
@@ -1623,6 +1686,7 @@ export class PiChatApp {
     this.uncertainCompactionBySession.delete(sessionId);
     this.uncertainExtensionResponseBySession.delete(sessionId);
     this.rpcOutcomePendingBySession.delete(sessionId);
+    this.rpcOutcomeTokensBySession.delete(sessionId);
     this.clearRuntimeFailure(sessionId);
     if (options.removeGatePreference) {
       this.gateModesBySession.delete(sessionId);
@@ -2078,8 +2142,14 @@ export class PiChatApp {
         this.primaryOperationAdmission.reopen(generation);
         return false;
       }
+      let keepAdmissionClosed = false;
       try {
-        await this.options.rpc.stop();
+        try {
+          await this.options.rpc.stop();
+        } catch (error) {
+          keepAdmissionClosed = this.rpcOutcomeUnknown(error);
+          this.rethrowResultPending(error, "回收会话运行时");
+        }
         this.setFastModeActive(sessionId, false);
         this.pendingPrimaryFastMode = undefined;
         this.primaryFailed = true;
@@ -2092,13 +2162,18 @@ export class PiChatApp {
         });
         return true;
       } finally {
-        this.primaryOperationAdmission.reopen(generation);
+        if (!keepAdmissionClosed)
+          this.primaryOperationAdmission.reopen(generation);
       }
     }
     const runtime = this.runtimePool.get(sessionId);
     if (!runtime || !this.runtimePool.canReclaim(runtime)) return false;
     this.clearNativeSteeringState(sessionId, "reclaim");
-    return this.runtimePool.reclaim(sessionId, "idle");
+    try {
+      return await this.runtimePool.reclaim(sessionId, "idle");
+    } catch (error) {
+      this.rethrowResultPending(error, "回收会话运行时");
+    }
   }
 
   private clientDisconnected(clientId: string, pageId = ""): void {
@@ -2551,12 +2626,20 @@ export class PiChatApp {
         }
         if (runtime) {
           await this.runtimePool.recover(runtime);
+          if (this.closed) {
+            this.clearNativeSteeringState(sessionId, "application-close");
+            return;
+          }
           this.clearRuntimeFailure(runtime.id);
           this.broadcastSessionActivity(runtime.id);
         } else {
           // Controller-managed restart adopts the startup state before resolve.
           // Re-reading get_state here used to reopen the same split authority.
           await this.restartPrimaryRuntime(this.activeSessionPath || undefined);
+          if (this.closed) {
+            this.clearNativeSteeringState(sessionId, "application-close");
+            return;
+          }
           // The replacement process cannot own the prior generation's live or
           // tool projection, including legacy embedding bridges without an
           // adopter callback.
@@ -2592,6 +2675,7 @@ export class PiChatApp {
     event: Record<string, unknown>,
     source?: RpcEventSource,
   ): void {
+    if (this.closed) return;
     const currentGeneration = runtime.rpc.currentGeneration?.() || 0;
     const sourceGeneration = source?.generation || currentGeneration;
     const fastMode = fastModeStatusFromExtensionEvent(event);
@@ -2620,10 +2704,28 @@ export class PiChatApp {
       return;
     }
     const type = String(event.type || "");
-    if (type === "compaction_end" || type === "agent_settled" || type === "pi_chat_process_error") {
+    const uncertainCompaction =
+      this.uncertainCompactionBySession.has(runtime.id);
+    const uncertainExtensionResponse =
+      this.uncertainExtensionResponseBySession.has(runtime.id);
+    if (type === "compaction_end") {
+      this.uncertainCompactionBySession.delete(runtime.id);
+      if (uncertainCompaction) {
+        this.rpcOutcomePendingBySession.delete(runtime.id);
+        this.rpcOutcomeTokensBySession.delete(runtime.id);
+      }
+    } else if (type === "agent_settled" || type === "pi_chat_process_error") {
       this.uncertainCompactionBySession.delete(runtime.id);
       this.uncertainExtensionResponseBySession.delete(runtime.id);
-      if (type !== "compaction_end") this.rpcOutcomePendingBySession.delete(runtime.id);
+      this.rpcOutcomePendingBySession.delete(runtime.id);
+      this.rpcOutcomeTokensBySession.delete(runtime.id);
+      // An uncertain Extension answer is resolved by the lifecycle boundary,
+      // not merely by dropping the uncertainty bit. Otherwise settlement can
+      // leave a stale dialog visible and allow a second answer to be sent.
+      if (type === "agent_settled" && uncertainExtensionResponse) {
+        const pending = this.pendingRequestForSession(runtime.id);
+        if (pending) this.clearPendingRequest(runtime.id, pending.id);
+      }
     }
     if (this.cancelInteractiveCopyHook(runtime.id, runtime.rpc, event)) return;
     const generation = runtime.rpcGeneration;
@@ -2790,6 +2892,7 @@ export class PiChatApp {
           { independentRead: true },
         ),
       );
+      if (this.closed) return;
       if (
         this.runtimePool.get(runtime.id) !== runtime ||
         sourceGeneration !== runtime.rpcGeneration
@@ -2830,6 +2933,7 @@ export class PiChatApp {
         void this.runtimePool.sweep();
       }
     } catch (error) {
+      if (this.closed) return;
       if (
         this.runtimePool.get(runtime.id) !== runtime ||
         sourceGeneration !== runtime.rpcGeneration
@@ -2884,6 +2988,7 @@ export class PiChatApp {
           { independentRead: true },
         ),
       );
+      if (this.closed) return;
       if (
         sessionId !== this.primaryBoundSessionId ||
         sourceGeneration !== this.primaryRpcGeneration
@@ -2920,6 +3025,7 @@ export class PiChatApp {
       this.broadcastSessionActivity(sessionId);
       if (!this.running) void this.dispatchNext();
     } catch (error) {
+      if (this.closed) return;
       if (
         sessionId !== this.primaryBoundSessionId ||
         sourceGeneration !== this.primaryRpcGeneration
@@ -2964,7 +3070,11 @@ export class PiChatApp {
     // generation-scoped Steer state and resumes already-admitted FIFO work.
     const existing = this.runtimePool.get(id);
     let runtime: SecondaryRuntime;
-    if (existing && this.secondaryNeedsRecovery(existing)) {
+    if (existing?.operationAdmission.isClosed) {
+      // RuntimePool owns the late confirmed-exit detach path. Do not call
+      // recover() directly while its writer admission is still fenced.
+      runtime = await this.runtimePool.ensure(id);
+    } else if (existing && this.secondaryNeedsRecovery(existing)) {
       await this.recoverRuntime(existing);
       runtime = existing;
     } else runtime = await this.runtimePool.ensure(id);
@@ -2974,10 +3084,23 @@ export class PiChatApp {
         this.options.sessions.summaryForId?.(id) || undefined;
     const desiredGateMode = this.gateModesBySession.get(id);
     if (desiredGateMode && runtime.gateMode !== desiredGateMode) {
-      await runtime.rpc.send(
-        { type: "prompt", message: `/gate ${desiredGateMode}` },
-        PROMPT_PREPARE_TIMEOUT_MS,
-      );
+      const outcomeToken = randomUUID();
+      try {
+        await runtime.rpc.send(
+          { type: "prompt", message: `/gate ${desiredGateMode}` },
+          PROMPT_PREPARE_TIMEOUT_MS,
+          {
+            onLateResponse: this.lateRpcOutcomeHandler(
+              id,
+              outcomeToken,
+              "generic",
+            ),
+          },
+        );
+      } catch (error) {
+        this.markRpcOutcomePending(id, error, outcomeToken);
+        this.rethrowResultPending(error, "同步 Gate", false);
+      }
       runtime.gateMode = desiredGateMode;
     }
     if (!runtime.messageSnapshot) this.warmRuntimeMessageSnapshot(runtime);
@@ -3160,6 +3283,7 @@ export class PiChatApp {
     event: Record<string, unknown>,
     source?: RpcEventSource,
   ): void {
+    if (this.closed) return;
     const currentGeneration = this.options.rpc.currentGeneration?.() || 0;
     const sourceGeneration = source?.generation || currentGeneration;
     if (
@@ -3201,10 +3325,27 @@ export class PiChatApp {
     }
     const sessionId = this.primaryBoundSessionId;
     const type = String(event.type || "");
-    if (sessionId && (type === "compaction_end" || type === "agent_settled" || type === "pi_chat_process_error")) {
+    const uncertainCompaction = Boolean(
+      sessionId && this.uncertainCompactionBySession.has(sessionId),
+    );
+    const uncertainExtensionResponse = Boolean(
+      sessionId && this.uncertainExtensionResponseBySession.has(sessionId),
+    );
+    if (sessionId && type === "compaction_end") {
+      this.uncertainCompactionBySession.delete(sessionId);
+      if (uncertainCompaction) {
+        this.rpcOutcomePendingBySession.delete(sessionId);
+        this.rpcOutcomeTokensBySession.delete(sessionId);
+      }
+    } else if (sessionId && (type === "agent_settled" || type === "pi_chat_process_error")) {
       this.uncertainCompactionBySession.delete(sessionId);
       this.uncertainExtensionResponseBySession.delete(sessionId);
-      if (type !== "compaction_end") this.rpcOutcomePendingBySession.delete(sessionId);
+      this.rpcOutcomePendingBySession.delete(sessionId);
+      this.rpcOutcomeTokensBySession.delete(sessionId);
+      if (type === "agent_settled" && uncertainExtensionResponse) {
+        const pending = this.pendingRequestForSession(sessionId);
+        if (pending) this.clearPendingRequest(sessionId, pending.id);
+      }
     }
     if (this.cancelInteractiveCopyHook(sessionId, this.options.rpc, event)) return;
     const generation = this.primaryRpcGeneration;
@@ -3362,6 +3503,7 @@ export class PiChatApp {
     response: Record<string, unknown>,
     context: PrimaryRuntimeAdoptionContext,
   ): Promise<void> {
+    if (this.closed) return;
     const state = asState(response);
     const childGeneration = this.options.rpc.currentGeneration?.() || 0;
     if (!childGeneration)
@@ -3381,11 +3523,28 @@ export class PiChatApp {
     const desiredGateMode = context.sessionFile
       ? this.gateModesBySession.get(this.activeSessionId) || this.primaryGateMode
       : "strict";
-    if (desiredGateMode !== "strict")
-      await this.options.rpc.send(
-        { type: "prompt", message: `/gate ${desiredGateMode}` },
-        PROMPT_PREPARE_TIMEOUT_MS,
-      );
+    if (desiredGateMode !== "strict") {
+      const outcomeToken = randomUUID();
+      try {
+        await this.options.rpc.send(
+          { type: "prompt", message: `/gate ${desiredGateMode}` },
+          PROMPT_PREPARE_TIMEOUT_MS,
+          {
+            onLateResponse: this.lateRpcOutcomeHandler(
+              this.activeSessionId,
+              outcomeToken,
+              "generic",
+            ),
+          },
+        );
+      } catch (error) {
+        this.markRpcOutcomePending(this.activeSessionId, error, outcomeToken);
+        if (this.rpcOutcomeUnknown(error))
+          this.primaryOperationAdmission.fence();
+        throw error;
+      }
+      if (this.closed) return;
+    }
     this.primaryGateMode = desiredGateMode;
     if (context.restart) {
       const recoveryStillOwnsQueue =
@@ -3444,6 +3603,12 @@ export class PiChatApp {
   }
 
   private async ensurePrimaryRuntime(): Promise<void> {
+    if (this.closed) throw new Error("Pi Chat 已关闭");
+    if (this.primaryOperationAdmission.isClosed) {
+      if (!this.options.rpc.isExitConfirmed?.())
+        throw new OperationAdmissionClosedError("Primary Runtime 正在确认退出，请稍后重试");
+      this.primaryOperationAdmission.reopen(this.primaryOperationAdmission.generation);
+    }
     const primaryRuntime = this.options.primaryRuntime;
     let readiness = primaryRuntime?.snapshot();
     // waitUntilReady() intentionally preserves a failed readiness snapshot for
@@ -3482,6 +3647,7 @@ export class PiChatApp {
               this.activeSessionPath || undefined,
               this.primaryRuntimeCwd,
             );
+            if (this.closed) return;
             if (!(primaryRuntime instanceof PrimaryRuntimeReadinessController)) {
               const state = asState(
                 await this.options.rpc.send({ type: "get_state" }),
@@ -3500,15 +3666,18 @@ export class PiChatApp {
               this.activeSessionPath || undefined,
               this.primaryRuntimeCwd,
             );
+            if (this.closed) return;
             const state = asState(
               response || (await this.options.rpc.send({ type: "get_state" })),
             );
+            if (this.closed) return;
             this.lastPrimaryState = state;
             this.running = state.isStreaming;
             this.primaryFailed = false;
             this.toolStatus = "";
             this.bindPrimaryIdentity(state);
           }
+          if (this.closed) return;
           this.clearRuntimeFailure(this.activeSessionId);
           const runGeneration = this.advanceSessionRunGeneration(
             this.activeSessionId,
@@ -3525,8 +3694,15 @@ export class PiChatApp {
       } catch (error) {
         this.primaryFailed = true;
         if (error instanceof PrimaryRuntimeUnavailableError) throw error;
+        if (this.rpcOutcomeUnknown(error)) {
+          // A failed Primary restart may still own its JSONL. Fence new
+          // operations until the RPC client proves that child ownership ended.
+          this.primaryOperationAdmission.fence();
+          throw error;
+        }
         throw new Error(
           `主 Pi RPC 恢复失败：${error instanceof Error ? error.message : String(error)}`,
+          { cause: error },
         );
       }
     })();
@@ -3620,27 +3796,49 @@ export class PiChatApp {
           candidate.id === settings.model!.modelId,
       );
       if (!model) throw new HttpRequestError(400, "所选模型不可用");
+      const outcomeToken = randomUUID();
       try {
-        await rpc.send({
-          type: "set_model",
-          provider: model.provider,
-          modelId: model.id,
-        });
+        await rpc.send(
+          {
+            type: "set_model",
+            provider: model.provider,
+            modelId: model.id,
+          },
+          undefined,
+          {
+            onLateResponse: this.lateRpcOutcomeHandler(
+              sessionId || "",
+              outcomeToken,
+              "generic",
+            ),
+          },
+        );
       } catch (error) {
-        this.markRpcOutcomePending(sessionId || "", error);
+        this.markRpcOutcomePending(sessionId || "", error, outcomeToken);
         throw error;
       }
       this.rememberModelContextWindows([model]);
       applied.model = model;
     }
     if (settings.thinkingLevel) {
+      const outcomeToken = randomUUID();
       try {
-        await rpc.send({
-          type: "set_thinking_level",
-          level: settings.thinkingLevel,
-        });
+        await rpc.send(
+          {
+            type: "set_thinking_level",
+            level: settings.thinkingLevel,
+          },
+          undefined,
+          {
+            onLateResponse: this.lateRpcOutcomeHandler(
+              sessionId || "",
+              outcomeToken,
+              "generic",
+            ),
+          },
+        );
       } catch (error) {
-        this.markRpcOutcomePending(sessionId || "", error);
+        this.markRpcOutcomePending(sessionId || "", error, outcomeToken);
         if (applied.model)
           throw new PartialTurnSettingsError(applied, error);
         throw error;
@@ -3701,8 +3899,9 @@ export class PiChatApp {
     try {
       applied = await this.applyTurnSettings(rpc, settings, sessionId);
     } catch (error) {
-      this.markRpcOutcomePending(sessionId || "", error);
-      this.rethrowResultPending(error, "准备 Prompt 设置");
+      // applyTurnSettings marks only a mutating set_model/set_thinking write.
+      // A read-only catalogue timeout must not become a Session mutation fence.
+      this.rethrowResultPending(error, "准备 Prompt 设置", false);
     }
     if (usePendingModel) delete pending.model;
     if (usePendingThinking) delete pending.thinkingLevel;
@@ -3786,14 +3985,22 @@ export class PiChatApp {
     // identical /gate command before every prompt adds a needless serialized
     // RPC round trip and can itself trigger extension work.
     if (!mode || mode === this.currentGateMode(sessionId)) return;
+    const outcomeToken = randomUUID();
     try {
       await rpc.send(
         { type: "prompt", message: `/gate ${mode}` },
         PROMPT_PREPARE_TIMEOUT_MS,
+        {
+          onLateResponse: this.lateRpcOutcomeHandler(
+            sessionId,
+            outcomeToken,
+            "generic",
+          ),
+        },
       );
     } catch (error) {
-      this.markRpcOutcomePending(sessionId, error);
-      this.rethrowResultPending(error, "同步 Gate");
+      this.markRpcOutcomePending(sessionId, error, outcomeToken);
+      this.rethrowResultPending(error, "同步 Gate", false);
     }
     this.setGateMode(sessionId, mode);
   }
@@ -3851,6 +4058,7 @@ export class PiChatApp {
     gateMode?: GateMode,
     promptId: string = randomUUID(),
     settings?: PromptSettingsSnapshot,
+    expectedAbortGeneration?: number,
   ): Promise<PromptAcceptance> {
     return this.scheduler.sendPrimaryPrompt(
       message,
@@ -3860,6 +4068,7 @@ export class PiChatApp {
       promptId,
       settings,
       true,
+      expectedAbortGeneration,
     );
   }
 
@@ -4101,6 +4310,7 @@ export class PiChatApp {
     sessionFile?: string,
     cwd = this.primaryRuntimeCwd,
   ): Promise<void> {
+    if (this.closed) throw new Error("Pi Chat 已关闭");
     if (cwd !== this.primaryRuntimeCwd)
       throw new Error("Primary Runtime 工作目录不可在原进程上重绑定");
     if (this.options.primaryRuntime) {
@@ -4118,17 +4328,35 @@ export class PiChatApp {
       if (this.options.primaryRuntime instanceof PrimaryRuntimeReadinessController)
         return;
     } else await this.options.rpc.restart(sessionFile, cwd);
+    if (this.closed) return;
     // Legacy embedding bridges have no adoption callback; preserve their old
     // post-restart Gate synchronization without affecting production.
     const desiredGateMode = sessionFile
       ? this.gateModesBySession.get(this.activeSessionId) ||
         this.primaryGateMode
       : "strict";
-    if (desiredGateMode !== "strict")
-      await this.options.rpc.send(
-        { type: "prompt", message: `/gate ${desiredGateMode}` },
-        PROMPT_PREPARE_TIMEOUT_MS,
-      );
+    if (desiredGateMode !== "strict") {
+      const outcomeToken = randomUUID();
+      try {
+        await this.options.rpc.send(
+          { type: "prompt", message: `/gate ${desiredGateMode}` },
+          PROMPT_PREPARE_TIMEOUT_MS,
+          {
+            onLateResponse: this.lateRpcOutcomeHandler(
+              this.activeSessionId,
+              outcomeToken,
+              "generic",
+            ),
+          },
+        );
+      } catch (error) {
+        this.markRpcOutcomePending(this.activeSessionId, error, outcomeToken);
+        if (this.rpcOutcomeUnknown(error))
+          this.primaryOperationAdmission.fence();
+        throw error;
+      }
+      if (this.closed) return;
+    }
     this.primaryGateMode = desiredGateMode;
   }
 
@@ -4292,7 +4520,11 @@ export class PiChatApp {
     // dedicated process is safely reclaimed after its mutation lease releases.
     if (!wasOpen && runtime && !runtime.running) {
       this.clearNativeSteeringState(id, "reclaim");
-      await this.runtimePool.reclaim(id, "idle");
+      try {
+        await this.runtimePool.reclaim(id, "idle");
+      } catch (error) {
+        this.rethrowResultPending(error, "回收会话运行时");
+      }
     }
     // JSONL indexing is read projection, not mutation authority. Do not make
     // a confirmed Pi write wait for a recursive SessionIndex scan or bootstrap;
@@ -4578,13 +4810,32 @@ export class PiChatApp {
   }
 
   private async deleteSession(id: string): Promise<BootstrapData> {
-    if (this.deletionOutcomePendingBySession.has(id))
-      throw new HttpRequestError(
-        409,
-        "删除结果尚未确认；请刷新对话列表核对，不要重复操作",
-        "RESULT_PENDING",
-        true,
-      );
+    if (this.deletionOutcomePendingBySession.has(id)) {
+      const fencedRuntime = this.runtimePool.get(id);
+      // A prior deletion stop failed only because child exit was unconfirmed.
+      // Once the same Runtime proves its child is gone, the destructive delete
+      // itself has not yet run and may safely be retried.
+      if (
+        fencedRuntime?.admissionFenceReason === "deletion" &&
+        fencedRuntime.rpc.isExitConfirmed?.()
+      )
+        this.deletionOutcomePendingBySession.delete(id);
+      else
+        throw new HttpRequestError(
+          409,
+          "删除结果尚未确认；请刷新对话列表核对，不要重复操作",
+          "RESULT_PENDING",
+          true,
+        );
+    }
+    const orphanedStart = this.runtimePool.orphanedStart(id);
+    if (orphanedStart) {
+      try {
+        await this.runtimePool.releaseOrphanedStart(id);
+      } catch (error) {
+        this.rethrowResultPending(error, "删除会话");
+      }
+    }
     await this.options.sessions.list(undefined, this.currentCwd);
     const isPrimary = id === this.activeSessionId;
     const state = isPrimary
@@ -4614,7 +4865,7 @@ export class PiChatApp {
           await this.options.rpc.send({ type: "new_session" }, 30_000),
         );
       } catch (error) {
-        if (isRpcOutcomeUnknown(error)) {
+        if (this.rpcOutcomeUnknown(error)) {
           this.deletionOutcomePendingBySession.add(id);
           this.broadcastSessionActivity(id);
         }
@@ -5656,12 +5907,23 @@ export class PiChatApp {
           incidentId: incident.incidentId,
         });
       }
+      if (this.rpcOutcomeUnknown(error)) {
+        const incident = report("rejected", "RESULT_PENDING");
+        return json(response, 409, {
+          error: "操作结果尚未确认；请刷新页面核对，不要重复操作",
+          code: "RESULT_PENDING",
+          retryable: true,
+          outcomeUnknown: true,
+          incidentId: incident.incidentId,
+        });
+      }
       if (error instanceof HttpRequestError) {
         const incident = report("rejected", error.code);
         return json(response, error.status, {
           error: error.message,
           code: error.code,
           ...(error.retryable ? { retryable: true } : null),
+          ...(error.outcomeUnknown ? { outcomeUnknown: true } : null),
           incidentId: incident.incidentId,
         });
       }
@@ -6496,41 +6758,73 @@ export class PiChatApp {
         // Production readiness must bind the primary before allocating a worker;
         // legacy in-process test hosts have no startup controller and retain the
         // historical lazy identity behavior for their minimal RPC doubles.
-        if (!this.activeSessionId && !existingSecondary)
-          await this.ensurePrimaryIdentity();
+        if (!this.activeSessionId && !existingSecondary) {
+          try {
+            await this.ensurePrimaryIdentity();
+          } catch (error) {
+            this.rethrowResultPending(error, "准备 Prompt Runtime", false);
+          }
+        }
         // A browser tab can outlive a Pi Chat restart. Restore its requested Session on demand
         // instead of rejecting the prompt because the old in-memory worker map was lost.
         const requestedIsPrimary = requestedSessionId === this.activeSessionId;
         if (
           !requestedIsPrimary &&
           !this.activeSessionIds().includes(requestedSessionId)
-        )
-          await this.ensureRuntime(requestedSessionId);
+        ) {
+          try {
+            await this.ensureRuntime(requestedSessionId);
+          } catch (error) {
+            this.rethrowResultPending(error, "准备 Prompt Runtime", false);
+          }
+        }
         const secondaryRuntime = !requestedIsPrimary
           ? this.runtimePool.get(requestedSessionId) || null
           : null;
+        // Capture cancellation intent before any Runtime recovery/readiness
+        // await. The per-Session prompt admission above intentionally defines
+        // a later queued submission as a new turn; an abort while waiting for
+        // that admission cancels the currently executing turn, not this next
+        // turn. Once admitted, however, abort must not be absorbed by a
+        // generation captured after preparation has started.
+        const secondaryBusyAtAdmission = secondaryRuntime
+          ? this.scheduler.runtimeBusyForQueue(secondaryRuntime)
+          : false;
+        const primaryBusyAtAdmission = this.scheduler.primaryBusyForQueue();
+        const expectedSecondaryAbortGeneration =
+          secondaryRuntime && !secondaryBusyAtAdmission
+            ? secondaryRuntime.abortGeneration
+            : undefined;
+        const expectedPrimaryAbortGeneration =
+          secondaryRuntime || primaryBusyAtAdmission
+            ? undefined
+            : this.scheduler.primaryAbortGeneration;
+        const expectedAbortGeneration = secondaryRuntime
+          ? expectedSecondaryAbortGeneration
+          : expectedPrimaryAbortGeneration;
         if (secondaryRuntime) {
           releaseRuntimeAdmission =
             this.runtimePool.acquireOperation(secondaryRuntime);
           this.runtimePool.touch(secondaryRuntime);
-          if (this.secondaryNeedsRecovery(secondaryRuntime))
-            await this.recoverRuntime(secondaryRuntime);
+          if (this.secondaryNeedsRecovery(secondaryRuntime)) {
+            try {
+              await this.recoverRuntime(secondaryRuntime);
+            } catch (error) {
+              this.rethrowResultPending(error, "恢复 Prompt Runtime", false);
+            }
+          }
         } else {
           releaseRuntimeAdmission =
             this.primaryOperationAdmission.acquire().release;
-          await this.ensurePrimaryRuntime();
+          try {
+            await this.ensurePrimaryRuntime();
+          } catch (error) {
+            this.rethrowResultPending(error, "准备 Prompt Runtime", false);
+          }
         }
         const targetRpc = secondaryRuntime?.rpc || this.options.rpc;
         const targetSessionId = secondaryRuntime?.id || this.activeSessionId;
-        if (
-          this.rpcOutcomePendingBySession.has(targetSessionId) ||
-          this.uncertainExtensionResponseBySession.has(targetSessionId) ||
-          this.uncertainCompactionBySession.has(targetSessionId) ||
-          (
-            this.compactionPendingBySession.has(targetSessionId) &&
-            !this.compactionIsActive(targetSessionId)
-          )
-        )
+        if (this.sessionMutationOutcomePending(targetSessionId))
           return json(response, 409, {
             error: "上一次操作结果尚未确认；请刷新页面核对，不要重复发送",
             code: "RESULT_PENDING",
@@ -6538,6 +6832,17 @@ export class PiChatApp {
         const extensionCommand = message
           ? await this.extensionCommand(message, targetRpc)
           : null;
+        if (
+          this.applicationLifecycle !== "idle" ||
+          (
+            expectedAbortGeneration !== undefined &&
+            expectedAbortGeneration !==
+              (secondaryRuntime
+                ? secondaryRuntime.abortGeneration
+                : this.scheduler.primaryAbortGeneration)
+          )
+        )
+          throw new Error("消息发送已取消");
         if (extensionCommand) {
           if (images.length)
             return json(response, 400, {
@@ -6549,15 +6854,22 @@ export class PiChatApp {
           this.clearPromptDiagnostic(
             secondaryRuntime?.id || this.activeSessionId,
           );
+          const outcomeToken = randomUUID();
           try {
             await targetRpc.send(
               { type: "prompt", message },
               PROMPT_PREPARE_TIMEOUT_MS,
+              {
+                onLateResponse: this.lateRpcOutcomeHandler(
+                  targetSessionId,
+                  outcomeToken,
+                  "generic",
+                ),
+              },
             );
           } catch (error) {
-            if (isRpcOutcomeUnknown(error)) {
-              this.rpcOutcomePendingBySession.add(targetSessionId);
-              this.broadcastSessionActivity(targetSessionId);
+            if (this.rpcOutcomeUnknown(error)) {
+              this.markRpcOutcomePending(targetSessionId, error, outcomeToken);
               this.rethrowResultPending(error, "Extension 指令");
             }
             throw error;
@@ -6579,11 +6891,11 @@ export class PiChatApp {
           try {
             extensionStateResponse = await targetRpc.send({ type: "get_state" });
           } catch (error) {
-            if (isRpcOutcomeUnknown(error)) {
-              this.rpcOutcomePendingBySession.add(targetSessionId);
-              this.broadcastSessionActivity(targetSessionId);
-              this.rethrowResultPending(error, "确认 Extension 指令");
-            }
+            // This is a read-only post-command confirmation. Do not turn its
+            // timeout into a new mutation fence after the Extension write was
+            // already acknowledged.
+            if (this.rpcOutcomeUnknown(error))
+              this.rethrowResultPending(error, "确认 Extension 指令", false);
             throw error;
           }
           const state = asState(extensionStateResponse);
@@ -6640,7 +6952,8 @@ export class PiChatApp {
             });
           }
           const promptId = randomUUID();
-          const generation = secondaryRuntime.abortGeneration;
+          const generation =
+            expectedSecondaryAbortGeneration ?? secondaryRuntime.abortGeneration;
           try {
             let appliedSettings: AppliedTurnSettings;
             try {
@@ -6760,6 +7073,7 @@ export class PiChatApp {
           requestedGateMode,
           promptId,
           requestedSettings,
+          expectedPrimaryAbortGeneration,
         );
         if (acceptance === "unknown")
           this.tracePrompt("delivery-uncertain", this.activeSessionId, promptId);
@@ -6918,7 +7232,7 @@ export class PiChatApp {
           try {
             await this.ensurePrimaryIdentity();
           } catch (error) {
-            this.rethrowResultPending(error, "准备压缩运行时");
+            this.rethrowResultPending(error, "准备压缩运行时", false);
           }
         }
         const requestedIsPrimary = sessionId === this.activeSessionId;
@@ -6943,12 +7257,12 @@ export class PiChatApp {
           try {
             await this.ensurePrimaryRuntime();
           } catch (error) {
-            this.rethrowResultPending(error, "准备压缩运行时");
+            this.rethrowResultPending(error, "准备压缩运行时", false);
           }
         }
         if (
           this.compactionPendingBySession.has(sessionId) ||
-          this.rpcOutcomePendingBySession.has(sessionId)
+          this.sessionMutationOutcomePending(sessionId)
         )
           return json(response, 409, {
             error: "上一次操作结果尚未确认；请刷新页面核对，不要重复压缩",
@@ -6967,6 +7281,7 @@ export class PiChatApp {
             ? body.customInstructions.trim()
             : "";
         let result: Record<string, unknown>;
+        const outcomeToken = randomUUID();
         try {
           result = rpcData<Record<string, unknown>>(
             await (secondaryRuntime?.rpc || this.options.rpc).send(
@@ -6975,16 +7290,25 @@ export class PiChatApp {
                 ...(customInstructions ? { customInstructions } : {}),
               },
               PROMPT_PREPARE_TIMEOUT_MS,
+              {
+                onLateResponse: this.lateRpcOutcomeHandler(
+                  sessionId,
+                  outcomeToken,
+                  "compact",
+                ),
+              },
             ),
           );
         } catch (error) {
-          if (isRpcOutcomeUnknown(error)) {
+          if (this.rpcOutcomeUnknown(error)) {
+            this.markRpcOutcomePending(sessionId, error, outcomeToken);
             this.compactionPendingBySession.add(sessionId);
             // A compact RPC may have emitted compaction_start before its
             // acknowledgement timed out. That event proves activity, not the
             // command result; keep ordinary prompts fenced until the outcome
             // is settled by a terminal Runtime event.
             this.uncertainCompactionBySession.add(sessionId);
+            this.broadcastSessionActivity(sessionId);
           }
           this.rethrowResultPending(error, "上下文压缩");
         }
@@ -7002,11 +7326,14 @@ export class PiChatApp {
       const sessionId = requiredSessionId(body);
       const runtime = this.runtimePool.get(sessionId);
       if (runtime) {
+        // Invalidate any in-flight settings/Gate preflight before attempting
+        // the operation lease. The lease protects reclaim, not cancellation;
+        // abort must be observable while another mutation is awaiting RPC.
+        runtime.abortGeneration += 1;
         const releaseRuntimeOperation =
           this.runtimePool.acquireOperation(runtime);
         try {
           this.runtimePool.touch(runtime);
-          runtime.abortGeneration += 1;
           if (runtime.failed || runtime.rpc.isRunning?.() === false)
             return json(response, 200, {
               ok: true,
@@ -7080,10 +7407,12 @@ export class PiChatApp {
       }
       if (sessionId !== this.activeSessionId)
         return json(response, 409, { error: "该会话不是活动运行会话" });
+      // Abort invalidates an in-flight Primary preflight before acquiring the
+      // operation lease; the lease is a reclaim fence, not a cancellation queue.
+      this.scheduler.primaryAbortGeneration += 1;
       const releasePrimaryOperation =
         this.primaryOperationAdmission.acquire().release;
       try {
-        this.scheduler.primaryAbortGeneration += 1;
         if (this.promptQueue.length || this.dispatching)
           this.queuePaused = true;
         if (this.primaryFailed || this.options.rpc.isRunning?.() === false) {
@@ -7290,7 +7619,7 @@ export class PiChatApp {
         try {
           await this.ensurePrimaryRuntime();
         } catch (error) {
-          this.rethrowResultPending(error, "准备会话运行时");
+          this.rethrowResultPending(error, "准备会话运行时", false);
         }
         return json(response, 200, {
           sessionId: id,
@@ -7305,7 +7634,7 @@ export class PiChatApp {
       try {
         runtime = existing || (await this.ensureRuntime(id));
       } catch (error) {
-        this.rethrowResultPending(error, "准备会话运行时");
+        this.rethrowResultPending(error, "准备会话运行时", false);
       }
       json(response, 200, this.runtimeReady(runtime));
       return;
@@ -7326,7 +7655,7 @@ export class PiChatApp {
         if (id === this.activeSessionId) await this.ensurePrimaryRuntime();
         else if (!existingSecondary) await this.ensureRuntime(id);
       } catch (error) {
-        this.rethrowResultPending(error, "激活会话");
+        this.rethrowResultPending(error, "激活会话", false);
       }
       const view = await this.sessionView(
         id,
@@ -7389,14 +7718,14 @@ export class PiChatApp {
         try {
           await this.waitForNewDraftPrimaryCompatibility();
         } catch (error) {
-          this.rethrowResultPending(error, "准备新会话运行时");
+          this.rethrowResultPending(error, "准备新会话运行时", false);
         }
       }
       let draftLease: import("./runtime-pool.js").DraftRuntimeLease;
       try {
         draftLease = await this.acquireDraftRuntime(clientId, requestedCwd);
       } catch (error) {
-        this.rethrowResultPending(error, "新建会话");
+        this.rethrowResultPending(error, "新建会话", false);
       }
       try {
         // Spawn and Primary compatibility are intentionally overlapped while
@@ -7406,7 +7735,7 @@ export class PiChatApp {
           try {
             await this.waitForNewDraftPrimaryCompatibility();
           } catch (error) {
-            this.rethrowResultPending(error, "准备新会话运行时");
+            this.rethrowResultPending(error, "准备新会话运行时", false);
           }
         }
         // The lease spans creation, preferences, Gate and prompt admission: an
@@ -7421,6 +7750,10 @@ export class PiChatApp {
           return;
         }
         const runtime = draftLease.runtime;
+        // Capture abort intent before any asynchronous first-turn preparation;
+        // an abort that arrives during readiness/settings/Gate must invalidate
+        // this draft prompt rather than being absorbed by a newer generation.
+        const initialAbortGeneration = runtime.abortGeneration;
         // Use the same per-Session prompt FIFO as ordinary /chat/prompt. The
         // runtime lease protects reclamation; this admission prevents a caller
         // that learns the newly allocated ID from interleaving another prompt
@@ -7455,19 +7788,33 @@ export class PiChatApp {
             } catch (error) {
               if (error instanceof PartialTurnSettingsError)
                 this.rememberRuntimeAppliedTurnSettings(runtime, error.applied);
-              this.markRpcOutcomePending(runtime.id, error);
-              this.rethrowResultPending(error, "准备初始 Prompt 设置");
+              // The inner setting writes own the uncertainty marker; a
+              // read-only model catalogue failure must not fence this Session.
+              this.rethrowResultPending(error, "准备初始 Prompt 设置", false);
             }
           }
+          if (
+            initialAbortGeneration !== runtime.abortGeneration ||
+            this.applicationLifecycle !== "idle"
+          )
+            throw new Error("消息发送已取消");
           const extensionCommand = initialMessage
             ? await this.extensionCommand(initialMessage, runtime.rpc)
             : null;
+          if (
+            initialAbortGeneration !== runtime.abortGeneration ||
+            this.applicationLifecycle !== "idle"
+          )
+            throw new Error("消息发送已取消");
           if (extensionCommand && initialImages.length)
             return json(response, 400, {
               error: "Extension 指令不能同时附加图片",
             });
           await this.syncGateMode(runtime.rpc, runtime.id, initialGateMode);
-          if (this.applicationLifecycle !== "idle")
+          if (
+            initialAbortGeneration !== runtime.abortGeneration ||
+            this.applicationLifecycle !== "idle"
+          )
             throw new Error("消息发送已取消");
           const promptId = extensionCommand ? "" : randomUUID();
           runtime.running = true;
@@ -7609,15 +7956,32 @@ export class PiChatApp {
               wasActive &&
               (updated.provider !== provider || updated.id !== modelId)
             ) {
+              const outcomeToken = randomUUID();
               try {
-                await this.options.rpc.send({
-                  type: "set_model",
-                  provider: updated.provider,
-                  modelId: updated.id,
-                });
+                await this.options.rpc.send(
+                  {
+                    type: "set_model",
+                    provider: updated.provider,
+                    modelId: updated.id,
+                  },
+                  undefined,
+                  {
+                    onLateResponse: this.lateRpcOutcomeHandler(
+                      this.activeSessionId,
+                      outcomeToken,
+                      "generic",
+                    ),
+                  },
+                );
               } catch (error) {
-                if (isRpcOutcomeUnknown(error))
+                if (this.rpcOutcomeUnknown(error)) {
+                  this.markRpcOutcomePending(
+                    this.activeSessionId,
+                    error,
+                    outcomeToken,
+                  );
                   this.rethrowResultPending(error, "确认重命名模型");
+                }
                 // The renamed model may be unreachable (auth/network); the user can
                 // reselect it from the refreshed model list.
               }
@@ -7686,6 +8050,12 @@ export class PiChatApp {
         return this.runtimePool.withOperation(secondaryRuntime, async () => {
           if (this.secondaryNeedsRecovery(secondaryRuntime))
             await this.recoverRuntime(secondaryRuntime);
+          if (this.sessionMutationOutcomePending(sessionId))
+            return json(response, 409, {
+              error: "上一次操作结果尚未确认；请刷新页面核对，不要重复修改设置",
+              code: "RESULT_PENDING",
+              retryable: true,
+            });
           const targetRpc = secondaryRuntime.rpc;
           if (secondaryRuntime.running) {
             const model = asModels(
@@ -7697,10 +8067,21 @@ export class PiChatApp {
             return json(response, 200, { model, pending: true });
           }
           let modelResponse: Record<string, unknown>;
+          const outcomeToken = randomUUID();
           try {
-            modelResponse = await targetRpc.send({ type: "set_model", provider, modelId });
+            modelResponse = await targetRpc.send(
+              { type: "set_model", provider, modelId },
+              undefined,
+              {
+                onLateResponse: this.lateRpcOutcomeHandler(
+                  sessionId,
+                  outcomeToken,
+                  "generic",
+                ),
+              },
+            );
           } catch (error) {
-            this.markRpcOutcomePending(sessionId, error);
+            this.markRpcOutcomePending(sessionId, error, outcomeToken);
             this.rethrowResultPending(error, "更新模型");
           }
           const model = rpcData<ModelInfo>(modelResponse);
@@ -7717,6 +8098,12 @@ export class PiChatApp {
           this.rethrowResultPending(error, "准备模型运行时");
         }
         const targetRunning = this.running;
+        if (this.sessionMutationOutcomePending(sessionId))
+          return json(response, 409, {
+            error: "上一次操作结果尚未确认；请刷新页面核对，不要重复修改设置",
+            code: "RESULT_PENDING",
+            retryable: true,
+          });
         if (targetRunning) {
           const model = asModels(
             await this.options.rpc.send({ type: "get_available_models" }),
@@ -7727,10 +8114,21 @@ export class PiChatApp {
           return json(response, 200, { model, pending: true });
         }
         let modelResponse: Record<string, unknown>;
+        const outcomeToken = randomUUID();
         try {
-          modelResponse = await this.options.rpc.send({ type: "set_model", provider, modelId });
+          modelResponse = await this.options.rpc.send(
+            { type: "set_model", provider, modelId },
+            undefined,
+            {
+              onLateResponse: this.lateRpcOutcomeHandler(
+                sessionId,
+                outcomeToken,
+                "generic",
+              ),
+            },
+          );
         } catch (error) {
-          this.markRpcOutcomePending(sessionId, error);
+          this.markRpcOutcomePending(sessionId, error, outcomeToken);
           this.rethrowResultPending(error, "更新模型");
         }
         const model = rpcData<ModelInfo>(modelResponse);
@@ -7765,6 +8163,12 @@ export class PiChatApp {
         return this.runtimePool.withOperation(secondaryRuntime, async () => {
           if (this.secondaryNeedsRecovery(secondaryRuntime))
             await this.recoverRuntime(secondaryRuntime);
+          if (this.sessionMutationOutcomePending(sessionId))
+            return json(response, 409, {
+              error: "上一次操作结果尚未确认；请刷新页面核对，不要重复修改设置",
+              code: "RESULT_PENDING",
+              retryable: true,
+            });
           if (secondaryRuntime.running) {
             secondaryRuntime.pendingTurnSettings.thinkingLevel = level;
             this.rememberRuntimeDisplaySettings(secondaryRuntime, {
@@ -7772,21 +8176,35 @@ export class PiChatApp {
             });
             return json(response, 200, { level, pending: true });
           }
+          const outcomeToken = randomUUID();
           try {
-            await secondaryRuntime.rpc.send({
-              type: "set_thinking_level",
-              level,
-            });
+            await secondaryRuntime.rpc.send(
+              {
+                type: "set_thinking_level",
+                level,
+              },
+              undefined,
+              {
+                onLateResponse: this.lateRpcOutcomeHandler(
+                  sessionId,
+                  outcomeToken,
+                  "generic",
+                ),
+              },
+            );
           } catch (error) {
-            this.markRpcOutcomePending(sessionId, error);
+            this.markRpcOutcomePending(sessionId, error, outcomeToken);
             this.rethrowResultPending(error, "更新 Thinking 强度");
           }
           let stateResponse: Record<string, unknown>;
           try {
             stateResponse = await secondaryRuntime.rpc.send({ type: "get_state" });
           } catch (error) {
-            this.markRpcOutcomePending(sessionId, error);
-            this.rethrowResultPending(error, "确认 Thinking 强度");
+            // set_thinking_level was already acknowledged; this follow-up read
+            // cannot prove a new mutation outcome and must not fence the Session.
+            if (this.rpcOutcomeUnknown(error))
+              this.rethrowResultPending(error, "确认 Thinking 强度", false);
+            throw error;
           }
           const state = asState(stateResponse);
           secondaryRuntime.lastState = state;
@@ -7805,23 +8223,43 @@ export class PiChatApp {
         } catch (error) {
           this.rethrowResultPending(error, "准备 Thinking 运行时");
         }
+        if (this.sessionMutationOutcomePending(sessionId))
+          return json(response, 409, {
+            error: "上一次操作结果尚未确认；请刷新页面核对，不要重复修改设置",
+            code: "RESULT_PENDING",
+            retryable: true,
+          });
         if (this.running) {
           this.pendingTurnSettings.thinkingLevel = level;
           this.rememberPrimaryDisplaySettings({ thinkingLevel: level });
           return json(response, 200, { level, pending: true });
         }
+        const outcomeToken = randomUUID();
         try {
-          await this.options.rpc.send({ type: "set_thinking_level", level });
+          await this.options.rpc.send(
+            { type: "set_thinking_level", level },
+            undefined,
+            {
+              onLateResponse: this.lateRpcOutcomeHandler(
+                sessionId,
+                outcomeToken,
+                "generic",
+              ),
+            },
+          );
         } catch (error) {
-          this.markRpcOutcomePending(sessionId, error);
+          this.markRpcOutcomePending(sessionId, error, outcomeToken);
           this.rethrowResultPending(error, "更新 Thinking 强度");
         }
         let stateResponse: Record<string, unknown>;
         try {
           stateResponse = await this.options.rpc.send({ type: "get_state" });
         } catch (error) {
-          this.markRpcOutcomePending(sessionId, error);
-          this.rethrowResultPending(error, "确认 Thinking 强度");
+          // set_thinking_level was already acknowledged; this follow-up read
+          // cannot prove a new mutation outcome and must not fence the Session.
+          if (this.rpcOutcomeUnknown(error))
+            this.rethrowResultPending(error, "确认 Thinking 强度", false);
+          throw error;
         }
         const state = asState(stateResponse);
         this.lastPrimaryState = state;
@@ -7911,6 +8349,12 @@ export class PiChatApp {
       // the authoritative pending state until sendRaw succeeds; a transport
       // failure must leave the dialog retryable.
       const claimKey = `${sessionId}\u0000${body.id}`;
+      if (this.uncertainExtensionResponseBySession.has(sessionId))
+        return json(response, 409, {
+          error: "上一次 Extension 回应结果尚未确认；请等待对话结束或刷新页面核对",
+          code: "RESULT_PENDING",
+          retryable: true,
+        });
       const pending = this.pendingRequestForSession(sessionId);
       if (
         !pending ||
@@ -7938,12 +8382,12 @@ export class PiChatApp {
         try {
           await targetRpc.sendRaw(command);
         } catch (error) {
-          if (isRpcOutcomeUnknown(error)) {
+          if (this.rpcOutcomeUnknown(error)) {
             // The frame may have reached Pi, but an unknown write is not proof
             // that Pi consumed the answer. Keep the Extension request and its
             // blocking state until an authoritative event settles it.
             this.uncertainExtensionResponseBySession.add(sessionId);
-            this.broadcastSessionActivity(sessionId);
+            this.markRpcOutcomePending(sessionId, error);
             this.rethrowResultPending(error, "确认 Extension 回应");
           }
           throw error;

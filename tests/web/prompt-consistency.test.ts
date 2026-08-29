@@ -88,6 +88,60 @@ test("a lost prompt acknowledgement cannot remove a user turn after SSE proves a
   }
 });
 
+test("a pre-existing RESULT_PENDING rejection does not retain a new local prompt", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { ApiRequestError, api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  Object.assign(api, {
+    bootstrap: async () => bootstrap,
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    prompt: async () => {
+      throw new ApiRequestError(
+        "上一次操作结果尚未确认",
+        409,
+        "RESULT_PENDING",
+      );
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "must be retried, not projected");
+      textarea.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: "must be retried, not projected",
+        }),
+      );
+      dom.window.document
+        .querySelector<HTMLButtonElement>(".send-button")!
+        .click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(
+      dom.window.document.querySelectorAll(".message-user").length,
+      0,
+      "a server fence that rejected this request must not look like an accepted turn",
+    );
+    assert.equal(textarea.value, "must be retried, not projected");
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("a lost prompt acknowledgement after a same-session refresh keeps its user turn visible", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");
