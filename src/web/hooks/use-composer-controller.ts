@@ -30,7 +30,7 @@ type ComposerControllerOptions = {
   paused: boolean;
   allowFollowupSubmissions: boolean;
   restoredDraft?: ComposerRestoredDraft | null;
-  onDraftRevisionChange?: (key: ComposerDraftKey, revision: number) => void;
+  onDraftRevisionChange?: (key: ComposerDraftKey, revision: number, hasContent: boolean) => void;
   onSubmissionPendingChange?: (scope: string, count: number) => void;
   onError?: (message: string) => void;
   onSend: (message: string, images: PromptImage[], delivery?: PromptDelivery, targetSessionId?: string) => Promise<void>;
@@ -94,7 +94,11 @@ export function useComposerController({
 
   const publish = useCallback((next: ComposerState, key: ComposerDraftKey) => {
     const partition = composerPartition(next, key);
-    onRevisionRef.current?.(key, partition.draft.revision);
+    onRevisionRef.current?.(
+      key,
+      partition.draft.revision,
+      Boolean(partition.draft.message.trim() || partition.draft.images.length),
+    );
     onPendingRef.current?.(
       composerDraftKeyId(key),
       partition.pending.length + (partition.inFlight ? 1 : 0),

@@ -678,6 +678,8 @@ export function App() {
   );
   const [mutatingSessionIds, setMutatingSessionIds] = useState<string[]>([]);
   const [copyingSessionIds, setCopyingSessionIds] = useState<string[]>([]);
+  /** Browser-local Composer partitions expose only whether the current draft has content. */
+  const [composerContentByScope, setComposerContentByScope] = useState<Record<string, boolean>>({});
   // Passive history browsing must stay fast without consuming a Pi Runtime.
   // Keep enough data-only panes to cover normal archive hopping; the server's
   // target snapshot cache has the same entry bound.
@@ -7774,6 +7776,7 @@ export function App() {
         sessionId: composerTargetSessionId || viewedSessionId || "none",
       };
   const composerSubmissionScope = composerDraftKeyId(composerDraftKey);
+  const composerHasContent = composerContentByScope[composerSubmissionScope] === true;
   const composerSubmissionPending = composerPendingByScope[composerSubmissionScope] || 0;
   const composerSubmissionPaused =
     !mutationBlocked &&
@@ -8559,6 +8562,7 @@ export function App() {
         pendingUserMessage={pendingUserMessage}
         liveMessage={liveMessage}
         localDraft={localDraft}
+        composerHasContent={composerHasContent}
         newConversationPresentation={newConversationPresentation}
         waitingForPiMessage={waitingForPiMessage}
         draftWorkspaceCwd={draftWorkspaceCwd}
@@ -8647,8 +8651,14 @@ export function App() {
             !localDraft &&
             runtimeStatus !== "active",
           restoredDraft: restoredComposerDrafts[composerDraftKeyId(composerDraftKey)] || null,
-          onDraftRevisionChange: (key, revision) => {
-            composerDraftRevisionsRef.current.set(composerDraftKeyId(key), revision);
+          onDraftRevisionChange: (key, revision, hasContent) => {
+            const keyId = composerDraftKeyId(key);
+            composerDraftRevisionsRef.current.set(keyId, revision);
+            setComposerContentByScope((current) =>
+              current[keyId] === hasContent
+                ? current
+                : { ...current, [keyId]: hasContent },
+            );
           },
           draftKey: composerDraftKey,
           forgottenComposerKeys,

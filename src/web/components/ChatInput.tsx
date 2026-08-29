@@ -115,7 +115,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   resolveImageCapabilityOnSend?: boolean;
   /** A cancelled queued prompt replaces the current Composer draft. */
   restoredDraft?: ComposerRestoredDraft | null;
-  onDraftRevisionChange?: (key: ComposerDraftKey, revision: number) => void;
+  onDraftRevisionChange?: (key: ComposerDraftKey, revision: number, hasContent: boolean) => void;
   /** Typed partition for an existing prompt target or one New draft generation. */
   draftKey?: ComposerDraftKey;
   /** Session-keyed Composer partitions to forget after structural deletion. */

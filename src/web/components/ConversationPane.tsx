@@ -31,6 +31,8 @@ export interface ConversationPaneProps {
   pendingUserMessage: PiMessage | null;
   liveMessage: PiMessage | null;
   localDraft: boolean;
+  /** Hide the empty New welcome once the Composer contains an unsent draft. */
+  composerHasContent: boolean;
   newConversationPresentation: boolean;
   /** Sole conversation-body explanation for a retained or preparing prompt. */
   waitingForPiMessage: string;
@@ -78,6 +80,7 @@ export function ConversationPane({
   pendingUserMessage,
   liveMessage,
   localDraft,
+  composerHasContent,
   newConversationPresentation,
   waitingForPiMessage,
   draftWorkspaceCwd,
@@ -174,7 +177,7 @@ export function ConversationPane({
               <p>正在恢复会话内容…</p>
             </div>
           </section>
-        ) : !messages.length && !pendingUserMessage && !liveMessage ? (
+        ) : !composerHasContent && !messages.length && !pendingUserMessage && !liveMessage ? (
           <section className="welcome" aria-label={newConversationPresentation ? "新对话" : "空对话"}>
             <span className="welcome-mark"><PiMarkIcon /></span>
             <h1>开始与 Pi 对话</h1>
