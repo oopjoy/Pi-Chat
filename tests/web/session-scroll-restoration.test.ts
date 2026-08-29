@@ -118,6 +118,10 @@ test("switching A to B and back restores A's last reading position", async () =>
     ...message,
     content: typeof message.content === "string" ? `${message.content} B` : message.content,
   })));
+  let resolveViewB!: (view: SessionViewData) => void;
+  const pendingViewB = new Promise<SessionViewData>((resolve) => {
+    resolveViewB = resolve;
+  });
   Object.assign(api, {
     bootstrap: async () => ({
       ...bootstrap,
@@ -130,7 +134,7 @@ test("switching A to B and back restores A's last reading position", async () =>
     }),
     eventsUrl: () => "/api/events",
     markSessionViewed: async (id: string) => ({ viewing: id }),
-    viewSession: async (id: string) => (id === sessionB.id ? viewB : viewA),
+    viewSession: async (id: string) => (id === sessionB.id ? pendingViewB : viewA),
   });
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {
@@ -144,14 +148,40 @@ test("switching A to B and back restores A's last reading position", async () =>
     await act(async () => {
       sessionButton("History B").click();
       await Promise.resolve();
+    });
+    assert.doesNotMatch(
+      timeline.textContent || "",
+      /older question B/,
+      "A remains the painted pane while the B view is pending",
+    );
+    timeline.scrollTop = 760;
+    timeline.dispatchEvent(new dom.window.Event("scroll", { bubbles: true }));
+
+    // The destination view is still pending while A remains the painted
+    // timeline. This delayed scroll is a real navigation race: it must update
+    // A's remembered position, never B's.
+    resolveViewB(viewB);
+    await Promise.resolve();
+    assert.doesNotMatch(
+      timeline.textContent || "",
+      /older question B/,
+      "the old A DOM remains painted until React flushes B",
+    );
+    await act(async () => {
+      await Promise.resolve();
       await Promise.resolve();
     });
+    assert.match(timeline.textContent || "", /older question B/);
     await act(async () => {
       sessionButton("Active").click();
       await Promise.resolve();
       await Promise.resolve();
     });
-    assert.equal(timeline.scrollTop, 420, "A → B → A must restore A's remembered reading position");
+    assert.equal(
+      timeline.scrollTop,
+      760,
+      "A → pending B → late A scroll → B → A must restore A's late reading position",
+    );
   } finally {
     restoreApi();
     await act(async () => root.unmount());
