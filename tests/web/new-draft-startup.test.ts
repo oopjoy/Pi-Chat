@@ -56,8 +56,9 @@ test("an empty unindexed Primary uses New presentation while keeping its real Se
   try {
     await act(async () => root.render(createElement(App)));
     assert.equal(dom.window.document.querySelector(".topbar-title")?.textContent, "新对话");
-    assert.equal(dom.window.document.querySelector(".welcome"), null, "the retired welcome proposal must never render");
-    assert.match(dom.window.document.querySelector(".new-conversation-surface")?.textContent || "", /新对话工作路径/);
+    assert.ok(dom.window.document.querySelector(".welcome"), "New must use the centered welcome presentation");
+    assert.ok(dom.window.document.querySelector(".welcome-mark"), "New must show the Pi bear mark");
+    assert.match(dom.window.document.querySelector(".welcome")?.textContent || "", /新对话工作路径/);
     assert.match(dom.window.document.querySelector(".draft-workspace")?.textContent || "", /当前新对话已准备就绪/);
 
     const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;

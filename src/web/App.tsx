@@ -7742,7 +7742,6 @@ export function App() {
   const emptyPrimaryDraftPresentation = Boolean(
     viewedSessionId &&
       viewedSessionId === activeSessionId &&
-      sidebarInventoryReady &&
       (viewedSession?.messageCount || 0) === 0 &&
       messages.length === 0 &&
       messageTotal === 0 &&

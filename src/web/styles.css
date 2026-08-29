@@ -171,7 +171,7 @@ body.sidebar-resizing .sidebar { transition: none; will-change: auto; }
 .sidebar-collapse:hover { border-color: var(--line); background: var(--surface-hover); color: var(--text); }
 .sidebar-panel-icon { display: block; width: 17px; height: 17px; flex-shrink: 0; }
 .sidebar-actions { display: grid; grid-template-columns: 1fr 40px 40px; gap: 7px; padding: 6px 2px 2px; }
-.brand-mark {
+.brand-mark, .welcome-mark {
   display: inline-grid;
   place-items: center;
   flex: 0 0 auto;
@@ -180,6 +180,7 @@ body.sidebar-resizing .sidebar { transition: none; will-change: auto; }
 }
 .brand-mark { width: 28px; height: 28px; border-radius: 8px; }
 .brand-mark svg { display: block; width: 100%; height: 100%; }
+.welcome-mark svg { display: block; width: 100%; height: 100%; }
 .brand-row strong { overflow: hidden; font-size: 15px; letter-spacing: .01em; text-overflow: ellipsis; white-space: nowrap; }
 .new-chat, .refresh-chat {
   min-height: 40px;
@@ -425,16 +426,17 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .message-window-notice button { padding: 3px 9px; border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line)); border-radius: 6px; background: var(--surface); color: var(--accent); font: inherit; font-weight: 700; cursor: pointer; }
 .message-window-notice button:hover:not(:disabled) { background: var(--accent-soft); }
 .message-window-notice button:disabled { cursor: wait; opacity: .65; }
-.center-state, .new-conversation-surface, .empty-session-surface, .pane-loading { display: flex; min-height: 100%; align-items: center; justify-content: center; color: var(--muted); }
+.center-state, .welcome, .pane-loading { display: flex; min-height: 60vh; align-items: center; justify-content: center; color: var(--muted); }
 .center-state { gap: 9px; font-size: 13px; }
 /* A first-open pane reserves the normal reading surface without mounting stale
-   messages or falling through to an obsolete empty-state presentation. */
+   messages or falling through to the welcome screen during navigation. */
 .pane-loading { gap: 12px; padding: 40px; text-align: left; }
 .pane-loading strong { display: block; color: var(--text); font-size: 14px; }
 .pane-loading p { margin: 4px 0 0; font-size: 12px; }
-.new-conversation-surface, .empty-session-surface { box-sizing: border-box; width: 100%; min-height: 100%; align-items: flex-end; padding: 0 0 12px; }
-.empty-session-surface { pointer-events: none; }
-.new-conversation-surface .draft-workspace { margin: 0 auto; }
+.welcome { flex-direction: column; padding: 40px; text-align: center; }
+.welcome-mark { width: 58px; height: 58px; font-size: 38px; border-radius: 17px; }
+.welcome h1 { margin: 18px 0 8px; color: var(--text); font-size: 25px; }
+.welcome p { max-width: 520px; margin: 0; font-size: 14px; line-height: 1.7; }
 
 /* Let Chromium skip layout/paint for history rows outside the viewport. This
    is progressive virtualization: DOM order, anchors, keyboard navigation, and

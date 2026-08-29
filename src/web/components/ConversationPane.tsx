@@ -7,7 +7,7 @@ import { AssistantMessageHeader, ChatMessage } from "./ChatMessage";
 import { CompactSelect } from "./CompactSelect";
 import { CoordinationMessage } from "./CoordinationMessage";
 import { ConversationProcess } from "./ConversationProcess";
-import { FolderIcon } from "./Icons";
+import { FolderIcon, PiMarkIcon } from "./Icons";
 import { PendingSteers } from "./PendingSteers";
 import { PromptQueue } from "./PromptQueue";
 import { SessionControlBanner } from "./SessionControlBanner";
@@ -175,13 +175,10 @@ export function ConversationPane({
             </div>
           </section>
         ) : !messages.length && !pendingUserMessage && !liveMessage ? (
-          /* The old centered logo/"开始与 Pi 对话" proposal is intentionally
-             removed. New is a quiet canvas; the real Composer below is the
-             only primary start affordance. */
-          <section
-            className={newConversationPresentation ? "new-conversation-surface" : "empty-session-surface"}
-            aria-label={newConversationPresentation ? "新对话" : "空对话"}
-          >
+          <section className="welcome" aria-label={newConversationPresentation ? "新对话" : "空对话"}>
+            <span className="welcome-mark"><PiMarkIcon /></span>
+            <h1>开始与 Pi 对话</h1>
+            <p>支持流式输出、Markdown、KaTeX，以及复制原始 LaTeX 源码。</p>
             {newConversationPresentation && <div className="draft-workspace">
               <span>新对话工作路径</span>
               <CompactSelect
