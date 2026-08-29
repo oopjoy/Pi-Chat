@@ -6,7 +6,8 @@
 - Empty active Primary Sessions use the New presentation without waiting for sidebar inventory, preventing a transient pathless legacy welcome screen during startup and navigation.
 - Local optimistic User turns reconcile conservatively with authoritative persisted JSONL rows, preventing duplicate user bubbles while preserving two genuinely identical prompts as separate turns.
 - Completed process rows retain their frozen final run duration after settlement, SSE recovery, and Session navigation.
-- Scroll restoration is bound to the Pane identity actually committed to the DOM, with a tighter bottom tolerance to avoid restoring the wrong Session position.
+- Scroll restoration is bound to the Pane identity actually committed to the DOM, with a tighter bottom tolerance to avoid restoring the wrong Session position; bottom-pinned timelines remain anchored through delayed image, font, and post-paint layout shifts.
+- Fork/clone-created Sessions receive a durable `（Fork）` display suffix from Pi's `parentSession` metadata, so copied conversations remain distinguishable after refresh and restart.
 
 ## Runtime, SSE, and recovery reliability
 
