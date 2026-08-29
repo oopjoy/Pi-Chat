@@ -438,10 +438,10 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .welcome h1 { margin: 18px 0 8px; color: var(--text); font-size: 25px; }
 .welcome p { max-width: 520px; margin: 0; font-size: 14px; line-height: 1.7; }
 
-/* Let Chromium skip layout/paint for history rows outside the viewport. This
-   is progressive virtualization: DOM order, anchors, keyboard navigation, and
-   screen-reader semantics remain intact while long transcripts stay responsive. */
-.message, .coordination-message, details.conversation-process { content-visibility: auto; contain-intrinsic-size: 0 120px; }
+/* Keep every timeline row in normal layout. Scroll restoration depends on the
+   browser's real cumulative geometry; content-visibility/contain-intrinsic-size
+   can report a provisional scrollHeight and land a fresh Session near the last
+   user row instead of at the true bottom. */
 .message { margin: 0 0 18px; }
 .coordination-message { margin: 3px 0 18px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--accent), transparent 72%); border-left: 3px solid color-mix(in srgb, var(--accent), transparent 28%); border-radius: 9px; background: color-mix(in srgb, var(--accent-soft), var(--surface) 58%); }
 .coordination-message > header { display: flex; min-height: 20px; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 6px; color: var(--muted); font-family: var(--app-font); font-size: 11px; }

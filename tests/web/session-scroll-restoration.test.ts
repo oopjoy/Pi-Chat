@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test, { beforeEach } from "node:test";
 import { act, createElement } from "react";
 import type { BootstrapData, PiMessage, SessionViewData } from "../../src/shared/types";
@@ -10,6 +11,20 @@ let bootstrap: BootstrapData;
 
 beforeEach(() => {
   bootstrap = createBootstrapFixture();
+});
+
+test("timeline rows keep real browser geometry for initial-bottom and restoration", () => {
+  const css = readFileSync(new URL("../../src/web/styles.css", import.meta.url), "utf8");
+  assert.doesNotMatch(
+    css,
+    /content-visibility\s*:/,
+    "content-visibility may report provisional timeline geometry and break scroll restoration",
+  );
+  assert.doesNotMatch(
+    css,
+    /contain-intrinsic-size\s*:/,
+    "intrinsic placeholders must not replace real timeline row heights",
+  );
 });
 
 function withGeometry(element: HTMLElement, scrollHeight: number, clientHeight: number): void {
@@ -154,12 +169,12 @@ test("switching A to B and back restores A's last reading position", async () =>
       /older question B/,
       "A remains the painted pane while the B view is pending",
     );
-    timeline.scrollTop = 760;
+    // The destination view is still pending while A is being replaced by the
+    // loading pane. Browsers emit a scroll event for that transient geometry;
+    // it must not overwrite A's saved position with the loading pane's top.
+    timeline.scrollTop = 0;
     timeline.dispatchEvent(new dom.window.Event("scroll", { bubbles: true }));
 
-    // The destination view is still pending while A remains the painted
-    // timeline. This delayed scroll is a real navigation race: it must update
-    // A's remembered position, never B's.
     resolveViewB(viewB);
     await Promise.resolve();
     assert.doesNotMatch(
@@ -179,8 +194,8 @@ test("switching A to B and back restores A's last reading position", async () =>
     });
     assert.equal(
       timeline.scrollTop,
-      760,
-      "A → pending B → late A scroll → B → A must restore A's late reading position",
+      420,
+      "A → loading B → transient scroll event → B → A must restore A's saved position",
     );
   } finally {
     restoreApi();

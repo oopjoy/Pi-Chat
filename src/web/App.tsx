@@ -851,6 +851,8 @@ export function App() {
   const stickToBottomRef = useRef(true);
   const scrollMemoryRef = useRef(new SessionScrollMemory());
   const pendingScrollRestoreRef = useRef("");
+  /** Suppresses scroll events caused by replacing the source pane with navigation UI. */
+  const scrollMemoryFenceRef = useRef<{ epoch: number; targetSessionId: string } | null>(null);
   const conversationNavigationTargetRef = useRef<number | null>(null);
   /** Abort leases are per Runtime Session; A stopping must not block B. */
   const stoppingOperationTokensRef = useRef(new Map<string, symbol>());
@@ -5122,6 +5124,7 @@ export function App() {
       timeline.scrollTop = timeline.scrollHeight;
       stickToBottomRef.current = true;
       pendingScrollRestoreRef.current = "";
+      scrollMemoryFenceRef.current = null;
       return;
     }
     const sessionId = pendingScrollRestoreRef.current;
@@ -5135,6 +5138,7 @@ export function App() {
     timeline.scrollTop = target.top;
     stickToBottomRef.current = target.stickToBottom;
     pendingScrollRestoreRef.current = "";
+    scrollMemoryFenceRef.current = null;
   }, [pane.identity, viewedSessionId, messages]);
 
   useEffect(() => {
@@ -5299,6 +5303,10 @@ export function App() {
   const onScroll = () => {
     const element = scrollRef.current;
     if (!element) return;
+    // setPaneLoading() replaces the source transcript with a short loading pane.
+    // Chromium emits a scroll event for that geometry change; it must not turn
+    // the transient loading position into the Session's remembered position.
+    if (scrollMemoryFenceRef.current) return;
     if (pendingScrollRestoreRef.current === viewedSessionIdRef.current) return;
     stickToBottomRef.current = isAtBottom(
       element.scrollTop,
@@ -6392,6 +6400,10 @@ export function App() {
     for (const request of loadingEarlierRequestsRef.current.values())
       request.controller.abort();
     const epoch = ++navigationEpochRef.current;
+    // Fence scroll-memory writes for the entire source→target replacement. The
+    // source position was snapshotted above; all subsequent scroll events until
+    // the target layout commit describe transitional/loading geometry.
+    scrollMemoryFenceRef.current = { epoch, targetSessionId: id };
     const controller = new AbortController();
     navigationAbortRef.current = controller;
     desiredSessionIdRef.current = id;
@@ -6568,12 +6580,18 @@ export function App() {
       )
         schedulePromptReconcile(id);
     } catch (cause) {
-      if (cause instanceof DOMException && cause.name === "AbortError") return;
+      if (cause instanceof DOMException && cause.name === "AbortError") {
+        if (scrollMemoryFenceRef.current?.epoch === epoch)
+          scrollMemoryFenceRef.current = null;
+        return;
+      }
       if (navigationEpochRef.current === epoch) {
         navigationStartedAtRef.current.delete(epoch);
         setPaneLoading(null);
         desiredSessionIdRef.current = viewedSessionIdRef.current;
         setError(cause instanceof Error ? cause.message : String(cause));
+        if (scrollMemoryFenceRef.current?.epoch === epoch)
+          scrollMemoryFenceRef.current = null;
       }
     } finally {
       if (navigationAbortRef.current === controller)
