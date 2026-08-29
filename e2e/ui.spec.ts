@@ -16,6 +16,92 @@ test("desktop session navigation keeps the left sidebar open", { tag: "@desktop-
   await expect(sidebar).toHaveClass(/is-open/);
 });
 
+test("long Session navigation opens at the real bottom and restores its reading position", { tag: "@desktop-only" }, async ({ page }) => {
+  await page.route(/\/api\/sessions\/[^/]+\/view(?:\?|$)/, async (route) => {
+    const requestUrl = new URL(route.request().url());
+    const response = await route.fetch({
+      headers: { ...route.request().headers(), origin: requestUrl.origin },
+    });
+    const data = await response.json() as {
+      session?: { name?: string };
+      messages?: Array<Record<string, unknown>>;
+      messageTotal?: number;
+      turnTotal?: number;
+      visibleTurnCount?: number;
+      messagesTruncated?: boolean;
+    };
+    if (data.session?.name !== "Second session") {
+      await route.fulfill({ response, json: data });
+      return;
+    }
+    const history = Array.from({ length: 70 }, (_, index) => [
+      { role: "user", content: `older user ${index}` },
+      { role: "assistant", content: `older answer ${index}` },
+    ]).flat();
+    const messages = [...history, ...(data.messages || [])];
+    await route.fulfill({
+      response,
+      json: {
+        ...data,
+        messages,
+        messageTotal: messages.length,
+        turnTotal: messages.filter((message) => message.role === "user").length,
+        visibleTurnCount: messages.filter((message) => message.role === "user").length,
+        messagesTruncated: false,
+      },
+    });
+  });
+  await page.goto("/");
+  const second = page.locator(".session-item", { hasText: "Second session" });
+  await second.click();
+  await expect(page.getByText("Final answer with")).toBeVisible();
+  const timeline = page.locator(".timeline");
+  await expect.poll(() => timeline.evaluate((element) => ({
+    top: element.scrollTop,
+    max: element.scrollHeight - element.clientHeight,
+    contentVisibility: getComputedStyle(element.querySelector(".message")!).contentVisibility,
+  }))).toEqual(expect.objectContaining({ contentVisibility: "visible" }));
+  await expect.poll(() => timeline.evaluate((element) => ({
+    top: element.scrollTop,
+    max: element.scrollHeight - element.clientHeight,
+    bottom: element.scrollTop === element.scrollHeight - element.clientHeight,
+  }))).toEqual(expect.objectContaining({ bottom: true }));
+  // Exercise a delayed post-paint layout shift after the initial scroll restore.
+  await timeline.evaluate((element) => new Promise<void>((resolve) => {
+    const shift = document.createElement("div");
+    shift.style.height = "1px";
+    shift.setAttribute("aria-hidden", "true");
+    element.querySelector(".timeline-inner")?.append(shift);
+    window.setTimeout(() => {
+      shift.style.height = "180px";
+      resolve();
+    }, 1_000);
+  }));
+  await expect.poll(() => timeline.evaluate((element) =>
+    element.scrollTop === element.scrollHeight - element.clientHeight,
+  )).toBe(true);
+
+  await timeline.evaluate((element) => {
+    element.scrollTop = 600;
+    element.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
+  await page.locator(".session-item", { hasText: "First session" }).click();
+  await expect(page.getByText("First answer")).toBeVisible();
+  await second.click();
+  await expect(page.getByText("Final answer with")).toBeVisible();
+  await expect.poll(() => timeline.evaluate((element) => element.scrollTop)).toBe(600);
+
+  await timeline.evaluate((element) => {
+    element.scrollTop = element.scrollHeight - element.clientHeight;
+    element.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
+  await page.locator(".session-item", { hasText: "First session" }).click();
+  await expect(page.getByText("First answer")).toBeVisible();
+  await second.click();
+  await expect(page.getByText("Final answer with")).toBeVisible();
+  await expect.poll(() => timeline.evaluate((element) => element.scrollTop === element.scrollHeight - element.clientHeight)).toBe(true);
+});
+
 test("desktop composer keeps Model and Thinking labels clear of their dropdown affordances", { tag: "@desktop-only" }, async ({ page }) => {
   await page.goto("/");
   for (const selector of [".composer-model-select", ".thinking-control"]) {

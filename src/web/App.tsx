@@ -129,7 +129,7 @@ import {
   recoverableRefreshError,
   surfaceAutomaticRefreshError,
 } from "./lib/refresh-error-policy";
-import { isAtBottom, SessionScrollMemory } from "./lib/session-scroll-memory";
+import { BOTTOM_THRESHOLD, isAtBottom, SessionScrollMemory } from "./lib/session-scroll-memory";
 import { withStreamingAppendHints } from "./lib/streaming-append";
 import { SessionViewCache } from "./lib/session-view-cache";
 import {
@@ -495,6 +495,20 @@ export function App() {
   /** Commands are part of the committed projection, not a render-closure fallback. */
   const committedPaneCommandsRef = useRef<SlashCommand[]>(pane.commands);
   const paneCommitRevisionRef = useRef(0);
+  /** Keeps an initial-bottom intent alive across image/font/layout reflows. */
+  const bottomLayoutIntentRef = useRef<{
+    revision: number;
+    lastTop: number;
+  } | null>(null);
+  const armBottomLayoutIntent = (timeline: HTMLElement) => {
+    bottomLayoutIntentRef.current = {
+      revision: paneCommitRevisionRef.current,
+      lastTop: timeline.scrollTop,
+    };
+  };
+  const clearBottomLayoutIntent = () => {
+    bottomLayoutIntentRef.current = null;
+  };
   const draftGenerationRef = useRef(0);
   const viewedSessionIdRef = useRef("");
   /** Draft intent is a coordinator guard only; pane.identity is the sole UI fact. */
@@ -5130,13 +5144,17 @@ export function App() {
     if (pane.identity.kind === "draft") {
       timeline.scrollTop = timeline.scrollHeight;
       stickToBottomRef.current = true;
+      armBottomLayoutIntent(timeline);
       pendingScrollRestoreRef.current = "";
       scrollMemoryFenceRef.current = null;
       return;
     }
     const sessionId = pendingScrollRestoreRef.current;
-    if (pane.identity.kind !== "session" || !sessionId || sessionId !== viewedSessionId)
+    if (pane.identity.kind !== "session" || !sessionId || sessionId !== viewedSessionId) {
+      if (pane.identity.kind === "session" && stickToBottomRef.current)
+        armBottomLayoutIntent(timeline);
       return;
+    }
     const target = scrollMemoryRef.current.target(
       sessionId,
       timeline.scrollHeight,
@@ -5144,6 +5162,8 @@ export function App() {
     );
     timeline.scrollTop = target.top;
     stickToBottomRef.current = target.stickToBottom;
+    if (target.stickToBottom) armBottomLayoutIntent(timeline);
+    else clearBottomLayoutIntent();
     pendingScrollRestoreRef.current = "";
     scrollMemoryFenceRef.current = null;
   }, [pane.identity, viewedSessionId, messages]);
@@ -5157,8 +5177,43 @@ export function App() {
       const timeline = scrollRef.current;
       if (!timeline || !stickToBottomRef.current) return;
       timeline.scrollTo({ top: timeline.scrollHeight, behavior: "auto" });
+      const intent = bottomLayoutIntentRef.current;
+      if (intent?.revision === paneCommitRevisionRef.current)
+        intent.lastTop = timeline.scrollTop;
     });
   }, [pane.identity, messages, liveMessage]);
+
+  useEffect(() => {
+    const timeline = scrollRef.current;
+    if (!timeline) return;
+    let frame: number | null = null;
+    const keepAtBottomAfterLayout = () => {
+      if (!stickToBottomRef.current || frame !== null) return;
+      frame = requestAnimationFrame(() => {
+        frame = null;
+        const current = scrollRef.current;
+        if (current !== timeline || !stickToBottomRef.current) return;
+        current.scrollTop = current.scrollHeight;
+        const intent = bottomLayoutIntentRef.current;
+        if (intent?.revision === paneCommitRevisionRef.current)
+          intent.lastTop = current.scrollTop;
+      });
+    };
+    const inner = timeline.querySelector<HTMLElement>(".timeline-inner") || timeline;
+    const resizeObserver = typeof ResizeObserver === "function"
+      ? new ResizeObserver(keepAtBottomAfterLayout)
+      : null;
+    resizeObserver?.observe(inner);
+    timeline.addEventListener("load", keepAtBottomAfterLayout, true);
+    keepAtBottomAfterLayout();
+    const fontsReady = timeline.ownerDocument.fonts?.ready;
+    fontsReady?.then(keepAtBottomAfterLayout).catch(() => undefined);
+    return () => {
+      if (frame !== null) cancelAnimationFrame(frame);
+      resizeObserver?.disconnect();
+      timeline.removeEventListener("load", keepAtBottomAfterLayout, true);
+    };
+  }, [pane.identity]);
 
   useEffect(() => {
     if (!error && !notice) return;
@@ -5315,6 +5370,18 @@ export function App() {
     // the transient loading position into the Session's remembered position.
     if (scrollMemoryFenceRef.current) return;
     if (pendingScrollRestoreRef.current === viewedSessionIdRef.current) return;
+    const bottomIntent = bottomLayoutIntentRef.current;
+    if (bottomIntent?.revision === paneCommitRevisionRef.current) {
+      if (Math.abs(element.scrollTop - bottomIntent.lastTop) <= BOTTOM_THRESHOLD) {
+        // A layout/image/font reflow kept the same bottom anchor. Retain the
+        // intent and let the layout observer move to the new max position.
+        bottomIntent.lastTop = element.scrollTop;
+        stickToBottomRef.current = true;
+        return;
+      }
+      // A large delta is an explicit reading change, not a browser reflow.
+      clearBottomLayoutIntent();
+    }
     stickToBottomRef.current = isAtBottom(
       element.scrollTop,
       element.scrollHeight,
@@ -5325,6 +5392,7 @@ export function App() {
 
   const clearConversationNavigationTarget = () => {
     conversationNavigationTargetRef.current = null;
+    clearBottomLayoutIntent();
   };
 
   const navigateConversation = (
@@ -5333,6 +5401,7 @@ export function App() {
     const timeline = scrollRef.current;
     if (!timeline) return;
     if (direction === "top") {
+      clearBottomLayoutIntent();
       stickToBottomRef.current = false;
       conversationNavigationTargetRef.current = 0;
       timeline.scrollTo({ top: 0, behavior: "smooth" });
@@ -5341,6 +5410,7 @@ export function App() {
     if (direction === "bottom") {
       stickToBottomRef.current = true;
       conversationNavigationTargetRef.current = timeline.scrollHeight;
+      armBottomLayoutIntent(timeline);
       timeline.scrollTo({ top: timeline.scrollHeight, behavior: "smooth" });
       return;
     }
@@ -5355,6 +5425,7 @@ export function App() {
       conversationNavigationTargetRef.current ?? timeline.scrollTop + 14;
     const target = adjacentUserMessageOffset(offsets, currentAnchor, direction);
     if (target !== null) {
+      clearBottomLayoutIntent();
       stickToBottomRef.current = false;
       conversationNavigationTargetRef.current = target;
       timeline.scrollTo({ top: Math.max(0, target - 14), behavior: "smooth" });
