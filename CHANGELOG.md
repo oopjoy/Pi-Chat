@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.4.6
+
+### Conversation continuity and presentation
+
+- Restored the centered New-conversation welcome surface with the Pi bear mark, title, description, and an always-visible new-conversation workspace path selector.
+- Empty active Primary Sessions now use the New presentation without waiting for sidebar inventory, preventing a transient pathless legacy welcome screen during startup and navigation.
+- Local optimistic User turns now reconcile conservatively with their authoritative persisted JSONL rows, preventing duplicate bubbles while preserving two genuinely identical prompts as separate turns.
+- Completed process rows retain their frozen final run duration after settlement, SSE recovery, and Session navigation.
+- Scroll restoration is bound to the Pane identity actually committed to the DOM, with a tighter bottom tolerance to avoid restoring the wrong Session position.
 
 ### Settings and supportability
 
