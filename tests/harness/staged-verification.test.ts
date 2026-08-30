@@ -31,7 +31,7 @@ test("staged verification gives unit work an isolated output and removes success
   });
 
   assert.equal(result.ok, true);
-  assert.deepEqual(calls.map((call) => call.args), [["test"]]);
+  assert.deepEqual(calls.map((call) => call.args), [["run", "test:source"]]);
   assert.equal(calls[0]!.env.PI_CHAT_DIST_DIR, "C:\\Temp\\pi-chat-unit-test");
   assert.equal(calls[0]!.env.PI_CHAT_BUILD_REVISION, "expected-revision");
   assert.deepEqual(removed, ["C:\\Temp\\pi-chat-unit-test"]);
@@ -93,7 +93,22 @@ test("a successful gate fails closed when its staging cannot be removed", async 
   });
 });
 
-test("full verification runs typecheck, isolated unit and e2e, then diff check serially", async () => {
+test("source verification reuses one build for unit and e2e while artifact checks stay separate", () => {
+  assert.deepEqual(verificationSteps("unit"), [
+    { kind: "staged", label: "unit", args: ["run", "test:source"] },
+  ]);
+  assert.deepEqual(verificationSteps("artifact"), [
+    { kind: "staged", label: "artifact", args: ["run", "build-and-test:artifact"] },
+  ]);
+  assert.deepEqual(verificationSteps("all"), [
+    { kind: "npm", label: "typecheck", args: ["run", "typecheck"] },
+    { kind: "staged", label: "source-and-e2e", args: ["run", "verify:source-and-e2e"] },
+    { kind: "staged", label: "artifact", args: ["run", "build-and-test:artifact"] },
+    { kind: "plain", label: "diff-check", command: "git", args: ["diff", "HEAD", "--check"] },
+  ]);
+});
+
+test("full verification runs typecheck, shared source/e2e, artifact gate and diff check serially", async () => {
   const calls: Array<{ command: string; args: string[]; stage?: string }> = [];
   const created: string[] = [];
   const removed: string[] = [];
@@ -115,13 +130,13 @@ test("full verification runs typecheck, isolated unit and e2e, then diff check s
   assert.equal(result.ok, true);
   assert.deepEqual(calls.map((call) => call.args), [
     ["run", "typecheck"],
-    ["test"],
-    ["run", "test:e2e"],
+    ["run", "verify:source-and-e2e"],
+    ["run", "build-and-test:artifact"],
     ["diff", "HEAD", "--check"],
   ]);
   assert.equal(calls[0]!.stage, undefined);
-  assert.equal(calls[1]!.stage, "/tmp/pi-chat-unit-0");
-  assert.equal(calls[2]!.stage, "/tmp/pi-chat-e2e-1");
+  assert.equal(calls[1]!.stage, "/tmp/pi-chat-source-and-e2e-0");
+  assert.equal(calls[2]!.stage, "/tmp/pi-chat-artifact-1");
   assert.equal(calls[3]!.stage, undefined);
   assert.deepEqual(removed, created);
 });
@@ -158,5 +173,5 @@ test("verification modes reject unsupported aliases before any process starts", 
     { cwd: repositoryRoot, encoding: "utf8" },
   );
   assert.equal(result.status, 2);
-  assert.match(result.stderr, /Usage: .*unit\|e2e\|all/);
+  assert.match(result.stderr, /Usage: .*unit\|e2e\|artifact\|all/);
 });

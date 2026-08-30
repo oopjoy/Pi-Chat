@@ -23,7 +23,7 @@ try {
 } catch (error) {
   if (!(error instanceof TestHarnessArgumentError)) throw error;
   console.error(`[Pi Chat] ${error.message}`);
-  console.error("Usage: node scripts/run-tests.mjs [--file tests/path/name.test.ts] [--test-name-pattern=<pattern>|--test-shard=<index>|--test-skip-pattern=<pattern>|--test-only]");
+  console.error("Usage: node scripts/run-tests.mjs [--file tests/path/name.test.ts|--exclude-file tests/path/name.test.ts] [--test-name-pattern=<pattern>|--test-shard=<index>|--test-skip-pattern=<pattern>|--test-only]");
   process.exit(2);
 }
 

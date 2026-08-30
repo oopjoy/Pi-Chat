@@ -71,6 +71,19 @@ test("repeatable file selection is contained, normalized, and deduplicated", () 
   assert.deepEqual(parsed.nodeArguments, ["--test-name-pattern=active"]);
 });
 
+test("source test selection excludes only discovered repository test files", () => {
+  const discovered = [
+    join(repositoryRoot, "tests", "keep.test.ts"),
+    join(repositoryRoot, "tests", "skip.test.ts"),
+  ];
+  const parsed = parseTestArguments(["--exclude-file", "tests/skip.test.ts"], discovered);
+  assert.deepEqual(parsed.selectedFiles, [join(repositoryRoot, "tests", "keep.test.ts")]);
+  assert.throws(
+    () => parseTestArguments(["--exclude-file", "tests/missing.test.ts"], discovered),
+    (error) => error instanceof TestHarnessArgumentError && /Unknown excluded test file/.test(error.message),
+  );
+});
+
 test("test selection preserves supported separate Node test option values", () => {
   const parsed = parseTestArguments([
     "--file=tests/active-sessions.test.ts",

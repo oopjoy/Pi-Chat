@@ -79,6 +79,7 @@ function validateTestNamePattern(pattern, selectedFiles) {
 export function parseTestArguments(argv, discovered = discoverTestFiles()) {
   const nodeArguments = [];
   const requested = [];
+  const excluded = [];
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--file") {
@@ -94,6 +95,21 @@ export function parseTestArguments(argv, discovered = discoverTestFiles()) {
       if (!value)
         throw new TestHarnessArgumentError("--file requires a repository-relative tests/**/*.test.ts path");
       requested.push(value);
+      continue;
+    }
+    if (argument === "--exclude-file") {
+      const value = argv[index + 1];
+      if (!value || value.startsWith("-"))
+        throw new TestHarnessArgumentError("--exclude-file requires a repository-relative tests/**/*.test.ts path");
+      excluded.push(value);
+      index += 1;
+      continue;
+    }
+    if (argument.startsWith("--exclude-file=")) {
+      const value = argument.slice("--exclude-file=".length);
+      if (!value)
+        throw new TestHarnessArgumentError("--exclude-file requires a repository-relative tests/**/*.test.ts path");
+      excluded.push(value);
       continue;
     }
     if (!argument.startsWith("-"))
@@ -118,15 +134,27 @@ export function parseTestArguments(argv, discovered = discoverTestFiles()) {
   }
 
   if (!discovered.length) throw new TestHarnessArgumentError("No tests/**/*.test.ts files were discovered");
-  const testNamePattern = testNamePatternValue(nodeArguments);
-  if (!requested.length) {
-    if (testNamePattern !== null) validateTestNamePattern(testNamePattern, discovered);
-    return { nodeArguments, selectedFiles: discovered };
-  }
-
   const discoveredByName = new Map(
     discovered.map((path) => [selectionKey(repositoryRelativeTestPath(path)), path]),
   );
+  const excludedKeys = new Set();
+  for (const raw of excluded) {
+    if (raw.includes("\0") || isAbsolute(raw) || /^[A-Za-z]:/.test(raw) || raw.startsWith("//") || raw.startsWith("\\\\"))
+      throw new TestHarnessArgumentError(`Excluded test must be repository-relative under tests/: ${raw}`);
+    const name = normalizedSelection(raw);
+    const path = discoveredByName.get(selectionKey(name));
+    if (!path)
+      throw new TestHarnessArgumentError(`Unknown excluded test file: ${raw}. Select a discovered tests/**/*.test.ts file.`);
+    excludedKeys.add(selectionKey(path));
+  }
+  const eligible = discovered.filter((path) => !excludedKeys.has(selectionKey(path)));
+  const testNamePattern = testNamePatternValue(nodeArguments);
+  if (!requested.length) {
+    if (!eligible.length) throw new TestHarnessArgumentError("Excluding all discovered tests is not allowed");
+    if (testNamePattern !== null) validateTestNamePattern(testNamePattern, eligible);
+    return { nodeArguments, selectedFiles: eligible };
+  }
+
   const selectedFiles = [];
   const selected = new Set();
   for (const raw of requested) {
@@ -137,10 +165,12 @@ export function parseTestArguments(argv, discovered = discoverTestFiles()) {
     if (!path)
       throw new TestHarnessArgumentError(`Unknown test file: ${raw}. Select a discovered tests/**/*.test.ts file.`);
     const key = selectionKey(path);
+    if (excludedKeys.has(key)) continue;
     if (selected.has(key)) continue;
     selected.add(key);
     selectedFiles.push(path);
   }
+  if (!selectedFiles.length) throw new TestHarnessArgumentError("No selected tests remain after exclusions");
   if (testNamePattern !== null) validateTestNamePattern(testNamePattern, selectedFiles);
   return { nodeArguments, selectedFiles };
 }

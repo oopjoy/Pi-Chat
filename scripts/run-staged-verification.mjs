@@ -7,14 +7,16 @@ const projectRoot = resolve(import.meta.dirname, "..");
 const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
 
 export function verificationSteps(mode) {
-  if (mode === "unit") return [{ kind: "staged", label: "unit", args: ["test"] }];
+  if (mode === "unit") return [{ kind: "staged", label: "unit", args: ["run", "test:source"] }];
   if (mode === "e2e")
     return [{ kind: "staged", label: "e2e", args: ["run", "test:e2e"] }];
+  if (mode === "artifact")
+    return [{ kind: "staged", label: "artifact", args: ["run", "build-and-test:artifact"] }];
   if (mode === "all")
     return [
       { kind: "npm", label: "typecheck", args: ["run", "typecheck"] },
-      { kind: "staged", label: "unit", args: ["test"] },
-      { kind: "staged", label: "e2e", args: ["run", "test:e2e"] },
+      { kind: "staged", label: "source-and-e2e", args: ["run", "verify:source-and-e2e"] },
+      { kind: "staged", label: "artifact", args: ["run", "build-and-test:artifact"] },
       { kind: "plain", label: "diff-check", command: "git", args: ["diff", "HEAD", "--check"] },
     ];
   throw new Error(`Unknown verification mode: ${mode}`);
@@ -117,7 +119,7 @@ export async function runStagedVerification(
 }
 
 function usage() {
-  return "Usage: node scripts/run-staged-verification.mjs <unit|e2e|all>";
+  return "Usage: node scripts/run-staged-verification.mjs <unit|e2e|artifact|all>";
 }
 
 async function main() {
