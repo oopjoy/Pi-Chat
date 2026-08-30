@@ -59,7 +59,7 @@ test("production web build emits independently cacheable React, Markdown and KaT
     await execFile(process.execPath, ["scripts/build-identity.mjs"], { cwd: projectRoot, env });
     await execFile(process.execPath, ["scripts/build-web.mjs"], { cwd: projectRoot, env });
     const assets = await readdir(join(distRoot, "web", "assets"));
-    for (const name of ["react", "markdown", "katex"])
+    for (const name of ["react", "markdown", "katex", "EditToolDiff"])
       assert.ok(assets.some((asset) => asset.startsWith(`${name}-`) && asset.endsWith(".js")), `missing ${name} production chunk`);
   } finally {
     await rm(distRoot, { recursive: true, force: true });

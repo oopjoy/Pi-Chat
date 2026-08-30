@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { ProcessEntry } from "../lib/conversation-process";
 import { AlertIcon, CheckIcon, ChevronUpIcon } from "./Icons";
-import { openEditDiffSidebar } from "./EditToolDiff";
+import { openEditDiffSidebar } from "../lib/edit-diff-events";
 import { compactEditPath } from "../lib/tool-edit-diff";
 import { MarkdownBody } from "./MarkdownBody";
 

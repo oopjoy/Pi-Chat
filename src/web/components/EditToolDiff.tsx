@@ -2,14 +2,9 @@ import { Fragment, useCallback, useEffect, useRef, useState, type CSSProperties,
 import type { WorkspaceFileData, WorkspaceRecentFilesData } from "../../shared/types";
 import { compactEditPath, type ToolEditDiff } from "../lib/tool-edit-diff";
 import { FileIcon, RefreshIcon } from "./Icons";
-
-const OPEN_DIFF_EVENT = "pi-chat-open-edit-diff";
+import { OPEN_DIFF_EVENT } from "../lib/edit-diff-events";
 
 type InspectorTab = "files" | "changes";
-
-export function openEditDiffSidebar(diff: ToolEditDiff): void {
-  window.dispatchEvent(new window.CustomEvent<ToolEditDiff>(OPEN_DIFF_EVENT, { detail: diff }));
-}
 
 export function EditToolDiff({ diff }: { diff: ToolEditDiff }) {
   if (diff.sensitive) return <p className="edit-tool-diff-note">敏感文件仅显示修改摘要。</p>;
