@@ -5739,8 +5739,13 @@ export class PiChatApp {
       this.rememberModelContextWindows([state.model]);
       this.lastAvailableModels = [state.model];
     }
-    const diskMessages = this.activeSessionPath
-      ? await readSessionMessages(this.activeSessionPath).catch(() => null)
+    // During a cold start the controller may have bound the authoritative
+    // Session state before app.activeSessionPath is copied. The state response
+    // carries the same verified JSONL path; use it to avoid returning an empty
+    // transcript for an already-existing Session.
+    const activeSessionPath = this.activeSessionPath || state.sessionFile;
+    const diskMessages = activeSessionPath
+      ? await readSessionMessages(activeSessionPath).catch(() => null)
       : null;
     let messages: PiMessage[] | null = null;
     const primaryTerminalTail =
@@ -5815,7 +5820,7 @@ export class PiChatApp {
       : this.startupModels;
     const windowedMessages = messageWindow(messages || []);
     const sidebar = this.sidebarSessions(
-      await this.cachedSessionList(state.sessionFile),
+      await this.cachedSessionList(activeSessionPath),
       clientId,
     );
     this.primarySummarySnapshot =

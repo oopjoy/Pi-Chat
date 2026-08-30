@@ -11,6 +11,7 @@
 - Scroll restoration is bound to the Pane identity actually committed to the DOM, with a tighter bottom tolerance to avoid restoring the wrong Session position; bottom-pinned timelines remain anchored through delayed image, font, and post-paint layout shifts.
 - Fork/clone-created Sessions now receive a durable `（Fork）` display suffix from Pi's `parentSession` metadata, so copied conversations remain distinguishable after refresh and restart.
 - Image attachments are no longer blocked by provisional or unsupported `ModelInfo.input` metadata in the browser; only local payload safety limits are checked before forwarding, and the upstream model decides whether it can interpret the images.
+- Restart and cold-start bootstrap recovery no longer lets a persisted Session fall through to the New welcome; the centered logo, workspace selector, and New composer presentation are reserved for actual New state.
 
 ### Settings and supportability
 

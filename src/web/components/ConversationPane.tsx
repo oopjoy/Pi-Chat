@@ -177,12 +177,12 @@ export function ConversationPane({
               <p>正在恢复会话内容…</p>
             </div>
           </section>
-        ) : !composerHasContent && !messages.length && !pendingUserMessage && !liveMessage ? (
-          <section className="welcome" aria-label={newConversationPresentation ? "新对话" : "空对话"}>
+        ) : newConversationPresentation && !composerHasContent && !messages.length && !pendingUserMessage && !liveMessage ? (
+          <section className="welcome" aria-label="新对话">
             <span className="welcome-mark"><PiMarkIcon /></span>
             <h1>开始与 Pi 对话</h1>
             <p>支持流式输出、Markdown、KaTeX，以及复制原始 LaTeX 源码。</p>
-            {newConversationPresentation && <div className="draft-workspace">
+            <div className="draft-workspace">
               <span>新对话工作路径</span>
               <CompactSelect
                 value={draftWorkspaceCwd || workspaceCwd || ""}
@@ -198,8 +198,13 @@ export function ConversationPane({
               />
               <button className="draft-workspace-picker" type="button" disabled={!localDraft || workspacePicking} onClick={onPickDraftWorkspace} title={localDraft ? "浏览新对话工作路径" : "当前新对话的工作路径已经确定"} aria-label="浏览新对话工作路径"><FolderIcon /></button>
               <small>{localDraft ? "点击路径可快速选择历史 Session 使用过的目录；浏览按钮可选择新目录。首次发送时才创建 Session。" : "当前新对话已准备就绪；发送第一条消息后会出现在历史对话中。"}</small>
-            </div>}
+            </div>
           </section>
+        ) : !newConversationPresentation && !composerHasContent && !messages.length && !pendingUserMessage && !liveMessage ? (
+          <div className="center-state saved-empty-state" role="status" aria-live="polite">
+            <span className="loader" />
+            正在恢复已保存的对话…
+          </div>
         ) : <>
           {messagesTruncated && <div className="message-window-notice" role="status">
             <span>当前显示最近 {visibleTurnCount} 轮（共 {turnTotal} 轮、{messageTotal} 条消息）</span>

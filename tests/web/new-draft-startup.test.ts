@@ -77,6 +77,141 @@ test("an empty unindexed Primary uses New presentation while keeping its real Se
   }
 });
 
+test("a saved Session never falls through to the New welcome while history is temporarily empty", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const saved = {
+    ...bootstrap.sessions[0],
+    name: "Saved conversation",
+    preview: "previous question",
+    messageCount: 3,
+    turnCount: 1,
+    active: true,
+  };
+  const incompleteBootstrap: BootstrapData = {
+    ...bootstrap,
+    state: {
+      ...bootstrap.state,
+      model: null,
+      sessionName: undefined,
+      messageCount: 3,
+    },
+    messages: [],
+    messageTotal: 0,
+    turnTotal: 0,
+    visibleTurnCount: 0,
+    sessions: [saved],
+    activeSessionId: activeId,
+    activeSessionIds: [activeId],
+  };
+  const restoredView: SessionViewData = {
+    ...draftView,
+    session: { ...saved, active: true, writable: true },
+    state: {
+      ...bootstrap.state,
+      sessionId: "active",
+      sessionFile: "C:/sessions/active.jsonl",
+      sessionName: "Saved conversation",
+      messageCount: 3,
+    },
+    messages: [
+      { role: "user", content: "previous question" },
+      { role: "assistant", content: "previous answer" },
+      { role: "user", content: "latest question" },
+    ],
+    messageTotal: 3,
+    turnTotal: 2,
+    visibleTurnCount: 2,
+    isActive: true,
+    isStreaming: false,
+    runtimeStatus: "active",
+  };
+  Object.assign(api, {
+    bootstrap: async () => incompleteBootstrap,
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    viewSession: async (id: string) => {
+      assert.equal(id, activeId);
+      return restoredView;
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    assert.equal(
+      dom.window.document.querySelector(".topbar-title")?.textContent,
+      "Saved conversation",
+    );
+    assert.equal(
+      dom.window.document.querySelector(".welcome"),
+      null,
+      "a persisted Session must never use the New welcome presentation",
+    );
+    assert.equal(dom.window.document.querySelector(".welcome-mark"), null);
+    assert.equal(dom.window.document.querySelector(".draft-workspace"), null);
+    assert.equal(dom.window.document.querySelector(".saved-empty-state"), null);
+    assert.match(
+      dom.window.document.querySelector(".timeline-inner")?.textContent || "",
+      /previous answer/,
+      "an incomplete bootstrap is hydrated from the authoritative Session view",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
+test("a saved Session keeps a recovery state when its bootstrap history read fails", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const saved = {
+    ...bootstrap.sessions[0],
+    name: "Saved but unavailable",
+    preview: "persisted prompt",
+    messageCount: 2,
+    turnCount: 1,
+    active: true,
+  };
+  const incompleteBootstrap: BootstrapData = {
+    ...bootstrap,
+    state: { ...bootstrap.state, model: null, messageCount: 2 },
+    messages: [],
+    messageTotal: 0,
+    turnTotal: 0,
+    visibleTurnCount: 0,
+    sessions: [saved],
+    activeSessionId: activeId,
+    activeSessionIds: [activeId],
+  };
+  Object.assign(api, {
+    bootstrap: async () => incompleteBootstrap,
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    viewSession: async () => {
+      throw new Error("history unavailable");
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    assert.equal(dom.window.document.querySelector(".welcome"), null);
+    assert.equal(dom.window.document.querySelector(".welcome-mark"), null);
+    assert.match(
+      dom.window.document.querySelector(".saved-empty-state")?.textContent || "",
+      /正在恢复已保存的对话/,
+    );
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("New is instant and the first send shows Pi startup before materializing a Runtime", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");

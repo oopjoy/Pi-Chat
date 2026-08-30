@@ -464,6 +464,30 @@ function modelCapabilityKey(model: ModelInfo | null | undefined): string {
   return [model.provider, model.id, ...(model.input || [])].join("\u0000");
 }
 
+/**
+ * Bootstrap can race Primary adoption and contain an active Session identity
+ * with an empty message array. Never treat that partial snapshot as a genuine
+ * empty conversation when its authoritative summary says history exists.
+ */
+function bootstrapNeedsHistoryRecovery(
+  data: BootstrapData,
+  activeSessionId: string,
+): boolean {
+  if (!activeSessionId || data.messages.length) return false;
+  const summary = data.sessions.find((session) => session.id === activeSessionId);
+  const preview = summary?.preview?.trim() || "";
+  const summaryHasContent = Boolean(
+    preview && preview !== "新对话" && preview !== "尚未发送消息",
+  );
+  return Boolean(
+    (data.messageTotal ?? 0) > 0 ||
+      (data.turnTotal ?? 0) > 0 ||
+      (data.state.messageCount ?? 0) > 0 ||
+      (summary?.turnCount ?? 0) > 0 ||
+      summaryHasContent,
+  );
+}
+
 export function App() {
   const [pane, dispatchPane] = useReducer(
     conversationPaneReducer,
@@ -2903,6 +2927,45 @@ export function App() {
         desiredSessionIdRef.current = activeId;
       }
     }
+    if (bootstrapNeedsHistoryRecovery(data, activeId)) {
+      // A just-started Primary may publish its Session identity before the
+      // bootstrap has a readable message snapshot. Fetch the authoritative view
+      // before allowing the partial bootstrap to paint as an empty conversation.
+      desiredSessionIdRef.current = activeId;
+      const historyAuthority =
+        bootstrapAuthority?.sessionId === activeId
+          ? bootstrapAuthority
+          : capturePaneAuthority(activeId);
+      const historyVersion =
+        sessionEventVersionRef.current.get(activeId) || 0;
+      const historyQueueRequestRevision =
+        queueProjectionRevisionRef.current.get(activeId) || 0;
+      try {
+        const view = await fetchSessionView(activeId);
+        if (
+          !refreshAuthorityIsCurrent(refreshAuthority) ||
+          desiredSessionIdRef.current !== activeId ||
+          (sessionEventVersionRef.current.get(activeId) || 0) !== historyVersion ||
+          !paneAuthorityCanCommit(historyAuthority)
+        )
+          return;
+        if (view.session.id !== activeId)
+          throw new Error("已保存对话恢复结果与当前 Session 不一致");
+        applyBootstrapMetadata(data);
+        applySessionView(view, historyAuthority, historyQueueRequestRevision);
+        if (view.historyPending || view.reconcilePending || view.isStreaming)
+          requestPromptReconcileRef.current(activeId);
+        setError((current) => (recoverableRefreshError(current) ? "" : current));
+        return;
+      } catch {
+        // Keep the successful bootstrap metadata, but the ConversationPane will
+        // show a recovery state rather than the New welcome until history lands.
+      }
+      if (!refreshAuthorityIsCurrent(refreshAuthority)) return;
+      applyBootstrap(data, historyAuthority, historyQueueRequestRevision);
+      setError((current) => (recoverableRefreshError(current) ? "" : current));
+      return;
+    }
     applyBootstrap(data, bootstrapAuthority, wantedQueueRequestRevision);
     setError((current) => (recoverableRefreshError(current) ? "" : current));
   }, [
@@ -2913,6 +2976,7 @@ export function App() {
     confirmPrimaryCapabilitySnapshot,
     capturePaneAuthority,
     ensureHandshake,
+    fetchSessionView,
     loadBootstrap,
     paneAuthorityCanCommit,
     refreshAuthorityIsCurrent,
