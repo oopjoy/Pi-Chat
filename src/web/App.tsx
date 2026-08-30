@@ -134,6 +134,7 @@ import { loadModelCatalog, mergeModelCatalog, saveModelCatalog } from "./lib/mod
 import { withStreamingAppendHints } from "./lib/streaming-append";
 import { SessionViewCache } from "./lib/session-view-cache";
 import { workspaceFileActivityParts, workspaceFileActivityRevisionFromParts } from "./lib/workspace-activity";
+import { windowPromptReconcileScheduler, type PromptReconcileScheduler } from "./lib/prompt-reconcile-scheduler";
 import {
   composerStateForSelection,
   promptSettingsForSelection,
@@ -475,7 +476,12 @@ function bootstrapNeedsHistoryRecovery(
   );
 }
 
-export function App() {
+export interface AppProps {
+  /** Test-only clock injection; production uses the browser timer scheduler. */
+  promptReconcileScheduler?: PromptReconcileScheduler;
+}
+
+export function App({ promptReconcileScheduler }: AppProps = {}) {
   const [pane, dispatchPane] = useReducer(
     conversationPaneReducer,
     undefined,
@@ -915,7 +921,17 @@ export function App() {
   const lastEventFrameAtRef = useRef(Date.now());
   const sessionEventVersionRef = useRef(new Map<string, number>());
   const lastSessionEventTypeRef = useRef(new Map<string, string>());
-  const promptReconcileTimerRef = useRef<number | null>(null);
+  const promptReconcileTimerRef = useRef<{
+    scheduler: PromptReconcileScheduler;
+    handle: number;
+  } | null>(null);
+  const promptReconcileSchedulerRef = useRef<PromptReconcileScheduler>(windowPromptReconcileScheduler);
+  promptReconcileSchedulerRef.current = promptReconcileScheduler || windowPromptReconcileScheduler;
+  const clearPromptReconcileTimer = () => {
+    if (promptReconcileTimerRef.current === null) return;
+    promptReconcileTimerRef.current.scheduler.clear(promptReconcileTimerRef.current.handle);
+    promptReconcileTimerRef.current = null;
+  };
   const requestPromptReconcileRef = useRef<(sessionId: string) => void>(() => undefined);
   const sseReconnectTimerRef = useRef<number | null>(null);
   const sseFloodCountRef = useRef(0);
@@ -4159,9 +4175,7 @@ export function App() {
             runGeneration: eventRunGeneration,
           });
         if (viewingEventSession) {
-          if (promptReconcileTimerRef.current !== null)
-            window.clearTimeout(promptReconcileTimerRef.current);
-          promptReconcileTimerRef.current = null;
+          clearPromptReconcileTimer();
           dispatchPane({
             type: "AGENT_SETTLED",
             sessionId: eventSessionId,
@@ -4966,9 +4980,7 @@ export function App() {
             runGeneration: eventRunGeneration,
           });
         if (viewingEventSession) {
-          if (promptReconcileTimerRef.current !== null)
-            window.clearTimeout(promptReconcileTimerRef.current);
-          promptReconcileTimerRef.current = null;
+          clearPromptReconcileTimer();
           dispatchPane({
             type: "PROCESS_FAILED",
             sessionId: eventSessionId,
@@ -5139,9 +5151,21 @@ export function App() {
     const isForeground = () =>
       document.visibilityState !== "hidden" && document.hasFocus();
     let foregroundCloseIntent = false;
-    const renewPresence = () => {
+    let lastSuccessfulPresenceRenewalAt = 0;
+    let presenceRenewalInFlight: Promise<unknown> | null = null;
+    const renewPresence = (force = false) => {
       if (!isForeground()) return;
-      void api.renewPresence().catch(() => undefined);
+      const now = Date.now();
+      // Lifecycle events should remain responsive, while the watchdog only
+      // renews when the previous successful lease is getting old. Coalescing
+      // both in-flight and recently successful renewals avoids duplicate
+      // presence writes without weakening foreground recovery.
+      if (!force && now - lastSuccessfulPresenceRenewalAt < 7_000) return;
+      if (presenceRenewalInFlight) return;
+      presenceRenewalInFlight = api.renewPresence()
+        .then(() => { lastSuccessfulPresenceRenewalAt = Date.now(); })
+        .catch(() => undefined)
+        .finally(() => { presenceRenewalInFlight = null; });
     };
     const relinquishPresence = () => {
       if (isForeground()) return;
@@ -5150,7 +5174,7 @@ export function App() {
     // Native dialogs and ordinary task switching trigger blur. Keep the lease
     // until hidden/pagehide or its TTL instead of immediately dropping control.
     const pausePresenceRenewal = () => undefined;
-    const resume = (event?: Event) => {
+    const resume = (event?: Event, forceRenewal = true) => {
       if (!isForeground()) {
         // A genuine close/reload commonly becomes hidden between beforeunload
         // and unload. Preserve its last fresh foreground lease until the close
@@ -5159,7 +5183,7 @@ export function App() {
         return;
       }
       foregroundCloseIntent = false;
-      renewPresence();
+      renewPresence(forceRenewal);
       // Chromium may preserve a half-open EventSource while a standalone PWA is
       // frozen. A real visibility/pageshow resume always gets a fresh socket;
       // focus/online/watchdog only reconnect after a missed heartbeat window.
@@ -5177,8 +5201,7 @@ export function App() {
       void refresh().catch(reportBackgroundRefreshError);
     };
     renewPresence();
-    const watchdog = window.setInterval(() => resume(), 10_000);
-    const presenceRenewal = window.setInterval(renewPresence, 7_000);
+    const watchdog = window.setInterval(() => resume(undefined, false), 10_000);
     document.addEventListener("visibilitychange", resume);
     window.addEventListener("pageshow", resume);
     window.addEventListener("focus", resume);
@@ -5199,7 +5222,6 @@ export function App() {
     window.addEventListener("unload", signalWindowClose);
     return () => {
       window.clearInterval(watchdog);
-      window.clearInterval(presenceRenewal);
       document.removeEventListener("visibilitychange", resume);
       window.removeEventListener("pageshow", resume);
       window.removeEventListener("focus", resume);
@@ -5212,8 +5234,7 @@ export function App() {
 
   useEffect(
     () => () => {
-      if (promptReconcileTimerRef.current !== null)
-        window.clearTimeout(promptReconcileTimerRef.current);
+      clearPromptReconcileTimer();
       if (sseReconnectTimerRef.current !== null)
         window.clearTimeout(sseReconnectTimerRef.current);
     },
@@ -5540,9 +5561,9 @@ export function App() {
     eventVersion = sessionEventVersionRef.current.get(sessionId) || 0,
     failedAttempts = 0,
   ): void => {
-    if (promptReconcileTimerRef.current !== null)
-      window.clearTimeout(promptReconcileTimerRef.current);
-    promptReconcileTimerRef.current = window.setTimeout(() => {
+    clearPromptReconcileTimer();
+    const scheduler = promptReconcileSchedulerRef.current;
+    const handle = scheduler.set(() => {
       promptReconcileTimerRef.current = null;
       if (viewedSessionIdRef.current !== sessionId) return;
       const latestVersion = sessionEventVersionRef.current.get(sessionId) || 0;
@@ -5584,6 +5605,7 @@ export function App() {
           }
         });
     }, 4_000);
+    promptReconcileTimerRef.current = { scheduler, handle };
   };
   requestPromptReconcileRef.current = (sessionId) =>
     schedulePromptReconcile(sessionId);
@@ -6788,9 +6810,7 @@ export function App() {
     // a completed global choice applies only to later drafts.
     draftWorkspacePickerTokenRef.current = null;
     if (!workspaceDefaultPickerTokenRef.current) setWorkspacePicking(false);
-    if (promptReconcileTimerRef.current !== null)
-      window.clearTimeout(promptReconcileTimerRef.current);
-    promptReconcileTimerRef.current = null;
+    clearPromptReconcileTimer();
     const previousViewedSessionId = viewedSessionIdRef.current;
     // Each New displays the current Runtime default. It does not inherit an
     // old Composer intent: only an explicit selection belongs to its next send.

@@ -222,6 +222,19 @@ test("New is instant and the first send shows Pi startup before materializing a 
   let clearViewedCalls = 0;
   let promptCalls = 0;
   let viewSessionCalls = 0;
+  let nextReconcileTimer = 0;
+  const reconcileTimers = new Map<number, () => void>();
+  const promptReconcileScheduler = {
+    set(callback: () => void, delayMs: number) {
+      assert.equal(delayMs, 4_000);
+      const id = ++nextReconcileTimer;
+      reconcileTimers.set(id, callback);
+      return id;
+    },
+    clear(id: number) {
+      reconcileTimers.delete(id);
+    },
+  };
   let resolveClear!: () => void;
   let resolveNew!: (view: SessionViewData) => void;
   const pendingClear = new Promise<void>((resolve) => {
@@ -269,7 +282,7 @@ test("New is instant and the first send shows Pi startup before materializing a 
   });
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {
-    await act(async () => root.render(createElement(App)));
+    await act(async () => root.render(createElement(App, { promptReconcileScheduler })));
     const newButton = [
       ...dom.window.document.querySelectorAll<HTMLButtonElement>("button"),
     ].find((button) => button.textContent?.trim() === "New");
@@ -344,7 +357,14 @@ test("New is instant and the first send shows Pi startup before materializing a 
     });
     assert.equal(promptCalls, 1);
     assert.ok(dom.window.document.querySelector(".stop-button"));
-    await act(async () => new Promise((resolve) => setTimeout(resolve, 4_100)));
+    const reconcile = reconcileTimers.values().next().value as (() => void) | undefined;
+    assert.ok(reconcile, "the prompt reconciliation should be scheduled");
+    await act(async () => {
+      reconcileTimers.clear();
+      reconcile();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
     assert.equal(viewSessionCalls, 1);
     assert.match(
       dom.window.document.body.textContent || "",

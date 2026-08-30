@@ -6,6 +6,36 @@ import test from "node:test";
 import { SessionIndex, cleanPreview, idForPath, parseSession, readSessionMessages, readSessionUsage, textFromContent } from "../src/server/session-index";
 import { LOCAL_COORDINATION_ROLE } from "../src/shared/types";
 
+test("session index refreshes files with bounded concurrency", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-sessions-bounded-refresh-"));
+  let active = 0;
+  let maximum = 0;
+  try {
+    for (let index = 0; index < 8; index += 1) {
+      await writeFile(join(root, `session-${index}.jsonl`), [
+        { type: "session", id: `session-${index}`, cwd: root },
+        { type: "message", id: `message-${index}`, message: { role: "user", content: `prompt-${index}` } },
+      ].map(JSON.stringify).join("\n") + "\n");
+    }
+    const sessions = new SessionIndex(
+      root,
+      join(root, "cache.json"),
+      async (path) => {
+        active += 1;
+        maximum = Math.max(maximum, active);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        try { return await stat(path); }
+        finally { active -= 1; }
+      },
+    );
+    assert.equal((await sessions.list()).length, 8);
+    assert.ok(maximum > 1, `expected concurrent file inspection, observed maximum ${maximum}`);
+    assert.ok(maximum <= 4, `refresh exceeded its bounded concurrency, observed maximum ${maximum}`);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("session index extracts header, title, preview, message count and user turn count", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-sessions-"));
   try {
@@ -352,6 +382,32 @@ test("session snapshots reuse one parsed branch until the JSONL file changes", a
   }
 });
 
+test("target snapshot reads expose summary and snapshot from one validated projection", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-target-snapshot-summary-"));
+  try {
+    const path = join(root, "target.jsonl");
+    await writeFile(path, [
+      { type: "session", id: "target", cwd: root },
+      { type: "message", id: "u1", parentId: null, message: { role: "user", content: "target prompt" } },
+    ].map(JSON.stringify).join("\n") + "\n");
+    const cachePath = join(root, "cache.json");
+    await new SessionIndex(root, cachePath).list();
+    let externalStatCalls = 0;
+    const index = new SessionIndex(root, cachePath, async (targetPath) => {
+      externalStatCalls += 1;
+      return stat(targetPath);
+    });
+    const targetId = idForPath(path);
+    const target = await index.snapshotAndSummaryForId(targetId);
+    assert.equal(target?.summary.id, targetId);
+    assert.equal(target?.summary.preview, "target prompt");
+    assert.equal(target?.snapshot.messages.length, 1);
+    assert.equal(externalStatCalls, 0, "the cold target snapshot must not run a separate summary stat pass");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("deleting a cached Session snapshot releases its tracked byte budget", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-snapshot-enoent-"));
   try {
@@ -368,6 +424,8 @@ test("deleting a cached Session snapshot releases its tracked byte budget", asyn
     await rm(path);
     assert.equal(await index.snapshotForId(session.id), null);
     assert.equal(index.cachedSnapshotForId(session.id), null);
+    assert.equal(index.pathForId(session.id), null);
+    assert.equal(index.summaryForId(session.id), null);
     assert.equal((index as unknown as { snapshotCacheBytes: number }).snapshotCacheBytes, 0);
   } finally {
     await rm(root, { recursive: true, force: true });

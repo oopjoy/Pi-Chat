@@ -22,6 +22,10 @@ export interface SessionProjectionOptions<Entry> {
 
 export interface SessionProjectionResult<Entry> {
   kind: SessionProjectionKind;
+  /** The authoritative open-handle stat used for this reconciliation. */
+  stats: Stats;
+  /** Bounded content fingerprint for the full observed file. */
+  fingerprint: string;
   entries: readonly Entry[];
   committedBytes: number;
   observedBytes: number;
@@ -261,7 +265,7 @@ export class SessionProjection<Entry> {
         // no-op; an incomplete tail is always re-read so it cannot stay stale.
         const verified = await committedFingerprint(handle, targetBytes);
         if (this.committedBytes === targetBytes && verified.value === this.prefixFingerprint)
-          return this.result("none", verified.bytesRead);
+          return this.result("none", verified.bytesRead, current, verified.value);
       }
 
       let kind: Exclude<SessionProjectionKind, "none"> = "rewrite";
@@ -293,10 +297,16 @@ export class SessionProjection<Entry> {
         const fingerprint = await committedFingerprint(handle, this.committedBytes);
         verificationBytes += fingerprint.bytesRead;
         this.prefixFingerprint = fingerprint.value;
+        let observedFingerprint = fingerprint.value;
+        if (this.committedBytes !== targetBytes) {
+          const observed = await committedFingerprint(handle, targetBytes);
+          verificationBytes += observed.bytesRead;
+          observedFingerprint = observed.value;
+        }
         this.observedBytes = targetBytes;
         this.identity = sourceIdentity(current);
         this.version = current;
-        return this.result("append", decoded.bytesRead + verificationBytes);
+        return this.result("append", decoded.bytesRead + verificationBytes, current, observedFingerprint);
       }
 
       const decoded = await decodeRange(handle, 0, targetBytes, "rewrite", this.options);
@@ -306,18 +316,26 @@ export class SessionProjection<Entry> {
       const fingerprint = await committedFingerprint(handle, this.committedBytes);
       verificationBytes += fingerprint.bytesRead;
       this.prefixFingerprint = fingerprint.value;
+      let observedFingerprint = fingerprint.value;
+      if (this.committedBytes !== targetBytes) {
+        const observed = await committedFingerprint(handle, targetBytes);
+        verificationBytes += observed.bytesRead;
+        observedFingerprint = observed.value;
+      }
       this.observedBytes = targetBytes;
       this.identity = sourceIdentity(current);
       this.version = current;
-      return this.result("rewrite", decoded.bytesRead + verificationBytes);
+      return this.result("rewrite", decoded.bytesRead + verificationBytes, current, observedFingerprint);
     } finally {
       await handle.close();
     }
   }
 
-  private result(kind: SessionProjectionKind, bytesRead: number): SessionProjectionResult<Entry> {
+  private result(kind: SessionProjectionKind, bytesRead: number, stats: Stats, fingerprint: string): SessionProjectionResult<Entry> {
     return {
       kind,
+      stats,
+      fingerprint,
       entries: this.entries,
       committedBytes: this.committedBytes,
       observedBytes: this.observedBytes,

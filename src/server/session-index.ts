@@ -35,6 +35,16 @@ export function sessionFileVersion(fileStat: Stats, fingerprint: string): Sessio
   };
 }
 
+function isValidCachedSessionPath(root: string, path: string, id: string): boolean {
+  const normalized = resolve(path);
+  const withinRoot = relative(resolve(root), normalized);
+  return extname(normalized).toLowerCase() === ".jsonl"
+    && !isAbsolute(withinRoot)
+    && withinRoot !== ".."
+    && !withinRoot.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`)
+    && idForPath(normalized) === id;
+}
+
 function sameSessionFileVersion(
   cached: Partial<SessionFileVersion> | undefined,
   current: SessionFileVersion,
@@ -462,6 +472,7 @@ export class SessionIndex {
   private readonly outlineProjections = new Map<string, SessionProjection<SessionEntry>>();
   private readonly snapshotCache = new Map<string, SessionFileVersion & {
     snapshot: SessionFileSnapshot;
+    summary: Omit<SessionSummary, "active"> | null;
     bytes: number;
     projection: SessionProjection<SessionEntry>;
   }>();
@@ -485,13 +496,30 @@ export class SessionIndex {
 
   private async projectSummary(path: string, fileStat: Stats): Promise<Omit<SessionSummary, "active"> | null> {
     if (!this.incrementalProjectionEnabled) return this.parseFile(path, fileStat.mtimeMs);
+    return (await this.projectSummaryWithVersion(path, fileStat)).summary;
+  }
+
+  private async projectSummaryWithVersion(path: string, fileStat: Stats): Promise<{
+    version: SessionFileVersion;
+    summary: Omit<SessionSummary, "active"> | null;
+  }> {
+    if (!this.incrementalProjectionEnabled) {
+      const fingerprint = await sessionFileFingerprint(path);
+      return {
+        version: sessionFileVersion(fileStat, fingerprint),
+        summary: await this.parseFile(path, fileStat.mtimeMs),
+      };
+    }
     // A selected Session may already own the richer transcript projection. Reuse
     // it instead of creating a second physical reader after a process restart
     // restored only persisted summary metadata.
     for (const [id, cached] of this.snapshotCache) {
       if (resolve(this.pathsById.get(id) || "") !== path) continue;
       const result = await cached.projection.reconcile(fileStat);
-      return sessionSummaryFromEntries(path, fileStat.mtimeMs, [...result.entries]);
+      return {
+        version: sessionFileVersion(result.stats, result.fingerprint),
+        summary: sessionSummaryFromEntries(path, result.stats.mtimeMs, [...result.entries]),
+      };
     }
     let projection = this.outlineProjections.get(path);
     if (!projection) {
@@ -501,7 +529,10 @@ export class SessionIndex {
       this.outlineProjections.set(path, projection);
     }
     const result = await projection.reconcile(fileStat);
-    return sessionSummaryFromEntries(path, fileStat.mtimeMs, [...result.entries]);
+    return {
+      version: sessionFileVersion(result.stats, result.fingerprint),
+      summary: sessionSummaryFromEntries(path, result.stats.mtimeMs, [...result.entries]),
+    };
   }
 
   private projectList(
@@ -553,6 +584,8 @@ export class SessionIndex {
 
   private async refresh(): Promise<SessionSummary[]> {
     if (!this.cache) this.cache = await loadSessionCache(this.cachePath);
+    const cache = this.cache;
+    if (!cache) throw new Error("Session index cache failed to initialize");
     const files = await listJsonlFiles(this.root);
     const livePaths = new Set(files.map((path) => resolve(path)));
     for (const path of this.outlineProjections.keys()) {
@@ -568,43 +601,73 @@ export class SessionIndex {
     const summaries: SessionSummary[] = [];
     const nextPathsById = new Map<string, string>();
     let cacheChanged = false;
+    const refreshResults: Array<{
+      normalized: string;
+      version?: SessionFileVersion;
+      summary?: Omit<SessionSummary, "active"> | null;
+      missing?: boolean;
+    }> = new Array(files.length);
+    const workerCount = Math.min(4, files.length);
+    let nextFileIndex = 0;
+    const inspectFile = async (): Promise<void> => {
+      while (true) {
+        const index = nextFileIndex++;
+        if (index >= files.length) return;
+        const path = files[index];
+        const normalized = resolve(path);
+        let fileStat;
+        try {
+          fileStat = await this.statFile(path);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          // Another request may delete a Session after enumeration but before
+          // stat(). Drop stale metadata and continue refreshing the remaining files.
+          refreshResults[index] = { normalized, missing: true };
+          continue;
+        }
+        const cached = cache.get(normalized);
+        let projected: { version: SessionFileVersion; summary: Omit<SessionSummary, "active"> | null };
+        try {
+          if (!this.incrementalProjectionEnabled) {
+            const fingerprint = await sessionFileFingerprint(normalized);
+            const version = sessionFileVersion(fileStat, fingerprint);
+            projected = {
+              version,
+              summary: sameSessionFileVersion(cached, version)
+                ? cached?.summary ?? null
+                : await this.projectSummary(normalized, fileStat),
+            };
+          } else {
+            projected = await this.projectSummaryWithVersion(normalized, fileStat);
+          }
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          refreshResults[index] = { normalized, missing: true };
+          continue;
+        }
+        refreshResults[index] = { normalized, version: projected.version, summary: projected.summary };
+      }
+    };
+    await Promise.all(Array.from({ length: workerCount }, () => inspectFile()));
 
-    for (const path of files) {
-      const normalized = resolve(path);
-      let fileStat;
-      try {
-        fileStat = await this.statFile(path);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-        // Another request may delete a Session after enumeration but before
-        // stat(). Drop stale metadata and continue refreshing the remaining files.
-        if (this.cache.delete(normalized)) cacheChanged = true;
+    for (const result of refreshResults) {
+      if (!result) continue;
+      if (result.missing) {
+        if (cache.delete(result.normalized)) cacheChanged = true;
         continue;
       }
-      let fingerprint: string;
-      try {
-        fingerprint = await sessionFileFingerprint(normalized);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-        if (this.cache.delete(normalized)) cacheChanged = true;
-        continue;
-      }
-      const currentVersion = sessionFileVersion(fileStat, fingerprint);
-      let cached = this.cache.get(normalized);
-      if (!sameSessionFileVersion(cached, currentVersion)) {
-        const summary = await this.projectSummary(normalized, fileStat);
-        cached = { ...currentVersion, summary };
-        this.cache.set(normalized, cached);
+      const cached = cache.get(result.normalized);
+      if (result.version && !sameSessionFileVersion(cached, result.version)) {
+        cache.set(result.normalized, { ...result.version, summary: result.summary ?? null });
         cacheChanged = true;
       }
       // Null is a durable negative cache entry. Unchanged empty drafts,
       // generated Subagent histories, and malformed/non-session JSONL are
       // statted and fingerprinted but never reparsed on subsequent inventory
       // refreshes.
-      if (!cached) continue;
-      if (!cached.summary) continue;
-      nextPathsById.set(cached.summary.id, normalized);
-      summaries.push({ ...cached.summary, active: false });
+      if (!result.summary) continue;
+      nextPathsById.set(result.summary.id, result.normalized);
+      summaries.push({ ...result.summary, active: false });
     }
 
     for (const cachedPath of this.cache.keys()) {
@@ -645,14 +708,9 @@ export class SessionIndex {
     for (const [path, entry] of this.cache) {
       if (!entry.summary || entry.summary.id !== id) continue;
       const normalized = resolve(path);
-      const withinRoot = relative(resolve(this.root), normalized);
-      const validPath = extname(normalized).toLowerCase() === ".jsonl"
-        && !isAbsolute(withinRoot)
-        && withinRoot !== ".."
-        && !withinRoot.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`)
-        && idForPath(normalized) === id;
-      if (!validPath) {
+      if (!isValidCachedSessionPath(this.root, normalized, id)) {
         this.cache.delete(path);
+        this.pathsById.delete(id);
         await saveSessionCache(this.cachePath, this.cache);
         return null;
       }
@@ -661,6 +719,7 @@ export class SessionIndex {
       catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         this.cache.delete(path);
+        this.pathsById.delete(id);
         await saveSessionCache(this.cachePath, this.cache);
         return null;
       }
@@ -670,6 +729,7 @@ export class SessionIndex {
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         this.cache.delete(path);
+        this.pathsById.delete(id);
         await saveSessionCache(this.cachePath, this.cache);
         return null;
       }
@@ -680,7 +740,10 @@ export class SessionIndex {
         this.cache.set(normalized, { ...currentVersion, summary: refreshed });
         if (normalized !== path) this.cache.delete(path);
         await saveSessionCache(this.cachePath, this.cache);
-        if (!refreshed || refreshed.id !== id) return null;
+        if (!refreshed || refreshed.id !== id) {
+          this.pathsById.delete(id);
+          return null;
+        }
         summary = refreshed;
       }
       this.pathsById.set(id, normalized);
@@ -702,46 +765,61 @@ export class SessionIndex {
     let path = this.pathForId(id);
     if (!path) {
       // A cold caller may know only the stable Session ID restored from the
-      // persisted metadata cache. Resolve that one target without a global scan.
-      await this.cachedSummaryForId(id);
-      path = this.pathForId(id);
+      // persisted metadata cache. Resolve the path without validating it twice;
+      // the open projection below is the single authoritative target read.
+      if (!this.cache) this.cache = await loadSessionCache(this.cachePath);
+      let removedInvalidPath = false;
+      for (const [candidatePath, entry] of this.cache) {
+        if (entry.summary?.id !== id) continue;
+        const normalized = resolve(candidatePath);
+        if (!isValidCachedSessionPath(this.root, normalized, id)) {
+          this.cache.delete(candidatePath);
+          removedInvalidPath = true;
+          continue;
+        }
+        path = normalized;
+        break;
+      }
+      if (removedInvalidPath) await saveSessionCache(this.cachePath, this.cache);
     }
     if (!path) return null;
     const inFlight = this.snapshotReads.get(id);
     if (inFlight) return inFlight;
     const read = (async () => {
-      let fileStat: Stats;
-      try { fileStat = await this.statFile(path); }
-      catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-          const cached = this.snapshotCache.get(id);
-          if (cached) this.snapshotCacheBytes = Math.max(0, this.snapshotCacheBytes - cached.bytes);
-          this.snapshotCache.delete(id);
-        } else throw error;
-        return null;
-      }
       const cached = this.snapshotCache.get(id);
-      let fingerprint: string;
-      try {
-        fingerprint = await sessionFileFingerprint(path);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-          if (cached) this.snapshotCacheBytes = Math.max(0, this.snapshotCacheBytes - cached.bytes);
-          this.snapshotCache.delete(id);
-          return null;
-        }
-        throw error;
-      }
-      const currentVersion = sessionFileVersion(fileStat, fingerprint);
-      if (cached && sameSessionFileVersion(cached, currentVersion)) return cached.snapshot;
       const projection = cached?.projection || new SessionProjection<SessionEntry>(path, {
         retain: (value) => value as SessionEntry,
       });
-      const projected = await projection.reconcile(fileStat);
-      const snapshot = sessionSnapshotFromBranch(activeSessionBranch([...projected.entries]));
+      let projected;
+      try {
+        // SessionProjection opens the file once and returns the authoritative
+        // stat and bounded content fingerprint from that same handle.
+        projected = await projection.reconcile();
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        if (cached) this.snapshotCacheBytes = Math.max(0, this.snapshotCacheBytes - cached.bytes);
+        this.snapshotCache.delete(id);
+        this.pathsById.delete(id);
+        if (this.cache?.delete(path)) await saveSessionCache(this.cachePath, this.cache);
+        return null;
+      }
+      const currentVersion = sessionFileVersion(projected.stats, projected.fingerprint);
+      if (cached && sameSessionFileVersion(cached, currentVersion)) return cached.snapshot;
+      const branchEntries = [...projected.entries];
+      const snapshot = sessionSnapshotFromBranch(activeSessionBranch(branchEntries));
+      // A snapshot read already has the validated file version and complete
+      // outline entries. Refresh the in-memory summary from those same entries
+      // so callers can consume summary + snapshot without a second JSONL read.
+      const summary = sessionSummaryFromEntries(path, projected.stats.mtimeMs, branchEntries);
+      const metadataCached = this.cache?.get(path);
+      if (this.cache && (!metadataCached || !sameSessionFileVersion(metadataCached, currentVersion))) {
+        this.cache.set(path, { ...currentVersion, summary });
+        await saveSessionCache(this.cachePath, this.cache);
+      }
+      if (summary) this.pathsById.set(summary.id, path);
       // The source file size is a conservative cache weight and is already
-      // available from stat(). Re-serializing every parsed message doubled the
-      // CPU work on the first open of a large cold conversation.
+      // available from the projection. Re-serializing every parsed message
+      // doubled the CPU work on the first open of a large cold conversation.
       const bytes = projected.observedBytes;
       const previous = this.snapshotCache.get(id);
       if (previous) this.snapshotCacheBytes -= previous.bytes;
@@ -749,6 +827,7 @@ export class SessionIndex {
       this.snapshotCache.set(id, {
         ...currentVersion,
         snapshot,
+        summary,
         bytes,
         projection,
       });
@@ -765,6 +844,16 @@ export class SessionIndex {
     this.snapshotReads.set(id, read);
     try { return await read; }
     finally { if (this.snapshotReads.get(id) === read) this.snapshotReads.delete(id); }
+  }
+
+  /** Read one target's validated snapshot and its summary from the same projection. */
+  async snapshotAndSummaryForId(id: string): Promise<{ snapshot: SessionFileSnapshot; summary: SessionSummary } | null> {
+    const snapshot = await this.snapshotForId(id);
+    if (!snapshot) return null;
+    // The summary is retained beside the snapshot only after both were derived
+    // from the same SessionProjection branch and file version.
+    const summary = this.snapshotCache.get(id)?.summary;
+    return summary ? { snapshot, summary: { ...summary, active: false } } : null;
   }
 
   /** Resolve one browser-visible persisted User message back to Pi's active-branch entry. */

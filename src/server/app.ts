@@ -109,6 +109,7 @@ import {
   idForPath,
   parseSessionContent,
   readSessionMessages,
+  readSessionSnapshot,
   readSessionSnapshotContent,
   SessionIndex,
   type SessionFileSnapshot,
@@ -5201,10 +5202,18 @@ export class PiChatApp {
         cachedSummaryForId?: (
           sessionId: string,
         ) => Promise<SessionSummary | null>;
+        snapshotAndSummaryForId?: (
+          sessionId: string,
+        ) => Promise<{ snapshot: SessionFileSnapshot; summary: SessionSummary } | null>;
       };
-      // Prefer the target-only revalidating lookup. A plain summaryForId()
-      // can be an unchanged in-memory projection and would bypass the v5
-      // same-size/same-mtime content gate.
+      // A target-only snapshot read already validates and parses the JSONL. Use
+      // its summary projection too, avoiding a second stat/fingerprint/outline
+      // pass during a cold navigation.
+      const target = await index.snapshotAndSummaryForId?.(id);
+      if (target)
+        return this.coldSessionViewFromSnapshot(id, target.summary, target.snapshot, turnLimit, clientId);
+      // Prefer the target-only revalidating lookup as a compatibility fallback
+      // for test doubles and older SessionIndex implementations.
       const knownSession =
         (await index.cachedSummaryForId?.(id)) ||
         this.options.sessions.summaryForId?.(id);
@@ -5666,9 +5675,10 @@ export class PiChatApp {
   private async statsForSession(
     id: string,
     response: Record<string, unknown>,
+    knownUsage?: SessionUsageSnapshot,
   ): Promise<SessionStats> {
     const live = asSessionStats(response);
-    const fallback = await this.offlineStatsForId(id);
+    const fallback = await this.offlineStatsForId(id, knownUsage);
     const contextUsage = live.contextUsage || fallback?.contextUsage;
     return {
       ...live,
@@ -5712,6 +5722,7 @@ export class PiChatApp {
     // read-only discovery. While Primary is starting/busy, retain any cached
     // catalogue on the browser and keep the UI explicitly pending.
     let modelInventoryPending = true;
+    let currentBootstrapStats: SessionStats | undefined;
     if (
       primaryAvailable &&
       !primaryStateAdopted &&
@@ -5748,9 +5759,10 @@ export class PiChatApp {
     // carries the same verified JSONL path; use it to avoid returning an empty
     // transcript for an already-existing Session.
     const activeSessionPath = this.activeSessionPath || state.sessionFile;
-    const diskMessages = activeSessionPath
-      ? await readSessionMessages(activeSessionPath).catch(() => null)
+    const diskSnapshot = activeSessionPath
+      ? await readSessionSnapshot(activeSessionPath).catch(() => null)
       : null;
+    const diskMessages = diskSnapshot?.messages ?? null;
     let messages: PiMessage[] | null = null;
     const primaryTerminalTail =
       this.primaryPendingTerminalSessionId === this.activeSessionId
@@ -5811,14 +5823,17 @@ export class PiChatApp {
       }
       if (commandsResponse)
         this.lastPrimaryCommands = asCommands(commandsResponse);
-      if (statsResponse)
+      if (statsResponse) {
+        currentBootstrapStats = await this.statsForSession(
+          this.activeSessionId,
+          statsResponse,
+          diskSnapshot?.usage,
+        );
         this.lastPrimaryStats = {
           sessionId: this.activeSessionId,
-          value: await this.statsForSession(
-            this.activeSessionId,
-            statsResponse,
-          ),
+          value: currentBootstrapStats,
         };
+      }
     }
     const availableModels = this.lastAvailableModels.length
       ? this.lastAvailableModels
@@ -5860,10 +5875,12 @@ export class PiChatApp {
       activeSessionIds: this.activeSessionIds(),
       liveMessage: this.liveMessage,
       toolStatus: this.toolStatus,
-      stats:
-        this.lastPrimaryStats?.sessionId === this.activeSessionId
-          ? this.lastPrimaryStats.value
-          : await this.offlineStatsForId(this.activeSessionId),
+      stats: currentBootstrapStats
+        ?? (diskSnapshot?.usage
+          ? this.offlineStatsFromUsage(this.activeSessionId, diskSnapshot.usage)
+          : this.lastPrimaryStats?.sessionId === this.activeSessionId
+            ? this.lastPrimaryStats.value
+            : await this.offlineStatsForId(this.activeSessionId)),
       models: availableModels,
       modelInventoryPending,
       commands: [...BUILTIN_COMMANDS, ...this.lastPrimaryCommands],
