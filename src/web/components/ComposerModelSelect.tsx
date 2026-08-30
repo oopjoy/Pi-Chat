@@ -21,9 +21,11 @@ export function groupComposerModels(models: ModelInfo[]): ComposerModelGroup[] {
   return [...groups].map(([provider, groupedModels]) => ({ provider, models: groupedModels }));
 }
 
-export function ComposerModelSelect({ value, models, disabled, onChange }: {
+export function ComposerModelSelect({ value, models, inventoryPending = false, disabled, onChange }: {
   value: ModelInfo | null;
   models: ModelInfo[];
+  /** The list may be a stale/local fallback until Runtime discovery completes. */
+  inventoryPending?: boolean;
   disabled?: boolean;
   onChange: (provider: string, id: string) => void;
 }) {
@@ -35,7 +37,12 @@ export function ComposerModelSelect({ value, models, disabled, onChange }: {
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const currentKey = value ? modelKey(value) : "";
-  const groups = useMemo(() => groupComposerModels(models), [models]);
+  const selectableModels = useMemo(() => {
+    if (!value || models.some((model) => modelKey(model) === currentKey))
+      return models;
+    return [value, ...models];
+  }, [currentKey, models, value]);
+  const groups = useMemo(() => groupComposerModels(selectableModels), [selectableModels]);
   const options = useMemo(() => groups.flatMap((group) => group.models), [groups]);
   const optionIndexes = useMemo(
     () => new Map(options.map((model, index) => [modelKey(model), index])),
@@ -55,7 +62,7 @@ export function ComposerModelSelect({ value, models, disabled, onChange }: {
     focusTrigger();
   };
   const openMenu = () => {
-    if (disabled || models.length === 0) return;
+    if (disabled) return;
     setActiveIndex(Math.max(0, options.findIndex((model) => modelKey(model) === currentKey)));
     setOpen(true);
   };
@@ -114,13 +121,18 @@ export function ComposerModelSelect({ value, models, disabled, onChange }: {
     }
   };
 
-  return <div className="compact-select composer-model-select" ref={rootRef} title="模型">
+  const inventoryTitle = inventoryPending
+    ? "模型列表正在加载；可以先编辑，发送时由 Pi 再次确认"
+    : "模型";
+
+  return <div className="compact-select composer-model-select" ref={rootRef} title={inventoryTitle}>
     <button
       ref={triggerRef}
       type="button"
       className="compact-select-trigger"
-      disabled={disabled || models.length === 0}
+      disabled={disabled}
       aria-label={`模型：${displayLabel}`}
+      aria-busy={inventoryPending || undefined}
       aria-haspopup="listbox"
       aria-expanded={open}
       aria-controls={open ? `${id}-listbox` : undefined}
@@ -137,6 +149,10 @@ export function ComposerModelSelect({ value, models, disabled, onChange }: {
       <i className="compact-select-chevron" aria-hidden="true" />
     </button>
     {open && <div className="compact-select-popover composer-model-popover is-left">
+      {inventoryPending && <div className="composer-model-status" role="status">
+        {options.length ? "模型列表正在加载；当前选择会在发送时由 Pi 复核" : "正在加载模型列表…"}
+      </div>}
+      {!options.length && !inventoryPending && <div className="composer-model-status" role="status">暂无可用模型</div>}
       <div
         ref={listRef}
         id={`${id}-listbox`}

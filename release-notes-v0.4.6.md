@@ -10,6 +10,7 @@
 - Fork/clone-created Sessions receive a durable `（Fork）` display suffix from Pi's `parentSession` metadata, so copied conversations remain distinguishable after refresh and restart.
 - Image attachments are no longer blocked by provisional or unsupported model metadata in the browser; local size/format limits remain, while the upstream model decides whether it can interpret the images.
 - Restart and cold-start recovery no longer renders the New welcome for a persisted Session with incomplete history; the centered logo and workspace selector remain exclusive to New.
+- The Composer Model control remains editable while Runtime discovery is pending. A bounded browser-local advisory catalogue keeps prior choices available when possible, while the server distinguishes pending from settled-empty discovery and revalidates the selected model at Send.
 
 ## Runtime, SSE, and recovery reliability
 

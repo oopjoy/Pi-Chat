@@ -5708,6 +5708,10 @@ export class PiChatApp {
           (this.options.rpc.currentGeneration?.() || this.primaryRpcGeneration),
     );
     let state = this.lastPrimaryState;
+    // An empty list is meaningful only after this generation has completed its
+    // read-only discovery. While Primary is starting/busy, retain any cached
+    // catalogue on the browser and keep the UI explicitly pending.
+    let modelInventoryPending = true;
     if (
       primaryAvailable &&
       !primaryStateAdopted &&
@@ -5803,6 +5807,7 @@ export class PiChatApp {
           : asModels(modelsResponse);
         this.rememberModelContextWindows(models);
         this.lastAvailableModels = models;
+        modelInventoryPending = false;
       }
       if (commandsResponse)
         this.lastPrimaryCommands = asCommands(commandsResponse);
@@ -5860,6 +5865,7 @@ export class PiChatApp {
           ? this.lastPrimaryStats.value
           : await this.offlineStatsForId(this.activeSessionId),
       models: availableModels,
+      modelInventoryPending,
       commands: [...BUILTIN_COMMANDS, ...this.lastPrimaryCommands],
       queue: this.publicQueue(),
       queuePaused: this.queuePaused,

@@ -148,7 +148,7 @@ interface ConversationPaneState {
 }
 ```
 
-`gateMode` remains derived from the coordinator-owned per-Session Gate map during this step. Model inventory also remains outside the pane reducer; only the selected `piState.model` belongs to the pane.
+`gateMode` remains derived from the coordinator-owned per-Session Gate map during this step. Model inventory also remains outside the pane reducer; only the selected `piState.model` belongs to the pane. The browser may retain a bounded model catalogue across a restart so the Composer stays editable while Runtime discovery is pending. `modelInventoryPending` distinguishes that advisory cache from a completed empty discovery; neither cached metadata nor `ModelInfo.input` authorizes a prompt, because the server revalidates the selected provider/model against the target Runtime at prompt admission.
 
 The following existing fields are replaced by this reducer rather than copied into another hook:
 

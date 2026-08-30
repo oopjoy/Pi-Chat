@@ -55,9 +55,11 @@ function UsageStats({ stats, isCompacting, fastModeActive = false }: { stats?: S
   );
 }
 
-export function ComposerControls({ state, models, stats, disabled, gateAvailable, gateMode, primaryUnavailable = false, onGate, onModel, onThinking }: {
+export function ComposerControls({ state, models, modelInventoryPending = false, stats, disabled, gateAvailable, gateMode, primaryUnavailable = false, onGate, onModel, onThinking }: {
   state: PiState;
   models: ModelInfo[];
+  /** Discovery may be incomplete while the selected Runtime is starting. */
+  modelInventoryPending?: boolean;
   stats?: SessionStats;
   disabled: boolean;
   gateAvailable: boolean;
@@ -74,7 +76,7 @@ export function ComposerControls({ state, models, stats, disabled, gateAvailable
   const unavailableTitle = "Pi Runtime 尚未就绪；历史仍可阅读，Runtime 恢复后可修改此设置";
 
   return <div className="composer-controls" title={primaryUnavailable ? unavailableTitle : undefined}>
-    <ComposerModelSelect value={state.model} models={models} disabled={controlsDisabled} onChange={onModel} />
+    <ComposerModelSelect value={state.model} models={models} inventoryPending={modelInventoryPending} disabled={controlsDisabled} onChange={onModel} />
     <CompactSelect value={(state.thinkingLevel || "off") as ThinkingLevel} options={THINKING_LEVELS} disabled={controlsDisabled || !state.model || state.model.reasoning === false} ariaLabel="思考强度" title="思考强度" align="left" icon={<LightbulbIcon className={`thinking-icon${state.thinkingLevel && state.thinkingLevel !== "off" ? " is-active" : ""}`} />} checkPosition="start" className="thinking-control thinking-select" onChange={onThinking} />
     {gateAvailable && <GateControl mode={gateMode} disabled={controlsDisabled} onChange={onGate} />}
     <UsageStats stats={stats} isCompacting={state.isCompacting} fastModeActive={state.fastModeActive} />

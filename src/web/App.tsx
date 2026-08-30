@@ -130,6 +130,7 @@ import {
   surfaceAutomaticRefreshError,
 } from "./lib/refresh-error-policy";
 import { BOTTOM_THRESHOLD, isAtBottom, SessionScrollMemory } from "./lib/session-scroll-memory";
+import { loadModelCatalog, mergeModelCatalog, saveModelCatalog } from "./lib/model-catalog";
 import { withStreamingAppendHints } from "./lib/streaming-append";
 import { SessionViewCache } from "./lib/session-view-cache";
 import {
@@ -585,7 +586,20 @@ export function App() {
   const [activeSessionIds, setActiveSessionIds] = useState<string[]>([]);
   const viewedSessionId =
     pane.identity.kind === "session" ? pane.identity.sessionId : "";
-  const [models, setModels] = useState<ModelInfo[]>([]);
+  // Keep the last bounded catalogue as an advisory startup fallback. Runtime
+  // readiness and prompt admission remain authoritative; this only prevents a
+  // transient empty discovery response from making the Model control look dead.
+  const [models, setModels] = useState<ModelInfo[]>(() => loadModelCatalog());
+  // A cached catalogue is useful immediately, but it is not authoritative for
+  // this process generation until Bootstrap/Runtime discovery confirms it.
+  const [modelInventoryConfirmed, setModelInventoryConfirmed] = useState(false);
+  useEffect(() => {
+    saveModelCatalog(models);
+  }, [models]);
+  const rememberObservedModel = useCallback((model: ModelInfo | null | undefined) => {
+    if (!model) return;
+    setModels((current) => mergeModelCatalog(current, [model]));
+  }, []);
   const [workspaceCwd, setWorkspaceCwd] = useState("");
   /** Server epoch + revision prevent stale bootstrap metadata from undoing workspace SSE. */
   const workspaceEpochRef = useRef("");
@@ -1321,6 +1335,7 @@ export function App() {
     primaryCapabilitySnapshotRef.current = null;
     setPrimaryRuntime(starting);
     setPrimaryCapabilitySnapshot(null);
+    setModelInventoryConfirmed(false);
   }, [syncMutatingSessionIds]);
   const recordSourceTurnTotal = (sessionId: string, total: number): void => {
     if (!Number.isFinite(total)) return;
@@ -2003,7 +2018,29 @@ export function App() {
       // its selected Session model is already known. Retain the last usable
       // choices through that transient snapshot. A selected model alone is not
       // an inventory, so do not discard a previously selectable catalogue.
-      if (data.models.length) setModels(data.models);
+      const modelInventoryPending =
+        typeof data.modelInventoryPending === "boolean"
+          ? data.modelInventoryPending
+          : data.primaryRuntime?.status !== "ready";
+      const discoveredModels = mergeModelCatalog([], data.models);
+      if (!modelInventoryPending) {
+        // A completed empty discovery is authoritative for this generation;
+        // stale cached alternatives must not remain presented as current.
+        setModels(
+          discoveredModels.length
+            ? discoveredModels
+            : data.state.model
+              ? mergeModelCatalog([], [data.state.model])
+              : [],
+        );
+      } else if (discoveredModels.length) {
+        // Startup-only custom models are useful immediately, but the Runtime
+        // may still publish more choices once it is ready.
+        setModels((current) => mergeModelCatalog(current, discoveredModels));
+      } else if (data.state.model) {
+        setModels((current) => mergeModelCatalog(current, [data.state.model!]));
+      }
+      setModelInventoryConfirmed(!modelInventoryPending);
       const workspaceEpoch =
         typeof data.workspaceEpoch === "string" ? data.workspaceEpoch : "";
       const workspaceRevision =
@@ -3337,6 +3374,7 @@ export function App() {
         primaryCapabilitySnapshotRef.current = null;
         setPrimaryRuntime(replacementReadiness);
         setPrimaryCapabilitySnapshot(null);
+        setModelInventoryConfirmed(false);
         workspaceEpochRef.current =
           typeof ready.workspaceEpoch === "string"
             ? ready.workspaceEpoch
@@ -3376,6 +3414,7 @@ export function App() {
           next.generation === incoming.generation &&
           incoming.status === "ready";
         if (acceptedReady && next.model) {
+          rememberObservedModel(next.model);
           const target = localDraftRef.current
             ? { kind: "draft" as const }
             : next.sessionId
@@ -3437,6 +3476,7 @@ export function App() {
       cancelPendingNavigation,
       clearStoppingForSession,
       recordSseRejectionDiagnostic,
+      rememberObservedModel,
       resetProcessOwnedUiState,
       startIdleRecovery,
     ],
@@ -4192,6 +4232,7 @@ export function App() {
             // visible Primary pane or local draft; cold/Secondary panes keep
             // their independent Session state.
             if (next.status === "ready" && next.model) {
+              rememberObservedModel(next.model);
               const target = localDraftRef.current
                 ? { kind: "draft" as const }
                 : next.sessionId
@@ -4959,6 +5000,7 @@ export function App() {
       refresh,
       reportBackgroundRefreshError,
       recordSseRejectionDiagnostic,
+      rememberObservedModel,
       scheduleLiveMessage,
       scheduleSidebarRefresh,
       setRuntimeWarming,
@@ -7865,6 +7907,21 @@ export function App() {
     () => composerStateForSelection(state, composerSelection),
     [state, composerSelection, composerSelectionRevision],
   );
+  // A selected Runtime model can arrive before the complete catalogue. Keep it
+  // as a temporary option so the control remains usable and can be reconciled
+  // when the next authoritative model inventory arrives.
+  const composerModels = useMemo(() => {
+    const selected = composerState.model;
+    if (
+      !selected ||
+      models.some(
+        (candidate) =>
+          candidate.provider === selected.provider && candidate.id === selected.id,
+      )
+    )
+      return models;
+    return [selected, ...models];
+  }, [composerState.model, models]);
   const currentSessionBusy = busySessionIds.includes(
     viewedSessionId || (localDraft ? LOCAL_DRAFT_BUSY_ID : ""),
   );
@@ -8439,7 +8496,8 @@ export function App() {
   const composerControls = (
     <ComposerControls
       state={composerState}
-      models={models}
+      models={composerModels}
+      modelInventoryPending={!modelInventoryConfirmed}
       stats={stats}
       disabled={mutationBlocked || viewingSubagentSession}
       gateAvailable={gateAvailable}

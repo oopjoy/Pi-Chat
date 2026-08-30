@@ -371,6 +371,8 @@ export interface BootstrapData {
   /** Total matching Sessions before the default recent-list limit. */
   sessionsTotal?: number;
   models: ModelInfo[];
+  /** True until the current Primary Runtime has completed an authoritative model discovery. */
+  modelInventoryPending?: boolean;
   commands: SlashCommand[];
   queue: QueuedPrompt[];
   queuePaused: boolean;

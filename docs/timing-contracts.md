@@ -75,7 +75,7 @@
 | pagination | selected Session 前 | `applySessionView` | `mergeNavigation` | request token + authority | isolated history、old request revisit |
 | prompt acknowledgement/rejection/reconcile | submit 前；draft 转 Session 后重捕获 | `commitPaneIfCurrent` / draft variant、`applySessionView` | local-turn/cache | same authority | stale acknowledgement/rejection、fast settlement |
 | warm Runtime | selected Session 前 | `commitPaneIfCurrent` | cached capability data | authority | stale warm A revisit |
-| model / thinking | `captureViewOperation` | `commitPaneIfCurrent` | staged prefs/cache | view operation | late model/thinking B isolation |
+| model / thinking | `captureViewOperation` | `commitPaneIfCurrent` | staged prefs/cache; bounded advisory model catalogue | view operation | late model/thinking B isolation; startup catalogue pending/empty |
 | extension response / Gate auto-allow feedback | submitted extension 的 Session 前 / pending request admission point | `commitPaneIfCurrent`；feedback 先验证 authority | authoritative reread | same authority | stale extension failure、A/B feedback isolation |
 | takeover | selected Session 前 | `commitPaneIfCurrent` | Session summary | pane authority + event version | stale takeover / newer SSE |
 | abort / queue cancel / resume | selected Session 前 | `commitPaneIfCurrent` / `applySessionView` | cache queue/turn overlay | view operation | late stop/queue B isolation |

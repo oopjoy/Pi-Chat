@@ -15,7 +15,7 @@ beforeEach(() => {
 });
 
 
-test("a transient empty model inventory never leaks the Composer's internal model key", async () => {
+test("a transient empty model inventory keeps the selected Model editable", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../../src/web/api");
@@ -33,6 +33,8 @@ test("a transient empty model inventory never leaks the Composer's internal mode
       ...bootstrap,
       state: { ...bootstrap.state, model: selected },
       models: [],
+      primaryRuntime: { status: "starting" as const, generation: 1 },
+      modelInventoryPending: true,
     }),
     eventsUrl: () => "/api/events",
     markSessionViewed: async () => ({ viewing: activeId }),
@@ -44,12 +46,162 @@ test("a transient empty model inventory never leaks the Composer's internal mode
       ".composer-model-select .compact-select-trigger",
     )!;
     assert.equal(trigger.textContent?.trim(), "gpt-5.6-sol");
-    assert.equal(trigger.parentElement?.title, "模型");
+    assert.equal(
+      trigger.parentElement?.title,
+      "模型列表正在加载；可以先编辑，发送时由 Pi 再次确认",
+    );
     assert.doesNotMatch(trigger.textContent || "", /xwill|\u0000/);
     assert.equal(
       trigger.disabled,
-      true,
-      "selection stays disabled until its inventory has arrived",
+      false,
+      "a transient empty inventory must not make Model look unavailable",
+    );
+    await act(async () => trigger.click());
+    assert.ok(
+      dom.window.document.querySelector(
+        ".composer-model-select [role='option']",
+      ),
+      "the selected Runtime model remains an explicit fallback option",
+    );
+    assert.match(
+      dom.window.document.querySelector(".composer-model-status")?.textContent || "",
+      /发送时由 Pi 复核/,
+    );
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
+test("a ready empty model inventory ends pending state without resurrecting stale choices", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const { MODEL_CATALOG_STORAGE_KEY } = await import("../../src/web/lib/model-catalog");
+  const restoreApi = captureApiSnapshot(api);
+  const stale = {
+    provider: "old-provider",
+    id: "old-model",
+    name: "Old model",
+    input: ["text"],
+    reasoning: true,
+  };
+  dom.window.localStorage.setItem(MODEL_CATALOG_STORAGE_KEY, JSON.stringify([stale]));
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, model: null },
+      models: [],
+      primaryRuntime: { status: "ready" as const, generation: 3 },
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const trigger = dom.window.document.querySelector<HTMLButtonElement>(
+      ".composer-model-select .compact-select-trigger",
+    )!;
+    assert.equal(trigger.disabled, false, "an empty catalogue is not a startup failure");
+    assert.equal(trigger.getAttribute("aria-busy"), null, "ready empty discovery is settled");
+    await act(async () => trigger.click());
+    assert.equal(
+      dom.window.document.querySelector(".composer-model-status")?.textContent,
+      "暂无可用模型",
+    );
+    assert.equal(
+      [...dom.window.document.querySelectorAll<HTMLElement>(
+        ".composer-model-select [role='option']",
+      )].some((option) => option.textContent?.includes("Old model")),
+      false,
+      "an authoritative empty catalogue does not present stale cached models",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
+test("a browser-cached model catalogue stays selectable across a restart bootstrap", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const { MODEL_CATALOG_STORAGE_KEY } = await import("../../src/web/lib/model-catalog");
+  const restoreApi = captureApiSnapshot(api);
+  const selected = {
+    provider: "xwill",
+    id: "gpt-5.6-sol",
+    name: "gpt-5.6-sol",
+    input: ["text"],
+    reasoning: true,
+  };
+  const alternative = {
+    provider: "xwill",
+    id: "gpt-5.6-terra",
+    name: "gpt-5.6-terra",
+    input: ["text"],
+    reasoning: true,
+  };
+  dom.window.localStorage.setItem(
+    MODEL_CATALOG_STORAGE_KEY,
+    JSON.stringify([selected, alternative]),
+  );
+  const promptCalls: unknown[][] = [];
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, model: selected },
+      models: [],
+      primaryRuntime: { status: "ready" as const, generation: 2 },
+      modelInventoryPending: true,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    prompt: async (...args: unknown[]) => {
+      promptCalls.push(args);
+      return { accepted: true, queued: false };
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const trigger = dom.window.document.querySelector<HTMLButtonElement>(
+      ".composer-model-select .compact-select-trigger",
+    )!;
+    assert.equal(trigger.disabled, false);
+    await act(async () => trigger.click());
+    const alternativeOption = [...dom.window.document.querySelectorAll<HTMLElement>(
+      ".composer-model-select [role='option']",
+    )].find((option) => option.textContent?.includes("gpt-5.6-terra"));
+    assert.ok(alternativeOption, "a previous catalogue supplies a real switch option");
+    await act(async () => alternativeOption!.click());
+    assert.match(trigger.textContent || "", /gpt-5.6-terra/);
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "send cached choice");
+      textarea.dispatchEvent(
+        new dom.window.InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: "send cached choice",
+        }),
+      );
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.deepEqual(
+      promptCalls[0]?.[5],
+      { model: { provider: "xwill", modelId: "gpt-5.6-terra" } },
+      "the cached choice is rechecked by the server at prompt admission",
     );
   } finally {
     await act(async () => root.unmount());
@@ -524,6 +676,18 @@ test("same-generation initial ready adopts its model without waiting for Bootstr
       ".composer-model-select .compact-select-trigger",
     )!;
     assert.match(modelTrigger.textContent || "", /Adopted ready/);
+    assert.equal(
+      modelTrigger.disabled,
+      false,
+      "an adopted ready model must also populate the selectable catalogue",
+    );
+    await act(async () => modelTrigger.click());
+    assert.ok(
+      [...dom.window.document.querySelectorAll<HTMLElement>(
+        ".composer-model-select [role='option']",
+      )].some((option) => option.textContent?.includes("Adopted ready")),
+      "the adopted model remains selectable before the next Bootstrap refresh",
+    );
   } finally {
     await act(async () => root.unmount());
     restoreApi();

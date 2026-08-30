@@ -55,6 +55,48 @@ test("warm starts a dedicated Runtime without full-view probes and same-mode Gat
   }
 });
 
+test("bootstrap marks a completed empty model discovery as settled", async () => {
+  class EmptyModelRpc extends FakeRpc {
+    override async send(...args: Parameters<FakeRpc["send"]>) {
+      const [command, timeoutMs, options] = args;
+      if (command.type === "get_available_models") {
+        this.commands.push(command);
+        this.requestTimeouts.push({
+          type: command.type,
+          timeoutMs,
+          independentRead: options?.independentRead === true,
+        });
+        return { type: "response", success: true, data: { models: [] } };
+      }
+      return super.send(...args);
+    }
+  }
+  const path = "C:\\sessions\\empty-model-catalogue.jsonl";
+  const sessionId = idForPath(path);
+  const rpc = new EmptyModelRpc(path, "empty-model-catalogue");
+  const sessions = {
+    list: async () => [{ id: sessionId, sessionId: "empty-model-catalogue", name: "Empty catalogue", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 0, active: true }],
+    pathForId: (id: string) => id === sessionId ? path : null,
+    summaryForId: (id: string) => id === sessionId ? { id: sessionId, sessionId: "empty-model-catalogue", name: "Empty catalogue", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 0, active: true } : null,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: rpc as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/bootstrap`);
+    assert.equal(response.status, 200);
+    const data = await response.json() as { models: unknown[]; modelInventoryPending?: boolean };
+    assert.deepEqual(data.models, []);
+    assert.equal(data.modelInventoryPending, false);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
 test("an idle known Runtime view never waits for a global Session inventory", async () => {
   const primaryPath = "C:\\sessions\\idle-view-primary.jsonl";
   const secondaryPath = "C:\\sessions\\idle-view-secondary.jsonl";

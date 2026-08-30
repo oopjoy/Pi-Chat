@@ -385,6 +385,7 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .compact-select-option.is-active { background: var(--surface-hover); }
 .compact-select-option.is-selected { background: var(--accent-soft); color: var(--accent); font-weight: 650; }
 .compact-select-option svg { width: 15px; height: 15px; flex: 0 0 auto; stroke-width: 2; }
+.composer-model-status { padding: 7px 8px; color: var(--muted); font-size: 11px; line-height: 1.45; white-space: normal; }
 /* Keep the model slot stable as models change; only its label ellipsizes. */
 .model-menu { position: relative; width: 168px; min-width: 0; flex: 0 0 168px; }
 .model-menu-trigger { display: flex; width: 100%; max-width: none; height: 26px; min-width: 0; align-items: center; gap: 6px; padding: 2px 4px 2px 1px; border: 0; border-radius: 6px; outline: 0; background: transparent; color: var(--text); cursor: pointer; font: inherit; font-size: 12px; }
