@@ -60,6 +60,18 @@ test("a cold JSONL view does not erase commands cached from its warm Runtime", (
   );
 });
 
+test("transient patches reuse the cached message array without terminal leases", () => {
+  const cache = new SessionViewCache();
+  const initial = cache.remember({
+    ...view("streaming"),
+    messages: [{ role: "user", content: "question", timestamp: 1 }],
+    messageTotal: 1,
+    turnTotal: 1,
+  });
+  const patched = cache.patch("streaming", { isStreaming: true, state: { isStreaming: true } });
+  assert.strictEqual(patched?.messages, initial.messages);
+});
+
 test("authoritative Gate updates survive cached session navigation", () => {
   const cache = new SessionViewCache();
   cache.remember({ ...view("gate"), gateMode: "open" });

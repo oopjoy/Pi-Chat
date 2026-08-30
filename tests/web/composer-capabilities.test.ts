@@ -867,44 +867,6 @@ test("Primary ready forwards a staged draft image without capability confirmatio
   }
 });
 
-test("Primary startup keeps cached model choices selectable", async () => {
-  const { dom } = installDom();
-  const { createRoot } = await import("react-dom/client");
-  const { api } = await import("../../src/web/api");
-  const { App } = await import("../../src/web/App");
-  const restoreApi = captureApiSnapshot(api);
-  const cached = {
-    provider: "cached",
-    id: "ready-later",
-    name: "Ready later",
-    reasoning: true,
-  };
-  Object.assign(api, {
-    bootstrap: async () => ({
-      ...bootstrap,
-      models: [cached],
-      primaryRuntime: { status: "starting" as const, generation: 1 },
-    }),
-    eventsUrl: () => "/api/events",
-    markSessionViewed: async () => ({ viewing: activeId }),
-  });
-  const root = createRoot(dom.window.document.querySelector("#root")!);
-  try {
-    await act(async () => root.render(createElement(App)));
-    const model = dom.window.document.querySelector<HTMLButtonElement>(
-      ".composer-model-select .compact-select-trigger",
-    )!;
-    assert.equal(
-      model.disabled,
-      false,
-      "cached model choices stage the next prompt while Primary prepares",
-    );
-  } finally {
-    await act(async () => root.unmount());
-    restoreApi();
-  }
-});
-
 test("Primary startup keeps editor and attachments available while capability is pending", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");

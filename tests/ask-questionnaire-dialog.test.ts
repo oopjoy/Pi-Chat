@@ -1,29 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { act, createElement } from "react";
-import { JSDOM } from "jsdom";
+import { installDialogDom as installDom } from "./helpers/dialog-dom";
 import { AskQuestionnaireDialog } from "../src/web/components/AskQuestionnaireDialog";
 import { parseAskQuestionnaire } from "../src/web/lib/ask-questionnaire";
 import type { ExtensionUiRequest } from "../src/shared/types";
-
-function installDom() {
-  const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", { url: "http://localhost" });
-  Object.assign(globalThis, {
-    window: dom.window,
-    document: dom.window.document,
-    Node: dom.window.Node,
-    HTMLElement: dom.window.HTMLElement,
-    KeyboardEvent: dom.window.KeyboardEvent,
-    Event: dom.window.Event,
-    InputEvent: dom.window.InputEvent,
-    IS_REACT_ACT_ENVIRONMENT: true,
-  });
-  Object.assign(dom.window.HTMLElement.prototype, {
-    attachEvent() {},
-    detachEvent() {},
-  });
-  return dom;
-}
 
 const plan = parseAskQuestionnaire("ask-tool", {
   questions: [

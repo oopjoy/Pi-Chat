@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { sanitizeAssistantText, visibleAssistantBlocksWithSourceIndex } from "../src/web/lib/assistant-text";
+import { sanitizeAssistantText, visibleAssistantBlocksWithSourceIndex, visibleAssistantMessage } from "../src/web/lib/assistant-text";
 
 test("visible assistant blocks retain their original stream content indexes", () => {
   assert.deepEqual(
@@ -13,6 +13,23 @@ test("visible assistant blocks retain their original stream content indexes", ()
     }),
     [{ block: { type: "text", text: "visible" }, sourceIndex: 1 }],
   );
+});
+
+test("reuses an unchanged assistant message during visibility projection", () => {
+  const message = { role: "assistant" as const, content: "ordinary answer" };
+  assert.strictEqual(visibleAssistantMessage(message), message);
+  const arrayMessage = {
+    role: "assistant" as const,
+    content: [{ type: "text" as const, text: "ordinary answer" }],
+  };
+  assert.strictEqual(visibleAssistantMessage(arrayMessage), arrayMessage);
+});
+
+test("creates a new assistant message only when visibility sanitization changes content", () => {
+  const message = { role: "assistant" as const, content: "before code**/analysis code**/analysis code**/analysis after" };
+  const visible = visibleAssistantMessage(message);
+  assert.notStrictEqual(visible, message);
+  assert.equal(visible?.content, "before after");
 });
 
 test("collapses an accidentally repeated complete long assistant response", () => {

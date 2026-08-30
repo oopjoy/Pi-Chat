@@ -133,6 +133,7 @@ import { BOTTOM_THRESHOLD, isAtBottom, SessionScrollMemory } from "./lib/session
 import { loadModelCatalog, mergeModelCatalog, saveModelCatalog } from "./lib/model-catalog";
 import { withStreamingAppendHints } from "./lib/streaming-append";
 import { SessionViewCache } from "./lib/session-view-cache";
+import { workspaceFileActivityParts, workspaceFileActivityRevisionFromParts } from "./lib/workspace-activity";
 import {
   composerStateForSelection,
   promptSettingsForSelection,
@@ -444,21 +445,6 @@ function forkMessagePreview(text: string, imageCount = 0, limit = 600): string {
   return imageCount ? `${truncated}\n\n[含 ${imageCount} 张图片]` : truncated;
 }
 
-function workspaceFileActivityRevision(messages: PiMessage[]): string {
-  const parts: string[] = [];
-  for (const message of messages) {
-    if (message.role === "toolResult" && message.toolCallId)
-      parts.push(`result:${message.toolCallId}:${message.isError === true ? "error" : "ok"}`);
-    if (!Array.isArray(message.content)) continue;
-    for (const block of message.content) {
-      const name = block.name?.toLowerCase();
-      if (block.type === "toolCall" && block.id && (name === "edit" || name === "write"))
-        parts.push(`call:${block.id}`);
-    }
-  }
-  return parts.slice(-100).join("|");
-}
-
 /** A capability snapshot is usable only for this exact selected-model shape. */
 function modelCapabilityKey(model: ModelInfo | null | undefined): string {
   if (!model) return "";
@@ -550,9 +536,20 @@ export function App() {
   const [, setLoadingEarlierRevision] = useState(0);
   const { stats } = pane;
   const { liveMessage } = pane;
+  const persistedWorkspaceActivityParts = useMemo(
+    () => workspaceFileActivityParts(messages),
+    [messages],
+  );
+  const liveWorkspaceActivityParts = useMemo(
+    () => liveMessage ? workspaceFileActivityParts([liveMessage]) : [],
+    [liveMessage],
+  );
   const workspaceActivityRevision = useMemo(
-    () => workspaceFileActivityRevision(liveMessage ? [...messages, liveMessage] : messages),
-    [liveMessage, messages],
+    () => workspaceFileActivityRevisionFromParts(
+      persistedWorkspaceActivityParts,
+      liveWorkspaceActivityParts,
+    ),
+    [persistedWorkspaceActivityParts, liveWorkspaceActivityParts],
   );
   const streamDiagnosticsRef = useRef<BrowserStreamDiagnosticsAggregator | null>(null);
   streamDiagnosticsRef.current ||= new BrowserStreamDiagnosticsAggregator();

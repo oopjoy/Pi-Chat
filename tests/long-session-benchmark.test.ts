@@ -50,22 +50,15 @@ test("long-session generator honors requested approximate size without a committ
   }
 });
 
-test("minimumBytes is a lower bound when intrinsic fixture content is larger", async () => {
+test("minimumBytes handles intrinsic content and bounded padding from one fixture", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-benchmark-minimum-"));
   try {
-    const fixture = await generateFixture({ scenario: "tool-process-heavy", outputPath: join(root, "intrinsic.jsonl"), minimumBytes: 1 });
-    assert.equal(fixture.minimumBytes, 1);
-    assert.ok(fixture.bytes > fixture.minimumBytes);
-    assert.equal(fixture.records, 486);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
+    const intrinsicPath = join(root, "intrinsic.jsonl");
+    const intrinsic = await generateFixture({ scenario: "tool-process-heavy", outputPath: intrinsicPath, minimumBytes: 1 });
+    assert.equal(intrinsic.minimumBytes, 1);
+    assert.ok(intrinsic.bytes > intrinsic.minimumBytes);
+    assert.equal(intrinsic.records, 486);
 
-test("minimumBytes just above intrinsic size appends bounded valid padding", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pi-chat-benchmark-padding-edge-"));
-  try {
-    const intrinsic = await generateFixture({ scenario: "tool-process-heavy", outputPath: join(root, "intrinsic.jsonl"), minimumBytes: 1 });
     const minimumBytes = intrinsic.bytes + 1;
     const paddedPath = join(root, "padded.jsonl");
     const padded = await generateFixture({ scenario: "tool-process-heavy", outputPath: paddedPath, minimumBytes });

@@ -112,7 +112,7 @@ export function visibleAssistantBlocksWithSourceIndex(message: PiMessage): Visib
     const block = content[sourceIndex];
     if (block.type === "text" && typeof block.text === "string") {
       const text = sanitizeAssistantText(block.text);
-      if (text.trim()) visible.push({ block: { ...block, text }, sourceIndex });
+      if (text.trim()) visible.push({ block: text === block.text ? block : { ...block, text }, sourceIndex });
     } else if (block.type === "image" && block.data && block.mimeType) {
       visible.push({ block, sourceIndex });
     }
@@ -127,8 +127,18 @@ export function visibleAssistantBlocks(message: PiMessage): PiContentBlock[] {
 
 export function visibleAssistantMessage(message: PiMessage): PiMessage | undefined {
   if (message.role !== "assistant") return message;
-  const visible = visibleAssistantBlocks(message);
-  if (!visible.length) return undefined;
+  const visibleWithSourceIndex = visibleAssistantBlocksWithSourceIndex(message);
+  if (!visibleWithSourceIndex.length) return undefined;
+  if (typeof message.content === "string") {
+    const visibleText = visibleWithSourceIndex[0]?.block;
+    if (visibleWithSourceIndex.length === 1 && visibleText?.type === "text" && visibleText.text === message.content)
+      return message;
+  } else if (Array.isArray(message.content)
+    && visibleWithSourceIndex.length === message.content.length
+    && visibleWithSourceIndex.every(({ block, sourceIndex }) => block === message.content?.[sourceIndex])) {
+    return message;
+  }
+  const visible = visibleWithSourceIndex.map(({ block }) => block);
   const content = typeof message.content === "string" && visible.length === 1 && visible[0].type === "text"
     ? visible[0].text || ""
     : visible;

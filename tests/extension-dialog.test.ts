@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
-import { JSDOM } from "jsdom";
+import { installDialogDom as installDom } from "./helpers/dialog-dom";
 import { describeGateRequest, ExtensionDialog, type ExtensionUiRequest } from "../src/web/components/ExtensionDialog";
 
 test("Gate dialog foregrounds the requested file or command and keeps its response values", () => {
@@ -36,25 +36,6 @@ test("Gate dialog preserves the dangerous suffix of long commands", () => {
   assert.equal(details?.target, command);
   assert.match(details?.target || "", /rm -rf important-data$/);
 });
-
-function installDom() {
-  const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", { url: "http://localhost" });
-  Object.assign(globalThis, {
-    window: dom.window,
-    document: dom.window.document,
-    Node: dom.window.Node,
-    HTMLElement: dom.window.HTMLElement,
-    KeyboardEvent: dom.window.KeyboardEvent,
-    IS_REACT_ACT_ENVIRONMENT: true,
-  });
-  // React's legacy input-event fallback probes these IE hooks when JSDOM
-  // auto-focuses an input that replaces a button inside the same dialog frame.
-  Object.assign(dom.window.HTMLElement.prototype, {
-    attachEvent() {},
-    detachEvent() {},
-  });
-  return dom;
-}
 
 test("Gate dialog exposes only Block and Allow, with Escape safely choosing Block", async () => {
   const dom = installDom();

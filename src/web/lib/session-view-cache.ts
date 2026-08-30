@@ -228,7 +228,13 @@ export class SessionViewCache {
     const previous = this.views.get(id);
     if (!previous) return undefined;
     const persisted = this.persistedMessages.get(id) || [];
-    const reconciled = reconcilePersistedHistory(persisted, this.terminalTails.get(id) || []);
+    const terminalTail = this.terminalTails.get(id) || [];
+    // Ordinary transient SSE updates cannot change the authoritative message
+    // list. Reusing the cached array avoids rescanning the full transcript on
+    // every streaming delta. Terminal leases still require reconciliation.
+    const messages = terminalTail.length
+      ? reconcilePersistedHistory(persisted, terminalTail).messages
+      : previous.messages;
     const control = hasControlOwner || hasControlledByThisWindow
       ? {
           controlOwner: hasControlOwner ? controlOwner : previous.controlOwner ?? previous.session.controlOwner,
@@ -241,7 +247,7 @@ export class SessionViewCache {
       ...control,
       ...(sessionActivity ? { session: { ...previous.session, activity: sessionActivity } } : null),
       ...(control ? { session: { ...(sessionActivity ? { ...previous.session, activity: sessionActivity } : previous.session), ...control } } : null),
-      messages: reconciled.messages,
+      messages,
       messageTotal: previous.messageTotal,
       turnTotal: previous.turnTotal,
       visibleTurnCount: previous.visibleTurnCount,
