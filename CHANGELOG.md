@@ -15,6 +15,7 @@
 - The Composer Model control remains editable while Runtime model discovery is pending, using a bounded browser-local advisory catalogue when available; the server reports pending versus settled-empty discovery, and every selected model is revalidated against the target Runtime at Send.
 - Accepted ordinary prompts remain recoverable across an immediate F5 while JSONL catches up, including their captured Model and Thinking settings; this server-owned projection never enters Pi JSONL or provider payloads.
 - Queue and native Steer projections are revision-fenced so stale Session views, cache entries, and reconnects cannot resurrect completed queue rows or erase newer pending Steers. Pending native Steers survive refresh separately and enter the transcript only after verified Pi consumption.
+- EventSource now keeps one transport connection while React callbacks update, preventing adjacent stream frames from being lost during render commits and reducing unnecessary reconnect/listener churn.
 
 ### Settings and supportability
 

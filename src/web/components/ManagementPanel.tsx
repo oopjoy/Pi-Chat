@@ -54,7 +54,10 @@ export function ManagementPanel({ section, appearance, workspaceCwd, workspacePi
   onExportDiagnostics: () => Promise<void>;
   onShutdown: () => void;
 }) {
-  const [settingsTab, setSettingsTab] = useState<SettingsTab>("appearance");
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>(() =>
+    section === "models" ? "models" : "appearance",
+  );
+  const previousSectionRef = useRef(section);
   const [skills, setSkills] = useState<SkillResource[]>([]);
   const [extensions, setExtensions] = useState<ExtensionResource[]>([]);
   const [packages, setPackages] = useState<PackageResource[]>([]);
@@ -66,6 +69,11 @@ export function ManagementPanel({ section, appearance, workspaceCwd, workspacePi
   useModalFocus(Boolean(section), dialogRef);
 
   useEffect(() => {
+    // Initial state already reflects the requested section. Skipping the mount
+    // reset prevents a very fast tab click from being overwritten when the
+    // lazy Settings chunk finishes its first passive-effect flush.
+    if (previousSectionRef.current === section) return;
+    previousSectionRef.current = section;
     setSettingsTab(section === "models" ? "models" : "appearance");
     setResourceError("");
   }, [section]);
