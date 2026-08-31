@@ -425,18 +425,12 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     }
     if (clipboardFiles.length || event.clipboardData.types.includes("Files")) {
       event.preventDefault();
-      const targetDraftKeyId = currentDraftKeyIdRef.current;
-      // Browsers may expose Explorer's file-drop payload without its path in
-      // ClipboardEvent. Only this uncommon fallback crosses the async Windows
-      // clipboard bridge; known text/URI paths above remain synchronous.
-      void onReadClipboardFiles().then((fallbackPaths) => {
-        if (currentDraftKeyIdRef.current !== targetDraftKeyId) return;
-        if (fallbackPaths.length) appendFileReferences(fallbackPaths, targetDraftKeyId);
-        else onError("无法取得文件的本地路径，请使用发送按钮旁的附件按钮选择本地文件");
-      }).catch((error) => {
-        if (currentDraftKeyIdRef.current === targetDraftKeyId)
-          onError(error instanceof Error ? error.message : String(error));
-      });
+      // Do not read the process clipboard asynchronously here: by the time the
+      // Windows bridge responds it may describe a newer clipboard operation.
+      // Explorer's URI/text payload and browser-exposed File.path are handled
+      // synchronously above; otherwise the explicit attachment picker is the
+      // safe path-bound operation.
+      onError("无法取得文件的本地路径，请使用发送按钮旁的附件按钮选择本地文件");
     }
   };
 

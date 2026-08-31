@@ -130,32 +130,35 @@ test("Explorer path paste updates the Composer synchronously without the clipboa
   }
 });
 
-test("a delayed clipboard path result cannot enter a newer Composer partition", async () => {
+test("a file-only clipboard paste does not read a mutable process clipboard", async () => {
   const { dom } = installAppDom();
-  let resolvePaths: ((paths: string[]) => void) | undefined;
-  const pendingPaths = new Promise<string[]>((resolve) => { resolvePaths = resolve; });
+  let fallbackReads = 0;
+  const errors: string[] = [];
   const root = createRoot(dom.window.document.querySelector("#root")!);
   const props = {
-    ...chatInputProps(() => {}),
+    ...chatInputProps((message) => errors.push(message)),
     draftKey: { kind: "session" as const, sessionId: "session-a" },
     submissionScope: "session:session-a",
-    onReadClipboardFiles: async () => pendingPaths,
+    onReadClipboardFiles: async () => {
+      fallbackReads += 1;
+      return ["C:\\Users\\me\\delayed.txt"];
+    },
   };
   try {
     await act(async () => root.render(createElement(ChatInput, props)));
     const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
     const event = new dom.window.Event("paste", { bubbles: true, cancelable: true });
     Object.defineProperty(event, "clipboardData", {
-      value: { items: [], types: ["Files"], getData: () => "" },
+      value: {
+        items: [{ kind: "file", getAsFile: () => new dom.window.File([""], "delayed.txt") }],
+        types: ["Files"],
+        getData: () => "",
+      },
     });
     await act(async () => textarea.dispatchEvent(event));
-    await act(async () => root.render(createElement(ChatInput, {
-      ...props,
-      draftKey: { kind: "session" as const, sessionId: "session-b" },
-      submissionScope: "session:session-b",
-    })));
-    await act(async () => resolvePaths?.(["C:\\Users\\me\\delayed.txt"]));
-    assert.equal(dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")?.value, "");
+    assert.equal(fallbackReads, 0);
+    assert.equal(errors.length, 1);
+    assert.match(errors[0], /无法取得文件的本地路径/);
   } finally {
     await act(async () => root.unmount());
   }
