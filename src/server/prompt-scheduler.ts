@@ -79,8 +79,20 @@ export interface PromptPublicationPort {
   /** Publish the server-derived activity snapshot after a queue-state mutation. */
   publishSessionActivity?(sessionId: string): void;
   /** `promptAt` is the original user-admission time, including queued prompts. */
-  onPrimaryPromptAccepted(sessionId: string, promptAt: number): void;
-  onSecondaryPromptAccepted(runtime: SecondaryRuntime, promptAt: number): void;
+  onPrimaryPromptAccepted(
+    sessionId: string,
+    promptAt: number,
+    message: string,
+    images: PromptImage[],
+    settings?: PromptSettingsSnapshot,
+  ): void;
+  onSecondaryPromptAccepted(
+    runtime: SecondaryRuntime,
+    promptAt: number,
+    message: string,
+    images: PromptImage[],
+    settings?: PromptSettingsSnapshot,
+  ): void;
 }
 
 /**
@@ -299,7 +311,13 @@ export class PromptScheduler {
           PROMPT_PREPARE_TIMEOUT_MS,
           observe ? { observe } : undefined,
         );
-        this.publication.onPrimaryPromptAccepted(this.runtime.activeSessionId(), promptAt);
+        this.publication.onPrimaryPromptAccepted(
+          this.runtime.activeSessionId(),
+          promptAt,
+          message,
+          images,
+          settings,
+        );
         return "confirmed";
       } catch (error) {
         // Pi's RPC protocol has no cancellation. Once stdin accepted the JSONL
@@ -309,7 +327,13 @@ export class PromptScheduler {
         if (error instanceof RpcRequestTimeoutError && error.outcomeUnknown) {
           // Conservatively retain recency/history overlays too. Pi may emit
           // agent_start after this response timer has elapsed.
-          this.publication.onPrimaryPromptAccepted(this.runtime.activeSessionId(), promptAt);
+          this.publication.onPrimaryPromptAccepted(
+            this.runtime.activeSessionId(),
+            promptAt,
+            message,
+            images,
+            settings,
+          );
           this.publication.publishSessionActivity?.(this.runtime.activeSessionId());
           return "unknown";
         }
@@ -322,8 +346,14 @@ export class PromptScheduler {
   }
 
   /** Immediate (non-queued) secondary prompt after host already applied settings. */
-  notifySecondaryPromptAccepted(runtime: SecondaryRuntime, promptAt = Date.now()): void {
-    this.publication.onSecondaryPromptAccepted(runtime, promptAt);
+  notifySecondaryPromptAccepted(
+    runtime: SecondaryRuntime,
+    promptAt = Date.now(),
+    message = "",
+    images: PromptImage[] = [],
+    settings?: PromptSettingsSnapshot,
+  ): void {
+    this.publication.onSecondaryPromptAccepted(runtime, promptAt, message, images, settings);
   }
 
   async dispatchPrimaryNext(): Promise<void> {
@@ -348,6 +378,7 @@ export class PromptScheduler {
       id: next.id,
       message: next.message,
       imageCount: next.imageCount,
+      ...(next.settings ? { settings: next.settings } : null),
       piChatSessionId: this.runtime.activeSessionId(),
     });
     try {
@@ -449,6 +480,7 @@ export class PromptScheduler {
       id: next.id,
       message: next.message,
       imageCount: next.imageCount,
+      ...(next.settings ? { settings: next.settings } : null),
       piChatSessionId: runtime.id,
     });
     try {
@@ -484,7 +516,13 @@ export class PromptScheduler {
         PROMPT_PREPARE_TIMEOUT_MS,
         observe ? { observe } : undefined,
       );
-      this.publication.onSecondaryPromptAccepted(runtime, next.createdAt);
+      this.publication.onSecondaryPromptAccepted(
+        runtime,
+        next.createdAt,
+        next.message,
+        next.images,
+        next.settings,
+      );
     } catch (error) {
       // A write timeout can occur after the prompt JSONL command reached Pi
       // stdin. Requeueing here could duplicate a turn Pi accepts later. Keep
@@ -493,7 +531,13 @@ export class PromptScheduler {
       if (error instanceof RpcRequestTimeoutError && error.outcomeUnknown) {
         runtime.dispatching = false;
         this.tracePrompt(runtime.id, next.id, "delivery-uncertain");
-        this.publication.onSecondaryPromptAccepted(runtime, next.createdAt);
+        this.publication.onSecondaryPromptAccepted(
+          runtime,
+          next.createdAt,
+          next.message,
+          next.images,
+          next.settings,
+        );
         this.publication.broadcast({
           type: "pi_chat_prompt_delivery_uncertain",
           id: next.id,

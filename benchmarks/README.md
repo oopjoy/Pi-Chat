@@ -2,6 +2,21 @@
 
 This directory is benchmark/test infrastructure only. It measures the current server-side Session reader/windowing helpers and the existing browser UI without changing production behavior.
 
+## React render evidence build
+
+The Web UI has a maintenance-only React Profiler seam around keyed conversation items. It is disabled in ordinary builds and cannot be enabled against the repository live `dist`:
+
+PowerShell example:
+
+```powershell
+$env:PI_CHAT_DIST_DIR = "C:\path\to\staging-dist"
+$env:PI_CHAT_BENCHMARK_REACT_PROFILER = "1"
+npm run build:identity
+npm run build:web
+```
+
+The same variables can be exported in a POSIX shell. Build the staging Web artifact with those variables, then inspect `window.__piChatReactRenderBenchmark.commits` in Chromium or use it from a benchmark runner. Each record contains the item identity, React phase, `actualDuration`, `baseDuration`, and commit timestamps. This is evidence collection only; it does not add a production threshold or change Session, SSE, Pane, or scroll behavior.
+
 ## Safety
 
 - Fixtures are generated on demand; no large JSONL files or result artifacts are committed.
@@ -55,7 +70,7 @@ The browser lane measures:
 - `hot-switch`: return to the same natural recent pane through `browser-cache` in one browser context;
 - `load-earlier`: expand that same generated 1000-turn Session and compare the viewport position of the same pre-existing user-message anchor.
 
-It records action-to-settled-frame time, existing Pi Chat pane-commit time, DOM node count, renderer Long Tasks overlapping the action window, Chromium renderer JS heap, and load-earlier anchor error. A missing completion signal is an operational failure, not a performance sample.
+It records action-to-settled-frame time, existing Pi Chat pane-commit time, DOM node count, renderer Long Tasks overlapping the action window, Chromium renderer JS heap, load-earlier anchor error, and optional maintenance-build React render evidence. React evidence is marked unsupported for ordinary production builds. A missing completion signal is an operational failure, not a performance sample.
 
 Server-only fixtures cover artificially padded 10 MiB and 50 MiB size targets, a natural 1000-user-turn Session, a tool/process-heavy turn, Markdown/KaTeX-heavy content, image metadata, and encoded image content. The browser lane deliberately uses only the natural 1000-turn fixture: size-padding fixtures append artificial assistant payloads after the final user turn and would conflate JSONL size with giant visible-tail rendering.
 

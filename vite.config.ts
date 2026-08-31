@@ -1,9 +1,16 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
+const reactRenderBenchmarkEnabled = process.env.PI_CHAT_BENCHMARK_REACT_PROFILER === "1";
+
 export default defineConfig({
   plugins: [react()],
   root: "src/web",
+  resolve: {
+    alias: reactRenderBenchmarkEnabled
+      ? [{ find: "react-dom/client", replacement: "react-dom/profiling" }]
+      : [],
+  },
   build: {
     outDir: "../../dist/web",
     emptyOutDir: true,

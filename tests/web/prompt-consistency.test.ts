@@ -15,6 +15,187 @@ beforeEach(() => {
 });
 
 
+test("F5 restores an accepted user turn and its captured thinking metadata before JSONL catches up", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const pendingMessage = {
+    role: "user" as const,
+    content: "accepted before reload",
+    timestamp: 10,
+    piChatPendingMessageId: "pending-1",
+  };
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true, thinkingLevel: "high" },
+      messages: [],
+      messageTotal: 0,
+      turnTotal: 0,
+      liveMessage: { role: "assistant" as const, content: "" },
+      pendingPrompt: {
+        id: "pending-1",
+        message: pendingMessage,
+        expectedTurnTotal: 1,
+        settings: { thinkingLevel: "high" as const },
+      },
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    assert.match(dom.window.document.body.textContent || "", /accepted before reload/);
+    assert.equal(
+      dom.window.document.querySelector<HTMLSpanElement>(".message-thinking")?.textContent,
+      "high",
+      "the captured thinking level survives a reload while the persisted rows catch up",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
+test("F5 restores native Steers from server authority without creating a User bubble", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true },
+      pendingSteers: [{
+        id: "00000000-0000-4000-8000-000000000701",
+        message: "continue after reload",
+        imageCount: 0,
+        createdAt: 10,
+      }],
+      pendingSteerRevision: 4,
+      messages: [],
+      messageTotal: 0,
+      turnTotal: 0,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    assert.match(
+      dom.window.document.querySelector(".pending-steers")?.textContent || "",
+      /continue after reload/,
+    );
+    assert.equal(
+      dom.window.document.querySelectorAll(".message-user").length,
+      0,
+      "a pending native Steer remains separate from the User transcript after reload",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
+test("an older native Steer projection cannot erase a newer pending Steer", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true },
+      pendingSteers: [{
+        id: "00000000-0000-4000-8000-000000000702",
+        message: "newer Steer",
+        imageCount: 0,
+        createdAt: 11,
+      }],
+      pendingSteerRevision: 5,
+      messages: [],
+      messageTotal: 0,
+      turnTotal: 0,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.emitPi({
+        type: "pi_chat_native_steering_cleared",
+        piChatSessionId: activeId,
+        droppedCount: 1,
+        pendingSteerRevision: 4,
+      });
+      await Promise.resolve();
+    });
+    assert.match(
+      dom.window.document.querySelector(".pending-steers")?.textContent || "",
+      /newer Steer/,
+    );
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
+test("an accepted high-thinking prompt replaces the old active max fallback", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, thinkingLevel: "max", isStreaming: false },
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    prompt: async () => ({ accepted: true, queued: false }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const thinkingTrigger = dom.window.document.querySelector<HTMLButtonElement>(
+      ".thinking-control .compact-select-trigger",
+    )!;
+    await act(async () => thinkingTrigger.click());
+    const high = [...dom.window.document.querySelectorAll<HTMLElement>(".compact-select-option")]
+      .find((option) => option.textContent?.trim() === "high");
+    assert.ok(high);
+    await act(async () => high!.click());
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "use high");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "use high" }));
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(
+      dom.window.document.querySelector<HTMLSpanElement>(".message-thinking")?.textContent,
+      "high",
+      "the active turn uses the captured prompt setting instead of the previous max state",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("a lost prompt acknowledgement cannot remove a user turn after SSE proves acceptance", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");

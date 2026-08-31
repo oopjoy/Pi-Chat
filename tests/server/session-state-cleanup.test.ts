@@ -200,6 +200,7 @@ test("Session deletion cleanup removes every server-owned per-Session projection
     fastModeBySession: Map<string, boolean>;
     pendingNativeSteeringBySession: Map<string, unknown>;
     nativeSteeringAdmissionsBySession: Map<string, unknown>;
+    nativeSteeringProjectionRevisions: Map<string, number>;
     nativeSteeringResetAfterSettlement: Map<string, number>;
     nativeSteeringDequeueResults: Map<string, { sessionId: string }>;
     runtimeFailureReasonsBySession: Map<string, string>;
@@ -225,6 +226,7 @@ test("Session deletion cleanup removes every server-owned per-Session projection
     generation: 4,
     items: [{ id: "steer", message: "steer", promptAt: 1, imageChars: 0 }],
   });
+  internals.nativeSteeringProjectionRevisions.set(SESSION_ID, 3);
   internals.nativeSteeringResetAfterSettlement.set(SESSION_ID, 4);
   internals.nativeSteeringDequeueResults.set("dequeue", { sessionId: SESSION_ID });
   internals.runtimeFailureReasonsBySession.set(SESSION_ID, "failed");
@@ -250,6 +252,7 @@ test("Session deletion cleanup removes every server-owned per-Session projection
     assert.equal(internals.fastModeBySession.has(SESSION_ID), false);
     assert.equal(internals.pendingNativeSteeringBySession.has(SESSION_ID), false);
     assert.equal(internals.nativeSteeringAdmissionsBySession.has(SESSION_ID), false);
+    assert.equal(internals.nativeSteeringProjectionRevisions.get(SESSION_ID), 4);
     assert.equal(internals.nativeSteeringResetAfterSettlement.has(SESSION_ID), false);
     assert.equal(internals.nativeSteeringDequeueResults.has("dequeue"), false);
     assert.equal(internals.runtimeFailureReasonsBySession.has(SESSION_ID), false);

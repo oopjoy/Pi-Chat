@@ -132,7 +132,7 @@ import {
 import { BOTTOM_THRESHOLD, isAtBottom, SessionScrollMemory } from "./lib/session-scroll-memory";
 import { loadModelCatalog, mergeModelCatalog, saveModelCatalog } from "./lib/model-catalog";
 import { withStreamingAppendHints } from "./lib/streaming-append";
-import { SessionViewCache } from "./lib/session-view-cache";
+import { SessionViewCache, type SessionViewSnapshot } from "./lib/session-view-cache";
 import { workspaceFileActivityParts, workspaceFileActivityRevisionFromParts } from "./lib/workspace-activity";
 import { windowPromptReconcileScheduler, type PromptReconcileScheduler } from "./lib/prompt-reconcile-scheduler";
 import {
@@ -209,6 +209,32 @@ function resultPendingError(cause: unknown): boolean {
 
 function finiteRunMetric(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function displaySettingsFromEvent(
+  raw: unknown,
+  currentModel: ModelInfo | null,
+): Partial<Pick<PiState, "model" | "thinkingLevel">> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const settings = raw as Record<string, unknown>;
+  const next: Partial<Pick<PiState, "model" | "thinkingLevel">> = {};
+  if (typeof settings.thinkingLevel === "string")
+    next.thinkingLevel = settings.thinkingLevel;
+  if (settings.model && typeof settings.model === "object" && !Array.isArray(settings.model)) {
+    const model = settings.model as Record<string, unknown>;
+    if (typeof model.provider === "string" && typeof model.modelId === "string") {
+      next.model = currentModel &&
+          currentModel.provider === model.provider &&
+          currentModel.id === model.modelId
+        ? currentModel
+        : {
+            provider: model.provider,
+            id: model.modelId,
+            name: model.modelId,
+          };
+    }
+  }
+  return next;
 }
 
 function authoritativeStoppedSteerRejection(
@@ -749,20 +775,51 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     // Historical/read-only views may intentionally omit queue authority. Do not
     // turn an unknown queue into an authoritative empty array while caching.
     if (!Array.isArray(view.queue)) return viewCacheRef.current.remember(view);
-    const filteredQueue = filterCancelledQueue(view.session.id, view.queue);
-    if (!latestQueueProjectionRef.current.has(view.session.id)) {
-      latestQueueProjectionRef.current.set(view.session.id, {
+    const sessionId = view.session.id;
+    const filteredQueue = filterCancelledQueue(sessionId, view.queue);
+    const latest = latestQueueProjectionRef.current.get(sessionId);
+    if (!latest) {
+      latestQueueProjectionRef.current.set(sessionId, {
         queue: filteredQueue,
         paused: view.queuePaused === true,
       });
-      advanceQueueProjectionRevision(view.session.id);
+      advanceQueueProjectionRevision(sessionId);
     }
-    return viewCacheRef.current.remember({ ...view, queue: filteredQueue });
+    // A stale response may arrive after a newer queue event and still be
+    // cached for a later navigation. Keep the cache in the same authority
+    // domain as the event projection, including an explicit empty queue.
+    const projection = latest || {
+      queue: filteredQueue,
+      paused: view.queuePaused === true,
+    };
+    return viewCacheRef.current.remember({
+      ...view,
+      queue: projection.queue,
+      queuePaused: projection.paused,
+    });
   };
   const refreshSessionCache = (id: string, patch: Partial<SessionViewData>) =>
     confirmedDeletedSessionIdsRef.current.has(id)
       ? undefined
       : viewCacheRef.current.refresh(id, patch);
+  /**
+   * Queue projections are event-owned and can be newer than a cached Session
+   * view. Never let a stale cached view resurrect an item already removed by a
+   * queue_update/dispatch event.
+   */
+  function withLatestQueueProjection(view: SessionViewSnapshot): SessionViewSnapshot;
+  function withLatestQueueProjection(view: undefined): undefined;
+  function withLatestQueueProjection(view: SessionViewSnapshot | undefined): SessionViewSnapshot | undefined;
+  function withLatestQueueProjection(view: SessionViewSnapshot | undefined): SessionViewSnapshot | undefined {
+    if (!view) return undefined;
+    const latest = latestQueueProjectionRef.current.get(view.session.id);
+    if (!latest) return view;
+    return {
+      ...view,
+      queue: latest.queue,
+      queuePaused: latest.paused,
+    };
+  };
   const patchSessionCache = (
     id: string,
     patch: Parameters<SessionViewCache["patch"]>[1],
@@ -803,6 +860,8 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     Record<string, PendingSteer[]>
   >({});
   const pendingSteersRef = useRef(new Map<string, PendingSteer[]>());
+  /** Latest server authority prevents an older refresh from reviving a consumed Steer. */
+  const pendingSteerProjectionRef = useRef(new Map<string, { revision: number; items: PendingSteer[] }>());
   const syncPendingSteers = (sessionId: string, items: PendingSteer[]) => {
     if (items.length) pendingSteersRef.current.set(sessionId, items);
     else pendingSteersRef.current.delete(sessionId);
@@ -1318,6 +1377,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     directoryLoadGenerationsRef.current.clear();
     directorySessionCoverageRef.current.clear();
     pendingSteersRef.current.clear();
+    pendingSteerProjectionRef.current.clear();
     setPendingSteersBySession({});
     setSteerDequeueingBySession({});
     setFailedSessionIds([]);
@@ -1844,6 +1904,89 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   };
   paneAuthorityDispatchRef.current = commitPaneIfCurrent;
 
+  /** Rehydrate a server-owned accepted turn after F5 without writing it to Pi. */
+  const reconcileServerPendingPrompt = useCallback((view: SessionViewData): void => {
+    const pending = view.pendingPrompt;
+    if (!pending) return;
+    const turns = localUserTurnsRef.current.get(view.session.id) || [];
+    const existing = turns.find(
+      (turn) => turn.message.piChatPendingMessageId === pending.id,
+    ) || turns.find(
+      (turn) =>
+        turn.expectedTurnTotal === pending.expectedTurnTotal &&
+        JSON.stringify(turn.message.content) === JSON.stringify(pending.message.content),
+    );
+    if (existing) {
+      existing.queueState = "dispatched";
+      existing.queueRetryPending = false;
+      return;
+    }
+    const message = { ...pending.message };
+    const turn: LocalUserTurn = {
+      sessionId: view.session.id,
+      message,
+      expectedTurnTotal: pending.expectedTurnTotal,
+      queueState: "dispatched",
+      confirmByPosition: Array.isArray(message.content),
+      renderedInTranscript: false,
+    };
+    localUserTurnsRef.current.set(view.session.id, [...turns, turn]);
+  }, []);
+
+  /** Rehydrate native Steers after F5 while keeping their server revision authoritative. */
+  const reconcileServerPendingSteers = useCallback((view: SessionViewData): void => {
+    if (!Array.isArray(view.pendingSteers)) return;
+    const sessionId = view.session.id;
+    const incomingRevision = typeof view.pendingSteerRevision === "number"
+      ? view.pendingSteerRevision
+      : 0;
+    const previous = pendingSteerProjectionRef.current.get(sessionId);
+    if (previous && incomingRevision < previous.revision) return;
+    const items = view.pendingSteers.map((item) => ({ ...item }));
+    pendingSteerProjectionRef.current.set(sessionId, {
+      revision: incomingRevision,
+      items,
+    });
+    const ids = new Set(items.map((item) => item.id));
+    let turns = localUserTurnsRef.current.get(sessionId) || [];
+    // A fresh server projection proves which hidden Steers are still waiting;
+    // consumed ones must not remain as phantom local turns after a reload.
+    for (const turn of [...turns]) {
+      if (
+        turn.revealOnMessageStart &&
+        turn.queueState === "waiting" &&
+        turn.queueId &&
+        !ids.has(turn.queueId)
+      )
+        turns = removeLocalTurnAndRebase(turns, turn);
+    }
+    let expectedTurnTotal = nextLocalTurnTotal(view.messages, view.turnTotal, turns);
+    for (const item of items) {
+      const existing = turns.find((turn) => turn.queueId === item.id);
+      if (existing) {
+        existing.queueState = "waiting";
+        existing.revealOnMessageStart = true;
+        continue;
+      }
+      turns.push({
+        sessionId,
+        message: {
+          role: "user",
+          content: item.message,
+          timestamp: item.createdAt,
+        },
+        expectedTurnTotal: expectedTurnTotal++,
+        queueId: item.id,
+        queueState: "waiting",
+        revealOnMessageStart: true,
+        renderedInTranscript: false,
+      });
+    }
+    if (turns.length) localUserTurnsRef.current.set(sessionId, turns);
+    else localUserTurnsRef.current.delete(sessionId);
+    syncPendingSteers(sessionId, items);
+  }, []);
+
   /**
    * Settle only IDs confirmed by Pi's native dequeue event. The browser-local
    * turns are a presentation cache; Pi's queue remains the authority for what
@@ -2177,8 +2320,15 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
             queuePaused: bootstrapProjection.paused,
             commands: data.commands,
             pendingExtensionRequest: data.pendingExtensionRequest,
+            pendingPrompt: data.pendingPrompt,
+            pendingSteers: data.pendingSteers,
+            pendingSteerRevision: data.pendingSteerRevision,
           })
         : null;
+      if (sourceView) {
+        reconcileServerPendingPrompt(sourceView);
+        reconcileServerPendingSteers(sourceView);
+      }
       reconcileQueuedAdmissions(activeViewId, sourceView?.queue || bootstrapQueue);
       const bootstrapLocalTurns = localUserTurnsRef.current.get(activeViewId) || [];
       promoteTurnsAbsentFromQueue(
@@ -2288,6 +2438,8 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       applyBootstrapMetadata,
       confirmPrimaryCapabilitySnapshot,
       commitPane,
+      reconcileServerPendingPrompt,
+      reconcileServerPendingSteers,
       paneAuthorityCanCommit,
       updateGateMode,
     ],
@@ -2458,6 +2610,8 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
             }
           : normalizedView;
       const sourceView = viewCacheRef.current.remember(queueFilteredView);
+      reconcileServerPendingPrompt(sourceView);
+      reconcileServerPendingSteers(sourceView);
       // A normalized view is stronger than an earlier local abort intent. Do
       // not leave a completed Session with a stale stop lease.
       if (!sourceView.isStreaming)
@@ -2645,6 +2799,8 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       draftAuthorityCanCommit,
       paneAuthorityCanCommit,
       recordPaneCommit,
+      reconcileServerPendingPrompt,
+      reconcileServerPendingSteers,
       setRuntimeWarming,
       tryAutoAllowGate,
       updateGateMode,
@@ -3631,7 +3787,21 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
               typeof id === "string" && /^[a-f0-9-]{36}$/i.test(id),
             )
           : [];
-        if (eventSessionId && ids.length) applyDequeuedSteers(eventSessionId, ids);
+        if (eventSessionId && ids.length) {
+          const incomingRevision = typeof event.pendingSteerRevision === "number"
+            ? event.pendingSteerRevision
+            : 0;
+          const previous = pendingSteerProjectionRef.current.get(eventSessionId);
+          if (!previous || incomingRevision >= previous.revision) {
+            pendingSteerProjectionRef.current.set(eventSessionId, {
+              revision: incomingRevision,
+              items: previous
+                ? previous.items.filter((item) => !ids.includes(item.id))
+                : [],
+            });
+            applyDequeuedSteers(eventSessionId, ids);
+          }
+        }
         return;
       }
       if (eventSessionId && invalidatesSessionViewVersion(type)) {
@@ -4074,6 +4244,16 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           });
       } else if (type === "pi_chat_native_steering_cleared") {
         if (eventSessionId) {
+          const incomingRevision = typeof event.pendingSteerRevision === "number"
+            ? event.pendingSteerRevision
+            : 0;
+          const previousProjection = pendingSteerProjectionRef.current.get(eventSessionId);
+          if (previousProjection && incomingRevision < previousProjection.revision)
+            return;
+          pendingSteerProjectionRef.current.set(eventSessionId, {
+            revision: incomingRevision,
+            items: [],
+          });
           const pending = localUserTurnsRef.current.get(eventSessionId) || [];
           const remaining = removePendingSteeringTurns(pending);
           syncPendingSteers(eventSessionId, []);
@@ -4440,7 +4620,20 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         const localTurns = eventSessionId
           ? localUserTurnsRef.current.get(eventSessionId) || []
           : [];
-        // Dispatch can beat the enqueue HTTP response. Bind its queue ID to the
+        const displaySettings = displaySettingsFromEvent(
+          event.settings,
+          paneStateRef.current.model,
+        );
+        if (eventSessionId && Object.keys(displaySettings).length) {
+          patchSessionCache(eventSessionId, { state: displaySettings });
+          if (viewingEventSession)
+            dispatchPane({
+              type: "RUNTIME_SETTINGS_ADOPTED",
+              target: { kind: "session", sessionId: eventSessionId },
+              state: displaySettings,
+            });
+        }
+        // Dispatch can beat the enqueue HTTP acknowledgement. Bind its queue ID to the
         // already-protected local turn before considering an observer fallback.
         const knownLocally = bindQueuedDispatch(
           localTurns,
@@ -5641,6 +5834,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       !steering && (alreadyStreaming || queuePaused || queue.length > 0);
     const previousToolStatus = toolStatus;
     const optimisticMessage =
+      !steering &&
       !message.startsWith("/") &&
       (Boolean(state.isCompacting) || !willQueueLocally)
         ? userMessage(message, images)
@@ -6000,6 +6194,26 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
                 targetSessionId,
                 requestedGateMode,
               ));
+      if (
+        targetSessionId &&
+        !result.queued &&
+        !result.steered &&
+        capturedSelection &&
+        promptPaneIsCurrent()
+      ) {
+        const displaySettings = {
+          ...(capturedSelection.model ? { model: capturedSelection.model } : null),
+          ...(capturedSelection.thinkingLevel
+            ? { thinkingLevel: capturedSelection.thinkingLevel }
+            : null),
+        };
+        patchSessionCache(targetSessionId, { state: displaySettings });
+        commitPaneIfCurrent(promptAuthority!, {
+          type: "RUNTIME_SETTINGS_ADOPTED",
+          target: { kind: "session", sessionId: targetSessionId },
+          state: displaySettings,
+        });
+      }
       // This Session-scoped selection remains the Composer's next-normal-turn
       // default after admission, matching a persistent Model chooser. The
       // immutable captured object above still prevents a later click from
@@ -6587,7 +6801,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     // Keep the current conversation visible until the destination view has
     // arrived. This avoids a blank timeline while an active Session is waiting
     // for a Gate confirmation or its runtime is answering state requests.
-    const cached = viewCacheRef.current.get(id);
+    const cached = withLatestQueueProjection(viewCacheRef.current.get(id));
     const cachedTurns = cached?.visibleTurnCount ?? cached?.turnTotal ?? 0;
     if (cached && (!rememberedTurns || cachedTurns >= rememberedTurns)) {
       if (
@@ -8732,6 +8946,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         liveMessage={liveMessage}
         localDraft={localDraft}
         composerHasContent={composerHasContent}
+        suppressNewWelcome={lifecycleBlocked}
         newConversationPresentation={newConversationPresentation}
         waitingForPiMessage={waitingForPiMessage}
         draftWorkspaceCwd={draftWorkspaceCwd}

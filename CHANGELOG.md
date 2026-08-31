@@ -13,6 +13,8 @@
 - Image attachments are no longer blocked by provisional or unsupported `ModelInfo.input` metadata in the browser; only local payload safety limits are checked before forwarding, and the upstream model decides whether it can interpret the images.
 - Restart and cold-start bootstrap recovery no longer lets a persisted Session fall through to the New welcome; the centered logo, workspace selector, and New composer presentation are reserved for actual New state.
 - The Composer Model control remains editable while Runtime model discovery is pending, using a bounded browser-local advisory catalogue when available; the server reports pending versus settled-empty discovery, and every selected model is revalidated against the target Runtime at Send.
+- Accepted ordinary prompts remain recoverable across an immediate F5 while JSONL catches up, including their captured Model and Thinking settings; this server-owned projection never enters Pi JSONL or provider payloads.
+- Queue and native Steer projections are revision-fenced so stale Session views, cache entries, and reconnects cannot resurrect completed queue rows or erase newer pending Steers. Pending native Steers survive refresh separately and enter the transcript only after verified Pi consumption.
 
 ### Settings and supportability
 

@@ -1,8 +1,9 @@
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, Profiler, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { CSSProperties } from "react";
 import type { PiContentBlock, PiMessage } from "../../shared/types";
 import { visibleAssistantBlocksWithSourceIndex } from "../lib/assistant-text";
+import { reactRenderBenchmarkEnabled, recordReactRenderBenchmarkCommit } from "../lib/benchmark-profiler";
 import { streamingAppendHint } from "../lib/streaming-append";
 import { CheckIcon, CopyIcon, ForkIcon } from "./Icons";
 import { MarkdownBody } from "./MarkdownBody";
@@ -200,7 +201,7 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
     copyTimerRef.current = window.setTimeout(() => setCopied(false), 1_600);
   };
 
-  return (
+  const body = (
     <article className={`message message-${message.role}${userTextNeedsFolding ? " is-foldable" : ""}`}>
       {message.role === "assistant" && showAssistantMetadata && <AssistantMessageHeader message={message} fallback={assistantMetadataFallback} />}
       {message.role === "user" && userImageBlocks.length > 0 && <div className="message-user-attachments" aria-label="用户附加图片">
@@ -283,4 +284,7 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
       </footer>}
     </article>
   );
+  return reactRenderBenchmarkEnabled
+    ? <Profiler id="component:ChatMessage" onRender={recordReactRenderBenchmarkCommit}>{body}</Profiler>
+    : body;
 });

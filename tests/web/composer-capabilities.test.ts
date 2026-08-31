@@ -1895,6 +1895,66 @@ test("tool activity keeps Sidebar and Composer active when a stale state snapsho
   }
 });
 
+test("a native Steer stays out of the transcript while its acknowledgement is pending", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  let steerId = "";
+  let resolvePrompt!: (value: { accepted: boolean; queued: boolean; steered: boolean; id: string }) => void;
+  const prompt = new Promise<{ accepted: boolean; queued: boolean; steered: boolean; id: string }>((resolve) => {
+    resolvePrompt = resolve;
+  });
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true },
+      sessions: bootstrap.sessions.map((session) => ({ ...session, running: true })),
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    prompt: async (...args: unknown[]) => {
+      steerId = String(args[6] || "");
+      return prompt;
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "steer without duplicate");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "steer without duplicate" }));
+      dom.window.document.querySelector<HTMLButtonElement>(".steer-submit-button")!.click();
+      await Promise.resolve();
+    });
+    assert.equal(
+      dom.window.document.querySelectorAll(".message-user").length,
+      0,
+      "the optimistic pending bubble must not duplicate the waiting Steer row",
+    );
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => resolvePrompt({ accepted: true, queued: false, steered: true, id: steerId }));
+    assert.equal(dom.window.document.querySelectorAll(".message-user").length, 0);
+    assert.ok(dom.window.document.querySelector(".pending-steers"));
+    await act(async () => source.emitPi({
+      type: "message_start",
+      piChatSessionId: activeId,
+      nativeSteeringConsumed: true,
+      nativeSteeringId: steerId,
+      message: { role: "user", content: "provider-normalized" },
+    }));
+    assert.equal(dom.window.document.querySelectorAll(".message-user").length, 1);
+    assert.equal(dom.window.document.querySelector(".pending-steers"), null);
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("ChatInput places Steer beside Queue and sends explicit steering delivery", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");

@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, Profiler, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { ProcessEntry } from "../lib/conversation-process";
+import { reactRenderBenchmarkEnabled, recordReactRenderBenchmarkCommit } from "../lib/benchmark-profiler";
 import { AlertIcon, CheckIcon, ChevronUpIcon } from "./Icons";
 import { openEditDiffSidebar } from "../lib/edit-diff-events";
 import { compactEditPath } from "../lib/tool-edit-diff";
@@ -114,13 +115,13 @@ function ThinkingEntry({ text, disclosureKey }: { text: string; disclosureKey: s
   </PersistentDetails>;
 }
 
-export function ConversationProcess({ entries, streaming = false, disclosureKey = "process", runStartedAt = null, runDurationMs = null }: { entries: ProcessEntry[]; streaming?: boolean; disclosureKey?: string; runStartedAt?: number | null; runDurationMs?: number | null }) {
+export const ConversationProcess = memo(function ConversationProcess({ entries, streaming = false, disclosureKey = "process", runStartedAt = null, runDurationMs = null }: { entries: ProcessEntry[]; streaming?: boolean; disclosureKey?: string; runStartedAt?: number | null; runDurationMs?: number | null }) {
   const summary = useMemo(() => summarize(entries, streaming), [entries, streaming]);
   const runDuration = useRunDuration(streaming, runStartedAt, runDurationMs);
   const hasFailures = entries.some((entry) => entry.kind === "tool" && entry.isError);
   const status = hasFailures ? <AlertIcon className="process-status-icon is-error" /> : streaming ? <span className="process-status-icon is-running" aria-hidden="true" /> : <CheckIcon className="process-status-icon" />;
 
-  return <PersistentDetails className={`conversation-process${streaming ? " is-streaming" : ""}`} disclosureKey={disclosureKey} footerCollapse>
+  const body = <PersistentDetails className={`conversation-process${streaming ? " is-streaming" : ""}`} disclosureKey={disclosureKey} footerCollapse>
     <summary><span className="conversation-process-summary process-summary-label">{status}{summary}</span>{runDuration && <time className="conversation-process-duration" {...(runDuration.dateTime ? { dateTime: runDuration.dateTime } : null)} title={runDuration.title}>{runDuration.label}</time>}<span className="conversation-process-chevron" aria-hidden="true"><svg className="chevron-collapsed" viewBox="0 0 16 16"><path d="M10 3.5 5.5 8 10 12.5" /></svg><svg className="chevron-expanded" viewBox="0 0 16 16"><path d="M3.5 6 8 10.5 12.5 6" /></svg></span></summary>
     <div className="conversation-process-body">
       {entries.map((entry, index) => {
@@ -154,4 +155,7 @@ export function ConversationProcess({ entries, streaming = false, disclosureKey 
       })}
     </div>
   </PersistentDetails>;
-}
+  return reactRenderBenchmarkEnabled
+    ? <Profiler id="component:ConversationProcess" onRender={recordReactRenderBenchmarkCommit}>{body}</Profiler>
+    : body;
+});

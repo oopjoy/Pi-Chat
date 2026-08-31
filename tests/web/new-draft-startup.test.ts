@@ -65,6 +65,10 @@ test("an empty unindexed Primary uses New presentation while keeping its real Se
     await act(async () => {
       Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "use existing primary");
       textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "use existing primary" }));
+      await Promise.resolve();
+      assert.ok(dom.window.document.querySelector(".welcome"), "typing in New must not remove the centered welcome");
+      assert.ok(dom.window.document.querySelector(".welcome-mark"), "typing in New must keep the Pi bear mark visible");
+      assert.ok(dom.window.document.querySelector(".draft-workspace"), "typing in New must keep the workspace picker visible");
       dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
       await Promise.resolve();
       await Promise.resolve();
@@ -316,6 +320,9 @@ test("New is instant and the first send shows Pi startup before materializing a 
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     assert.equal(textarea.value, "hello from a cold draft");
+    assert.ok(dom.window.document.querySelector(".welcome"), "a local New draft keeps the centered welcome while typing");
+    assert.ok(dom.window.document.querySelector(".welcome-mark"), "a local New draft keeps the Pi mark while typing");
+    assert.ok(dom.window.document.querySelector(".draft-workspace"), "a local New draft keeps the selected workspace path while typing");
     const send =
       dom.window.document.querySelector<HTMLButtonElement>(".send-button")!;
     assert.ok(send.querySelector("[data-icon='send']"));

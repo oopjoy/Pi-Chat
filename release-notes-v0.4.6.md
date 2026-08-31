@@ -11,6 +11,8 @@
 - Image attachments are no longer blocked by provisional or unsupported model metadata in the browser; local size/format limits remain, while the upstream model decides whether it can interpret the images.
 - Restart and cold-start recovery no longer renders the New welcome for a persisted Session with incomplete history; the centered logo and workspace selector remain exclusive to New.
 - The Composer Model control remains editable while Runtime discovery is pending. A bounded browser-local advisory catalogue keeps prior choices available when possible, while the server distinguishes pending from settled-empty discovery and revalidates the selected model at Send.
+- Accepted ordinary prompts remain recoverable across an immediate F5 while JSONL catches up, including the captured Model and Thinking settings; the server-owned projection is never written to Pi JSONL or provider payloads.
+- Queue and native Steer projections are revision-fenced so stale Session views, cache entries, and reconnects cannot resurrect completed queue rows or erase newer pending Steers. Pending native Steers survive refresh as a separate waiting projection and enter the transcript only after verified Pi consumption.
 
 ## Runtime, SSE, and recovery reliability
 
@@ -20,7 +22,7 @@
 
 ## Verification and package scope
 
-- TypeScript checks, the focused New/draft regression suite, the isolated unit suite, and the Playwright suite pass for the release candidate.
+- TypeScript checks, the focused queue/Steer/F5 regression suites, the isolated unit suite, and the Playwright suite pass for the release candidate.
 - `pi-chat-windows-0.4.6.zip` is the runnable Windows package. GitHub-generated source archives are source-only development inputs.
 - Pi Chat remains loopback-only and local-first; this release does not add remote hosting, a desktop shell, or a replacement Pi agent loop.
 

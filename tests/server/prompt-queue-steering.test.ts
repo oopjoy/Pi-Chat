@@ -288,6 +288,38 @@ test("steering bypasses local queues for running Primary and Secondary only", as
       stateDiagnostics: { snapshot(): { promptEvidence: { records: unknown[] } } };
     }).stateDiagnostics.snapshot().promptEvidence.records.length, 0);
 
+    const beforeConsumption = await fetch(`${origin}/api/sessions/${primaryId}/view`);
+    assert.equal(beforeConsumption.status, 200);
+    const beforeConsumptionBody = await beforeConsumption.json() as {
+      pendingSteers?: Array<{ id: string; message: string; imageCount: number }>;
+      pendingSteerRevision?: number;
+    };
+    assert.equal(beforeConsumptionBody.pendingSteers?.length, 1);
+    assert.match(beforeConsumptionBody.pendingSteers?.[0]?.id || "", /^[a-f0-9-]{36}$/i);
+    assert.equal(beforeConsumptionBody.pendingSteers?.[0]?.message, "redirect primary");
+    assert.equal(beforeConsumptionBody.pendingSteers?.[0]?.imageCount, 0);
+    assert.equal(typeof beforeConsumptionBody.pendingSteers?.[0]?.createdAt, "number");
+
+    // Pi removes the native Steer before forwarding its user message. The
+    // server must keep it visible until that verified message_start arrives.
+    primary.emit({ type: "queue_update", steering: ["redirect primary"], followUp: [] });
+    primary.emit({ type: "queue_update", steering: [], followUp: [] });
+    primary.emit({
+      type: "message_start",
+      message: { role: "user", content: "redirect primary" },
+    });
+    const afterConsumption = await fetch(`${origin}/api/sessions/${primaryId}/view`);
+    assert.equal(afterConsumption.status, 200);
+    const afterConsumptionBody = await afterConsumption.json() as {
+      pendingSteers?: unknown[];
+      pendingSteerRevision?: number;
+    };
+    assert.deepEqual(afterConsumptionBody.pendingSteers, []);
+    assert.ok(
+      (afterConsumptionBody.pendingSteerRevision || 0) > (beforeConsumptionBody.pendingSteerRevision || 0),
+      "verified native consumption advances the Steer projection revision",
+    );
+
     const abortSecondary = await fetch(`${origin}/api/chat/abort`, {
       method: "POST",
       headers: { "content-type": "application/json" },

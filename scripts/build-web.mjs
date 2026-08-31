@@ -6,6 +6,10 @@ import {
   assertBrowserStreamingBenchmarkStaging,
   parseBrowserStreamingBenchmarkPolicy,
 } from "./streaming-cadence-config.mjs";
+import {
+  assertReactRenderBenchmarkStaging,
+  parseReactRenderBenchmarkEnabled,
+} from "./react-render-benchmark-config.mjs";
 
 const distRoot = resolve(process.env.PI_CHAT_DIST_DIR || "dist");
 const buildIdentity = JSON.parse(await readFile(resolve(distRoot, "build-identity.json"), "utf8"));
@@ -17,11 +21,20 @@ assertBrowserStreamingBenchmarkStaging(
   distRoot,
   resolve("dist"),
 );
+const reactRenderBenchmarkEnabled = parseReactRenderBenchmarkEnabled(
+  process.env.PI_CHAT_BENCHMARK_REACT_PROFILER,
+);
+assertReactRenderBenchmarkStaging(
+  reactRenderBenchmarkEnabled,
+  distRoot,
+  resolve("dist"),
+);
 await build({
   configFile: resolve("vite.config.ts"),
   define: {
     __PI_CHAT_BUILD_IDENTITY__: JSON.stringify(buildIdentity),
     __PI_CHAT_BENCHMARK_BROWSER_STREAMING_POLICY__: JSON.stringify(browserStreamingPolicy),
+    __PI_CHAT_BENCHMARK_REACT_PROFILER__: JSON.stringify(reactRenderBenchmarkEnabled),
   },
   build: {
     outDir: resolve(distRoot, "web"),

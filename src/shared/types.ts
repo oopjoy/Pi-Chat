@@ -143,6 +143,8 @@ export interface PiMessage {
   piChatLiveMessageId?: string;
   /** Stable identity derived from the owning persisted JSONL entry. */
   piChatPersistedMessageId?: string;
+  /** Server-only accepted-prompt projection; never written to Pi JSONL or provider payloads. */
+  piChatPendingMessageId?: string;
   role: string;
   /** Metadata records such as compactionSummary legitimately omit content. */
   content?: string | PiContentBlock[];
@@ -281,8 +283,21 @@ export interface InitialPromptData extends SessionRuntimeReadyData {
   queue?: QueuedPrompt[];
 }
 
+export interface PendingPromptProjection {
+  id: string;
+  message: PiMessage;
+  expectedTurnTotal: number;
+  settings?: PromptSettingsSnapshot;
+}
+
 export interface SessionViewData {
   session: SessionSummary;
+  /** Server-owned accepted turn retained until JSONL visibility is confirmed. */
+  pendingPrompt?: PendingPromptProjection;
+  /** Native Steers accepted by this hot Runtime but not yet consumed by Pi. */
+  pendingSteers?: PendingSteer[];
+  /** Monotonic server projection revision for pendingSteers. */
+  pendingSteerRevision?: number;
   forkOrigin?: SessionForkOrigin;
   state: PiState;
   messages: PiMessage[];
@@ -362,6 +377,12 @@ export interface BootstrapHandshakeData {
 
 export interface BootstrapData {
   buildIdentity: BuildIdentity;
+  /** Server-owned accepted turn retained until JSONL visibility is confirmed. */
+  pendingPrompt?: PendingPromptProjection;
+  /** Native Steers accepted by the active hot Runtime but not yet consumed by Pi. */
+  pendingSteers?: PendingSteer[];
+  /** Monotonic server projection revision for pendingSteers. */
+  pendingSteerRevision?: number;
   forkOrigin?: SessionForkOrigin;
   state: PiState;
   messages: PiMessage[];

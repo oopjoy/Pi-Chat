@@ -977,7 +977,12 @@ test("queued prompt moves exclusively between queue and transcript across dispat
     resolvePrompt = resolve;
   });
   Object.assign(api, {
-    bootstrap: async () => ({ ...bootstrap, queue: [], queuePaused: true }),
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, thinkingLevel: "max" },
+      queue: [],
+      queuePaused: true,
+    }),
     eventsUrl: () => "/api/events",
     markSessionViewed: async () => ({ viewing: activeId }),
     prompt: async () => pendingPrompt,
@@ -1057,6 +1062,7 @@ test("queued prompt moves exclusively between queue and transcript across dispat
         id: queuedId,
         message: queuedItem.message,
         imageCount: 0,
+        settings: { thinkingLevel: "high" },
       }),
     );
     assert.equal(
@@ -1066,6 +1072,11 @@ test("queued prompt moves exclusively between queue and transcript across dispat
     assert.equal(
       dom.window.document.querySelectorAll(".message-user").length,
       1,
+    );
+    assert.equal(
+      dom.window.document.querySelector<HTMLSpanElement>(".message-thinking")?.textContent,
+      "high",
+      "queue dispatch applies the queued turn's captured thinking level",
     );
     const stopAfterDispatch =
       dom.window.document.querySelector<HTMLButtonElement>(".stop-button")!;

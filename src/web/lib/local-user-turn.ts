@@ -168,6 +168,7 @@ export function promoteTurnsAbsentFromQueue(
   for (const turn of turns) {
     if (
       turn.queueState === "waiting"
+      && !turn.revealOnMessageStart
       && !turn.queueRetryPending
       && turn.queueId
       && !queueIds.has(turn.queueId)

@@ -1,6 +1,10 @@
-import { Fragment, useMemo, type ComponentProps, type RefObject } from "react";
+import { Fragment, Profiler, useMemo, type ComponentProps, type RefObject } from "react";
 import type { PendingSteer, PiMessage, PiState, SessionForkOrigin } from "../../shared/types";
 import { appendPendingUserMessage } from "../lib/local-user-turn";
+import {
+  reactRenderBenchmarkEnabled,
+  recordReactRenderBenchmarkCommit,
+} from "../lib/benchmark-profiler";
 import { groupConversation } from "../lib/conversation-process";
 import { ChatInput } from "./ChatInput";
 import { AssistantMessageHeader, ChatMessage } from "./ChatMessage";
@@ -31,8 +35,10 @@ export interface ConversationPaneProps {
   pendingUserMessage: PiMessage | null;
   liveMessage: PiMessage | null;
   localDraft: boolean;
-  /** Hide the empty New welcome once the Composer contains an unsent draft. */
+  /** Hide a saved-empty recovery placeholder while the Composer contains an unsent draft. */
   composerHasContent: boolean;
+  /** Maintenance status takes precedence over the decorative New welcome. */
+  suppressNewWelcome: boolean;
   newConversationPresentation: boolean;
   /** Sole conversation-body explanation for a retained or preparing prompt. */
   waitingForPiMessage: string;
@@ -81,6 +87,7 @@ export function ConversationPane({
   liveMessage,
   localDraft,
   composerHasContent,
+  suppressNewWelcome,
   newConversationPresentation,
   waitingForPiMessage,
   draftWorkspaceCwd,
@@ -177,7 +184,9 @@ export function ConversationPane({
               <p>正在恢复会话内容…</p>
             </div>
           </section>
-        ) : newConversationPresentation && !composerHasContent && !messages.length && !pendingUserMessage && !liveMessage ? (
+        ) : newConversationPresentation && !suppressNewWelcome && !messages.length && !pendingUserMessage && !liveMessage ? (
+          /* Keep the New affordance visible while the user drafts; the Composer
+             is a separate bottom surface and must not turn the canvas blank. */
           <section className="welcome" aria-label="新对话">
             <span className="welcome-mark"><PiMarkIcon /></span>
             <h1>开始与 Pi 对话</h1>
@@ -218,14 +227,15 @@ export function ConversationPane({
                   fallback={activeAssistantMetadata}
                 />
               : null;
+            const itemKey = `${paneKey}:${item.key}`;
             if (item.kind === "coordination") {
-              return <CoordinationMessage
-                key={`${paneKey}:${item.key}`}
-                message={item.message}
-              />;
+              const body = <CoordinationMessage message={item.message} />;
+              return reactRenderBenchmarkEnabled
+                ? <Profiler key={itemKey} id={`conversation-item:coordination:${itemKey}`} onRender={recordReactRenderBenchmarkCommit}>{body}</Profiler>
+                : <Fragment key={itemKey}>{body}</Fragment>;
             }
             if (item.kind === "process") {
-              return <Fragment key={`${paneKey}:${item.key}`}>
+              const body = <Fragment>
                 {activeHeader}
                 {!inActiveRunningTurn && item.assistantHeader && <AssistantMessageHeader message={item.assistantHeader} />}
                 <ConversationProcess
@@ -236,11 +246,14 @@ export function ConversationPane({
                   runDurationMs={index === latestProcessIndex ? lastRunDurationMs : null}
                 />
               </Fragment>;
+              return reactRenderBenchmarkEnabled
+                ? <Profiler key={itemKey} id={`conversation-item:process:${itemKey}`} onRender={recordReactRenderBenchmarkCommit}>{body}</Profiler>
+                : <Fragment key={itemKey}>{body}</Fragment>;
             }
             const messageStreaming = state.isStreaming
               && index === conversationItems.length - 1
               && Boolean(liveMessage);
-            return <Fragment key={`${paneKey}:${item.key}`}>
+            const body = <Fragment>
               {activeHeader}
               <ChatMessage
                 message={item.message}
@@ -251,6 +264,9 @@ export function ConversationPane({
                 forkUserMessageDisabled={forkUserMessageDisabled}
               />
             </Fragment>;
+            return reactRenderBenchmarkEnabled
+              ? <Profiler key={itemKey} id={`conversation-item:message:${itemKey}`} onRender={recordReactRenderBenchmarkCommit}>{body}</Profiler>
+              : <Fragment key={itemKey}>{body}</Fragment>;
           })}
           {state.isStreaming && activeTurnItemStart >= conversationItems.length && activeHeaderMessage && <AssistantMessageHeader
             message={activeHeaderMessage}

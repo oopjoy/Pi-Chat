@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { memo, Profiler, useState } from "react";
 import type { PiContentBlock, PiMessage } from "../../shared/types";
+import { reactRenderBenchmarkEnabled, recordReactRenderBenchmarkCommit } from "../lib/benchmark-profiler";
 
 /** Fold only explicit source lines; visual wrapping is device-dependent. */
 export const COORDINATION_MESSAGE_FOLD_LINE_LIMIT = 10;
@@ -36,7 +37,7 @@ function coordinationText(message: PiMessage): string {
     .trim();
 }
 
-export function CoordinationMessage({ message }: { message: PiMessage }) {
+export const CoordinationMessage = memo(function CoordinationMessage({ message }: { message: PiMessage }) {
   const text = coordinationText(message);
   const [expanded, setExpanded] = useState(false);
   if (!text) return null;
@@ -47,7 +48,7 @@ export function CoordinationMessage({ message }: { message: PiMessage }) {
     : null;
   const validTimestamp = timestamp && !Number.isNaN(timestamp.getTime()) ? timestamp : null;
 
-  return <article
+  const body = <article
     className="coordination-message"
     aria-label={source ? `来自 ${source} 的协调消息` : "协调消息"}
   >
@@ -72,4 +73,7 @@ export function CoordinationMessage({ message }: { message: PiMessage }) {
       >{expanded ? "收起" : "展开全部"}</button>}
     </div>
   </article>;
-}
+  return reactRenderBenchmarkEnabled
+    ? <Profiler id="component:CoordinationMessage" onRender={recordReactRenderBenchmarkCommit}>{body}</Profiler>
+    : body;
+});

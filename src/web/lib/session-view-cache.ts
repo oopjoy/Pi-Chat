@@ -163,6 +163,9 @@ export class SessionViewCache {
     const snapshot: SessionViewSnapshot = {
       ...previous,
       ...view,
+      // An authoritative view omitting pendingPrompt confirms that the
+      // accepted-turn projection has reached JSONL; do not retain it in cache.
+      pendingPrompt: view.pendingPrompt,
       forkOrigin: view.forkOrigin,
       messages: reconciled.messages,
       messageTotal: Math.max(view.messageTotal + reconciled.pending.length, reconciled.messages.length),

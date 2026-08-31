@@ -553,13 +553,19 @@ test("resource reload clears Runtime overlays without discarding the New Compose
       setter?.call(textarea, "draft survives resource reload");
       textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "draft survives resource reload" }));
     });
+    assert.ok(dom.window.document.querySelector(".welcome"), "a local New draft keeps its welcome while text is being composed");
+    assert.ok(dom.window.document.querySelector(".welcome-mark"), "a local New draft keeps the Pi mark while text is being composed");
+    assert.ok(dom.window.document.querySelector(".draft-workspace"), "a local New draft keeps its workspace path while text is being composed");
     const source = FakeEventSource.instances.at(-1)!;
     await act(async () => source.emitPi({ type: "pi_chat_application_lifecycle", lifecycle: "resources-reloading" }));
     assert.equal(textarea.value, "draft survives resource reload");
     assert.match(dom.window.document.body.textContent || "", /正在更新配置并重载 Runtime/);
+    assert.equal(dom.window.document.querySelector(".welcome"), null, "maintenance status temporarily replaces the decorative welcome");
     await act(async () => source.emitPi({ type: "pi_chat_application_lifecycle", lifecycle: "idle" }));
     assert.equal(textarea.value, "draft survives resource reload");
-    assert.equal(dom.window.document.querySelector(".welcome"), null);
+    assert.ok(dom.window.document.querySelector(".welcome"), "the New welcome returns with the preserved draft after maintenance");
+    assert.ok(dom.window.document.querySelector(".welcome-mark"));
+    assert.ok(dom.window.document.querySelector(".draft-workspace"));
   } finally {
     await act(async () => root.unmount());
     restoreApi();

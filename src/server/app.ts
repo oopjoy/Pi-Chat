@@ -26,6 +26,7 @@ import type {
   ModelInfo,
   PiMessage,
   PiState,
+  PendingSteer,
   PrimaryRuntimeReadiness,
   PromptDelivery,
   PromptImage,
@@ -387,12 +388,25 @@ interface NativeSteeringSnapshot {
 /** Accepted native steers waiting for Pi consumption, scoped to one worker generation. */
 interface NativeSteeringAdmissions {
   generation: number;
-  items: Array<{ id: string; message: string; promptAt: number; imageChars: number }>;
+  items: Array<{
+    id: string;
+    message: string;
+    promptAt: number;
+    imageChars: number;
+    imageCount?: number;
+  }>;
 }
 
 interface ActivePromptDiagnostic {
   promptId: string;
   rpcGeneration: number;
+}
+
+interface PendingAcceptedPrompt {
+  id: string;
+  message: PiMessage;
+  expectedTurnTotal: number;
+  settings?: PromptSettingsSnapshot;
 }
 
 interface ActiveSessionRunTiming {
@@ -529,6 +543,8 @@ export class PiChatApp {
   private readonly runtimeIncidentIdsBySession = new Map<string, string>();
   /** Fresh accepted prompts win over JSONL mtime while a Runtime is alive. */
   private readonly lastUserPromptAtBySession = new Map<string, number>();
+  /** Accepted ordinary turns survive a browser reload until their JSONL row is visible. */
+  private readonly pendingAcceptedPromptsBySession = new Map<string, PendingAcceptedPrompt[]>();
   /** Preserve arrival order even when two local requests share one Date.now() millisecond. */
   private lastPromptOrderAt = 0;
   /** Authoritative mode of the bundled Gate extension in the Primary Runtime. */
@@ -556,6 +572,8 @@ export class PiChatApp {
     string,
     NativeSteeringAdmissions
   >();
+  /** Monotonic browser-facing revision for the native Steer projection. */
+  private readonly nativeSteeringProjectionRevisions = new Map<string, number>();
   /** Short-lived correlation from Pi's dequeue event to the initiating HTTP response. */
   private readonly nativeSteeringDequeueResults = new Map<
     string,
@@ -778,8 +796,8 @@ export class PiChatApp {
         broadcast: (event) => this.broadcast(event),
         publishSessionActivity: (sessionId) =>
           this.broadcastSessionActivity(sessionId),
-        onPrimaryPromptAccepted: (sessionId, promptAt) => {
-          this.recordUserPrompt(sessionId, promptAt);
+        onPrimaryPromptAccepted: (sessionId, promptAt, message, images, settings) => {
+          this.recordAcceptedPrompt(sessionId, promptAt, message, images, settings);
           this.warmPrimaryMessageSnapshot();
           this.broadcast({
             type: "pi_chat_sessions_changed",
@@ -787,8 +805,8 @@ export class PiChatApp {
             sessionId,
           });
         },
-        onSecondaryPromptAccepted: (runtime, promptAt) => {
-          this.recordUserPrompt(runtime.id, promptAt);
+        onSecondaryPromptAccepted: (runtime, promptAt, message, images, settings) => {
+          this.recordAcceptedPrompt(runtime.id, promptAt, message, images, settings);
           this.warmRuntimeMessageSnapshot(runtime);
           // Keep draftSession until agent_settled confirms JSONL has the user turn.
           // Mark prompted so sessionSummaries can inject a sidebar row immediately —
@@ -2459,14 +2477,40 @@ export class PiChatApp {
     this.pendingNativeSteeringBySession.delete(sessionId);
     this.nativeSteeringAdmissionsBySession.delete(sessionId);
     this.nativeSteeringResetAfterSettlement.delete(sessionId);
+    const revision = droppedCount > 0
+      ? this.advanceNativeSteeringProjection(sessionId)
+      : (this.nativeSteeringProjectionRevisions.get(sessionId) || 0);
     if (droppedCount > 0)
       this.broadcast({
         type: "pi_chat_native_steering_cleared",
         piChatSessionId: sessionId,
         reason,
         droppedCount,
+        pendingSteerRevision: revision,
       });
     return droppedCount;
+  }
+
+  private advanceNativeSteeringProjection(sessionId: string): number {
+    const revision = (this.nativeSteeringProjectionRevisions.get(sessionId) || 0) + 1;
+    this.nativeSteeringProjectionRevisions.set(sessionId, revision);
+    return revision;
+  }
+
+  private pendingSteerProjection(sessionId: string): {
+    items: PendingSteer[];
+    revision: number;
+  } {
+    const admissions = this.nativeSteeringAdmissionsBySession.get(sessionId);
+    return {
+      items: (admissions?.items || []).map((item) => ({
+        id: item.id,
+        message: item.message,
+        imageCount: item.imageCount || 0,
+        createdAt: item.promptAt,
+      })),
+      revision: this.nativeSteeringProjectionRevisions.get(sessionId) || 0,
+    };
   }
 
   private nativeSteeringMessageText(event: Record<string, unknown>): string {
@@ -2536,13 +2580,16 @@ export class PiChatApp {
       if (typeof oldest !== "string") break;
       this.nativeSteeringDequeueResults.delete(oldest);
     }
-    if (items.length)
+    if (items.length) {
+      const revision = this.advanceNativeSteeringProjection(sessionId);
       this.broadcast({
         type: "pi_chat_native_steering_dequeued",
         piChatRunEpoch: this.runEpoch,
         piChatSessionId: sessionId,
         ids: items.map((item) => item.id),
+        pendingSteerRevision: revision,
       });
+    }
     return items;
   }
 
@@ -2583,6 +2630,7 @@ export class PiChatApp {
       this.pendingNativeSteeringBySession.set(sessionId, snapshot);
     else this.pendingNativeSteeringBySession.delete(sessionId);
     this.nativeSteeringResetAfterSettlement.delete(sessionId);
+    this.advanceNativeSteeringProjection(sessionId);
     this.noteUserPrompt(sessionId, consumed.promptAt);
     return consumed.id;
   }
@@ -4058,6 +4106,126 @@ export class PiChatApp {
       runtime.lastUserPromptAt = Math.max(runtime.lastUserPromptAt || 0, next);
   }
 
+  private pendingPromptMessage(
+    id: string,
+    message: string,
+    images: PromptImage[],
+    promptAt: number,
+  ): PiMessage {
+    const content = images.length
+      ? [
+          ...(message ? [{ type: "text", text: message }] : []),
+          ...images.map((image) => ({
+            type: "image",
+            data: image.data,
+            mimeType: image.mimeType,
+          })),
+        ]
+      : message;
+    return {
+      role: "user",
+      content,
+      timestamp: promptAt,
+      piChatPendingMessageId: id,
+    };
+  }
+
+  private promptPayloadKey(message: PiMessage): string {
+    if (typeof message.content === "string") return JSON.stringify([["text", message.content]]);
+    if (!Array.isArray(message.content)) return "[]";
+    return JSON.stringify(message.content.map((block) =>
+      block.type === "image"
+        ? ["image", block.data || "", block.mimeType || ""]
+        : block.type === "text"
+          ? ["text", block.text || ""]
+          : [block.type, block.text || ""],
+    ));
+  }
+
+  private pendingPromptPersisted(
+    pending: PendingAcceptedPrompt,
+    messages: PiMessage[],
+  ): boolean {
+    const users = messages.filter((message) => message.role === "user");
+    if (!users.length) return false;
+    const expectedTotal = pending.expectedTurnTotal;
+    // Reconciliation is called with the full persisted branch, not the
+    // windowed browser projection. A smaller persisted turn count proves that
+    // this accepted prompt is still absent; never mistake an older identical
+    // prompt for the newer one.
+    if (expectedTotal > users.length) return false;
+    const positional = users[expectedTotal - 1];
+    return Boolean(
+      positional &&
+      this.promptPayloadKey(positional) === this.promptPayloadKey(pending.message),
+    );
+  }
+
+  private reconcilePendingAcceptedPrompts(
+    sessionId: string,
+    messages: PiMessage[] | null | undefined,
+  ): void {
+    if (!messages) return;
+    const pending = this.pendingAcceptedPromptsBySession.get(sessionId);
+    if (!pending?.length) return;
+    const remaining = pending.filter((item) => !this.pendingPromptPersisted(item, messages));
+    if (remaining.length) this.pendingAcceptedPromptsBySession.set(sessionId, remaining);
+    else this.pendingAcceptedPromptsBySession.delete(sessionId);
+  }
+
+  private pendingPromptForSession(sessionId: string): PendingAcceptedPrompt | undefined {
+    return this.pendingAcceptedPromptsBySession.get(sessionId)?.at(-1);
+  }
+
+  private stateWithPendingPromptSettings(
+    sessionId: string,
+    state: PiState,
+  ): PiState {
+    const pending = this.pendingPromptForSession(sessionId);
+    const settings = pending?.settings;
+    if (!settings) return state;
+    return {
+      ...state,
+      ...(settings.model
+        ? {
+            model: this.modelFromSessionSettings({
+              provider: settings.model.provider,
+              modelId: settings.model.modelId,
+            }),
+          }
+        : null),
+      ...(settings.thinkingLevel
+        ? { thinkingLevel: settings.thinkingLevel }
+        : null),
+    };
+  }
+
+  private recordAcceptedPrompt(
+    sessionId: string,
+    promptAt: number,
+    message: string,
+    images: PromptImage[],
+    settings?: PromptSettingsSnapshot,
+  ): void {
+    this.recordUserPrompt(sessionId, promptAt);
+    if (!sessionId) return;
+    const runtime = this.runtimePool.get(sessionId);
+    const persisted = sessionId === this.activeSessionId && this.lastPrimaryMessagesSessionId === sessionId
+      ? this.lastPrimaryMessages
+      : runtime?.messageSnapshot ||
+        this.options.sessions.cachedSnapshotForId?.(sessionId)?.messages ||
+        [];
+    const existing = this.pendingAcceptedPromptsBySession.get(sessionId) || [];
+    const id = randomUUID();
+    const pending: PendingAcceptedPrompt = {
+      id,
+      message: this.pendingPromptMessage(id, message, images, promptAt),
+      expectedTurnTotal: persisted.filter((item) => item.role === "user").length + existing.length + 1,
+      ...(settings ? { settings } : null),
+    };
+    this.pendingAcceptedPromptsBySession.set(sessionId, [...existing, pending]);
+  }
+
   private noteUserPrompt(sessionId: string, promptAt = this.now()): void {
     this.recordUserPrompt(sessionId, promptAt);
     // The sidebar needs to move at admission/queue time, never when assistant
@@ -4100,6 +4268,7 @@ export class PiChatApp {
             messages,
             runtime.pendingTerminalMessages,
           );
+          this.reconcilePendingAcceptedPrompts(runtime.id, messages);
           runtime.messageSnapshot = messages;
           runtime.pendingTerminalMessages = reconciled.pending;
           runtime.summarySnapshot =
@@ -4125,6 +4294,7 @@ export class PiChatApp {
               ? this.primaryPendingTerminalMessages
               : [];
           const reconciled = reconcilePersistedHistory(messages, terminalTail);
+          this.reconcilePendingAcceptedPrompts(sessionId, messages);
           this.lastPrimaryMessages = messages;
           this.primaryPendingTerminalMessages = reconciled.pending;
           this.lastPrimaryMessagesSessionId = sessionId;
@@ -4998,6 +5168,8 @@ export class PiChatApp {
       removeGatePreference: true,
     });
     this.lastUserPromptAtBySession.delete(id);
+    this.pendingAcceptedPromptsBySession.delete(id);
+    this.nativeSteeringProjectionRevisions.delete(id);
     this.runGenerationsBySession.delete(id);
     this.copyOutcomePendingSessionIds.delete(id);
     this.copyProjectionPendingSessionIds.delete(id);
@@ -5123,10 +5295,16 @@ export class PiChatApp {
         : []
       : runtime!.pendingTerminalMessages;
     const messages = reconcilePersistedHistory(persisted || [], tail).messages;
+    this.reconcilePendingAcceptedPrompts(id, persisted || []);
+    const pendingPrompt = this.pendingPromptForSession(id);
+    const pendingSteerProjection = this.pendingSteerProjection(id);
     const windowed = messageWindow(messages, turnLimit);
-    const state = primary
-      ? this.lastPrimaryState
-      : runtime!.lastState || { model: null, isStreaming: runtime!.running };
+    const state = this.stateWithPendingPromptSettings(
+      id,
+      primary
+        ? this.lastPrimaryState
+        : runtime!.lastState || { model: null, isStreaming: runtime!.running },
+    );
     const streaming = primary
       ? this.primaryTurnActive()
       : this.runtimeTurnActive(runtime!) || runtime!.dispatching;
@@ -5170,6 +5348,13 @@ export class PiChatApp {
           : undefined,
       gateMode: primary ? this.primaryGateMode : runtime!.gateMode,
       pendingExtensionRequest: this.pendingRequestForSession(id),
+      ...(pendingPrompt ? { pendingPrompt } : null),
+      ...(this.runtimePool.get(id) || id === this.activeSessionId
+        ? {
+            pendingSteers: pendingSteerProjection.items,
+            pendingSteerRevision: pendingSteerProjection.revision,
+          }
+        : null),
       historyPending: !persisted,
       reconcilePending:
         !persisted ||
@@ -5491,6 +5676,7 @@ export class PiChatApp {
         }
       }
       if (!messages) throw new Error("无法读取会话消息");
+      this.reconcilePendingAcceptedPrompts(id, persistedMessages || messages);
       if (persistedMessages) {
         const reconciled = reconcilePersistedHistory(
           persistedMessages,
@@ -5514,6 +5700,8 @@ export class PiChatApp {
         }
         messages = reconciled.messages;
       }
+      const pendingPrompt = this.pendingPromptForSession(id);
+      const pendingSteerProjection = this.pendingSteerProjection(id);
       const windowed = messageWindow(messages, turnLimit);
       const stats = statsResponse
         ? await this.statsForSession(id, statsResponse)
@@ -5550,7 +5738,7 @@ export class PiChatApp {
           activity: this.sessionActivity(id),
         },
         state: this.stateWithFastMode(id, {
-          ...liveState,
+          ...this.stateWithPendingPromptSettings(id, liveState),
           isStreaming: presentationBusy || liveState.isStreaming,
         }),
         messages: windowed.messages,
@@ -5576,6 +5764,9 @@ export class PiChatApp {
             ? this.primaryGateMode
             : (runtime as SecondaryRuntime).gateMode,
         pendingExtensionRequest: this.pendingRequestForSession(id),
+        ...(pendingPrompt ? { pendingPrompt } : null),
+        pendingSteers: pendingSteerProjection.items,
+        pendingSteerRevision: pendingSteerProjection.revision,
         ...this.controlState(id, clientId),
       };
     }
@@ -5838,6 +6029,12 @@ export class PiChatApp {
     const availableModels = this.lastAvailableModels.length
       ? this.lastAvailableModels
       : this.startupModels;
+    this.reconcilePendingAcceptedPrompts(
+      this.activeSessionId,
+      messages || [],
+    );
+    const pendingPrompt = this.pendingPromptForSession(this.activeSessionId);
+    const pendingSteerProjection = this.pendingSteerProjection(this.activeSessionId);
     const windowedMessages = messageWindow(messages || []);
     const sidebar = this.sidebarSessions(
       await this.cachedSessionList(activeSessionPath),
@@ -5865,7 +6062,13 @@ export class PiChatApp {
       buildIdentity: this.buildIdentity,
       ...(this.options.piVersion ? { piVersion: this.options.piVersion } : null),
       ...(forkOrigin ? { forkOrigin } : null),
-      state: this.stateWithFastMode(this.activeSessionId, state),
+      state: this.stateWithFastMode(
+        this.activeSessionId,
+        this.stateWithPendingPromptSettings(this.activeSessionId, state),
+      ),
+      ...(pendingPrompt ? { pendingPrompt } : null),
+      pendingSteers: pendingSteerProjection.items,
+      pendingSteerRevision: pendingSteerProjection.revision,
       messages: windowedMessages.messages,
       messageTotal: windowedMessages.total,
       turnTotal: windowedMessages.turns,
@@ -6761,11 +6964,13 @@ export class PiChatApp {
             message: steeringMessage,
             promptAt,
             imageChars: incomingImageChars,
+            imageCount: images.length,
           });
           this.nativeSteeringAdmissionsBySession.set(
             requestedSessionId,
             currentAdmissions,
           );
+          this.advanceNativeSteeringProjection(requestedSessionId);
           let deliveryUncertain = false;
           try {
             await targetRpc.send(
@@ -6799,6 +7004,7 @@ export class PiChatApp {
                   this.nativeSteeringAdmissionsBySession.delete(
                     requestedSessionId,
                   );
+                this.advanceNativeSteeringProjection(requestedSessionId);
               }
               throw error;
             }
@@ -7130,6 +7336,9 @@ export class PiChatApp {
               this.scheduler.notifySecondaryPromptAccepted(
                 secondaryRuntime,
                 promptAt,
+                message,
+                images,
+                requestedSettings,
               );
               json(response, 202, {
                 accepted: true,
@@ -7141,6 +7350,9 @@ export class PiChatApp {
             this.scheduler.notifySecondaryPromptAccepted(
               secondaryRuntime,
               promptAt,
+              message,
+              images,
+              requestedSettings,
             );
             json(response, 202, { accepted: true, queued: false });
           } catch (error) {
@@ -7962,7 +8174,13 @@ export class PiChatApp {
               this.noteUserPrompt(runtime.id, promptAt);
               await this.finalizePersistedDraft(runtime);
             } else {
-              this.scheduler.notifySecondaryPromptAccepted(runtime, promptAt);
+              this.scheduler.notifySecondaryPromptAccepted(
+                runtime,
+                promptAt,
+                initialMessage,
+                initialImages,
+                initialSettings,
+              );
             }
           } catch (error) {
             if (error instanceof RpcRequestTimeoutError && error.outcomeUnknown) {
@@ -7972,7 +8190,13 @@ export class PiChatApp {
               deliveryUncertain = true;
               if (promptId)
                 this.tracePrompt("delivery-uncertain", runtime.id, promptId);
-              this.scheduler.notifySecondaryPromptAccepted(runtime, promptAt);
+              this.scheduler.notifySecondaryPromptAccepted(
+                runtime,
+                promptAt,
+                initialMessage,
+                initialImages,
+                initialSettings,
+              );
             } else {
               runtime.running = false;
               this.broadcastSessionActivity(runtime.id);

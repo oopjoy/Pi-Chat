@@ -19,6 +19,7 @@ import {
   aggregateBrowserFluency,
   publicFixtureMetadata,
   type BrowserFluencySample,
+  type ReactRenderBenchmarkSample,
 } from "./lib/browser-fluency.mjs";
 
 const projectRoot = resolve(import.meta.dirname, "..");
@@ -484,6 +485,64 @@ async function finishSample(options: {
       },
       anchorErrorCssPx: anchorError,
       anchorAbsoluteErrorCssPx: anchorError === null ? null : Math.abs(anchorError),
+      reactRender: (() => {
+        const commits = (benchmarkWindow as Window & {
+          __piChatReactRenderBenchmark?: { commits?: Array<{
+            id?: unknown;
+            phase?: unknown;
+            actualDuration?: unknown;
+            baseDuration?: unknown;
+            commitTime?: unknown;
+          }> };
+        }).__piChatReactRenderBenchmark?.commits;
+        const empty: ReactRenderBenchmarkSample = {
+          supported: false,
+          commitCount: 0,
+          actualDurationMs: 0,
+          baseDurationMs: 0,
+          byPhase: { mount: 0, update: 0, "nested-update": 0 },
+          bySurface: {},
+        };
+        if (!Array.isArray(commits)) return empty;
+        const selected = commits.filter((commit) =>
+          typeof commit.commitTime === "number"
+          && Number.isFinite(commit.commitTime)
+          && commit.commitTime >= state.start
+          && commit.commitTime <= input.settledAt
+          && typeof commit.id === "string"
+          && (commit.phase === "mount" || commit.phase === "update" || commit.phase === "nested-update")
+          && typeof commit.actualDuration === "number"
+          && Number.isFinite(commit.actualDuration)
+          && typeof commit.baseDuration === "number"
+          && Number.isFinite(commit.baseDuration),
+        ) as Array<{
+          id: string;
+          phase: "mount" | "update" | "nested-update";
+          actualDuration: number;
+          baseDuration: number;
+        }>;
+        const byPhase = { mount: 0, update: 0, "nested-update": 0 };
+        const bySurface: ReactRenderBenchmarkSample["bySurface"] = {};
+        let actualDurationMs = 0;
+        let baseDurationMs = 0;
+        for (const commit of selected) {
+          byPhase[commit.phase] += 1;
+          actualDurationMs += commit.actualDuration;
+          baseDurationMs += commit.baseDuration;
+          const surface = bySurface[commit.id] ??= { commits: 0, actualDurationMs: 0, baseDurationMs: 0 };
+          surface.commits += 1;
+          surface.actualDurationMs += commit.actualDuration;
+          surface.baseDurationMs += commit.baseDuration;
+        }
+        return {
+          supported: true,
+          commitCount: selected.length,
+          actualDurationMs,
+          baseDurationMs,
+          byPhase,
+          bySurface,
+        };
+      })(),
     };
   }, input);
 }
@@ -750,6 +809,7 @@ export async function runBrowserFluencyBenchmark(options: {
         longTasks: "Renderer Long Task entries overlapping the action window; explicit unsupported values remain null.",
         heap: "Chromium renderer used JS heap from performance.memory before and after the action; not total browser or application memory.",
         anchorErrorCssPx: "Signed change in viewport-relative top of the same pre-existing first visible user message after load-earlier; absolute value is also reported.",
+        reactRender: "Optional maintenance-only React Profiler commits overlapping the action window; unsupported in ordinary production builds.",
       },
       samples,
       summaries: aggregateBrowserFluency(samples),

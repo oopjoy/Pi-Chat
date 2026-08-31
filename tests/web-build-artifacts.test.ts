@@ -61,6 +61,12 @@ test("production web build emits independently cacheable React, Markdown and KaT
     const assets = await readdir(join(distRoot, "web", "assets"));
     for (const name of ["react", "markdown", "katex", "EditToolDiff"])
       assert.ok(assets.some((asset) => asset.startsWith(`${name}-`) && asset.endsWith(".js")), `missing ${name} production chunk`);
+    const javascript = await Promise.all(
+      assets.filter((asset) => asset.endsWith(".js"))
+        .map(async (asset) => readFile(join(distRoot, "web", "assets", asset), "utf8")),
+    );
+    assert.ok(javascript.every((source) => !source.includes("piChatReactRenderBenchmark")), "production bundle contains the React benchmark sink");
+    assert.ok(javascript.every((source) => !source.includes("conversation-item:message")), "production bundle contains benchmark-only item IDs");
   } finally {
     await rm(distRoot, { recursive: true, force: true });
   }

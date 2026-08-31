@@ -6,6 +6,15 @@ export interface DescriptiveSummary {
   max: number;
 }
 
+export interface ReactRenderBenchmarkSample {
+  supported: boolean;
+  commitCount: number;
+  actualDurationMs: number;
+  baseDurationMs: number;
+  byPhase: Record<"mount" | "update" | "nested-update", number>;
+  bySurface: Record<string, { commits: number; actualDurationMs: number; baseDurationMs: number }>;
+}
+
 export interface BrowserFluencySample {
   iteration: number;
   scenario: "cold-first-pane" | "hot-switch" | "load-earlier";
@@ -29,6 +38,7 @@ export interface BrowserFluencySample {
   };
   anchorErrorCssPx: number | null;
   anchorAbsoluteErrorCssPx: number | null;
+  reactRender?: ReactRenderBenchmarkSample;
 }
 
 function round(value: number): number {
