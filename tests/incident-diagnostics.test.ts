@@ -15,7 +15,8 @@ const expectedKeys = [
   "rpcGeneration", "rpcRequestId", "childPid", "operation",
   "lifecycle", "queueLength", "controlState", "outcome",
   "durationMs", "errorCode", "startupSpanId", "startupAttempt",
-  "startupMode", "startupBackend", "startupPhase",
+  "startupMode", "startupBackend", "startupPhase", "extensionOrdinal",
+  "extensionImportDurationMs", "extensionFactoryDurationMs",
 ].sort();
 
 async function fixture(maximumBytes = 5 * 1024 * 1024) {
@@ -57,6 +58,9 @@ test("incident diagnostics writes fixed metadata-only JSONL", async () => {
       startupMode: "recovery",
       startupBackend: "bundle",
       startupPhase: "transport-ready",
+      extensionOrdinal: 7,
+      extensionImportDurationMs: 1234,
+      extensionFactoryDurationMs: 56,
     });
     diagnostics.record({
       sessionId: session,
@@ -84,6 +88,9 @@ test("incident diagnostics writes fixed metadata-only JSONL", async () => {
     assert.equal(records[0].startupMode, "recovery");
     assert.equal(records[0].startupBackend, "bundle");
     assert.equal(records[0].startupPhase, "transport-ready");
+    assert.equal(records[0].extensionOrdinal, 7);
+    assert.equal(records[0].extensionImportDurationMs, 1234);
+    assert.equal(records[0].extensionFactoryDurationMs, 56);
   } finally {
     await diagnostics.close();
     await rm(root, { recursive: true, force: true });

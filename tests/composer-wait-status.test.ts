@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { composerWaitStatus } from "../src/web/lib/composer-wait-status.ts";
+import {
+  composerWaitStatus,
+  runtimePreparationForDisplay,
+} from "../src/web/lib/composer-wait-status.ts";
 
 const status = (overrides: Partial<Parameters<typeof composerWaitStatus>[0]> = {}) =>
   composerWaitStatus({
@@ -12,6 +15,74 @@ const status = (overrides: Partial<Parameters<typeof composerWaitStatus>[0]> = {
     subagentTargetUnavailable: false,
     ...overrides,
   });
+
+test("Runtime preparation display distinguishes cold capability from active admission", () => {
+  assert.equal(
+    runtimePreparationForDisplay({
+      localDraft: false,
+      runtimeStatus: "active",
+      warming: false,
+      primaryStatus: "ready",
+    }),
+    false,
+  );
+  assert.equal(
+    runtimePreparationForDisplay({
+      localDraft: false,
+      runtimeStatus: "active",
+      warming: true,
+      primaryStatus: "ready",
+    }),
+    true,
+  );
+  assert.equal(
+    runtimePreparationForDisplay({
+      localDraft: false,
+      runtimeStatus: "restoring",
+      warming: false,
+      primaryStatus: "ready",
+    }),
+    true,
+  );
+  assert.equal(
+    runtimePreparationForDisplay({
+      localDraft: true,
+      runtimeStatus: "draft",
+      warming: false,
+      primaryStatus: "starting",
+    }),
+    true,
+  );
+  assert.equal(
+    runtimePreparationForDisplay({
+      localDraft: false,
+      runtimeStatus: "active",
+      warming: false,
+      primaryStatus: "ready",
+      draftSubmissionBusy: true,
+    }),
+    false,
+  );
+  assert.equal(
+    runtimePreparationForDisplay({
+      localDraft: true,
+      runtimeStatus: "draft",
+      warming: false,
+      primaryStatus: "ready",
+      draftSubmissionBusy: true,
+    }),
+    true,
+  );
+  assert.equal(
+    runtimePreparationForDisplay({
+      localDraft: true,
+      runtimeStatus: "draft",
+      warming: false,
+      primaryStatus: "ready",
+    }),
+    false,
+  );
+});
 
 test("Composer wait status explains each retained-submission boundary", () => {
   assert.match(status({ viewSwitching: true }), /等待会话切换完成后自动发送/);

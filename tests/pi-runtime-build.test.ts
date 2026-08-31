@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
 import test from "node:test";
 import { PiRpcClient, rpcData } from "../src/server/rpc-client";
+import type { IncidentDiagnostics, IncidentFields } from "../src/server/incident-diagnostics";
 
 const execFile = promisify(execFileCallback);
 const projectRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -112,10 +113,22 @@ export default function bundleParity(pi: any) {
   });
 }
 `, "utf8");
+    const startupRecords: IncidentFields[] = [];
+    const diagnostics: IncidentDiagnostics = {
+      directory: null,
+      hostId: "test",
+      record(fields) {
+        startupRecords.push(fields);
+        return { incidentId: "PC-TEST0001" };
+      },
+      flush: async () => {},
+      close: async () => {},
+    };
     const client = new PiRpcClient({
       cwd: projectRoot,
       piEntry: join(runtimeRoot, "package", "dist", "rpc-entry.bundle.mjs"),
       startupProbe: join(projectRoot, "resources", "runtime", "pi-chat-startup-probe.mjs"),
+      diagnostics,
       childEnvironment: {
         PI_CHAT_BUNDLED_RUNTIME: "1",
         PI_CODING_AGENT_DIR: agentDir,
@@ -139,6 +152,15 @@ export default function bundleParity(pi: any) {
       await client.start();
       const state = rpcData<{ isStreaming: boolean }>(await client.send({ type: "get_state" }));
       assert.equal(state.isStreaming, false);
+      const importEnds = startupRecords.filter((record) => record.startupPhase === "extension-import-end");
+      const factoryEnds = startupRecords.filter((record) => record.startupPhase === "extension-factory-end");
+      assert.ok(importEnds.length >= 2, "Bundle startup should report each imported Extension ordinal");
+      assert.ok(factoryEnds.length >= 2, "Bundle startup should report each Extension factory ordinal");
+      assert.ok(importEnds.every((record) => (record.extensionOrdinal ?? 0) >= 1));
+      assert.ok(importEnds.every((record) => (record.extensionImportDurationMs ?? -1) >= 0));
+      assert.ok(factoryEnds.every((record) => (record.extensionFactoryDurationMs ?? -1) >= 0));
+      const slowStartup = startupRecords.filter((record) => record.startupPhase === "startup-slow-observed");
+      assert.equal(slowStartup.length, 0, "the fixture Bundle must not trigger the slow-start watchdog");
       const dequeued = rpcData<{ steering: string[]; followUp: string[] }>(await client.send({
         type: "dequeue",
         dequeueId: "44444444-4444-4444-8444-444444444444",
