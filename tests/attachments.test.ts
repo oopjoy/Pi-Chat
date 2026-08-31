@@ -18,7 +18,9 @@ import { idForPath, type SessionIndex } from "../src/server/session-index";
 import type { ResourceManager } from "../src/server/resource-manager";
 import {
   commandMatches,
+  clipboardWindowsPaths,
   fileReferences,
+  isWindowsAbsolutePath,
   promptImageAdditionError,
   promptImagesByteLength,
   windowsPathsFromText,
@@ -86,6 +88,7 @@ test("file attachments stay drive-only while workspaces accept canonical WSL UNC
     "D:\\资料\\文档.pdf",
   ]);
   assert.deepEqual(parsePickerOutput('"C:\\\\single.txt"'), ["C:\\single.txt"]);
+  assert.deepEqual(parsePickerOutput(JSON.stringify(["C:\\Users\\me\\bad\nname.txt", "relative.txt", "C:\\Users\\me\\safe.txt"])), ["C:\\Users\\me\\safe.txt"]);
   assert.deepEqual(parsePickerOutput(JSON.stringify([wslWorkspace])), []);
   assert.equal(isWindowsWorkspacePath(wslWorkspace), true);
   assert.equal(isWindowsWorkspacePath("\\\\wsl$\\Ubuntu\\home\\brave\\projects"), true);
@@ -99,12 +102,40 @@ test("file attachments stay drive-only while workspaces accept canonical WSL UNC
   assert.equal(isWindowsWorkspacePath("\\\\wsl.localhost\\"), false);
 });
 
-test("attachment path helpers preserve Windows absolute paths", () => {
+test("attachment path helpers preserve Windows absolute paths without prompt boilerplate", () => {
   assert.deepEqual(windowsPathsFromText('"C:\\Users\\me\\paper.pdf"\nfile:///D:/notes/data.csv\nrelative.txt'), [
     "C:\\Users\\me\\paper.pdf",
     "D:\\notes\\data.csv",
   ]);
-  assert.equal(fileReferences(["C:\\Users\\me\\paper.pdf"]), "请按需使用工具读取以下本地文件：\n- `C:\\Users\\me\\paper.pdf`");
+  assert.equal(fileReferences(["C:\\Users\\me\\paper.pdf"]), "C:\\Users\\me\\paper.pdf");
+  assert.equal(fileReferences(["C:\\Users\\me\\My Notes\\paper.pdf"]), '"C:\\Users\\me\\My Notes\\paper.pdf"');
+  assert.equal(isWindowsAbsolutePath("C:\\Users\\me\\paper.pdf"), true);
+  assert.equal(isWindowsAbsolutePath("C:\\Users\\me\\paper.pdf\nmore"), false);
+  assert.equal(fileReferences(["relative.txt", "/tmp/not-a-Windows-path"]), "");
+  assert.deepEqual(windowsPathsFromText("C:\\Users\\me\\paper.txt and ordinary prose"), []);
+  assert.equal(
+    clipboardWindowsPaths(
+      "# Windows URI list\r\nfile:///C:/Users/me/My%20Notes/paper.pdf",
+      "C:\\Users\\me\\My Notes\\paper.pdf",
+    )[0],
+    "C:\\Users\\me\\My Notes\\paper.pdf",
+  );
+  assert.deepEqual(
+    clipboardWindowsPaths("# comment only", '"C:\\Users\\me\\paper.pdf"'),
+    ["C:\\Users\\me\\paper.pdf"],
+  );
+  assert.deepEqual(clipboardWindowsPaths("file://attacker/C:/Users/me/secret.txt", ""), []);
+  assert.deepEqual(clipboardWindowsPaths("file://localhost/C:/Users/me/local.txt", ""), ["C:\\Users\\me\\local.txt"]);
+  assert.deepEqual(clipboardWindowsPaths("file://user:pass@localhost/C:/Users/me/secret.txt", ""), []);
+  assert.deepEqual(clipboardWindowsPaths("file://@localhost/C:/Users/me/secret.txt", ""), []);
+  assert.deepEqual(clipboardWindowsPaths("file://:@localhost/C:/Users/me/secret.txt", ""), []);
+  assert.deepEqual(clipboardWindowsPaths("file://localhost:8080/C:/Users/me/secret.txt", ""), []);
+  assert.deepEqual(clipboardWindowsPaths("file://localhost:/C:/Users/me/secret.txt", ""), []);
+  assert.deepEqual(clipboardWindowsPaths("file:///C:/Users/me/file.txt?remote=1", ""), []);
+  assert.deepEqual(clipboardWindowsPaths("file:///C:/Users/me/file.txt?", ""), []);
+  assert.deepEqual(clipboardWindowsPaths("file:///C:/Users/me/file.txt#fragment", ""), []);
+  assert.deepEqual(clipboardWindowsPaths("file:///C:/Users/me/file.txt#", ""), []);
+  assert.deepEqual(clipboardWindowsPaths("file:///C:/Users/me/a%0Aname.txt", ""), []);
 });
 
 test("slash command matching prioritizes prefixes and closes after arguments begin", () => {

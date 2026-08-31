@@ -96,6 +96,71 @@ test("Escape closes the attachment menu and restores focus to its trigger", asyn
   }
 });
 
+test("Explorer path paste updates the Composer synchronously without the clipboard bridge", async () => {
+  const { dom } = installAppDom();
+  let fallbackReads = 0;
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(
+      ChatInput,
+      {
+        ...chatInputProps(() => {}),
+        onReadClipboardFiles: async () => {
+          fallbackReads += 1;
+          return [];
+        },
+      },
+    )));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    const event = new dom.window.Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "clipboardData", {
+      value: {
+        items: [],
+        types: ["text/uri-list", "text/plain"],
+        getData: (type: string) => type === "text/uri-list"
+          ? "# Windows URI list\r\nfile:///C:/Users/me/My%20Notes/paper.pdf"
+          : "C:\\Users\\me\\My Notes\\paper.pdf",
+      },
+    });
+    await act(async () => textarea.dispatchEvent(event));
+    assert.equal(textarea.value, '"C:\\Users\\me\\My Notes\\paper.pdf"');
+    assert.equal(fallbackReads, 0);
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+test("a delayed clipboard path result cannot enter a newer Composer partition", async () => {
+  const { dom } = installAppDom();
+  let resolvePaths: ((paths: string[]) => void) | undefined;
+  const pendingPaths = new Promise<string[]>((resolve) => { resolvePaths = resolve; });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  const props = {
+    ...chatInputProps(() => {}),
+    draftKey: { kind: "session" as const, sessionId: "session-a" },
+    submissionScope: "session:session-a",
+    onReadClipboardFiles: async () => pendingPaths,
+  };
+  try {
+    await act(async () => root.render(createElement(ChatInput, props)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    const event = new dom.window.Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "clipboardData", {
+      value: { items: [], types: ["Files"], getData: () => "" },
+    });
+    await act(async () => textarea.dispatchEvent(event));
+    await act(async () => root.render(createElement(ChatInput, {
+      ...props,
+      draftKey: { kind: "session" as const, sessionId: "session-b" },
+      submissionScope: "session:session-b",
+    })));
+    await act(async () => resolvePaths?.(["C:\\Users\\me\\delayed.txt"]));
+    assert.equal(dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")?.value, "");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
 test("overlapping image additions recheck the latest attachment count before commit", async () => {
   const { dom } = installAppDom();
   Object.assign(globalThis, { FileReader: dom.window.FileReader });
