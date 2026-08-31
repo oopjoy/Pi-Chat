@@ -54,6 +54,23 @@ function restoreGlobals(snapshot: DescriptorSnapshot): void {
   }
 }
 
+export async function waitForDomSelector<T extends Element>(
+  document: Document,
+  selector: string,
+  timeoutMs = 5_000,
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() <= deadline) {
+    const element = document.querySelector<T>(selector);
+    if (element) return element;
+    await new Promise<void>((resolve) => {
+      const timer = document.defaultView?.setTimeout(resolve, 10);
+      if (timer === undefined) setTimeout(resolve, 10);
+    });
+  }
+  throw new Error(`Timed out waiting for DOM selector: ${selector}`);
+}
+
 export function installAppDom(): AppDomFixture {
   const snapshot = snapshotGlobals();
   const dom = new JSDOM(

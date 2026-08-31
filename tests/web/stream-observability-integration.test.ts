@@ -7,7 +7,7 @@ import {
   activeSessionId,
 } from "../fixtures/app-bootstrap";
 import { captureApiSnapshot } from "../helpers/api-stub";
-import { installAppDom } from "../helpers/app-dom";
+import { installAppDom, waitForDomSelector } from "../helpers/app-dom";
 
 const OFFSCREEN_SESSION_ID = "fedcba9876543210abcd";
 
@@ -766,7 +766,10 @@ test("diagnostic export checkpoints an active browser stream only once per count
         piChatSessionId: activeSessionId,
         piChatRunGeneration: 44,
       });
-      source.emitPi({
+      await Promise.resolve();
+    });
+    await act(async () => {
+      (FakeEventSource.instances.at(-1) || source).emitPi({
         type: "message_update",
         piChatSessionId: activeSessionId,
         piChatRunGeneration: 44,
@@ -774,20 +777,28 @@ test("diagnostic export checkpoints an active browser stream only once per count
       });
       await Promise.resolve();
     });
-    const button = (label: string) => [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
-      .find((candidate) => candidate.textContent?.trim() === label);
     await act(async () => {
       dom.window.document.querySelector<HTMLButtonElement>('[aria-label="打开设置"]')?.click();
       await Promise.resolve();
     });
-    await act(async () => button("关于")?.click());
+    await waitForDomSelector(dom.window.document, "#pi-chat-settings-dialog");
+    const aboutTab = [...dom.window.document.querySelectorAll<HTMLButtonElement>(
+      ".settings-nav-tabs button",
+    )].find((candidate) => candidate.textContent?.trim() === "关于");
+    assert.ok(aboutTab, "the About settings tab must be available after the panel loads");
+    await act(async () => aboutTab.click());
+    await waitForDomSelector(dom.window.document, ".about-panel");
+    const exportButton = await waitForDomSelector<HTMLButtonElement>(
+      dom.window.document,
+      ".diagnostics-actions button",
+    );
     await act(async () => {
-      button("导出最近五分钟诊断")?.click();
+      exportButton.click();
       await Promise.resolve();
       await Promise.resolve();
     });
     await act(async () => {
-      button("导出最近五分钟诊断")?.click();
+      exportButton.click();
       await Promise.resolve();
       await Promise.resolve();
     });

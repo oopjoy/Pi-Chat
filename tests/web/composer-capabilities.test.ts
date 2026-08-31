@@ -4,7 +4,7 @@ import { act, createElement, StrictMode } from "react";
 import { LOCAL_COORDINATION_ROLE, type BootstrapData, type SessionViewData } from "../../src/shared/types";
 import { activeSessionId as activeId, createBootstrapFixture, createSessionViewFixture } from "../fixtures/app-bootstrap";
 import { captureApiSnapshot } from "../helpers/api-stub";
-import { installAppDom as installDom } from "../helpers/app-dom";
+import { installAppDom as installDom, waitForDomSelector } from "../helpers/app-dom";
 
 let bootstrap: BootstrapData;
 let draftView: SessionViewData;
@@ -2575,7 +2575,7 @@ test("conversation controls live in the composer while settings moves to the top
       "pi-chat-settings-dialog",
     );
     await act(async () => settings.click());
-    assert.ok(dom.window.document.querySelector("#pi-chat-settings-dialog"));
+    await waitForDomSelector(dom.window.document, "#pi-chat-settings-dialog");
     assert.equal(settings.getAttribute("aria-expanded"), "true");
     assert.equal(settings.getAttribute("aria-label"), "关闭设置");
   } finally {

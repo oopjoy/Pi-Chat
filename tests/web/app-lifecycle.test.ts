@@ -4,7 +4,7 @@ import { act, createElement } from "react";
 import type { BootstrapData, SessionViewData } from "../../src/shared/types";
 import { activeSessionId as activeId, createBootstrapFixture, createSessionViewFixture } from "../fixtures/app-bootstrap";
 import { captureApiSnapshot } from "../helpers/api-stub";
-import { installAppDom as installDom } from "../helpers/app-dom";
+import { installAppDom as installDom, waitForDomSelector } from "../helpers/app-dom";
 
 let bootstrap: BootstrapData;
 let draftView: SessionViewData;
@@ -310,13 +310,15 @@ test("a build mismatch blocks ordinary mutations but preserves server-guarded li
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     assert.equal(restartCalls, 1);
-    const settings =
-      dom.window.document.querySelector<HTMLButtonElement>(".topbar-settings")!;
+    const settings = await waitForDomSelector<HTMLButtonElement>(
+      dom.window.document,
+      ".topbar-settings",
+    );
     await act(async () => settings.click());
-    const workspacePicker =
-      dom.window.document.querySelector<HTMLButtonElement>(
-        "button[aria-label='选择默认工作路径']",
-      )!;
+    const workspacePicker = await waitForDomSelector<HTMLButtonElement>(
+      dom.window.document,
+      "button[aria-label='选择默认工作路径']",
+    );
     assert.equal(
       workspacePicker.disabled,
       true,

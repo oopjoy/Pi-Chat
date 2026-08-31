@@ -103,6 +103,37 @@ test("an EventSource from an earlier generation cannot deliver queued callbacks 
   }
 });
 
+test("handler updates do not recreate EventSource or drop adjacent frames", async () => {
+  const { dom, FakeEventSource } = installAppDom();
+  const { createRoot } = await import("react-dom/client");
+  const received: string[] = [];
+  const url = () => "/api/events";
+  function Probe({ version }: { version: number }) {
+    usePiEventSource({
+      enabled: true,
+      generation: 1,
+      url,
+      onReady: () => undefined,
+      onPi: () => received.push(`v${version}`),
+      onError: () => undefined,
+      onOversized: () => undefined,
+    });
+    return null;
+  }
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(Probe, { version: 1 })));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => root.render(createElement(Probe, { version: 2 })));
+    assert.equal(FakeEventSource.instances.length, 1);
+    source.emitPi({ type: "message_update", message: { role: "assistant", content: "one" } });
+    source.emitPi({ type: "message_update", message: { role: "assistant", content: "two" } });
+    assert.deepEqual(received, ["v2", "v2"]);
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
 test("large terminal frames retain appended Session diagnostic metadata", () => {
   const frame = diagnosticFrame(JSON.stringify({
     type: "message_end",

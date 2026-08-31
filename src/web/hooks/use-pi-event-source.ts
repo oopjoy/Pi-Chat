@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { isHighFrequencyStateDiagnosticEventType } from "../../shared/state-diagnostics";
 import { recordBrowserStateDiagnostic } from "../lib/state-diagnostics";
 
@@ -52,6 +52,14 @@ export function diagnosticFrame(data: unknown): {
 }
 
 export function usePiEventSource({ enabled, generation = 0, url, onReady, onPi, onError, onOversized }: PiEventSourceHandlers): void {
+  // App event handlers intentionally depend on pane/application state and may
+  // change on every streamed frame. Keep the transport listener stable so a
+  // React commit cannot close/reopen EventSource between two adjacent frames.
+  // The generation/enabled/url effect below remains the only reconnection
+  // authority; handler refs only select the newest callback.
+  const handlersRef = useRef({ onReady, onPi, onError, onOversized });
+  handlersRef.current = { onReady, onPi, onError, onOversized };
+
   useEffect(() => {
     if (!enabled) return;
     const source = new EventSource(url());
@@ -64,7 +72,7 @@ export function usePiEventSource({ enabled, generation = 0, url, onReady, onPi, 
         runGeneration: frame.runGeneration,
         details: { channel: "ready", eventType: frame.eventType, size: frame.size },
       });
-      onReady(event, source);
+      handlersRef.current.onReady(event, source);
     };
     const pi = (event: Event) => {
       if (!active) return;
@@ -77,8 +85,8 @@ export function usePiEventSource({ enabled, generation = 0, url, onReady, onPi, 
           details: { channel: "pi", eventType: frame.eventType, size: frame.size },
         });
       if (frame.eventType === "tool_execution_update") return;
-      if (isOversizedEventSourceFrame(data)) onOversized(source, data.length);
-      else onPi(event, source);
+      if (isOversizedEventSourceFrame(data)) handlersRef.current.onOversized(source, data.length);
+      else handlersRef.current.onPi(event, source);
     };
     source.addEventListener("ready", ready);
     source.addEventListener("pi", pi);
@@ -87,7 +95,7 @@ export function usePiEventSource({ enabled, generation = 0, url, onReady, onPi, 
       recordBrowserStateDiagnostic("sse", "error", {
         details: { readyState: source.readyState },
       });
-      onError(source);
+      handlersRef.current.onError(source);
     };
     return () => {
       active = false;
@@ -96,5 +104,5 @@ export function usePiEventSource({ enabled, generation = 0, url, onReady, onPi, 
       source.onerror = null;
       source.close();
     };
-  }, [enabled, generation, onError, onOversized, onPi, onReady, url]);
+  }, [enabled, generation, url]);
 }

@@ -1,47 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { act, createElement } from "react";
-import { JSDOM } from "jsdom";
 import type { BootstrapData, SessionViewData } from "../src/shared/types";
+import { installAppDom, waitForDomSelector } from "./helpers/app-dom";
 
 function installDom() {
-  const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", { url: "http://127.0.0.1:30170/" });
-  Object.assign(globalThis, {
-    window: dom.window,
-    document: dom.window.document,
-    Node: dom.window.Node,
-    HTMLElement: dom.window.HTMLElement,
-    HTMLTextAreaElement: dom.window.HTMLTextAreaElement,
-    Event: dom.window.Event,
-    MouseEvent: dom.window.MouseEvent,
-    InputEvent: dom.window.InputEvent,
-    KeyboardEvent: dom.window.KeyboardEvent,
-    sessionStorage: dom.window.sessionStorage,
-    localStorage: dom.window.localStorage,
-    IS_REACT_ACT_ENVIRONMENT: true,
-    requestAnimationFrame: (callback: FrameRequestCallback) => { callback(0); return 1; },
-    cancelAnimationFrame: () => undefined,
-  });
-  Object.defineProperty(globalThis, "navigator", { value: dom.window.navigator, configurable: true });
-  Object.defineProperty(dom.window, "matchMedia", { value: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }), configurable: true });
-  Object.defineProperty(dom.window.document, "hasFocus", { value: () => true, configurable: true });
-  Object.defineProperty(dom.window.HTMLElement.prototype, "scrollTo", { value() {}, configurable: true });
-  class FakeEventSource {
-    static readonly CONNECTING = 0;
-    static readonly OPEN = 1;
-    static readonly CLOSED = 2;
-    readonly CONNECTING = 0;
-    readonly OPEN = 1;
-    readonly CLOSED = 2;
-    readyState = 1;
-    onerror: ((event: Event) => void) | null = null;
-    constructor(readonly url: string | URL) {}
-    addEventListener() {}
-    removeEventListener() {}
-    close() { this.readyState = 2; }
-  }
-  Object.assign(globalThis, { EventSource: FakeEventSource });
-  return dom;
+  return installAppDom().dom;
 }
 
 const activeId = "0123456789abcdefabcd";
@@ -125,8 +89,21 @@ test("an independent default workspace picker completes after New without changi
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {
     await act(async () => root.render(createElement(App)));
-    await act(async () => dom.window.document.querySelector<HTMLButtonElement>(".topbar-settings")!.click());
-    await act(async () => dom.window.document.querySelector<HTMLButtonElement>("button[aria-label='选择默认工作路径']")!.click());
+    await act(async () =>
+      (await waitForDomSelector<HTMLButtonElement>(dom.window.document, ".topbar-settings")).click(),
+    );
+    await waitForDomSelector(dom.window.document, "#pi-chat-settings-dialog");
+    const appearanceTab = [...dom.window.document.querySelectorAll<HTMLButtonElement>(
+      ".settings-nav-tabs button",
+    )].find((button) => button.textContent?.trim() === "外观");
+    if (appearanceTab)
+      await act(async () => appearanceTab.click());
+    await act(async () =>
+      (await waitForDomSelector<HTMLButtonElement>(
+        dom.window.document,
+        "button[aria-label='选择默认工作路径']",
+      )).click(),
+    );
     const newButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
       .find((button) => button.textContent?.trim() === "New")!;
     await act(async () => newButton.click());
@@ -161,8 +138,19 @@ test("settings changes the default workspace only for later New drafts", async (
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {
     await act(async () => root.render(createElement(App)));
-    await act(async () => dom.window.document.querySelector<HTMLButtonElement>(".topbar-settings")!.click());
-    const picker = dom.window.document.querySelector<HTMLButtonElement>("button[aria-label='选择默认工作路径']")!;
+    await act(async () =>
+      (await waitForDomSelector<HTMLButtonElement>(dom.window.document, ".topbar-settings")).click(),
+    );
+    await waitForDomSelector(dom.window.document, "#pi-chat-settings-dialog");
+    const appearanceTab = [...dom.window.document.querySelectorAll<HTMLButtonElement>(
+      ".settings-nav-tabs button",
+    )].find((button) => button.textContent?.trim() === "外观");
+    if (appearanceTab)
+      await act(async () => appearanceTab.click());
+    const picker = await waitForDomSelector<HTMLButtonElement>(
+      dom.window.document,
+      "button[aria-label='选择默认工作路径']",
+    );
     assert.equal(picker.disabled, false);
     await act(async () => {
       picker.click();

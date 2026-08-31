@@ -7,7 +7,7 @@ import { PiRpcClient, resolvePiEntry, rpcData } from "../src/server/rpc-client";
 
 const overlayUrl = new URL("../resources/runtime/pi-chat-rpc-loader.mjs", import.meta.url).href;
 
-test("Pi Chat adds native dequeue only inside its RPC child", async () => {
+test("Pi Chat adds native dequeue only inside its RPC child", { skip: !resolvePiEntry() }, async () => {
   const piEntry = resolvePiEntry();
   assert.ok(piEntry, "global Pi RPC entry must be discoverable");
   const rpcModePath = resolve(dirname(piEntry), "modes", "rpc", "rpc-mode.js");
