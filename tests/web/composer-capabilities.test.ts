@@ -422,6 +422,36 @@ test("slash suggestions return after a starting bootstrap refreshes to ready", a
   }
 });
 
+test("a Primary replacement clears the previous Fast indicator before the new Runtime reports status", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, fastModeActive: true },
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    assert.ok(dom.window.document.querySelector(".fast-mode-indicator"));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => source.emitPi({
+      type: "pi_chat_primary_runtime_status",
+      primaryRuntime: { status: "starting", generation: 1 },
+    }));
+    assert.equal(dom.window.document.querySelector(".fast-mode-indicator"), null);
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("cold and capability-only hot panes retain the confirmed slash catalog", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");

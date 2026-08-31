@@ -223,6 +223,19 @@ test("Secondary startup and recovery retain only the exact current generation's 
     const afterStale = await fetch(`${origin}/api/sessions/${fastId}/view?fast=1`);
     assert.equal(afterStale.status, 200);
     assert.equal((await afterStale.json() as { state: { fastModeActive?: boolean } }).state.fastModeActive, true);
+
+    // A replacement that does not emit Fast must reset the old App projection;
+    // the status is Runtime-generation state, not a persisted Session setting.
+    fastWorker.restartActive = false;
+    fastWorker.fail();
+    const resetPrompt = await fetch(`${origin}/api/chat/prompt`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "reset fast", sessionId: fastId }),
+    });
+    assert.equal(resetPrompt.status, 202);
+    const resetView = await fetch(`${origin}/api/sessions/${fastId}/view?fast=1`);
+    assert.equal((await resetView.json() as { state: { fastModeActive?: boolean } }).state.fastModeActive, false);
   } finally {
     server.close();
     await app.close();

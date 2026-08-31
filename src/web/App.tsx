@@ -4419,6 +4419,23 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
             if (next.status !== "ready") {
               primaryCapabilitySnapshotRef.current = null;
               setPrimaryCapabilitySnapshot(null);
+              // Fast is Runtime-generation state. Clear the old visible/cache
+              // projection as soon as a Primary replacement starts; a later
+              // current-generation extension event may explicitly re-enable it.
+              const previousPrimarySessionId = current.sessionId || "";
+              const resetFastSessionId =
+                next.sessionId || previousPrimarySessionId;
+              if (resetFastSessionId) {
+                patchSessionCache(resetFastSessionId, {
+                  state: { fastModeActive: false },
+                });
+                if (viewedSessionIdRef.current === resetFastSessionId)
+                  dispatchPane({
+                    type: "FAST_MODE_CHANGED",
+                    sessionId: resetFastSessionId,
+                    active: false,
+                  });
+              }
             }
             setPrimaryRuntime(next);
             // Ready is now an adopted state/capability snapshot, not a request
