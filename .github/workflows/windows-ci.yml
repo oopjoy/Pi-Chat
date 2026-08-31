@@ -33,10 +33,18 @@ jobs:
         run: |
           $before = "${{ github.event.before }}"
           $head = "${{ github.sha }}"
-          if ($before -match '^0+$') {
+          # A forced tag update can report the previous tag-object SHA even
+          # though checkout no longer contains that object. The diff check must
+          # remain fail-closed for a real bad diff, but an unavailable before
+          # object is a new-history boundary, not a source-format failure.
+          $beforeCommit = $null
+          if ($before -notmatch '^0+$') {
+            $beforeCommit = git rev-parse --verify "$before^{commit}" 2>$null
+          }
+          if ($before -match '^0+$' -or -not $beforeCommit) {
             git show --check --format= $head
           } else {
-            git diff --check $before $head
+            git diff --check $beforeCommit $head
           }
       - name: Upload Playwright diagnostics
         if: always()
