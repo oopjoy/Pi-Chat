@@ -16,7 +16,6 @@ function chatInputProps(onError: (message: string) => void) {
     onSend: async () => {},
     onAbort: async () => {},
     onPickLocalFiles: async () => [],
-    onReadClipboardFiles: async () => [],
     onError,
   };
 }
@@ -105,10 +104,6 @@ test("Explorer path paste updates the Composer synchronously without the clipboa
       ChatInput,
       {
         ...chatInputProps(() => {}),
-        onReadClipboardFiles: async () => {
-          fallbackReads += 1;
-          return [];
-        },
       },
     )));
     const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
@@ -139,10 +134,6 @@ test("a file-only clipboard paste does not read a mutable process clipboard", as
     ...chatInputProps((message) => errors.push(message)),
     draftKey: { kind: "session" as const, sessionId: "session-a" },
     submissionScope: "session:session-a",
-    onReadClipboardFiles: async () => {
-      fallbackReads += 1;
-      return ["C:\\Users\\me\\delayed.txt"];
-    },
   };
   try {
     await act(async () => root.render(createElement(ChatInput, props)));

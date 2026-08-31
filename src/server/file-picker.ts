@@ -18,16 +18,6 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 }
 `;
 
-const CLIPBOARD_FILES_SCRIPT = String.raw`
-Add-Type -AssemblyName System.Windows.Forms
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-if ([System.Windows.Forms.Clipboard]::ContainsFileDropList()) {
-  ConvertTo-Json -InputObject @([System.Windows.Forms.Clipboard]::GetFileDropList()) -Compress
-} else {
-  '[]'
-}
-`;
-
 const FOLDER_PICKER_SCRIPT = String.raw`
 Add-Type -TypeDefinition @'
 using System;
@@ -184,15 +174,6 @@ export async function pickLocalFiles(): Promise<string[]> {
     return parsePickerOutput(await runPicker(PICKER_SCRIPT, "文件选择窗口等待超时"));
   } catch (error) {
     if (error instanceof SyntaxError) throw new Error("无法读取 Windows 文件选择器结果");
-    throw error;
-  }
-}
-
-export async function readClipboardFiles(): Promise<string[]> {
-  try {
-    return parsePickerOutput(await runPicker(CLIPBOARD_FILES_SCRIPT, "读取 Windows 剪贴板超时"));
-  } catch (error) {
-    if (error instanceof SyntaxError) throw new Error("无法读取 Windows 剪贴板文件路径");
     throw error;
   }
 }

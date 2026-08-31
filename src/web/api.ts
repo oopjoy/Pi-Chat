@@ -366,7 +366,6 @@ export const api = {
     }),
   }, PROMPT_PREPARE_TIMEOUT_MS),
   pickLocalFiles: () => request<{ paths: string[] }>("/api/local-files/pick", { method: "POST" }),
-  clipboardLocalFiles: () => request<{ paths: string[] }>("/api/local-files/clipboard", { method: "POST" }),
   pickDraftWorkspace: () => request<{ cancelled: boolean; cwd?: string }>("/api/workspace/draft-pick", { method: "POST" }),
   pickWorkspace: () => request<{ cancelled: boolean; workspaceName?: string; cwd?: string; workspaceEpoch?: string; workspaceRevision?: number; data?: BootstrapData }>("/api/workspace/pick", { method: "POST" }),
   abort: (sessionId: string) => request<{ ok: boolean; abortPending?: boolean; isStreaming: boolean; queuePaused: boolean }>("/api/chat/abort", { method: "POST", body: JSON.stringify({ sessionId }) }),
