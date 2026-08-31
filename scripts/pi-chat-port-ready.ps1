@@ -9,14 +9,15 @@ try {
   # This is the desired build on disk, not merely an arbitrary Pi Chat listener.
   # A stale Node process can continue to serve a replaced dist\web directory.
   $expected = Get-Content -LiteralPath $identityPath -Raw | ConvertFrom-Json
-  if ($expected.schemaVersion -ne 1 -or $expected.fingerprint -notmatch '^[a-f0-9]{64}$') { exit 1 }
+  if ($expected.schemaVersion -ne 1 -or $expected.packageVersion -isnot [string] -or $expected.revision -isnot [string] -or $expected.fingerprint -notmatch '^[a-f0-9]{64}$') { exit 1 }
 
   # Only the handshake is tokenless. It proves that Pi Chat owns the port and
   # returns the token the browser will use for protected requests. Runtime
   # readiness is intentionally not part of launcher readiness.
   $handshake = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/bootstrap/handshake" -Method Get -TimeoutSec 2
-  if (-not $handshake.requestToken -or -not $handshake.buildIdentity -or $handshake.buildIdentity.fingerprint -notmatch '^[a-f0-9]{64}$') { exit 1 }
-  if ($handshake.buildIdentity.schemaVersion -eq $expected.schemaVersion -and $handshake.buildIdentity.fingerprint -eq $expected.fingerprint) { exit 0 }
+  $actual = $handshake.buildIdentity
+  if (-not $handshake.requestToken -or -not $actual -or $actual.schemaVersion -ne 1 -or $actual.packageVersion -isnot [string] -or $actual.revision -isnot [string] -or $actual.fingerprint -notmatch '^[a-f0-9]{64}$') { exit 1 }
+  if ($actual.schemaVersion -eq $expected.schemaVersion -and $actual.packageVersion -eq $expected.packageVersion -and $actual.revision -eq $expected.revision -and $actual.fingerprint -eq $expected.fingerprint) { exit 0 }
 
   # The endpoint is an authenticated Pi Chat instance but it is not the build
   # represented by this launcher's local dist. cmd reports this conflict rather

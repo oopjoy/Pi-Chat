@@ -28,24 +28,45 @@ jobs:
         if: github.event_name == 'pull_request'
         run: git diff --check "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}"
       - name: Check push diff
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.event.deleted != true
         shell: pwsh
+        env:
+          PI_CHAT_REF_TYPE: ${{ github.ref_type }}
+          PI_CHAT_EVENT_DELETED: ${{ github.event.deleted }}
         run: |
           $before = "${{ github.event.before }}"
           $head = "${{ github.sha }}"
-          # A forced tag update can report the previous tag-object SHA even
-          # though checkout no longer contains that object. The diff check must
-          # remain fail-closed for a real bad diff, but an unavailable before
-          # object is a new-history boundary, not a source-format failure.
+          $refType = "${env:PI_CHAT_REF_TYPE}"
           $beforeCommit = $null
           if ($before -notmatch '^0+$') {
             $beforeCommit = git rev-parse --verify "$before^{commit}" 2>$null
+            if ($LASTEXITCODE -ne 0) {
+              $beforeCommit = $null
+            }
           }
-          if ($before -match '^0+$' -or -not $beforeCommit) {
-            git show --check --format= $head
+          if ($refType -eq 'branch') {
+            if ($before -match '^0+$') {
+              git show --check --format= $head
+            } elseif (-not $beforeCommit) {
+              throw "Cannot resolve github.event.before for a branch push; refusing to check only the tip commit."
+            } else {
+              git diff --check $beforeCommit $head
+            }
+          } elseif ($refType -eq 'tag') {
+            if ($beforeCommit) {
+              git diff --check $beforeCommit $head
+            } else {
+              # Tag creation/forced updates may have no trustworthy diff base.
+              # Check the commit patch and every committed LF-governed blob.
+              git show --check --format= $head
+              node scripts/check-committed-text.mjs --all
+            }
           } else {
-            git diff --check $beforeCommit $head
+            throw "Unsupported push ref type: $refType"
           }
+      - name: Check committed text line endings
+        if: github.event_name != 'push' || github.event.deleted != true
+        run: node scripts/check-committed-text.mjs --all
       - name: Upload Playwright diagnostics
         if: always()
         uses: actions/upload-artifact@v6
