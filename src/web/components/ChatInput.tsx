@@ -6,7 +6,7 @@ import {
 } from "../../shared/rpc-contracts";
 import type { PromptDelivery, PromptImage, SlashCommand } from "../../shared/types";
 import { useComposerController, type ComposerRestoredDraft } from "../hooks/use-composer-controller";
-import type { ComposerDraftKey } from "../state/composer";
+import { composerDraftKeyId, type ComposerDraftKey } from "../state/composer";
 import { CloseIcon, FileSearchIcon, ImageIcon, PaperclipIcon, SendIcon } from "./Icons";
 
 const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
@@ -58,18 +58,85 @@ function imageFromFile(file: File): Promise<PromptImage> {
   });
 }
 
+export function isWindowsAbsolutePath(value: string): boolean {
+  return /^[A-Za-z]:[\\/][^<>:"|?*\u0000-\u001f]*$/.test(value)
+    && value.length > 3;
+}
+
+function parsedWindowsPathLine(line: string): string {
+  const raw = line.trim();
+  if (!raw || raw.startsWith("#")) return "";
+  const quoted = raw.startsWith('"') || raw.endsWith('"');
+  if (quoted && !(raw.startsWith('"') && raw.endsWith('"') && raw.length >= 2)) return "";
+  let clean = quoted ? raw.slice(1, -1) : raw;
+  const fromFileUri = /^file:\/\//i.test(clean);
+  if (fromFileUri) {
+    try {
+      const url = new URL(clean);
+      const authorityStart = "file://".length;
+      const authorityEnd = clean.indexOf("/", authorityStart);
+      const authority = clean.slice(
+        authorityStart,
+        authorityEnd < 0 ? clean.length : authorityEnd,
+      );
+      if (
+        url.protocol !== "file:"
+        || (url.hostname && url.hostname.toLowerCase() !== "localhost")
+        || authority.includes("@")
+        || authority.includes(":")
+        || clean.includes("?")
+        || clean.includes("#")
+        || url.username
+        || url.password
+        || url.port
+        || url.search
+        || url.hash
+      ) return "";
+      clean = decodeURIComponent(url.pathname)
+        .replace(/^\/([A-Za-z]:)/, "$1")
+        .replace(/\//g, "\\");
+    } catch {
+      return "";
+    }
+  }
+  if (!isWindowsAbsolutePath(clean)) return "";
+  // An unquoted final component containing spaces is indistinguishable from
+  // prose appended after a path. Explorer supplies URI/quoted forms for such
+  // paths; requiring quotes here prevents ordinary text from being consumed.
+  if (!quoted && !fromFileUri && /\s/.test(clean.split(/[\\/]/).at(-1) || "")) return "";
+  return clean;
+}
+
+function quoteWindowsPath(path: string): string {
+  const clean = path.trim().replace(/^"|"$/g, "");
+  if (!isWindowsAbsolutePath(clean)) return "";
+  // Keep ordinary Explorer paths readable; quote only paths whose whitespace
+  // would make the boundary ambiguous in a natural-language prompt.
+  return /\s/.test(clean) ? `"${clean.replace(/"/g, '\\"')}"` : clean;
+}
+
 export function fileReferences(paths: string[]): string {
-  if (!paths.length) return "";
-  return `请按需使用工具读取以下本地文件：\n${paths.map((path) => `- \`${path.replace(/`/g, "\\`")}\``).join("\n")}`;
+  return [...new Set(paths.map((path) => quoteWindowsPath(path)).filter(Boolean))].join("\n");
 }
 
 export function windowsPathsFromText(text: string): string[] {
-  const paths = text.split(/\r?\n/).map((line) => line.trim().replace(/^"|"$/g, "")).map((line) => {
-    if (!/^file:\/\//i.test(line)) return line;
-    try { return decodeURIComponent(new URL(line).pathname).replace(/^\/([A-Za-z]:)/, "$1").replace(/\//g, "\\"); }
-    catch { return ""; }
-  }).filter((line) => /^[A-Za-z]:[\\/]/.test(line));
-  return [...new Set(paths)];
+  return [...new Set(text.split(/\r?\n/).map(parsedWindowsPathLine).filter(Boolean))];
+}
+
+/**
+ * Prefer browser-exposed clipboard text before invoking the slower Windows
+ * clipboard bridge. URI lists commonly contain comment lines, so validate
+ * each representation independently and fall back from URI to plain text.
+ */
+export function clipboardWindowsPaths(uriList: string, plainText: string): string[] {
+  for (const text of [uriList, plainText]) {
+    const meaningfulLines = text.split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith("#"));
+    const paths = windowsPathsFromText(text);
+    if (paths.length && paths.length === meaningfulLines.length) return paths;
+  }
+  return [];
 }
 
 function subsequenceScore(name: string, query: string): number | null {
@@ -148,6 +215,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   const attachmentMenuRef = useRef<HTMLDivElement>(null);
   const composingRef = useRef(false);
   const lastCompositionEndAtRef = useRef(0);
+  const editorDisabledRef = useRef(disabled);
   // Legacy unit fixtures may provide only a scope. Production App always
   // supplies the typed identity; the fallback retains the old fixture contract.
   const resolvedDraftKey: ComposerDraftKey = draftKey || (
@@ -155,6 +223,8 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
       ? { kind: "new", generation: Number(submissionScope.slice(6)) || 0 }
       : { kind: "session", sessionId: submissionScope.replace(/^session:/, "") }
   );
+  const currentDraftKeyIdRef = useRef(composerDraftKeyId(resolvedDraftKey));
+  currentDraftKeyIdRef.current = composerDraftKeyId(resolvedDraftKey);
   const composer = useComposerController({
     draftKey: resolvedDraftKey,
     forgottenKeys: forgottenComposerKeys,
@@ -213,6 +283,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   const currentPendingSubmissions = composer.pendingCount;
   const submissionLocked = !allowFollowupSubmissions && currentPendingSubmissions > 0;
   const editorDisabled = disabled || submissionLocked;
+  editorDisabledRef.current = editorDisabled;
   const imageAttachmentLimitReached =
     images.length >= MAX_PROMPT_IMAGES ||
     promptImagesByteLength(images) >= MAX_PROMPT_IMAGES_TOTAL_BYTES;
@@ -322,14 +393,14 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     }
   };
 
-  const appendFileReferences = (paths: string[]) => {
-    if (editorDisabled) return;
+  const appendFileReferences = (paths: string[], expectedDraftKeyId?: string) => {
+    if (editorDisabledRef.current) return;
     const references = fileReferences(paths);
-    if (references) {
-      const current = composer.currentDraft();
-      const next = current.message.trim() ? `${current.message.trimEnd()}\n\n${references}` : references;
-      composer.edit(next);
-    }
+    if (!references) return;
+    const current = composer.currentDraft();
+    if (expectedDraftKeyId && currentDraftKeyIdRef.current !== expectedDraftKeyId) return;
+    const next = current.message.trim() ? `${current.message.trimEnd()}\n\n${references}` : references;
+    composer.edit(next);
   };
 
   const paste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
@@ -340,21 +411,32 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
       void addImages(imageFiles);
       return;
     }
-    const clipboardText = event.clipboardData.getData("text/uri-list") || event.clipboardData.getData("text/plain");
-    const textPaths = windowsPathsFromText(clipboardText);
-    const clipboardLines = clipboardText.split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith("#"));
-    if (textPaths.length && textPaths.length === clipboardLines.length) {
+    const uriList = event.clipboardData.getData("text/uri-list");
+    const plainText = event.clipboardData.getData("text/plain");
+    const textPaths = clipboardWindowsPaths(uriList, plainText);
+    const directPaths = clipboardFiles
+      .map((file) => (file as File & { path?: string }).path || "")
+      .filter(isWindowsAbsolutePath);
+    const paths = [...new Set([...directPaths, ...textPaths])];
+    if (paths.length) {
       event.preventDefault();
-      appendFileReferences(textPaths);
+      appendFileReferences(paths);
       return;
     }
     if (clipboardFiles.length || event.clipboardData.types.includes("Files")) {
       event.preventDefault();
-      composer.edit(composer.currentDraft().message);
-      void onReadClipboardFiles().then((paths) => {
-        if (paths.length) appendFileReferences(paths);
+      const targetDraftKeyId = currentDraftKeyIdRef.current;
+      // Browsers may expose Explorer's file-drop payload without its path in
+      // ClipboardEvent. Only this uncommon fallback crosses the async Windows
+      // clipboard bridge; known text/URI paths above remain synchronous.
+      void onReadClipboardFiles().then((fallbackPaths) => {
+        if (currentDraftKeyIdRef.current !== targetDraftKeyId) return;
+        if (fallbackPaths.length) appendFileReferences(fallbackPaths, targetDraftKeyId);
         else onError("无法取得文件的本地路径，请使用发送按钮旁的附件按钮选择本地文件");
-      }).catch((error) => onError(error instanceof Error ? error.message : String(error)));
+      }).catch((error) => {
+        if (currentDraftKeyIdRef.current === targetDraftKeyId)
+          onError(error instanceof Error ? error.message : String(error));
+      });
     }
   };
 
@@ -379,10 +461,11 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     if (editorDisabled) return;
     setAttachmentOpen(false);
     setPickingFiles(true);
+    const targetDraftKeyId = currentDraftKeyIdRef.current;
     composer.edit(composer.currentDraft().message);
     try {
       const paths = await onPickLocalFiles();
-      appendFileReferences(paths);
+      appendFileReferences(paths, targetDraftKeyId);
       textareaRef.current?.focus();
     } catch (error) {
       onError(error instanceof Error ? error.message : String(error));

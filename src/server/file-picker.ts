@@ -131,13 +131,18 @@ export function isWindowsWorkspacePath(value: unknown): value is string {
     && !/[\\/:*?"<>|\u0000-\u001f]/.test(share);
 }
 
+function isSafeWindowsFilePath(value: string): boolean {
+  return /^[A-Za-z]:[\\/][^<>:"|?*\u0000-\u001f]*$/.test(value)
+    && value.length > 3;
+}
+
 export function parsePickerOutput(output: string): string[] {
   const trimmed = output.trim();
   if (!trimmed) return [];
   const parsed: unknown = JSON.parse(trimmed);
   const values = Array.isArray(parsed) ? parsed : [parsed];
   // Local-file and clipboard attachment behavior intentionally stays drive-only.
-  return values.filter((value): value is string => typeof value === "string" && /^[A-Za-z]:[\\/]/.test(value));
+  return values.filter((value): value is string => typeof value === "string" && isSafeWindowsFilePath(value));
 }
 
 async function runPicker(script: string, timeoutMessage: string, extraEnv: NodeJS.ProcessEnv = {}): Promise<string> {
