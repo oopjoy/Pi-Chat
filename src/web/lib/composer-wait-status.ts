@@ -1,3 +1,29 @@
+export interface RuntimePreparationDisplayInput {
+  localDraft: boolean;
+  runtimeStatus: "active" | "restoring" | "view-only" | "draft";
+  warming: boolean;
+  primaryStatus: "starting" | "ready" | "failed";
+  /** A first draft submission necessarily creates its dedicated Runtime. */
+  draftSubmissionBusy?: boolean;
+}
+
+/**
+ * Runtime preparation is a capability fact, not a generic per-pane mutation
+ * lease. An active Runtime may still be busy admitting a prompt or awaiting
+ * its first lifecycle event; that state must not be mislabeled as cold start.
+ */
+export function runtimePreparationForDisplay({
+  localDraft,
+  runtimeStatus,
+  warming,
+  primaryStatus,
+  draftSubmissionBusy = false,
+}: RuntimePreparationDisplayInput): boolean {
+  if (warming || runtimeStatus === "restoring") return true;
+  if (localDraft && draftSubmissionBusy) return true;
+  return localDraft && primaryStatus === "starting";
+}
+
 export interface ComposerWaitStatusInput {
   isStreaming: boolean;
   pendingSubmissions: number;

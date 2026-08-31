@@ -71,7 +71,10 @@ import {
 } from "./lib/ask-questionnaire";
 import { recentSessionWorkspaces } from "./lib/session-workspaces";
 import { adjacentUserMessageOffset } from "./lib/conversation-navigation";
-import { composerWaitStatus } from "./lib/composer-wait-status";
+import {
+  composerWaitStatus,
+  runtimePreparationForDisplay,
+} from "./lib/composer-wait-status";
 import { extensionExecutionNotice } from "./lib/extension-notice";
 import {
   gateModeFromCommand,
@@ -8158,7 +8161,18 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   );
   // Once Pi has authoritatively started generating, the composer may accept a
   // follow-up into the queue even if the first HTTP acknowledgement is late.
-  const currentSessionPreparing = currentSessionBusy && !state.isStreaming;
+  // This busy lease remains the submission/admission barrier; it is deliberately
+  // separate from the user-visible Runtime preparation label below.
+  const currentSessionBusyBeforeStreaming = currentSessionBusy && !state.isStreaming;
+  const currentSessionRuntimePreparing = runtimePreparationForDisplay({
+    localDraft,
+    runtimeStatus,
+    warming: Boolean(
+      viewedSessionId && warmingSessionIds.includes(viewedSessionId),
+    ),
+    primaryStatus: primaryRuntime.status,
+    draftSubmissionBusy: localDraft && currentSessionBusyBeforeStreaming,
+  });
   // Content partitions use the ordinary prompt target. An empty unindexed
   // Primary is therefore a Session partition even though it renders the New
   // presentation; only an actual local Draft receives a New generation key.
@@ -8174,13 +8188,13 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   const composerSubmissionPaused =
     !mutationBlocked &&
     (viewSwitching ||
-      currentSessionPreparing ||
+      currentSessionBusyBeforeStreaming ||
       (viewingSubagentSession && !composerTargetSessionId));
   const waitingForPiMessage = composerWaitStatus({
     isStreaming: state.isStreaming,
     pendingSubmissions: composerSubmissionPending,
     viewSwitching,
-    runtimePreparing: currentSessionPreparing,
+    runtimePreparing: currentSessionRuntimePreparing,
     compacting: Boolean(state.isCompacting),
     subagentTargetUnavailable:
       viewingSubagentSession && !composerTargetSessionId,
@@ -8696,7 +8710,8 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     recordDiagnosticProjection(false);
   }, [
     composerQueueMode,
-    currentSessionPreparing,
+    currentSessionBusyBeforeStreaming,
+    currentSessionRuntimePreparing,
     diagnosticSidebarSignature,
     effectiveControl.controlOwner,
     effectiveControl.controlledByThisWindow,
@@ -8999,7 +9014,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           queue,
           paused: queuePaused,
           busy:
-            currentSessionPreparing ||
+            currentSessionBusyBeforeStreaming ||
             viewSwitching ||
             mutationBlocked ||
             viewingSubagentSession,

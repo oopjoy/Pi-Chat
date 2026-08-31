@@ -196,6 +196,55 @@ test("an accepted high-thinking prompt replaces the old active max fallback", as
   }
 });
 
+test("an active Runtime admission is not mislabeled as Runtime preparation", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  let resolvePrompt!: (value: { accepted: true; queued: false }) => void;
+  const pendingPrompt = new Promise<{ accepted: true; queued: false }>((resolve) => {
+    resolvePrompt = resolve;
+  });
+  let promptCalls = 0;
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: false },
+      runtimeStatus: "active" as const,
+      isActive: true,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    prompt: async () => {
+      promptCalls += 1;
+      return pendingPrompt;
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "active runtime admission");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "active runtime admission" }));
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const body = dom.window.document.body.textContent || "";
+    assert.equal(promptCalls, 1);
+    assert.match(body, /消息已提交，正在等待 Pi 处理/);
+    assert.doesNotMatch(body, /正在准备 Pi Runtime/);
+    resolvePrompt({ accepted: true, queued: false });
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("a lost prompt acknowledgement cannot remove a user turn after SSE proves acceptance", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");

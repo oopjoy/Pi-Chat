@@ -21,6 +21,7 @@ export type IncidentStartupPhase =
   | "ready-request-allocated"
   | "ready-request-written"
   | "first-stdout-byte"
+  | "startup-slow-observed"
   | "transport-ready"
   | "failed";
 export type IncidentControlState =
@@ -88,6 +89,10 @@ export interface IncidentFields {
   startupMode?: IncidentStartupMode;
   startupBackend?: IncidentStartupBackend;
   startupPhase?: IncidentStartupPhase;
+  /** Anonymous ordinal only; never an Extension name or path. */
+  extensionOrdinal?: number;
+  extensionImportDurationMs?: number;
+  extensionFactoryDurationMs?: number;
 }
 
 export interface IncidentReference { incidentId: string }
@@ -263,6 +268,9 @@ class FileIncidentDiagnostics implements IncidentDiagnostics {
       startupMode: fields.startupMode || null,
       startupBackend: fields.startupBackend || "unknown",
       startupPhase: fields.startupPhase || null,
+      extensionOrdinal: integer(fields.extensionOrdinal),
+      extensionImportDurationMs: integer(fields.extensionImportDurationMs),
+      extensionFactoryDurationMs: integer(fields.extensionFactoryDurationMs),
     };
     const line = `${JSON.stringify(record)}\n`;
     this.tail = this.tail.then(() => this.append(line)).catch((error) => {

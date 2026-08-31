@@ -15,6 +15,7 @@ import {
   incidentReference,
   recordIncident,
   type IncidentDiagnostics,
+  type IncidentFields,
   type IncidentOperation,
   type IncidentRuntimeKind,
   type IncidentStartupBackend,
@@ -169,6 +170,11 @@ interface RpcChildSource extends RpcEventSource {
   firstStdoutObserved: boolean;
   preEntryObserved: boolean;
   entryEvaluatedObserved: boolean;
+  extensionOrdinal?: number;
+  extensionImportStartedAt?: number;
+  extensionFactoryStartedAt?: number;
+  startupSlowTimers?: NodeJS.Timeout[];
+  startupReadyObserved?: boolean;
 }
 
 type EventListener = (
@@ -257,11 +263,30 @@ export class PiRpcClient {
     return extraArgs.includes("--session") ? "persisted-session" : "new-draft";
   }
 
+  private clearStartupWatchdog(source: Pick<RpcChildSource, "startupSlowTimers">): void {
+    for (const timer of source.startupSlowTimers || []) clearTimeout(timer);
+    source.startupSlowTimers = [];
+  }
+
+  private armStartupWatchdog(source: RpcChildSource): void {
+    const thresholds = [5_000, 15_000, 30_000];
+    source.startupSlowTimers = thresholds.map((threshold) => setTimeout(() => {
+      if (this.source !== source || source.startupReadyObserved) return;
+      this.recordStartupPhase(
+        source,
+        "startup-slow-observed",
+        "observed",
+        `RPC_STARTUP_SLOW_${threshold}MS`,
+      );
+    }, threshold));
+  }
+
   private recordStartupPhase(
     source: Pick<RpcChildSource, "generation" | "childPid" | "startupStartedAt" | "startupSpanId" | "startupAttempt" | "startupMode">,
     phase: IncidentStartupPhase,
     outcome: "started" | "observed" | "succeeded" | "failed" = "observed",
     errorCode?: string,
+    extension?: Pick<IncidentFields, "extensionOrdinal" | "extensionImportDurationMs" | "extensionFactoryDurationMs">,
   ): void {
     try {
       this.options.diagnostics?.record({
@@ -279,6 +304,7 @@ export class PiRpcClient {
         startupMode: source.startupMode,
         startupBackend: this.options.startupBackend || "unknown",
         startupPhase: phase,
+        ...extension,
       });
     } catch {
       // Startup diagnostics are metadata-only and can never affect Runtime authority.
@@ -393,6 +419,7 @@ export class PiRpcClient {
     this.recordStartupPhase(source, "spawn-returned");
     this.child = child;
     this.source = source;
+    this.armStartupWatchdog(source);
 
     child.once("spawn", () => this.recordStartupPhase(source, "child-spawn-event"));
     child.stderr.on("data", (chunk: Buffer) => {
@@ -417,14 +444,49 @@ export class PiRpcClient {
           this.recordStartupPhase(source, "child-entry-evaluated");
         } else if (marker === "B") {
           this.recordStartupPhase(source, "bundle-entry");
-        } else if (marker === "X") {
-          this.recordStartupPhase(source, "extension-import-start");
-        } else if (marker === "Y") {
-          this.recordStartupPhase(source, "extension-import-end");
-        } else if (marker === "F") {
-          this.recordStartupPhase(source, "extension-factory-start");
-        } else if (marker === "G") {
-          this.recordStartupPhase(source, "extension-factory-end");
+        } else {
+          const extensionMarker = marker.match(/^([XYFG])(?::([0-9]+))?$/);
+          const extensionPhase = extensionMarker?.[1];
+          const extensionOrdinal = extensionMarker?.[2] ? Number(extensionMarker[2]) : undefined;
+          if (
+            !extensionPhase
+            || (extensionOrdinal !== undefined && (!Number.isSafeInteger(extensionOrdinal) || extensionOrdinal < 1))
+          ) {
+            newline = probeBuffer.indexOf("\n");
+            continue;
+          }
+          const now = performance.now();
+          if (extensionPhase === "X") {
+            source.extensionOrdinal = extensionOrdinal;
+            source.extensionImportStartedAt = now;
+            this.recordStartupPhase(source, "extension-import-start", "observed", undefined, {
+              extensionOrdinal,
+            });
+          } else if (extensionPhase === "Y") {
+            const duration = source.extensionImportStartedAt === undefined
+              ? undefined
+              : now - source.extensionImportStartedAt;
+            this.recordStartupPhase(source, "extension-import-end", "observed", undefined, {
+              extensionOrdinal: extensionOrdinal ?? source.extensionOrdinal,
+              extensionImportDurationMs: duration,
+            });
+            source.extensionImportStartedAt = undefined;
+          } else if (extensionPhase === "F") {
+            source.extensionOrdinal = extensionOrdinal ?? source.extensionOrdinal;
+            source.extensionFactoryStartedAt = now;
+            this.recordStartupPhase(source, "extension-factory-start", "observed", undefined, {
+              extensionOrdinal: source.extensionOrdinal,
+            });
+          } else if (extensionPhase === "G") {
+            const duration = source.extensionFactoryStartedAt === undefined
+              ? undefined
+              : now - source.extensionFactoryStartedAt;
+            this.recordStartupPhase(source, "extension-factory-end", "observed", undefined, {
+              extensionOrdinal: extensionOrdinal ?? source.extensionOrdinal,
+              extensionFactoryDurationMs: duration,
+            });
+            source.extensionFactoryStartedAt = undefined;
+          }
         }
         newline = probeBuffer.indexOf("\n");
       }
@@ -474,6 +536,10 @@ export class PiRpcClient {
         },
       },
     );
+    if (source) {
+      source.startupReadyObserved = true;
+      this.clearStartupWatchdog(source);
+    }
     this.recordStartupPhase(source, "transport-ready", "succeeded");
     return response;
   }
@@ -729,6 +795,7 @@ export class PiRpcClient {
       return;
     }
     const activeChild = this.source.child;
+    this.clearStartupWatchdog(this.source);
     const incident = this.recordTransportIncident(error, {
       operation: "rpc.child-exit",
       outcome: "failed",
@@ -1103,7 +1170,10 @@ export class PiRpcClient {
       this.child = null;
       this.unconfirmedChild = child;
       if (source) this.unconfirmedSource = { generation: source.generation, childPid: source.childPid ?? pid };
-      if (this.source?.child === child) this.source = null;
+      if (this.source?.child === child) {
+        this.clearStartupWatchdog(this.source);
+        this.source = null;
+      }
       this.rejectPending(new Error("Pi RPC 已停止"));
       const waitForExit = (timeoutMs: number) => new Promise<boolean>((resolve) => {
         // Node documents signalCode as nullable, but lightweight embeddings and

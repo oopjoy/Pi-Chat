@@ -101,11 +101,11 @@ const extensionLoaderPlugin = {
         .replace(loaderMarker, bundledLoaderMarker)
         .replace(
           "const module = await jiti.import(extensionPath, { default: true });",
-          "globalThis.__piChatStartupMark?.(\"X\");\n    const module = await jiti.import(extensionPath, { default: true });\n    globalThis.__piChatStartupMark?.(\"Y\");",
+          "const extensionOrdinal = (globalThis.__piChatStartupExtensionOrdinal = (globalThis.__piChatStartupExtensionOrdinal || 0) + 1);\n    globalThis.__piChatStartupMark?.(\"X\", extensionOrdinal);\n    const module = await jiti.import(extensionPath, { default: true });\n    globalThis.__piChatStartupMark?.(\"Y\", extensionOrdinal);",
         )
         .replace(
           "await factory(api);",
-          "globalThis.__piChatStartupMark?.(\"F\");\n        await factory(api);\n        globalThis.__piChatStartupMark?.(\"G\");",
+          "globalThis.__piChatStartupMark?.(\"F\", globalThis.__piChatStartupExtensionOrdinal);\n        await factory(api);\n        globalThis.__piChatStartupMark?.(\"G\", globalThis.__piChatStartupExtensionOrdinal);",
         );
       return {
         contents: tracedSource,
@@ -136,7 +136,7 @@ const mainBuild = await build({
   metafile: true,
   plugins: [extensionLoaderPlugin],
   banner: {
-    js: "import { createRequire as __piChatCreateRequire } from 'node:module'; import { writeSync as __piChatWriteStartupMarker } from 'node:fs'; const require = __piChatCreateRequire(import.meta.url); globalThis.__piChatStartupMark = (marker) => { try { __piChatWriteStartupMarker(3, marker + '\\n'); } catch {} }; globalThis.__piChatStartupMark('B');",
+    js: "import { createRequire as __piChatCreateRequire } from 'node:module'; import { writeSync as __piChatWriteStartupMarker } from 'node:fs'; const require = __piChatCreateRequire(import.meta.url); globalThis.__piChatStartupMark = (marker, ordinal) => { try { __piChatWriteStartupMarker(3, marker + (Number.isSafeInteger(ordinal) ? ':' + ordinal : '') + '\\n'); } catch {} }; globalThis.__piChatStartupMark('B');",
   },
 });
 if (!transformedLoader) throw new Error("Pi extension loader was not included in the runtime bundle");
