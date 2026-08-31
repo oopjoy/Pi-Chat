@@ -1200,7 +1200,6 @@ test("ChatInput forwards an image draft without a client model-capability gate",
       onSend: async (message: string, images: unknown[]) => { sent.push([message, images]); },
       onAbort: async () => undefined,
       onPickLocalFiles: async () => [],
-      onReadClipboardFiles: async () => [],
       onError: (message: string) => { errors.push(message); },
     });
   try {
@@ -1276,7 +1275,6 @@ test("ChatInput accepts follow-up snapshots while one send is pending and drains
     onSend,
     onAbort: async () => undefined,
     onPickLocalFiles: async () => [],
-    onReadClipboardFiles: async () => [],
     onError: () => undefined,
   });
   const typeAndSend = async (message: string) => {
@@ -1338,7 +1336,6 @@ test("ChatInput does not drain a queued snapshot while mutation authority is dis
     onSend,
     onAbort: async () => undefined,
     onPickLocalFiles: async () => [],
-    onReadClipboardFiles: async () => [],
     onError: () => undefined,
   });
   const typeAndSend = async (message: string) => {
@@ -1393,7 +1390,6 @@ test("ChatInput keeps a send snapshot while local control is unavailable and dra
     onSend: async (message: string) => { calls.push(message); },
     onAbort: async () => undefined,
     onPickLocalFiles: async () => [],
-    onReadClipboardFiles: async () => [],
     onError: () => undefined,
   });
   try {
@@ -1451,7 +1447,6 @@ test("ChatInput pauses undrained snapshots when navigation changes submission sc
     onSend: senders[scope],
     onAbort: async () => undefined,
     onPickLocalFiles: async () => [],
-    onReadClipboardFiles: async () => [],
     onError: () => undefined,
   });
   const typeAndSend = async (message: string) => {
@@ -1515,7 +1510,6 @@ test("ChatInput keeps unsent drafts partitioned by Session target and New genera
     onSend: async () => undefined,
     onAbort: async () => undefined,
     onPickLocalFiles: async () => [],
-    onReadClipboardFiles: async () => [],
     onError: () => undefined,
   });
   const type = async (message: string) => {
@@ -1562,7 +1556,6 @@ test("ChatInput protects IME confirmation and exposes slash suggestions as an ac
       onSend: async (message: string) => { sent.push(message); },
       onAbort: async () => undefined,
       onPickLocalFiles: async () => [],
-      onReadClipboardFiles: async () => [],
       onError: () => undefined,
     })));
     const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
@@ -1613,7 +1606,6 @@ test("ChatInput restores a definite failure without overwriting a newer draft", 
     },
     onAbort: async () => undefined,
     onPickLocalFiles: async () => [],
-    onReadClipboardFiles: async () => [],
     onError: () => undefined,
   });
   const type = async (message: string) => {
@@ -1686,8 +1678,7 @@ test("ChatInput never shows Stop from a stale stopping flag after streaming ende
           onSend: async () => undefined,
           onAbort: async () => undefined,
           onPickLocalFiles: async () => [],
-          onReadClipboardFiles: async () => [],
-          onError: () => undefined,
+              onError: () => undefined,
         }),
       ),
     );
@@ -1977,8 +1968,7 @@ test("ChatInput places Steer beside Queue and sends explicit steering delivery",
           },
           onAbort: async () => undefined,
           onPickLocalFiles: async () => [],
-          onReadClipboardFiles: async () => [],
-          onError: () => undefined,
+              onError: () => undefined,
         }),
       ),
     );

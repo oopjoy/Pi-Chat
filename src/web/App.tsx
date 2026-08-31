@@ -9075,8 +9075,6 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
             return send(message, images, delivery, targetSessionId);
           },
           onPickLocalFiles: async () => (await api.pickLocalFiles()).paths,
-          onReadClipboardFiles: async () =>
-            (await api.clipboardLocalFiles()).paths,
           onError: setError,
           onAbort: stopGeneration,
         }}

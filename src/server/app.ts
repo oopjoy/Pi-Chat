@@ -52,7 +52,6 @@ import {
 import {
   pickLocalFiles,
   pickWorkspaceFolder,
-  readClipboardFiles,
   revealInExplorer,
 } from "./file-picker.js";
 import {
@@ -7478,12 +7477,6 @@ export class PiChatApp {
     if (url.pathname === "/api/local-files/pick") {
       if (request.method !== "POST") return methodNotAllowed(response);
       json(response, 200, { paths: await pickLocalFiles() });
-      return;
-    }
-
-    if (url.pathname === "/api/local-files/clipboard") {
-      if (request.method !== "POST") return methodNotAllowed(response);
-      json(response, 200, { paths: await readClipboardFiles() });
       return;
     }
 

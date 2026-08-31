@@ -69,7 +69,7 @@ export function apiRouteAdmission(request: IncomingMessage, url: URL): ApiRouteA
   const excluded = [
     "/api/restart", "/api/shutdown", "/api/window/close", "/api/presence",
     "/api/workspace/pick", "/api/workspace/set", "/api/workspace/draft-pick",
-    "/api/local-files/pick", "/api/local-files/clipboard", "/api/sessions/viewing/clear",
+    "/api/local-files/pick", "/api/sessions/viewing/clear",
   ].includes(url.pathname)
     || url.pathname.startsWith("/api/resources/")
     || url.pathname === "/api/models"
