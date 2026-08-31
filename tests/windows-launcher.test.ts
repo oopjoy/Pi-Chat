@@ -64,7 +64,7 @@ test("PowerShell readiness distinguishes the expected build from a verified stal
     const server = createServer((request, response) => {
       if (request.url === "/api/bootstrap/handshake") {
         response.setHeader("content-type", "application/json");
-        response.end(JSON.stringify({ requestToken: "test-token", buildIdentity: { schemaVersion: 1, fingerprint } }));
+        response.end(JSON.stringify({ requestToken: "test-token", buildIdentity: { schemaVersion: 1, packageVersion: "0.4.6", revision: "test-revision", fingerprint } }));
       } else { response.statusCode = 404; response.end(); }
     });
     server.listen(0, "127.0.0.1", () => console.log("PORT=" + server.address().port));
@@ -91,10 +91,12 @@ test("PowerShell readiness distinguishes the expected build from a verified stal
     const port = Number(/PORT=(\d+)/.exec(output)?.[1]);
     assert.ok(port > 0, "test listener must announce a port");
     await mkdir(join(sandbox, "dist"));
-    await writeFile(join(sandbox, "dist", "build-identity.json"), JSON.stringify({ schemaVersion: 1, fingerprint: matching }), "utf8");
+    await writeFile(join(sandbox, "dist", "build-identity.json"), JSON.stringify({ schemaVersion: 1, packageVersion: "0.4.6", revision: "test-revision", fingerprint: matching }), "utf8");
     assert.equal(await runReadiness(port), 0, "matching listener is ready");
-    await writeFile(join(sandbox, "dist", "build-identity.json"), JSON.stringify({ schemaVersion: 1, fingerprint: stale }), "utf8");
-    assert.equal(await runReadiness(port), 2, "verified mismatched listener is distinguished from no listener");
+    await writeFile(join(sandbox, "dist", "build-identity.json"), JSON.stringify({ schemaVersion: 1, packageVersion: "0.4.6", revision: "other-revision", fingerprint: matching }), "utf8");
+    assert.equal(await runReadiness(port), 2, "revision mismatch is distinguished from a matching build");
+    await writeFile(join(sandbox, "dist", "build-identity.json"), JSON.stringify({ schemaVersion: 1, packageVersion: "0.4.6", revision: "test-revision", fingerprint: stale }), "utf8");
+    assert.equal(await runReadiness(port), 2, "fingerprint mismatch is distinguished from no listener");
   } finally {
     fixture.kill("SIGTERM");
     await Promise.race([once(fixture, "exit"), new Promise((resolveWait) => setTimeout(resolveWait, 2_000))]);
