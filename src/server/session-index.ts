@@ -380,8 +380,13 @@ function isSubagentSession(path: string, name: string): boolean {
   // Pi has used both nested run-N/session.jsonl children and newer top-level
   // generated names such as subagent-planner-40b9af6d-1. They are process
   // details, not user conversations, so the main sidebar excludes both forms.
-  const nestedChild = /(?:^|[\\/])run-\d+(?:[\\/]|$)/i.test(path) && /^subagent-/i.test(name);
-  const generatedSubagentName = /^subagent-[a-z0-9_-]+-[a-f0-9]{6,}-\d+$/i.test(name);
+  // Derived user Fork names add a trailing suffix after the session name; strip
+  // that presentation-only suffix before applying the generated-name check.
+  const baseName = name.endsWith(DERIVED_SESSION_SUFFIX)
+    ? name.slice(0, -DERIVED_SESSION_SUFFIX.length)
+    : name;
+  const nestedChild = /(?:^|[\\/])run-\d+(?:[\\/]|$)/i.test(path) && /^subagent-/i.test(baseName);
+  const generatedSubagentName = /^subagent-[a-z0-9_-]+-[a-f0-9]{6,}-\d+$/i.test(baseName);
   return nestedChild || generatedSubagentName;
 }
 
@@ -427,7 +432,7 @@ function sessionSummaryFromEntries(
   const displayName = isDerivedSession
     ? derivedSessionDisplayName(baseDisplayName)
     : baseDisplayName;
-  if (!options.includeSubagents && isSubagentSession(path, displayName)) return null;
+  if (!options.includeSubagents && isSubagentSession(path, baseDisplayName)) return null;
   return {
     id: idForPath(path),
     sessionId: header.id,
@@ -645,7 +650,10 @@ export class SessionIndex {
           refreshResults[index] = { normalized, missing: true };
           continue;
         }
-        refreshResults[index] = { normalized, version: projected.version, summary: projected.summary };
+        const summary = projected.summary && isSubagentSession(normalized, projected.summary.name)
+          ? null
+          : projected.summary;
+        refreshResults[index] = { normalized, version: projected.version, summary };
       }
     };
     await Promise.all(Array.from({ length: workerCount }, () => inspectFile()));
@@ -657,7 +665,16 @@ export class SessionIndex {
         continue;
       }
       const cached = cache.get(result.normalized);
-      if (result.version && !sameSessionFileVersion(cached, result.version)) {
+      const cachedSummaryHidden = Boolean(
+        cached?.summary && isSubagentSession(result.normalized, cached.summary.name),
+      );
+      if (
+        result.version && (
+          !sameSessionFileVersion(cached, result.version)
+          || cachedSummaryHidden
+          || (cached?.summary === null) !== (result.summary === null)
+        )
+      ) {
         cache.set(result.normalized, { ...result.version, summary: result.summary ?? null });
         cacheChanged = true;
       }
@@ -691,6 +708,7 @@ export class SessionIndex {
   summaryForId(id: string): SessionSummary | null {
     const path = this.pathForId(id);
     const cached = path ? this.cache?.get(resolve(path)) : undefined;
+    if (path && cached?.summary && isSubagentSession(path, cached.summary.name)) return null;
     return cached?.summary ? { ...cached.summary, active: false } : null;
   }
 
@@ -735,6 +753,12 @@ export class SessionIndex {
       }
       const currentVersion = sessionFileVersion(fileStat, fingerprint);
       let summary = entry.summary;
+      if (isSubagentSession(normalized, summary.name)) {
+        this.cache.delete(path);
+        this.pathsById.delete(id);
+        await saveSessionCache(this.cachePath, this.cache);
+        return null;
+      }
       if (!sameSessionFileVersion(entry, currentVersion)) {
         const refreshed = await this.projectSummary(normalized, fileStat);
         this.cache.set(normalized, { ...currentVersion, summary: refreshed });
