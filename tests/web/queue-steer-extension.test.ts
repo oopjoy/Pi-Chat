@@ -1225,6 +1225,197 @@ test("dispatch before HTTP acknowledgement cannot resurrect an executing queue i
   }
 });
 
+test("queue update promotes an accepted turn when its dispatch SSE frame is missed", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const queuedItem = {
+    id: "00000000-0000-4000-8000-000000000032",
+    message: "dispatch frame was missed",
+    imageCount: 0,
+    createdAt: 2,
+  };
+  let resolvePrompt!: (value: {
+    accepted: true;
+    queued: true;
+    id: string;
+    queue: typeof queuedItem[];
+  }) => void;
+  const pendingPrompt = new Promise<{
+    accepted: true;
+    queued: true;
+    id: string;
+    queue: typeof queuedItem[];
+  }>((resolve) => { resolvePrompt = resolve; });
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true },
+      queue: [],
+      queuePaused: true,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    prompt: async () => pendingPrompt,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, queuedItem.message);
+      textarea.dispatchEvent(new dom.window.InputEvent("input", {
+        bubbles: true,
+        inputType: "insertText",
+        data: queuedItem.message,
+      }));
+      dom.window.document.querySelector<HTMLButtonElement>(
+        ".queue-submit-button",
+      )!.click();
+      await Promise.resolve();
+    });
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      // Lose both the admission snapshot and the separate queue_dispatch frame.
+      // Only the complete empty pre-dispatch snapshot reaches this browser.
+      source.emitPi({
+        type: "pi_chat_queue_update",
+        piChatSessionId: activeId,
+        queue: [],
+        paused: false,
+      });
+    });
+    await act(async () => {
+      resolvePrompt({
+        accepted: true,
+        queued: true,
+        id: queuedItem.id,
+        // This is the older enqueue response; it must not resurrect the row.
+        queue: [queuedItem],
+      });
+      await Promise.resolve();
+    });
+    assert.equal(dom.window.document.querySelector(".prompt-queue"), null);
+    assert.equal(
+      dom.window.document.querySelectorAll(".message-user").length,
+      1,
+      "an omitted queue_dispatch must not strand the accepted turn",
+    );
+    await act(async () => {
+      source.emitPi({
+        type: "pi_chat_queue_dispatch",
+        piChatSessionId: activeId,
+        id: queuedItem.id,
+        message: queuedItem.message,
+        imageCount: 0,
+      });
+    });
+    assert.equal(
+      dom.window.document.querySelectorAll(".message-user").length,
+      1,
+      "a late dispatch frame cannot duplicate the promoted user turn",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
+test("an in-flight cancellation fences an empty queue snapshot from promoting the turn", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const queuedItem = {
+    id: "00000000-0000-4000-8000-000000000033",
+    message: "cancellation is still pending",
+    imageCount: 0,
+    createdAt: 2,
+  };
+  let cancelCalls = 0;
+  const pendingCancel = new Promise<{ queue: []; paused: false }>(() => undefined);
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true },
+      queue: [],
+      queuePaused: true,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    prompt: async () => ({
+      accepted: true,
+      queued: true,
+      id: queuedItem.id,
+      queue: [queuedItem],
+    }),
+    cancelQueued: async () => {
+      cancelCalls += 1;
+      return pendingCancel;
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, queuedItem.message);
+      textarea.dispatchEvent(new dom.window.InputEvent("input", {
+        bubbles: true,
+        inputType: "insertText",
+        data: queuedItem.message,
+      }));
+      dom.window.document.querySelector<HTMLButtonElement>(
+        ".queue-submit-button",
+      )!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const source = FakeEventSource.instances.at(-1)!;
+    const cancel = dom.window.document.querySelector<HTMLButtonElement>(
+      ".prompt-queue-cancel",
+    )!;
+    await act(async () => cancel.click());
+    assert.equal(cancelCalls, 1);
+    await act(async () => {
+      // The server sends this before the delayed DELETE acknowledgement. It
+      // must not make a cancellation look like an executed prompt.
+      source.emitPi({
+        type: "pi_chat_queue_update",
+        piChatSessionId: activeId,
+        queue: [],
+        paused: false,
+      });
+    });
+    assert.match(
+      dom.window.document.querySelector(".prompt-queue")?.textContent || "",
+      /cancellation is still pending/,
+      "an unresolved cancellation keeps the item visible for recovery",
+    );
+    assert.equal(
+      dom.window.document.querySelectorAll(".message-user").length,
+      0,
+      "an in-flight cancellation cannot promote the item into the transcript",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("queue SSE invalidates an older Session view before it can erase queue state", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");
@@ -1283,6 +1474,18 @@ test("queue SSE invalidates an older Session view before it can erase queue stat
     assert.equal(
       dom.window.document.querySelectorAll(".prompt-queue article").length,
       1,
+    );
+    await act(async () => {
+      source.emitPi({
+        type: "pi_chat_queue_update",
+        piChatSessionId: activeId,
+        paused: false,
+      });
+    });
+    assert.equal(
+      dom.window.document.querySelectorAll(".prompt-queue article").length,
+      1,
+      "a malformed queue frame cannot be treated as an empty queue",
     );
 
     await act(async () => resolveView(oldView));

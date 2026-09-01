@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { appendLocalTurnOnce, appendPendingUserMessage, bindQueuedAdmission, bindQueuedDispatch, consumeLocalSteeringTurn, markLocalTurnQueued, nextLocalTurnTotal, promoteTurnsAbsentFromQueue, protectTranscriptWithLocalTurns, removeLocalTurnAndRebase, removePendingSteeringTurns, transcriptConfirmsLocalTurn, transcriptTurnTotal, type LocalUserTurn } from "../src/web/lib/local-user-turn";
+import { appendLocalTurnOnce, appendPendingUserMessage, bindQueuedAdmission, bindQueuedDispatch, consumeLocalSteeringTurn, markLocalTurnQueued, nextLocalTurnTotal, promoteTurnsAbsentFromQueue, protectTranscriptWithLocalTurns, queuedPromptFromLocalTurn, removeLocalTurnAndRebase, removePendingSteeringTurns, transcriptConfirmsLocalTurn, transcriptTurnTotal, type LocalUserTurn } from "../src/web/lib/local-user-turn";
 import { SessionViewCache } from "../src/web/lib/session-view-cache";
 import type { PiMessage, SessionViewData } from "../src/shared/types";
 
@@ -24,6 +24,24 @@ test("a stale busy transcript keeps the accepted local user turn visible", () =>
   assert.deepEqual(stale.messages, [previous, local]);
   assert.equal(stale.messageTotal, 2);
   assert.equal(stale.turnTotal, 2);
+});
+
+test("transcript protection does not append a local turn already present by identity", () => {
+  const dispatched: LocalUserTurn = {
+    ...pending,
+    queueState: "dispatched",
+  };
+  const alreadyPaintedEarlier: PiMessage = { role: "user", content: "different earlier" };
+  const protectedTranscript = protectTranscriptWithLocalTurns(
+    [{ ...dispatched, expectedTurnTotal: 3 }],
+    [alreadyPaintedEarlier, local],
+    2,
+    4,
+  );
+  assert.deepEqual(protectedTranscript.messages, [alreadyPaintedEarlier, local]);
+  const protectedTurn = protectedTranscript.pendingTurns[0];
+  assert.ok(protectedTurn);
+  assert.equal(protectedTurn.renderedInTranscript, true);
 });
 
 test("the authoritative transcript replaces the local turn exactly once when persisted", () => {
@@ -292,6 +310,128 @@ test("cache navigation never mistakes its own local overlay for persisted histor
   const returnedPaint = protectTranscriptWithLocalTurns(firstPaint.pendingTurns, returnedSource.messages, returnedSource.messageTotal, returnedSource.turnTotal);
   assert.deepEqual(returnedPaint.messages, [previous, local]);
   assert.deepEqual(returnedPaint.pendingTurns, [pending]);
+});
+
+test("waiting local turns have a stable synthetic queue projection while authority is missing", () => {
+  const turn: LocalUserTurn = {
+    sessionId: "session-a",
+    message: {
+      role: "user",
+      content: [
+        { type: "text", text: "inspect these" },
+        { type: "image", data: "AA==", mimeType: "image/png" },
+      ],
+      timestamp: 42,
+    },
+    expectedTurnTotal: 2,
+    queueId: "queue-fallback",
+    queueState: "waiting",
+  };
+  assert.deepEqual(queuedPromptFromLocalTurn(turn), {
+    id: "queue-fallback",
+    message: "inspect these",
+    imageCount: 1,
+    createdAt: 42,
+  });
+  assert.equal(
+    queuedPromptFromLocalTurn({ ...turn, queueState: "dispatched" }),
+    undefined,
+  );
+});
+
+test("an authoritative empty queue promotes a waiting ordinary turn even after idle", () => {
+  const turn: LocalUserTurn = {
+    sessionId: "session-a",
+    message: local,
+    expectedTurnTotal: 2,
+    queueId: "queue-authoritative-empty",
+    queueState: "waiting",
+  };
+  assert.deepEqual(
+    promoteTurnsAbsentFromQueue([turn], new Set<string>(), false, true),
+    [turn],
+  );
+  assert.equal(turn.queueState, "dispatched");
+
+  const retrying: LocalUserTurn = {
+    ...turn,
+    queueState: "waiting",
+    queueRetryPending: true,
+  };
+  assert.deepEqual(
+    promoteTurnsAbsentFromQueue([retrying], new Set<string>(), false, true),
+    [],
+  );
+  assert.equal(retrying.queueState, "waiting");
+
+  const steering: LocalUserTurn = {
+    ...turn,
+    queueState: "waiting",
+    queueRetryPending: false,
+    revealOnMessageStart: true,
+  };
+  assert.deepEqual(
+    promoteTurnsAbsentFromQueue([steering], new Set<string>(), false, true),
+    [],
+  );
+  assert.equal(steering.queueState, "waiting");
+
+  const first: LocalUserTurn = {
+    ...turn,
+    queueId: "queue-first",
+    queueState: "waiting",
+  };
+  const second: LocalUserTurn = {
+    ...turn,
+    message: { role: "user", content: "second" },
+    queueId: "queue-second",
+    queueState: "waiting",
+  };
+  assert.deepEqual(
+    promoteTurnsAbsentFromQueue(
+      [first, second],
+      new Set(["queue-second"]),
+      false,
+      true,
+    ),
+    [first],
+  );
+  assert.equal(first.queueState, "dispatched");
+  assert.equal(second.queueState, "waiting");
+});
+
+test("an inflated non-truncated turn watermark cannot delete an absent local turn", () => {
+  const stale = protectTranscriptWithLocalTurns(
+    [{ ...pending, expectedTurnTotal: 2, queueState: "dispatched" }],
+    [previous],
+    1,
+    10,
+    false,
+  );
+  assert.equal(stale.pendingTurns.length, 1);
+  assert.deepEqual(stale.messages, [previous, local]);
+
+  const waiting = protectTranscriptWithLocalTurns(
+    [{ ...pending, expectedTurnTotal: 2, queueId: "queue-live", queueState: "waiting" }],
+    [previous],
+    1,
+    10,
+    false,
+    new Set(["queue-live"]),
+  );
+  assert.equal(waiting.pendingTurns.length, 1);
+  assert.deepEqual(waiting.messages, [previous]);
+
+  const retrying = protectTranscriptWithLocalTurns(
+    [{ ...pending, expectedTurnTotal: 2, queueId: "queue-retry", queueState: "waiting", queueRetryPending: true }],
+    [previous],
+    1,
+    10,
+    false,
+    new Set<string>(),
+  );
+  assert.equal(retrying.pendingTurns.length, 1);
+  assert.deepEqual(retrying.messages, [previous]);
 });
 
 test("a view after a missed queue dispatch reveals a local turn no longer in Pi's queue", async () => {

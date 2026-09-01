@@ -1,4 +1,4 @@
-import type { PiMessage } from "../../shared/types";
+import type { PiMessage, QueuedPrompt } from "../../shared/types";
 
 /** A locally accepted user turn that JSONL has not yet exposed to a view read. */
 export interface LocalUserTurn {
@@ -132,6 +132,21 @@ export function localTurnBelongsInTranscript(turn: LocalUserTurn): boolean {
   return turn.queueState !== "waiting";
 }
 
+/** Render a waiting local admission when a complete queue snapshot is temporarily unavailable. */
+export function queuedPromptFromLocalTurn(turn: LocalUserTurn): QueuedPrompt | undefined {
+  if (turn.queueState !== "waiting" || !turn.queueId) return undefined;
+  const shape = textAndImageCount(turn.message);
+  const createdAt = typeof turn.message.timestamp === "number" && Number.isFinite(turn.message.timestamp)
+    ? turn.message.timestamp
+    : Date.now();
+  return {
+    id: turn.queueId,
+    message: shape.text,
+    imageCount: shape.imageCount,
+    createdAt,
+  };
+}
+
 /**
  * A late prompt acknowledgement may arrive after a view has already confirmed
  * and removed this local turn. Render only the still-pending object once.
@@ -157,24 +172,32 @@ export function markLocalTurnQueued(turn: LocalUserTurn, queueId: string): void 
  * A reconnect can miss both queue_dispatch and message_start. A fresh hot view
  * whose explicit queue no longer contains an admitted ID proves that Pi moved
  * that turn out of its waiting queue; reveal it instead of leaving the user
- * message hidden forever.
+ * message hidden forever. Complete SSE queue snapshots may pass
+ * authoritativeQueue even when the Runtime is already idle.
  */
 export function promoteTurnsAbsentFromQueue(
   turns: LocalUserTurn[],
   queueIds: ReadonlySet<string> | undefined,
   runtimeActive: boolean,
-): void {
-  if (!runtimeActive || !queueIds) return;
+  authoritativeQueue = false,
+  blockedQueueIds?: ReadonlySet<string>,
+): LocalUserTurn[] {
+  if ((!runtimeActive && !authoritativeQueue) || !queueIds) return [];
+  const promoted: LocalUserTurn[] = [];
   for (const turn of turns) {
     if (
       turn.queueState === "waiting"
       && !turn.revealOnMessageStart
       && !turn.queueRetryPending
       && turn.queueId
+      && !blockedQueueIds?.has(turn.queueId)
       && !queueIds.has(turn.queueId)
-    )
+    ) {
       turn.queueState = "dispatched";
+      promoted.push(turn);
+    }
   }
+  return promoted;
 }
 
 /** Reveal the native steering turn Pi actually consumes. */
@@ -226,7 +249,12 @@ export function nextLocalTurnTotal(messages: PiMessage[], total: number | undefi
   return Math.max(transcriptTurnTotal(messages, total), ...pending.map((turn) => turn.expectedTurnTotal), 0) + 1;
 }
 
-export function transcriptConfirmsLocalTurn(turn: LocalUserTurn, messages: PiMessage[], total?: number): boolean {
+export function transcriptConfirmsLocalTurn(
+  turn: LocalUserTurn,
+  messages: PiMessage[],
+  total?: number,
+  messagesTruncated = false,
+): boolean {
   const authoritativeTotal = transcriptTurnTotal(messages, total);
   if (authoritativeTotal < turn.expectedTurnTotal) {
     // A stale/windowed response can carry fewer turns than the local watermark.
@@ -238,7 +266,7 @@ export function transcriptConfirmsLocalTurn(turn: LocalUserTurn, messages: PiMes
   const firstVisibleTurn = authoritativeTotal - visibleUsers.length + 1;
   // The authoritative suffix has advanced beyond this old local turn. It can no
   // longer be visible, but the later turn watermark proves it was persisted.
-  if (turn.expectedTurnTotal < firstVisibleTurn) return true;
+  if (turn.expectedTurnTotal < firstVisibleTurn) return messagesTruncated;
   const candidate = visibleUsers[turn.expectedTurnTotal - firstVisibleTurn];
   return Boolean(candidate && (turn.confirmByPosition || sameUserInstruction(candidate, turn.message)))
     || Boolean(authoritativeUserMatch(turn, messages, total)?.piChatPersistedMessageId);
@@ -266,23 +294,48 @@ export function appendPendingUserMessage(messages: PiMessage[], pending: PiMessa
 /**
  * Keep every accepted local user turn visible until an authoritative JSONL
  * view contains its corresponding cumulative user-turn count. Queued prompts
- * can coexist, so a single pending-turn watermark is insufficient.
+ * can coexist, so a single pending-turn watermark is insufficient. A complete
+ * queue projection also keeps an item waiting while it is still in the FIFO,
+ * even if a stale turn watermark would otherwise appear to confirm it.
  */
 export function protectTranscriptWithLocalTurns(
   turns: LocalUserTurn[] | undefined,
   messages: PiMessage[],
   messageTotal: number | undefined,
   turnTotal: number | undefined,
+  messagesTruncated = false,
+  waitingQueueIds?: ReadonlySet<string>,
 ): ProtectedTranscript {
   const resolvedMessageTotal = typeof messageTotal === "number" && Number.isFinite(messageTotal) ? messageTotal : messages.length;
   const resolvedTurnTotal = transcriptTurnTotal(messages, turnTotal);
-  const pendingTurns = (turns || []).filter((turn) => !transcriptConfirmsLocalTurn(turn, messages, resolvedTurnTotal));
+  const pendingTurns = (turns || []).filter((turn) => {
+    const keepWaitingAdmission =
+      turn.queueState === "waiting" &&
+      !turn.revealOnMessageStart &&
+      (!turn.queueId ||
+        turn.queueRetryPending ||
+        waitingQueueIds?.has(turn.queueId));
+    return keepWaitingAdmission || !transcriptConfirmsLocalTurn(
+      turn,
+      messages,
+      resolvedTurnTotal,
+      messagesTruncated,
+    );
+  });
   if (!pendingTurns.length) {
     return { messages, messageTotal: resolvedMessageTotal, turnTotal: resolvedTurnTotal, pendingTurns };
   }
   const protectedMessages = [...messages];
   const visiblePendingTurns = pendingTurns.filter(localTurnBelongsInTranscript);
   for (const turn of visiblePendingTurns) {
+    // A stale view can re-run protection after an SSE/ack handler already
+    // inserted this exact optimistic object. Do not append it a second time;
+    // object identity is intentional so two genuinely identical prompts stay
+    // distinct.
+    if (protectedMessages.includes(turn.message)) {
+      turn.renderedInTranscript = true;
+      continue;
+    }
     const localTimestamp = typeof turn.message.timestamp === "number" && Number.isFinite(turn.message.timestamp)
       ? turn.message.timestamp
       : undefined;

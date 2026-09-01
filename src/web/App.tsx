@@ -120,6 +120,7 @@ import {
   nextLocalTurnTotal,
   promoteTurnsAbsentFromQueue,
   protectTranscriptWithLocalTurns,
+  queuedPromptFromLocalTurn,
   removeLocalTurnAndRebase,
   removePendingSteeringTurns,
   type LocalUserTurn,
@@ -786,6 +787,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         queue: filteredQueue,
         paused: view.queuePaused === true,
       });
+      queueProjectionSourceRef.current.set(sessionId, "view");
       advanceQueueProjectionRevision(sessionId);
     }
     // A stale response may arrive after a newer queue event and still be
@@ -1074,7 +1076,13 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   const queueMutationSequenceRef = useRef(new Map<string, number>());
   const appliedQueueMutationSequenceRef = useRef(new Map<string, number>());
   const cancelledQueueIdsRef = useRef(new Map<string, Set<string>>());
+  /** In-flight cancellation IDs cannot be interpreted as dispatched merely because they leave the FIFO. */
+  const cancellingQueueIdsRef = useRef(new Map<string, Set<string>>());
   const queueProjectionRevisionRef = useRef(new Map<string, number>());
+  /** Distinguishes fresh SSE queue authority from a stale HTTP/view snapshot. */
+  const queueProjectionSourceRef = useRef(
+    new Map<string, "event" | "view" | "ack" | "mutation">(),
+  );
   /** Latest queue projection per Session, independent of pane/cache residency. */
   const latestQueueProjectionRef = useRef(
     new Map<string, { queue: QueuedPrompt[]; paused: boolean }>(),
@@ -1164,12 +1172,14 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     sessionId: string,
     incoming: QueuedPrompt[],
     paused: boolean,
+    source: "event" | "view" | "ack" | "mutation" = "view",
   ): { queue: QueuedPrompt[]; paused: boolean } => {
     const projection = {
       queue: filterCancelledQueue(sessionId, incoming),
       paused,
     };
     latestQueueProjectionRef.current.set(sessionId, projection);
+    queueProjectionSourceRef.current.set(sessionId, source);
     advanceQueueProjectionRevision(sessionId);
     return projection;
   };
@@ -1177,7 +1187,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     const projection = latestQueueProjectionRef.current.get(sessionId);
     const queue = projection?.queue || viewCacheRef.current.get(sessionId)?.queue || [];
     if (!queue.length && projection?.paused !== false)
-      acceptQueueProjection(sessionId, [], false);
+      acceptQueueProjection(sessionId, [], false, "event");
   };
   const acceptQueueProjectionIfCurrent = (
     sessionId: string,
@@ -1306,6 +1316,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     completedCompactionSessionIdsRef.current.clear();
     cancelledQueueIdsRef.current.clear();
     queueProjectionRevisionRef.current.clear();
+    queueProjectionSourceRef.current.clear();
     latestQueueProjectionRef.current.clear();
     queueMutationSequenceRef.current.clear();
     appliedQueueMutationSequenceRef.current.clear();
@@ -1345,6 +1356,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     completedCompactionSessionIdsRef.current.clear();
     cancelledQueueIdsRef.current.clear();
     queueProjectionRevisionRef.current.clear();
+    queueProjectionSourceRef.current.clear();
     latestQueueProjectionRef.current.clear();
     queueMutationSequenceRef.current.clear();
     appliedQueueMutationSequenceRef.current.clear();
@@ -1475,7 +1487,9 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       session: settleSidebarActivity(view.session),
       isStreaming: false,
       liveMessage: undefined,
-      queuePaused: (view.queue?.length || 0) > 0 && view.queuePaused === true,
+      queuePaused: Array.isArray(view.queue)
+        ? view.queue.length > 0 && view.queuePaused === true
+        : view.queuePaused,
       toolStatus: "",
       state: { ...view.state, isStreaming: false },
     };
@@ -2344,12 +2358,16 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           || sourceView?.liveMessage
           || sourceView?.toolStatus,
         ),
+        Boolean(activeViewId),
+        cancellingQueueIdsRef.current.get(activeViewId),
       );
       const protectedTranscript = protectTranscriptWithLocalTurns(
         localUserTurnsRef.current.get(activeViewId),
         sourceView?.messages || data.messages,
         sourceView?.messageTotal ?? data.messageTotal,
         sourceView?.turnTotal ?? data.turnTotal,
+        sourceView?.messagesTruncated ?? data.messagesTruncated === true,
+        new Set(bootstrapQueue.map((item) => item.id)),
       );
       if (protectedTranscript.pendingTurns.length) {
         protectedTranscript.pendingTurns.forEach((turn) => {
@@ -2651,12 +2669,18 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
             || sourceView.liveMessage
             || sourceView.toolStatus,
           ),
+          queueProjection.known,
+          cancellingQueueIdsRef.current.get(sourceView.session.id),
         );
       const protectedTranscript = protectTranscriptWithLocalTurns(
         localUserTurnsRef.current.get(sourceView.session.id),
         sourceView.messages,
         sourceView.messageTotal,
         sourceView.turnTotal,
+        sourceView.messagesTruncated,
+        queueProjection.known
+          ? new Set(filteredQueue.map((item) => item.id))
+          : undefined,
       );
       if (protectedTranscript.pendingTurns.length) {
         protectedTranscript.pendingTurns.forEach((turn) => {
@@ -4545,12 +4569,23 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         }
         scheduleSidebarRefresh();
       } else if (type === "pi_chat_queue_update") {
+        // Queue updates are complete server snapshots. A malformed frame must
+        // not be interpreted as an empty queue, or every accepted local turn
+        // would temporarily fall outside both the queue and transcript.
+        if (!Array.isArray(event.queue)) {
+          recordSseRejectionDiagnostic({
+            sessionId: eventSessionId,
+            runGeneration: eventRunGeneration,
+            eventType: type,
+            decisionReason: "malformed-queue-snapshot",
+          });
+          return;
+        }
         const currentProjection = acceptQueueProjection(
           eventSessionId,
-          Array.isArray(event.queue)
-            ? (event.queue as unknown as QueuedPrompt[])
-            : [],
+          event.queue as unknown as QueuedPrompt[],
           event.paused === true,
+          "event",
         );
         const currentQueue = currentProjection.queue;
         const admittedId =
@@ -4571,6 +4606,36 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           : undefined;
         const removeAdmittedTurn = Boolean(turn?.renderedInTranscript);
         if (turn) turn.renderedInTranscript = false;
+        // The queue snapshot itself is authoritative evidence that an ordinary
+        // queued item has left the waiting FIFO. This handles a lost
+        // queue_dispatch frame during SSE reconnect/backpressure. Native Steers
+        // and queue-error retries remain hidden until their own authority says
+        // they may be revealed.
+        const promotedTurns = promoteTurnsAbsentFromQueue(
+          localTurns,
+          new Set(currentQueue.map((item) => item.id)),
+          false,
+          true,
+          cancellingQueueIdsRef.current.get(eventSessionId),
+        );
+        const promotedForPane = viewingEventSession
+          ? promotedTurns.filter((candidate) => !candidate.renderedInTranscript)
+          : [];
+        for (const promoted of promotedForPane)
+          promoted.renderedInTranscript = true;
+        const messagePatch =
+          (removeAdmittedTurn && Boolean(turn)) || promotedForPane.length
+            ? (current: PiMessage[]) => {
+                let next = removeAdmittedTurn && turn
+                  ? current.filter((candidate) => candidate !== turn.message)
+                  : current;
+                for (const promoted of promotedForPane) {
+                  if (!next.includes(promoted.message))
+                    next = [...next, promoted.message];
+                }
+                return next;
+              }
+            : undefined;
         if (eventSessionId)
           setSessions((current) =>
             current.map((session) =>
@@ -4586,23 +4651,21 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         if (eventSessionId)
           patchSessionCache(eventSessionId, {
             queue: currentQueue,
-            queuePaused: event.paused === true,
+            queuePaused: currentProjection.paused,
           });
         if (viewingEventSession)
           dispatchPane({
             type: "QUEUE_UPDATED",
             sessionId: eventSessionId,
             queue: currentQueue,
-            paused: event.paused === true,
-            messages:
-              removeAdmittedTurn && turn
-                ? (current) =>
-                    current.filter((candidate) => candidate !== turn.message)
-                : undefined,
+            paused: currentProjection.paused,
+            messages: messagePatch,
             pendingUserMessage: turn
               ? (current) => (current === turn.message ? null : current)
               : undefined,
           });
+        if (eventSessionId && viewingEventSession && promotedTurns.length)
+          requestPromptReconcileRef.current(eventSessionId);
       } else if (type === "pi_chat_queue_dispatch") {
         const dispatchedId = typeof event.id === "string" ? event.id : "";
         const dispatchProjection = eventSessionId
@@ -4615,6 +4678,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
               ).filter((item) => item.id !== dispatchedId),
               latestQueueProjectionRef.current.get(eventSessionId)?.paused ||
                 viewCacheRef.current.get(eventSessionId)?.queuePaused === true,
+              "event",
             )
           : { queue: [], paused: false };
         if (eventSessionId) {
@@ -4625,7 +4689,11 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           setSessions((current) =>
             current.map((session) =>
               session.id === eventSessionId
-                ? applySidebarQueueProjection(session, dispatchProjection.queue)
+                ? applySidebarQueueProjection(
+                    session,
+                    dispatchProjection.queue,
+                    dispatchProjection.paused,
+                  )
                 : session,
             ),
           );
@@ -4655,6 +4723,14 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         }
         // Dispatch can beat the enqueue HTTP acknowledgement. Bind its queue ID to the
         // already-protected local turn before considering an observer fallback.
+        const cancelling = eventSessionId
+          ? cancellingQueueIdsRef.current.get(eventSessionId)
+          : undefined;
+        if (cancelling && dispatchedId) {
+          cancelling.delete(dispatchedId);
+          if (!cancelling.size)
+            cancellingQueueIdsRef.current.delete(eventSessionId);
+        }
         const knownLocally = bindQueuedDispatch(
           localTurns,
           dispatchedId,
@@ -4731,6 +4807,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           eventQueue,
           event.paused === true ||
             latestQueueProjectionRef.current.get(eventSessionId)?.paused === true,
+          "event",
         );
         const currentQueue = currentProjection.queue;
         const failedId = typeof event.id === "string" ? event.id : "";
@@ -5211,6 +5288,10 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           setError(
             incidentId ? `${message}（事件 ID：${incidentId}）` : message,
           );
+          // A process error can race an accepted queue admission before its
+          // queue/dispatch frame reaches this browser. Reconcile the durable
+          // Session instead of leaving a local turn dependent on navigation.
+          requestPromptReconcileRef.current(eventSessionId);
         }
       }
     },
@@ -5798,8 +5879,28 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           }
           const reconciledView = acceptAuthoritativeIdleSessionView(view);
           applySessionView(reconciledView, authority, queueRequestRevision);
-          if (reconciledView.isStreaming)
-            schedulePromptReconcile(sessionId, completedVersion);
+          const unresolvedLocalTurn = (
+            localUserTurnsRef.current.get(sessionId) || []
+          ).some((turn) => {
+            if (turn.revealOnMessageStart) return false;
+            if (
+              turn.queueState === "waiting" &&
+              turn.queueId &&
+              Array.isArray(reconciledView.queue) &&
+              reconciledView.queue.some((item) => item.id === turn.queueId)
+            )
+              return false;
+            return true;
+          });
+          if (
+            reconciledView.isStreaming ||
+            (unresolvedLocalTurn && failedAttempts < 4)
+          )
+            schedulePromptReconcile(
+              sessionId,
+              completedVersion,
+              reconciledView.isStreaming ? 0 : failedAttempts + 1,
+            );
         })
         .catch((cause) => {
           if (!paneAuthorityCanCommit(authority)) return;
@@ -5851,7 +5952,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     };
     const alreadyStreaming = state.isStreaming;
     const willQueueLocally =
-      !steering && (alreadyStreaming || queuePaused || queue.length > 0);
+      !steering && (alreadyStreaming || queuePaused || displayedQueue.length > 0);
     const previousToolStatus = toolStatus;
     const optimisticMessage =
       !steering &&
@@ -6253,6 +6354,15 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         protectedLocalTurn = null;
       }
       const acceptedLocalTurn = localTurnEntry();
+      // Bind the server queue ID before comparing projections. The admission
+      // snapshot and queue_dispatch can both be missed; the delayed HTTP ack
+      // must still be correlated with the local turn before it is reconciled.
+      if (
+        result.queued &&
+        acceptedLocalTurn &&
+        typeof result.id === "string"
+      )
+        markLocalTurnQueued(acceptedLocalTurn, result.id);
       const acknowledgedProjection = result.queue
         ? (() => {
             const currentRevision =
@@ -6263,12 +6373,20 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
                   targetSessionId,
                   result.queue,
                   queuePaused,
+                  "ack",
                 ),
                 accepted: true,
               };
             const current = latestQueueProjectionRef.current.get(
               targetSessionId,
             ) || { queue: [], paused: queuePaused };
+            // A fresh SSE/mutation queue snapshot is stronger than this older
+            // HTTP response. A view snapshot, however, may simply be the old
+            // empty queue read that raced the acknowledgement, so retain the
+            // historical recovery path for that source only.
+            const source = queueProjectionSourceRef.current.get(targetSessionId);
+            if (source === "event" || source === "mutation")
+              return { ...current, accepted: false };
             if (!result.queued || typeof result.id !== "string")
               return { ...current, accepted: false };
             const acknowledgedTurn = localTurnEntry();
@@ -6279,21 +6397,23 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
               return { ...current, accepted: false };
             const admitted = result.queue.find((item) => item.id === result.id);
             if (!admitted) return { ...current, accepted: false };
-            const alreadyProjected = current.queue.some(
-              (item) => item.id === admitted.id,
-            );
-            if (alreadyProjected) return { ...current, accepted: false };
+            if (current.queue.some((item) => item.id === admitted.id))
+              return { ...current, accepted: false };
             return {
               ...acceptQueueProjection(
                 targetSessionId,
                 [...current.queue, admitted],
                 current.paused,
+                "ack",
               ),
               accepted: true,
             };
           })()
         : undefined;
-      const acknowledgedQueue = acknowledgedProjection?.queue;
+      const acknowledgedQueue = acknowledgedProjection?.accepted
+        ? acknowledgedProjection.queue
+        : undefined;
+      let promotedAcknowledgedTurns: LocalUserTurn[] = [];
       if (
         result.steered &&
         acceptedLocalTurn?.queueState === "waiting" &&
@@ -6311,7 +6431,20 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       } else if (result.queued && acceptedLocalTurn && typeof result.id === "string") {
         // Dispatch SSE may beat this acknowledgement. Never demote a turn that
         // the scheduler has already started into the waiting-only queue UI.
-        markLocalTurnQueued(acceptedLocalTurn, result.id);
+        // A newer complete queue projection can prove that this acknowledged
+        // item has already left the FIFO even when queue_dispatch was lost.
+        const currentProjection = latestQueueProjectionRef.current.get(targetSessionId);
+        if (
+          currentProjection &&
+          !currentProjection.queue.some((item) => item.id === result.id)
+        )
+          promotedAcknowledgedTurns = promoteTurnsAbsentFromQueue(
+            localUserTurnsRef.current.get(targetSessionId) || [],
+            new Set(currentProjection.queue.map((item) => item.id)),
+            false,
+            true,
+            cancellingQueueIdsRef.current.get(targetSessionId),
+          );
       } else if (!result.extension && !result.steered && acceptedLocalTurn) {
         acceptedLocalTurn.queueState = "dispatched";
       }
@@ -6326,6 +6459,15 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           ),
         );
       }
+      const promotedAcknowledgedForPane = promptPaneIsCurrent()
+        ? promotedAcknowledgedTurns.filter(
+            (candidate) => !candidate.renderedInTranscript,
+          )
+        : [];
+      for (const promoted of promotedAcknowledgedForPane)
+        promoted.renderedInTranscript = true;
+      if (targetSessionId && promotedAcknowledgedTurns.length)
+        requestPromptReconcileRef.current(targetSessionId);
       // A late acknowledgement is useful for Session reconciliation, but it
       // must not write into a later A pane after A → B → A. Queue state is
       // Session-owned: after a same-Session view commit (e.g. an SSE-driven
@@ -6417,16 +6559,26 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         if (removeQueuedTurn) queuedTurn.renderedInTranscript = false;
         // A dispatch event can beat this HTTP acknowledgement. In that race the
         // response contains the old enqueue snapshot, so SSE remains authoritative.
+        const acknowledgementMessages =
+          removeQueuedTurn || promotedAcknowledgedForPane.length
+            ? (current: PiMessage[]) => {
+                let next = removeQueuedTurn
+                  ? current.filter(
+                      (candidate) => candidate !== queuedTurn!.message,
+                    )
+                  : current;
+                for (const promoted of promotedAcknowledgedForPane) {
+                  if (!next.includes(promoted.message))
+                    next = [...next, promoted.message];
+                }
+                return next;
+              }
+            : undefined;
         commitPaneIfCurrent(promptAuthority!, {
           type: "PROMPT_ACKNOWLEDGED",
           sessionId: targetSessionId,
-          ...(removeQueuedTurn
-            ? {
-                messages: (current) =>
-                  current.filter(
-                    (candidate) => candidate !== queuedTurn!.message,
-                  ),
-              }
+          ...(acknowledgementMessages
+            ? { messages: acknowledgementMessages }
             : null),
           ...(acknowledgedQueue && queuedTurn?.queueState !== "dispatched"
             ? { queue: acknowledgedQueue }
@@ -6895,17 +7047,31 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           // Patch the already-painted cache without promoting its transcript into
           // the authoritative branch; a later non-empty view performs confirmation.
           if (!reconciledView.messages.length && cached.messages.length) {
-            const projection = acceptQueueProjectionIfCurrent(
+            const projection = Array.isArray(reconciledView.queue)
+              ? acceptQueueProjectionIfCurrent(
+                  id,
+                  queueRequestRevision,
+                  reconciledView.queue,
+                  reconciledView.queuePaused === true,
+                )
+              : undefined;
+            const patched = refreshSessionCache(
               id,
-              queueRequestRevision,
-              reconciledView.queue || [],
-              reconciledView.queuePaused === true,
+              projection
+                ? {
+                    ...reconciledView,
+                    queue: projection.queue,
+                    queuePaused: projection.paused,
+                  }
+                : (() => {
+                    const {
+                      queue: _unknownQueue,
+                      queuePaused: _unknownPaused,
+                      ...withoutQueueAuthority
+                    } = reconciledView;
+                    return withoutQueueAuthority;
+                  })(),
             );
-            const patched = refreshSessionCache(id, {
-              ...reconciledView,
-              queue: projection.queue,
-              queuePaused: projection.paused,
-            });
             if (patched)
               applySessionView(
                 patched,
@@ -7396,7 +7562,9 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     appliedDraftRestorationSequencesRef.current.delete(keyId);
     steerDequeueExpectedDraftRevisionRef.current.delete(sessionId);
     cancelledQueueIdsRef.current.delete(sessionId);
+    cancellingQueueIdsRef.current.delete(sessionId);
     queueProjectionRevisionRef.current.delete(sessionId);
+    queueProjectionSourceRef.current.delete(sessionId);
     latestQueueProjectionRef.current.delete(sessionId);
     queueMutationSequenceRef.current.delete(sessionId);
     appliedQueueMutationSequenceRef.current.delete(sessionId);
@@ -8133,8 +8301,22 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     anySessionRunning ||
     anySessionQueued ||
     anySessionPendingConfirmation;
+  // A complete queue snapshot can arrive before its dispatch frame, and a
+  // reconnect can miss that frame altogether. Keep a waiting local admission
+  // visible as a synthetic queue row until authoritative code promotes or
+  // removes it; localUserTurns is never allowed to become an invisible state.
+  const localQueueFallback = viewedSessionId
+    ? (localUserTurnsRef.current.get(viewedSessionId) || [])
+        .filter((turn) => !turn.revealOnMessageStart)
+        .map(queuedPromptFromLocalTurn)
+        .filter((item): item is QueuedPrompt => Boolean(item))
+        .filter((item) => !queue.some((current) => current.id === item.id))
+    : [];
+  const displayedQueue = localQueueFallback.length
+    ? [...queue, ...localQueueFallback]
+    : queue;
   const composerQueueMode =
-    state.isStreaming || queuePaused || queue.length > 0;
+    state.isStreaming || queuePaused || displayedQueue.length > 0;
   // A stop request belongs to one Session. A stale/local abort intent must
   // never paint a stop button (or disable Send) after this pane has settled.
   const stoppingCurrentSession =
@@ -8399,6 +8581,10 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     const localCancelledAtCancellation = pendingAtCancellation.find(
       (turn) => turn.queueId === item.id,
     );
+    const cancellingIds =
+      cancellingQueueIdsRef.current.get(operation.sessionId) || new Set<string>();
+    cancellingIds.add(item.id);
+    cancellingQueueIdsRef.current.set(operation.sessionId, cancellingIds);
     void api
       .cancelQueued(item.id, operation.sessionId)
       .then((result) => {
@@ -8407,6 +8593,12 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           return;
         const pending =
           localUserTurnsRef.current.get(operation.sessionId) || [];
+        const cancelling = cancellingQueueIdsRef.current.get(operation.sessionId);
+        if (cancelling) {
+          cancelling.delete(item.id);
+          if (!cancelling.size)
+            cancellingQueueIdsRef.current.delete(operation.sessionId);
+        }
         const cancelled =
           pending.find((turn) => turn.queueId === item.id) ||
           localCancelledAtCancellation;
@@ -8454,6 +8646,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           operation.sessionId,
           authoritativeProjection,
         );
+        queueProjectionSourceRef.current.set(operation.sessionId, "mutation");
         if (!queueProjectionChanged)
           advanceQueueProjectionRevision(operation.sessionId);
         const authoritativeQueue = authoritativeProjection.queue;
@@ -8558,11 +8751,13 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
               operation.sessionId,
               currentProjection.queue,
               result.paused,
+              "mutation",
             )
           : acceptQueueProjection(
               operation.sessionId,
               result.queue,
               result.paused,
+              "mutation",
             );
         patchSessionCache(operation.sessionId, {
           queue: resumedProjection.queue,
@@ -9018,7 +9213,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           mutationBlocked ||
           state.isStreaming ||
           state.isCompacting ||
-          queue.length > 0 ||
+          displayedQueue.length > 0 ||
           queuePaused ||
           extensionRequest ||
           copyingSessionIds.includes(viewedSessionId),
@@ -9028,7 +9223,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           observing: viewingSubagentSession ? false : observing,
         }}
         promptQueue={{
-          queue,
+          queue: displayedQueue,
           paused: queuePaused,
           busy:
             currentSessionBusyBeforeStreaming ||
