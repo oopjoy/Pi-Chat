@@ -700,6 +700,11 @@ export class PiChatApp {
       this.adoptPrimaryRuntime(response, context),
     );
     options.primaryRuntime?.subscribe((readiness) => {
+      // Fast is owned by the live Runtime generation. Clear the old Primary
+      // projection at the readiness boundary, before any bootstrap/view can
+      // observe a replacement that is still starting or has failed.
+      if (readiness.status !== "ready" && this.primaryBoundSessionId)
+        this.setFastModeActive(this.primaryBoundSessionId, false);
       this.broadcast({
         type: "pi_chat_primary_runtime_status",
         primaryRuntime: this.browserPrimaryReadiness(readiness),

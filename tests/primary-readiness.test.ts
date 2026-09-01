@@ -480,6 +480,26 @@ test("a live Primary child failure advances readiness before recovery", async ()
   assert.equal(rpc.restarts, 1);
 });
 
+test("Primary replacement clears Fast state before readiness broadcasts starting", async () => {
+  const f = await fixture({ status: "ready", generation: 1, sessionId: "readiness" });
+  const internals = f.app as unknown as {
+    primaryBoundSessionId: string;
+    fastModeBySession: Map<string, boolean>;
+  };
+  internals.primaryBoundSessionId = f.id;
+  internals.fastModeBySession.set(f.id, true);
+  try {
+    f.bridge.set({ status: "starting", generation: 2 });
+    const view = await fetch(`${f.origin}/api/sessions/${f.id}/view`);
+    assert.equal(view.status, 200);
+    assert.equal(
+      (await view.json() as { state: { fastModeActive?: boolean } }).state.fastModeActive,
+      false,
+    );
+    assert.equal(internals.fastModeBySession.has(f.id), false);
+  } finally { await f.close(); }
+});
+
 for (const readiness of [
   { status: "starting" as const, generation: 1 },
   { status: "failed" as const, generation: 1, error: "protocol mismatch" },
