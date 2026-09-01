@@ -109,6 +109,10 @@ test("attachment path helpers preserve Windows absolute paths without prompt boi
   ]);
   assert.equal(fileReferences(["C:\\Users\\me\\paper.pdf"]), "C:\\Users\\me\\paper.pdf");
   assert.equal(fileReferences(["C:\\Users\\me\\My Notes\\paper.pdf"]), '"C:\\Users\\me\\My Notes\\paper.pdf"');
+  assert.equal(
+    fileReferences(["C:\\Users\\me\\one.txt", "D:\\notes\\two.txt"]),
+    "C:\\Users\\me\\one.txt D:\\notes\\two.txt",
+  );
   assert.equal(isWindowsAbsolutePath("C:\\Users\\me\\paper.pdf"), true);
   assert.equal(isWindowsAbsolutePath("C:\\Users\\me\\paper.pdf\nmore"), false);
   assert.equal(fileReferences(["relative.txt", "/tmp/not-a-Windows-path"]), "");

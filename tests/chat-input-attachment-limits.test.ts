@@ -95,18 +95,29 @@ test("Escape closes the attachment menu and restores focus to its trigger", asyn
   }
 });
 
-test("Explorer path paste updates the Composer synchronously without the clipboard bridge", async () => {
+test("Explorer path paste inserts at the caret without blank lines or newlines", async () => {
   const { dom } = installAppDom();
   let fallbackReads = 0;
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {
+    const draftKey = { kind: "session" as const, sessionId: "attachment-limit" };
     await act(async () => root.render(createElement(
       ChatInput,
       {
         ...chatInputProps(() => {}),
+        draftKey,
+        restoredDraft: {
+          key: draftKey,
+          revision: 1,
+          expectedDraftRevision: 0,
+          message: "前缀后缀",
+          images: [],
+        },
       },
     )));
     const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    await act(async () => Promise.resolve());
+    textarea.setSelectionRange(2, 2);
     const event = new dom.window.Event("paste", { bubbles: true, cancelable: true });
     Object.defineProperty(event, "clipboardData", {
       value: {
@@ -117,8 +128,15 @@ test("Explorer path paste updates the Composer synchronously without the clipboa
           : "C:\\Users\\me\\My Notes\\paper.pdf",
       },
     });
-    await act(async () => textarea.dispatchEvent(event));
-    assert.equal(textarea.value, '"C:\\Users\\me\\My Notes\\paper.pdf"');
+    await act(async () => {
+      textarea.dispatchEvent(event);
+      await new Promise<void>((resolve) => dom.window.setTimeout(resolve, 0));
+    });
+    const reference = '"C:\\Users\\me\\My Notes\\paper.pdf"';
+    assert.equal(textarea.value, `前缀${reference}后缀`);
+    assert.equal(textarea.value.includes("\n"), false);
+    assert.equal(textarea.selectionStart, 2 + reference.length);
+    assert.equal(textarea.selectionEnd, 2 + reference.length);
     assert.equal(fallbackReads, 0);
   } finally {
     await act(async () => root.unmount());

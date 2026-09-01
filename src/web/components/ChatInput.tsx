@@ -116,7 +116,7 @@ function quoteWindowsPath(path: string): string {
 }
 
 export function fileReferences(paths: string[]): string {
-  return [...new Set(paths.map((path) => quoteWindowsPath(path)).filter(Boolean))].join("\n");
+  return [...new Set(paths.map((path) => quoteWindowsPath(path)).filter(Boolean))].join(" ");
 }
 
 export function windowsPathsFromText(text: string): string[] {
@@ -392,14 +392,25 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     }
   };
 
-  const appendFileReferences = (paths: string[], expectedDraftKeyId?: string) => {
+  const appendFileReferences = (paths: string[], expectedDraftKeyId?: string, selection?: { start: number; end: number }) => {
     if (editorDisabledRef.current) return;
     const references = fileReferences(paths);
     if (!references) return;
     const current = composer.currentDraft();
     if (expectedDraftKeyId && currentDraftKeyIdRef.current !== expectedDraftKeyId) return;
-    const next = current.message.trim() ? `${current.message.trimEnd()}\n\n${references}` : references;
+    const textarea = textareaRef.current;
+    const start = Math.max(0, Math.min(selection?.start ?? textarea?.selectionStart ?? current.message.length, current.message.length));
+    const end = Math.max(start, Math.min(selection?.end ?? textarea?.selectionEnd ?? start, current.message.length));
+    const next = `${current.message.slice(0, start)}${references}${current.message.slice(end)}`;
     composer.edit(next);
+    const draftKeyId = currentDraftKeyIdRef.current;
+    window.setTimeout(() => {
+      const input = textareaRef.current;
+      if (!input || currentDraftKeyIdRef.current !== draftKeyId || input.disabled) return;
+      const caret = start + references.length;
+      input.focus();
+      input.setSelectionRange(caret, caret);
+    }, 0);
   };
 
   const paste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
@@ -455,10 +466,14 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     setAttachmentOpen(false);
     setPickingFiles(true);
     const targetDraftKeyId = currentDraftKeyIdRef.current;
+    const textarea = textareaRef.current;
+    const selection = textarea
+      ? { start: textarea.selectionStart, end: textarea.selectionEnd }
+      : undefined;
     composer.edit(composer.currentDraft().message);
     try {
       const paths = await onPickLocalFiles();
-      appendFileReferences(paths, targetDraftKeyId);
+      appendFileReferences(paths, targetDraftKeyId, selection);
       textareaRef.current?.focus();
     } catch (error) {
       onError(error instanceof Error ? error.message : String(error));
