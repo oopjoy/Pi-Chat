@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { SessionIndex, cleanPreview, idForPath, parseSession, readSessionMessages, readSessionUsage, textFromContent } from "../src/server/session-index";
+import { sessionFileFingerprint } from "../src/server/session-projection";
 import { LOCAL_COORDINATION_ROLE } from "../src/shared/types";
 
 test("session index refreshes files with bounded concurrency", async () => {
@@ -142,11 +143,57 @@ test("session index keeps generated top-level subagent sessions out of sidebar h
   try {
     const path = join(root, "subagent.jsonl");
     await writeFile(path, [
-      { type: "session", id: "child", cwd: "C:\\work" },
-      { type: "session_info", id: "name", parentId: null, name: "subagent-planner-40b9af6d-1" },
+      { type: "session", id: "child", cwd: "C:\\work", parentSession: join(root, "parent.jsonl") },
+      { type: "session_info", id: "name", parentId: null, name: "subagent-oracle-4a348f95-1" },
       { type: "message", id: "m1", parentId: "name", message: { role: "user", content: "child task" } },
     ].map(JSON.stringify).join("\n"));
     assert.deepEqual(await new SessionIndex(root, join(root, "cache.json")).list(), []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("session index invalidates cached subagent summaries with derived Fork suffixes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-subagent-cache-index-"));
+  try {
+    const path = join(root, "subagent.jsonl");
+    const cachePath = join(root, "cache.json");
+    await writeFile(path, [
+      { type: "session", id: "child", cwd: "C:\\work", parentSession: join(root, "parent.jsonl") },
+      { type: "session_info", id: "name", parentId: null, name: "subagent-oracle-4a348f95-1" },
+      { type: "message", id: "m1", parentId: "name", message: { role: "user", content: "child task" } },
+    ].map(JSON.stringify).join("\n"));
+    const fileStat = await stat(path);
+    const fingerprint = await sessionFileFingerprint(path);
+    await writeFile(cachePath, JSON.stringify({
+      version: 6,
+      entries: {
+        [path]: {
+          mtimeMs: fileStat.mtimeMs,
+          ctimeMs: fileStat.ctimeMs,
+          birthtimeMs: fileStat.birthtimeMs,
+          size: fileStat.size,
+          dev: String(fileStat.dev),
+          ino: String(fileStat.ino),
+          fingerprint,
+          summary: {
+            id: idForPath(path),
+            sessionId: "child",
+            name: "subagent-oracle-4a348f95-1（Fork）",
+            preview: "child task",
+            cwd: "C:\\work",
+            updatedAt: fileStat.mtimeMs,
+            lastUserPromptAt: fileStat.mtimeMs,
+            messageCount: 1,
+            turnCount: 1,
+          },
+        },
+      },
+    }) + "\n");
+    const index = new SessionIndex(root, cachePath);
+    assert.deepEqual(await index.list(), []);
+    const cache = JSON.parse(await readFile(cachePath, "utf8")) as { entries: Record<string, { summary: unknown }> };
+    assert.equal(cache.entries[path]?.summary, null);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
