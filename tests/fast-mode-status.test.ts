@@ -16,6 +16,7 @@ class FastWorker {
   active: boolean;
   restartActive: boolean;
   emitOldErrorDuringRestart = false;
+  emitFastOnRestart = true;
 
   constructor(readonly path: string, active: boolean) {
     this.active = active;
@@ -53,7 +54,7 @@ class FastWorker {
     this.generation += 1;
     this.running = true;
     this.active = this.restartActive;
-    this.emitFast(this.active, this.generation);
+    if (this.emitFastOnRestart) this.emitFast(this.active, this.generation);
     if (this.emitOldErrorDuringRestart)
       this.emit({ type: "pi_chat_process_error", error: "old worker exited" }, oldGeneration);
   }
@@ -227,6 +228,7 @@ test("Secondary startup and recovery retain only the exact current generation's 
     // A replacement that does not emit Fast must reset the old App projection;
     // the status is Runtime-generation state, not a persisted Session setting.
     fastWorker.restartActive = false;
+    fastWorker.emitFastOnRestart = false;
     fastWorker.fail();
     const resetPrompt = await fetch(`${origin}/api/chat/prompt`, {
       method: "POST",
