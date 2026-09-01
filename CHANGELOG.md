@@ -26,6 +26,7 @@
 
 - A transient EventSource/token reconnect no longer clears the visible running turn, Queue, Steer, or streaming wire before fresh bootstrap authority arrives. A real process-epoch replacement still performs the full process-owned reset after the replacement `ready` frame.
 - Fast mode is now explicitly scoped to the live Runtime generation. Primary replacement clears the old server/browser projection at `starting`; only a current-generation Extension status can enable it again.
+- Generated Subagent Fork histories are excluded from the normal Session sidebar even when inherited names carry the derived `（Fork）` suffix; stale positive index-cache entries are invalidated while user-created Fork conversations remain visible.
 - Hot Session views now reveal an accepted local queued turn when an authoritative active queue no longer contains its ID, covering a missed `queue_dispatch`/`message_start` pair without synthesizing a persisted Pi record.
 
 ### Windows cold Runtime startup
