@@ -19,6 +19,7 @@
 
 - Runtime replacement, RPC shutdown, abort, model/thinking, Extension, resource mutation, reload, and deletion paths retain fail-closed ownership and `RESULT_PENDING` semantics when an outcome cannot be proven.
 - Fast mode is treated as live Runtime-generation state: Primary replacement clears the old server and browser projection at the `starting` boundary, and only a current-generation Extension status can enable it again.
+- Generated Subagent Fork histories are excluded from the normal Session sidebar even when their inherited name has the derived `（Fork）` suffix; stale positive index-cache entries are invalidated without hiding user-created Fork conversations.
 - Per-Session Runtime isolation, queue ordering, native Steer handling, compaction ordering, SSE recovery, and single-writer protection remain generation-scoped across reconnects and process replacement.
 - Session indexes, resource caches, startup diagnostics, and bundle selection remain authority- and fingerprint-gated without writing browser-local projections or metadata into Pi JSONL/provider payloads.
 
