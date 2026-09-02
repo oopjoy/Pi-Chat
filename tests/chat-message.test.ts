@@ -4,6 +4,7 @@ import React, { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { JSDOM } from "jsdom";
+import { readFileSync } from "node:fs";
 import { ConversationProcess, formatRunDuration } from "../src/web/components/ConversationProcess";
 import { assistantCopyText, assistantGeneratedAt, assistantModelLabel, assistantThinkingLabel, ChatMessage, shouldFoldUserText, userSentAt, USER_MESSAGE_FOLD_LINE_LIMIT } from "../src/web/components/ChatMessage";
 
@@ -102,6 +103,13 @@ test("user text folding leaves attached images fully visible", () => {
   assert.match(html, /class="message-user-attachments"[^>]*aria-label="用户附加图片"/);
   assert.match(html, /class="message-image-thumbnail"[\s\S]*class="message-image"[^>]*src="data:image\/png;base64,aGVsbG8="/);
   assert.ok(html.indexOf('class="message-user-attachments"') < html.indexOf('class="message-content"'));
+});
+
+test("chat images use the bounded framed style shared with Composer previews", () => {
+  const css = readFileSync(new URL("../src/web/styles.css", import.meta.url), "utf8");
+  assert.match(css, /\.image-preview img \{[^}]*width: 92px;[^}]*height: 72px;[^}]*border: 1px solid var\(--line\);[^}]*object-fit: cover;/s);
+  assert.match(css, /\.message-image \{[^}]*border: 1px solid var\(--line\);[^}]*background: var\(--surface-soft\);/s);
+  assert.match(css, /\.message-user-attachments \.message-image \{[^}]*width: 160px;[^}]*height: 120px;[^}]*border-radius: 8px;[^}]*object-fit: cover;/s);
 });
 
 test("user image thumbnails open a closable accessible preview", async () => {

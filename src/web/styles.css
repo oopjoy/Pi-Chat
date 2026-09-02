@@ -490,8 +490,8 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .message-user-attachments { display: flex; width: fit-content; max-width: 80%; justify-content: flex-end; flex-wrap: wrap; gap: 6px; margin: 0 0 6px auto; }
 .message-image-thumbnail { display: block; max-width: 100%; padding: 0; border: 0; border-radius: 7px; background: transparent; cursor: zoom-in; }
 .message-image-thumbnail:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
-.message-image { display: block; max-width: min(320px, 100%); max-height: 320px; border-radius: 9px; object-fit: contain; }
-.message-user-attachments .message-image { max-width: min(160px, 100%); max-height: 120px; border-radius: 7px; }
+.message-image { display: block; max-width: min(320px, 100%); max-height: 320px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-soft); object-fit: contain; }
+.message-user-attachments .message-image { width: 160px; height: 120px; max-width: min(160px, 100%); max-height: 120px; border-radius: 8px; object-fit: cover; }
 .image-preview-backdrop { position: fixed; z-index: 100; inset: 0; display: grid; box-sizing: border-box; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); place-items: center; padding: 24px; background: rgba(5, 12, 23, .72); }
 .image-preview-dialog { position: relative; display: grid; box-sizing: border-box; min-width: 0; max-width: min(calc(100vw - 48px), 1440px); max-height: calc(100dvh - 48px); place-items: center; padding: 40px 12px 12px; border: 1px solid color-mix(in srgb, var(--line), transparent 45%); border-radius: 12px; background: var(--surface); box-shadow: 0 18px 54px rgba(0, 0, 0, .4); }
 .image-preview-full { display: block; min-width: 0; max-width: min(calc(100vw - 74px), 1414px); max-height: calc(100dvh - 102px); object-fit: contain; }
