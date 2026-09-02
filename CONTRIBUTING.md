@@ -32,7 +32,7 @@ npm run verify:e2e
 npm run verify
 ```
 
-The wrappers create separate unique directories under the OS temp directory. Successful staging is removed automatically. A failed unit or E2E stage is retained and printed for diagnosis. `npm run verify` runs typecheck, full unit tests, complete Playwright, and `git diff HEAD --check` serially so both staged and unstaged tracked changes are covered.
+The wrappers create separate unique directories under the OS temp directory. Successful staging is removed automatically. A failed unit or E2E stage is retained and printed for diagnosis. `verify:unit` runs both the batched core source lane and the separately isolated benchmark-contract lane. `npm run verify` runs typecheck, full unit tests, complete Playwright, and `git diff HEAD --check` serially so both staged and unstaged tracked changes are covered.
 
 Release verification is different: follow [`docs/release-checklist.md`](docs/release-checklist.md) and retain the explicitly named staged artifact that will be packaged.
 

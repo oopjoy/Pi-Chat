@@ -11,10 +11,11 @@
 本次审计基于当前 `main` 工作树：
 
 - 138 个 `tests/**/*.test.ts` 文件；
-- 由测试名称解析器识别出约 1,099 个测试声明；
-- source lane 约 1,057 个测试声明；
-- artifact lane 42 个测试声明；
-- `test:source` 当前把 129 个 source 测试文件交给同一个 Node 进程；
+- 由测试名称解析器识别出 1,101 个测试声明；
+- 核心 source lane 124 个文件、1,031 个测试声明；
+- benchmark lane 5 个文件、28 个测试声明；
+- artifact lane 9 个文件、42 个测试声明；
+- 核心 source lane 现在通过独立 Node batch 进程执行；
 - 测试 harness 固定 `--test-concurrency=1`、V8 old-space 2,048 MiB，Windows
   Job memory 3,072 MiB。
 
@@ -56,14 +57,14 @@ source suite 的进程级内存累积。
 
 ## 分阶段计划
 
-### Phase 1：审计与分类（当前阶段）
+### Phase 1：审计与分类（已完成）
 
 - 建立上述规模和职责基线；
 - 找出混合域测试文件；
 - 明确 release 必须保留的 gate；
 - 不删除测试，不改变生产代码。
 
-### Phase 2：测试执行减负（下一阶段）
+### Phase 2：测试执行减负（已完成）
 
 优先改造执行层，不减少覆盖：
 
@@ -89,15 +90,19 @@ source suite 的进程级内存累积。
 - Browser App integration；
 - benchmark contracts。
 
-### Phase 3：日常测试与 Release 测试分层
+### Phase 3：日常测试与 Release 测试分层（已完成）
 
-- 日常开发默认执行非 benchmark 的快速 lane；
-- benchmark contract 单独执行；
-- nightly 和 release 仍执行完整 source、artifact、E2E 和 benchmark；
+- `test:source` 执行 124 个核心 source 文件；
+- `test:benchmark` 单独执行 5 个 benchmark 文件；
+- `test:source-and-benchmark` 是 unit/release 的完整非 artifact 测试入口；
+- benchmark 实现及其 contract 仍被保留，未从仓库删除；
+- `npm test`、nightly 和 release 仍执行 source、benchmark 和 artifact；
 - 不改变 `test:artifact` 的 9 个文件边界，继续保留 build、runtime、launcher
-  和 live-dist 安全检查。
+  和 live-dist 安全检查；
+- `first-token-latency`、`streaming-cadence-config`、`react-render` 的安全配置
+  contract 不因 benchmark lane 分流而消失；
 
-### Phase 4：拆分杂糅测试文件
+### Phase 4：拆分杂糅测试文件（下一阶段）
 
 从最混合且最重的文件开始拆分，优先顺序：
 
@@ -122,7 +127,8 @@ source suite 的进程级内存累积。
 以下不能因为日常减负而移出完整 release verification：
 
 - `npm run typecheck`；
-- 完整 source suite；
+- 完整核心 source suite；
+- 完整 benchmark lane（通过 `test:source-and-benchmark`）；
 - 9 个 artifact test files；
 - Playwright 三个项目及其 tag 覆盖；
 - build identity、Windows launcher、startup、runtime bundle、live-dist guard；

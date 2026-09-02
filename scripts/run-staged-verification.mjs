@@ -7,7 +7,7 @@ const projectRoot = resolve(import.meta.dirname, "..");
 const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
 
 export function verificationSteps(mode) {
-  if (mode === "unit") return [{ kind: "staged", label: "unit", args: ["run", "test:source"] }];
+  if (mode === "unit") return [{ kind: "staged", label: "unit", args: ["run", "test:source-and-benchmark"] }];
   if (mode === "e2e")
     return [{ kind: "staged", label: "e2e", args: ["run", "test:e2e"] }];
   if (mode === "artifact")

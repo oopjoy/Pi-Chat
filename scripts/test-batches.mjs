@@ -1,13 +1,13 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { declaredTestNamePatterns } from "./test-name-patterns.mjs";
-import { discoverTestFiles, repositoryRelativeTestPath, repositoryRoot } from "./test-files.mjs";
+import { discoverTestFiles, repositoryRelativeTestPath } from "./test-files.mjs";
 
 export const DEFAULT_SOURCE_BATCH_COUNT = 20;
+export const DEFAULT_BENCHMARK_BATCH_COUNT = 5;
 
-// Keep the artifact boundary in one executable manifest. Source batching must
-// never silently absorb build/runtime/launcher tests, and artifact tests must
-// remain available to the separate artifact gate.
+// These tests exercise build/runtime/launcher artifacts and remain in the
+// artifact gate rather than the source lane.
 export const ARTIFACT_TEST_PATHS = new Set([
   "tests/application-restart.test.ts",
   "tests/build-guard.test.ts",
@@ -18,6 +18,22 @@ export const ARTIFACT_TEST_PATHS = new Set([
   "tests/startup-smoke.test.ts",
   "tests/web-build-artifacts.test.ts",
   "tests/windows-launcher.test.ts",
+]);
+
+// Benchmark implementations are intentionally retained and run in their own
+// lane. Their contract tests are still part of source coverage below.
+export const BENCHMARK_TEST_PATHS = new Set([
+  "tests/browser-fluency-benchmark.test.ts",
+  "tests/e2e-streaming-benchmark.test.ts",
+  "tests/long-session-benchmark.test.ts",
+  "tests/react-render-benchmark.test.ts",
+  "tests/streaming-cadence-benchmark.test.ts",
+]);
+
+const PROCESS_ISOLATION_PATHS = new Set([
+  "tests/rpc-client.test.ts",
+  "tests/session-index.test.ts",
+  "tests/session-management.test.ts",
 ]);
 
 function testMetadata(path) {
@@ -32,19 +48,14 @@ function testMetadata(path) {
 function requiresProcessIsolation(path) {
   const metadata = testMetadata(path);
   // App-level jsdom suites retain React roots, EventSource instances and
-  // browser fixtures longer than pure unit tests. Keep the largest ones alone
-  // so a batch cannot reproduce the old process-wide memory accumulation.
+  // browser fixtures longer than pure unit tests. Keep the largest ones alone.
   if (
     metadata.path.startsWith("tests/web/") &&
     (metadata.tests >= 14 || metadata.lines >= 1_000)
   ) return true;
   // These suites create real child/process or broad Session fixtures and are
   // safer as independent memory/ownership boundaries as well.
-  return new Set([
-    "tests/rpc-client.test.ts",
-    "tests/session-index.test.ts",
-    "tests/session-management.test.ts",
-  ]).has(metadata.path);
+  return PROCESS_ISOLATION_PATHS.has(metadata.path);
 }
 
 function testWeight(path) {
@@ -53,32 +64,43 @@ function testWeight(path) {
 }
 
 export function sourceTestFiles(discovered = discoverTestFiles()) {
-  const source = discovered.filter(
-    (path) => !ARTIFACT_TEST_PATHS.has(repositoryRelativeTestPath(path)),
-  );
-  if (!source.length) throw new Error("No source tests remain after artifact exclusion");
+  const source = discovered.filter((path) => {
+    const relative = repositoryRelativeTestPath(path);
+    return !ARTIFACT_TEST_PATHS.has(relative) && !BENCHMARK_TEST_PATHS.has(relative);
+  });
+  if (!source.length) throw new Error("No source tests remain after artifact/benchmark exclusion");
   return source;
 }
 
+export function benchmarkTestFiles(discovered = discoverTestFiles()) {
+  const benchmark = discovered.filter((path) => BENCHMARK_TEST_PATHS.has(repositoryRelativeTestPath(path)));
+  if (!benchmark.length) throw new Error("No benchmark tests were discovered");
+  if (benchmark.length !== BENCHMARK_TEST_PATHS.size)
+    throw new Error("The benchmark manifest does not match the discovered benchmark test set");
+  return benchmark;
+}
+
 /**
- * Partition every source file exactly once using a deterministic weighted
- * greedy bin-packing pass. Each returned batch is later executed in a fresh
- * Node process, so module/jsdom/fixture memory cannot accumulate forever.
+ * Partition files exactly once using deterministic weighted greedy bin packing.
+ * Each returned batch is later executed in a fresh Node process.
  */
-export function partitionSourceTests(
-  files = sourceTestFiles(),
-  batchCount = DEFAULT_SOURCE_BATCH_COUNT,
+export function partitionTestFiles(
+  files,
+  batchCount,
+  label = "test",
 ) {
   if (!Number.isInteger(batchCount) || batchCount < 1)
     throw new Error("batchCount must be a positive integer");
   if (batchCount > files.length)
-    throw new Error("batchCount cannot exceed the number of source test files");
+    throw new Error("batchCount cannot exceed the number of test files");
   const batches = Array.from({ length: batchCount }, () => []);
   const totals = Array.from({ length: batchCount }, () => 0);
   const isolated = files.filter(requiresProcessIsolation)
     .sort((left, right) => testWeight(right) - testWeight(left) || left.localeCompare(right));
   if (isolated.length > batchCount)
-    throw new Error(`batchCount ${batchCount} is too small for ${isolated.length} isolated source suites`);
+    throw new Error(`batchCount ${batchCount} is too small for ${isolated.length} isolated ${label} suites`);
+  if (isolated.length === batchCount && files.length > isolated.length)
+    throw new Error(`batchCount ${batchCount} must exceed the ${isolated.length} isolated ${label} suites so ordinary suites have a batch`);
   for (const [index, path] of isolated.entries()) {
     batches[index].push(path);
     totals[index] = testWeight(path);
@@ -96,18 +118,36 @@ export function partitionSourceTests(
   }
   for (const batch of batches)
     batch.sort((left, right) => repositoryRelativeTestPath(left).localeCompare(repositoryRelativeTestPath(right)));
-  verifySourcePartition(batches.flat(), files);
+  verifyTestPartition(batches.flat(), files, label);
   return batches;
 }
 
-export function verifySourcePartition(actual, expected = sourceTestFiles()) {
+export function partitionSourceTests(
+  files = sourceTestFiles(),
+  batchCount = DEFAULT_SOURCE_BATCH_COUNT,
+) {
+  return partitionTestFiles(files, batchCount, "source");
+}
+
+export function partitionBenchmarkTests(
+  files = benchmarkTestFiles(),
+  batchCount = DEFAULT_BENCHMARK_BATCH_COUNT,
+) {
+  return partitionTestFiles(files, batchCount, "benchmark");
+}
+
+export function verifyTestPartition(actual, expected, label = "test") {
   const expectedKeys = expected.map((path) => resolve(path)).sort();
   const actualKeys = actual.map((path) => resolve(path)).sort();
   if (new Set(actualKeys).size !== actualKeys.length)
-    throw new Error("Source test batches contain a duplicate test file");
+    throw new Error(`${label} batches contain a duplicate test file`);
   if (actualKeys.length !== expectedKeys.length || actualKeys.some((path, index) => path !== expectedKeys[index]))
-    throw new Error("Source test batches do not cover exactly the discovered source test set");
+    throw new Error(`${label} batches do not cover exactly the discovered test set`);
   return true;
+}
+
+export function verifySourcePartition(actual, expected = sourceTestFiles()) {
+  return verifyTestPartition(actual, expected, "Source");
 }
 
 export function batchSummary(batches) {
@@ -117,13 +157,4 @@ export function batchSummary(batches) {
     tests: paths.reduce((total, path) => total + declaredTestNamePatterns(path).length, 0),
     paths: paths.map((path) => repositoryRelativeTestPath(path)),
   }));
-}
-
-if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename)) {
-  const batches = partitionSourceTests(
-    sourceTestFiles(),
-    Number(process.argv[2] || DEFAULT_SOURCE_BATCH_COUNT),
-  );
-  for (const summary of batchSummary(batches))
-    console.log(`${summary.index}: ${summary.files} files, ${summary.tests} tests`);
 }

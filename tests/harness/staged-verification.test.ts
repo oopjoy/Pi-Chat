@@ -31,7 +31,7 @@ test("staged verification gives unit work an isolated output and removes success
   });
 
   assert.equal(result.ok, true);
-  assert.deepEqual(calls.map((call) => call.args), [["run", "test:source"]]);
+  assert.deepEqual(calls.map((call) => call.args), [["run", "test:source-and-benchmark"]]);
   assert.equal(calls[0]!.env.PI_CHAT_DIST_DIR, "C:\\Temp\\pi-chat-unit-test");
   assert.equal(calls[0]!.env.PI_CHAT_BUILD_REVISION, "expected-revision");
   assert.deepEqual(removed, ["C:\\Temp\\pi-chat-unit-test"]);
@@ -95,7 +95,7 @@ test("a successful gate fails closed when its staging cannot be removed", async 
 
 test("source verification reuses one build for unit and e2e while artifact checks stay separate", () => {
   assert.deepEqual(verificationSteps("unit"), [
-    { kind: "staged", label: "unit", args: ["run", "test:source"] },
+    { kind: "staged", label: "unit", args: ["run", "test:source-and-benchmark"] },
   ]);
   assert.deepEqual(verificationSteps("artifact"), [
     { kind: "staged", label: "artifact", args: ["run", "build-and-test:artifact"] },

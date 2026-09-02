@@ -23,17 +23,24 @@ import {
 } from "../../scripts/test-harness-policy.mjs";
 import {
   ARTIFACT_TEST_PATHS,
+  BENCHMARK_TEST_PATHS,
   batchSummary,
+  benchmarkTestFiles,
+  partitionBenchmarkTests,
   partitionSourceTests,
   sourceTestFiles,
   verifySourcePartition,
 } from "../../scripts/test-batches.mjs";
 import { runSourceBatches } from "../../scripts/run-test-batches.mjs";
 
-test("source batches cover every non-artifact test file exactly once", () => {
-  const source = sourceTestFiles();
+test("source and benchmark lanes partition every discovered non-artifact file", () => {
+  const discovered = discoverTestFiles();
+  const source = sourceTestFiles(discovered);
+  const benchmark = benchmarkTestFiles(discovered);
   const batches = partitionSourceTests(source, 20);
+  const benchmarkBatches = partitionBenchmarkTests(benchmark, 5);
   assert.equal(batches.length, 20);
+  assert.equal(benchmarkBatches.length, 5);
   assert.ok(batches.every((batch) => batch.length > 0));
   assert.equal(verifySourcePartition(batches.flat(), source), true);
   assert.equal(
@@ -43,6 +50,16 @@ test("source batches cover every non-artifact test file exactly once", () => {
   assert.equal(
     batchSummary(batches).reduce((total, batch) => total + batch.tests, 0),
     source.reduce((total, path) => total + declaredTestNamePatterns(path).length, 0),
+  );
+  assert.deepEqual(
+    new Set([...source, ...benchmark].map((path) => repositoryRelativeTestPath(path))),
+    new Set(discovered
+      .filter((path) => !ARTIFACT_TEST_PATHS.has(repositoryRelativeTestPath(path)))
+      .map((path) => repositoryRelativeTestPath(path))),
+  );
+  assert.deepEqual(
+    new Set(benchmark.map((path) => repositoryRelativeTestPath(path))),
+    BENCHMARK_TEST_PATHS,
   );
 });
 
@@ -59,9 +76,35 @@ test("source batch runner starts one fresh harness process per batch", async () 
     log: { error: () => undefined },
   });
   assert.equal(result.ok, true);
-  assert.equal(calls.length, 2);
+  assert.ok(calls.length >= 2);
   assert.ok(calls.every((args) => args[0]?.replaceAll("\\", "/").endsWith("scripts/run-tests.mjs")));
   assert.equal(calls.flatMap((args) => args.filter((arg) => arg.startsWith("tests/"))).length, source.length);
+});
+
+test("batch counts that cannot preserve isolated suites fail closed", () => {
+  assert.throws(
+    () => partitionSourceTests(sourceTestFiles(), 11),
+    /must exceed the 11 isolated source suites so ordinary suites have a batch/,
+  );
+});
+
+test("memory-heavy pane suites use a finite exact one-case process plan", async () => {
+  const pane = sourceTestFiles().find((path) => repositoryRelativeTestPath(path) === "tests/web/pane-authority.test.ts");
+  assert.ok(pane);
+  const calls: string[][] = [];
+  const result = await runSourceBatches({
+    files: [pane],
+    batchCount: 1,
+    execute: async (_command, args) => {
+      calls.push(args);
+      return 0;
+    },
+    log: { error: () => undefined },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(calls.length, 24);
+  assert.ok(calls.every((args) => args.includes("--test-name-pattern")));
+  assert.equal(new Set(calls.flatMap((args) => args.filter((arg) => arg.startsWith("^(?:")))).size, 24);
 });
 
 test("test discovery recursively finds regular test files in stable order", async () => {
