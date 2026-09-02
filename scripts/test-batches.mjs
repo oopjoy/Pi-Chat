@@ -63,6 +63,10 @@ function testWeight(path) {
   return Math.max(1, metadata.lines + metadata.tests * 80);
 }
 
+export function processIsolatedTestFiles(files = sourceTestFiles()) {
+  return files.filter(requiresProcessIsolation);
+}
+
 export function sourceTestFiles(discovered = discoverTestFiles()) {
   const source = discovered.filter((path) => {
     const relative = repositoryRelativeTestPath(path);
@@ -95,7 +99,7 @@ export function partitionTestFiles(
     throw new Error("batchCount cannot exceed the number of test files");
   const batches = Array.from({ length: batchCount }, () => []);
   const totals = Array.from({ length: batchCount }, () => 0);
-  const isolated = files.filter(requiresProcessIsolation)
+  const isolated = processIsolatedTestFiles(files)
     .sort((left, right) => testWeight(right) - testWeight(left) || left.localeCompare(right));
   if (isolated.length > batchCount)
     throw new Error(`batchCount ${batchCount} is too small for ${isolated.length} isolated ${label} suites`);

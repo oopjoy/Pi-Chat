@@ -20,7 +20,7 @@ Elapsed times are wall-clock measurements from Node `spawnSync`. They include No
 
 | Task | Domain regression | Locate | Focused validation | Result |
 |---|---|---:|---:|---|
-| Cold slash catalog fallback | `tests/web/composer-capabilities.test.ts:60` | 23.8 ms | 1.61 s | 1 passed |
+| Cold slash catalog fallback | `tests/web/composer-model-runtime.test.ts` | 23.8 ms | 1.61 s | 1 passed |
 | Timed-out native Steer settlement | `tests/server/prompt-queue-steering.test.ts:763` | 22.7 ms | 0.42 s | 1 passed |
 | Immutable live Runtime workspace binding | `tests/server/workspace-resource-lifecycle.test.ts:195` | 23.9 ms | 0.39 s | 1 passed |
 | Stale pane takeover fencing | `tests/web/pane-authority.test.ts:1116` | 24.9 ms | 2.54 s | 1 passed |
@@ -44,7 +44,7 @@ Remeasured on local `main` after Session Inventory, artifact safety, line-ending
 
 | Task | Current regression | Locate | Focused validation | Owner locate | Result |
 |---|---|---:|---:|---:|---|
-| Cold slash catalog fallback | `tests/web/composer-capabilities.test.ts:60` | 18.5 ms | 1.37 s | 13.2 ms | 1 passed |
+| Cold slash catalog fallback | `tests/web/composer-model-runtime.test.ts` | 18.5 ms | 1.37 s | 13.2 ms | 1 passed |
 | Timed-out native Steer settlement | `tests/server/prompt-queue-steering.test.ts:660` | 15.0 ms | 0.53 s | 12.0 ms | 1 passed |
 | Immutable live Runtime workspace binding | `tests/server/workspace-resource-lifecycle.test.ts:92` | 15.6 ms | 0.49 s | 11.9 ms | 1 passed |
 | Stale pane takeover fencing | `tests/web/pane-authority.test.ts:1116` | 15.7 ms | 2.29 s | 18.9 ms | 1 passed |

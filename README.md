@@ -83,11 +83,15 @@ npm run dev
 
 ```bash
 # --file 可重复，路径必须是仓库 tests/ 下已发现的 .test.ts
-npm run test:focus -- --file tests/web/composer-capabilities.test.ts
+npm run test:focus -- --file tests/web/composer-model-runtime.test.ts
 # 文件与名称过滤可以组合；NODE_ENV=test 由 harness 负责设置
-npm run test:focus -- --file tests/web/composer-capabilities.test.ts --test-name-pattern="slash suggestions"
-# source-only lane：跳过需要编译产物、Runtime 或 launcher 的 artifact 测试
+npm run test:focus -- --file tests/web/composer-model-runtime.test.ts --test-name-pattern="slash suggestions"
+# 核心 source lane：跳过 benchmark contract 与需要编译产物的 artifact 测试
 npm run test:source
+# benchmark contract lane：使用独立新进程执行，不从 unit/release gate 删除
+npm run test:benchmark
+# 完整非 artifact unit 入口
+npm run test:source-and-benchmark
 # artifact/restart lane：显式运行被 source lane 排除的测试（要求已有受信任 dist）
 npm run test:artifact
 # 在隔离 staging 中重新 build 后运行 artifact/restart gate

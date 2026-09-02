@@ -18,10 +18,10 @@
 
 | 修改目标 | 首要生产入口 | 唯一策略所有者 | 首要测试 |
 |---|---|---|---|
-| Slash 指令联想与 Composer 能力 | `ChatInput.tsx`、`App.tsx` command projection | App coordinator 提交的 Pane commands；组件只渲染 | `web/composer-capabilities.test.ts`、`session-view-cache.test.ts` |
+| Slash 指令联想与 Composer 能力 | `ChatInput.tsx`、`App.tsx` command projection | App coordinator 提交的 Pane commands；组件只渲染 | `web/composer-model-runtime.test.ts`、`session-view-cache.test.ts` |
 | Queue 排队、撤销与恢复 Composer | `App.tsx`、`local-user-turn.ts`、`prompt-scheduler.ts` | 浏览器 local-turn overlay；服务端 `PromptScheduler` | `web/queue-steer-extension.test.ts`、`local-user-turn.test.ts`、`prompt-scheduler.test.ts` |
 | Prompt acknowledgement / delivery uncertain | `App.tsx`、`prompt-scheduler.ts`、`rpc-client.ts` | 服务端调度与 RPC outcome；浏览器 local-turn reconciliation | `web/prompt-consistency.test.ts`、`server/prompt-queue-steering.test.ts`、`prompt-scheduler.test.ts` |
-| Native Steer | `app.ts`、`App.tsx` | `PiChatApp` 的 generation-scoped admission/snapshot；Pi queue 是消费证据 | `server/prompt-queue-steering.test.ts`、`web/composer-capabilities.test.ts` |
+| Native Steer | `app.ts`、`App.tsx` | `PiChatApp` 的 generation-scoped admission/snapshot；Pi queue 是消费证据 | `server/prompt-queue-steering.test.ts`、`web/composer-steer.test.ts` |
 | 冷历史浏览与分页 | `session-index.ts`、`session-projection.ts`、`app.ts` Session view、`session-view-cache.ts` | `SessionIndex` 语义 snapshot 建立在服务端增量 JSONL projection 上；append 仅验证有界 prefix 并解析 suffix，rewrite 回退全读；App coordinator 决定可见提交 | `session-projection.test.ts`、`session-index.test.ts`、`session-navigation.test.ts`、`web/session-navigation-gate.test.ts` |
 | 后台 Subagent 顶栏与只读子对话 | `subagent-status-provider.ts`、`routes/subagents-read.ts`、`use-background-subagents.ts`、`SubagentStatusControl.tsx`、`App.tsx` | 服务端 provider 独占安全解析与父子 JSONL 地址验证；Hook 只拥有当前 Session 的可丢弃轮询快照；App 仅保留 parent+child 只读地址，主 Session Queue/Steer/Runtime/SessionControl authority 不变 | `subagent-status-provider.test.ts`、`subagents-read-route.test.ts`、`subagent-status-control.test.ts`、`web/pane-authority.test.ts` |
 | Session 切换与旧响应隔离 | `App.tsx` authority helpers | App coordinator | `web/pane-authority.test.ts`、`web/session-navigation-gate.test.ts`、`refresh-navigation-guards.test.ts` |
@@ -39,7 +39,7 @@
 | Restart / shutdown | `application-lifecycle.ts`、`application-restart.ts`、`app.ts` | lifecycle barrier 与对应资源所有者 | `application-lifecycle.test.ts`、`application-restart.test.ts`、`server/application-restart-admission.test.ts`、`server/shutdown-control.test.ts` |
 | Host / Origin / request token admission | `request-guard.ts` | request guard | `request-guard.test.ts`、`api-recovery-token.test.ts` |
 | 关于、版本与更新检查 | `web/components/ManagementPanel.tsx`、`web/api.ts`、`App.tsx`、`server/app.ts`、`shared/types.ts` | 设置中的 About/关于面板显示 Pi Chat/Pi Runtime 版本、构建 Revision/Fingerprint、Web/服务一致性、Primary Runtime 与生命周期；用户显式点击后只读取 GitHub 最新 Release，不自动下载、安装、重启或部署 | `web/diagnostic-settings.test.ts`、`request-guard.test.ts` |
-| 状态诊断黑匣子与 JSON 导出 | `server/state-diagnostics.ts`、`server/stream-observability.ts`、`server/sse-hub.ts`、`server/prompt-scheduler.ts`、`server/rpc-client.ts`、`web/lib/state-diagnostics.ts`、`web/lib/stream-observability.ts`、`web/hooks/use-live-message.ts`、`App.tsx`、`ManagementPanel.tsx` | 服务端与当前浏览器页面各自始终开启的有界 closed-schema 内存 lane；SseHub 的高频累计快照结果只进入有界聚合计数并在终止/导出检查点形成摘要；浏览器仅记录聚合调度计数与双 rAF 绘制机会；PromptScheduler 仍独占 Queue ID 与投递，诊断仅复用既有 Queue ID 或内存即时 UUID；导出使用一次性 Session/Prompt alias，不拥有启停、窗口控制、Prompt、Runtime 或 Pane authority | `state-diagnostics.test.ts`、`server/state-diagnostics-route.test.ts`、`prompt-scheduler.test.ts`、`rpc-client.test.ts`、`sse-hub.test.ts`、`server/stream-observability.test.ts`、`use-live-message.test.ts`、`web/stream-observability.test.ts`、`web/stream-observability-integration.test.ts`、`web/state-diagnostics.test.ts`、`web/diagnostic-settings.test.ts`、`web/app-replacement-recovery.test.ts`、`web/composer-capabilities.test.ts` |
+| 状态诊断黑匣子与 JSON 导出 | `server/state-diagnostics.ts`、`server/stream-observability.ts`、`server/sse-hub.ts`、`server/prompt-scheduler.ts`、`server/rpc-client.ts`、`web/lib/state-diagnostics.ts`、`web/lib/stream-observability.ts`、`web/hooks/use-live-message.ts`、`App.tsx`、`ManagementPanel.tsx` | 服务端与当前浏览器页面各自始终开启的有界 closed-schema 内存 lane；SseHub 的高频累计快照结果只进入有界聚合计数并在终止/导出检查点形成摘要；浏览器仅记录聚合调度计数与双 rAF 绘制机会；PromptScheduler 仍独占 Queue ID 与投递，诊断仅复用既有 Queue ID 或内存即时 UUID；导出使用一次性 Session/Prompt alias，不拥有启停、窗口控制、Prompt、Runtime 或 Pane authority | `state-diagnostics.test.ts`、`server/state-diagnostics-route.test.ts`、`prompt-scheduler.test.ts`、`rpc-client.test.ts`、`sse-hub.test.ts`、`server/stream-observability.test.ts`、`use-live-message.test.ts`、`web/stream-observability.test.ts`、`web/stream-observability-integration.test.ts`、`web/state-diagnostics.test.ts`、`web/diagnostic-settings.test.ts`、`web/app-replacement-recovery.test.ts`、`web/chat-input-delivery.test.ts` |
 | System Gate 安装与完整性 | `system-gate-installer.ts` | system Gate installer | `system-gate-installer.test.ts` |
 
 ## 可写状态所有权
@@ -108,7 +108,7 @@
 | `ConversationPane` 稳定挂载，Session 切换不丢 Composer draft | Frontend ownership plan | `web/session-navigation-gate.test.ts`、Playwright |
 | 等待中的本地 turn 只在 Queue，dispatch 后才进入 transcript | Prompt/local-turn contract | `web/queue-steer-extension.test.ts`、`local-user-turn`、`prompt-scheduler` |
 | Prompt write timeout 是 outcome unknown，不能自动重试或越过排序 | Prompt/RPC contract | `prompt-scheduler`、`rpc-client`、`server/prompt-queue-steering.test.ts` |
-| Native Steer 只有 Pi queue 的已验证消费才能显现为用户 turn | Steer contract | `server/prompt-queue-steering.test.ts`、`web/composer-capabilities.test.ts` |
+| Native Steer 只有 Pi queue 的已验证消费才能显现为用户 turn | Steer contract | `server/prompt-queue-steering.test.ts`、`web/composer-steer.test.ts` |
 | 已移除能力不得留下隐藏 route、browser wrapper、shared type 或专用测试 | Feature surface | source search 与对应 route tests |
 
 ## 验证入口

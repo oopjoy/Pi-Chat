@@ -28,6 +28,7 @@ import {
   benchmarkTestFiles,
   partitionBenchmarkTests,
   partitionSourceTests,
+  processIsolatedTestFiles,
   sourceTestFiles,
   verifySourcePartition,
 } from "../../scripts/test-batches.mjs";
@@ -82,9 +83,12 @@ test("source batch runner starts one fresh harness process per batch", async () 
 });
 
 test("batch counts that cannot preserve isolated suites fail closed", () => {
+  const source = sourceTestFiles();
+  const isolatedCount = processIsolatedTestFiles(source).length;
+  assert.ok(isolatedCount > 0);
   assert.throws(
-    () => partitionSourceTests(sourceTestFiles(), 11),
-    /must exceed the 11 isolated source suites so ordinary suites have a batch/,
+    () => partitionSourceTests(source, isolatedCount),
+    new RegExp(`must exceed the ${isolatedCount} isolated source suites so ordinary suites have a batch`),
   );
 });
 

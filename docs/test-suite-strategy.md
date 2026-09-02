@@ -10,9 +10,9 @@
 
 本次审计基于当前 `main` 工作树：
 
-- 138 个 `tests/**/*.test.ts` 文件；
+- 142 个 `tests/**/*.test.ts` 文件；
 - 由测试名称解析器识别出 1,101 个测试声明；
-- 核心 source lane 124 个文件、1,031 个测试声明；
+- 核心 source lane 128 个文件、1,031 个测试声明；
 - benchmark lane 5 个文件、28 个测试声明；
 - artifact lane 9 个文件、42 个测试声明；
 - 核心 source lane 现在通过独立 Node batch 进程执行；
@@ -32,7 +32,7 @@ source suite 的进程级内存累积。
 | 文件 | 测试数 | 行数 | 主要问题 |
 | --- | ---: | ---: | --- |
 | `tests/conversation-process.test.ts` | 43 | 763 | 单一投影域，但案例密集 |
-| `tests/web/composer-capabilities.test.ts` | 35 | 2,627 | Composer、Runtime readiness、模型能力、Fast、Extension 混合 |
+| `tests/web/composer-capabilities.test.ts`（已拆分） | 35 | 2,627 | 已按模型/Runtime、图片能力、delivery、Steer、Gate/layout 拆成 5 个职责文件 |
 | `tests/session-index.test.ts` | 35 | 945 | Index、缓存、分支、Session metadata 混合 |
 | `tests/rpc-client.test.ts` | 30 | 789 | RPC framing、timeout、process ownership、late response 混合 |
 | `tests/web/pane-authority.test.ts` | 24 | 2,604 | Pane authority、navigation、stale response、lifecycle 混合 |
@@ -50,7 +50,7 @@ source suite 的进程级内存累积。
 - `state-diagnostics`：共享 schema、Server recorder、Browser projection；
 - `session-index`、`session-projection`、`session-view-cache`：文件分支、增量
   读取、浏览器 transient merge 分属不同 authority；
-- `primary-readiness`、`fast-mode-status`、`web/composer-capabilities`：分别
+- `primary-readiness`、`fast-mode-status`、`web/composer-model-runtime`：分别
   覆盖 server readiness、Fast projection、可见 Composer 行为。
 
 只有完成 assertion-level 对照后，才允许合并或删除其中的测试。
@@ -92,7 +92,7 @@ source suite 的进程级内存累积。
 
 ### Phase 3：日常测试与 Release 测试分层（已完成）
 
-- `test:source` 执行 124 个核心 source 文件；
+- `test:source` 执行 128 个核心 source 文件；
 - `test:benchmark` 单独执行 5 个 benchmark 文件；
 - `test:source-and-benchmark` 是 unit/release 的完整非 artifact 测试入口；
 - benchmark 实现及其 contract 仍被保留，未从仓库删除；
@@ -102,14 +102,22 @@ source suite 的进程级内存累积。
 - `first-token-latency`、`streaming-cadence-config`、`react-render` 的安全配置
   contract 不因 benchmark lane 分流而消失；
 
-### Phase 4：拆分杂糅测试文件（下一阶段）
+### Phase 4：拆分杂糅测试文件（进行中）
 
-从最混合且最重的文件开始拆分，优先顺序：
+从最混合且最重的文件开始拆分，当前进度：
 
-1. `tests/web/composer-capabilities.test.ts`；
-2. `tests/web/pane-authority.test.ts`；
-3. `tests/web/app-replacement-recovery.test.ts`；
-4. `tests/web/queue-steer-extension.test.ts`。
+1. `tests/web/composer-capabilities.test.ts`：已拆成 5 个职责文件；
+2. `tests/web/pane-authority.test.ts`：下一批；
+3. `tests/web/app-replacement-recovery.test.ts`：待拆分；
+4. `tests/web/queue-steer-extension.test.ts`：待拆分。
+
+Composer 第一批拆分后的职责边界：
+
+- `composer-model-runtime.test.ts`：模型 inventory、commands、Fast 与 readiness；
+- `composer-image-capability.test.ts`：图片 draft 与 Runtime capability；
+- `chat-input-delivery.test.ts`：串行发送、submission scope、IME 与 lifecycle；
+- `composer-steer.test.ts`：native Steer 的 pending、consume、withdraw 与 drop；
+- `composer-gate-layout.test.ts`：Gate authority 与 Composer/Settings layout。
 
 拆分只移动测试和共享 fixture，不改变断言语义；每次拆分后必须保持原
 测试集合与新测试集合的名称/数量映射。
