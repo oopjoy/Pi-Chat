@@ -11,35 +11,6 @@ import {
   verifyTestPartition,
 } from "./test-batches.mjs";
 import { repositoryRelativeTestPath, repositoryRoot } from "./test-files.mjs";
-import { declaredTestNamePatterns } from "./test-name-patterns.mjs";
-
-const TEST_CASE_SPLIT_PATHS = new Set([
-  "tests/web/pane-authority.test.ts",
-]);
-const TEST_CASES_PER_PROCESS = 1;
-
-function regexEscape(value) {
-  return value.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&");
-}
-
-function invocationGroups(paths) {
-  return paths.flatMap((path) => {
-    const relative = repositoryRelativeTestPath(path);
-    if (!TEST_CASE_SPLIT_PATHS.has(relative)) return [{ path, names: null }];
-    const names = declaredTestNamePatterns(path);
-    const groups = [];
-    for (let index = 0; index < names.length; index += TEST_CASES_PER_PROCESS)
-      groups.push({ path, names: names.slice(index, index + TEST_CASES_PER_PROCESS) });
-    return groups;
-  });
-}
-
-function invocationArguments(invocation) {
-  const args = ["--file", repositoryRelativeTestPath(invocation.path)];
-  if (invocation.names)
-    args.push("--test-name-pattern", `^(?:${invocation.names.map(regexEscape).join("|")})$`);
-  return args;
-}
 
 export function runProcess(command, args, { cwd = repositoryRoot, env = process.env } = {}) {
   return new Promise((resolveExit, reject) => {
@@ -84,20 +55,17 @@ export async function runTestBatches({
   const completed = [];
   for (const summary of selectedSummaries) {
     const paths = batches[summary.index - 1];
-    const invocations = invocationGroups(paths);
-    log.error(`[Pi Chat] Running ${suite} batch ${summary.index}/${batches.length}: ${summary.files} files, ${summary.tests} tests${invocations.length > 1 ? ` in ${invocations.length} fresh processes` : ""}`);
-    for (const [invocationIndex, invocation] of invocations.entries()) {
-      const code = await execute(
-        process.execPath,
-        [resolve(repositoryRoot, "scripts", "run-tests.mjs"), ...invocationArguments(invocation)],
-        { cwd: repositoryRoot, env: environment },
-      );
-      if (code !== 0) {
-        completed.push({ ...summary, code, invocation: invocationIndex + 1 });
-        return { ok: false, completed, failed: summary.index };
-      }
-    }
-    completed.push({ ...summary, code: 0, processes: invocations.length });
+    log.error(`[Pi Chat] Running ${suite} batch ${summary.index}/${batches.length}: ${summary.files} files, ${summary.tests} tests`);
+    const code = await execute(
+      process.execPath,
+      [
+        resolve(repositoryRoot, "scripts", "run-tests.mjs"),
+        ...paths.flatMap((path) => ["--file", repositoryRelativeTestPath(path)]),
+      ],
+      { cwd: repositoryRoot, env: environment },
+    );
+    completed.push({ ...summary, code });
+    if (code !== 0) return { ok: false, completed, failed: summary.index };
   }
   return { ok: true, completed };
 }

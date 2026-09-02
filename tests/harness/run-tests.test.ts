@@ -76,7 +76,7 @@ test("source batch runner starts one fresh harness process per batch", async () 
     log: { error: () => undefined },
   });
   assert.equal(result.ok, true);
-  assert.ok(calls.length >= 2);
+  assert.equal(calls.length, 2);
   assert.ok(calls.every((args) => args[0]?.replaceAll("\\", "/").endsWith("scripts/run-tests.mjs")));
   assert.equal(calls.flatMap((args) => args.filter((arg) => arg.startsWith("tests/"))).length, source.length);
 });
@@ -88,7 +88,7 @@ test("batch counts that cannot preserve isolated suites fail closed", () => {
   );
 });
 
-test("memory-heavy pane suites use a finite exact one-case process plan", async () => {
+test("memory-heavy pane suites remain isolated in one Job-backed file process", async () => {
   const pane = sourceTestFiles().find((path) => repositoryRelativeTestPath(path) === "tests/web/pane-authority.test.ts");
   assert.ok(pane);
   const calls: string[][] = [];
@@ -102,9 +102,9 @@ test("memory-heavy pane suites use a finite exact one-case process plan", async 
     log: { error: () => undefined },
   });
   assert.equal(result.ok, true);
-  assert.equal(calls.length, 24);
-  assert.ok(calls.every((args) => args.includes("--test-name-pattern")));
-  assert.equal(new Set(calls.flatMap((args) => args.filter((arg) => arg.startsWith("^(?:")))).size, 24);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.filter((argument) => argument === "tests/web/pane-authority.test.ts").length, 1);
+  assert.equal(calls[0]!.includes("--test-name-pattern"), false);
 });
 
 test("test discovery recursively finds regular test files in stable order", async () => {
