@@ -925,9 +925,10 @@ test("a stale A prompt acknowledgement cannot modify a newer A revisit", async (
   const viewA: SessionViewData = {
     ...draftView,
     session: { ...bootstrap.sessions[0], active: true, writable: true },
-    state: { ...bootstrap.state, isStreaming: false },
+    state: { ...bootstrap.state, isStreaming: true },
     runtimeStatus: "active",
     isActive: true,
+    isStreaming: true,
     queue: [],
     queuePaused: false,
   };
@@ -1030,6 +1031,11 @@ test("a stale A prompt acknowledgement cannot modify a newer A revisit", async (
       dom.window.document.querySelector(".prompt-queue"),
       null,
       "a pre-navigation A acknowledgement cannot install its queue in later A",
+    );
+    assert.equal(
+      dom.window.document.querySelectorAll(".message-user").length,
+      1,
+      "the accepted queued turn remains recoverable in the current A transcript",
     );
   } finally {
     await act(async () => root.unmount());

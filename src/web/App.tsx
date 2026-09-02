@@ -6444,16 +6444,23 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         protectedLocalTurn = null;
       }
       const acceptedLocalTurn = localTurnEntry();
-      // Bind the server queue ID before comparing projections. The admission
-      // snapshot and queue_dispatch can both be missed; the delayed HTTP ack
-      // must still be correlated with the local turn before it is reconciled.
+      const promptNavigationIsCurrent = Boolean(
+        promptAuthority &&
+        promptAuthority.navigationEpoch === navigationEpochRef.current &&
+        viewedSessionIdRef.current === targetSessionId &&
+        desiredSessionIdRef.current === targetSessionId,
+      );
+      // Bind the server queue ID as Session-scoped bookkeeping even when the
+      // acknowledgement crossed navigation. Pane authority still fences the
+      // visible projection below, but dropping this binding would strand an
+      // accepted waiting turn without a recoverable queue identity.
       if (
         result.queued &&
         acceptedLocalTurn &&
         typeof result.id === "string"
       )
         markLocalTurnQueued(acceptedLocalTurn, result.id);
-      const acknowledgedProjection = result.queue
+      const acknowledgedProjection = result.queue && promptNavigationIsCurrent
         ? (() => {
             const currentRevision =
               queueProjectionRevisionRef.current.get(targetSessionId) || 0;
@@ -6518,7 +6525,11 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
             createdAt: Date.now(),
           },
         ]);
-      } else if (result.queued && acceptedLocalTurn && typeof result.id === "string") {
+      } else if (
+        result.queued &&
+        acceptedLocalTurn &&
+        typeof result.id === "string"
+      ) {
         // Dispatch SSE may beat this acknowledgement. Never demote a turn that
         // the scheduler has already started into the waiting-only queue UI.
         // A newer complete queue projection can prove that this acknowledged
@@ -6556,7 +6567,12 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         : [];
       for (const promoted of promotedAcknowledgedForPane)
         promoted.renderedInTranscript = true;
-      if (targetSessionId && promotedAcknowledgedTurns.length)
+      // A prompt acknowledgement that crossed a real navigation boundary must
+      // not schedule a background reconcile against the later pane. The later
+      // A view owns its own authority and will reconcile the Session on entry;
+      // allowing the stale chain to schedule here can retain a deferred React
+      // update after unmount (and can repeatedly poll a stale test/consumer).
+      if (targetSessionId && promotedAcknowledgedTurns.length && promptNavigationIsCurrent)
         requestPromptReconcileRef.current(targetSessionId);
       // A late acknowledgement is useful for Session reconciliation, but it
       // must not write into a later A pane after A → B → A. Queue state is
