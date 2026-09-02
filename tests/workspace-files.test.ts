@@ -88,20 +88,30 @@ test("workspace file reads remain bounded and reject traversal, secrets, generat
   }
 });
 
-test("workspace file reads reject symlinked paths even when their target stays inside the workspace", async (context) => {
+test("workspace file reads reject symlinked paths even when their target stays inside the workspace", async () => {
   const root = await fixture();
   try {
-    try {
-      await symlink(join(root, "README.md"), join(root, "readme-link.md"), "file");
+    if (process.platform === "win32") {
+      // Directory junctions exercise the same lstat symbolic-link rejection
+      // without requiring Windows Developer Mode or administrator privileges.
       await symlink(join(root, "src"), join(root, "src-link"), "junction");
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === "EPERM" || code === "EACCES") {
-        context.skip(`symlink creation unavailable: ${code}`);
-        return;
+      await assert.rejects(() => readWorkspaceFile(root, "src-link/app.ts"), /符号链接/);
+
+      // Also cover file links when the machine permits creating them, but do
+      // not turn a host privilege setting into a skipped security regression.
+      try {
+        await symlink(join(root, "README.md"), join(root, "readme-link.md"), "file");
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "EPERM" || code === "EACCES") return;
+        throw error;
       }
-      throw error;
+      await assert.rejects(() => readWorkspaceFile(root, "readme-link.md"), /符号链接/);
+      return;
     }
+
+    await symlink(join(root, "README.md"), join(root, "readme-link.md"), "file");
+    await symlink(join(root, "src"), join(root, "src-link"), "dir");
     await assert.rejects(() => readWorkspaceFile(root, "readme-link.md"), /符号链接/);
     await assert.rejects(() => readWorkspaceFile(root, "src-link/app.ts"), /符号链接/);
   } finally {
