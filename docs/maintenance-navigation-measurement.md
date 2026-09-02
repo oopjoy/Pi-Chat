@@ -23,7 +23,7 @@ Elapsed times are wall-clock measurements from Node `spawnSync`. They include No
 | Cold slash catalog fallback | `tests/web/composer-model-runtime.test.ts` | 23.8 ms | 1.61 s | 1 passed |
 | Timed-out native Steer settlement | `tests/server/prompt-queue-steering.test.ts:763` | 22.7 ms | 0.42 s | 1 passed |
 | Immutable live Runtime workspace binding | `tests/server/workspace-resource-lifecycle.test.ts:195` | 23.9 ms | 0.39 s | 1 passed |
-| Stale pane takeover fencing | `tests/web/pane-authority.test.ts:1116` | 24.9 ms | 2.54 s | 1 passed |
+| Stale pane takeover fencing | `tests/web/pane-prompt-authority.test.ts` | 24.9 ms | 2.54 s | 1 passed |
 | Window close during admitted mutation | `tests/server/window-control-lifecycle.test.ts:196` | 22.8 ms | 0.42 s | 1 passed |
 
 Production-owner navigation used at most three mapped files per task:
@@ -47,7 +47,7 @@ Remeasured on local `main` after Session Inventory, artifact safety, line-ending
 | Cold slash catalog fallback | `tests/web/composer-model-runtime.test.ts` | 18.5 ms | 1.37 s | 13.2 ms | 1 passed |
 | Timed-out native Steer settlement | `tests/server/prompt-queue-steering.test.ts:660` | 15.0 ms | 0.53 s | 12.0 ms | 1 passed |
 | Immutable live Runtime workspace binding | `tests/server/workspace-resource-lifecycle.test.ts:92` | 15.6 ms | 0.49 s | 11.9 ms | 1 passed |
-| Stale pane takeover fencing | `tests/web/pane-authority.test.ts:1116` | 15.7 ms | 2.29 s | 18.9 ms | 1 passed |
+| Stale pane takeover fencing | `tests/web/pane-prompt-authority.test.ts` | 15.7 ms | 2.29 s | 18.9 ms | 1 passed |
 | Window close during admitted mutation | `tests/server/window-control-lifecycle.test.ts:93` | 17.3 ms | 0.51 s | 17.6 ms | 1 passed |
 | Fresh full Session Inventory refresh | `tests/web/session-inventory-mutations.test.ts:1582` | 18.4 ms | 1.36 s | 16.4 ms | 1 passed |
 

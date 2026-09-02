@@ -92,12 +92,13 @@ test("batch counts that cannot preserve isolated suites fail closed", () => {
   );
 });
 
-test("memory-heavy pane suites remain isolated in one Job-backed file process", async () => {
-  const pane = sourceTestFiles().find((path) => repositoryRelativeTestPath(path) === "tests/web/pane-authority.test.ts");
-  assert.ok(pane);
+test("memory-heavy App suites remain isolated in one Job-backed file process", async () => {
+  const appSuite = sourceTestFiles().find((path) =>
+    repositoryRelativeTestPath(path) === "tests/web/app-replacement-recovery.test.ts");
+  assert.ok(appSuite);
   const calls: string[][] = [];
   const result = await runSourceBatches({
-    files: [pane],
+    files: [appSuite],
     batchCount: 1,
     execute: async (_command, args) => {
       calls.push(args);
@@ -107,7 +108,7 @@ test("memory-heavy pane suites remain isolated in one Job-backed file process", 
   });
   assert.equal(result.ok, true);
   assert.equal(calls.length, 1);
-  assert.equal(calls[0]!.filter((argument) => argument === "tests/web/pane-authority.test.ts").length, 1);
+  assert.equal(calls[0]!.filter((argument) => argument === "tests/web/app-replacement-recovery.test.ts").length, 1);
   assert.equal(calls[0]!.includes("--test-name-pattern"), false);
 });
 

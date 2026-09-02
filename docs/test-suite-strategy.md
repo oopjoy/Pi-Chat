@@ -10,9 +10,9 @@
 
 本次审计基于当前 `main` 工作树：
 
-- 142 个 `tests/**/*.test.ts` 文件；
+- 146 个 `tests/**/*.test.ts` 文件；
 - 由测试名称解析器识别出 1,101 个测试声明；
-- 核心 source lane 128 个文件、1,031 个测试声明；
+- 核心 source lane 132 个文件、1,031 个测试声明；
 - benchmark lane 5 个文件、28 个测试声明；
 - artifact lane 9 个文件、42 个测试声明；
 - 核心 source lane 现在通过独立 Node batch 进程执行；
@@ -35,7 +35,7 @@ source suite 的进程级内存累积。
 | `tests/web/composer-capabilities.test.ts`（已拆分） | 35 | 2,627 | 已按模型/Runtime、图片能力、delivery、Steer、Gate/layout 拆成 5 个职责文件 |
 | `tests/session-index.test.ts` | 35 | 945 | Index、缓存、分支、Session metadata 混合 |
 | `tests/rpc-client.test.ts` | 30 | 789 | RPC framing、timeout、process ownership、late response 混合 |
-| `tests/web/pane-authority.test.ts` | 24 | 2,604 | Pane authority、navigation、stale response、lifecycle 混合 |
+| `tests/web/pane-authority.test.ts`（已拆分） | 24 | 2,609 | 已按 Subagent、navigation、Prompt、Runtime control、recovery 拆成 5 个职责文件 |
 | `tests/web/app-replacement-recovery.test.ts` | 23 | 2,300 | replacement、bootstrap、navigation、recovery 混合 |
 | `tests/web/session-inventory-mutations.test.ts` | 23 | 2,110 | Session inventory、mutation、rename/delete、navigation 混合 |
 | `tests/web/session-navigation-gate.test.ts` | 22 | 2,086 | navigation、Gate、cold/hot Session、composer 混合 |
@@ -92,7 +92,7 @@ source suite 的进程级内存累积。
 
 ### Phase 3：日常测试与 Release 测试分层（已完成）
 
-- `test:source` 执行 128 个核心 source 文件；
+- `test:source` 执行 132 个核心 source 文件；
 - `test:benchmark` 单独执行 5 个 benchmark 文件；
 - `test:source-and-benchmark` 是 unit/release 的完整非 artifact 测试入口；
 - benchmark 实现及其 contract 仍被保留，未从仓库删除；
@@ -107,8 +107,8 @@ source suite 的进程级内存累积。
 从最混合且最重的文件开始拆分，当前进度：
 
 1. `tests/web/composer-capabilities.test.ts`：已拆成 5 个职责文件；
-2. `tests/web/pane-authority.test.ts`：下一批；
-3. `tests/web/app-replacement-recovery.test.ts`：待拆分；
+2. `tests/web/pane-authority.test.ts`：已拆成 5 个职责文件；
+3. `tests/web/app-replacement-recovery.test.ts`：下一批；
 4. `tests/web/queue-steer-extension.test.ts`：待拆分。
 
 Composer 第一批拆分后的职责边界：
@@ -118,6 +118,14 @@ Composer 第一批拆分后的职责边界：
 - `chat-input-delivery.test.ts`：串行发送、submission scope、IME 与 lifecycle；
 - `composer-steer.test.ts`：native Steer 的 pending、consume、withdraw 与 drop；
 - `composer-gate-layout.test.ts`：Gate authority 与 Composer/Settings layout。
+
+Pane authority 第二批拆分后的职责边界：
+
+- `pane-subagent-navigation.test.ts`：Subagent status、只读 child 地址和 rehydrate；
+- `pane-navigation-authority.test.ts`：cold/warm/replacement navigation fencing；
+- `pane-prompt-authority.test.ts`：Prompt、Extension、Gate、model/thinking stale response；
+- `pane-runtime-control.test.ts`：Abort、Stop、Queue 与历史 Queue authority；
+- `pane-recovery-authority.test.ts`：token/SSE recovery、terminal refresh 与 child controls。
 
 拆分只移动测试和共享 fixture，不改变断言语义；每次拆分后必须保持原
 测试集合与新测试集合的名称/数量映射。
