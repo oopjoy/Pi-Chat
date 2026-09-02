@@ -446,6 +446,27 @@ test("a Primary replacement clears the previous Fast indicator before the new Ru
       primaryRuntime: { status: "starting", generation: 1 },
     }));
     assert.equal(dom.window.document.querySelector(".fast-mode-indicator"), null);
+
+    // A full Pi Chat restart creates a new process epoch. Even if the old
+    // pane is still visible while the replacement reconnects, its Fast footer
+    // must not survive until the replacement bootstrap finishes.
+    await act(async () =>
+      source.dispatchEvent(
+        new dom.window.MessageEvent("ready", {
+          data: JSON.stringify({
+            lifecycle: "restarting",
+            piChatRunEpoch: "epoch-b",
+            workspaceEpoch: "epoch-b",
+            primaryRuntime: { status: "starting", generation: 0 },
+          }),
+        }),
+      ),
+    );
+    assert.equal(
+      dom.window.document.querySelector(".fast-mode-indicator"),
+      null,
+      "a process restart must clear Fast from the retained visible pane",
+    );
   } finally {
     await act(async () => root.unmount());
     restoreApi();

@@ -1117,6 +1117,11 @@ export class PiChatApp {
     this.pendingWindowPageTimers.clear();
     this.connectedPageClients.clear();
     this.scheduler.clearPrimary();
+    // Fast is a live Runtime-generation projection, never a persisted Session
+    // preference. Drop it explicitly on process shutdown so a reused App/test
+    // instance cannot expose the previous generation after close.
+    this.fastModeBySession.clear();
+    this.pendingPrimaryFastMode = undefined;
     for (const timer of this.pendingExtensionTimers.values())
       clearTimeout(timer);
     this.pendingExtensionTimers.clear();

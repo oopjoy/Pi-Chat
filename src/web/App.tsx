@@ -1379,6 +1379,13 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     terminalAssistantStreamGenerationsRef.current.clear();
     streamingWireProjectionsRef.current.clear();
     streamGapRecoveriesRef.current.clear();
+    const viewedSessionId = viewedSessionIdRef.current;
+    if (viewedSessionId)
+      dispatchPane({
+        type: "FAST_MODE_CHANGED",
+        sessionId: viewedSessionId,
+        active: false,
+      });
   }, [syncMutatingSessionIds]);
 
   /**
@@ -1428,6 +1435,13 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     streamingWireProjectionsRef.current.clear();
     streamGapRecoveriesRef.current.clear();
     streamDiagnosticsRef.current?.clear();
+    const viewedSessionId = viewedSessionIdRef.current;
+    if (viewedSessionId)
+      dispatchPane({
+        type: "FAST_MODE_CHANGED",
+        sessionId: viewedSessionId,
+        active: false,
+      });
     directoryLoadGenerationsRef.current.clear();
     directorySessionCoverageRef.current.clear();
     pendingSteersRef.current.clear();
