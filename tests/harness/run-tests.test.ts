@@ -94,7 +94,7 @@ test("batch counts that cannot preserve isolated suites fail closed", () => {
 
 test("memory-heavy App suites remain isolated in one Job-backed file process", async () => {
   const appSuite = sourceTestFiles().find((path) =>
-    repositoryRelativeTestPath(path) === "tests/web/app-replacement-recovery.test.ts");
+    repositoryRelativeTestPath(path) === "tests/web/session-inventory-mutations.test.ts");
   assert.ok(appSuite);
   const calls: string[][] = [];
   const result = await runSourceBatches({
@@ -108,7 +108,7 @@ test("memory-heavy App suites remain isolated in one Job-backed file process", a
   });
   assert.equal(result.ok, true);
   assert.equal(calls.length, 1);
-  assert.equal(calls[0]!.filter((argument) => argument === "tests/web/app-replacement-recovery.test.ts").length, 1);
+  assert.equal(calls[0]!.filter((argument) => argument === "tests/web/session-inventory-mutations.test.ts").length, 1);
   assert.equal(calls[0]!.includes("--test-name-pattern"), false);
 });
 
@@ -366,7 +366,7 @@ test("the official harness accepts an exact statically expanded template-generat
     process.execPath,
     [
       join(repositoryRoot, "scripts", "run-tests.mjs"),
-      "--file=tests/web/app-replacement-recovery.test.ts",
+      "--file=tests/web/app-workspace-replacement.test.ts",
       "--test-name-pattern=^a same-generation stale bootstrap cannot overwrite Primary ready SSE$",
     ],
     {
@@ -384,7 +384,7 @@ test("the official harness rejects a pattern that matches only a template prefix
     process.execPath,
     [
       join(repositoryRoot, "scripts", "run-tests.mjs"),
-      "--file=tests/web/app-replacement-recovery.test.ts",
+      "--file=tests/web/app-workspace-replacement.test.ts",
       "--test-name-pattern=Primary $",
     ],
     {
