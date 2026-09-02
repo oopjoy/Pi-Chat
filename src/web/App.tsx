@@ -120,6 +120,7 @@ import {
   nextLocalTurnTotal,
   promoteTurnsAbsentFromQueue,
   protectTranscriptWithLocalTurns,
+  transcriptConfirmsLocalTurn,
   queuedPromptFromLocalTurn,
   removeLocalTurnAndRebase,
   removePendingSteeringTurns,
@@ -1083,6 +1084,8 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   const queueProjectionSourceRef = useRef(
     new Map<string, "event" | "view" | "ack" | "mutation">(),
   );
+  /** Queue IDs whose user turn was already confirmed by a persisted view. */
+  const confirmedQueueDispatchIdsRef = useRef(new Map<string, Set<string>>());
   /** Latest queue projection per Session, independent of pane/cache residency. */
   const latestQueueProjectionRef = useRef(
     new Map<string, { queue: QueuedPrompt[]; paused: boolean }>(),
@@ -1182,6 +1185,40 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     queueProjectionSourceRef.current.set(sessionId, source);
     advanceQueueProjectionRevision(sessionId);
     return projection;
+  };
+  const rememberConfirmedQueueDispatchIds = (
+    sessionId: string,
+    before: LocalUserTurn[],
+    pending: LocalUserTurn[],
+    messages: PiMessage[],
+    turnTotal: number | undefined,
+    messagesTruncated: boolean,
+  ): void => {
+    const pendingSet = new Set(pending);
+    const confirmed = before.filter(
+      (turn) =>
+        turn.queueState === "dispatched" &&
+        !turn.revealOnMessageStart &&
+        turn.queueId &&
+        !pendingSet.has(turn) &&
+        transcriptConfirmsLocalTurn(
+          turn,
+          messages,
+          turnTotal,
+          messagesTruncated,
+        ),
+    );
+    if (!confirmed.length) return;
+    const ids =
+      confirmedQueueDispatchIdsRef.current.get(sessionId) || new Set<string>();
+    for (const turn of confirmed) {
+      if (!turn.queueId) continue;
+      ids.add(turn.queueId);
+    }
+    // This is only a late-event fence; keep it bounded and let a matching
+    // dispatch consume each entry.
+    while (ids.size > 64) ids.delete(ids.values().next().value!);
+    confirmedQueueDispatchIdsRef.current.set(sessionId, ids);
   };
   const clearEmptyQueuePause = (sessionId: string): void => {
     const projection = latestQueueProjectionRef.current.get(sessionId);
@@ -1317,6 +1354,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     cancelledQueueIdsRef.current.clear();
     queueProjectionRevisionRef.current.clear();
     queueProjectionSourceRef.current.clear();
+    confirmedQueueDispatchIdsRef.current.clear();
     latestQueueProjectionRef.current.clear();
     queueMutationSequenceRef.current.clear();
     appliedQueueMutationSequenceRef.current.clear();
@@ -1357,6 +1395,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     cancelledQueueIdsRef.current.clear();
     queueProjectionRevisionRef.current.clear();
     queueProjectionSourceRef.current.clear();
+    confirmedQueueDispatchIdsRef.current.clear();
     latestQueueProjectionRef.current.clear();
     queueMutationSequenceRef.current.clear();
     appliedQueueMutationSequenceRef.current.clear();
@@ -2369,6 +2408,14 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         sourceView?.messagesTruncated ?? data.messagesTruncated === true,
         new Set(bootstrapQueue.map((item) => item.id)),
       );
+      rememberConfirmedQueueDispatchIds(
+        activeViewId,
+        bootstrapLocalTurns,
+        protectedTranscript.pendingTurns,
+        sourceView?.messages || data.messages,
+        sourceView?.turnTotal ?? data.turnTotal,
+        sourceView?.messagesTruncated ?? data.messagesTruncated === true,
+      );
       if (protectedTranscript.pendingTurns.length) {
         protectedTranscript.pendingTurns.forEach((turn) => {
           turn.renderedInTranscript = localTurnBelongsInTranscript(turn);
@@ -2681,6 +2728,14 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         queueProjection.known
           ? new Set(filteredQueue.map((item) => item.id))
           : undefined,
+      );
+      rememberConfirmedQueueDispatchIds(
+        sourceView.session.id,
+        viewLocalTurns,
+        protectedTranscript.pendingTurns,
+        sourceView.messages,
+        sourceView.turnTotal,
+        sourceView.messagesTruncated,
       );
       if (protectedTranscript.pendingTurns.length) {
         protectedTranscript.pendingTurns.forEach((turn) => {
@@ -4758,6 +4813,26 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           }
         }
         if (eventSessionId && !knownLocally) {
+          const confirmedIds = confirmedQueueDispatchIdsRef.current.get(eventSessionId);
+          const wasAlreadyConfirmed = Boolean(
+            dispatchedId && confirmedIds?.has(dispatchedId),
+          );
+          if (wasAlreadyConfirmed && confirmedIds) {
+            confirmedIds.delete(dispatchedId);
+            if (!confirmedIds.size)
+              confirmedQueueDispatchIdsRef.current.delete(eventSessionId);
+          }
+          if (wasAlreadyConfirmed) {
+            // The authoritative view already contained this turn and removed
+            // its local admission. A late dispatch is only a transport echo;
+            // never create a second synthetic bubble for it.
+            if (viewingEventSession)
+              dispatchPane({
+                type: "QUEUE_DISPATCHED",
+                sessionId: eventSessionId,
+                queue: dispatchProjection.queue,
+              });
+          } else {
           const queuedText =
             dispatchedMessage ||
             (imageCount > 0 ? `请查看附加的 ${imageCount} 张图片` : "队列消息");
@@ -4785,6 +4860,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
               queue: dispatchProjection.queue,
               messages: (current) => [...current, message],
             });
+          }
         }
         if (eventSessionId)
           patchSessionCache(eventSessionId, {
@@ -7565,6 +7641,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     cancellingQueueIdsRef.current.delete(sessionId);
     queueProjectionRevisionRef.current.delete(sessionId);
     queueProjectionSourceRef.current.delete(sessionId);
+    confirmedQueueDispatchIdsRef.current.delete(sessionId);
     latestQueueProjectionRef.current.delete(sessionId);
     queueMutationSequenceRef.current.delete(sessionId);
     appliedQueueMutationSequenceRef.current.delete(sessionId);

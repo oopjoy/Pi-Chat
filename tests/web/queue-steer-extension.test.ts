@@ -1328,6 +1328,114 @@ test("queue update promotes an accepted turn when its dispatch SSE frame is miss
   }
 });
 
+test("a late dispatch after persisted-view confirmation does not append a duplicate", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const queuedItem = {
+    id: "00000000-0000-4000-8000-000000000034",
+    message: "already persisted before dispatch echo",
+    imageCount: 0,
+    createdAt: 2,
+  };
+  const persistedMessage = {
+    role: "user" as const,
+    content: queuedItem.message,
+    piChatPersistedMessageId: "persisted-entry-34",
+  };
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true },
+      queue: [],
+      queuePaused: true,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    prompt: async () => ({
+      accepted: true as const,
+      queued: true as const,
+      id: queuedItem.id,
+      queue: [queuedItem],
+    }),
+    viewSession: async () => ({
+      ...draftView,
+      session: { ...draftView.session, id: activeId, sessionId: activeId },
+      state: { ...bootstrap.state, isStreaming: false },
+      messages: [persistedMessage],
+      messageTotal: 1,
+      turnTotal: 1,
+      messagesTruncated: false,
+      isActive: false,
+      isStreaming: false,
+      queue: [],
+      queuePaused: false,
+    }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, queuedItem.message);
+      textarea.dispatchEvent(new dom.window.InputEvent("input", {
+        bubbles: true,
+        inputType: "insertText",
+        data: queuedItem.message,
+      }));
+      dom.window.document.querySelector<HTMLButtonElement>(
+        ".queue-submit-button",
+      )!.click();
+      await Promise.resolve();
+    });
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.emitPi({
+        type: "pi_chat_queue_update",
+        piChatSessionId: activeId,
+        queue: [queuedItem],
+        paused: true,
+      });
+    });
+    await act(async () => {
+      source.emitPi({
+        type: "agent_settled",
+        piChatSessionId: activeId,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    assert.equal(
+      dom.window.document.querySelectorAll(".message-user").length,
+      1,
+      "the persisted view should contain one user bubble",
+    );
+    await act(async () => {
+      source.emitPi({
+        type: "pi_chat_queue_dispatch",
+        piChatSessionId: activeId,
+        id: queuedItem.id,
+        message: queuedItem.message,
+        imageCount: 0,
+      });
+    });
+    assert.equal(
+      dom.window.document.querySelectorAll(".message-user").length,
+      1,
+      "a late dispatch echo must not append a synthetic duplicate",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("an in-flight cancellation fences an empty queue snapshot from promoting the turn", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");
