@@ -51,6 +51,7 @@
     "test": "node scripts/run-tests.mjs",
     "test:focus": "node scripts/run-tests.mjs",
     "test:source": "node scripts/run-tests.mjs --exclude-file tests/application-restart.test.ts --exclude-file tests/build-guard.test.ts --exclude-file tests/e2e-fixtures.test.ts --exclude-file tests/e2e-runtime-dist.test.ts --exclude-file tests/pi-runtime-build.test.ts --exclude-file tests/pi-runtime-bundle.test.ts --exclude-file tests/startup-smoke.test.ts --exclude-file tests/web-build-artifacts.test.ts --exclude-file tests/windows-launcher.test.ts",
+    "test:source:batched": "node scripts/run-test-batches.mjs",
     "test:artifact": "node scripts/run-tests.mjs --file tests/application-restart.test.ts --file tests/build-guard.test.ts --file tests/e2e-fixtures.test.ts --file tests/e2e-runtime-dist.test.ts --file tests/pi-runtime-build.test.ts --file tests/pi-runtime-bundle.test.ts --file tests/startup-smoke.test.ts --file tests/web-build-artifacts.test.ts --file tests/windows-launcher.test.ts",
     "build-and-test:artifact": "npm run build && npm run test:artifact",
     "release:package": "node scripts/release-package.mjs",

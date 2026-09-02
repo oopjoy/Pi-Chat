@@ -21,6 +21,48 @@ import {
   testRunnerArguments,
   windowsTestJobInvocation,
 } from "../../scripts/test-harness-policy.mjs";
+import {
+  ARTIFACT_TEST_PATHS,
+  batchSummary,
+  partitionSourceTests,
+  sourceTestFiles,
+  verifySourcePartition,
+} from "../../scripts/test-batches.mjs";
+import { runSourceBatches } from "../../scripts/run-test-batches.mjs";
+
+test("source batches cover every non-artifact test file exactly once", () => {
+  const source = sourceTestFiles();
+  const batches = partitionSourceTests(source, 20);
+  assert.equal(batches.length, 20);
+  assert.ok(batches.every((batch) => batch.length > 0));
+  assert.equal(verifySourcePartition(batches.flat(), source), true);
+  assert.equal(
+    batches.flat().some((path) => ARTIFACT_TEST_PATHS.has(repositoryRelativeTestPath(path))),
+    false,
+  );
+  assert.equal(
+    batchSummary(batches).reduce((total, batch) => total + batch.tests, 0),
+    source.reduce((total, path) => total + declaredTestNamePatterns(path).length, 0),
+  );
+});
+
+test("source batch runner starts one fresh harness process per batch", async () => {
+  const source = sourceTestFiles().slice(0, 4);
+  const calls: string[][] = [];
+  const result = await runSourceBatches({
+    files: source,
+    batchCount: 2,
+    execute: async (_command, args) => {
+      calls.push(args);
+      return 0;
+    },
+    log: { error: () => undefined },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(calls.length, 2);
+  assert.ok(calls.every((args) => args[0]?.replaceAll("\\", "/").endsWith("scripts/run-tests.mjs")));
+  assert.equal(calls.flatMap((args) => args.filter((arg) => arg.startsWith("tests/"))).length, source.length);
+});
 
 test("test discovery recursively finds regular test files in stable order", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-test-discovery-"));

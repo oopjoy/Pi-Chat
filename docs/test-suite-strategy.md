@@ -67,14 +67,20 @@ source suite 的进程级内存累积。
 
 优先改造执行层，不减少覆盖：
 
-1. 将 source suite 分成若干由代码生成的 batch；
+1. 将 source suite 分成由代码生成的 batch；
 2. 每个 batch 使用一个全新的 Node 进程；
 3. batch 之间顺序执行，避免额外消耗机器并发；
 4. 自动验证所有 source 文件恰好覆盖一次；
 5. 保留现有 `test:source` 作为完整 source gate，或让它转发到上述
-   sharded runner，但不能静默排除测试。
+   sharded runner，但不能静默排除测试；
+6. 对大型 Browser App、RPC 和 Session 集成文件使用单文件 process
+   isolation，不能只按测试数量平均切分。
 
-建议初始分组：
+初步试验表明，5 个或 10 个普通大小 batch 仍可能把多个大型 App 测试
+放在同一个进程中并触发 3 GB 限制。因此当前实现默认使用 20 个 batch，
+其中大型集成文件单独运行，其余测试再做加权分配。
+
+建议的职责分组仍用于后续维护，但执行分片先以内存安全为优先：
 
 - shared/pure web utilities；
 - Session index/projection/cache；
