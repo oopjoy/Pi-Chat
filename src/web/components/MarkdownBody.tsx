@@ -1,7 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import { createMarkdownRehypePlugins, markdownRemarkPlugins } from "../lib/markdown";
-import { normalizeDisplayMathWithSourceMap, registerSourceCopyRoot } from "../lib/markdown-source-copy";
+import { normalizeDisplayMathForRendering, normalizeDisplayMathWithSourceMap, registerSourceCopyRoot } from "../lib/markdown-source-copy";
 import {
   advanceStreamingMarkdown,
   type StreamingMarkdownAppendHint,
@@ -44,7 +44,7 @@ const StreamingMarkdownSegment = memo(function StreamingMarkdownSegment({ childr
     rehypePlugins={streamingRehypePlugins}
     components={markdownComponents}
   >
-    {children}
+    {normalizeDisplayMathForRendering(children)}
   </ReactMarkdown>;
 });
 

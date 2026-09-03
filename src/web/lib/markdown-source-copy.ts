@@ -30,6 +30,7 @@ function normalizeDisplayMath(source: string, trackOffsets: boolean): SourceMapp
   const output: string[] = [];
   const boundaries: number[] | null = trackOffsets ? [0] : null;
   let changed = false;
+  let displayMath = false;
 
   const appendOriginal = (text: string, sourceStart: number) => {
     output.push(text);
@@ -39,6 +40,9 @@ function normalizeDisplayMath(source: string, trackOffsets: boolean): SourceMapp
     output.push(text);
     if (boundaries) for (let index = 0; index < text.length; index += 1) boundaries.push(sourceOffset);
   };
+  const isDisplayBoundary = (line: string) => /^([ \t]{0,3})\$\$[ \t]*$/.test(line);
+  const mismatchedDisplayClose = (line: string) => line.match(/^([ \t]{0,3})\\\]([ \t]*)$/);
+  const isStructuralBoundary = (line: string) => /^ {0,3}#{1,6}(?:[ \t]+|$)/.test(line);
 
   let fence: { marker: string; size: number } | null = null;
   let match: RegExpExecArray | null;
@@ -49,6 +53,15 @@ function normalizeDisplayMath(source: string, trackOffsets: boolean): SourceMapp
     const line = eol ? wholeLine.slice(0, -eol.length) : wholeLine;
     const sourceStart = match.index;
     const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})/);
+    if (fenceMatch && displayMath && !fence) {
+      changed = true;
+      // A new code fence is a Markdown boundary, not math content.
+      appendInserted(`$$${lineBreak}`, sourceStart);
+      appendOriginal(wholeLine, sourceStart);
+      displayMath = false;
+      fence = { marker: fenceMatch[1][0], size: fenceMatch[1].length };
+      continue;
+    }
     if (fenceMatch) {
       const marker = fenceMatch[1][0];
       const size = fenceMatch[1].length;
@@ -58,9 +71,46 @@ function normalizeDisplayMath(source: string, trackOffsets: boolean): SourceMapp
       continue;
     }
 
+    if (displayMath) {
+      if (isDisplayBoundary(line)) {
+        appendOriginal(wholeLine, sourceStart);
+        displayMath = false;
+        continue;
+      }
+
+      const mismatchedClose = mismatchedDisplayClose(line);
+      if (mismatchedClose) {
+        changed = true;
+        const indent = mismatchedClose[1];
+        const suffix = mismatchedClose[2];
+        const markerStart = sourceStart + indent.length;
+        appendOriginal(indent, sourceStart);
+        // Keep the replacement the same width so source-copy offsets remain stable.
+        appendInserted("$$", markerStart);
+        appendOriginal(suffix, markerStart + 2);
+        if (boundaries) boundaries[boundaries.length - 1] = sourceStart + line.length;
+        if (eol) appendOriginal(eol, sourceStart + line.length);
+        displayMath = false;
+        continue;
+      }
+
+      if (isStructuralBoundary(line)) {
+        changed = true;
+        // A missing close must not consume a following Markdown heading and its content.
+        appendInserted(`$$${lineBreak}`, sourceStart);
+        appendOriginal(wholeLine, sourceStart);
+        displayMath = false;
+        continue;
+      }
+
+      appendOriginal(wholeLine, sourceStart);
+      continue;
+    }
+
     const display = !fence ? line.match(/^([ \t]{0,3})\$\$(.+)\$\$[ \t]*$/) : null;
     if (!display || !display[2].trim()) {
       appendOriginal(wholeLine, sourceStart);
+      if (!fence && isDisplayBoundary(line)) displayMath = true;
       continue;
     }
 
@@ -95,6 +145,11 @@ function normalizeDisplayMath(source: string, trackOffsets: boolean): SourceMapp
 
 export function normalizeDisplayMathWithSourceMap(source: string): SourceMappedMarkdown {
   return normalizeDisplayMath(source, true);
+}
+
+/** Keep malformed display-math boundaries local in streaming Markdown too. */
+export function normalizeDisplayMathForRendering(source: string): string {
+  return normalizeDisplayMath(source, false).markdown;
 }
 
 const atomicTags = new Set([

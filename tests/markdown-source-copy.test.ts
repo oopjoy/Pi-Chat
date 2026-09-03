@@ -73,6 +73,90 @@ y`;
   assert.equal(source.slice(mapped.mapOffset(start), mapped.mapOffset(end)), String.raw`$$   \frac{1}{2}   $$`);
 });
 
+test("a mismatched display-math close is isolated without swallowing following Markdown", () => {
+  const markdown = String.raw`intro
+
+$$
+\eta^2>4\mu\lambda,
+\]
+
+## 临界阻尼
+
+后面的正文继续正常渲染。
+
+$$
+|r_{\mathrm{slow}}|
+$$`;
+  const { dom, root } = renderDom(markdown);
+  assert.equal(root.querySelectorAll(".katex-display").length, 2);
+  assert.equal(root.querySelector("h2")?.textContent, "临界阻尼");
+  assert.match(root.textContent || "", /后面的正文继续正常渲染/);
+  const math = root.querySelector(".katex-display");
+  assert.ok(math);
+  assert.equal(sourceForSelection(root, selectContents(dom, math), markdown), String.raw`$$
+\eta^2>4\mu\lambda,
+\]`);
+});
+
+test("display-math recovery ignores matching delimiters inside fenced code", () => {
+  const markdown = [
+    "```text",
+    "$$",
+    String.raw`\eta^2>4\mu\lambda,`,
+    String.raw`\]`,
+    "```",
+    "",
+    "## 后续标题",
+  ].join("\n");
+  const { root } = renderDom(markdown);
+  assert.equal(root.querySelector("h2")?.textContent, "后续标题");
+  assert.equal(root.querySelectorAll(".katex-display").length, 0);
+  assert.match(root.textContent || "", /\\eta\^2>4\\mu\\lambda/);
+});
+
+test("an unclosed display-math block stops before a following code fence", () => {
+  const markdown = [
+    "$$",
+    String.raw`\eta^2>4\mu\lambda,`,
+    "```text",
+    "$$",
+    String.raw`\eta^2>4\mu\lambda,`,
+    String.raw`\]`,
+    "```",
+    "",
+    "## 后续标题",
+  ].join("\n");
+  const { root } = renderDom(markdown);
+  assert.equal(root.querySelector("h2")?.textContent, "后续标题");
+  assert.equal(root.querySelectorAll(".katex-display").length, 1);
+  assert.match(root.textContent || "", /\\eta\^2>4\\mu\\lambda/);
+});
+
+test("an unclosed display-math block stops before a following Markdown heading", () => {
+  const markdown = String.raw`$$
+\eta^2>4\mu\lambda,
+
+## 临界阻尼
+
+正文不会被前面的公式吞掉。`;
+  const { root } = renderDom(markdown);
+  assert.equal(root.querySelector("h2")?.textContent, "临界阻尼");
+  assert.match(root.textContent || "", /正文不会被前面的公式吞掉/);
+});
+
+test("streaming Markdown applies the same display-math isolation", () => {
+  const markdown = String.raw`$$
+\eta^2>4\mu\lambda,
+\]
+
+## 临界阻尼
+
+流式后文仍然可见。`;
+  const html = renderToStaticMarkup(React.createElement(MarkdownBody, { streaming: true }, markdown));
+  assert.match(html, /<h2>临界阻尼<\/h2>/);
+  assert.match(html, /流式后文仍然可见/);
+});
+
 test("selecting a line inside a fenced code block does not expand to the whole fence", () => {
   const markdown = "intro\n\n```powershell\nWrite-Host one\nWrite-Host two\n```\n\noutro";
   const { dom, root } = renderDom(markdown);
