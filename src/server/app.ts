@@ -51,6 +51,7 @@ import {
 } from "./application-lifecycle.js";
 import {
   pickLocalFiles,
+  readClipboardFiles,
   pickWorkspaceFolder,
   revealInExplorer,
 } from "./file-picker.js";
@@ -7487,6 +7488,21 @@ export class PiChatApp {
     if (url.pathname === "/api/local-files/pick") {
       if (request.method !== "POST") return methodNotAllowed(response);
       json(response, 200, { paths: await pickLocalFiles() });
+      return;
+    }
+
+    if (url.pathname === "/api/local-files/clipboard") {
+      if (request.method !== "POST") return methodNotAllowed(response);
+      const body = await bodyJson(request);
+      const expected = Array.isArray(body?.files)
+        ? body.files.filter((item: unknown): item is { name: string; size: number } => Boolean(
+          item && typeof item === "object"
+          && typeof (item as { name?: unknown }).name === "string"
+          && Number.isSafeInteger((item as { size?: unknown }).size)
+          && (item as { size: number }).size >= 0,
+        )).slice(0, 10)
+        : [];
+      json(response, 200, { paths: await readClipboardFiles(expected) });
       return;
     }
 

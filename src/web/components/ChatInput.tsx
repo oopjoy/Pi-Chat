@@ -164,7 +164,7 @@ export function commandMatches(value: string, commands: SlashCommand[]): SlashCo
   }).sort((a, b) => a.rank - b.rank || a.score - b.score || a.command.name.localeCompare(b.command.name)).slice(0, 9).map(({ command }) => command);
 }
 
-export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, placeholder, acceptsImages, imageInputPending = false, restoredDraft, onDraftRevisionChange, draftKey, forgottenComposerKeys = [], submissionScope, submissionTargetSessionId, allowFollowupSubmissions = true, submissionPaused = false, onSubmissionPendingChange, commands, controls, notices, onSend, onAbort, onPickLocalFiles, onError }: {
+export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, placeholder, acceptsImages, imageInputPending = false, restoredDraft, onDraftRevisionChange, draftKey, forgottenComposerKeys = [], submissionScope, submissionTargetSessionId, allowFollowupSubmissions = true, submissionPaused = false, onSubmissionPendingChange, commands, controls, notices, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles = async () => [], onError }: {
   /** True when a submission will enter the local queue. */
   streaming: boolean;
   /** True only while Pi is actively generating and can be stopped. */
@@ -200,6 +200,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   onSend: (message: string, images: PromptImage[], delivery?: PromptDelivery, targetSessionId?: string) => Promise<void>;
   onAbort: () => Promise<void>;
   onPickLocalFiles: () => Promise<string[]>;
+  onReadClipboardFiles?: (files: Array<{ name: string; size: number }>) => Promise<string[]>;
   onError: (message: string) => void;
 }) {
   const [dragging, setDragging] = useState(false);
@@ -435,12 +436,16 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     }
     if (clipboardFiles.length || event.clipboardData.types.includes("Files")) {
       event.preventDefault();
-      // Do not read the process clipboard asynchronously here: by the time the
-      // Windows bridge responds it may describe a newer clipboard operation.
-      // Explorer's URI/text payload and browser-exposed File.path are handled
-      // synchronously above; otherwise the explicit attachment picker is the
-      // safe path-bound operation.
-      onError("无法取得文件的本地路径，请使用发送按钮旁的附件按钮选择本地文件");
+      const draftKeyId = currentDraftKeyIdRef.current;
+      const files = clipboardFiles.map((file) => ({ name: file.name, size: file.size }));
+      void onReadClipboardFiles(files).then((nativePaths) => {
+        if (currentDraftKeyIdRef.current !== draftKeyId || editorDisabledRef.current) return;
+        if (nativePaths.length) appendFileReferences(nativePaths, draftKeyId);
+        else onError("无法取得文件的本地路径，请使用发送按钮旁的附件按钮选择本地文件");
+      }).catch(() => {
+        if (currentDraftKeyIdRef.current === draftKeyId && !editorDisabledRef.current)
+          onError("无法取得文件的本地路径，请使用发送按钮旁的附件按钮选择本地文件");
+      });
     }
   };
 

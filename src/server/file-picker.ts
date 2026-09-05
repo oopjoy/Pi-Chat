@@ -1,6 +1,7 @@
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { spawn } from "node:child_process";
+import { basename } from "node:path";
 
 const PICKER_SCRIPT = String.raw`
 Add-Type -AssemblyName System.Windows.Forms
@@ -13,6 +14,16 @@ $dialog.RestoreDirectory = $true
 $dialog.Filter = '所有文件 (*.*)|*.*'
 if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
   ConvertTo-Json -InputObject @($dialog.FileNames) -Compress
+} else {
+  '[]'
+}
+`;
+
+const CLIPBOARD_FILES_SCRIPT = String.raw`
+Add-Type -AssemblyName System.Windows.Forms
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+if ([System.Windows.Forms.Clipboard]::ContainsFileDropList()) {
+  ConvertTo-Json -InputObject @([System.Windows.Forms.Clipboard]::GetFileDropList()) -Compress
 } else {
   '[]'
 }
@@ -167,6 +178,35 @@ async function runPicker(script: string, timeoutMessage: string, extraEnv: NodeJ
       resolve(stdout);
     });
   });
+}
+
+export async function readClipboardFiles(expected: Array<{ name: string; size: number }> = []): Promise<string[]> {
+  try {
+    const paths = parsePickerOutput(await runPicker(CLIPBOARD_FILES_SCRIPT, "读取 Windows 剪贴板超时"));
+    // Never return the mutable process clipboard without browser file metadata
+    // that binds this native snapshot to the paste event.
+    if (!expected.length) return [];
+    const remaining = [...expected];
+    const matched: string[] = [];
+    for (const path of paths) {
+      const index = remaining.findIndex((item) => item.name === basename(path) && item.size === statSyncSize(path));
+      if (index < 0) continue;
+      matched.push(path);
+      remaining.splice(index, 1);
+    }
+    return remaining.length === 0 && matched.length === paths.length ? matched : [];
+  } catch (error) {
+    if (error instanceof SyntaxError) throw new Error("无法读取 Windows 剪贴板文件路径");
+    throw error;
+  }
+}
+
+function statSyncSize(path: string): number {
+  try {
+    return statSync(path).size;
+  } catch {
+    return -1;
+  }
 }
 
 export async function pickLocalFiles(): Promise<string[]> {

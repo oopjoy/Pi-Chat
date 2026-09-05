@@ -143,6 +143,39 @@ test("Explorer path paste inserts at the caret without blank lines or newlines",
   }
 });
 
+test("a file-only clipboard paste resolves a matching native path and inserts it at the caret", async () => {
+  const { dom } = installAppDom();
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(ChatInput, {
+      ...chatInputProps(() => {}),
+      onReadClipboardFiles: async (files) => {
+        assert.deepEqual(files, [{ name: "paper.pdf", size: 4 }]);
+        return ["C:\\Users\\me\\paper.pdf"];
+      },
+      draftKey: { kind: "session" as const, sessionId: "session-a" },
+      restoredDraft: { key: { kind: "session" as const, sessionId: "session-a" }, revision: 1, expectedDraftRevision: 0, message: "前后", images: [] },
+    })));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    textarea.setSelectionRange(1, 1);
+    const event = new dom.window.Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "clipboardData", {
+      value: {
+        items: [{ kind: "file", getAsFile: () => new dom.window.File(["data"], "paper.pdf", { type: "application/pdf" }) }],
+        types: ["Files"],
+        getData: () => "",
+      },
+    });
+    await act(async () => {
+      textarea.dispatchEvent(event);
+      await new Promise<void>((resolve) => dom.window.setTimeout(resolve, 0));
+    });
+    assert.equal(textarea.value, '前C:\\Users\\me\\paper.pdf后');
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
 test("a file-only clipboard paste does not read a mutable process clipboard", async () => {
   const { dom } = installAppDom();
   let fallbackReads = 0;
