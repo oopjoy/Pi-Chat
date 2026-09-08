@@ -20,7 +20,7 @@ async function fixture() {
   const sourceFiles: Record<string, string> = {
     "package.json": JSON.stringify({
       name: "@earendil-works/pi-coding-agent",
-      version: "0.84.2",
+      version: "0.85.1",
       type: "module",
       bin: { pi: "dist/cli.js" },
     }),
@@ -51,7 +51,7 @@ async function fixture() {
     .filter(([path]) => path !== "dist/cli.js")
     .map(([relativePath, content]) => ({
       packageName: "@earendil-works/pi-coding-agent",
-      packageVersion: "0.84.2",
+      packageVersion: "0.85.1",
       packageLocator: ".",
       relativePath,
       sha256: sha256(content),
@@ -64,14 +64,14 @@ async function fixture() {
     schemaVersion: 2,
     layoutVersion: 1,
     piPackageName: "@earendil-works/pi-coding-agent",
-    piVersion: "0.84.2",
+    piVersion: "0.85.1",
     minimumNodeMajor: 22,
     supportedPlatforms: [process.platform],
     supportedArchitectures: [process.arch],
     bundleRelativePath: "package/dist/rpc-entry.bundle.mjs",
     bundleSha256: outputHashes["package/dist/rpc-entry.bundle.mjs"],
     originalCliRelativePath: "dist/cli.js",
-    recipeVersion: 3,
+    recipeVersion: 4,
     esbuildVersion: "0.28.1",
     sourceInputs,
     outputHashes,

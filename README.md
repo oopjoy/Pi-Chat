@@ -196,8 +196,8 @@ Skills 可以向模型注入指令，Plugins/Packages 可以用当前用户的�
 
 ## 兼容的 Pi 版本
 
-- **已验证：** Pi `0.84.2`（全局 `@earendil-works/pi-coding-agent`；包含 `ask_user_question` RPC dialog fallback 冒烟验证）
-- **探测方式：** 服务启动时冻结一个 Primary/Secondary 共用的 Pi launch plan。Bundle 选择先验证 Pi `0.84.2`、固定 esbuild/配方、全部 Bundle 输入 hash、全部 Runtime 输出 hash 和 Node/平台要求；显式 `PI_CHAT_PI_ENTRY` 保持 direct-only authority，`PI_CHAT_DISABLE_BUNDLED_PI_RUNTIME=1` 可强制使用原始入口。Primary 随后执行 RPC 能力探测（`get_state` / `get_messages` / `get_available_models` / `get_commands` / `get_session_stats`）。不兼容时 Session 浏览继续可用，而新的或需要恢复的 Runtime 写操作返回明确的不可用状态；已经健康的 Secondary 保持可用。任何 Primary 恢复都会重新探测
+- **已验证：** Pi `0.85.1`（全局 `@earendil-works/pi-coding-agent`；包含 `ask_user_question` RPC dialog fallback 冒烟验证）
+- **探测方式：** 服务启动时冻结一个 Primary/Secondary 共用的 Pi launch plan。Bundle 选择先验证 Pi `0.85.1`、固定 esbuild/配方、全部 Bundle 输入 hash、全部 Runtime 输出 hash 和 Node/平台要求；显式 `PI_CHAT_PI_ENTRY` 保持 direct-only authority，`PI_CHAT_DISABLE_BUNDLED_PI_RUNTIME=1` 可强制使用原始入口。Primary 随后执行 RPC 能力探测（`get_state` / `get_messages` / `get_available_models` / `get_commands` / `get_session_stats`）。不兼容时 Session 浏览继续可用，而新的或需要恢复的 Runtime 写操作返回明确的不可用状态；已经健康的 Secondary 保持可用。任何 Primary 恢复都会重新探测
 - 升级 Pi 后若启动失败，请先 `pi --version`，再确认 Pi Chat 是否为最新 0.4.x
 
 更完整的模块边界与拆分优先级见 `docs/architecture.md`；日常维护入口见 [`docs/change-map.md`](docs/change-map.md)。

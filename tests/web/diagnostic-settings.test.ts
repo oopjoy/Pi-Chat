@@ -24,7 +24,7 @@ test("Settings exposes one export-only diagnostic action", async () => {
       diagnosticsBusy: false,
       buildIdentity: { schemaVersion: 1, packageVersion: "0.4.5", revision: "abc123", fingerprint: "a".repeat(64), builtAt: "2026-01-01T00:00:00.000Z" },
       webBuildIdentity: { schemaVersion: 1, packageVersion: "0.4.5", revision: "abc123", fingerprint: "a".repeat(64), builtAt: "2026-01-01T00:00:00.000Z" },
-      piVersion: "0.84.2",
+      piVersion: "0.85.1",
       primaryRuntime: { status: "ready", generation: 1 },
       onClose: () => {},
       onAppearance: () => {},
@@ -77,7 +77,7 @@ test("Settings About panel shows build diagnostics and checks GitHub releases on
       diagnosticsBusy: false,
       buildIdentity: { schemaVersion: 1, packageVersion: "0.4.5", revision: "abc123", fingerprint: "a".repeat(64), builtAt: "2026-01-01T00:00:00.000Z" },
       webBuildIdentity: { schemaVersion: 1, packageVersion: "0.4.5", revision: "abc123", fingerprint: "a".repeat(64), builtAt: "2026-01-01T00:00:00.000Z" },
-      piVersion: "0.84.2",
+      piVersion: "0.85.1",
       primaryRuntime: { status: "ready", generation: 1 },
       onClose: () => {},
       onAppearance: () => {},
@@ -90,7 +90,7 @@ test("Settings About panel shows build diagnostics and checks GitHub releases on
       .find((candidate) => candidate.textContent?.trim() === label) as HTMLButtonElement | undefined;
     await act(async () => button("关于")?.click());
     assert.match(dom.window.document.body.textContent || "", /v0\.4\.5/);
-    assert.match(dom.window.document.body.textContent || "", /v0\.84\.2/);
+    assert.match(dom.window.document.body.textContent || "", /v0\.85\.1/);
     assert.match(dom.window.document.body.textContent || "", /Build Fingerprint/);
     assert.equal(dom.window.document.querySelector(".about-mark")?.tagName, "svg");
     assert.doesNotMatch(dom.window.document.body.textContent || "", /服务生命周期/);

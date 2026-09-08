@@ -5,6 +5,7 @@ import {
   DEFAULT_MAX_IDLE_SECONDARY_RUNTIMES,
   DEFAULT_MAX_SECONDARY_RUNTIMES,
   RuntimePool,
+  RuntimeStartupError,
   type SecondaryRuntime,
 } from "../src/server/runtime-pool";
 import { RpcProcessExitUnconfirmedError, RpcRequestTimeoutError } from "../src/server/rpc-client";
@@ -231,6 +232,81 @@ test("draft handoff lease blocks reclaim while an empty draft probe is pending",
   assert.equal(target.operationLeases, 0);
   assert.equal(await targetPool.reclaim(target.id, "capacity"), true);
   assert.equal(stopCount, 1);
+});
+
+test("a new draft retries one timed-out readiness start before returning failure to Send", async () => {
+  const path = "C:\\sessions\\slow-new-draft.jsonl";
+  let startCalls = 0;
+  let createCalls = 0;
+  const targetPool = pool(() => {
+    createCalls += 1;
+    return {
+      onEvent: () => () => {},
+      start: async () => {
+        startCalls += 1;
+        if (startCalls === 1) throw new RpcRequestTimeoutError("get_state");
+        return {
+          type: "response",
+          success: true,
+          data: {
+            model: null,
+            isStreaming: false,
+            sessionFile: path,
+            sessionId: "slow-new-draft",
+          },
+        };
+      },
+      stop: async () => {},
+      isRunning: () => true,
+      isExitConfirmed: () => true,
+      currentGeneration: () => startCalls,
+      send: async () => ({ type: "response", success: true }),
+    } as never;
+  });
+
+  const lease = await targetPool.acquireDraft("client-a");
+  assert.equal(createCalls, 1, "the retry stays within one Runtime owner");
+  assert.equal(startCalls, 2, "one readiness timeout retries before Send sees a failure");
+  assert.equal(lease.runtime.id, idForPath(path));
+  assert.equal(targetPool.get(lease.runtime.id), lease.runtime);
+  lease.release();
+});
+
+test("a new draft exposes a bounded startup error after both readiness attempts time out", async () => {
+  const targetPool = pool(() => ({
+    onEvent: () => () => {},
+    start: async () => { throw new RpcRequestTimeoutError("get_state"); },
+    stop: async () => {},
+    isRunning: () => true,
+    isExitConfirmed: () => true,
+    currentGeneration: () => 1,
+  }) as never);
+  await assert.rejects(
+    () => targetPool.acquireDraft("client-a"),
+    (error) => error instanceof RuntimeStartupError
+      && error.code === "RUNTIME_START_TIMEOUT"
+      && /启动超时/.test(error.message),
+  );
+  assert.equal(targetPool.runtimes.size, 0, "failed draft startup must not retain an empty owner");
+});
+
+test("a persisted Session exposes a bounded startup error after both readiness attempts time out", async () => {
+  const path = "C:\\sessions\\slow-persisted.jsonl";
+  const id = idForPath(path);
+  const targetPool = pool(() => ({
+    onEvent: () => () => {},
+    start: async () => { throw new RpcRequestTimeoutError("get_state"); },
+    stop: async () => {},
+    isRunning: () => true,
+    isExitConfirmed: () => true,
+    currentGeneration: () => 1,
+  }) as never);
+  const sessions = (targetPool as unknown as { options: { pathForId: (candidate: string) => string | null } }).options;
+  sessions.pathForId = (candidate) => candidate === id ? path : null;
+  await assert.rejects(
+    () => targetPool.ensure(id),
+    (error) => error instanceof RuntimeStartupError && error.code === "RUNTIME_START_TIMEOUT",
+  );
 });
 
 test("an unconfirmed reclaim keeps Runtime ownership closed until exit is confirmed", async () => {

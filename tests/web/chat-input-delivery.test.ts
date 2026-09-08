@@ -412,7 +412,7 @@ test("ChatInput restores a definite failure without overwriting a newer draft", 
     assert.equal(textarea.value, "failed message");
     assert.match(
       dom.window.document.querySelector(".composer-submission-status")?.textContent || "",
-      /发送失败，草稿已恢复/,
+      /发送失败，草稿已恢复；rejected/,
     );
     assert.ok(dom.window.document.querySelector(".image-preview"), "the failed image is restored with its text");
     await act(async () => {

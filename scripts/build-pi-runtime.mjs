@@ -7,7 +7,8 @@ import { build, version as esbuildVersion } from "esbuild";
 const PI_PACKAGE_NAME = "@earendil-works/pi-coding-agent";
 const BUNDLE_SCHEMA_VERSION = 2;
 const BUNDLE_LAYOUT_VERSION = 1;
-const BUNDLE_RECIPE_VERSION = 3;
+const BUNDLE_RECIPE_VERSION = 4;
+const MAX_BUNDLE_SOURCE_INPUTS = 4_096;
 
 function sha256(content) {
   return createHash("sha256").update(content).digest("hex");
@@ -77,9 +78,11 @@ await mkdir(packageDist, { recursive: true });
 
 try {
 const { patchPiRpcModeSource } = await import(pathToFileURL(resolve("resources", "runtime", "pi-chat-rpc-loader.mjs")).href);
-const loaderMarker = `...(isBunBinary\n            ? { virtualModules: VIRTUAL_MODULES, tryNative: false }\n            : isTypeScriptSourceRuntime`;
-const bundledLoaderMarker = `...(isBunBinary || process.env.PI_CHAT_BUNDLED_RUNTIME === "1"\n            ? { virtualModules: VIRTUAL_MODULES, tryNative: false }\n            : isTypeScriptSourceRuntime`;
+const loaderMarker = `...(isBunBinary || isNodeSeaBinary || isBundledNode\n            ? { virtualModules: VIRTUAL_MODULES, tryNative: false }\n            : isTypeScriptSourceRuntime`;
+const bundledLoaderMarker = `...(isBunBinary || isNodeSeaBinary || isBundledNode || process.env.PI_CHAT_BUNDLED_RUNTIME === "1"\n            ? { virtualModules: VIRTUAL_MODULES, tryNative: false }\n            : isTypeScriptSourceRuntime`;
 let transformedLoader = false;
+let transformedExtensionImport = false;
+let transformedExtensionFactory = false;
 let transformedRpcMode = false;
 const extensionLoaderPlugin = {
   name: "pi-chat-bundled-extension-loader",
@@ -97,15 +100,22 @@ const extensionLoaderPlugin = {
         throw new Error("Installed Pi extension loader is incompatible with the bundled-runtime transform");
       }
       transformedLoader = true;
+      const importMarker = "const module = await jiti.import(extensionPath, { default: true });";
+      const factoryMarker = "await factory(load.api);";
+      if (!source.includes(importMarker) || !source.includes(factoryMarker)) {
+        throw new Error("Installed Pi extension lifecycle is incompatible with startup tracing");
+      }
+      transformedExtensionImport = true;
+      transformedExtensionFactory = true;
       const tracedSource = source
         .replace(loaderMarker, bundledLoaderMarker)
         .replace(
-          "const module = await jiti.import(extensionPath, { default: true });",
+          importMarker,
           "const extensionOrdinal = (globalThis.__piChatStartupExtensionOrdinal = (globalThis.__piChatStartupExtensionOrdinal || 0) + 1);\n    globalThis.__piChatStartupMark?.(\"X\", extensionOrdinal);\n    const module = await jiti.import(extensionPath, { default: true });\n    globalThis.__piChatStartupMark?.(\"Y\", extensionOrdinal);",
         )
         .replace(
-          "await factory(api);",
-          "globalThis.__piChatStartupMark?.(\"F\", globalThis.__piChatStartupExtensionOrdinal);\n        await factory(api);\n        globalThis.__piChatStartupMark?.(\"G\", globalThis.__piChatStartupExtensionOrdinal);",
+          factoryMarker,
+          "globalThis.__piChatStartupMark?.(\"F\", globalThis.__piChatStartupExtensionOrdinal);\n        await factory(load.api);\n        globalThis.__piChatStartupMark?.(\"G\", globalThis.__piChatStartupExtensionOrdinal);",
         );
       return {
         contents: tracedSource,
@@ -140,6 +150,8 @@ const mainBuild = await build({
   },
 });
 if (!transformedLoader) throw new Error("Pi extension loader was not included in the runtime bundle");
+if (!transformedExtensionImport || !transformedExtensionFactory)
+  throw new Error("Pi extension startup tracing was not included in the runtime bundle");
 if (!transformedRpcMode) throw new Error("Pi RPC mode was not included in the native Steer dequeue transform");
 const imageWorkerPath = resolve(packageDist, "image-resize-worker.js");
 const workerBuild = await build({
@@ -203,6 +215,8 @@ sourceInputs.sort((left, right) =>
   || left.packageVersion.localeCompare(right.packageVersion)
   || left.packageLocator.localeCompare(right.packageLocator)
   || left.relativePath.localeCompare(right.relativePath));
+if (sourceInputs.length > MAX_BUNDLE_SOURCE_INPUTS)
+  throw new Error(`Pi runtime source input count ${sourceInputs.length} exceeds ${MAX_BUNDLE_SOURCE_INPUTS}`);
 const outputHashes = Object.fromEntries(await Promise.all(
   (await regularFiles(packageRoot)).map(async (path) => [
     `package/${relative(packageRoot, path).split(/[/\\\\]/).join("/")}`,

@@ -96,12 +96,13 @@ test("Composer reducer restores a definite failure without losing a newer draft"
   state = composerReducer(state, { type: "accept", snapshot: snapshot(key, "send me"), retry: false });
   state = composerReducer(state, { type: "start-delivery", key });
   state = composerReducer(state, { type: "edit", key, message: "newer text" });
-  state = composerReducer(state, { type: "delivery-rejected", key });
+  state = composerReducer(state, { type: "delivery-rejected", key, error: "Pi Runtime 启动超时" });
 
   let partition = composerPartition(state, key);
   assert.equal(partition.draft.message, "send me");
   assert.equal(partition.suspended?.message, "newer text");
   assert.equal(partition.blocked?.message, "send me");
+  assert.equal(partition.blockedError, "Pi Runtime 启动超时");
 
   state = composerReducer(state, { type: "accept", snapshot: snapshot(key, "send me"), retry: true });
   state = composerReducer(state, { type: "start-delivery", key });
@@ -109,6 +110,7 @@ test("Composer reducer restores a definite failure without losing a newer draft"
   partition = composerPartition(state, key);
   assert.equal(partition.draft.message, "newer text");
   assert.equal(partition.blocked, undefined);
+  assert.equal(partition.blockedError, undefined);
 });
 
 test("Composer reducer never restores an outcome-unknown snapshot", () => {

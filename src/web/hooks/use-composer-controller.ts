@@ -136,7 +136,11 @@ export function useComposerController({
       snapshot.targetSessionId,
     )
       .then(() => commit({ type: "delivery-accepted", key: snapshot.key }))
-      .catch(() => commit({ type: "delivery-rejected", key: snapshot.key }))
+      .catch((error) => commit({
+        type: "delivery-rejected",
+        key: snapshot.key,
+        error: error instanceof Error ? error.message : String(error),
+      }))
       .finally(() => {
         drainingKeysRef.current.delete(keyId);
         // Only the currently painted partition is eligible for this hook's
@@ -224,6 +228,7 @@ export function useComposerController({
   return {
     draft: partition.draft,
     blocked: Boolean(partition.blocked),
+    blockedError: partition.blockedError,
     pendingCount: partition.pending.length + (partition.inFlight ? 1 : 0),
     edit,
     replace,

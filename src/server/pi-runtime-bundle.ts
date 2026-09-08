@@ -7,8 +7,9 @@ import { resolvePiEntry } from "./rpc-client.js";
 const PI_PACKAGE_NAME = "@earendil-works/pi-coding-agent";
 const BUNDLE_SCHEMA_VERSION = 2;
 const BUNDLE_LAYOUT_VERSION = 1;
-const BUNDLE_RECIPE_VERSION = 3;
+const BUNDLE_RECIPE_VERSION = 4;
 const BUNDLE_ESBUILD_VERSION = "0.28.1";
+const MAX_BUNDLE_SOURCE_INPUTS = 4_096;
 const BUNDLED_RUNTIME_DISABLED_ENV = "PI_CHAT_DISABLE_BUNDLED_PI_RUNTIME";
 
 interface InstalledPiPackage {
@@ -81,7 +82,7 @@ function parseManifest(value: unknown): PiRuntimeBundleManifest | null {
     || record.esbuildVersion !== BUNDLE_ESBUILD_VERSION
     || !Array.isArray(record.sourceInputs)
     || record.sourceInputs.length === 0
-    || record.sourceInputs.length > 2_048
+    || record.sourceInputs.length > MAX_BUNDLE_SOURCE_INPUTS
     || !record.outputHashes
     || typeof record.outputHashes !== "object"
     || Array.isArray(record.outputHashes)

@@ -33,6 +33,7 @@ type ComposerPartition = {
   pending: ComposerSnapshot[];
   inFlight?: ComposerSnapshot;
   blocked?: ComposerSnapshot;
+  blockedError?: string;
   suspended?: ComposerDraft;
 };
 
@@ -185,7 +186,7 @@ export type ComposerAction =
   | { type: "start-delivery"; key: ComposerDraftKey }
   | { type: "delivery-accepted"; key: ComposerDraftKey }
   | { type: "delivery-unknown"; key: ComposerDraftKey }
-  | { type: "delivery-rejected"; key: ComposerDraftKey }
+  | { type: "delivery-rejected"; key: ComposerDraftKey; error?: string }
   | {
       type: "restore-cancelled";
       key: ComposerDraftKey;
@@ -221,6 +222,7 @@ export function composerReducer(
       },
       pending,
       blocked: undefined,
+      blockedError: undefined,
     });
   }
 
@@ -271,6 +273,7 @@ export function composerReducer(
       ...partition,
       inFlight: undefined,
       blocked: failed,
+      blockedError: action.error?.trim().slice(0, 1_000) || "修改后可重试",
       suspended: hasNewerDraft ? partition.draft : partition.suspended,
       draft: {
         message: failed.message,

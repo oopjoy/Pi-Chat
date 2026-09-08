@@ -118,6 +118,20 @@ export interface SecondaryRuntime {
 
 export type RuntimeReclaimReason = "idle" | "capacity";
 export class RuntimeCapacityError extends Error {}
+/** A Runtime readiness attempt failed before any prompt mutation was admitted. */
+export class RuntimeStartupError extends Error {
+  readonly code: "RUNTIME_START_TIMEOUT" | "RUNTIME_START_FAILED";
+
+  constructor(cause: unknown) {
+    const timedOut = cause instanceof RpcRequestTimeoutError;
+    super(timedOut
+      ? "Pi Runtime 启动超时；已安全重试一次，请稍后重试"
+      : "Pi Runtime 启动失败；请稍后重试");
+    this.name = "RuntimeStartupError";
+    this.code = timedOut ? "RUNTIME_START_TIMEOUT" : "RUNTIME_START_FAILED";
+    this.cause = cause;
+  }
+}
 /** A syntactically valid ID has no known persisted Session path. */
 export class SessionNotFoundError extends Error {
   constructor() {
@@ -499,12 +513,24 @@ export class RuntimePool {
   }
 
   /**
-   * Resuming a persisted Session can spend most of the ordinary startup budget
-   * loading a large JSONL branch, images, and extensions before get_state is
-   * answered. Pi RPC has no request cancellation, so PiRpcClient tears down the
-   * timed-out child first. Retry that whole safe process boundary once rather
-   * than making the user manually press Send again.
+   * Pi RPC has no request cancellation, so PiRpcClient tears down a timed-out
+   * child before returning. Before any prompt is accepted, a New draft can
+   * safely retry that whole process boundary once instead of requiring another
+   * user Send.
    */
+  private async startNewDraft(rpc: PiRpcClient): Promise<Record<string, unknown>> {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return await rpc.start();
+      } catch (error) {
+        if (!(error instanceof RpcRequestTimeoutError)) throw error;
+        if (attempt === 1) throw new RuntimeStartupError(error);
+      }
+    }
+    throw new RuntimeStartupError(new RpcRequestTimeoutError("get_state"));
+  }
+
+  /** A cold persisted Session has the same one-retry process boundary. */
   private async startPersistedSession(
     rpc: PiRpcClient,
     path: string,
@@ -513,11 +539,11 @@ export class RuntimePool {
       try {
         return await rpc.start(["--session", path]);
       } catch (error) {
-        if (!(error instanceof RpcRequestTimeoutError) || attempt === 1)
-          throw error;
+        if (!(error instanceof RpcRequestTimeoutError)) throw error;
+        if (attempt === 1) throw new RuntimeStartupError(error);
       }
     }
-    throw new Error("Pi RPC 会话恢复失败");
+    throw new RuntimeStartupError(new RpcRequestTimeoutError("get_state"));
   }
 
   async ensure(id: string): Promise<SecondaryRuntime> {
@@ -874,7 +900,10 @@ export class RuntimePool {
       };
       runtime.unsubscribe = reservedRpc.onEvent((event, source) => this.options.onSecondaryEvent(runtime, event, source));
       try {
-        const startResult = await reservedRpc.start();
+        // Like a cold persisted Session, an empty draft owns no accepted user
+        // mutation yet. A readiness timeout therefore permits one whole-child
+        // retry without risking a duplicate JSONL writer or duplicate prompt.
+        const startResult = await this.startNewDraft(reservedRpc);
         runtime.rpcGeneration = reservedRpc.currentGeneration?.() || 0;
         const state = asState(startResult || await reservedRpc.send({ type: "get_state" }));
         runtime.lastState = state;
@@ -922,6 +951,8 @@ export class RuntimePool {
           this.retainOrphanedStart(runtime);
           throw new RpcProcessExitUnconfirmedError(reservedRpc.currentPid?.() || undefined);
         }
+        if (error instanceof RpcRequestTimeoutError)
+          throw new RuntimeStartupError(error);
         throw error;
       } finally {
         await reservation.release();

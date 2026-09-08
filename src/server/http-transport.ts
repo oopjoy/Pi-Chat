@@ -58,7 +58,7 @@ export function requestPageId(request: IncomingMessage): string {
 
 export class HttpRequestError extends Error {
   constructor(
-    readonly status: 400 | 404 | 408 | 409 | 413,
+    readonly status: 400 | 404 | 408 | 409 | 413 | 503,
     message: string,
     readonly code = "HTTP_REQUEST_REJECTED",
     readonly retryable = false,

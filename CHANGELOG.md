@@ -32,10 +32,12 @@
 ### Windows cold Runtime startup
 
 - Primary, Secondary, draft, and recovery clients now share one immutable per-host launch plan while retaining one independent Node/Pi RPC process per executing Session; no shared SDK host, broker, or process rebinding is introduced.
-- Windows builds include a Pi `0.84.2` RPC acceleration Bundle. It is selected only when the installed Pi version, the fixed build recipe, every bundled-input hash, platform tuple, and every generated Runtime artifact hash match; explicit/custom or mismatched Pi installations remain direct, and missing Pi still permits JSONL-only browsing.
+- Before an initial prompt is accepted, a New-draft Runtime now retries one whole child process after a readiness timeout, matching cold persisted-Session recovery without risking a duplicate prompt or JSONL writer.
+- Definite Composer failures retain the server-provided cause beside the restored draft, so Runtime startup timeouts are no longer presented as if the prompt content must be edited.
+- Windows builds include a Pi `0.85.1` RPC acceleration Bundle. It is selected only when the installed Pi version, the fixed build recipe, every bundled-input hash, platform tuple, and every generated Runtime artifact hash match; explicit/custom or mismatched Pi installations remain direct, and missing Pi still permits JSONL-only browsing.
 - The bundled Extension loader uses Pi's `VIRTUAL_MODULES` graph to preserve one kernel/API identity, while image resizing retains a separate worker and external Photon/WASM package. Package-relative resources and CLI authority remain with the verified global Pi installation.
 - Spawn-to-ready diagnostics now distinguish parent spawn, child preload, startup request allocation/write, first stdout, and transport readiness without entering RPC payloads, JSONL, SSE, scheduling, or writer authority.
-- Added a fresh-process, copied-Session startup benchmark. On the investigated Windows machine, a representative installed-profile sample improved from about `9.1s` direct to `3.3s` bundled; a core-only sample improved from about `1.8s` to `0.6s`. These figures do not claim an OS- or Defender-cold cache.
+- Added a fresh-process, copied-Session startup benchmark. With Pi `0.85.1` on the investigated Windows machine, three installed-profile probes improved from about `5.2–5.4s` direct to `2.7–2.9s` bundled; three core-only probes improved from about `1.2s` to `0.43s`. These figures do not claim an OS- or Defender-cold cache.
 
 ## 0.4.5
 

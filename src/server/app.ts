@@ -121,6 +121,7 @@ import {
   PartialTurnSettingsError,
   RuntimeCapacityError,
   RuntimePool,
+  RuntimeStartupError,
   SessionNotFoundError,
   type AppliedTurnSettings,
   type PendingTurnSettings,
@@ -6199,6 +6200,15 @@ export class PiChatApp {
         return json(response, 409, {
           error: error.message,
           code: "APPLICATION_BUSY",
+          incidentId: incident.incidentId,
+        });
+      }
+      if (error instanceof RuntimeStartupError) {
+        const incident = report("failed", error.code);
+        return json(response, 503, {
+          error: error.message,
+          code: error.code,
+          retryable: true,
           incidentId: incident.incidentId,
         });
       }
