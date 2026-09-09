@@ -1,12 +1,24 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { appendLocalTurnOnce, appendPendingUserMessage, bindQueuedAdmission, bindQueuedDispatch, consumeLocalSteeringTurn, markLocalTurnQueued, nextLocalTurnTotal, promoteTurnsAbsentFromQueue, protectTranscriptWithLocalTurns, queuedPromptFromLocalTurn, removeLocalTurnAndRebase, removePendingSteeringTurns, transcriptConfirmsLocalTurn, transcriptTurnTotal, type LocalUserTurn } from "../src/web/lib/local-user-turn";
+import { appendLocalTurnOnce, appendPendingUserMessage, bindQueuedAdmission, bindQueuedDispatch, consumeLocalSteeringTurn, diagnoseVisibleUserTurnDuplicates, markLocalTurnQueued, nextLocalTurnTotal, promoteTurnsAbsentFromQueue, protectTranscriptWithLocalTurns, queuedPromptFromLocalTurn, removeLocalTurnAndRebase, removePendingSteeringTurns, transcriptConfirmsLocalTurn, transcriptTurnTotal, type LocalUserTurn } from "../src/web/lib/local-user-turn";
 import { SessionViewCache } from "../src/web/lib/session-view-cache";
 import type { PiMessage, SessionViewData } from "../src/shared/types";
 
 const previous: PiMessage = { role: "user", content: "earlier" };
 const local: PiMessage = { role: "user", content: "submitted just now" };
 const pending: LocalUserTurn = { sessionId: "session-a", message: local, expectedTurnTotal: 2 };
+
+test("diagnoseVisibleUserTurnDuplicates classifies local plus persisted duplicates without retaining content", () => {
+  const message: PiMessage = { role: "user", content: "same prompt", timestamp: 1000 };
+  const persisted = { ...message, piChatPersistedMessageId: "persisted-1" };
+  const turn: LocalUserTurn = { sessionId: "session", message, expectedTurnTotal: 1 };
+  const result = diagnoseVisibleUserTurnDuplicates([message, persisted], [turn]);
+  assert.equal(result.length, 1);
+  assert.equal(result[0].kind, "local-and-persisted");
+  assert.equal(result[0].persistedCount, 1);
+  assert.match(result[0].contentHash, /^[a-f0-9]{8}$/);
+  assert.equal("content" in result[0], false);
+});
 
 test("the immediate composer overlay does not duplicate its protected local turn", () => {
   const localWithTimestamp: PiMessage = { role: "user", content: "submitted just now", timestamp: 42 };

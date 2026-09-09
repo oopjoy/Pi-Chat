@@ -113,6 +113,7 @@ import {
 import {
   appendLocalTurnOnce,
   bindQueuedAdmission,
+  diagnoseVisibleUserTurnDuplicates,
   bindQueuedDispatch,
   consumeLocalSteeringTurn,
   localTurnBelongsInTranscript,
@@ -9024,6 +9025,39 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     diagnosticSidebarRowsRef.current = nextRows;
   };
   diagnosticCheckpointRef.current = () => recordDiagnosticProjection(true);
+
+  const diagnosedUserTurnProjectionRef = useRef("");
+  useEffect(() => {
+    const duplicates = diagnoseVisibleUserTurnDuplicates(
+      messages,
+      viewedSessionId ? (localUserTurnsRef.current.get(viewedSessionId) || []) : [],
+    );
+    for (const duplicate of duplicates) {
+      const signature = [
+        viewedSessionId,
+        duplicate.kind,
+        duplicate.contentHash,
+        duplicate.pairCount,
+        pane.identity.sessionId,
+        paneCommitRevisionRef.current,
+      ].join(":");
+      if (diagnosedUserTurnProjectionRef.current === signature) continue;
+      diagnosedUserTurnProjectionRef.current = signature;
+      recordBrowserStateDiagnostic("projection", "user-turn-duplicate", {
+        sessionId: viewedSessionId,
+        details: {
+          duplicateKind: duplicate.kind,
+          duplicateCount: duplicate.messageCount,
+          duplicatePairCount: duplicate.pairCount,
+          localTurnCount: duplicate.localTurnCount,
+          persistedCount: duplicate.persistedCount,
+          identityCount: duplicate.identityCount,
+          sourceGeneration: paneCommitRevisionRef.current,
+          projectionSource: "pane-commit",
+        },
+      });
+    }
+  }, [messages, pane.identity.sessionId, viewedSessionId]);
 
   useEffect(() => {
     recordDiagnosticProjection(false);

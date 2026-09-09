@@ -120,6 +120,9 @@ const NUMBER_DETAIL_KEYS = new Set([
   "snapshotsWritten",
   "status",
   "transcriptCount",
+  "duplicateCount",
+  "duplicatePairCount",
+  "localTurnCount",
   "transportClients",
 ]);
 
@@ -293,6 +296,8 @@ const ENUM_DETAIL_VALUES: Record<string, ReadonlySet<string>> = {
   primaryStatus: new Set(["failed", "ready", "starting", "unknown"]),
   runtimeStatus: new Set(["active", "draft", "none", "restoring", "view-only", "unknown"]),
   sidebarExecution: EXECUTION_VALUES,
+  duplicateKind: new Set(["same-identity", "local-and-persisted", "same-content", "unknown"]),
+  projectionSource: new Set(["pane-commit", "sse", "bootstrap", "session-view", "optimistic", "unknown"]),
   viewSource: new Set(["browser-cache", "cold-jsonl", "hot-memory", "none", "unknown"]),
 };
 
@@ -328,6 +333,7 @@ const STATE_DIAGNOSTIC_EVENT_PAIRS = new Set([
   "projection:session-view-rejected",
   "projection:sidebar-session",
   "projection:ui-state",
+  "projection:user-turn-duplicate",
   "render:first-assistant-paint-opportunity",
   "render:stream-summary",
   "rpc-event:received",

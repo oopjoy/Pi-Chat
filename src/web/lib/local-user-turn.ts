@@ -245,6 +245,63 @@ export function transcriptTurnTotal(messages: PiMessage[], total?: number): numb
     : visibleTurns;
 }
 
+export interface UserTurnDuplicateDiagnostic {
+  kind: "same-identity" | "local-and-persisted" | "same-content" | "unknown";
+  pairCount: number;
+  messageCount: number;
+  localTurnCount: number;
+  persistedCount: number;
+  identityCount: number;
+  contentHash: string;
+}
+
+function diagnosticContentHash(message: PiMessage): string {
+  const value = userInstructionIdentity(message);
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+/** Detect only visible duplicate User rows; does not alter projection authority. */
+export function diagnoseVisibleUserTurnDuplicates(
+  messages: PiMessage[],
+  localTurns: readonly LocalUserTurn[] = [],
+): UserTurnDuplicateDiagnostic[] {
+  const users = messages.filter((message) => message.role === "user");
+  const results: UserTurnDuplicateDiagnostic[] = [];
+  for (let left = 0; left < users.length; left += 1) {
+    for (let right = left + 1; right < users.length; right += 1) {
+      const first = users[left];
+      const second = users[right];
+      if (!sameUserInstruction(first, second)) continue;
+      const sameIdentity = Boolean(
+        first.piChatPersistedMessageId &&
+        first.piChatPersistedMessageId === second.piChatPersistedMessageId,
+      ) || Boolean(
+        first.piChatLiveMessageId &&
+        first.piChatLiveMessageId === second.piChatLiveMessageId,
+      );
+      const localMatch = localTurns.some((turn) =>
+        sameUserInstruction(turn.message, first) || sameUserInstruction(turn.message, second),
+      );
+      const persistedCount = [first, second].filter((message) => Boolean(message.piChatPersistedMessageId)).length;
+      results.push({
+        kind: sameIdentity ? "same-identity" : localMatch && persistedCount > 0 ? "local-and-persisted" : "same-content",
+        pairCount: 1,
+        messageCount: users.length,
+        localTurnCount: localTurns.length,
+        persistedCount,
+        identityCount: new Set([first.piChatPersistedMessageId || first.piChatLiveMessageId || "", second.piChatPersistedMessageId || second.piChatLiveMessageId || ""]).size,
+        contentHash: diagnosticContentHash(first),
+      });
+    }
+  }
+  return results;
+}
+
 export function nextLocalTurnTotal(messages: PiMessage[], total: number | undefined, pending: LocalUserTurn[]): number {
   return Math.max(transcriptTurnTotal(messages, total), ...pending.map((turn) => turn.expectedTurnTotal), 0) + 1;
 }
