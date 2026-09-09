@@ -4414,6 +4414,30 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         const completedAssistantReply =
           eventSessionId &&
           terminalAssistantSessionIdsRef.current.delete(eventSessionId);
+        if (eventSessionId) {
+          const settledMessages = viewCacheRef.current.get(eventSessionId)?.messages || (viewingEventSession ? pane.messages : []);
+          const assistantMessages = settledMessages.filter((message) => message.role === "assistant");
+          const visibleAssistantMessages = assistantMessages.filter((message) => {
+            if (typeof message.content === "string") return Boolean(message.content.trim());
+            return Array.isArray(message.content) && message.content.some(
+              (block) => block.type === "text" && Boolean(block.text?.trim()),
+            );
+          });
+          if (!completedAssistantReply && visibleAssistantMessages.length === 0) {
+            recordBrowserStateDiagnostic("projection", "assistant-settlement-gap", {
+              sessionId: eventSessionId,
+              runGeneration: eventRunGeneration,
+              details: {
+                settlementSource: "agent-settled",
+                messageCount: settledMessages.length,
+                assistantCount: assistantMessages.length,
+                visibleAssistantCount: visibleAssistantMessages.length,
+                eventType: lastSessionEventTypeRef.current.get(eventSessionId) || "unknown",
+                projectionSource: "sse",
+              },
+            });
+          }
+        }
         if (completedAssistantReply && !viewingEventSession) {
           setUnseenReplySessionIds((current) =>
             current.includes(eventSessionId)

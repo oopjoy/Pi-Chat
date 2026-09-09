@@ -123,6 +123,11 @@ const NUMBER_DETAIL_KEYS = new Set([
   "duplicateCount",
   "duplicatePairCount",
   "localTurnCount",
+  "assistantCount",
+  "visibleAssistantCount",
+  "messageCount",
+  "lastEventAgeMs",
+  "sseReconnectCount",
   "transportClients",
 ]);
 
@@ -297,7 +302,9 @@ const ENUM_DETAIL_VALUES: Record<string, ReadonlySet<string>> = {
   runtimeStatus: new Set(["active", "draft", "none", "restoring", "view-only", "unknown"]),
   sidebarExecution: EXECUTION_VALUES,
   duplicateKind: new Set(["same-identity", "local-and-persisted", "same-content", "unknown"]),
+  settlementSource: new Set(["agent-settled", "message-end", "session-view", "unknown"]),
   projectionSource: new Set(["pane-commit", "sse", "bootstrap", "session-view", "optimistic", "unknown"]),
+  lastEventType: EVENT_TYPE_VALUES,
   viewSource: new Set(["browser-cache", "cold-jsonl", "hot-memory", "none", "unknown"]),
 };
 
@@ -334,6 +341,8 @@ const STATE_DIAGNOSTIC_EVENT_PAIRS = new Set([
   "projection:sidebar-session",
   "projection:ui-state",
   "projection:user-turn-duplicate",
+  "projection:assistant-settlement-gap",
+  "projection:upstream-stall",
   "render:first-assistant-paint-opportunity",
   "render:stream-summary",
   "rpc-event:received",
