@@ -1,5 +1,6 @@
 import { LOCAL_COORDINATION_ROLE, type PiContentBlock, type PiMessage } from "../../shared/types";
-import { sanitizeAssistantText, visibleAssistantMessage } from "./assistant-text";
+import { assistantErrorNotice } from "../../shared/assistant-error";
+import { sanitizeAssistantText, visibleAssistantBlocksWithSourceIndex, visibleAssistantMessage } from "./assistant-text";
 import { editDiffFromToolCall, type ToolEditDiff } from "./tool-edit-diff";
 
 export type ProcessEntry =
@@ -180,6 +181,20 @@ function toolResultText(message: PiMessage): string | undefined {
   return detail(text);
 }
 
+/**
+ * A failed attempt usually carries no content, so the ordinary visibility rules
+ * drop it and the turn looks like an unexplained stop. It still has to reach
+ * ChatMessage, which renders the provider reason for it.
+ */
+function failureVisibleMessage(fallback: PiMessage): PiMessage | undefined {
+  return assistantErrorNotice(fallback) ? fallback : undefined;
+}
+
+/** True when the message only exists to report a failed attempt. */
+function isFailureOnlyMessage(message: PiMessage): boolean {
+  return Boolean(assistantErrorNotice(message)) && visibleAssistantBlocksWithSourceIndex(message).length === 0;
+}
+
 function processFromMessage(message: PiMessage): { entries: ProcessEntry[]; visibleMessage?: PiMessage } {
   if (message.role === "toolResult") {
     const result = toolResultText(message);
@@ -209,7 +224,8 @@ function processFromMessage(message: PiMessage): { entries: ProcessEntry[]; visi
     .map((block) => sanitizeAssistantText(block.thinking as string))
     .filter((text) => Boolean(text.trim()))
     .map((text) => ({ kind: "thinking" as const, text }));
-  if (!hasToolCall && thinking.length === 0) return { entries: [], visibleMessage: visibleAssistantMessage(message) };
+  if (!hasToolCall && thinking.length === 0)
+    return { entries: [], visibleMessage: visibleAssistantMessage(message) ?? failureVisibleMessage(message) };
 
   const entries: ProcessEntry[] = [...thinking];
   for (const block of content) {
@@ -229,7 +245,8 @@ function processFromMessage(message: PiMessage): { entries: ProcessEntry[]; visi
   }
 
   if (hasToolCall) return { entries };
-  return { entries, visibleMessage: visibleAssistantMessage({ ...message, content: content.filter((block) => block.type !== "thinking") }) };
+  const withoutThinking: PiMessage = { ...message, content: content.filter((block) => block.type !== "thinking") };
+  return { entries, visibleMessage: visibleAssistantMessage(withoutThinking) ?? failureVisibleMessage(withoutThinking) };
 }
 
 function mergeProcessEntries(entries: ProcessEntry[]): ProcessEntry[] {
@@ -287,6 +304,8 @@ export function groupConversation(messages: PiMessage[], options: { liveMessage?
   let precedingProcessAnchor = "start";
   let processAssistantTimestamp: number | null = null;
   let processAssistantHeader: PiMessage | null = null;
+  /** Position of the failure card already emitted for the current retry burst. */
+  let failureCardIndex = -1;
   let processHasThinking = false;
   const processToolIds = new Set<string>();
   const flushProcess = (fallbackHeader?: PiMessage): boolean => {
@@ -343,7 +362,22 @@ export function groupConversation(messages: PiMessage[], options: { liveMessage?
     }
     processEntries.push(...entries);
     if (visibleMessage) {
+      // Pi records one failed attempt per retry of the same turn. A burst paints
+      // one card holding the last reason, which is the attempt that ended the
+      // turn, instead of one card per attempt.
+      const failureCard = isFailureOnlyMessage(visibleMessage);
+      if (failureCard && failureCardIndex >= 0) {
+        items[failureCardIndex] = {
+          kind: "message",
+          message: visibleMessage,
+          key: uniqueMessageKey(visibleMessage),
+        };
+        precedingProcessAnchor = compactContentKey(visibleMessage);
+        continue;
+      }
       const metadataRenderedWithProcess = flushProcess(visibleMessage);
+      if (failureCard) failureCardIndex = items.length;
+      else failureCardIndex = -1;
       items.push({
         kind: "message",
         message: visibleMessage,
@@ -366,6 +400,8 @@ export function groupConversation(messages: PiMessage[], options: { liveMessage?
         key: uniqueMessageKey(message),
         ...(metadataRenderedWithProcess ? { hideAssistantMetadata: true } : null),
       });
+    } else {
+      failureCardIndex = -1;
     }
   }
   flushProcess();

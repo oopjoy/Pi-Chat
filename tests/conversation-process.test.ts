@@ -11,6 +11,7 @@ import {
   CoordinationMessage,
   shouldFoldCoordinationText,
 } from "../src/web/components/CoordinationMessage";
+import { ChatMessage } from "../src/web/components/ChatMessage";
 import { ConversationProcess, toolLabel } from "../src/web/components/ConversationProcess";
 import { EditDiffSidebar } from "../src/web/components/EditToolDiff";
 import { groupConversation, messageItemKey } from "../src/web/lib/conversation-process";
@@ -759,4 +760,52 @@ test("streaming status never overrides the user's process disclosure choice", as
   assert.equal(dom.window.document.querySelector<HTMLDetailsElement>(".conversation-process"), details);
   assert.equal(details.open, false);
   await act(async () => root.unmount());
+});
+
+test("a contentless failed attempt reaches the transcript instead of vanishing", () => {
+  // Pi records one failed attempt per retry with empty content, which the
+  // ordinary visibility rules drop; the provider reason has to stay readable.
+  const failed: PiMessage = {
+    role: "assistant",
+    content: [],
+    stopReason: "error",
+    errorMessage: 'OpenAI API error (503): {"message":"auth_unavailable: no auth available"}',
+    timestamp: 1_000,
+  };
+  const items = groupConversation([{ role: "user", content: "继续", timestamp: 900 }, failed], {});
+  const messages = items.filter((item) => item.kind === "message");
+  assert.equal(messages.length, 2);
+  assert.equal(messages[1].message.stopReason, "error");
+
+  const html = renderToStaticMarkup(createElement(ChatMessage, { message: messages[1].message }));
+  assert.match(html, /class="message-error"/);
+  assert.match(html, /auth_unavailable/);
+});
+
+test("a retry burst paints one failure card instead of one per attempt", () => {
+  const attempt = (timestamp: number, errorMessage: string): PiMessage => ({
+    role: "assistant",
+    content: [],
+    stopReason: "error",
+    errorMessage,
+    timestamp,
+  });
+  const items = groupConversation([
+    { role: "user", content: "继续", timestamp: 900 },
+    attempt(1_000, "Error Code server_is_overloaded: Our servers are currently overloaded."),
+    attempt(2_000, 'OpenAI API error (503): {"message":"auth_unavailable: no auth available"}'),
+    attempt(3_000, 'OpenAI API error (503): {"message":"auth_unavailable: no auth available"}'),
+  ], {});
+  const cards = items.filter((item) => item.kind === "message" && item.message.stopReason === "error");
+  assert.equal(cards.length, 1, "one turn paints one failure card, not one per retry");
+  assert.match(
+    cards[0].message.errorMessage || "",
+    /auth_unavailable/,
+    "the card keeps the attempt that actually ended the turn",
+  );
+});
+
+test("an ordinary empty assistant placeholder is still dropped", () => {
+  const items = groupConversation([{ role: "assistant", content: [], timestamp: 1_000 }], {});
+  assert.equal(items.filter((item) => item.kind === "message").length, 0);
 });
