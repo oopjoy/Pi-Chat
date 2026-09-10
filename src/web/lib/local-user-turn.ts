@@ -6,6 +6,13 @@ export interface LocalUserTurn {
   message: PiMessage;
   /** Cumulative user-turn count at which this individual turn is persisted. */
   expectedTurnTotal: number;
+  /**
+   * Authoritative user-turn count observed when this turn was submitted. A
+   * windowed view can carry a smaller watermark than the local speculative
+   * ordinal, so persisted evidence is compared against this baseline instead of
+   * against `expectedTurnTotal`.
+   */
+  baselineTurnTotal?: number;
   /** Assigned after a queued-prompt acknowledgement; used to deduplicate dispatch. */
   queueId?: string;
   /** Queued turns stay out of the transcript until the scheduler dispatches them. */
@@ -48,6 +55,52 @@ function userInstructionIdentity(message: PiMessage): string {
 
 function sameUserInstruction(left: PiMessage, right: PiMessage): boolean {
   return left.role === "user" && right.role === "user" && userInstructionIdentity(left) === userInstructionIdentity(right);
+}
+
+/** Visible User rows plus the ordinal the authoritative watermark assigns to the first of them. */
+function visibleUserOrdinals(messages: PiMessage[], turnTotal?: number): { users: PiMessage[]; firstOrdinal: number } {
+  const users = messages.filter((message) => message.role === "user");
+  return {
+    users,
+    firstOrdinal: transcriptTurnTotal(messages, turnTotal) - users.length + 1,
+  };
+}
+
+/**
+ * Persisted User rows that appeared strictly after this turn's authoritative
+ * baseline. Such a row proves the turn reached the Session log even when a
+ * repeated identical prompt makes text correlation ambiguous, and a row without
+ * an explicit persisted identity is a local overlay that never confirms itself.
+ */
+function persistedEchoRows(turn: LocalUserTurn, messages: PiMessage[], turnTotal?: number): PiMessage[] {
+  const baseline = turn.baselineTurnTotal;
+  if (typeof baseline !== "number" || !Number.isFinite(baseline)) return [];
+  const { users, firstOrdinal } = visibleUserOrdinals(messages, turnTotal);
+  const rows: PiMessage[] = [];
+  for (let index = 0; index < users.length; index += 1) {
+    const row = users[index];
+    if (!row.piChatPersistedMessageId) continue;
+    if (firstOrdinal + index <= baseline) continue;
+    if (!turn.confirmByPosition && !sameUserInstruction(row, turn.message)) continue;
+    rows.push(row);
+  }
+  return rows;
+}
+
+/**
+ * 1-based position of a turn among still-pending turns with the same payload,
+ * ordered by submission. Repeated identical prompts must consume one persisted
+ * row each instead of confirming one another.
+ */
+function samePayloadRank(turns: readonly LocalUserTurn[], turn: LocalUserTurn): number {
+  let rank = 1;
+  for (const candidate of turns) {
+    if (candidate === turn) break;
+    if (!sameUserInstruction(candidate.message, turn.message)) continue;
+    if ((candidate.baselineTurnTotal ?? 0) > (turn.baselineTurnTotal ?? 0)) continue;
+    rank += 1;
+  }
+  return rank;
 }
 
 function authoritativeUserMatch(turn: LocalUserTurn, messages: PiMessage[], turnTotal?: number): PiMessage | undefined {
@@ -247,12 +300,19 @@ export function transcriptTurnTotal(messages: PiMessage[], total?: number): numb
 
 export interface UserTurnDuplicateDiagnostic {
   kind: "same-identity" | "local-and-persisted" | "same-content" | "unknown";
+  /** Pairs inside one repeated-payload group: n rows produce n * (n - 1) / 2. */
   pairCount: number;
   messageCount: number;
   localTurnCount: number;
   persistedCount: number;
   identityCount: number;
   contentHash: string;
+  /** Rows of this group that are a local turn's own message object. */
+  localRowCount: number;
+  /** Rows of this group that appeared after the newest matching turn's baseline. */
+  persistedAfterBaselineCount: number;
+  /** True when the repeated rows occupy one contiguous run of User rows. */
+  adjacent: boolean;
 }
 
 function diagnosticContentHash(message: PiMessage): string {
@@ -265,39 +325,72 @@ function diagnosticContentHash(message: PiMessage): string {
   return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
-/** Detect only visible duplicate User rows; does not alter projection authority. */
+/**
+ * Summarize repeated visible User payloads; does not alter projection authority.
+ * `same-content` alone is a legitimate repeated instruction, so the result also
+ * reports whether any row is a local overlay object and whether a persisted row
+ * appeared after the matching turn's authoritative baseline.
+ */
 export function diagnoseVisibleUserTurnDuplicates(
   messages: PiMessage[],
   localTurns: readonly LocalUserTurn[] = [],
+  turnTotal?: number,
 ): UserTurnDuplicateDiagnostic[] {
   const users = messages.filter((message) => message.role === "user");
+  const groups = new Map<string, number[]>();
+  for (let index = 0; index < users.length; index += 1) {
+    const key = userInstructionIdentity(users[index]);
+    const existing = groups.get(key);
+    if (existing) existing.push(index);
+    else groups.set(key, [index]);
+  }
+  const firstOrdinal = transcriptTurnTotal(messages, turnTotal) - users.length + 1;
   const results: UserTurnDuplicateDiagnostic[] = [];
-  for (let left = 0; left < users.length; left += 1) {
-    for (let right = left + 1; right < users.length; right += 1) {
-      const first = users[left];
-      const second = users[right];
-      if (!sameUserInstruction(first, second)) continue;
-      const sameIdentity = Boolean(
-        first.piChatPersistedMessageId &&
-        first.piChatPersistedMessageId === second.piChatPersistedMessageId,
-      ) || Boolean(
-        first.piChatLiveMessageId &&
-        first.piChatLiveMessageId === second.piChatLiveMessageId,
-      );
-      const localMatch = localTurns.some((turn) =>
-        sameUserInstruction(turn.message, first) || sameUserInstruction(turn.message, second),
-      );
-      const persistedCount = [first, second].filter((message) => Boolean(message.piChatPersistedMessageId)).length;
-      results.push({
-        kind: sameIdentity ? "same-identity" : localMatch && persistedCount > 0 ? "local-and-persisted" : "same-content",
-        pairCount: 1,
-        messageCount: users.length,
-        localTurnCount: localTurns.length,
-        persistedCount,
-        identityCount: new Set([first.piChatPersistedMessageId || first.piChatLiveMessageId || "", second.piChatPersistedMessageId || second.piChatLiveMessageId || ""]).size,
-        contentHash: diagnosticContentHash(first),
-      });
-    }
+  for (const indexes of groups.values()) {
+    if (indexes.length < 2) continue;
+    const rows = indexes.map((index) => users[index]);
+    const identities = new Set(
+      rows.map((row) => row.piChatPersistedMessageId || row.piChatLiveMessageId || ""),
+    );
+    const sameIdentity = rows.some((row, position) => {
+      const identity = row.piChatPersistedMessageId || row.piChatLiveMessageId || "";
+      const previous = rows[position - 1];
+      if (!identity || !previous) return false;
+      return identity === (previous.piChatPersistedMessageId || previous.piChatLiveMessageId || "");
+    });
+    const localRowCount = rows.filter((row) =>
+      localTurns.some((turn) => turn.message === row),
+    ).length;
+    const persistedCount = rows.filter((row) => Boolean(row.piChatPersistedMessageId)).length;
+    const baselines = localTurns
+      .filter((turn) => sameUserInstruction(turn.message, rows[0]))
+      .map((turn) => turn.baselineTurnTotal)
+      .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+    const persistedAfterBaselineCount = baselines.length
+      ? indexes.filter((_index, position) =>
+          Boolean(rows[position].piChatPersistedMessageId) &&
+          firstOrdinal + indexes[position] > Math.max(...baselines),
+        ).length
+      : 0;
+    const adjacent = indexes.every((index, position) =>
+      position === 0 || index === indexes[position - 1] + 1,
+    );
+    results.push({
+      kind: sameIdentity
+        ? "same-identity"
+        : localRowCount > 0 && persistedCount > 0
+          ? "local-and-persisted"
+          : "same-content",
+      pairCount: (indexes.length * (indexes.length - 1)) / 2,
+      messageCount: users.length,
+      localTurnCount: localTurns.length,
+      persistedCount,
+      identityCount: identities.size,
+      contentHash: diagnosticContentHash(rows[0]),
+      localRowCount,
+      persistedAfterBaselineCount,
+      adjacent,
+    });
   }
   return results;
 }
@@ -311,7 +404,23 @@ export function transcriptConfirmsLocalTurn(
   messages: PiMessage[],
   total?: number,
   messagesTruncated = false,
+  payloadRank = 1,
 ): boolean {
+  // A known baseline makes persisted evidence authoritative: a windowed view
+  // that shows no new persisted User row cannot confirm this turn, and a
+  // payload match against an older row must not hide a genuinely pending one.
+  const baseline = turn.baselineTurnTotal;
+  if (typeof baseline === "number" && Number.isFinite(baseline)) {
+    // Identity-bearing rows are the Session projection, so once the window has
+    // any, only persisted evidence may confirm. A window made entirely of
+    // identity-less rows cannot be told apart from local overlays and keeps the
+    // positional rules below.
+    const authoritativeRows = messages.some((message) =>
+      message.role === "user"
+      && (message.piChatPersistedMessageId || message.piChatLiveMessageId || message.piChatPendingMessageId));
+    if (authoritativeRows)
+      return persistedEchoRows(turn, messages, total).length >= Math.max(1, payloadRank);
+  }
   const authoritativeTotal = transcriptTurnTotal(messages, total);
   if (authoritativeTotal < turn.expectedTurnTotal) {
     // A stale/windowed response can carry fewer turns than the local watermark.
@@ -355,7 +464,11 @@ export function appendPendingUserMessage(messages: PiMessage[], pending: PiMessa
     latestUser?.piChatPersistedMessageId &&
     sameUserInstruction(latestUser, pending) &&
     typeof pending.timestamp === "number" && Number.isFinite(pending.timestamp) &&
-    latestUser.timestamp === pending.timestamp,
+    typeof latestUser.timestamp === "number" && Number.isFinite(latestUser.timestamp) &&
+    // The persisted echo carries Runtime receipt time, so it is never older
+    // than the overlay that produced it. An independently submitted identical
+    // prompt always has a later overlay and must stay visible.
+    latestUser.timestamp >= pending.timestamp,
   );
   return alreadyPersisted ? messages : [...messages, pending];
 }
@@ -377,7 +490,8 @@ export function protectTranscriptWithLocalTurns(
 ): ProtectedTranscript {
   const resolvedMessageTotal = typeof messageTotal === "number" && Number.isFinite(messageTotal) ? messageTotal : messages.length;
   const resolvedTurnTotal = transcriptTurnTotal(messages, turnTotal);
-  const pendingTurns = (turns || []).filter((turn) => {
+  const candidates = turns || [];
+  const pendingTurns = candidates.filter((turn) => {
     const keepWaitingAdmission =
       turn.queueState === "waiting" &&
       !turn.revealOnMessageStart &&
@@ -389,6 +503,7 @@ export function protectTranscriptWithLocalTurns(
       messages,
       resolvedTurnTotal,
       messagesTruncated,
+      samePayloadRank(candidates, turn),
     );
   });
   if (!pendingTurns.length) {

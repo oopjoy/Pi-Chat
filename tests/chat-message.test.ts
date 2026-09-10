@@ -324,3 +324,24 @@ test("a running turn can suppress completion time without removing its copy acti
   assert.doesNotMatch(html, /message-generated-at|生成于/);
   assert.match(html, /aria-label="复制整个回答"/);
 });
+
+test("a settled failed attempt renders its provider reason instead of vanishing", () => {
+  const html = renderToStaticMarkup(React.createElement(ChatMessage, {
+    message: {
+      role: "assistant",
+      content: [],
+      stopReason: "error",
+      errorMessage: 'OpenAI API error (503): {"message":"auth_unavailable: no auth available (providers=codex, model=gpt-6-astra)"}',
+    },
+  }));
+  assert.match(html, /class="message-error"/);
+  assert.match(html, /模型服务凭据不可用（HTTP 503）/);
+  assert.match(html, /auth_unavailable/);
+});
+
+test("an ordinary empty assistant placeholder still renders nothing", () => {
+  const html = renderToStaticMarkup(React.createElement(ChatMessage, {
+    message: { role: "assistant", content: [] },
+  }));
+  assert.equal(html, "");
+});

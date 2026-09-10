@@ -24,6 +24,8 @@ export interface CanonicalMessageEndEvent extends CanonicalMessageEndPayload {
 const SESSION_ID_PATTERN = /^[a-f0-9]{20}$/;
 const RUN_EPOCH_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const LIVE_MESSAGE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+/** Provider failure text is display data; the transcript renders 240 of these characters. */
+const MAXIMUM_ERROR_MESSAGE_LENGTH = 1_200;
 
 function boundedString(value: unknown, maximum: number): string | undefined {
   return typeof value === "string" && value.length <= maximum ? value : undefined;
@@ -108,6 +110,12 @@ export function canonicalPiMessage(value: unknown): CanonicalTerminalMessage | n
     ? { piChatLiveMessageId: liveMessageId }
     : {};
 
+  // Provider failure text is presentation data: truncate it instead of failing
+  // the whole terminal message on an unexpected length, and ignore a non-string
+  // value so a malformed body cannot drop the assistant message itself.
+  const errorMessage = typeof input.errorMessage === "string"
+    ? input.errorMessage.slice(0, MAXIMUM_ERROR_MESSAGE_LENGTH)
+    : undefined;
   if (role === "toolResult") {
     const toolCallId = requiredString(input.toolCallId, 400);
     const toolName = requiredString(input.toolName, 400);
@@ -139,6 +147,7 @@ export function canonicalPiMessage(value: unknown): CanonicalTerminalMessage | n
     ...(input.provider !== undefined ? { provider: input.provider as string } : null),
     ...(input.model !== undefined ? { model: input.model as string } : null),
     ...(input.thinkingLevel !== undefined ? { thinkingLevel: input.thinkingLevel as string } : null),
+    ...(errorMessage ? { errorMessage } : null),
   };
 }
 

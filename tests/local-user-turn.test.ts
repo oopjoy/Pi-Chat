@@ -499,3 +499,198 @@ test("a late prompt acknowledgement cannot reappend a local turn already confirm
   assert.deepEqual(pendingAfterView, []);
   assert.deepEqual(appendLocalTurnOnce(authoritative, pendingAfterView[0]), authoritative);
 });
+
+const repeatedPrompt = "继续";
+
+function persistedUser(text: string, timestamp: number, identity: string): PiMessage {
+  return {
+    role: "user",
+    content: [{ type: "text", text }],
+    timestamp,
+    piChatPersistedMessageId: identity,
+  };
+}
+
+test("a persisted echo after the local baseline confirms a repeated prompt without a duplicate row", () => {
+  const window = [
+    persistedUser(repeatedPrompt, 1_000, "entry-1:0"),
+    { role: "assistant" as const, content: "first" },
+    persistedUser(repeatedPrompt, 9_000, "entry-2:0"),
+  ];
+  const turn: LocalUserTurn = {
+    sessionId: "session-a",
+    message: { role: "user", content: repeatedPrompt, timestamp: 9_000 },
+    expectedTurnTotal: 2,
+    baselineTurnTotal: 1,
+  };
+  assert.equal(transcriptConfirmsLocalTurn(turn, window, 2), true);
+  const protectedTranscript = protectTranscriptWithLocalTurns([turn], window, 3, 2);
+  assert.deepEqual(protectedTranscript.pendingTurns, []);
+  assert.deepEqual(protectedTranscript.messages, window);
+});
+
+test("a repeated prompt cannot confirm two local turns from one persisted row", () => {
+  const window = [
+    persistedUser(repeatedPrompt, 1_000, "entry-1:0"),
+    { role: "assistant" as const, content: "first" },
+    persistedUser(repeatedPrompt, 9_000, "entry-2:0"),
+  ];
+  const first: LocalUserTurn = {
+    sessionId: "session-a",
+    message: { role: "user", content: repeatedPrompt, timestamp: 9_000 },
+    expectedTurnTotal: 2,
+    baselineTurnTotal: 1,
+  };
+  const second: LocalUserTurn = {
+    sessionId: "session-a",
+    message: { role: "user", content: repeatedPrompt, timestamp: 9_400 },
+    expectedTurnTotal: 3,
+    baselineTurnTotal: 2,
+  };
+  const protectedTranscript = protectTranscriptWithLocalTurns([first, second], window, 3, 2);
+  assert.deepEqual(protectedTranscript.pendingTurns, [second]);
+  assert.equal(protectedTranscript.messages.filter((message) => message.role === "user").length, 3);
+});
+
+test("a persisted row at or before the local baseline never confirms a new turn", () => {
+  const window = [
+    persistedUser(repeatedPrompt, 1_000, "entry-1:0"),
+    { role: "assistant" as const, content: "first" },
+  ];
+  const turn: LocalUserTurn = {
+    sessionId: "session-a",
+    message: { role: "user", content: repeatedPrompt, timestamp: 9_000 },
+    expectedTurnTotal: 2,
+    baselineTurnTotal: 1,
+  };
+  // The same payload was already persisted once, but no row appeared after the
+  // baseline, so the older row must not confirm the pending repeat.
+  assert.equal(transcriptConfirmsLocalTurn(turn, window, 1), false);
+  const protectedTranscript = protectTranscriptWithLocalTurns([turn], window, 2, 1);
+  assert.deepEqual(protectedTranscript.pendingTurns, [turn]);
+  assert.deepEqual(protectedTranscript.messages, [...window, turn.message]);
+});
+
+test("an image prompt confirms by position after its baseline advanced", () => {
+  const window = [
+    persistedUser("older", 1_000, "entry-1:0"),
+    {
+      role: "user" as const,
+      content: [{ type: "text" as const, text: "请查看这些图片。" }, { type: "image" as const, data: "AA==", mimeType: "image/png" }],
+      timestamp: 9_000,
+      piChatPersistedMessageId: "entry-2:0",
+    },
+  ];
+  const turn: LocalUserTurn = {
+    sessionId: "session-a",
+    message: {
+      role: "user",
+      content: [{ type: "text", text: "inspect" }, { type: "image", data: "AA==", mimeType: "image/png" }],
+      timestamp: 8_900,
+    },
+    expectedTurnTotal: 2,
+    baselineTurnTotal: 1,
+    confirmByPosition: true,
+  };
+  assert.equal(transcriptConfirmsLocalTurn(turn, window, 2), true);
+  assert.deepEqual(protectTranscriptWithLocalTurns([turn], window, 2, 2).pendingTurns, []);
+});
+
+test("a persisted echo that arrives after the overlay suppresses the immediate overlay", () => {
+  const overlay: PiMessage = { role: "user", content: "same prompt", timestamp: 42 };
+  const persisted = { ...overlay, timestamp: 55, piChatPersistedMessageId: "entry-9:0" };
+  assert.deepEqual(appendPendingUserMessage([previous, persisted], overlay), [previous, persisted]);
+});
+
+test("a later identical submission keeps its own overlay above an older persisted echo", () => {
+  const firstPersisted = { role: "user" as const, content: "same prompt", timestamp: 42, piChatPersistedMessageId: "entry-9:0" };
+  const secondOverlay: PiMessage = { role: "user", content: "same prompt", timestamp: 99 };
+  assert.deepEqual(
+    appendPendingUserMessage([previous, firstPersisted], secondOverlay),
+    [previous, firstPersisted, secondOverlay],
+  );
+});
+
+test("duplicate diagnostics separate legit repeats from a local overlay row", () => {
+  const older = persistedUser(repeatedPrompt, 1_000, "entry-1:0");
+  const newer = persistedUser(repeatedPrompt, 9_000, "entry-2:0");
+  const turn: LocalUserTurn = {
+    sessionId: "session-a",
+    message: { role: "user", content: repeatedPrompt, timestamp: 9_000 },
+    expectedTurnTotal: 2,
+    baselineTurnTotal: 1,
+  };
+  const repeats = diagnoseVisibleUserTurnDuplicates([older, newer], [turn], 2);
+  assert.equal(repeats.length, 1);
+  assert.equal(repeats[0].kind, "same-content");
+  assert.equal(repeats[0].pairCount, 1);
+  assert.equal(repeats[0].persistedCount, 2);
+  assert.equal(repeats[0].localRowCount, 0);
+  assert.equal(repeats[0].adjacent, true);
+
+  const overlay = turn.message;
+  const withOverlay = diagnoseVisibleUserTurnDuplicates([older, newer, overlay], [turn], 2);
+  assert.equal(withOverlay.length, 1);
+  assert.equal(withOverlay[0].kind, "local-and-persisted");
+  assert.equal(withOverlay[0].localRowCount, 1);
+  assert.equal(withOverlay[0].persistedCount, 2);
+  assert.equal(withOverlay[0].persistedAfterBaselineCount, 1);
+  assert.equal(withOverlay[0].adjacent, true);
+});
+
+test("the recorded duplicate incident replay resolves every re-sent prompt", () => {
+  // Observed live: the pane showed the 10-turn authoritative window plus one
+  // extra bubble per still-pending local turn (duplicateCount 14 with
+  // localTurnCount 4), because this Session re-sends identical instructions and
+  // the speculative ordinal had drifted ahead of the Session turn count.
+  const reSent = ".pi-subagents/artifacts/ 和 dist-local 这些确实可以清理";
+  const window = [
+    persistedUser(reSent, 1_000, "entry-247:0"),
+    persistedUser(reSent, 1_100, "entry-248:0"),
+    persistedUser(reSent, 1_200, "entry-249:0"),
+    persistedUser(reSent, 1_300, "entry-250:0"),
+    persistedUser(reSent, 1_400, "entry-251:0"),
+    persistedUser("我刚刚git clone了 deepseek harness 这个项目", 1_500, "entry-252:0"),
+    persistedUser("你保持git里的dsh，帮我把本机其他的dsh清理一下", 1_600, "entry-253:0"),
+    persistedUser("你查看一下，这里又出现了2条一样的用户消息", 1_700, "entry-254:0"),
+    persistedUser("你现在导出诊断不可以查到吗", 1_800, "entry-255:0"),
+    persistedUser("pi-chat-state-diagnostic-2026-09-10T05-47-45-456Z.json 好像只有最近5分钟的", 1_900, "entry-256:0"),
+  ];
+  const pending: LocalUserTurn[] = [
+    { message: "你保持git里的dsh，帮我把本机其他的dsh清理一下", expected: 253, baseline: 252 },
+    { message: "你查看一下，这里又出现了2条一样的用户消息", expected: 254, baseline: 253 },
+    { message: "你现在导出诊断不可以查到吗", expected: 255, baseline: 254 },
+    { message: "pi-chat-state-diagnostic-2026-09-10T05-47-45-456Z.json 好像只有最近5分钟的", expected: 256, baseline: 255 },
+  ].map((entry, index) => ({
+    sessionId: "session-a",
+    message: { role: "user" as const, content: entry.message, timestamp: 2_000 + index },
+    expectedTurnTotal: entry.expected,
+    baselineTurnTotal: entry.baseline,
+  }));
+
+  const protectedTranscript = protectTranscriptWithLocalTurns(pending, window, 20, 256);
+  assert.deepEqual(protectedTranscript.pendingTurns, []);
+  assert.equal(
+    protectedTranscript.messages.filter((message) => message.role === "user").length,
+    10,
+    "every persisted echo replaces its local bubble instead of adding a duplicate",
+  );
+
+  // A re-sent payload cannot confirm more local turns than it has persisted rows.
+  const reSentPending: LocalUserTurn[] = [
+    { message: reSent, expected: 255, baseline: 250 },
+    { message: reSent, expected: 256, baseline: 250 },
+  ].map((entry, index) => ({
+    sessionId: "session-a",
+    message: { role: "user" as const, content: entry.message, timestamp: 3_000 + index },
+    expectedTurnTotal: entry.expected,
+    baselineTurnTotal: entry.baseline,
+  }));
+  const reSentResult = protectTranscriptWithLocalTurns(reSentPending, window, 22, 256);
+  assert.deepEqual(reSentResult.pendingTurns, [reSentPending[1]]);
+  assert.equal(
+    reSentResult.messages.filter((message) => message.role === "user").length,
+    11,
+    "only the row count the Session actually persisted decides confirmation",
+  );
+});

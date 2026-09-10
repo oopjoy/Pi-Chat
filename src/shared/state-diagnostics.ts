@@ -53,6 +53,7 @@ export interface StateDiagnosticExportBundle {
 
 const BOOLEAN_DETAIL_KEYS = new Set([
   "authorityPresent",
+  "adjacent",
   "compacting",
   "composerDisabled",
   "composerQueueVisible",
@@ -123,6 +124,10 @@ const NUMBER_DETAIL_KEYS = new Set([
   "duplicateCount",
   "duplicatePairCount",
   "localTurnCount",
+  "localRowCount",
+  "persistedCount",
+  "identityCount",
+  "persistedAfterBaselineCount",
   "assistantCount",
   "visibleAssistantCount",
   "messageCount",

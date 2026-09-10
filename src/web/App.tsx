@@ -213,6 +213,15 @@ function resultPendingError(cause: unknown): boolean {
     cause.outcomeUnknown;
 }
 
+/**
+ * The session Runtime refused the selected Model before any prompt was written.
+ * Leaving that selection staged would fail every later prompt the same way, so
+ * the caller must drop the staged preference and fall back to the Runtime model.
+ */
+function modelUnavailableError(cause: unknown): boolean {
+  return cause instanceof ApiRequestError && cause.code === "MODEL_UNAVAILABLE";
+}
+
 function finiteRunMetric(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
@@ -1486,6 +1495,25 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       Math.max(sourceTurnTotalsRef.current.get(sessionId) || 0, total),
     );
   };
+  /**
+   * Authoritative user-turn watermark for one Session. Local optimistic rows
+   * never raise it, so it is the only safe baseline for confirming a new turn
+   * from a persisted echo instead of from a speculative ordinal.
+   */
+  const authoritativeTurnTotal = (sessionId: string): number | undefined => {
+    if (!sessionId) return undefined;
+    // Two authoritative sources can disagree: the cached view carries the latest
+    // snapshot (its `turnTotal` may add a retained terminal tail), while the
+    // recorded watermark is monotonic (it survives a rewind). The lower value is
+    // the safe direction: an over-high baseline can never confirm a persisted
+    // echo, which is exactly the duplicate this baseline exists to prevent.
+    const cached = viewCacheRef.current.get(sessionId)?.turnTotal;
+    const recorded = sourceTurnTotalsRef.current.get(sessionId);
+    const values = [cached, recorded].filter(
+      (value): value is number => typeof value === "number" && Number.isFinite(value),
+    );
+    return values.length ? Math.min(...values) : undefined;
+  };
   const applyLocalTurnCount = (session: SessionSummary): SessionSummary => {
     const localTurnTotal = Math.max(
       0,
@@ -1997,6 +2025,10 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       sessionId: view.session.id,
       message,
       expectedTurnTotal: pending.expectedTurnTotal,
+      baselineTurnTotal:
+        typeof view.turnTotal === "number" && Number.isFinite(view.turnTotal)
+          ? view.turnTotal
+          : undefined,
       queueState: "dispatched",
       confirmByPosition: Array.isArray(message.content),
       renderedInTranscript: false,
@@ -2032,6 +2064,10 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         turns = removeLocalTurnAndRebase(turns, turn);
     }
     let expectedTurnTotal = nextLocalTurnTotal(view.messages, view.turnTotal, turns);
+    const steeringBaseline =
+      typeof view.turnTotal === "number" && Number.isFinite(view.turnTotal)
+        ? view.turnTotal
+        : undefined;
     for (const item of items) {
       const existing = turns.find((turn) => turn.queueId === item.id);
       if (existing) {
@@ -2047,6 +2083,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           timestamp: item.createdAt,
         },
         expectedTurnTotal: expectedTurnTotal++,
+        baselineTurnTotal: steeringBaseline,
         queueId: item.id,
         queueState: "waiting",
         revealOnMessageStart: true,
@@ -4886,6 +4923,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
                 sourceTurnTotalsRef.current.get(eventSessionId),
               localTurns,
             ),
+            baselineTurnTotal: authoritativeTurnTotal(eventSessionId),
             queueId: dispatchedId || undefined,
             queueState: "dispatched",
             confirmByPosition: imageCount > 0,
@@ -6122,6 +6160,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         sessionId: targetSessionId,
         message: turn,
         expectedTurnTotal: nextLocalTurnTotal(messages, turnTotal, pending),
+        baselineTurnTotal: authoritativeTurnTotal(targetSessionId),
         queueState:
           (willQueueLocally || steering) && !message.startsWith("/")
             ? "waiting"
@@ -6796,6 +6835,12 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       // admission as hidden `waiting` merely because its old pane token expired.
       const localEntry = localTurnEntry();
       const resultPending = resultPendingError(cause);
+      if (modelUnavailableError(cause))
+        // The Runtime rejected this Model, so the staged selection can never be
+        // applied to this Session by retrying the same prompt. Dropping it makes
+        // the pane fall back to the Runtime-confirmed Model instead of failing
+        // every later prompt the same way.
+        pendingSessionPrefsRef.current.delete(targetSessionId || DRAFT_PREFS_KEY);
       const explicitClientRejection =
         cause instanceof ApiRequestError &&
         cause.status >= 400 &&
@@ -9055,6 +9100,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     const duplicates = diagnoseVisibleUserTurnDuplicates(
       messages,
       viewedSessionId ? (localUserTurnsRef.current.get(viewedSessionId) || []) : [],
+      turnTotal,
     );
     for (const duplicate of duplicates) {
       const signature = [
@@ -9074,8 +9120,11 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           duplicateCount: duplicate.messageCount,
           duplicatePairCount: duplicate.pairCount,
           localTurnCount: duplicate.localTurnCount,
+          localRowCount: duplicate.localRowCount,
           persistedCount: duplicate.persistedCount,
           identityCount: duplicate.identityCount,
+          persistedAfterBaselineCount: duplicate.persistedAfterBaselineCount,
+          adjacent: duplicate.adjacent,
           sourceGeneration: paneCommitRevisionRef.current,
           projectionSource: "pane-commit",
         },

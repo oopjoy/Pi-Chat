@@ -152,6 +152,8 @@ export interface PiMessage {
   tokensBefore?: number;
   timestamp?: number;
   stopReason?: string;
+  /** Pi-provided reason for a failed attempt; rendered as a bounded error notice. */
+  errorMessage?: string;
   provider?: string;
   model?: string;
   /** Thinking level active when this assistant turn was generated, when Pi recorded it. */

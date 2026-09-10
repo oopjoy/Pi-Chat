@@ -3865,14 +3865,23 @@ export class PiChatApp {
   ): Promise<AppliedTurnSettings> {
     const applied: AppliedTurnSettings = {};
     if (settings.model) {
-      const model = asModels(
+      const available = asModels(
         await rpc.send({ type: "get_available_models" }),
-      ).find(
+      );
+      const model = available.find(
         (candidate) =>
           candidate.provider === settings.model!.provider &&
           candidate.id === settings.model!.modelId,
       );
-      if (!model) throw new HttpRequestError(400, "所选模型不可用");
+      // Name the rejected pair and the catalogue it was checked against: a
+      // silent generic message left the user unable to tell which Runtime
+      // refused the selection or that the catalogue simply lacks that model.
+      if (!model)
+        throw new HttpRequestError(
+          400,
+          `所选模型不可用：${settings.model.provider}/${settings.model.modelId} 不在当前会话 Pi Runtime 的模型列表中（该 Runtime 提供 ${available.length} 个模型）。请在模型菜单中改选该 Runtime 提供的模型；若你刚更新过模型配置，请重启该会话的 Pi Runtime 后重试。`,
+          "MODEL_UNAVAILABLE",
+        );
       const outcomeToken = randomUUID();
       try {
         await rpc.send(
@@ -8430,7 +8439,11 @@ export class PiChatApp {
             const model = asModels(
               await targetRpc.send({ type: "get_available_models" }),
             ).find((item) => item.provider === provider && item.id === modelId);
-            if (!model) return json(response, 404, { error: "所选模型不可用" });
+            if (!model)
+              return json(response, 404, {
+                error: `所选模型不可用：${provider}/${modelId} 不在该会话 Pi Runtime 的模型列表中。请改选该 Runtime 提供的模型；若你刚更新过模型配置，请重启该会话的 Pi Runtime 后重试。`,
+                code: "MODEL_UNAVAILABLE",
+              });
             secondaryRuntime.pendingTurnSettings.model = { provider, modelId };
             this.rememberRuntimeDisplaySettings(secondaryRuntime, { model });
             return json(response, 200, { model, pending: true });
@@ -8477,7 +8490,11 @@ export class PiChatApp {
           const model = asModels(
             await this.options.rpc.send({ type: "get_available_models" }),
           ).find((item) => item.provider === provider && item.id === modelId);
-          if (!model) return json(response, 404, { error: "所选模型不可用" });
+          if (!model)
+            return json(response, 404, {
+              error: `所选模型不可用：${provider}/${modelId} 不在当前 Pi Runtime 的模型列表中。请改选该 Runtime 提供的模型；若你刚更新过模型配置，请重启 Pi Runtime 后重试。`,
+              code: "MODEL_UNAVAILABLE",
+            });
           this.pendingTurnSettings.model = { provider, modelId };
           this.rememberPrimaryDisplaySettings({ model });
           return json(response, 200, { model, pending: true });

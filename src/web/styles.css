@@ -472,6 +472,11 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .message-footer > button:hover { border-color: var(--line); background: var(--surface-hover); color: var(--text); }
 .message-footer > button svg { width: 17px; height: 17px; }
 .message-content { overflow-wrap: anywhere; font-family: var(--reading-font); font-size: var(--reading-font-size); line-height: var(--reading-line-height); }
+/* A settled failed attempt carries provider text and no content; without this
+   card the transcript simply stopped with no explanation. */
+.message-error { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; padding: 9px 11px; border: 1px solid color-mix(in srgb, var(--danger), transparent 52%); border-left-width: 3px; border-radius: 8px; background: color-mix(in srgb, var(--danger), transparent 93%); font-family: var(--app-font); font-size: 12px; line-height: 1.6; }
+.message-error-title { color: color-mix(in srgb, var(--danger), var(--text) 22%); font-size: 12px; font-weight: 700; }
+.message-error-detail { margin: 0; color: var(--muted); overflow-wrap: anywhere; white-space: pre-wrap; }
 .message-user .message-content { display: flex; box-sizing: border-box; width: fit-content; max-width: 80%; margin-left: auto; padding: 10px 14px; flex-wrap: wrap; gap: 8px; border: 1px solid color-mix(in srgb, var(--accent), transparent 72%); border-radius: 14px 14px 4px 14px; background: var(--user); }
 .message-user.is-foldable .message-content { width: 80%; }
 .message-user-actions { display: flex; justify-content: flex-end; min-height: 25px; align-items: center; gap: 4px; margin-top: 3px; }

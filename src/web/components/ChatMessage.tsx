@@ -2,6 +2,7 @@ import { memo, Profiler, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { CSSProperties } from "react";
 import type { PiContentBlock, PiMessage } from "../../shared/types";
+import { assistantErrorNotice } from "../../shared/assistant-error";
 import { visibleAssistantBlocksWithSourceIndex } from "../lib/assistant-text";
 import { reactRenderBenchmarkEnabled, recordReactRenderBenchmarkCommit } from "../lib/benchmark-profiler";
 import { streamingAppendHint } from "../lib/streaming-append";
@@ -171,7 +172,8 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
     (block.type === "text" && Boolean(block.text))
     || (block.type === "image" && Boolean(block.data && block.mimeType)),
   );
-  if (!hasVisibleContent && (!streaming || !showAssistantMetadata)) return null;
+  const errorNotice = message.role === "assistant" ? assistantErrorNotice(message) : null;
+  if (!hasVisibleContent && !errorNotice && (!streaming || !showAssistantMetadata)) return null;
   const copyText = message.role === "assistant" ? assistantCopyText(content) : "";
   const userTextBlocks = message.role === "user" ? content.filter((block): block is PiContentBlock & { text: string } => block.type === "text" && typeof block.text === "string" && Boolean(block.text)) : [];
   const userImageBlocks = message.role === "user" ? content.filter((block): block is PiContentBlock & { data: string; mimeType: string } => block.type === "image" && typeof block.data === "string" && typeof block.mimeType === "string") : [];
@@ -238,6 +240,10 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
           aria-expanded={expandedUserText}
           onClick={() => setExpandedUserText((current) => !current)}
         >{expandedUserText ? "收起" : "展开全部"}</button>}
+        {errorNotice && <div className="message-error" role="status">
+          <strong className="message-error-title">{errorNotice.title}</strong>
+          <p className="message-error-detail">{errorNotice.detail}</p>
+        </div>}
       </div>}
       {previewImage && createPortal(<div
         className="image-preview-backdrop"

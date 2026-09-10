@@ -6,6 +6,7 @@ import {
   projectStreamingWireEvent,
   streamingMessageAppends,
 } from "../src/shared/streaming-wire";
+import { canonicalPiMessage } from "../src/shared/runtime-events";
 import type { PiMessage } from "../src/shared/types";
 import { streamingAppendHint, withStreamingAppendHints } from "../src/web/lib/streaming-append";
 
@@ -148,4 +149,32 @@ test("browser delta application rejects missing, duplicate, and mismatched seque
   assert.equal(applyStreamingDelta(previous, { ...valid, piChatSequence: 6 }), null);
   assert.equal(applyStreamingDelta(previous, { ...valid, piChatLiveMessageId: "other" }), null);
   assert.equal(applyStreamingDelta(undefined, valid), null);
+});
+
+test("a streamed failed attempt carries its bounded provider reason to the transcript", () => {
+  const failed = canonicalPiMessage({
+    role: "assistant",
+    content: [],
+    stopReason: "error",
+    errorMessage: "OpenAI API error (503): auth_unavailable",
+  });
+  assert.equal(failed?.stopReason, "error");
+  assert.equal(failed?.errorMessage, "OpenAI API error (503): auth_unavailable");
+
+  // Oversized and non-string reasons must not drop the terminal message itself.
+  const oversized = canonicalPiMessage({
+    role: "assistant",
+    content: [],
+    stopReason: "error",
+    errorMessage: "x".repeat(5_000),
+  });
+  assert.equal(oversized?.errorMessage?.length, 1_200);
+  const malformed = canonicalPiMessage({
+    role: "assistant",
+    content: [],
+    stopReason: "error",
+    errorMessage: { nested: true },
+  });
+  assert.equal(malformed?.errorMessage, undefined);
+  assert.equal(malformed?.stopReason, "error");
 });
