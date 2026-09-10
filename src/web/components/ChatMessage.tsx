@@ -242,6 +242,9 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
         >{expandedUserText ? "收起" : "展开全部"}</button>}
         {errorNotice && <div className="message-error" role="status">
           <strong className="message-error-title">{errorNotice.title}</strong>
+          {/* The route Pi recorded for this attempt: a failure that came back from
+              another provider must be visible as such, not only by model name. */}
+          {errorNotice.route && <p className="message-error-route">{errorNotice.route}</p>}
           <p className="message-error-detail">{errorNotice.detail}</p>
         </div>}
       </div>}

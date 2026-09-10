@@ -24,6 +24,8 @@ export interface AssistantErrorNotice {
   kind: FailureKind;
   title: string;
   detail: string;
+  /** provider · model · api of the attempt, when Pi recorded the route. */
+  route?: string;
 }
 
 /** One browser-local failure retained in the conversation body for its Session. */
@@ -92,7 +94,22 @@ export function classifyFailureReason(raw: string): AssistantErrorNotice {
 /** Classify the reason carried by a persisted failed assistant attempt. */
 export function assistantErrorNotice(message: PiMessage): AssistantErrorNotice | null {
   if (!isAssistantErrorStop(message)) return null;
-  return classifyFailureReason((message.errorMessage || "").trim());
+  const notice = classifyFailureReason((message.errorMessage || "").trim());
+  const route = failureRoute(message.provider, message.model, message.api);
+  return route ? { ...notice, route } : notice;
+}
+
+/**
+ * The provider route a failed attempt actually used. A silent provider change is
+ * the difference between "the proxy is out of capacity" and "the request went
+ * somewhere else", so the transcript shows the recorded route instead of only the
+ * model name the composer was asked for.
+ */
+export function failureRoute(provider?: string, model?: string, api?: string): string | undefined {
+  const parts = [provider, model, api]
+    .map((part) => (typeof part === "string" ? part.replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, 80) : ""))
+    .filter(Boolean);
+  return parts.length ? Array.from(new Set(parts)).join(" · ") : undefined;
 }
 
 /**

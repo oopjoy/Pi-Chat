@@ -156,6 +156,8 @@ export interface PiMessage {
   errorMessage?: string;
   provider?: string;
   model?: string;
+  /** Transport Pi recorded for this row; shown with a failed attempt's route. */
+  api?: string;
   /** Thinking level active when this assistant turn was generated, when Pi recorded it. */
   thinkingLevel?: string;
   toolCallId?: string;

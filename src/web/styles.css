@@ -1190,3 +1190,13 @@ button.ask-questionnaire-option:hover:not(:disabled) { background: var(--surface
    place in the conversation body instead of only a five-second toast. */
 .message-local-failure { margin: 8px 0 0; }
 .message-local-failure .message-content { max-width: 100%; }
+
+/* The provider route Pi recorded for a failed attempt. */
+.message-error-route {
+  margin: 2px 0 4px;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  color: var(--muted, #6b7280);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}

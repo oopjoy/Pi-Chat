@@ -113,6 +113,9 @@ export function canonicalPiMessage(value: unknown): CanonicalTerminalMessage | n
   // Provider failure text is presentation data: truncate it instead of failing
   // the whole terminal message on an unexpected length, and ignore a non-string
   // value so a malformed body cannot drop the assistant message itself.
+  // The provider transport is presentation metadata like the failure text: keep
+  // it bounded, but never let a malformed value drop the terminal message.
+  const api = typeof input.api === "string" ? boundedString(input.api, 80) : undefined;
   const errorMessage = typeof input.errorMessage === "string"
     ? input.errorMessage.slice(0, MAXIMUM_ERROR_MESSAGE_LENGTH)
     : undefined;
@@ -146,6 +149,7 @@ export function canonicalPiMessage(value: unknown): CanonicalTerminalMessage | n
     ...(input.stopReason !== undefined ? { stopReason: input.stopReason as string } : null),
     ...(input.provider !== undefined ? { provider: input.provider as string } : null),
     ...(input.model !== undefined ? { model: input.model as string } : null),
+    ...(api !== undefined ? { api } : null),
     ...(input.thinkingLevel !== undefined ? { thinkingLevel: input.thinkingLevel as string } : null),
     ...(errorMessage ? { errorMessage } : null),
   };

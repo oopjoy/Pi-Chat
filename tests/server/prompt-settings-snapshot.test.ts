@@ -742,3 +742,58 @@ test("partial prompt-setting failure retains the successfully applied Model in t
     await app.close();
   }
 });
+
+test("a model id under a different provider is refused instead of applied", async () => {
+  // The catalogue offers id "next" only under provider "test". Requesting the same
+  // id under another provider must never silently apply the "test" route: that is
+  // exactly how a request could reach a provider the user did not choose.
+  const path = "C:\sessions\provider-mismatch.jsonl";
+  const sessionId = idForPath(path);
+  const rpc = new FakeRpc(path, "provider-mismatch");
+  const sessions = {
+    list: async () => [{ id: sessionId, sessionId: "provider-mismatch", name: "Provider mismatch", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+    pathForId: (id: string) => (id === sessionId ? path : null),
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: rpc as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const prompt = (provider: string) => fetch(`${origin}/api/chat/prompt`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sessionId, message: "route check", settings: { model: { provider, modelId: "next" } } }),
+  });
+  try {
+    assert.equal((await fetch(`${origin}/api/bootstrap`)).status, 200);
+
+    const rejected = await prompt("codex");
+    assert.equal(rejected.status, 400);
+    const body = await rejected.json() as { code?: string; error?: string };
+    assert.equal(body.code, "MODEL_UNAVAILABLE");
+    assert.match(body.error || "", /codex\/next/, "the rejected pair names the provider the user asked for");
+    assert.deepEqual(
+      rpc.commands.filter((command) => command.type === "set_model"),
+      [],
+      "nothing is applied when the provider does not own that model id",
+    );
+    assert.deepEqual(
+      rpc.commands.filter((command) => command.type === "prompt"),
+      [],
+      "the prompt is not dispatched to another provider",
+    );
+
+    // The exact pair still works, so the fence rejects only the mismatch.
+    const accepted = await prompt("test");
+    assert.equal(accepted.status, 202);
+    assert.deepEqual(
+      rpc.commands.filter((command) => command.type === "set_model").map((command) => ({ provider: command.provider, modelId: command.modelId })),
+      [{ provider: "test", modelId: "next" }],
+    );
+  } finally {
+    server.close();
+    await app.close();
+  }
+});

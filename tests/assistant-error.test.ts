@@ -5,6 +5,7 @@ import {
   assistantErrorNotice,
   boundedAssistantErrorDetail,
   classifyFailureReason,
+  failureRoute,
   isTranscriptWorthyFailure,
   isAssistantErrorStop,
   localFailureNotice,
@@ -136,4 +137,45 @@ test("the classifier exposes a stable kind next to the provider wording", () => 
   assert.equal(classifyFailureReason("Pi RPC 已退出").kind, "runtime-gone");
   assert.equal(classifyFailureReason("This operation was aborted").kind, "aborted");
   assert.equal(classifyFailureReason("something else entirely").kind, "unknown");
+});
+
+test("a failed attempt shows the provider route it actually used", () => {
+  // The route comes from Pi's own row, so a provider that differs from the
+  // composer selection is visible in the transcript instead of being inferred.
+  const notice = assistantErrorNotice({
+    role: "assistant",
+    content: [],
+    stopReason: "error",
+    errorMessage: 'OpenAI API error (503): {"message":"auth_unavailable: no auth available"}',
+    provider: "cpa-proxy",
+    model: "gpt-6-astra",
+    api: "openai-responses",
+    timestamp: 1,
+  });
+  assert.equal(notice?.route, "cpa-proxy · gpt-6-astra · openai-responses");
+
+  // A retry on another provider records that other provider.
+  const other = assistantErrorNotice({
+    role: "assistant",
+    content: [],
+    stopReason: "error",
+    errorMessage: "upstream failed",
+    provider: "codex",
+    model: "gpt-6-astra",
+    timestamp: 1,
+  });
+  assert.equal(other?.route, "codex · gpt-6-astra", "a different provider is named, not hidden");
+
+  // No recorded route: the card simply omits the line.
+  const bare = assistantErrorNotice({ role: "assistant", content: [], stopReason: "error", errorMessage: "boom", timestamp: 1 });
+  assert.equal(bare?.route, undefined);
+});
+
+test("the route line is bounded and cannot smuggle control characters", () => {
+  const route = failureRoute("cp\u0000a-proxy", "gpt-\u001f6-astra", "x".repeat(200));
+  assert.equal(route, `cpa-proxy · gpt-6-astra · ${"x".repeat(80)}`);
+  assert.equal(failureRoute(undefined, undefined, undefined), undefined);
+  assert.equal(failureRoute("  ", "", undefined), undefined);
+  // Duplicated identity is not repeated.
+  assert.equal(failureRoute("p", "p", undefined), "p");
 });

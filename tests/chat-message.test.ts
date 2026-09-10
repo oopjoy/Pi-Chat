@@ -366,3 +366,27 @@ test("a Runtime failure entry stays in the conversation body", () => {
     "",
   );
 });
+
+test("a failed attempt paints the provider route it recorded", () => {
+  const html = renderToStaticMarkup(createElement(ChatMessage, {
+    message: {
+      role: "assistant",
+      content: [],
+      stopReason: "error",
+      errorMessage: 'OpenAI API error (503): {"message":"auth_unavailable: no auth available"}',
+      provider: "cpa-proxy",
+      model: "gpt-6-astra",
+      api: "openai-responses",
+      timestamp: 1,
+    },
+  }));
+  assert.match(html, /class="message-error-route">cpa-proxy · gpt-6-astra · openai-responses</);
+});
+
+test("a failed attempt without a recorded route paints no route line", () => {
+  const html = renderToStaticMarkup(createElement(ChatMessage, {
+    message: { role: "assistant", content: [], stopReason: "error", errorMessage: "boom", timestamp: 1 },
+  }));
+  assert.match(html, /message-error-title/);
+  assert.doesNotMatch(html, /message-error-route/);
+});
