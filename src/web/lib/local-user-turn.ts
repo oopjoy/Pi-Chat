@@ -57,6 +57,13 @@ function sameUserInstruction(left: PiMessage, right: PiMessage): boolean {
   return left.role === "user" && right.role === "user" && userInstructionIdentity(left) === userInstructionIdentity(right);
 }
 
+/**
+ * Slack allowed between a local submit time and the Runtime receipt time of its
+ * persisted echo. Both use the local clock, so this only absorbs millisecond
+ * rounding rather than a real clock difference.
+ */
+const PERSISTED_ECHO_CLOCK_TOLERANCE_MS = 2_000;
+
 /** Visible User rows plus the ordinal the authoritative watermark assigns to the first of them. */
 function visibleUserOrdinals(messages: PiMessage[], turnTotal?: number): { users: PiMessage[]; firstOrdinal: number } {
   const users = messages.filter((message) => message.role === "user");
@@ -71,10 +78,19 @@ function visibleUserOrdinals(messages: PiMessage[], turnTotal?: number): { users
  * baseline. Such a row proves the turn reached the Session log even when a
  * repeated identical prompt makes text correlation ambiguous, and a row without
  * an explicit persisted identity is a local overlay that never confirms itself.
+ *
+ * The baseline can be understated because a view may omit its `turnTotal`, so a
+ * row also has to postdate this turn's submission: an older row with the same
+ * payload belongs to an earlier instruction of that payload and must not hide a
+ * genuinely pending one. Rows without a timestamp keep the ordinal-plus-rank
+ * rule, which is the only remaining evidence for them.
  */
 function persistedEchoRows(turn: LocalUserTurn, messages: PiMessage[], turnTotal?: number): PiMessage[] {
   const baseline = turn.baselineTurnTotal;
   if (typeof baseline !== "number" || !Number.isFinite(baseline)) return [];
+  const submittedAt = typeof turn.message.timestamp === "number" && Number.isFinite(turn.message.timestamp)
+    ? turn.message.timestamp
+    : undefined;
   const { users, firstOrdinal } = visibleUserOrdinals(messages, turnTotal);
   const rows: PiMessage[] = [];
   for (let index = 0; index < users.length; index += 1) {
@@ -82,6 +98,12 @@ function persistedEchoRows(turn: LocalUserTurn, messages: PiMessage[], turnTotal
     if (!row.piChatPersistedMessageId) continue;
     if (firstOrdinal + index <= baseline) continue;
     if (!turn.confirmByPosition && !sameUserInstruction(row, turn.message)) continue;
+    if (
+      submittedAt !== undefined
+      && typeof row.timestamp === "number"
+      && Number.isFinite(row.timestamp)
+      && row.timestamp < submittedAt - PERSISTED_ECHO_CLOCK_TOLERANCE_MS
+    ) continue;
     rows.push(row);
   }
   return rows;

@@ -694,3 +694,55 @@ test("the recorded duplicate incident replay resolves every re-sent prompt", () 
     "only the row count the Session actually persisted decides confirmation",
   );
 });
+
+test("an older identical echo cannot confirm a newer submission when the watermark is understated", () => {
+  // A view may omit `turnTotal`, so the cache can report only the visible window
+  // as the baseline. The submit time is then the remaining evidence that the
+  // persisted row predates this instruction.
+  const window = [
+    persistedUser(repeatedPrompt, 1_000, "entry-1:0"),
+    { role: "assistant" as const, content: "first" },
+  ];
+  const turn: LocalUserTurn = {
+    sessionId: "session-a",
+    message: { role: "user", content: repeatedPrompt, timestamp: 9_000 },
+    expectedTurnTotal: 2,
+    baselineTurnTotal: 1,
+  };
+  assert.equal(transcriptConfirmsLocalTurn(turn, window, 1), false);
+  const protectedTranscript = protectTranscriptWithLocalTurns([turn], window, 2, 1);
+  assert.deepEqual(protectedTranscript.pendingTurns, [turn]);
+  assert.deepEqual(protectedTranscript.messages, [...window, turn.message]);
+});
+
+test("the persisted echo of this submission confirms even when it shares the submit millisecond", () => {
+  const window = [
+    persistedUser(repeatedPrompt, 1_000, "entry-1:0"),
+    { role: "assistant" as const, content: "first" },
+    // The Runtime records the receipt time, which equals the local submit time
+    // in the recorded incident.
+    persistedUser(repeatedPrompt, 9_000, "entry-2:0"),
+  ];
+  const turn: LocalUserTurn = {
+    sessionId: "session-a",
+    message: { role: "user", content: repeatedPrompt, timestamp: 9_000 },
+    expectedTurnTotal: 2,
+    baselineTurnTotal: 1,
+  };
+  assert.equal(transcriptConfirmsLocalTurn(turn, window, 2), true);
+  assert.deepEqual(protectTranscriptWithLocalTurns([turn], window, 3, 2).pendingTurns, []);
+});
+
+test("a persisted row without a timestamp still confirms by ordinal when a baseline exists", () => {
+  const window = [
+    persistedUser("older", 1_000, "entry-1:0"),
+    { role: "user" as const, content: repeatedPrompt, piChatPersistedMessageId: "entry-2:0" },
+  ];
+  const turn: LocalUserTurn = {
+    sessionId: "session-a",
+    message: { role: "user", content: repeatedPrompt, timestamp: 9_000 },
+    expectedTurnTotal: 2,
+    baselineTurnTotal: 1,
+  };
+  assert.equal(transcriptConfirmsLocalTurn(turn, window, 2), true);
+});
