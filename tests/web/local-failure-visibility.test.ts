@@ -71,7 +71,7 @@ test("a definite upstream failure keeps its reason in the conversation body", as
       await Promise.resolve();
     });
     assert.equal(failureCards(dom).length, 1, "the failure is readable after the toast expires");
-    assert.match(cardText(dom), /模型服务凭据不可用/);
+    assert.match(cardText(dom), /OpenAI API error \(503\)/);
     assert.match(cardText(dom), /auth_unavailable/);
     assert.match(cardText(dom), /PC-ABCDEFGH/);
   } finally {
@@ -191,7 +191,7 @@ test("a New draft's first message keeps its failure reason on the draft screen",
       await Promise.resolve();
     });
     assert.equal(failureCards(dom).length, 1, "the draft screen keeps the reason");
-    assert.match(cardText(dom), /模型服务凭据不可用|与模型服务的连接中断/);
+    assert.match(cardText(dom), /OpenAI API error \(503\): auth_unavailable/);
   } finally {
     await act(async () => root.unmount());
     restoreApi();

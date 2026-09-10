@@ -1,8 +1,5 @@
 import type { PiMessage } from "./types.js";
 
-/** Longest provider excerpt shown in the transcript; UI text stays bounded. */
-export const ASSISTANT_ERROR_DETAIL_LIMIT = 240;
-
 /** Last parenthesized status wins: an earlier one may describe a proxied hop. */
 const HTTP_STATUS = /\(([0-9]{3})\)/g;
 function lastHttpStatus(raw: string): string {
@@ -12,8 +9,6 @@ function lastHttpStatus(raw: string): string {
 }
 /** One fixture's identifier; anchored, and only the identifier is ever echoed. */
 const INCIDENT_ID = /^PC-[A-Z0-9_-]{8}$/;
-const RETRY_ATTEMPTS = /Retry failed after ([0-9]+) attempts/i;
-
 /** Stable category of a failure, independent of the provider's wording. */
 export type FailureKind =
   | "aborted"
@@ -26,7 +21,7 @@ export type FailureKind =
   | "server"
   | "unknown";
 
-/** One bounded, user-visible explanation of a failed model or Runtime attempt. */
+/** One user-visible explanation of a failed model or Runtime attempt. */
 export interface AssistantErrorNotice {
   kind: FailureKind;
   title: string;
@@ -68,38 +63,41 @@ export function isAssistantErrorStop(message: PiMessage): boolean {
     && message.errorMessage.trim().length > 0;
 }
 
-/** Collapse provider text to one bounded line so no untrusted body can bloat the view. */
 /**
- * Providers occasionally echo the credential they rejected. The reason is kept
- * in the transcript, so obvious secret shapes are hidden before it renders.
+ * Providers occasionally echo the credential they rejected. Error cards retain
+ * the original text, so obvious secret shapes remain hidden before it renders.
  */
 const SECRET_LIKE = [
   /\b(?:sk|rk|pk|ghp|gho|github_pat)[-_][A-Za-z0-9_-]{8,}/gi,
   /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi,
   /\b[A-Za-z0-9+/]{40,}={0,2}\b/g,
 ];
+/** Preserve line breaks and ordinary whitespace; strip only unsafe controls. */
+const UNSAFE_ERROR_DISPLAY_CHARACTERS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g;
+
 export function redactSensitiveDetail(text: string): string {
   let redacted = text;
   for (const pattern of SECRET_LIKE) redacted = redacted.replace(pattern, "[已隐藏]");
   return redacted;
 }
 
-export function boundedAssistantErrorDetail(raw: string): string {
-  const collapsed = raw.replace(/\s+/g, " ").trim();
-  if (collapsed.length <= ASSISTANT_ERROR_DETAIL_LIMIT) return collapsed;
-  return `${collapsed.slice(0, ASSISTANT_ERROR_DETAIL_LIMIT - 1)}…`;
+/**
+ * The transcript is the diagnostic record: preserve the provider's original
+ * line structure and full body. Security redaction is deliberately the only
+ * transformation; presentation handles large bodies with a user-controlled fold.
+ */
+export function visibleAssistantErrorDetail(raw: string): string {
+  return redactSensitiveDetail(raw).replace(UNSAFE_ERROR_DISPLAY_CHARACTERS, "");
 }
 
 /**
- * Classify one failure into a stable category plus the bounded provider reason.
- * Categories stay provider-agnostic because Pi forwards the upstream body
- * verbatim and its wording differs per provider, and because the same classifier
- * serves both a persisted failed attempt and a Runtime-level failure that never
- * produced a message.
+ * Classify one failure into a stable category while retaining the full provider
+ * body. Categories stay provider-agnostic because Pi forwards upstream wording
+ * verbatim, and because the same classifier serves persisted and Runtime-level
+ * failures.
  */
 export function classifyFailureReason(raw: string): AssistantErrorNotice {
   const status = lastHttpStatus(raw);
-  const attempts = RETRY_ATTEMPTS.exec(raw)?.[1] || "";
   const authority = /auth_unavailable|no auth available/i.test(raw);
   const overloaded = /overloaded|server_is_overloaded/i.test(raw);
   const aborted = /operation was aborted|request aborted/i.test(raw);
@@ -116,18 +114,21 @@ export function classifyFailureReason(raw: string): AssistantErrorNotice {
   else if (runtimeGone) [kind, category] = ["runtime-gone", "Pi Runtime 已退出"];
   else if (interrupted || truncated) [kind, category] = ["connection", "与模型服务的连接中断"];
   else if (status.startsWith("5")) [kind, category] = ["server", "模型服务返回错误"];
-  const reason = redactSensitiveDetail(attempts ? `已重试 ${attempts} 次仍未成功。${raw}` : raw);
   return {
     kind,
     title: status ? `${category}（HTTP ${status}）` : category,
-    detail: boundedAssistantErrorDetail(reason),
+    detail: visibleAssistantErrorDetail(raw),
   };
 }
 
-/** Classify the reason carried by a persisted failed assistant attempt. */
+/**
+ * Classify an error carried by an assistant snapshot. A live `message_update`
+ * may acquire the error text before its terminal `stopReason`, so it is rendered
+ * immediately and continues through the same streaming projection as an answer.
+ */
 export function assistantErrorNotice(message: PiMessage): AssistantErrorNotice | null {
-  if (!isAssistantErrorStop(message)) return null;
-  const notice = classifyFailureReason((message.errorMessage || "").trim());
+  if (message.role !== "assistant" || typeof message.errorMessage !== "string" || !message.errorMessage.trim()) return null;
+  const notice = classifyFailureReason(message.errorMessage);
   const route = failureRoute(message.provider, message.model, message.api);
   return route ? { ...notice, route } : notice;
 }
@@ -164,14 +165,28 @@ export function localFailureNotice(
   const incident = incidentId && INCIDENT_ID.test(incidentId)
     ? incidentId.slice(0, 11)
     : (INCIDENT_ID.exec(rawText)?.[0] || "").slice(0, 11);
-  const notice = classifyFailureReason(rawText.trim() || "Pi 未能完成这次请求");
+  const rawDetail = rawText || "Pi 未能完成这次请求";
+  const notice = classifyFailureReason(
+    incident && !rawDetail.includes(incident)
+      ? `${rawDetail}\n事件 ID：${incident}`
+      : rawDetail,
+  );
   return {
     ...notice,
-    id: `${sessionId}:${incident || `${notice.kind}:${notice.detail}`}`,
+    id: `${sessionId}:${incident || `${notice.kind}:${errorDetailIdentity(notice.detail)}`}`,
     sessionId,
     at,
-    detail: incident ? `${notice.detail}（事件 ID：${incident}）` : notice.detail,
   };
+}
+
+/** Stable, short identity for an unbounded visible error detail. */
+function errorDetailIdentity(detail: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < detail.length; index += 1) {
+    hash ^= detail.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `${detail.length.toString(36)}-${(hash >>> 0).toString(36)}`;
 }
 
 /**

@@ -6,6 +6,7 @@ import { assistantErrorNotice } from "../../shared/assistant-error";
 import { visibleAssistantBlocksWithSourceIndex } from "../lib/assistant-text";
 import { reactRenderBenchmarkEnabled, recordReactRenderBenchmarkCommit } from "../lib/benchmark-profiler";
 import { streamingAppendHint } from "../lib/streaming-append";
+import { ErrorDetail } from "./ErrorDetail";
 import { CheckIcon, CopyIcon, ForkIcon } from "./Icons";
 import { MarkdownBody } from "./MarkdownBody";
 
@@ -241,11 +242,12 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
           onClick={() => setExpandedUserText((current) => !current)}
         >{expandedUserText ? "收起" : "展开全部"}</button>}
         {errorNotice && <div className="message-error" role="status">
-          <strong className="message-error-title">{errorNotice.title}</strong>
-          {/* The route Pi recorded for this attempt: a failure that came back from
-              another provider must be visible as such, not only by model name. */}
+          {/* The provider body is transcript data, not a summary: preserve every
+              received line and let the normal live-message SSE stream append it. */}
+          <ErrorDetail detail={errorNotice.detail} streaming={streaming} />
+          {/* This is Pi-recorded routing metadata, separate from the verbatim
+              provider body above. */}
           {errorNotice.route && <p className="message-error-route">{errorNotice.route}</p>}
-          <p className="message-error-detail">{errorNotice.detail}</p>
         </div>}
       </div>}
       {previewImage && createPortal(<div

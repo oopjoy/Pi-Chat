@@ -1,4 +1,5 @@
 import type { LocalFailureNotice } from "../../shared/assistant-error";
+import { ErrorDetail } from "./ErrorDetail";
 
 /**
  * Persistent in-transcript record of the Runtime failures that never produced an
@@ -11,8 +12,7 @@ export function LocalFailureList({ failures }: { failures: LocalFailureNotice[] 
     <article className="message message-assistant message-local-failure" key={failure.id}>
       <div className="message-content">
         <div className="message-error" role="status">
-          <strong className="message-error-title">{failure.title}</strong>
-          <p className="message-error-detail">{failure.detail}</p>
+          <ErrorDetail detail={failure.detail} />
           {/* These entries sit at the end of the transcript, so the time keeps an
               older failure from reading as part of the newest turn. */}
           <span className="message-error-time">{failureTime(failure.at)}</span>

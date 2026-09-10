@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { JSDOM } from "jsdom";
 import { readFileSync } from "node:fs";
 import { ConversationProcess, formatRunDuration } from "../src/web/components/ConversationProcess";
+import { ErrorDetail, shouldFoldErrorDetail } from "../src/web/components/ErrorDetail";
 import { LocalFailureList } from "../src/web/components/LocalFailureList";
 import { assistantCopyText, assistantGeneratedAt, assistantModelLabel, assistantThinkingLabel, ChatMessage, shouldFoldUserText, userSentAt, USER_MESSAGE_FOLD_LINE_LIMIT } from "../src/web/components/ChatMessage";
 
@@ -336,8 +337,9 @@ test("a settled failed attempt renders its provider reason instead of vanishing"
     },
   }));
   assert.match(html, /class="message-error"/);
-  assert.match(html, /模型服务凭据不可用（HTTP 503）/);
+  assert.match(html, /OpenAI API error \(503\)/);
   assert.match(html, /auth_unavailable/);
+  assert.doesNotMatch(html, /message-error-title/);
 });
 
 test("an ordinary empty assistant placeholder still renders nothing", () => {
@@ -359,8 +361,9 @@ test("a Runtime failure entry stays in the conversation body", () => {
     }],
   }));
   assert.match(html, /class="message message-assistant message-local-failure"/);
-  assert.match(html, /模型服务凭据不可用（HTTP 503）/);
+  assert.match(html, /auth_unavailable: no auth available/);
   assert.match(html, /PC-HW9KS-JE/);
+  assert.doesNotMatch(html, /message-error-title/);
   assert.equal(
     renderToStaticMarkup(React.createElement(LocalFailureList, { failures: [] })),
     "",
@@ -387,8 +390,55 @@ test("a failed attempt without a recorded route paints no route line", () => {
   const html = renderToStaticMarkup(createElement(ChatMessage, {
     message: { role: "assistant", content: [], stopReason: "error", errorMessage: "boom", timestamp: 1 },
   }));
-  assert.match(html, /message-error-title/);
+  assert.match(html, /message-error-detail/);
   assert.doesNotMatch(html, /message-error-route/);
+});
+
+test("an error detail retains every line and folds only after ten", async () => {
+  const elevenLines = Array.from({ length: 11 }, (_, index) => `line ${index + 1}`).join("\n");
+  assert.equal(shouldFoldErrorDetail(Array.from({ length: 10 }, (_, index) => `line ${index + 1}`).join("\n")), false);
+  assert.equal(shouldFoldErrorDetail(elevenLines), true);
+  const folded = renderToStaticMarkup(createElement(ErrorDetail, { detail: elevenLines }));
+  assert.match(folded, /message-error-detail is-collapsed/);
+  assert.match(folded, /展开全部/);
+  assert.match(folded, /line 1\nline 2/);
+
+  const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>");
+  Object.assign(globalThis, {
+    window: dom.window,
+    document: dom.window.document,
+    HTMLElement: dom.window.HTMLElement,
+    IS_REACT_ACT_ENVIRONMENT: true,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(ErrorDetail, { detail: elevenLines })));
+    const detail = dom.window.document.querySelector(".message-error-detail")!;
+    const toggle = dom.window.document.querySelector<HTMLButtonElement>(".message-error-fold-toggle")!;
+    assert.equal(detail.classList.contains("is-collapsed"), true);
+    assert.equal(toggle.textContent, "展开全部");
+    await act(async () => toggle.click());
+    assert.equal(detail.classList.contains("is-collapsed"), false);
+    assert.equal(toggle.textContent, "收起");
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
+});
+
+test("a streamed error card is expanded and contains its exact provider body", () => {
+  const detail = "error: upstream rejected\n  at gateway:42\n  retry: 3";
+  const html = renderToStaticMarkup(createElement(ChatMessage, {
+    streaming: true,
+    message: {
+      role: "assistant",
+      content: [],
+      errorMessage: detail,
+      piChatLiveMessageId: "live-error-1",
+    },
+  }));
+  assert.match(html, /error: upstream rejected\n  at gateway:42\n  retry: 3/);
+  assert.doesNotMatch(html, /message-error-detail is-collapsed/);
 });
 
 test("a retained Runtime failure card shows when it happened", () => {

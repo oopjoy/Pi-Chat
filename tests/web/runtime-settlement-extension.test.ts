@@ -413,6 +413,61 @@ test("authoritative checkpoints and append deltas stream through the existing br
   }
 });
 
+test("a streamed error body uses the same browser throttle and preserves line breaks", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  Object.assign(api, {
+    bootstrap: async () => bootstrap,
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.emitPi({
+        type: "agent_start",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+      });
+      source.emitPi({
+        type: "message_checkpoint",
+        piChatStreamSchema: 1,
+        piChatSequence: 0,
+        piChatStreamStart: true,
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        message: {
+          role: "assistant",
+          content: [],
+          errorMessage: "upstream error:\n",
+          piChatLiveMessageId: "live-browser-error-1",
+        },
+      });
+      source.emitPi({
+        type: "message_delta",
+        piChatStreamSchema: 1,
+        piChatSequence: 1,
+        piChatSessionId: activeId,
+        piChatRunGeneration: 1,
+        piChatLiveMessageId: "live-browser-error-1",
+        operations: [{ contentIndex: -1, field: "errorMessage", append: "  retry 1 failed\n  retry 2 failed" }],
+      });
+      await new Promise((resolve) => dom.window.setTimeout(resolve, 80));
+    });
+    const detail = dom.window.document.querySelector<HTMLPreElement>(".message-error-detail")!;
+    assert.equal(detail.textContent, "upstream error:\n  retry 1 failed\n  retry 2 failed");
+    assert.equal(detail.classList.contains("is-collapsed"), false, "live errors stay expanded");
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("a missing stream sequence closes the lease and reconnects for a fresh checkpoint", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");

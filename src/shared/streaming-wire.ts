@@ -6,8 +6,9 @@ export const MESSAGE_CHECKPOINT_EVENT = "message_checkpoint" as const;
 export const MESSAGE_DELTA_EVENT = "message_delta" as const;
 
 export interface StreamingMessageAppend {
+  /** -1 targets the assistant error body; non-negative values target content. */
   contentIndex: number;
-  field: "text" | "thinking";
+  field: "text" | "thinking" | "errorMessage";
   append: string;
 }
 
@@ -38,7 +39,10 @@ function jsonIdentity(value: unknown): string | null {
 }
 
 function messageMetadata(message: PiMessage): Record<string, unknown> {
-  const { content: _content, ...metadata } = message;
+  // `errorMessage` is a streamed append target, like a text block. Keeping it
+  // out of static metadata lets a growing Runtime error use the delta wire
+  // instead of forcing a complete checkpoint every time it gains a line.
+  const { content: _content, errorMessage: _errorMessage, ...metadata } = message;
   return metadata;
 }
 
@@ -55,7 +59,7 @@ function appendOperation(
   previous: string,
   next: string,
   contentIndex: number,
-  field: "text" | "thinking",
+  field: StreamingMessageAppend["field"],
 ): StreamingMessageAppend | null | false {
   if (!next.startsWith(previous)) return false;
   const append = next.slice(previous.length);
@@ -75,15 +79,21 @@ export function streamingMessageAppends(
     || jsonIdentity(messageMetadata(previous)) !== jsonIdentity(messageMetadata(next))
   ) return null;
 
+  const operations: StreamingMessageAppend[] = [];
+  const errorOperation = appendOperation(previous.errorMessage || "", next.errorMessage || "", -1, "errorMessage");
+  if (errorOperation === false) return null;
+  if (errorOperation) operations.push(errorOperation);
+
   if (typeof previous.content === "string" || typeof next.content === "string") {
     if (typeof previous.content !== "string" || typeof next.content !== "string") return null;
     const operation = appendOperation(previous.content, next.content, 0, "text");
-    return operation === false ? null : operation ? [operation] : [];
+    if (operation === false) return null;
+    if (operation) operations.push(operation);
+    return operations;
   }
   if (!Array.isArray(previous.content) || !Array.isArray(next.content)) return null;
   if (previous.content.length !== next.content.length) return null;
 
-  const operations: StreamingMessageAppend[] = [];
   for (let index = 0; index < previous.content.length; index += 1) {
     const before = previous.content[index];
     const after = next.content[index];
@@ -201,29 +211,32 @@ export function applyStreamingDelta(
     || event.operations.length > 256
   ) return null;
 
-  const content = typeof previous.message.content === "string"
+  let content = typeof previous.message.content === "string"
     ? previous.message.content
     : Array.isArray(previous.message.content)
       ? previous.message.content.map((block) => ({ ...block }))
       : undefined;
-  if (typeof content === "string" && event.operations.length !== 1) return null;
+  let errorMessage = previous.message.errorMessage;
   for (const raw of event.operations) {
     if (!raw || typeof raw !== "object") return null;
     const operation = raw as unknown as StreamingMessageAppend;
     if (
       !Number.isInteger(operation.contentIndex)
-      || operation.contentIndex < 0
-      || operation.contentIndex >= 256
-      || (operation.field !== "text" && operation.field !== "thinking")
+      || (operation.field === "errorMessage"
+        ? operation.contentIndex !== -1
+        : operation.contentIndex < 0 || operation.contentIndex >= 256)
+      || (operation.field !== "text" && operation.field !== "thinking" && operation.field !== "errorMessage")
       || typeof operation.append !== "string"
       || operation.append.length > 1_000_000
     ) return null;
+    if (operation.field === "errorMessage") {
+      errorMessage = (errorMessage || "") + operation.append;
+      continue;
+    }
     if (typeof content === "string") {
       if (operation.contentIndex !== 0 || operation.field !== "text") return null;
-      return {
-        message: { ...previous.message, content: content + operation.append },
-        sequence: event.piChatSequence,
-      };
+      content += operation.append;
+      continue;
     }
     if (!Array.isArray(content)) return null;
     const block = content[operation.contentIndex];
@@ -232,7 +245,11 @@ export function applyStreamingDelta(
     else block.thinking = (block.thinking || "") + operation.append;
   }
   return {
-    message: { ...previous.message, content },
+    message: {
+      ...previous.message,
+      content,
+      ...(errorMessage !== undefined ? { errorMessage } : null),
+    },
     sequence: event.piChatSequence,
   };
 }

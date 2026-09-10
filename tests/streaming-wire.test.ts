@@ -151,7 +151,7 @@ test("browser delta application rejects missing, duplicate, and mismatched seque
   assert.equal(applyStreamingDelta(undefined, valid), null);
 });
 
-test("a streamed failed attempt carries its bounded provider reason to the transcript", () => {
+test("a streamed failed attempt carries its complete provider reason to the transcript", () => {
   const failed = canonicalPiMessage({
     role: "assistant",
     content: [],
@@ -161,14 +161,16 @@ test("a streamed failed attempt carries its bounded provider reason to the trans
   assert.equal(failed?.stopReason, "error");
   assert.equal(failed?.errorMessage, "OpenAI API error (503): auth_unavailable");
 
-  // Oversized and non-string reasons must not drop the terminal message itself.
+  // Error details are transcript data, not a preview: all received characters
+  // and line breaks survive the canonical wire payload.
+  const body = `line 1\n${"x".repeat(5_000)}\nline 3`;
   const oversized = canonicalPiMessage({
     role: "assistant",
     content: [],
     stopReason: "error",
-    errorMessage: "x".repeat(5_000),
+    errorMessage: body,
   });
-  assert.equal(oversized?.errorMessage?.length, 1_200);
+  assert.equal(oversized?.errorMessage, body);
   const malformed = canonicalPiMessage({
     role: "assistant",
     content: [],
@@ -177,4 +179,50 @@ test("a streamed failed attempt carries its bounded provider reason to the trans
   });
   assert.equal(malformed?.errorMessage, undefined);
   assert.equal(malformed?.stopReason, "error");
+});
+
+test("a growing error body uses the SSE append stream", () => {
+  const initial = message([]);
+  const first = projectStreamingWireEvent(undefined, {
+    ...event("message_start", []),
+    message: { ...initial, errorMessage: "upstream error:\n" },
+  });
+  assert.equal(first?.event?.type, "message_checkpoint");
+
+  const second = projectStreamingWireEvent(first?.projection, {
+    ...event("message_update", []),
+    message: { ...initial, errorMessage: "upstream error:\n  retry 1 failed\n" },
+  });
+  assert.deepEqual(second?.event && "operations" in second.event ? second.event.operations : null, [
+    { contentIndex: -1, field: "errorMessage", append: "  retry 1 failed\n" },
+  ]);
+  const browser = applyStreamingDelta(
+    { message: first!.projection.message, sequence: first!.projection.sequence },
+    second?.event || {},
+  );
+  assert.equal(browser?.message.errorMessage, "upstream error:\n  retry 1 failed\n");
+});
+
+test("an error append and answer append share one ordered stream delta", () => {
+  const firstMessage = message([{ type: "text", text: "partial answer" }]);
+  const first = projectStreamingWireEvent(undefined, {
+    ...event("message_start", firstMessage.content),
+    message: { ...firstMessage, errorMessage: "provider log:\n" },
+  });
+  const nextMessage = {
+    ...firstMessage,
+    content: [{ type: "text" as const, text: "partial answer continued" }],
+    errorMessage: "provider log:\nretry failed",
+  };
+  const second = projectStreamingWireEvent(first?.projection, {
+    ...event("message_update", nextMessage.content),
+    message: nextMessage,
+  });
+  assert.deepEqual(second?.event && "operations" in second.event ? second.event.operations : null, [
+    { contentIndex: -1, field: "errorMessage", append: "retry failed" },
+    { contentIndex: 0, field: "text", append: " continued" },
+  ]);
+  const browser = applyStreamingDelta(first?.projection, second?.event || {});
+  assert.equal(browser?.message.errorMessage, nextMessage.errorMessage);
+  assert.deepEqual(browser?.message.content, nextMessage.content);
 });

@@ -152,7 +152,7 @@ export interface PiMessage {
   tokensBefore?: number;
   timestamp?: number;
   stopReason?: string;
-  /** Pi-provided reason for a failed attempt; rendered as a bounded error notice. */
+  /** Pi-provided reason for a failed attempt; rendered as its complete redacted body. */
   errorMessage?: string;
   provider?: string;
   model?: string;
