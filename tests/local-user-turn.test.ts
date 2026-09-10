@@ -20,6 +20,12 @@ test("diagnoseVisibleUserTurnDuplicates classifies local plus persisted duplicat
   assert.equal("content" in result[0], false);
 });
 
+test("the pending overlay is suppressed by the latest persisted echo", () => {
+  const pending: PiMessage = { role: "user", content: "same prompt", timestamp: 42 };
+  const persisted = { ...pending, piChatPersistedMessageId: "persisted-1" };
+  assert.deepEqual(appendPendingUserMessage([previous, persisted], pending), [previous, persisted]);
+});
+
 test("the immediate composer overlay does not duplicate its protected local turn", () => {
   const localWithTimestamp: PiMessage = { role: "user", content: "submitted just now", timestamp: 42 };
   assert.deepEqual(appendPendingUserMessage([previous, localWithTimestamp], localWithTimestamp), [previous, localWithTimestamp]);

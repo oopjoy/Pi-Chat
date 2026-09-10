@@ -345,7 +345,19 @@ export interface ProtectedTranscript {
  * must remain separate turns.
  */
 export function appendPendingUserMessage(messages: PiMessage[], pending: PiMessage | null): PiMessage[] {
-  return !pending || messages.includes(pending) ? messages : [...messages, pending];
+  if (!pending || messages.includes(pending)) return messages;
+  // The persisted echo can be a different object from the short-lived overlay.
+  // Only reconcile the overlay against the *latest* persisted User row with an
+  // explicit persisted identity and the same timestamp/payload. This avoids
+  // collapsing two genuine identical prompts elsewhere in the transcript.
+  const latestUser = [...messages].reverse().find((message) => message.role === "user");
+  const alreadyPersisted = Boolean(
+    latestUser?.piChatPersistedMessageId &&
+    sameUserInstruction(latestUser, pending) &&
+    typeof pending.timestamp === "number" && Number.isFinite(pending.timestamp) &&
+    latestUser.timestamp === pending.timestamp,
+  );
+  return alreadyPersisted ? messages : [...messages, pending];
 }
 
 /**
