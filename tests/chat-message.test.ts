@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { JSDOM } from "jsdom";
 import { readFileSync } from "node:fs";
 import { ConversationProcess, formatRunDuration } from "../src/web/components/ConversationProcess";
+import { LocalFailureList } from "../src/web/components/LocalFailureList";
 import { assistantCopyText, assistantGeneratedAt, assistantModelLabel, assistantThinkingLabel, ChatMessage, shouldFoldUserText, userSentAt, USER_MESSAGE_FOLD_LINE_LIMIT } from "../src/web/components/ChatMessage";
 
 test("user messages stay literal instead of rendering incomplete Markdown or math", () => {
@@ -344,4 +345,24 @@ test("an ordinary empty assistant placeholder still renders nothing", () => {
     message: { role: "assistant", content: [] },
   }));
   assert.equal(html, "");
+});
+
+test("a Runtime failure entry stays in the conversation body", () => {
+  const html = renderToStaticMarkup(React.createElement(LocalFailureList, {
+    failures: [{
+      id: "s:1:x",
+      sessionId: "aaaaaaaaaaaaaaaaaaaa",
+      at: 1,
+      kind: "authority",
+      title: "模型服务凭据不可用（HTTP 503）",
+      detail: 'auth_unavailable: no auth available（事件 ID：PC-HW9KS-JE）',
+    }],
+  }));
+  assert.match(html, /class="message message-assistant message-local-failure"/);
+  assert.match(html, /模型服务凭据不可用（HTTP 503）/);
+  assert.match(html, /PC-HW9KS-JE/);
+  assert.equal(
+    renderToStaticMarkup(React.createElement(LocalFailureList, { failures: [] })),
+    "",
+  );
 });

@@ -1,6 +1,7 @@
 import { Fragment, Profiler, useMemo, type ComponentProps, type RefObject } from "react";
 import type { PendingSteer, PiMessage, PiState, SessionForkOrigin } from "../../shared/types";
 import { appendPendingUserMessage } from "../lib/local-user-turn";
+import type { LocalFailureNotice } from "../../shared/assistant-error";
 import {
   reactRenderBenchmarkEnabled,
   recordReactRenderBenchmarkCommit,
@@ -13,6 +14,7 @@ import { CoordinationMessage } from "./CoordinationMessage";
 import { ConversationProcess } from "./ConversationProcess";
 import { FolderIcon, PiMarkIcon } from "./Icons";
 import { PendingSteers } from "./PendingSteers";
+import { LocalFailureList } from "./LocalFailureList";
 import { PromptQueue } from "./PromptQueue";
 import { SessionControlBanner } from "./SessionControlBanner";
 import { SessionForkBanner } from "./SessionForkBanner";
@@ -64,6 +66,8 @@ export interface ConversationPaneProps {
   sessionControl: ComponentProps<typeof SessionControlBanner>;
   promptQueue: ComponentProps<typeof PromptQueue>;
   pendingSteers: ComponentProps<typeof PendingSteers>;
+  /** Browser-local failures kept in the conversation body for this Session. */
+  localFailures: LocalFailureNotice[];
   chatInput: ComponentProps<typeof ChatInput>;
 }
 
@@ -112,6 +116,7 @@ export function ConversationPane({
   sessionControl,
   promptQueue,
   pendingSteers,
+  localFailures,
   chatInput,
 }: ConversationPaneProps) {
   const conversationItems = useMemo(
@@ -285,6 +290,7 @@ export function ConversationPane({
           <span className="loader small" />
           {toolStatus}
         </div>}
+        <LocalFailureList failures={localFailures} />
       </div>
     </div>
     <nav className="conversation-nav" aria-label="对话导航">

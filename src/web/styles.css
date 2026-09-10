@@ -1186,3 +1186,7 @@ button.ask-questionnaire-option:hover:not(:disabled) { background: var(--surface
   .subagent-status-row.is-failed .subagent-status-dot { border: 3px double Highlight; background: Canvas; }
   .subagent-status-row.is-cancelled .subagent-status-dot { height: 3px; margin-top: 7px; border-radius: 0; background: CanvasText; }
 }
+/* A Runtime failure that never produced an assistant message keeps a permanent
+   place in the conversation body instead of only a five-second toast. */
+.message-local-failure { margin: 8px 0 0; }
+.message-local-failure .message-content { max-width: 100%; }

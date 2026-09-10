@@ -107,6 +107,12 @@ import {
   recordBrowserStateDiagnostic,
 } from "./lib/state-diagnostics";
 import {
+  isTranscriptWorthyFailure,
+  localFailureNotice,
+  withoutPersistedFailure,
+  type LocalFailureNotice,
+} from "../shared/assistant-error";
+import {
   BrowserStreamDiagnosticsAggregator,
   type LiveMessageSchedulerOutcome,
 } from "./lib/stream-observability";
@@ -731,6 +737,27 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     useState<AppearancePreferences>(loadAppearance);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  /**
+   * Runtime/upstream failures stay in the conversation body instead of only
+   * flashing the five-second toast, so the user can still read what happened.
+   * Browser-local only: these entries never reach Pi or a provider payload.
+   */
+  const [localFailures, setLocalFailures] = useState<LocalFailureNotice[]>([]);
+  const recordLocalFailure = useCallback(
+    (sessionId: string, rawText: string, incidentId?: string): void => {
+      if (!sessionId) return;
+      const notice = localFailureNotice(sessionId, rawText, incidentId);
+      setLocalFailures((current) => {
+        if (current.some((entry) => entry.id === notice.id)) return current;
+        // One Session keeps its recent reasons; the whole list stays bounded so a
+        // retry loop cannot grow the projection without limit.
+        const sameSession = current.filter((entry) => entry.sessionId === sessionId);
+        const drop = sameSession.length >= 3 ? new Set([sameSession[0].id]) : undefined;
+        return [...current.filter((entry) => !drop?.has(entry.id)), notice].slice(-20);
+      });
+    },
+    [],
+  );
   const {
     toolStatus,
     extensionRequest,
@@ -5385,6 +5412,9 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
             /^PC-[A-Z0-9_-]{8}$/.test(event.incidentId)
               ? event.incidentId
               : undefined;
+          // A Runtime failure keeps its reason in this Session's transcript, not
+          // only in the five-second toast that the user cannot revisit.
+          if (errorText) recordLocalFailure(eventSessionId, errorText, incidentId);
           const error = errorText
             ? incidentId
               ? `${errorText}（事件 ID：${incidentId}）`
@@ -6835,6 +6865,21 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       // admission as hidden `waiting` merely because its old pane token expired.
       const localEntry = localTurnEntry();
       const resultPending = resultPendingError(cause);
+      {
+        // A failed upstream call never becomes an assistant message, so its reason
+        // is kept in the transcript instead of only in the five-second toast.
+        // Input validation stays a toast: the composer already explains it.
+        const failureText = cause instanceof Error ? cause.message : String(cause);
+        const failureStatus = cause instanceof ApiRequestError ? cause.status : undefined;
+        const failureCode = cause instanceof ApiRequestError ? cause.code : undefined;
+        if (targetSessionId && !resultPending && !steering
+          && isTranscriptWorthyFailure(failureText, failureStatus, failureCode))
+          recordLocalFailure(
+            targetSessionId,
+            failureText,
+            cause instanceof ApiRequestError ? cause.incidentId : undefined,
+          );
+      }
       if (modelUnavailableError(cause))
         // The Runtime rejected this Model, so the staged selection can never be
         // applied to this Session by retrying the same prompt. Dropping it makes
@@ -9384,6 +9429,14 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           void viewSession(origin.sourceSessionId, origin.sourceName);
         }}
         pendingUserMessage={pendingUserMessage}
+        localFailures={
+          viewedSessionId
+            ? withoutPersistedFailure(
+                localFailures.filter((entry) => entry.sessionId === viewedSessionId),
+                messages,
+              )
+            : []
+        }
         liveMessage={liveMessage}
         localDraft={localDraft}
         composerHasContent={composerHasContent}

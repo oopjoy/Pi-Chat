@@ -4,7 +4,11 @@ import {
   ASSISTANT_ERROR_DETAIL_LIMIT,
   assistantErrorNotice,
   boundedAssistantErrorDetail,
+  classifyFailureReason,
+  isTranscriptWorthyFailure,
   isAssistantErrorStop,
+  localFailureNotice,
+  withoutPersistedFailure,
 } from "../src/shared/assistant-error";
 import type { PiMessage } from "../src/shared/types";
 
@@ -68,4 +72,68 @@ test("the rendered detail is collapsed and bounded", () => {
   assert.equal(notice.detail.length <= ASSISTANT_ERROR_DETAIL_LIMIT, true);
   assert.doesNotMatch(notice.detail, /\n/);
   assert.equal(boundedAssistantErrorDetail("  a\n b  "), "a b");
+});
+
+test("a Runtime failure that never produced a message keeps a transcript entry", () => {
+  const notice = localFailureNotice(
+    "aaaaaaaaaaaaaaaaaaaa",
+    'OpenAI API error (503): {"message":"auth_unavailable: no auth available"}',
+    "PC-HW9KS-JE",
+    1_000,
+  );
+  assert.equal(notice.title, "模型服务凭据不可用（HTTP 503）");
+  assert.match(notice.detail, /事件 ID：PC-HW9KS-JE/);
+  assert.equal(notice.sessionId, "aaaaaaaaaaaaaaaaaaaa");
+  assert.equal(notice.at, 1_000);
+});
+
+test("a dead Runtime process reports its own category", () => {
+  assert.equal(localFailureNotice("s", "Pi RPC 已退出").title, "Pi Runtime 已退出");
+  assert.equal(localFailureNotice("s", "Pi 未能完成这次请求").title, "模型调用失败");
+  assert.equal(localFailureNotice("s", "fetch failed").title, "与模型服务的连接中断");
+});
+
+test("the same failure frame is recorded once and never grows unbounded", () => {
+  const one = localFailureNotice("s", "boom", undefined, 5);
+  const same = localFailureNotice("s", "boom", undefined, 5);
+  assert.equal(one.id, same.id);
+  assert.notEqual(one.id, localFailureNotice("s", "boom", undefined, 6).id);
+});
+
+test("a persisted failed attempt suppresses its duplicate local entry", () => {
+  const failure = localFailureNotice("s", "OpenAI API error (503): auth_unavailable", undefined, 10_000);
+  const persisted: PiMessage = {
+    role: "assistant",
+    content: [],
+    stopReason: "error",
+    errorMessage: "OpenAI API error (503): auth_unavailable",
+    timestamp: 11_000,
+  };
+  assert.deepEqual(withoutPersistedFailure([failure], [persisted]), []);
+
+  // An unrelated failed attempt elsewhere in the transcript must not hide it.
+  const unrelated: PiMessage = { ...persisted, timestamp: 900_000 };
+  assert.deepEqual(withoutPersistedFailure([failure], [unrelated]), [failure]);
+  assert.deepEqual(withoutPersistedFailure([failure], []), [failure]);
+});
+
+test("upstream and Runtime failures earn a transcript entry while validation does not", () => {
+  // Upstream/Runtime failures: the reason must survive in the conversation.
+  assert.equal(isTranscriptWorthyFailure("OpenAI API error (503): auth_unavailable"), true);
+  assert.equal(isTranscriptWorthyFailure("boom", 503), true);
+  assert.equal(isTranscriptWorthyFailure("Pi RPC 已退出"), true);
+  assert.equal(isTranscriptWorthyFailure("fetch failed"), true);
+  assert.equal(isTranscriptWorthyFailure("所选模型不可用", 400, "MODEL_UNAVAILABLE"), true);
+  // Client-side rejections and user aborts stay transient.
+  assert.equal(isTranscriptWorthyFailure("当前对话已不再运行，无法发送 Steer 消息", 409), false);
+  assert.equal(isTranscriptWorthyFailure("This operation was aborted"), false);
+  assert.equal(isTranscriptWorthyFailure("结果尚未确认", 409, "RESULT_PENDING"), false);
+});
+
+test("the classifier exposes a stable kind next to the provider wording", () => {
+  assert.equal(classifyFailureReason("OpenAI API error (503): auth_unavailable").kind, "authority");
+  assert.equal(classifyFailureReason("OpenAI API error (429): rate limited").kind, "rate-limit");
+  assert.equal(classifyFailureReason("Pi RPC 已退出").kind, "runtime-gone");
+  assert.equal(classifyFailureReason("This operation was aborted").kind, "aborted");
+  assert.equal(classifyFailureReason("something else entirely").kind, "unknown");
 });
