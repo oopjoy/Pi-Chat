@@ -112,6 +112,10 @@ test("a persisted failed attempt suppresses its duplicate local entry", () => {
   };
   assert.deepEqual(withoutPersistedFailure([failure], [persisted]), []);
 
+  // A different failure must not be hidden by any persisted one nearby.
+  const runtimeExit = { ...failure, kind: "runtime-gone" as const, id: "s:2:runtime", title: "Pi Runtime 已退出" };
+  assert.deepEqual(withoutPersistedFailure([runtimeExit], [persisted]), [runtimeExit]);
+
   // An unrelated failed attempt elsewhere in the transcript must not hide it.
   const unrelated: PiMessage = { ...persisted, timestamp: 900_000 };
   assert.deepEqual(withoutPersistedFailure([failure], [unrelated]), [failure]);

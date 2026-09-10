@@ -163,11 +163,21 @@ export function withoutPersistedFailure(
   windowMs = 120_000,
 ): LocalFailureNotice[] {
   if (!failures.length) return [];
-  const persisted = messages.filter((message) => isAssistantErrorStop(message));
+  const persisted = messages
+    .filter((message) => isAssistantErrorStop(message))
+    .map((message) => ({
+      kind: classifyFailureReason((message.errorMessage || "").trim()).kind,
+      timestamp:
+        typeof message.timestamp === "number" && Number.isFinite(message.timestamp)
+          ? message.timestamp
+          : undefined,
+    }));
   if (!persisted.length) return [...failures];
-  return failures.filter((failure) => !persisted.some((message) =>
-    typeof message.timestamp === "number" && Number.isFinite(message.timestamp)
-      ? Math.abs(message.timestamp - failure.at) <= windowMs
-      : true,
+  // Suppress only a likely duplicate: the same category of failure, close in
+  // time. Proximity alone would hide a different failure that happened shortly
+  // after a persisted one, which is exactly the reason this entry exists.
+  return failures.filter((failure) => !persisted.some((entry) =>
+    entry.kind === failure.kind
+    && (entry.timestamp === undefined || Math.abs(entry.timestamp - failure.at) <= windowMs),
   ));
 }
