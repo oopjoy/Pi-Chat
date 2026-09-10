@@ -809,3 +809,47 @@ test("an ordinary empty assistant placeholder is still dropped", () => {
   const items = groupConversation([{ role: "assistant", content: [], timestamp: 1_000 }], {});
   assert.equal(items.filter((item) => item.kind === "message").length, 0);
 });
+
+test("a tool-calling attempt that also failed still shows its reason", () => {
+  // A row can carry tool calls and end in an error; the process card keeps the
+  // work and the failure card keeps the reason.
+  const failedWithTools: PiMessage = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "ls" } }],
+    stopReason: "error",
+    errorMessage: "stream terminated by RST_STREAM",
+    timestamp: 1_000,
+  };
+  const items = groupConversation([{ role: "user", content: "run it", timestamp: 900 }, failedWithTools], {});
+  const card = items.find((item) => item.kind === "message" && item.message.role === "assistant");
+  assert.ok(card, "the reason reaches the transcript");
+  assert.match(renderToStaticMarkup(createElement(ChatMessage, { message: card!.message })), /message-error/);
+  assert.equal(items.some((item) => item.kind === "process" && item.entries.length > 0), true, "the tool work is kept");
+});
+
+test("a burst replacement keeps the metadata decision of the card it replaces", () => {
+  // The first attempt renders its model line inside the process card; the
+  // replacement must not render a second one for a different attempt.
+  const attempt = (timestamp: number): PiMessage => ({
+    role: "assistant",
+    content: [],
+    stopReason: "error",
+    errorMessage: "OpenAI API error (503): auth_unavailable",
+    provider: "cpa-proxy",
+    model: "gpt-6-astra",
+    timestamp,
+  });
+  const items = groupConversation([
+    { role: "user", content: "go", timestamp: 100 },
+    { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "bash", arguments: {} }], stopReason: "toolUse", timestamp: 110 },
+    attempt(120),
+    attempt(130),
+  ], {});
+  const cards = items.filter((item) => item.kind === "message" && item.message.stopReason === "error");
+  assert.equal(cards.length, 1);
+  assert.equal(
+    (cards[0] as { hideAssistantMetadata?: boolean }).hideAssistantMetadata,
+    true,
+    "the replacement inherits the decision instead of re-showing metadata",
+  );
+});

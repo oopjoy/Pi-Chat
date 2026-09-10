@@ -94,11 +94,13 @@ test("a dead Runtime process reports its own category", () => {
   assert.equal(localFailureNotice("s", "fetch failed").title, "与模型服务的连接中断");
 });
 
-test("the same failure frame is recorded once and never grows unbounded", () => {
+test("failure identity is content-keyed, so a redelivery keeps the same id", () => {
   const one = localFailureNotice("s", "boom", undefined, 5);
-  const same = localFailureNotice("s", "boom", undefined, 5);
-  assert.equal(one.id, same.id);
-  assert.notEqual(one.id, localFailureNotice("s", "boom", undefined, 6).id);
+  const redelivered = localFailureNotice("s", "boom", undefined, 5_004);
+  assert.equal(one.id, redelivered.id, "arrival time is not part of the identity");
+  assert.equal(one.at, 5, "the time is retained for display");
+  assert.notEqual(one.id, localFailureNotice("s", "different", undefined, 5).id);
+  assert.notEqual(one.id, localFailureNotice("other", "boom", undefined, 5).id);
 });
 
 test("a persisted failed attempt suppresses its duplicate local entry", () => {
@@ -182,4 +184,65 @@ test("the route line is bounded and cannot smuggle control characters", () => {
   assert.equal(failureRoute("  ", "", undefined), undefined);
   // Duplicated identity is not repeated.
   assert.equal(failureRoute("p", "p", undefined), "p");
+});
+
+test("a broken stream is a connection failure, never a user abort", () => {
+  // Regression: `terminated` used to classify as an abort, which made the reason
+  // ineligible for a transcript entry, so a killed stream was silently dropped.
+  assert.equal(classifyFailureReason("stream terminated by RST_STREAM").kind, "connection");
+  assert.equal(classifyFailureReason("upstream terminated by peer").kind, "connection");
+  assert.equal(isTranscriptWorthyFailure("stream terminated by RST_STREAM"), true);
+  // A real user abort still stays transient and still reads as an abort.
+  assert.equal(classifyFailureReason("This operation was aborted").kind, "aborted");
+  assert.equal(isTranscriptWorthyFailure("This operation was aborted"), false);
+});
+
+test("the last recorded status is the one the client saw", () => {
+  const notice = classifyFailureReason("Error: upstream returned (502) while proxying; client saw (503)");
+  assert.match(notice.title, /HTTP 503/);
+});
+
+test("only a well-formed incident identifier is echoed", () => {
+  // A string that merely contains an identifier must not smuggle its payload in.
+  const smuggled = localFailureNotice("s", "Pi RPC 已退出", `PC-ABCDEFGH${"x".repeat(200)}`, 1);
+  assert.equal(smuggled.detail.includes("x"), false);
+  assert.equal(/PC-/.test(smuggled.detail), false);
+  assert.ok(smuggled.id.length < 200, "the id cannot inherit unbounded text");
+
+  // The real shape the server issues is echoed and names the incident.
+  const real = localFailureNotice("s", "Pi RPC 已退出", "PC-ABCDEFGH", 1);
+  assert.match(real.detail, /PC-ABCDEFGH/);
+  assert.equal(real.id, "s:PC-ABCDEFGH");
+});
+
+test("a credential echoed by a provider is hidden before it renders", () => {
+  const notice = classifyFailureReason("Incorrect API key provided: sk-live-abcdefghijklmnopqrstuvwxyz012345");
+  assert.equal(notice.detail.includes("sk-live-abcdefghijklmnopqrstuvwxyz012345"), false);
+  assert.match(notice.detail, /已隐藏/);
+  const bearer = classifyFailureReason("Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123456789");
+  assert.equal(bearer.detail.includes("abcdefghijklmnopqrstuvwxyz0123456789"), false);
+  // Ordinary prose and model names are untouched.
+  const plain = classifyFailureReason("OpenAI API error (503): auth_unavailable: no auth available");
+  assert.equal(plain.detail.includes("已隐藏"), false);
+});
+
+test("a persisted row without a usable time cannot suppress a later failure", () => {
+  const later = localFailureNotice("s", "fetch failed", undefined, 6_000_000);
+  const noTime: PiMessage = {
+    role: "assistant",
+    content: [],
+    stopReason: "error",
+    errorMessage: "fetch failed",
+  };
+  assert.deepEqual(
+    withoutPersistedFailure([later], [noTime]),
+    [later],
+    "an incomparable row must not hide the reason",
+  );
+});
+
+test("the route line cannot smuggle bidi overrides", () => {
+  const route = failureRoute("openai\u202Emoc.ytiruces", "gpt-6-astra", undefined);
+  assert.equal(route?.includes("\u202e"), false);
+  assert.equal(route, "openaimoc.ytiruces · gpt-6-astra", "format characters are stripped, not reordered");
 });

@@ -244,7 +244,10 @@ function processFromMessage(message: PiMessage): { entries: ProcessEntry[]; visi
     }
   }
 
-  if (hasToolCall) return { entries };
+  // A row can carry tool calls and still end in an error. Its process card shows
+  // the work, and the failure reason must appear as well rather than being lost
+  // behind the early return.
+  if (hasToolCall) return { entries, visibleMessage: failureVisibleMessage({ ...message, content: [] }) };
   const withoutThinking: PiMessage = { ...message, content: content.filter((block) => block.type !== "thinking") };
   return { entries, visibleMessage: visibleAssistantMessage(withoutThinking) ?? failureVisibleMessage(withoutThinking) };
 }
@@ -367,10 +370,17 @@ export function groupConversation(messages: PiMessage[], options: { liveMessage?
       // turn, instead of one card per attempt.
       const failureCard = isFailureOnlyMessage(visibleMessage);
       if (failureCard && failureCardIndex >= 0) {
+        // Keep the metadata decision of the item being replaced: when the first
+        // attempt of the burst already rendered its model line inside the process
+        // card, the replacement must not render a second one.
+        const replaced = items[failureCardIndex];
         items[failureCardIndex] = {
           kind: "message",
           message: visibleMessage,
           key: uniqueMessageKey(visibleMessage),
+          ...(replaced && replaced.kind === "message" && replaced.hideAssistantMetadata
+            ? { hideAssistantMetadata: true }
+            : null),
         };
         precedingProcessAnchor = compactContentKey(visibleMessage);
         continue;

@@ -1200,3 +1200,12 @@ button.ask-questionnaire-option:hover:not(:disabled) { background: var(--surface
   font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
 }
+
+/* When a retained Runtime failure happened, since these cards trail the transcript. */
+.message-error-time {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--muted, #6b7280);
+  font-variant-numeric: tabular-nums;
+}

@@ -13,8 +13,19 @@ export function LocalFailureList({ failures }: { failures: LocalFailureNotice[] 
         <div className="message-error" role="status">
           <strong className="message-error-title">{failure.title}</strong>
           <p className="message-error-detail">{failure.detail}</p>
+          {/* These entries sit at the end of the transcript, so the time keeps an
+              older failure from reading as part of the newest turn. */}
+          <span className="message-error-time">{failureTime(failure.at)}</span>
         </div>
       </div>
     </article>
   ))}</>;
+}
+
+function failureTime(at: number): string {
+  if (!Number.isFinite(at)) return "";
+  const date = new Date(at);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }

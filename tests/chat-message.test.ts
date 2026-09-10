@@ -390,3 +390,18 @@ test("a failed attempt without a recorded route paints no route line", () => {
   assert.match(html, /message-error-title/);
   assert.doesNotMatch(html, /message-error-route/);
 });
+
+test("a retained Runtime failure card shows when it happened", () => {
+  const at = new Date(2026, 8, 10, 18, 52, 10).getTime();
+  const html = renderToStaticMarkup(createElement(LocalFailureList, {
+    failures: [{
+      id: "s:1",
+      sessionId: "s",
+      at,
+      kind: "connection",
+      title: "与模型服务的连接中断",
+      detail: "stream terminated by RST_STREAM",
+    }],
+  }));
+  assert.match(html, /class="message-error-time">18:52</);
+});

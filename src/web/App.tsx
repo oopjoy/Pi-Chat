@@ -107,11 +107,16 @@ import {
   recordBrowserStateDiagnostic,
 } from "./lib/state-diagnostics";
 import {
+  DRAFT_FAILURE_SCOPE,
   isTranscriptWorthyFailure,
   localFailureNotice,
   withoutPersistedFailure,
   type LocalFailureNotice,
 } from "../shared/assistant-error";
+import {
+  forgetLocalFailuresForSession,
+  recordLocalFailureEntry,
+} from "./lib/local-failures";
 import {
   BrowserStreamDiagnosticsAggregator,
   type LiveMessageSchedulerOutcome,
@@ -744,17 +749,10 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
    */
   const [localFailures, setLocalFailures] = useState<LocalFailureNotice[]>([]);
   const recordLocalFailure = useCallback(
-    (sessionId: string, rawText: string, incidentId?: string): void => {
-      if (!sessionId) return;
-      const notice = localFailureNotice(sessionId, rawText, incidentId);
-      setLocalFailures((current) => {
-        if (current.some((entry) => entry.id === notice.id)) return current;
-        // One Session keeps its recent reasons; the whole list stays bounded so a
-        // retry loop cannot grow the projection without limit.
-        const sameSession = current.filter((entry) => entry.sessionId === sessionId);
-        const drop = sameSession.length >= 3 ? new Set([sameSession[0].id]) : undefined;
-        return [...current.filter((entry) => !drop?.has(entry.id)), notice].slice(-20);
-      });
+    (scope: string, rawText: string, incidentId?: string): void => {
+      if (!scope || !rawText.trim()) return;
+      const notice = localFailureNotice(scope, rawText.trim(), incidentId);
+      setLocalFailures((current) => recordLocalFailureEntry(current, notice));
     },
     [],
   );
@@ -5413,8 +5411,13 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
               ? event.incidentId
               : undefined;
           // A Runtime failure keeps its reason in this Session's transcript, not
-          // only in the five-second toast that the user cannot revisit.
-          if (errorText) recordLocalFailure(eventSessionId, errorText, incidentId);
+          // only in the five-second toast that the user cannot revisit. The text
+          // matches the toast's fallback so an empty frame still names the cause.
+          recordLocalFailure(
+            eventSessionId,
+            errorText || "Pi RPC 已退出",
+            incidentId || undefined,
+          );
           const error = errorText
             ? incidentId
               ? `${errorText}（事件 ID：${incidentId}）`
@@ -6353,6 +6356,9 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         });
         if (!promptOperationIsInCurrentRun()) return;
         targetSessionId = initial.sessionId;
+        // The draft's own failure reason is resolved once its first message is
+        // accepted; the Session that now exists keeps its own entries.
+        setLocalFailures((current) => forgetLocalFailuresForSession(current, DRAFT_FAILURE_SCOPE));
         promptQueueProjectionRevision =
           queueProjectionRevisionRef.current.get(targetSessionId) || 0;
         moveSessionBusyTo(targetSessionId);
@@ -6865,17 +6871,47 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       // admission as hidden `waiting` merely because its old pane token expired.
       const localEntry = localTurnEntry();
       const resultPending = resultPendingError(cause);
+      // Whether this failure is definite is decided before anything is recorded:
+      // a request that may still be executing must not leave a permanent failure
+      // card under a running turn.
+      const explicitClientRejection =
+        cause instanceof ApiRequestError &&
+        cause.status >= 400 &&
+        cause.status < 500 &&
+        !resultPending;
+      const outcomeUnknown =
+        resultPending ||
+        (promptSubmitted &&
+          (promptAcceptedByEvent ||
+            promptTerminalByEvent ||
+            !explicitClientRejection));
       {
         // A failed upstream call never becomes an assistant message, so its reason
         // is kept in the transcript instead of only in the five-second toast.
-        // Input validation stays a toast: the composer already explains it.
+        // Input validation stays a toast: the composer already explains it. A
+        // steer keeps the composer's own surface, and a failure whose outcome is
+        // unknown may still complete, so neither is recorded here.
         const failureText = cause instanceof Error ? cause.message : String(cause);
         const failureStatus = cause instanceof ApiRequestError ? cause.status : undefined;
         const failureCode = cause instanceof ApiRequestError ? cause.code : undefined;
-        if (targetSessionId && !resultPending && !steering
+        // A New draft's first message fails before the client learns the Session
+        // id, so its reason is kept under the draft scope and shown in that pane.
+        const scope = targetSessionId || (localDraftRef.current ? DRAFT_FAILURE_SCOPE : "");
+        // Whether the *reason* is definite is decided by the server's own signal,
+        // not by the broader client retention heuristic above: a returned 5xx is a
+        // definite failure, while only a written-but-unanswered RPC is ambiguous.
+        // A turn that SSE already proved accepted keeps running without a card, and
+        // if it fails later Pi persists the attempt, which renders on its own.
+        // Deliberate: a steer keeps the composer's own pending/steer surface, and
+        // only an ordinary prompt that produced no assistant message needs a card.
+        const failureIsDefinite =
+          !resultPending &&
+          !(cause instanceof ApiRequestError && cause.outcomeUnknown) &&
+          !(promptAcceptedByEvent && !promptTerminalByEvent);
+        if (scope && failureIsDefinite && !steering
           && isTranscriptWorthyFailure(failureText, failureStatus, failureCode))
           recordLocalFailure(
-            targetSessionId,
+            scope,
             failureText,
             cause instanceof ApiRequestError ? cause.incidentId : undefined,
           );
@@ -6886,21 +6922,10 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         // the pane fall back to the Runtime-confirmed Model instead of failing
         // every later prompt the same way.
         pendingSessionPrefsRef.current.delete(targetSessionId || DRAFT_PREFS_KEY);
-      const explicitClientRejection =
-        cause instanceof ApiRequestError &&
-        cause.status >= 400 &&
-        cause.status < 500 &&
-        !resultPending;
       const stoppedSteerRejection = authoritativeStoppedSteerRejection(
         cause,
         steering,
       );
-      const outcomeUnknown =
-        resultPending ||
-        (promptSubmitted &&
-          (promptAcceptedByEvent ||
-            promptTerminalByEvent ||
-            !explicitClientRejection));
       let rejectionMessages:
         PiMessage[] | ((current: PiMessage[]) => PiMessage[]) | undefined;
       if (localEntry && outcomeUnknown) {
@@ -8315,6 +8340,9 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       wasViewed,
     });
     streamDiagnosticsRef.current?.deleteSession(deletingId);
+    // Session ids are path-derived, so a conversation created later can reuse the
+    // id of a deleted one; retained failure cards must not survive the delete.
+    setLocalFailures((current) => forgetLocalFailuresForSession(current, deletingId));
     syncMutatingSessionIds();
     if (wasViewed) cancelPendingNavigation();
     setSessionDialog(null);
@@ -9429,14 +9457,12 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           void viewSession(origin.sourceSessionId, origin.sourceName);
         }}
         pendingUserMessage={pendingUserMessage}
-        localFailures={
-          viewedSessionId
-            ? withoutPersistedFailure(
-                localFailures.filter((entry) => entry.sessionId === viewedSessionId),
-                messages,
-              )
-            : []
-        }
+        localFailures={withoutPersistedFailure(
+          localFailures.filter((entry) =>
+            entry.sessionId === (localDraft ? DRAFT_FAILURE_SCOPE : viewedSessionId),
+          ),
+          messages,
+        )}
         liveMessage={liveMessage}
         localDraft={localDraft}
         composerHasContent={composerHasContent}

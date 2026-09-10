@@ -3,9 +3,16 @@ import type { PiMessage } from "./types.js";
 /** Longest provider excerpt shown in the transcript; UI text stays bounded. */
 export const ASSISTANT_ERROR_DETAIL_LIMIT = 240;
 
-const HTTP_STATUS = /\(([0-9]{3})\)/;
+/** Last parenthesized status wins: an earlier one may describe a proxied hop. */
+const HTTP_STATUS = /\(([0-9]{3})\)/g;
+function lastHttpStatus(raw: string): string {
+  let status = "";
+  for (const match of raw.matchAll(HTTP_STATUS)) status = match[1] || status;
+  return status;
+}
+/** One fixture's identifier; anchored, and only the identifier is ever echoed. */
+const INCIDENT_ID = /^PC-[A-Z0-9_-]{8}$/;
 const RETRY_ATTEMPTS = /Retry failed after ([0-9]+) attempts/i;
-const INCIDENT_ID = /PC-[A-Z0-9_-]{8}/;
 
 /** Stable category of a failure, independent of the provider's wording. */
 export type FailureKind =
@@ -29,11 +36,22 @@ export interface AssistantErrorNotice {
 }
 
 /** One browser-local failure retained in the conversation body for its Session. */
+/**
+ * Failure scope for a turn that has no Session yet: a New draft's first message
+ * can fail before the server has handed the client a Session id.
+ */
+export const DRAFT_FAILURE_SCOPE = "draft";
+
 export interface LocalFailureNotice extends AssistantErrorNotice {
-  /** Stable identity so repeated SSE frames never append the same failure twice. */
+  /**
+   * Identity for React keys and for the recorder's duplicate check. It carries
+   * the failure's own content, not only its arrival time, so a redelivered frame
+   * is recognized and two distinct failures are never collapsed into one.
+   */
   id: string;
-  /** Session the failure belongs to; it renders only inside that conversation. */
+  /** Session the failure belongs to, or {@link DRAFT_FAILURE_SCOPE}. */
   sessionId: string;
+  /** When the browser recorded it; shown so an older card is not misread as recent. */
   at: number;
 }
 
@@ -51,6 +69,21 @@ export function isAssistantErrorStop(message: PiMessage): boolean {
 }
 
 /** Collapse provider text to one bounded line so no untrusted body can bloat the view. */
+/**
+ * Providers occasionally echo the credential they rejected. The reason is kept
+ * in the transcript, so obvious secret shapes are hidden before it renders.
+ */
+const SECRET_LIKE = [
+  /\b(?:sk|rk|pk|ghp|gho|github_pat)[-_][A-Za-z0-9_-]{8,}/gi,
+  /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi,
+  /\b[A-Za-z0-9+/]{40,}={0,2}\b/g,
+];
+export function redactSensitiveDetail(text: string): string {
+  let redacted = text;
+  for (const pattern of SECRET_LIKE) redacted = redacted.replace(pattern, "[已隐藏]");
+  return redacted;
+}
+
 export function boundedAssistantErrorDetail(raw: string): string {
   const collapsed = raw.replace(/\s+/g, " ").trim();
   if (collapsed.length <= ASSISTANT_ERROR_DETAIL_LIMIT) return collapsed;
@@ -65,12 +98,12 @@ export function boundedAssistantErrorDetail(raw: string): string {
  * produced a message.
  */
 export function classifyFailureReason(raw: string): AssistantErrorNotice {
-  const status = HTTP_STATUS.exec(raw)?.[1] || "";
+  const status = lastHttpStatus(raw);
   const attempts = RETRY_ATTEMPTS.exec(raw)?.[1] || "";
   const authority = /auth_unavailable|no auth available/i.test(raw);
   const overloaded = /overloaded|server_is_overloaded/i.test(raw);
-  const aborted = /operation was aborted|terminated|request aborted/i.test(raw);
-  const interrupted = /request_timeout|stream disconnected|stream error|protocol_error|unexpected eof|tls handshake|connection error|connection reset|socket hang up|upstream connect error|econnreset|etimedout|econnrefused|fetch failed|network error|no auth available/i.test(raw);
+  const aborted = /operation was aborted|request aborted/i.test(raw);
+  const interrupted = /request_timeout|stream disconnected|stream error|stream terminated|terminated by|protocol_error|unexpected eof|tls handshake|connection error|connection reset|socket hang up|upstream connect error|econnreset|etimedout|econnrefused|fetch failed|network error/i.test(raw);
   const truncated = /stream ended before|ended before a terminal/i.test(raw);
   const runtimeGone = /RPC 已退出|Runtime 已退出|进程已退出|Runtime 不可用|启动超时/i.test(raw);
   let kind: FailureKind = "unknown";
@@ -83,7 +116,7 @@ export function classifyFailureReason(raw: string): AssistantErrorNotice {
   else if (runtimeGone) [kind, category] = ["runtime-gone", "Pi Runtime 已退出"];
   else if (interrupted || truncated) [kind, category] = ["connection", "与模型服务的连接中断"];
   else if (status.startsWith("5")) [kind, category] = ["server", "模型服务返回错误"];
-  const reason = attempts ? `已重试 ${attempts} 次仍未成功。${raw}` : raw;
+  const reason = redactSensitiveDetail(attempts ? `已重试 ${attempts} 次仍未成功。${raw}` : raw);
   return {
     kind,
     title: status ? `${category}（HTTP ${status}）` : category,
@@ -107,7 +140,7 @@ export function assistantErrorNotice(message: PiMessage): AssistantErrorNotice |
  */
 export function failureRoute(provider?: string, model?: string, api?: string): string | undefined {
   const parts = [provider, model, api]
-    .map((part) => (typeof part === "string" ? part.replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, 80) : ""))
+    .map((part) => (typeof part === "string" ? part.replace(/[\u0000-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g, "").trim().slice(0, 80) : ""))
     .filter(Boolean);
   return parts.length ? Array.from(new Set(parts)).join(" · ") : undefined;
 }
@@ -126,13 +159,15 @@ export function localFailureNotice(
   incidentId?: string,
   at = Date.now(),
 ): LocalFailureNotice {
+  // Only a well-formed identifier is echoed, and only the identifier: a longer
+  // string that merely contains one must not reach the rendered reason.
   const incident = incidentId && INCIDENT_ID.test(incidentId)
-    ? incidentId
-    : INCIDENT_ID.exec(rawText)?.[0] || "";
+    ? incidentId.slice(0, 11)
+    : (INCIDENT_ID.exec(rawText)?.[0] || "").slice(0, 11);
   const notice = classifyFailureReason(rawText.trim() || "Pi 未能完成这次请求");
   return {
     ...notice,
-    id: `${sessionId}:${at}:${incident || notice.title}`,
+    id: `${sessionId}:${incident || `${notice.kind}:${notice.detail}`}`,
     sessionId,
     at,
     detail: incident ? `${notice.detail}（事件 ID：${incident}）` : notice.detail,
@@ -175,9 +210,11 @@ export function withoutPersistedFailure(
   if (!persisted.length) return [...failures];
   // Suppress only a likely duplicate: the same category of failure, close in
   // time. Proximity alone would hide a different failure that happened shortly
-  // after a persisted one, which is exactly the reason this entry exists.
+  // after a persisted one, which is exactly the reason this entry exists. A row
+  // with no comparable time cannot prove proximity, so it suppresses nothing.
   return failures.filter((failure) => !persisted.some((entry) =>
     entry.kind === failure.kind
-    && (entry.timestamp === undefined || Math.abs(entry.timestamp - failure.at) <= windowMs),
+    && entry.timestamp !== undefined
+    && Math.abs(entry.timestamp - failure.at) <= windowMs,
   ));
 }
