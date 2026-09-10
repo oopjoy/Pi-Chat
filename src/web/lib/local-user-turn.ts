@@ -440,8 +440,15 @@ export function transcriptConfirmsLocalTurn(
     const authoritativeRows = messages.some((message) =>
       message.role === "user"
       && (message.piChatPersistedMessageId || message.piChatLiveMessageId || message.piChatPendingMessageId));
-    if (authoritativeRows)
-      return persistedEchoRows(turn, messages, total).length >= Math.max(1, payloadRank);
+    if (authoritativeRows) {
+      if (persistedEchoRows(turn, messages, total).length >= Math.max(1, payloadRank)) return true;
+      // A reconnect can miss every view that still contained this turn before its
+      // echo was observed. A truncated window whose oldest visible turn is newer
+      // than this turn's ordinal proves the Session advanced beyond it, so keep
+      // the historical out-of-window rule instead of stranding the bubble forever.
+      const { users, firstOrdinal } = visibleUserOrdinals(messages, total);
+      return messagesTruncated && users.length > 0 && turn.expectedTurnTotal < firstOrdinal;
+    }
   }
   const authoritativeTotal = transcriptTurnTotal(messages, total);
   if (authoritativeTotal < turn.expectedTurnTotal) {

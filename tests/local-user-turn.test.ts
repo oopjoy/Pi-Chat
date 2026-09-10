@@ -746,3 +746,26 @@ test("a persisted row without a timestamp still confirms by ordinal when a basel
   };
   assert.equal(transcriptConfirmsLocalTurn(turn, window, 2), true);
 });
+
+test("a turn the window scrolled past is released instead of stranded forever", () => {
+  // The echo was never observed because every view that contained it was missed
+  // by a reconnect; the window watermark now proves the Session advanced past it.
+  const window = [
+    persistedUser("turn ten", 5_000, "entry-10:0"),
+    persistedUser("turn eleven", 6_000, "entry-11:0"),
+  ];
+  const turn: LocalUserTurn = {
+    sessionId: "session-a",
+    message: { role: "user", content: "an older pending turn", timestamp: 1_000 },
+    expectedTurnTotal: 4,
+    baselineTurnTotal: 3,
+  };
+  assert.equal(transcriptConfirmsLocalTurn(turn, window, 11, true), true);
+  assert.deepEqual(protectTranscriptWithLocalTurns([turn], window, 2, 11, true).pendingTurns, []);
+
+  // A non-truncated window claims to hold every turn, so an absent row there is
+  // not evidence and the bubble must stay until its own echo arrives.
+  assert.equal(transcriptConfirmsLocalTurn(turn, window, 11, false), false);
+  const retained = protectTranscriptWithLocalTurns([turn], window, 2, 11, false);
+  assert.deepEqual(retained.pendingTurns, [turn]);
+});
