@@ -13,7 +13,10 @@ export type PromptOperationPhase =
   | "aborted";
 
 export interface PromptOperation {
+  /** Browser-local operation identity; never sent to Pi as server authority. */
   readonly promptId: string;
+  /** Server-owned identity returned by HTTP admission and echoed by SSE. */
+  readonly serverPromptId?: string;
   readonly sessionId: string;
   readonly navigationEpoch: number;
   readonly runtimeGeneration?: number;

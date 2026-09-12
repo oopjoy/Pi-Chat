@@ -4050,6 +4050,25 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           queuePaused: projection.paused,
         });
       };
+      if (
+        parsedEvent.promptId &&
+        eventSessionId &&
+        (type === "agent_start" ||
+          type === "agent_settled" ||
+          type === "pi_chat_process_error")
+      ) {
+        const observed = promptCoordinatorRef.current.observeServerLifecycle(
+          parsedEvent.promptId,
+          type,
+          eventRunGeneration,
+          eventSessionId,
+          runEpochRef.current,
+        );
+        if (observed?.phase === "settled" ||
+          observed?.phase === "failed" ||
+          observed?.phase === "aborted")
+          promptCoordinatorRef.current.clearTerminal();
+      }
       recordBrowserStateDiagnostic("sse", "admitted", {
         sessionId: eventSessionId,
         runGeneration: eventRunGeneration,
@@ -6346,7 +6365,6 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         ? userMessage(message, images)
         : null;
     const localTurn = optimisticMessage || userMessage(message, images);
-    const promptOperationId = crypto.randomUUID();
     let targetSessionId = requestedTargetSessionId || viewedSessionIdRef.current;
     let promptQueueProjectionRevision = targetSessionId
       ? queueProjectionRevisionRef.current.get(targetSessionId) || 0
@@ -6377,6 +6395,8 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     let promptAcceptedByEvent = false;
     let promptTerminalByEvent = false;
     let promptSubmitted = false;
+    let promptOperationId: string | null = crypto.randomUUID();
+    let serverPromptId: string | null = null;
     const protectLocalPrompt = (turn: PiMessage | null = localTurn) => {
       // A child transcript never receives optimistic parent turns, queue rows,
       // or Runtime projections. The server remains the sole parent authority
@@ -6696,33 +6716,77 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         pendingGateModesRef.current.get(targetSessionId) ??
         gateModesRef.current[targetSessionId];
       if (!promptOperationIsInCurrentRun()) return;
+      if (!initialPromptResult) promptOperationId = crypto.randomUUID();
+      if (admittedLocalTurn && promptOperationId)
+        admittedLocalTurn.promptOperationId = promptOperationId;
       const result =
         initialPromptResult ||
-        (steering
-          ? await api.prompt(
-              message,
-              images,
-              targetSessionId,
-              requestedGateMode,
-              "steer",
-              undefined,
-              admittedLocalTurn?.queueId,
-            )
-          : capturedPromptSettings
-            ? await api.prompt(
+        await promptCoordinatorRef.current.admit(
+          {
+            promptId: promptOperationId!,
+            sessionId: targetSessionId,
+            navigationEpoch: sessionCoordinatorRef.current.navigationEpoch,
+            runEpoch: runEpochRef.current,
+            runtimeGeneration: sessionRunGenerationsRef.current.get(targetSessionId),
+            delivery: steering ? "steer" : "queue",
+          },
+          () => steering
+            ? api.prompt(
                 message,
                 images,
                 targetSessionId,
                 requestedGateMode,
-                "queue",
-                capturedPromptSettings,
+                "steer",
+                undefined,
+                admittedLocalTurn?.queueId,
               )
-            : await api.prompt(
-                message,
-                images,
-                targetSessionId,
-                requestedGateMode,
-              ));
+            : capturedPromptSettings
+              ? api.prompt(
+                  message,
+                  images,
+                  targetSessionId,
+                  requestedGateMode,
+                  "queue",
+                  capturedPromptSettings,
+                )
+              : api.prompt(
+                  message,
+                  images,
+                  targetSessionId,
+                  requestedGateMode,
+                ),
+          {
+            phaseForResult: (admission) => admission.deliveryUncertain
+              ? { type: "uncertain" }
+              : admission.queued
+                ? { type: "queue" }
+                : { type: "run" },
+            phaseForError: (cause) => {
+              const resultPending = resultPendingError(cause);
+              const explicitClientRejection =
+                cause instanceof ApiRequestError &&
+                cause.status >= 400 &&
+                cause.status < 500 &&
+                !resultPending;
+              const outcomeUnknown =
+                resultPending ||
+                (promptSubmitted &&
+                  (promptAcceptedByEvent ||
+                    promptTerminalByEvent ||
+                    !explicitClientRejection));
+              return outcomeUnknown ? { type: "uncertain" } : { type: "fail" };
+            },
+          },
+        );
+      if (promptOperationId && result.promptId) {
+        serverPromptId = result.promptId;
+        const boundOperation = promptCoordinatorRef.current.bindServerPromptId(
+          promptOperationId,
+          result.promptId,
+        );
+        if (["settled", "failed", "aborted"].includes(boundOperation.phase))
+          promptCoordinatorRef.current.clearTerminal();
+      }
       if (
         targetSessionId &&
         !result.queued &&
@@ -7264,6 +7328,8 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       // scoped snapshot even when the user has navigated elsewhere.
       if (!outcomeUnknown) throw cause;
     } finally {
+      if (promptOperationId && !serverPromptId)
+        promptCoordinatorRef.current.delete(promptOperationId);
       if (
         promptBusyRelease &&
         promptBusyReleasesRef.current.get(targetSessionId)?.release ===

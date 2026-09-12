@@ -25,6 +25,25 @@ test("PromptCoordinator admits a result without owning transport semantics", asy
   assert.equal(coordinator.get("p1")?.phase, "queued");
 });
 
+test("PromptCoordinator binds Server identity and settles from explicit lifecycle facts", async () => {
+  const coordinator = new PromptCoordinator();
+  await coordinator.admit(input, async () => "ok");
+  coordinator.bindServerPromptId("p1", "server-p1");
+  assert.equal(coordinator.getByServerPromptId("server-p1")?.promptId, "p1");
+  const settled = coordinator.observeServerLifecycle("server-p1", "agent_settled", 9);
+  assert.equal(settled?.phase, "settled");
+  assert.equal(settled?.serverPromptId, "server-p1");
+  assert.equal(coordinator.observeServerLifecycle("server-p1", "agent_start"), settled);
+});
+
+test("PromptCoordinator fences an SSE lifecycle fact that beats HTTP identity binding", async () => {
+  const coordinator = new PromptCoordinator();
+  await coordinator.admit(input, async () => "ok");
+  coordinator.observeServerLifecycle("server-race", "agent_settled", 9);
+  coordinator.bindServerPromptId("p1", "server-race");
+  assert.equal(coordinator.get("p1")?.phase, "settled");
+});
+
 test("PromptCoordinator preserves unknown delivery as uncertain", async () => {
   const coordinator = new PromptCoordinator();
   const failure = new Error("request timeout");

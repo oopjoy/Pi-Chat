@@ -289,7 +289,7 @@ invalid type/generation 不再伪装成缺失字段
 
 这是最重要、风险最高的业务 coordinator，必须在 Stream event admission 稳定后进行。
 
-第一步已抽取纯 operation model 和 authority contract；尚未移动网络发送逻辑。
+第一步已抽取纯 operation model 和 authority contract；现有 Session 的 Prompt admission 已接入 facade。Browser operation identity 目前只作为 admission 期间的本地 tracking token，不冒充 Server prompt identity。
 
 目标中的 admission facade：
 
@@ -319,15 +319,14 @@ PromptCoordinator 不能：
 自己替代 server queue authority
 ```
 
-每个 operation 都必须有：
+跨层必须区分两类 identity：
 
 ```text
-prompt ID
-Session ID
-navigation epoch
-Runtime generation
-settlement state
+Server/SSE-owned：piChatSessionId、piChatRunEpoch、piChatRunGeneration、未来的 piChatPromptId
+Browser-local fence：navigationEpoch、connection generation、PaneAuthority
 ```
+
+Browser operation ID 不是当前 Server identity 的替代品；在 HTTP admission 与 SSE settlement 对齐后，它可以作为本地 tracking token 绑定 `serverPromptId`，但不能取代 Server/Pane authority。
 
 当前实现：
 
@@ -353,7 +352,23 @@ lost acknowledgement reconciliation 不退化
 failure card 行为不变
 ```
 
-网络发送逻辑仍暂时保留在 App；下一步是把普通/队列/Steer 的调用接入 facade，之后再迁移 optimistic projection。
+现有 Session 的普通/queue/Steer Prompt admission 已接入 facade；draft 首次创建的组合事务仍由 App 保持原子控制。模型 route identity 已贯穿普通 Prompt 的 settings snapshot，并已补齐 New draft 的 `InitialPromptRequest.model.api` 传递与 Runtime route 校验。本阶段已继续完成：
+
+```text
+1. direct/queued admission response 暴露 Server promptId；兼容保留旧 id
+2. queued 路径明确 queueItemId 与 promptId 当前 alias 的 contract
+3. Server 根据 activePromptDiagnostics 向 agent_start/agent_settled/process_error 注入 piChatPromptId
+4. Stream parser 校验并暴露 piChatPromptId
+```
+
+当前已验证 Primary direct/queued HTTP response 与 lifecycle SSE/settlement 的 identity 关联；queued 路径继续保持 `id === queueItemId === promptId`。普通 Session 的 Browser operation 现在会在 HTTP response 后绑定 Server promptId，并在显式 lifecycle SSE 上完成 settle/fail；旧 RPC generation 的 Server fencing 也已有覆盖。尚未完成且保持为下一阶段：
+
+```text
+1. 补齐 Secondary direct/queued HTTP response 与 Browser operation/SSE settlement 的端到端关联测试
+2. 补充 A→B→A、跨 Session 相同 generation、Runtime replacement 的 promptId 不串联测试
+3. 验证 retry/Steer 是否应复用或保持独立的 prompt identity
+4. 最后迁移 optimistic projection、abort/cancel 和 draft rebind
+```
 
 ### Phase 6：SidebarCoordinator
 

@@ -34,6 +34,11 @@ export interface PromptAdmissionOptions<TResult> {
  */
 export class PromptCoordinator {
   private readonly operations = new Map<string, PromptOperation>();
+  /** SSE can win the race against the HTTP response; retain only the latest fact per Server ID. */
+  private readonly unboundServerLifecycle = new Map<
+    string,
+    { eventType: "agent_start" | "agent_settled" | "pi_chat_process_error"; runtimeGeneration?: number }
+  >();
 
   begin(input: PromptAdmissionInput): PromptOperation {
     if (this.operations.has(input.promptId))
@@ -45,6 +50,29 @@ export class PromptCoordinator {
 
   get(promptId: string): PromptOperation | undefined {
     return this.operations.get(promptId);
+  }
+
+  getByServerPromptId(serverPromptId: string): PromptOperation | undefined {
+    for (const operation of this.operations.values())
+      if (operation.serverPromptId === serverPromptId) return operation;
+    return undefined;
+  }
+
+  bindServerPromptId(promptId: string, serverPromptId: string): PromptOperation {
+    const current = this.operations.get(promptId);
+    if (!current) throw new Error("Prompt operation 不存在");
+    if (!serverPromptId.trim()) throw new Error("Server prompt ID 不能为空");
+    const existing = this.getByServerPromptId(serverPromptId);
+    if (existing && existing.promptId !== promptId)
+      throw new Error("Server prompt ID 已绑定到其他 operation");
+    const next = { ...current, serverPromptId };
+    this.operations.set(promptId, next);
+    const pending = this.unboundServerLifecycle.get(serverPromptId);
+    if (pending) {
+      this.unboundServerLifecycle.delete(serverPromptId);
+      this.observeServerLifecycle(serverPromptId, pending.eventType, pending.runtimeGeneration);
+    }
+    return this.get(promptId)!;
   }
 
   transition(promptId: string, event: PromptOperationEvent): PromptOperation {
@@ -76,6 +104,47 @@ export class PromptCoordinator {
     }
   }
 
+  /** Apply only the small lifecycle facts that Server explicitly exposes over SSE. */
+  observeServerLifecycle(
+    serverPromptId: string,
+    eventType: "agent_start" | "agent_settled" | "pi_chat_process_error",
+    runtimeGeneration?: number,
+  ): PromptOperation | undefined {
+    const current = this.getByServerPromptId(serverPromptId);
+    if (!current) {
+      this.unboundServerLifecycle.set(serverPromptId, { eventType, runtimeGeneration });
+      while (this.unboundServerLifecycle.size > 128)
+        this.unboundServerLifecycle.delete(this.unboundServerLifecycle.keys().next().value!);
+      return undefined;
+    }
+    if (isPromptOperationTerminal(current)) return current;
+    if (eventType === "agent_start") {
+      if (current.phase === "queued") this.transition(current.promptId, { type: "dispatch" });
+      const afterDispatch = this.get(current.promptId)!;
+      if (["admitting", "dispatching", "uncertain"].includes(afterDispatch.phase))
+        return this.transition(current.promptId, { type: "run", runtimeGeneration });
+      return afterDispatch;
+    }
+    if (eventType === "agent_settled") {
+      if (current.phase === "queued") this.transition(current.promptId, { type: "dispatch" });
+      const afterDispatch = this.get(current.promptId)!;
+      if (["dispatching", "uncertain"].includes(afterDispatch.phase))
+        this.transition(current.promptId, { type: "run", runtimeGeneration });
+      const afterRun = this.get(current.promptId)!;
+      if (["running", "uncertain"].includes(afterRun.phase))
+        return this.transition(current.promptId, { type: "settle" });
+      return afterRun;
+    }
+    if (["queued", "dispatching", "admitting"].includes(current.phase)) {
+      // A process error before a runtime event is still a definite server-side
+      // terminal fact, unlike an HTTP acknowledgement timeout.
+      return this.transition(current.promptId, { type: "fail" });
+    }
+    if (["running", "uncertain"].includes(current.phase))
+      return this.transition(current.promptId, { type: "fail" });
+    return current;
+  }
+
   markSettled(promptId: string): PromptOperation {
     return this.transition(promptId, { type: "settle" });
   }
@@ -90,11 +159,16 @@ export class PromptCoordinator {
   }
 
   delete(promptId: string): void {
+    const operation = this.operations.get(promptId);
     this.operations.delete(promptId);
+    if (operation?.serverPromptId) this.unboundServerLifecycle.delete(operation.serverPromptId);
   }
 
   clearTerminal(): void {
     for (const [promptId, operation] of this.operations)
-      if (isPromptOperationTerminal(operation)) this.operations.delete(promptId);
+      if (isPromptOperationTerminal(operation)) {
+        this.operations.delete(promptId);
+        if (operation.serverPromptId) this.unboundServerLifecycle.delete(operation.serverPromptId);
+      }
   }
 }
