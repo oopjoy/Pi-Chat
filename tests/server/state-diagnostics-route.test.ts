@@ -351,6 +351,102 @@ test("settlement barrier failure does not invent prompt execution failure", asyn
   }
 });
 
+test("native retry lifecycle reuses the active Prompt identity and redacts provider errors", async () => {
+  const target = await fixture();
+  const frames: string[] = [];
+  const client = new EventEmitter() as EventEmitter & {
+    write(frame: string): boolean;
+    end(): void;
+  };
+  client.write = (frame) => { frames.push(frame); return true; };
+  client.end = () => undefined;
+  const promptId = "77777777-7777-4777-8777-777777777777";
+  const internals = target.app as unknown as {
+    sseClients: Map<unknown, string>;
+    activePromptDiagnostics: Map<string, { promptId: string; rpcGeneration: number }>;
+    broadcastPromptRetryLifecycle(
+      sessionId: string,
+      event: Record<string, unknown>,
+      runGeneration: number,
+      rpcGeneration: number,
+    ): void;
+  };
+  internals.sseClients.set(client, "retry-client");
+  try {
+    await register(target.origin, ownerA);
+    await fetch(`${target.origin}/api/bootstrap`, { headers: ownerA });
+    internals.activePromptDiagnostics.set(target.id, { promptId, rpcGeneration: 7 });
+    internals.broadcastPromptRetryLifecycle(target.id, {
+      type: "auto_retry_start",
+      attempt: 1,
+      maxAttempts: 3,
+      delayMs: 25,
+      errorMessage: "529 {private provider error body}",
+    }, 4, 7);
+    const scheduled = frames.map(ssePayload).find((event) => event.type === "pi_chat_prompt_retry_scheduled");
+    assert.equal(scheduled?.piChatPromptId, promptId);
+    assert.equal(JSON.stringify(scheduled).includes("private provider error body"), false);
+
+    internals.broadcastPromptRetryLifecycle(target.id, { type: "agent_start" }, 4, 7);
+    const started = frames.map(ssePayload).find((event) => event.type === "pi_chat_prompt_retry_started");
+    assert.equal(started?.piChatPromptId, promptId);
+
+    internals.broadcastPromptRetryLifecycle(target.id, {
+      type: "auto_retry_end",
+      success: false,
+      attempt: 1,
+      finalError: "529 overloaded_error: Overloaded",
+    }, 4, 7);
+    internals.broadcastPromptRetryLifecycle(target.id, {
+      type: "auto_retry_end",
+      success: false,
+      attempt: 1,
+      finalError: "duplicate final error",
+    }, 4, 7);
+    const exhausted = frames.map(ssePayload).filter((event) => event.type === "pi_chat_prompt_retry_exhausted");
+    assert.equal(exhausted.length, 1);
+    assert.equal(exhausted[0].piChatPromptId, promptId);
+    const evidence = (await snapshot(target.origin, ownerA)).value!.promptEvidence.records[0];
+    assert.ok(evidence.facts.includes("retry-scheduled"));
+    assert.ok(evidence.facts.includes("retry-started"));
+    assert.ok(evidence.facts.includes("retry-exhausted"));
+  } finally {
+    internals.sseClients.delete(client);
+    await target.close();
+  }
+});
+
+test("native retry false completion without finalError is not published as exhaustion", async () => {
+  const target = await fixture();
+  const frames: string[] = [];
+  const client = new EventEmitter() as EventEmitter & { write(frame: string): boolean; end(): void };
+  client.write = (frame) => { frames.push(frame); return true; };
+  client.end = () => undefined;
+  const internals = target.app as unknown as {
+    sseClients: Map<unknown, string>;
+    activePromptDiagnostics: Map<string, { promptId: string; rpcGeneration: number; retryPending?: boolean }>;
+    broadcastPromptRetryLifecycle(sessionId: string, event: Record<string, unknown>, runGeneration: number, rpcGeneration: number): void;
+  };
+  internals.sseClients.set(client, "retry-cancel-client");
+  try {
+    internals.activePromptDiagnostics.set(target.id, {
+      promptId: "88888888-8888-4888-8888-888888888888",
+      rpcGeneration: 7,
+    });
+    internals.broadcastPromptRetryLifecycle(target.id, {
+      type: "auto_retry_start", attempt: 1, maxAttempts: 3, delayMs: 25,
+    }, 4, 7);
+    internals.broadcastPromptRetryLifecycle(target.id, {
+      type: "auto_retry_end", success: false, attempt: 1,
+    }, 4, 7);
+    assert.equal(frames.some((frame) => frame.includes("pi_chat_prompt_retry_exhausted")), false);
+    assert.equal(internals.activePromptDiagnostics.get(target.id)?.retryPending, false);
+  } finally {
+    internals.sseClients.delete(client);
+    await target.close();
+  }
+});
+
 test("current process failure settles and clears active prompt diagnostics", async () => {
   const target = await fixture();
   try {

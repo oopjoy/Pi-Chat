@@ -1,6 +1,15 @@
 import type { PromptDelivery } from "../../shared/types";
 
 export type PromptOperationDelivery = "normal" | PromptDelivery;
+export type PromptRetryPhase = "scheduled" | "running" | "exhausted" | "cancelled";
+
+export interface PromptRetryState {
+  readonly phase: PromptRetryPhase;
+  readonly attempt?: number;
+  readonly maxAttempts?: number;
+  readonly delayMs?: number;
+}
+
 export type PromptOperationPhase =
   | "created"
   | "admitting"
@@ -19,7 +28,13 @@ export interface PromptOperation {
   readonly serverPromptId?: string;
   readonly sessionId: string;
   readonly navigationEpoch: number;
-  readonly runtimeGeneration?: number;
+  /** Server Runtime/workspace epoch; distinct from browser navigationEpoch. */
+  readonly runEpoch?: string;
+  /** Generation observed when this Browser operation was admitted. */
+  readonly admissionRuntimeGeneration?: number;
+  /** Generation observed from an actual Runtime lifecycle event. */
+  readonly observedRuntimeGeneration?: number;
+  readonly retry?: PromptRetryState;
   readonly delivery: PromptOperationDelivery;
   readonly phase: PromptOperationPhase;
   readonly createdAt: number;
@@ -38,6 +53,7 @@ export type PromptOperationEvent =
 export type PromptAuthoritySnapshot = {
   sessionId: string;
   navigationEpoch: number;
+  runEpoch?: string;
   runtimeGeneration?: number;
 };
 
@@ -58,12 +74,18 @@ export function createPromptOperation(input: {
   promptId: string;
   sessionId: string;
   navigationEpoch: number;
+  runEpoch?: string;
   runtimeGeneration?: number;
   delivery: PromptOperationDelivery;
   createdAt?: number;
 }): PromptOperation {
   return {
-    ...input,
+    promptId: input.promptId,
+    sessionId: input.sessionId,
+    navigationEpoch: input.navigationEpoch,
+    ...(input.runEpoch ? { runEpoch: input.runEpoch } : null),
+    admissionRuntimeGeneration: input.runtimeGeneration,
+    delivery: input.delivery,
     createdAt: input.createdAt ?? Date.now(),
     phase: "created",
   };
@@ -102,7 +124,7 @@ export function transitionPromptOperation(
     ...operation,
     phase: nextPhase,
     ...(event.type === "run" && event.runtimeGeneration !== undefined
-      ? { runtimeGeneration: event.runtimeGeneration }
+      ? { observedRuntimeGeneration: event.runtimeGeneration }
       : null),
   };
 }
@@ -120,7 +142,13 @@ export function promptOperationIsCurrent(
   if (isPromptOperationTerminal(operation)) return false;
   if (operation.sessionId !== current.sessionId) return false;
   if (operation.navigationEpoch !== current.navigationEpoch) return false;
-  return operation.runtimeGeneration === undefined
+  if (operation.runEpoch !== undefined
+    && current.runEpoch !== undefined
+    && operation.runEpoch !== current.runEpoch)
+    return false;
+  const observedGeneration = operation.observedRuntimeGeneration
+    ?? operation.admissionRuntimeGeneration;
+  return observedGeneration === undefined
     || current.runtimeGeneration === undefined
-    || operation.runtimeGeneration === current.runtimeGeneration;
+    || observedGeneration === current.runtimeGeneration;
 }

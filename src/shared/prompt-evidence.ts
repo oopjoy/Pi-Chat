@@ -90,6 +90,9 @@ const LIFECYCLE_FACTS = new Set<PromptEvidenceFactKind>([
   "settled",
   "settlement-barrier",
   "process-failed",
+  "retry-scheduled",
+  "retry-started",
+  "retry-exhausted",
 ]);
 const RETRY_FACTS = new Set<PromptEvidenceFactKind>([
   "retry-scheduled",

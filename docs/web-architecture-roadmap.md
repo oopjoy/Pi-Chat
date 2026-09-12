@@ -361,13 +361,15 @@ failure card 行为不变
 4. Stream parser 校验并暴露 piChatPromptId
 ```
 
-当前已验证 Primary direct/queued HTTP response 与 lifecycle SSE/settlement 的 identity 关联；queued 路径继续保持 `id === queueItemId === promptId`。普通 Session 的 Browser operation 现在会在 HTTP response 后绑定 Server promptId，并在显式 lifecycle SSE 上完成 settle/fail；旧 RPC generation 的 Server fencing 也已有覆盖。尚未完成且保持为下一阶段：
+当前已验证 Primary direct/queued HTTP response 与 lifecycle SSE/settlement 的 identity 关联；queued 路径继续保持 `id === queueItemId === promptId`。普通 Session 的 Browser operation 现在会在 HTTP response 后绑定 Server promptId，并在显式 lifecycle SSE 上完成 settle/fail；旧 RPC generation 的 Server fencing 也已有覆盖。Retry 已完成 Server producer 与基础 Browser metadata projection，但最终失败/取消语义和更完整的 integrated smoke 仍保持为下一阶段：
 
 ```text
-1. 验证 retry/Steer 是否应复用或保持独立的 prompt identity
-2. 检查未知浏览器 operation 与其他窗口 Prompt 的有界清理
-3. 将 Browser operation terminal cleanup 接入更多 abort/cancel 路径
-4. 最后迁移 optimistic projection、abort/cancel 和 draft rebind
+1. 已根据 bundled Pi RPC 文档固化 auto_retry_start/auto_retry_end envelope normalization；不暴露 provider error body，也不把无 finalError 的 success=false 猜成 exhausted
+2. 已将 Primary/Secondary native retry fact 投影为 Server-owned retry lifecycle，复用 active serverPromptId，并接入 Browser retry metadata projection
+3. 已保持 Retry metadata 单调 fencing；继续验证 retry/Steer 是否应复用或保持独立的 prompt identity
+4. 检查未知浏览器 operation 与其他窗口 Prompt 的有界清理
+5. 已将 active Prompt abort 与 still-queued Prompt cancel 接入 operation terminal cleanup；Prompt operation 现按 runEpoch/runtimeGeneration 做 lifecycle fencing，并保留 bounded retired Server identity
+6. 最后迁移 optimistic projection、abort/cancel 和 draft rebind
 ```
 
 ### Phase 6：SidebarCoordinator
