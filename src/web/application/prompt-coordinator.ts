@@ -37,7 +37,7 @@ export class PromptCoordinator {
   /** SSE can win the race against the HTTP response; retain only the latest fact per Server ID. */
   private readonly unboundServerLifecycle = new Map<
     string,
-    { eventType: "agent_start" | "agent_settled" | "pi_chat_process_error"; runtimeGeneration?: number }
+    { eventType: "agent_start" | "agent_settled" | "pi_chat_process_error"; runtimeGeneration?: number; sessionId?: string }
   >();
 
   begin(input: PromptAdmissionInput): PromptOperation {
@@ -70,7 +70,12 @@ export class PromptCoordinator {
     const pending = this.unboundServerLifecycle.get(serverPromptId);
     if (pending) {
       this.unboundServerLifecycle.delete(serverPromptId);
-      this.observeServerLifecycle(serverPromptId, pending.eventType, pending.runtimeGeneration);
+      this.observeServerLifecycle(
+        serverPromptId,
+        pending.eventType,
+        pending.runtimeGeneration,
+        pending.sessionId,
+      );
     }
     return this.get(promptId)!;
   }
@@ -109,15 +114,19 @@ export class PromptCoordinator {
     serverPromptId: string,
     eventType: "agent_start" | "agent_settled" | "pi_chat_process_error",
     runtimeGeneration?: number,
+    sessionId?: string,
   ): PromptOperation | undefined {
     const current = this.getByServerPromptId(serverPromptId);
     if (!current) {
-      this.unboundServerLifecycle.set(serverPromptId, { eventType, runtimeGeneration });
+      this.unboundServerLifecycle.set(serverPromptId, { eventType, runtimeGeneration, sessionId });
       while (this.unboundServerLifecycle.size > 128)
         this.unboundServerLifecycle.delete(this.unboundServerLifecycle.keys().next().value!);
       return undefined;
     }
     if (isPromptOperationTerminal(current)) return current;
+    // Server prompt identity is globally opaque, but keep Session identity as a
+    // second fence so a malformed/replayed frame cannot settle another Session.
+    if (sessionId && current.sessionId !== sessionId) return current;
     if (eventType === "agent_start") {
       if (current.phase === "queued") this.transition(current.promptId, { type: "dispatch" });
       const afterDispatch = this.get(current.promptId)!;

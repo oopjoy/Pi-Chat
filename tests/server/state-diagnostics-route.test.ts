@@ -413,6 +413,39 @@ test("stale RPC generations cannot bind a current prompt diagnostic", async () =
   }
 });
 
+test("a replaced Runtime cannot reuse an old Prompt identity in SSE", async () => {
+  const target = await fixture();
+  const frames: string[] = [];
+  const client = new EventEmitter() as EventEmitter & { write(frame: string): boolean; end(): void };
+  client.write = (frame) => { frames.push(frame); return true; };
+  client.end = () => undefined;
+  const internals = target.app as unknown as {
+    sseClients: Map<unknown, string>;
+    primaryBoundSessionId: string;
+    primaryRpcGeneration: number;
+    activePromptDiagnostics: Map<string, { promptId: string; rpcGeneration: number }>;
+    handleRpcEvent(event: Record<string, unknown>, source: { generation: number }): void;
+  };
+  internals.sseClients.set(client, "replacement-prompt-client");
+  try {
+    internals.primaryBoundSessionId = target.id;
+    internals.primaryRpcGeneration = 8;
+    target.rpc.generation = 8;
+    internals.activePromptDiagnostics.set(target.id, {
+      promptId: "66666666-6666-4666-8666-666666666666",
+      rpcGeneration: 8,
+    });
+    internals.handleRpcEvent({ type: "agent_start" }, { generation: 7 });
+    assert.equal(frames.some((frame) => frame.includes("66666666-6666-4666-8666-666666666666")), false);
+    internals.handleRpcEvent({ type: "agent_start" }, { generation: 8 });
+    const started = frames.map(ssePayload).find((event) => event.type === "agent_start");
+    assert.equal(started?.piChatPromptId, "66666666-6666-4666-8666-666666666666");
+  } finally {
+    internals.sseClients.delete(client);
+    await target.close();
+  }
+});
+
 test("app close clears observation-only prompt correlation", async () => {
   const target = await fixture();
   const active = (target.app as unknown as {

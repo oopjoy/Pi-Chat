@@ -44,6 +44,26 @@ test("PromptCoordinator fences an SSE lifecycle fact that beats HTTP identity bi
   assert.equal(coordinator.get("p1")?.phase, "settled");
 });
 
+test("PromptCoordinator refuses a lifecycle fact attributed to another Session", async () => {
+  const coordinator = new PromptCoordinator();
+  await coordinator.admit(input, async () => "ok");
+  coordinator.bindServerPromptId("p1", "server-session-a");
+  const ignored = coordinator.observeServerLifecycle(
+    "server-session-a",
+    "agent_settled",
+    9,
+    "bbbbbbbbbbbbbbbbbbbb",
+  );
+  assert.equal(ignored?.phase, "running");
+  const settled = coordinator.observeServerLifecycle(
+    "server-session-a",
+    "agent_settled",
+    9,
+    input.sessionId,
+  );
+  assert.equal(settled?.phase, "settled");
+});
+
 test("PromptCoordinator preserves unknown delivery as uncertain", async () => {
   const coordinator = new PromptCoordinator();
   const failure = new Error("request timeout");

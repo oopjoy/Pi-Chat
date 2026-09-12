@@ -364,9 +364,9 @@ failure card 行为不变
 当前已验证 Primary direct/queued HTTP response 与 lifecycle SSE/settlement 的 identity 关联；queued 路径继续保持 `id === queueItemId === promptId`。普通 Session 的 Browser operation 现在会在 HTTP response 后绑定 Server promptId，并在显式 lifecycle SSE 上完成 settle/fail；旧 RPC generation 的 Server fencing 也已有覆盖。尚未完成且保持为下一阶段：
 
 ```text
-1. 补齐 Secondary direct/queued HTTP response 与 Browser operation/SSE settlement 的端到端关联测试
-2. 补充 A→B→A、跨 Session 相同 generation、Runtime replacement 的 promptId 不串联测试
-3. 验证 retry/Steer 是否应复用或保持独立的 prompt identity
+1. 验证 retry/Steer 是否应复用或保持独立的 prompt identity
+2. 检查未知浏览器 operation 与其他窗口 Prompt 的有界清理
+3. 将 Browser operation terminal cleanup 接入更多 abort/cancel 路径
 4. 最后迁移 optimistic projection、abort/cancel 和 draft rebind
 ```
 
