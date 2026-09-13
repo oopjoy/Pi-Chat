@@ -16,6 +16,9 @@ export const PROMPT_EVIDENCE_FACT_KINDS = [
   "settled",
   "settlement-barrier",
   "process-failed",
+  "retry-scheduled",
+  "retry-started",
+  "retry-exhausted",
 ] as const;
 
 export type PromptEvidenceFactKind = typeof PROMPT_EVIDENCE_FACT_KINDS[number];
@@ -30,6 +33,9 @@ export interface PromptEvidenceFact {
   kind: PromptEvidenceFactKind;
   rpcGeneration?: number;
   runGeneration?: number;
+  attempt?: number;
+  maxAttempts?: number;
+  delayMs?: number;
 }
 
 export interface PromptEvidenceRecord {
@@ -46,6 +52,10 @@ export interface PromptEvidenceRecord {
   factCount?: number;
   factsTruncated?: boolean;
   conflicted?: boolean;
+  retryAttempt?: number;
+  retryMaxAttempts?: number;
+  retryDelayMs?: number;
+  retryExhausted?: boolean;
 }
 
 export interface PromptEvidenceStatus {
@@ -80,6 +90,11 @@ const LIFECYCLE_FACTS = new Set<PromptEvidenceFactKind>([
   "settled",
   "settlement-barrier",
   "process-failed",
+]);
+const RETRY_FACTS = new Set<PromptEvidenceFactKind>([
+  "retry-scheduled",
+  "retry-started",
+  "retry-exhausted",
 ]);
 const POSITIVE_DELIVERY_FACTS = new Set<PromptEvidenceFactKind>([
   "rpc-response-success",
@@ -228,7 +243,7 @@ export function reducePromptEvidenceRecord(
     && runGeneration !== undefined
     && base.runGeneration !== runGeneration
   ) return base;
-  if (base.facts.at(-1) === fact.kind) return base;
+  if (base.facts.at(-1) === fact.kind && !RETRY_FACTS.has(fact.kind)) return base;
 
   let next: PromptEvidenceRecord = {
     ...base,
@@ -243,6 +258,15 @@ export function reducePromptEvidenceRecord(
   };
   next = applyDelivery(next, fact.kind);
   next = applyExecution(next, fact.kind);
+  if (RETRY_FACTS.has(fact.kind)) {
+    next = {
+      ...next,
+      ...(safeGeneration(fact.attempt) !== undefined ? { retryAttempt: safeGeneration(fact.attempt) } : null),
+      ...(safeGeneration(fact.maxAttempts) !== undefined ? { retryMaxAttempts: safeGeneration(fact.maxAttempts) } : null),
+      ...(safeGeneration(fact.delayMs) !== undefined ? { retryDelayMs: safeGeneration(fact.delayMs) } : null),
+      ...(fact.kind === "retry-exhausted" ? { retryExhausted: true } : null),
+    };
+  }
   if (fact.kind === "requeued") {
     const {
       rpcGeneration: _completedAttemptRpcGeneration,

@@ -11,7 +11,8 @@ export const DEFAULT_MAX_SECONDARY_RUNTIMES = 6;
 export const DEFAULT_MAX_IDLE_SECONDARY_RUNTIMES = 6;
 
 export interface PendingTurnSettings {
-  model?: { provider: string; modelId: string };
+  /** Exact route identity; API is optional for legacy Runtime inventories. */
+  model?: { provider: string; modelId: string; api?: string };
   thinkingLevel?: ThinkingLevel;
 }
 

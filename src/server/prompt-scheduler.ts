@@ -22,6 +22,29 @@ export type PromptAcceptance = "confirmed" | "unknown";
 const MAX_QUEUE_LENGTH = 20;
 const MAX_QUEUED_IMAGE_CHARS = MAX_PROMPT_IMAGES_ENCODED_BYTES;
 
+/** Convert Runtime-confirmed settings into the immutable route snapshot saved
+ * with the accepted prompt. The Runtime's returned Model is authoritative. */
+function effectivePromptSettings(
+  requested: PromptSettingsSnapshot | undefined,
+  applied: AppliedTurnSettings,
+  current?: PromptSettingsSnapshot,
+): PromptSettingsSnapshot | undefined {
+  const model = applied.model
+    ? {
+        provider: applied.model.provider,
+        modelId: applied.model.id,
+        ...(applied.model.api ? { api: applied.model.api } : null),
+      }
+    : requested?.model || current?.model;
+  const thinkingLevel = applied.thinkingLevel || requested?.thinkingLevel || current?.thinkingLevel;
+  return model || thinkingLevel
+    ? {
+        ...(model ? { model } : null),
+        ...(thinkingLevel ? { thinkingLevel } : null),
+      }
+    : undefined;
+}
+
 export interface InternalQueuedPrompt extends QueuedPrompt {
   images: PromptImage[];
   /** Gate mode selected for this turn; replayed immediately before dispatch. */
@@ -41,6 +64,8 @@ export interface PromptRuntimePort {
   acquirePrimaryOperation(): () => void;
   acquireRuntimeOperation(runtime: SecondaryRuntime): () => void;
   touchRuntime(runtime: SecondaryRuntime): void;
+  /** Last authoritative local Runtime route; never performs provider discovery. */
+  currentPromptSettings?(sessionId: string): PromptSettingsSnapshot | undefined;
 }
 
 /** Immutable queued settings and Gate preflight, applied immediately before prompt RPC. */
@@ -297,6 +322,11 @@ export class PromptScheduler {
         throw error;
       }
       this.preparation.onPrimaryPromptSettingsApplied?.(appliedSettings);
+      const acceptedSettings = effectivePromptSettings(
+        settings,
+        appliedSettings,
+        this.runtime.currentPromptSettings?.(sessionId),
+      );
       if (generation !== this.primaryAbortGeneration || this.runtime.isClosed() || !this.runtime.isLifecycleIdle()) throw new Error("消息发送已取消");
       const rpc = this.runtime.primaryRpc();
       await this.preparation.syncGateMode(rpc, sessionId, gateMode);
@@ -316,7 +346,7 @@ export class PromptScheduler {
           promptAt,
           message,
           images,
-          settings,
+          acceptedSettings,
         );
         return "confirmed";
       } catch (error) {
@@ -332,7 +362,7 @@ export class PromptScheduler {
             promptAt,
             message,
             images,
-            settings,
+            acceptedSettings,
           );
           this.publication.publishSessionActivity?.(this.runtime.activeSessionId());
           return "unknown";
@@ -483,6 +513,7 @@ export class PromptScheduler {
       ...(next.settings ? { settings: next.settings } : null),
       piChatSessionId: runtime.id,
     });
+    let acceptedSettings = next.settings;
     try {
       let appliedSettings: AppliedTurnSettings;
       try {
@@ -504,6 +535,11 @@ export class PromptScheduler {
         throw error;
       }
       this.preparation.onRuntimePromptSettingsApplied?.(runtime, appliedSettings);
+      acceptedSettings = effectivePromptSettings(
+        next.settings,
+        appliedSettings,
+        this.runtime.currentPromptSettings?.(runtime.id),
+      );
       if (generation !== runtime.abortGeneration || this.runtime.isClosed() || !this.runtime.isLifecycleIdle()) throw new Error("消息发送已取消");
       await this.preparation.syncGateMode(runtime.rpc, runtime.id, next.gateMode);
       if (generation !== runtime.abortGeneration || this.runtime.isClosed() || !this.runtime.isLifecycleIdle()) throw new Error("消息发送已取消");
@@ -521,7 +557,7 @@ export class PromptScheduler {
         next.createdAt,
         next.message,
         next.images,
-        next.settings,
+        acceptedSettings,
       );
     } catch (error) {
       // A write timeout can occur after the prompt JSONL command reached Pi
@@ -536,7 +572,7 @@ export class PromptScheduler {
           next.createdAt,
           next.message,
           next.images,
-          next.settings,
+          acceptedSettings,
         );
         this.publication.broadcast({
           type: "pi_chat_prompt_delivery_uncertain",

@@ -13,6 +13,9 @@ export interface PromptEvidenceInput {
   kind: PromptEvidenceFactKind;
   rpcGeneration?: number;
   runGeneration?: number;
+  attempt?: number;
+  maxAttempts?: number;
+  delayMs?: number;
 }
 
 export interface PromptEvidenceLedgerOptions {
@@ -80,6 +83,9 @@ export class PromptEvidenceLedger {
         kind: input.kind,
         ...(rpcGeneration !== undefined ? { rpcGeneration } : null),
         ...(runGeneration !== undefined ? { runGeneration } : null),
+        ...(safeGeneration(input.attempt) !== undefined ? { attempt: safeGeneration(input.attempt) } : null),
+        ...(safeGeneration(input.maxAttempts) !== undefined ? { maxAttempts: safeGeneration(input.maxAttempts) } : null),
+        ...(safeGeneration(input.delayMs) !== undefined ? { delayMs: safeGeneration(input.delayMs) } : null),
       };
       const record = reducePromptEvidenceRecord(stored?.record, fact);
       if (record === stored?.record) return;

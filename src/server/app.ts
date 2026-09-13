@@ -775,6 +775,7 @@ export class PiChatApp {
         acquireRuntimeOperation: (runtime) =>
           this.runtimePool.acquireOperation(runtime),
         touchRuntime: (runtime) => this.runtimePool.touch(runtime),
+        currentPromptSettings: (sessionId) => this.currentPromptSettings(sessionId),
       },
       preparation: {
         applyPendingTurnSettings: (rpc, pending) =>
@@ -4206,6 +4207,23 @@ export class PiChatApp {
         ? { thinkingLevel: settings.thinkingLevel }
         : null),
     });
+  }
+
+  /** Read the already-known Runtime route without issuing a network/provider request. */
+  private currentPromptSettings(sessionId: string): PromptSettingsSnapshot | undefined {
+    const state = sessionId === this.activeSessionId
+      ? this.lastPrimaryState
+      : this.runtimePool.get(sessionId)?.lastState;
+    const model = state?.model;
+    if (!model?.provider || !model.id) return undefined;
+    return {
+      model: {
+        provider: model.provider,
+        modelId: model.id,
+        ...(model.api ? { api: model.api } : null),
+      },
+      ...(state?.thinkingLevel ? { thinkingLevel: state.thinkingLevel as ThinkingLevel } : null),
+    };
   }
 
   private currentGateMode(sessionId: string): GateMode {
