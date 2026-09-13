@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { createReadStream, existsSync, readFileSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync, watch, type FSWatcher } from "node:fs";
 import { stat, unlink } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { basename, dirname, extname, join, normalize, resolve } from "node:path";
@@ -274,16 +274,19 @@ function promptSettingsSnapshot(body: Record<string, unknown>): PromptSettingsSn
     const candidate = rawModel as Record<string, unknown>;
     const provider = typeof candidate.provider === "string" ? candidate.provider.trim() : "";
     const modelId = typeof candidate.modelId === "string" ? candidate.modelId.trim() : "";
+    const api = typeof candidate.api === "string" ? candidate.api.trim() : "";
     if (
       !provider ||
       !modelId ||
       provider.length > 80 ||
       modelId.length > 200 ||
+      api.length > 120 ||
       /[\u0000-\u001f]/.test(provider) ||
-      /[\u0000-\u001f]/.test(modelId)
+      /[\u0000-\u001f]/.test(modelId) ||
+      /[\u0000-\u001f]/.test(api)
     )
       throw new HttpRequestError(400, "模型设置无效");
-    model = { provider, modelId };
+    model = { provider, modelId, ...(api ? { api } : null) };
   }
   const thinkingLevel =
     typeof raw.thinkingLevel === "string" &&
@@ -523,8 +526,14 @@ export class PiChatApp {
   /** Current model catalogue, retained so cold JSONL settings get a display name without waking Pi. */
   private readonly knownModels = new Map<string, ModelInfo>();
   private lastAvailableModels: ModelInfo[] = [];
-  /** Best-effort local catalogue for the startup shell before Primary becomes ready. */
-  private readonly startupModels: ModelInfo[];
+  /** Host-side model catalogue; refreshed after atomic models.json mutations. */
+  private startupModels: ModelInfo[];
+  private modelCatalogueRevision = 1;
+  private modelRuntimeSyncPending = false;
+  private modelCatalogueWatcher?: FSWatcher;
+  private modelCatalogueRefreshTimer?: ReturnType<typeof setTimeout>;
+  private modelRuntimeSyncTimer?: ReturnType<typeof setTimeout>;
+  private modelRuntimeSyncInFlight = false;
   private lastPrimaryCommands: SlashCommand[] = [];
   private lastPrimaryStats:
     { sessionId: string; value: SessionStats } | undefined;
@@ -646,6 +655,7 @@ export class PiChatApp {
     // Seed it from the configured catalogue so models.json models keep their
     // reasoning/input/contextWindow instead of degrading to a bare-name fallback.
     this.rememberModelContextWindows(this.startupModels);
+    this.startModelCatalogueWatcher();
     this.requestToken =
       options.requestToken || randomBytes(32).toString("base64url");
     this.buildIdentity = options.buildIdentity || {
@@ -959,12 +969,25 @@ export class PiChatApp {
   }
   /** Read custom configured models without waking Pi, so the fresh startup
    * shell can offer real choices before Primary's runtime inventory arrives. */
+  private modelRouteKey(model: Pick<ModelInfo, "provider" | "id" | "api">): string {
+    return [model.provider, model.id, model.api || ""].join(String.fromCharCode(0));
+  }
+
+  private mergeHostAndRuntimeModels(runtimeModels: ModelInfo[], hostModels: ModelInfo[]): ModelInfo[] {
+    const result = new Map<string, ModelInfo>();
+    for (const model of [...runtimeModels, ...hostModels]) {
+      const key = this.modelRouteKey(model);
+      result.set(key, { ...result.get(key), ...model });
+    }
+    return [...result.values()];
+  }
+
   private readStartupModels(): ModelInfo[] {
     if (!this.options.modelManager) return [];
     try {
       const raw = JSON.parse(
         readFileSync(this.options.modelManager.path, "utf8"),
-      ) as { providers?: Record<string, { models?: unknown[] }> };
+      ) as { providers?: Record<string, { models?: unknown[]; api?: unknown }> };
       const models: ModelInfo[] = [];
       for (const [provider, config] of Object.entries(raw.providers || {})) {
         for (const item of config?.models || []) {
@@ -980,10 +1003,17 @@ export class PiChatApp {
           models.push({
             provider,
             id: value.id,
+            ...(typeof value.api === "string"
+              ? { api: value.api }
+              : typeof config.api === "string"
+                ? { api: config.api }
+                : null),
             name:
               typeof value.name === "string" && value.name
                 ? value.name
                 : value.id,
+            source: "models-json",
+            authMode: "api-key",
             reasoning: value.reasoning === true,
             input: configuredInput.length
               ? configuredInput
@@ -1001,6 +1031,102 @@ export class PiChatApp {
       return models;
     } catch {
       return [];
+    }
+  }
+
+  private startModelCatalogueWatcher(): void {
+    const modelPath = this.options.modelManager?.path;
+    if (!modelPath) return;
+    try {
+      this.modelCatalogueWatcher = watch(dirname(modelPath), (_event, filename) => {
+        if (filename && filename.toString() !== basename(modelPath)) return;
+        if (this.modelCatalogueRefreshTimer) clearTimeout(this.modelCatalogueRefreshTimer);
+        this.modelCatalogueRefreshTimer = setTimeout(() => {
+          this.modelCatalogueRefreshTimer = undefined;
+          if (this.closed) return;
+          try {
+            if (!existsSync(modelPath)) {
+              // Atomic replacement can expose a short rename gap. Give the
+              // replacement event a chance, then publish a real deletion.
+              this.modelCatalogueRefreshTimer = setTimeout(() => {
+                this.modelCatalogueRefreshTimer = undefined;
+                if (!this.closed && !existsSync(modelPath))
+                  this.refreshHostModelCatalogue();
+              }, 100);
+              return;
+            }
+            JSON.parse(readFileSync(modelPath, "utf8"));
+            this.refreshHostModelCatalogue();
+          } catch {
+            // Ignore a transient partial/malformed external write; atomic saves
+            // produce another event after the complete file is visible.
+          }
+        }, 50);
+      });
+      this.modelCatalogueWatcher.on("error", () => {
+        // Watching is advisory; API mutations and bootstrap remain authoritative.
+      });
+    } catch {
+      // The API mutation path still refreshes synchronously when watching is unavailable.
+    }
+  }
+
+  private refreshHostModelCatalogue(): ModelInfo[] {
+    const previous = this.startupModels;
+    const next = this.readStartupModels();
+    this.startupModels = next;
+    const changed = JSON.stringify(previous) !== JSON.stringify(next);
+    this.rememberModelContextWindows(next);
+    if (changed) {
+      this.modelCatalogueRevision += 1;
+      this.modelRuntimeSyncPending = true;
+      this.broadcast({
+        type: "pi_chat_models_updated",
+        models: this.mergeHostAndRuntimeModels(this.lastAvailableModels, next),
+        revision: this.modelCatalogueRevision,
+        runtimeSync: "waiting-for-runtime-reload",
+      });
+      this.scheduleModelRuntimeSync();
+    }
+    return next;
+  }
+
+  private scheduleModelRuntimeSync(delayMs = 100): void {
+    if (!this.modelRuntimeSyncPending || this.closed || this.modelRuntimeSyncInFlight) return;
+    if (this.modelRuntimeSyncTimer) clearTimeout(this.modelRuntimeSyncTimer);
+    this.modelRuntimeSyncTimer = setTimeout(() => {
+      this.modelRuntimeSyncTimer = undefined;
+      void this.syncModelRuntime().catch(() => {
+        // Keep pending=true and retry when the current turn settles or when the
+        // next catalogue change arrives; failed reloads never replace the live Runtime.
+      });
+    }, delayMs);
+  }
+
+  private async syncModelRuntime(): Promise<void> {
+    if (!this.modelRuntimeSyncPending || this.closed || this.modelRuntimeSyncInFlight) return;
+    if (this.busyConversationCount() > 0) {
+      this.scheduleModelRuntimeSync(500);
+      return;
+    }
+    this.modelRuntimeSyncInFlight = true;
+    try {
+      await this.withLifecycle("models-refreshing", "同步模型 Runtime", async () => {
+        await this.reloadRpc();
+        const models = asModels(await this.options.rpc.send({ type: "get_available_models" }));
+        this.lastAvailableModels = models;
+        const hostKeys = new Set(this.startupModels.map((model) => this.modelRouteKey(model)));
+        const runtimeKeys = new Set(models.map((model) => this.modelRouteKey(model)));
+        this.modelRuntimeSyncPending = [...hostKeys].some((key) => !runtimeKeys.has(key));
+        this.broadcast({
+          type: "pi_chat_models_updated",
+          models: this.mergeHostAndRuntimeModels(models, this.startupModels),
+          revision: this.modelCatalogueRevision,
+          runtimeSync: this.modelRuntimeSyncPending ? "waiting-for-runtime-reload" : "ready",
+        });
+      });
+    } finally {
+      this.modelRuntimeSyncInFlight = false;
     }
   }
 
@@ -1035,7 +1161,10 @@ export class PiChatApp {
   ): Promise<T> {
     this.beginLifecycle(lifecycle);
     try {
-      await this.verifyApplicationQuiescent(action);
+      // Host-only model catalogue refreshes do not touch the active Pi Runtime;
+      // an in-flight prompt therefore keeps its immutable route snapshot.
+      if (lifecycle !== "models-refreshing")
+        await this.verifyApplicationQuiescent(action);
       return await operation();
     } finally {
       this.endLifecycle(lifecycle);
@@ -1081,6 +1210,12 @@ export class PiChatApp {
 
   async close(): Promise<void> {
     this.closed = true;
+    if (this.modelCatalogueRefreshTimer) clearTimeout(this.modelCatalogueRefreshTimer);
+    if (this.modelRuntimeSyncTimer) clearTimeout(this.modelRuntimeSyncTimer);
+    this.modelCatalogueRefreshTimer = undefined;
+    this.modelRuntimeSyncTimer = undefined;
+    this.modelCatalogueWatcher?.close();
+    this.modelCatalogueWatcher = undefined;
     this.cancelLastWindowShutdown();
     clearInterval(this.secondaryRuntimeSweepTimer);
     for (const timer of this.draftPersistenceRetryTimers.values())
@@ -2917,6 +3052,7 @@ export class PiChatApp {
       (effect) => effect.type === "settled",
     );
     if (settled) {
+      this.scheduleModelRuntimeSync();
       const promptId = this.traceActivePrompt(
         "settled",
         runtime.id,
@@ -3535,6 +3671,7 @@ export class PiChatApp {
       (effect) => effect.type === "settled",
     );
     if (settled) {
+      this.scheduleModelRuntimeSync();
       const promptId = this.traceActivePrompt(
         "settled",
         sessionId,
@@ -3887,7 +4024,10 @@ export class PiChatApp {
       const model = available.find(
         (candidate) =>
           candidate.provider === settings.model!.provider &&
-          candidate.id === settings.model!.modelId,
+          candidate.id === settings.model!.modelId &&
+          // When the browser captured the Runtime API, require the same full
+          // route. Legacy inventories may omit api and remain pair-compatible.
+          (!settings.model!.api || candidate.api === settings.model!.api),
       );
       // Name the rejected pair and the catalogue it was checked against: a
       // silent generic message left the user unable to tell which Runtime
@@ -4653,6 +4793,28 @@ export class PiChatApp {
         );
       }
       throw new Error(`资源修改失败，原配置已自动恢复：${original}`);
+    }
+  }
+
+  /** Mutate models.json without replacing any Pi Runtime. The host catalogue is
+   * refreshed atomically; active requests keep their existing Runtime snapshot. */
+  private async applyModelFileTransaction<T>(mutation: () => Promise<T>): Promise<T> {
+    if (!this.options.modelManager) throw new Error("模型管理不可用");
+    const snapshot = await snapshotFile(this.options.modelManager.path);
+    let changed = false;
+    try {
+      const result = await mutation();
+      changed = true;
+      this.refreshHostModelCatalogue();
+      return result;
+    } catch (error) {
+      if (changed) {
+        await restoreSnapshots([snapshot]);
+        this.refreshHostModelCatalogue();
+        throw new Error(`模型配置失败，原配置已自动恢复：${error instanceof Error ? error.message : String(error)}`);
+      }
+      this.rethrowResultPending(error, "更新模型配置", false);
+      throw error;
     }
   }
 
@@ -6046,6 +6208,15 @@ export class PiChatApp {
           : asModels(modelsResponse);
         this.rememberModelContextWindows(models);
         this.lastAvailableModels = models;
+        // Preserve the legacy wildcard only for Host rows that truly omit API.
+        // Once a row declares an API route, the Runtime must confirm the same
+        // provider + model + api identity before clearing pending sync.
+        if (this.startupModels.every((configured) =>
+          models.some((loaded) => this.modelRouteKey(loaded) === this.modelRouteKey(configured)
+            || (!configured.api
+              && loaded.provider === configured.provider
+              && loaded.id === configured.id))))
+          this.modelRuntimeSyncPending = false;
         modelInventoryPending = false;
       }
       if (commandsResponse)
@@ -6062,9 +6233,10 @@ export class PiChatApp {
         };
       }
     }
-    const availableModels = this.lastAvailableModels.length
-      ? this.lastAvailableModels
-      : this.startupModels;
+    const availableModels = this.mergeHostAndRuntimeModels(
+      this.lastAvailableModels.length ? this.lastAvailableModels : [],
+      this.startupModels,
+    );
     this.reconcilePendingAcceptedPrompts(
       this.activeSessionId,
       messages || [],
@@ -6122,6 +6294,8 @@ export class PiChatApp {
             : await this.offlineStatsForId(this.activeSessionId)),
       models: availableModels,
       modelInventoryPending,
+      modelCatalogueRevision: this.modelCatalogueRevision,
+      modelRuntimeSyncPending: this.modelRuntimeSyncPending,
       commands: [...BUILTIN_COMMANDS, ...this.lastPrimaryCommands],
       queue: this.publicQueue(),
       queuePaused: this.queuePaused,
@@ -8308,6 +8482,47 @@ export class PiChatApp {
       return;
     }
 
+    if (url.pathname === "/api/models/provider" && request.method === "POST") {
+      if (!this.options.modelManager) return json(response, 501, { error: "模型管理不可用" });
+      const result = await this.withLifecycle("models-refreshing", "添加 Provider", async () => {
+        const body = preparedBody || (await bodyJson(request));
+        await this.applyModelFileTransaction(() => this.options.modelManager!.addProvider(body));
+        return this.bootstrap();
+      });
+      json(response, 200, result);
+      return;
+    }
+    const customProviderMatch = /^\/api\/models\/provider\/([A-Za-z0-9._-]{1,80})$/.exec(url.pathname);
+    if (customProviderMatch) {
+      if (!this.options.modelManager) return json(response, 501, { error: "模型管理不可用" });
+      const provider = decodeURIComponent(customProviderMatch[1]);
+      if (request.method === "GET") {
+        json(response, 200, { provider: await this.options.modelManager.getCustomProvider(provider) });
+        return;
+      }
+      if (request.method === "DELETE") {
+        const state = asState(await this.options.rpc.send({ type: "get_state" }));
+        if (state.model?.provider === provider)
+          throw new Error("请先切换到其他模型，再删除当前 Provider");
+        const result = await this.withLifecycle("models-refreshing", "删除 Provider", async () => {
+          await this.applyModelFileTransaction(() => this.options.modelManager!.removeProvider(provider));
+          return this.bootstrap();
+        });
+        json(response, 200, result);
+        return;
+      }
+      if (request.method === "PUT") {
+        const result = await this.withLifecycle("models-refreshing", "更新 Provider 配置", async () => {
+          const body = preparedBody || (await bodyJson(request));
+          await this.applyModelFileTransaction(() => this.options.modelManager!.updateProvider(provider, body));
+          return this.bootstrap();
+        });
+        json(response, 200, result);
+        return;
+      }
+      return methodNotAllowed(response);
+    }
+
     const customModelMatch =
       /^\/api\/models\/([A-Za-z0-9._-]{1,80})\/([^/]{1,200})$/.exec(
         url.pathname,
@@ -8328,7 +8543,7 @@ export class PiChatApp {
       }
       if (request.method === "PUT") {
         const result = await this.withLifecycle(
-          "resources-reloading",
+          "models-refreshing",
           "更新模型配置",
           async () => {
             const body = preparedBody || (await bodyJson(request));
@@ -8337,17 +8552,14 @@ export class PiChatApp {
             );
             const wasActive =
               state.model?.provider === provider && state.model?.id === modelId;
-            const snapshot = await snapshotFile(
-              this.options.modelManager!.path,
-            );
-            const updated = await this.applyResourceFileTransaction(
-              [snapshot],
-              () => this.options.modelManager!.update(provider, modelId, body),
+            const updated = await this.applyModelFileTransaction(() =>
+              this.options.modelManager!.update(provider, modelId, body),
             );
             // A rename invalidates the session's model reference; reselect the new
             // key so the UI never points at a model that no longer exists.
             if (
               wasActive &&
+              !this.primaryTurnActive() &&
               (updated.provider !== provider || updated.id !== modelId)
             ) {
               const outcomeToken = randomUUID();
@@ -8380,6 +8592,9 @@ export class PiChatApp {
                 // reselect it from the refreshed model list.
               }
             }
+            // An in-flight prompt owns its captured Runtime route. Leave the
+            // old model selected until settlement; the next prompt admission
+            // will revalidate against the refreshed Host catalogue.
             return this.bootstrap();
           },
         );
@@ -8395,16 +8610,15 @@ export class PiChatApp {
       if (request.method !== "POST" && request.method !== "DELETE")
         return methodNotAllowed(response);
       const result = await this.withLifecycle(
-        "resources-reloading",
+        "models-refreshing",
         "更新模型配置",
         async () => {
           const body = preparedBody || (await bodyJson(request));
-          const snapshot = await snapshotFile(this.options.modelManager!.path);
-          if (request.method === "POST") {
-            await this.applyResourceFileTransaction([snapshot], () =>
-              this.options.modelManager!.add(body),
-            );
-          } else {
+          await this.applyModelFileTransaction(async () => {
+            if (request.method === "POST") {
+              await this.options.modelManager!.add(body);
+              return;
+            }
             const state = asState(
               await this.options.rpc.send({ type: "get_state" }),
             );

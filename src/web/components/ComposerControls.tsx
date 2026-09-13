@@ -67,7 +67,7 @@ export function ComposerControls({ state, models, modelInventoryPending = false,
   /** Model, thinking, and Gate mutate the selected Primary Runtime. */
   primaryUnavailable?: boolean;
   onGate: (mode: GateMode) => void;
-  onModel: (provider: string, id: string) => void;
+  onModel: (provider: string, id: string, api?: string) => void;
   onThinking: (level: ThinkingLevel) => void;
 }) {
   // A setting request may still be in flight, but the next choice is a new

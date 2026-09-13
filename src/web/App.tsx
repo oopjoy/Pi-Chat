@@ -156,6 +156,7 @@ import {
   composerStateForSelection,
   promptSettingsForSelection,
   stageSessionComposerSelection,
+  validateSelectedRoute,
   type SessionComposerSelection,
 } from "./lib/session-composer-selection";
 import {
@@ -338,6 +339,7 @@ const GLOBAL_SSE_EVENT_TYPES = new Set([
   "pi_chat_sessions_changed",
   "pi_chat_primary_runtime_status",
   "pi_chat_workspace_changed",
+  "pi_chat_models_updated",
 ]);
 
 const SESSION_VIEW_INVALIDATING_EVENT_TYPES = new Set([
@@ -501,7 +503,7 @@ function forkMessagePreview(text: string, imageCount = 0, limit = 600): string {
 /** A capability snapshot is usable only for this exact selected-model shape. */
 function modelCapabilityKey(model: ModelInfo | null | undefined): string {
   if (!model) return "";
-  return [model.provider, model.id, ...(model.input || [])].join("\u0000");
+  return [model.provider, model.id, model.api || "", ...(model.input || [])].join("\u0000");
 }
 
 /**
@@ -648,6 +650,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   // A cached catalogue is useful immediately, but it is not authoritative for
   // this process generation until Bootstrap/Runtime discovery confirms it.
   const [modelInventoryConfirmed, setModelInventoryConfirmed] = useState(false);
+  const [modelRuntimeSyncPending, setModelRuntimeSyncPending] = useState(false);
   useEffect(() => {
     saveModelCatalog(models);
   }, [models]);
@@ -2311,6 +2314,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         typeof data.modelInventoryPending === "boolean"
           ? data.modelInventoryPending
           : data.primaryRuntime?.status !== "ready";
+      setModelRuntimeSyncPending(data.modelRuntimeSyncPending === true);
       const discoveredModels = mergeModelCatalog([], data.models);
       if (!modelInventoryPending) {
         // A completed empty discovery is authoritative for this generation;
@@ -4742,6 +4746,18 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           workspaceRevisionRef.current = workspaceRevision;
           setWorkspaceCwd(cwd);
         }
+      } else if (type === "pi_chat_models_updated") {
+        const nextModels = Array.isArray(event.models)
+          ? mergeModelCatalog([], event.models as ModelInfo[])
+          : [];
+        setModels(nextModels);
+        saveModelCatalog(nextModels);
+        setModelRuntimeSyncPending(event.runtimeSync === "waiting-for-runtime-reload");
+        setNotice(
+          event.runtimeSync === "waiting-for-runtime-reload"
+            ? "模型配置已更新；当前请求继续使用旧 Runtime，新请求将在 Runtime 刷新后应用。"
+            : "模型目录已更新。",
+        );
       } else if (type === "pi_chat_application_lifecycle") {
         const lifecycle = String(
           event.lifecycle || "idle",
@@ -4761,6 +4777,8 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           setNotice("正在切换工作目录…");
         else if (lifecycle === "resources-reloading")
           setNotice("正在更新配置并重载 Runtime…");
+        else if (lifecycle === "models-refreshing")
+          setNotice("正在刷新模型目录…");
         else if (lifecycle === "idle") {
           startIdleRecovery(false, true);
         }
@@ -6380,6 +6398,22 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       const capturedPromptSettings = promptSettingsForSelection(
         capturedSelection,
       );
+      if (capturedSelection?.model && modelInventoryConfirmed) {
+        const route = validateSelectedRoute(
+          models,
+          capturedSelection.model.provider,
+          capturedSelection.model.id,
+          capturedSelection.model.api,
+        );
+        if (!route.ok) {
+          setError(
+            `当前模型路由无效：${capturedSelection.model.provider}/${capturedSelection.model.id}`
+            + (capturedSelection.model.api ? `（${capturedSelection.model.api}）` : "")
+            + " 不在当前 Runtime 的模型目录中，请重新选择模型。",
+          );
+          return;
+        }
+      }
       let initialPromptResult: Awaited<ReturnType<typeof api.prompt>> | null =
         null;
       if (localDraftRef.current) {
@@ -7699,11 +7733,12 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     return stageComposerSelection(key, patch);
   };
 
-  const changeModel = (provider: string, modelId: string) => {
+  const changeModel = (provider: string, modelId: string, api?: string) => {
     if (buildIdentityMismatch || !provider || !modelId) return;
     const model = models.find(
       (candidate) =>
-        candidate.provider === provider && candidate.id === modelId,
+        candidate.provider === provider && candidate.id === modelId
+        && (api ? candidate.api === api : true),
     );
     const viewed = viewedSessionIdRef.current;
     const targetSessionId = composerTargetForViewedSession();
@@ -9335,7 +9370,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       gateMode={gateMode}
       primaryUnavailable={false}
       onGate={(mode) => void changeGate(mode)}
-      onModel={(provider, id) => void changeModel(provider, id)}
+      onModel={(provider, id, api) => void changeModel(provider, id, api)}
       onThinking={(level) => void changeThinking(level)}
     />
   );
@@ -9679,6 +9714,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         workspacePicking={workspacePicking}
         workspaceDisabled={mutationBlocked}
         models={models}
+        modelRuntimeSyncPending={modelRuntimeSyncPending}
         state={state}
         busy={busy || globalMutationBlocked}
         shutdownBlocked={
@@ -9695,7 +9731,13 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         onClose={() => setManagementSection(null)}
         onAppearance={setAppearance}
         onPickWorkspace={() => void pickDefaultWorkspace()}
-        onModel={(provider, id) => void changeModel(provider, id)}
+        onModel={(provider, id, api) => void changeModel(provider, id, api)}
+        onModelsChanged={(data) => {
+          setModels(data.models);
+          setModelRuntimeSyncPending(data.modelRuntimeSyncPending === true);
+          saveModelCatalog(data.models);
+          dispatchPane({ type: "RUNTIME_SETTINGS_ADOPTED", target: localDraftRef.current ? { kind: "draft" } : { kind: "session", sessionId: viewedSessionIdRef.current }, state: { model: data.state.model } });
+        }}
         onExportDiagnostics={exportStateDiagnostics}
         onShutdown={() => void shutdownPiChat()}
       />

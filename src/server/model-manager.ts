@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { CustomModelInput, ModelInfo } from "../shared/types.js";
+import type { CustomModelInput, CustomProviderInput, ModelInfo } from "../shared/types.js";
 import { writeFileAtomic } from "./file-transaction.js";
 
 export const MODEL_APIS = ["openai-completions", "openai-responses", "anthropic-messages", "google-generative-ai"] as const;
@@ -99,7 +99,15 @@ export class ModelManager {
 
   async annotate(models: ModelInfo[]): Promise<ModelInfo[]> {
     const custom = await this.customKeys();
-    return models.map((model) => ({ ...model, custom: custom.has(`${model.provider}\u0000${model.id}`) }));
+    return models.map((model) => {
+      const isCustom = custom.has(`${model.provider}\u0000${model.id}`);
+      return {
+        ...model,
+        custom: isCustom,
+        source: isCustom ? "models-json" : "pi-runtime",
+        authMode: isCustom ? "api-key" : "pi-managed",
+      };
+    });
   }
 
   async getCustomConfig(providerValue: unknown, idValue: unknown): Promise<CustomModelInput> {
@@ -204,6 +212,93 @@ export class ModelManager {
     this.upsert(value, input, carried, originalProvider === input.provider ? sourceIndex : undefined);
     await this.write(value);
     return input;
+  }
+
+  async getCustomProvider(providerValue: unknown): Promise<CustomProviderInput> {
+    const providerName = validateName(String(providerValue || ""), "Provider", /^[A-Za-z0-9._-]+$/, 80);
+    const value = await this.read();
+    const provider = value.providers?.[providerName];
+    if (!provider || !Array.isArray(provider.models)) throw new Error("只能编辑 models.json 中的自定义 Provider");
+    const api = (typeof provider.api === "string" ? provider.api : "openai-completions") as ModelApi;
+    if (!MODEL_APIS.includes(api)) throw new Error("模型 API 类型不受支持");
+    return {
+      provider: providerName,
+      baseUrl: typeof provider.baseUrl === "string" ? provider.baseUrl : "",
+      api,
+      apiKey: "",
+      models: provider.models.flatMap((item) => {
+        if (!item || typeof item !== "object") return [];
+        const model = item as Record<string, unknown>;
+        if (typeof model.id !== "string" || !model.id) return [];
+        return [{
+          id: model.id,
+          name: typeof model.name === "string" ? model.name : model.id,
+          ...(typeof model.contextWindow === "number" ? { contextWindow: model.contextWindow } : null),
+          ...(typeof model.maxTokens === "number" ? { maxTokens: model.maxTokens } : null),
+        }];
+      }),
+    };
+  }
+
+  async addProvider(raw: unknown): Promise<CustomProviderInput> {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Provider 配置必须是对象");
+    const provider = (raw as Record<string, unknown>).provider;
+    const value = await this.read();
+    const name = validateName(String(provider || ""), "Provider", /^[A-Za-z0-9._-]+$/, 80);
+    if (value.providers?.[name]) throw new Error(`models.json 中已存在 Provider：${name}`);
+    return this.updateProvider(name, raw);
+  }
+
+  async updateProvider(providerValue: unknown, raw: unknown): Promise<CustomProviderInput> {
+    const originalProvider = validateName(String(providerValue || ""), "Provider", /^[A-Za-z0-9._-]+$/, 80);
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Provider 配置必须是对象");
+    const input = raw as Record<string, unknown>;
+    const baseUrl = nonEmptyString(input.baseUrl);
+    if (!baseUrl) throw new Error("必须填写 Base URL");
+    let parsed: URL;
+    try { parsed = new URL(baseUrl); } catch { throw new Error("Base URL 格式无效"); }
+    if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("Base URL 只支持 HTTP 或 HTTPS");
+    const api = String(input.api || "openai-completions") as ModelApi;
+    if (!MODEL_APIS.includes(api)) throw new Error("不支持的模型 API 类型");
+    if (!Array.isArray(input.models) || !input.models.length) throw new Error("至少保留一个模型");
+    const models = input.models.map((rawModel) => {
+      if (!rawModel || typeof rawModel !== "object" || Array.isArray(rawModel)) throw new Error("模型条目必须是对象");
+      const model = rawModel as Record<string, unknown>;
+      const id = validateName(String(model.id || ""), "Model ID", /^[^\s\u0000-\u001f]+$/, 200);
+      const name = nonEmptyString(model.name) || id;
+      const contextWindow = positiveInteger(model.contextWindow, "Context Window", 100_000_000);
+      const maxTokens = positiveInteger(model.maxTokens, "Max Tokens", 10_000_000);
+      return { id, name, contextWindow, maxTokens };
+    });
+    const ids = new Set<string>();
+    if (models.some((model) => ids.has(model.id) || (ids.add(model.id), false))) throw new Error("模型 ID 不能重复");
+    const value = await this.read();
+    const provider = value.providers?.[originalProvider];
+    // A Runtime-discovered provider can be promoted into models.json by the
+    // editor. Existing provider configuration is still updated in place.
+    const targetProvider = provider && typeof provider === "object" && !Array.isArray(provider)
+      ? provider
+      : (value.providers ||= {}, value.providers[originalProvider] = {}, value.providers[originalProvider]);
+    targetProvider.baseUrl = baseUrl;
+    targetProvider.api = api;
+    if (nonEmptyString(input.apiKey)) targetProvider.apiKey = String(input.apiKey).trim();
+    targetProvider.models = models.map((model) => ({
+      id: model.id,
+      name: model.name,
+
+      ...(model.contextWindow ? { contextWindow: model.contextWindow } : {}),
+      ...(model.maxTokens ? { maxTokens: model.maxTokens } : {}),
+    }));
+    await this.write(value);
+    return { provider: originalProvider, baseUrl, api, apiKey: "", models };
+  }
+
+  async removeProvider(providerValue: unknown): Promise<void> {
+    const providerName = validateName(String(providerValue || ""), "Provider", /^[A-Za-z0-9._-]+$/, 80);
+    const value = await this.read();
+    if (!value.providers?.[providerName] || !Array.isArray(value.providers[providerName].models)) throw new Error("只能删除 models.json 中的自定义 Provider");
+    delete value.providers[providerName];
+    await this.write(value);
   }
 
   async remove(providerValue: unknown, idValue: unknown): Promise<void> {

@@ -16,6 +16,27 @@ export interface SessionComposerSelection {
   thinkingLevel?: ThinkingLevel;
 }
 
+export type SelectedRouteValidation =
+  | { ok: true; model: ModelInfo }
+  | { ok: false; reason: "inventory-pending" | "route-missing" };
+
+/** Local guard for an explicitly staged route; it performs no network request and the server remains authoritative. */
+export function validateSelectedRoute(
+  models: readonly ModelInfo[],
+  provider: string,
+  modelId: string,
+  api?: string,
+  inventoryPending = false,
+): SelectedRouteValidation {
+  if (inventoryPending) return { ok: false, reason: "inventory-pending" };
+  const key = `${provider}\u0000${modelId}`;
+  const exact = models.find((model) =>
+    `${model.provider}\u0000${model.id}` === key
+    && (api ? model.api === api : true),
+  );
+  return exact ? { ok: true, model: exact } : { ok: false, reason: "route-missing" };
+}
+
 export type SessionComposerSelectionPatch = Pick<
   SessionComposerSelection,
   "model" | "thinkingLevel"
@@ -63,6 +84,7 @@ export function promptSettingsForSelection(
           model: {
             provider: selection.model.provider,
             modelId: selection.model.id,
+            ...(selection.model.api ? { api: selection.model.api } : null),
           },
         }
       : null),

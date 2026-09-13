@@ -98,6 +98,31 @@ test("composer model picker keeps provider rows outside option navigation and sh
   }
 });
 
+test("composer model picker preserves API-specific variants through DOM selection", async () => {
+  const dom = installDom();
+  const root = createRoot(dom.window.document.querySelector<HTMLElement>("#root")!);
+  const variants: ModelInfo[] = [
+    { provider: "p", id: "m", api: "openai-completions", name: "Completions" },
+    { provider: "p", id: "m", api: "openai-responses", name: "Responses" },
+  ];
+  const changes: Array<[string, string, string | undefined]> = [];
+  try {
+    await act(async () => root.render(createElement(ComposerModelSelect, {
+      value: variants[0]!,
+      models: variants,
+      onChange: (provider: string, id: string, api?: string) => changes.push([provider, id, api]),
+    })));
+    await act(async () => dom.window.document.querySelector<HTMLButtonElement>(".compact-select-trigger")!.click());
+    const options = [...dom.window.document.querySelectorAll<HTMLElement>("[role='option']")];
+    assert.equal(options.length, 2);
+    assert.notEqual(options[0]!.getAttribute("data-compact-select-option-index"), options[1]!.getAttribute("data-compact-select-option-index"));
+    await act(async () => options[1]!.click());
+    assert.deepEqual(changes, [["p", "m", "openai-responses"]]);
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
 test("composer model picker CSS keeps a compact bounded list without search or provider decoration", () => {
   const css = readFileSync(new URL("../src/web/styles.css", import.meta.url), "utf8");
   assert.match(css, /\.composer-model-list\s*{[^}]*max-height:\s*min\(320px,\s*60dvh\)[^}]*overflow-y:\s*auto[^}]*scrollbar-gutter:\s*stable/s);

@@ -1,5 +1,5 @@
 import type { ServerStateDiagnosticSnapshot } from "../shared/state-diagnostics";
-import type { BackgroundSubagentSnapshot, BootstrapData, BootstrapHandshakeData, ExtensionResource, GateMode, InitialPromptData, ModelInfo, PackageResource, PromptDelivery, PromptImage, PromptSettingsSnapshot, QueuedPrompt, ResourceResponse, SessionCopyData, SessionDirectorySummary, SessionRuntimeReadyData, SessionSummary, SessionViewData, SkillResource, ThinkingLevel, WorkspaceFileData, WorkspaceRecentFilesData } from "../shared/types";
+import type { BackgroundSubagentSnapshot, BootstrapData, BootstrapHandshakeData, CustomModelInput, CustomProviderInput, ExtensionResource, GateMode, InitialPromptData, ModelInfo, PackageResource, PromptDelivery, PromptImage, PromptSettingsSnapshot, QueuedPrompt, ResourceResponse, SessionCopyData, SessionDirectorySummary, SessionRuntimeReadyData, SessionSummary, SessionViewData, SkillResource, ThinkingLevel, WorkspaceFileData, WorkspaceRecentFilesData } from "../shared/types";
 import { recordBrowserStateDiagnostic } from "./lib/state-diagnostics";
 
 export type ExtensionResponseInput = {
@@ -473,6 +473,14 @@ export const api = {
   }, PROMPT_PREPARE_TIMEOUT_MS),
   renameSession: (id: string, name: string) => request<{ id: string; name: string }>(`/api/sessions/${id}`, { method: "PATCH", body: JSON.stringify({ name }) }, RUNTIME_OPERATION_TIMEOUT_MS),
   deleteSession: (id: string) => request<BootstrapData>(`/api/sessions/${id}`, { method: "DELETE" }, RUNTIME_OPERATION_TIMEOUT_MS),
+  getCustomModel: (provider: string, id: string) => request<{ model: CustomModelInput }>(`/api/models/${encodeURIComponent(provider)}/${encodeURIComponent(id)}`),
+  getCustomProvider: (provider: string) => request<{ provider: CustomProviderInput }>(`/api/models/provider/${encodeURIComponent(provider)}`),
+  addCustomProvider: (config: CustomProviderInput) => request<BootstrapData>("/api/models/provider", { method: "POST", body: JSON.stringify(config) }, RUNTIME_OPERATION_TIMEOUT_MS),
+  updateCustomProvider: (provider: string, config: CustomProviderInput) => request<BootstrapData>(`/api/models/provider/${encodeURIComponent(provider)}`, { method: "PUT", body: JSON.stringify(config) }, RUNTIME_OPERATION_TIMEOUT_MS),
+  deleteCustomProvider: (provider: string) => request<BootstrapData>(`/api/models/provider/${encodeURIComponent(provider)}`, { method: "DELETE" }, RUNTIME_OPERATION_TIMEOUT_MS),
+  addCustomModel: (model: CustomModelInput) => request<BootstrapData>("/api/models", { method: "POST", body: JSON.stringify(model) }, RUNTIME_OPERATION_TIMEOUT_MS),
+  updateCustomModel: (provider: string, id: string, model: CustomModelInput) => request<BootstrapData>(`/api/models/${encodeURIComponent(provider)}/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(model) }, RUNTIME_OPERATION_TIMEOUT_MS),
+  deleteCustomModel: (provider: string, id: string) => request<BootstrapData>("/api/models", { method: "DELETE", body: JSON.stringify({ provider, modelId: id }) }, RUNTIME_OPERATION_TIMEOUT_MS),
   setModel: (provider: string, modelId: string, sessionId: string) => request<{ model: BootstrapData["state"]["model"]; pending: boolean }>("/api/models/set", {
     method: "POST",
     body: JSON.stringify({ provider, modelId, sessionId }),

@@ -761,10 +761,14 @@ test("a model id under a different provider is refused instead of applied", asyn
   const address = server.address();
   assert.ok(address && typeof address === "object");
   const origin = `http://127.0.0.1:${address.port}`;
-  const prompt = (provider: string) => fetch(`${origin}/api/chat/prompt`, {
+  const prompt = (provider: string, api?: string) => fetch(`${origin}/api/chat/prompt`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ sessionId, message: "route check", settings: { model: { provider, modelId: "next" } } }),
+    body: JSON.stringify({
+      sessionId,
+      message: "route check",
+      settings: { model: { provider, modelId: "next", ...(api ? { api } : null) } },
+    }),
   });
   try {
     assert.equal((await fetch(`${origin}/api/bootstrap`)).status, 200);
@@ -783,6 +787,17 @@ test("a model id under a different provider is refused instead of applied", asyn
       rpc.commands.filter((command) => command.type === "prompt"),
       [],
       "the prompt is not dispatched to another provider",
+    );
+
+    // The exact pair plus a wrong API is also refused; provider/model alone
+    // must not silently select a different transport.
+    const wrongApi = await prompt("test", "anthropic-messages");
+    assert.equal(wrongApi.status, 400);
+    assert.equal((await wrongApi.json() as { code?: string }).code, "MODEL_UNAVAILABLE");
+    assert.deepEqual(
+      rpc.commands.filter((command) => command.type === "set_model"),
+      [],
+      "a mismatched API cannot mutate the Runtime route",
     );
 
     // The exact pair still works, so the fence rejects only the mismatch.

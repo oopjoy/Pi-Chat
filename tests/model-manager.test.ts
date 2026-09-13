@@ -125,6 +125,32 @@ test("model manager update renames provider/id, carries secrets and rejects coll
   }
 });
 
+test("provider editor returns a redacted key and updates the whole model directory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-provider-editor-"));
+  try {
+    await writeFile(join(root, "models.json"), JSON.stringify({ providers: { ds: { baseUrl: "https://api.example.com", api: "openai-responses", apiKey: "secret", models: [{ id: "one", name: "One" }, { id: "two", name: "Two" }] } } }));
+    const manager = new ModelManager(root);
+    assert.deepEqual(await manager.getCustomProvider("ds"), { provider: "ds", baseUrl: "https://api.example.com", api: "openai-responses", apiKey: "", models: [{ id: "one", name: "One" }, { id: "two", name: "Two" }] });
+    await manager.updateProvider("ds", { provider: "ds", baseUrl: "https://new.example.com", api: "openai-completions", apiKey: "", models: [{ id: "one", name: "Renamed", contextWindow: 128000, maxTokens: 4096 }] });
+    const configured = JSON.parse(await readFile(join(root, "models.json"), "utf8"));
+    assert.equal(configured.providers.ds.apiKey, "secret");
+    assert.equal(configured.providers.ds.models.length, 1);
+    assert.equal(configured.providers.ds.models[0].name, "Renamed");
+    await manager.removeProvider("ds");
+    assert.equal(JSON.parse(await readFile(join(root, "models.json"), "utf8")).providers.ds, undefined);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("provider editor accepts normal IDs containing s and rejects whitespace", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-provider-id-"));
+  try {
+    await writeFile(join(root, "models.json"), JSON.stringify({ providers: { ds: { baseUrl: "https://api.example.com", models: [{ id: "one" }] } } }));
+    const manager = new ModelManager(root);
+    await manager.updateProvider("ds", { provider: "ds", baseUrl: "https://api.example.com", api: "openai-completions", models: [{ id: "claude-3-sonnet", name: "Claude" }] });
+    await assert.rejects(() => manager.updateProvider("ds", { provider: "ds", baseUrl: "https://api.example.com", api: "openai-completions", models: [{ id: "model name", name: "Bad" }] }), /Model ID/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("custom model validation rejects unsafe provider names and invalid endpoints", () => {
   assert.throws(() => validateCustomModel({ provider: "../bad", id: "model", api: "openai-completions" }), /Provider/);
   assert.throws(() => validateCustomModel({ provider: "local", id: "model", api: "openai-completions", baseUrl: "file:///tmp" }), /Base URL/);

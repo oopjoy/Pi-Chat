@@ -10,6 +10,7 @@ export function lifecycleMessage(lifecycle: ApplicationLifecycle): string {
   if (lifecycle === "shutting-down") return "Pi Chat 正在关闭，暂时不能提交新操作";
   if (lifecycle === "workspace-changing") return "Pi Chat 正在切换工作目录，暂时不能提交新操作";
   if (lifecycle === "resources-reloading") return "Pi Chat 正在更新配置并重载 Runtime，暂时不能提交新操作";
+  if (lifecycle === "models-refreshing") return "Pi Chat 正在刷新模型目录，暂时不能提交新操作";
   return "Pi Chat 当前不能提交新操作";
 }
 

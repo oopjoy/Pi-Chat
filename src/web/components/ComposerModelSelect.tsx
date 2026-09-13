@@ -7,8 +7,8 @@ export interface ComposerModelGroup {
   models: ModelInfo[];
 }
 
-function modelKey(model: Pick<ModelInfo, "provider" | "id">): string {
-  return `${model.provider}\u0000${model.id}`;
+function modelKey(model: Pick<ModelInfo, "provider" | "id" | "api">): string {
+  return `${model.provider}\u0000${model.id}\u0000${model.api || ""}`;
 }
 
 export function groupComposerModels(models: ModelInfo[]): ComposerModelGroup[] {
@@ -27,7 +27,7 @@ export function ComposerModelSelect({ value, models, inventoryPending = false, d
   /** The list may be a stale/local fallback until Runtime discovery completes. */
   inventoryPending?: boolean;
   disabled?: boolean;
-  onChange: (provider: string, id: string) => void;
+  onChange: (provider: string, id: string, api?: string) => void;
 }) {
   const id = useId();
   const rootRef = useRef<HTMLDivElement>(null);
@@ -58,7 +58,7 @@ export function ComposerModelSelect({ value, models, inventoryPending = false, d
   const choose = (model: ModelInfo | undefined) => {
     if (!model) return;
     setOpen(false);
-    if (modelKey(model) !== currentKey) onChange(model.provider, model.id);
+    if (modelKey(model) !== currentKey) onChange(model.provider, model.id, model.api);
     focusTrigger();
   };
   const openMenu = () => {

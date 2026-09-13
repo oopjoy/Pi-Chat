@@ -139,6 +139,7 @@ export class FakeRpc {
               provider: "test",
               id: "next",
               name: "Next",
+              api: "openai-completions",
               reasoning: true,
             },
           ],

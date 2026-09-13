@@ -22,6 +22,7 @@ function normalizeModel(value: unknown): ModelInfo | null {
   const id = safeText(candidate.id);
   if (!provider || !id) return null;
   const name = safeText(candidate.name, id) || id;
+  const api = safeText(candidate.api);
   const input = Array.isArray(candidate.input)
     ? [...new Set(candidate.input.filter((item): item is string => item === "text" || item === "image"))]
     : undefined;
@@ -32,6 +33,9 @@ function normalizeModel(value: unknown): ModelInfo | null {
     provider,
     id,
     name,
+    ...(api ? { api } : null),
+    ...(candidate.source === "pi-runtime" || candidate.source === "models-json" ? { source: candidate.source } : null),
+    ...(candidate.authMode === "pi-managed" || candidate.authMode === "api-key" ? { authMode: candidate.authMode } : null),
     ...(typeof candidate.reasoning === "boolean" ? { reasoning: candidate.reasoning } : null),
     ...(input?.length ? { input } : null),
     ...(contextWindow ? { contextWindow } : null),
@@ -39,8 +43,8 @@ function normalizeModel(value: unknown): ModelInfo | null {
   };
 }
 
-function modelKey(model: Pick<ModelInfo, "provider" | "id">): string {
-  return `${model.provider}\u0000${model.id}`;
+function modelKey(model: Pick<ModelInfo, "provider" | "id" | "api">): string {
+  return `${model.provider}\u0000${model.id}\u0000${model.api || ""}`;
 }
 
 /** Normalize, deduplicate, and bound an advisory model catalogue. */

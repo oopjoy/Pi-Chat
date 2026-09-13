@@ -149,7 +149,7 @@ test("running Sessions stage model and thinking changes until their next prompt"
   const post = (url: string, body: object) => fetch(`${origin}${url}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   try {
     assert.equal((await fetch(`${origin}/api/bootstrap`)).status, 200);
-    assert.deepEqual(await (await post("/api/models/set", { provider: "test", modelId: "next", sessionId: id })).json(), { model: { provider: "test", id: "next", name: "Next", reasoning: true }, pending: true });
+    assert.deepEqual(await (await post("/api/models/set", { provider: "test", modelId: "next", sessionId: id })).json(), { model: { provider: "test", id: "next", name: "Next", api: "openai-completions", reasoning: true }, pending: true });
     assert.deepEqual(await (await post("/api/thinking/set", { level: "high", sessionId: id })).json(), { level: "high", pending: true });
     // Busy bootstrap/view calls intentionally do not queue get_state behind the
     // turn. They must therefore expose the accepted pending selections rather

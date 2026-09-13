@@ -98,6 +98,12 @@ export interface ModelInfo {
   id: string;
   name: string;
   provider: string;
+  /** Pi's actual transport API; optional for legacy model inventories. */
+  api?: string;
+  /** Where the Provider/model description came from. */
+  source?: "pi-runtime" | "models-json";
+  /** Authentication is owned by Pi or by the models.json API-key config. */
+  authMode?: "pi-managed" | "api-key";
   reasoning?: boolean;
   input?: string[];
   contextWindow?: number;
@@ -120,6 +126,22 @@ export interface CustomModelInput {
 export interface CustomModelConfig extends CustomModelInput {
   /** API keys are never returned by the server; an empty value preserves the existing key on save. */
   apiKey: "";
+}
+
+export interface CustomProviderModelInput {
+  id: string;
+  name: string;
+  contextWindow?: number;
+  maxTokens?: number;
+}
+
+export interface CustomProviderInput {
+  provider: string;
+  baseUrl: string;
+  api: "openai-completions" | "openai-responses" | "anthropic-messages" | "google-generative-ai";
+  /** Always empty when returned; empty on update preserves the existing key. */
+  apiKey?: string;
+  models: CustomProviderModelInput[];
 }
 
 export interface PiContentBlock {
@@ -333,7 +355,7 @@ export interface SessionViewData {
   viewSource?: "browser-cache" | "hot-memory" | "cold-jsonl";
 }
 
-export type ApplicationLifecycle = "idle" | "restarting" | "shutting-down" | "workspace-changing" | "resources-reloading";
+export type ApplicationLifecycle = "idle" | "restarting" | "shutting-down" | "workspace-changing" | "resources-reloading" | "models-refreshing";
 
 /** Primary Pi process capability is separate from Session/JSONL availability. */
 export type PrimaryRuntimeStatus = "starting" | "ready" | "failed";
@@ -398,6 +420,10 @@ export interface BootstrapData {
   models: ModelInfo[];
   /** True until the current Primary Runtime has completed an authoritative model discovery. */
   modelInventoryPending?: boolean;
+  /** Host models.json revision; changes do not imply a Runtime restart. */
+  modelCatalogueRevision?: number;
+  /** True when the host catalogue is newer than the currently running Runtime. */
+  modelRuntimeSyncPending?: boolean;
   commands: SlashCommand[];
   queue: QueuedPrompt[];
   queuePaused: boolean;
@@ -432,7 +458,8 @@ export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhi
 
 /** Exact settings intentionally captured for one ordinary prompt dispatch. */
 export interface PromptSettingsSnapshot {
-  model?: { provider: string; modelId: string };
+  /** Immutable route identity captured at prompt admission. */
+  model?: { provider: string; modelId: string; api?: string };
   thinkingLevel?: ThinkingLevel;
 }
 

@@ -92,6 +92,10 @@ export function CloseIcon(props: IconProps) {
   return <LineIcon {...props}><path d="m6 6 12 12M18 6 6 18" /></LineIcon>;
 }
 
+export function TrashIcon(props: IconProps) {
+  return <LineIcon {...props}><path d="M5 7h14M10 4h4l1 3H9l1-3ZM8 10v7M12 10v7M16 10v7M6.5 7l.8 13h9.4l.8-13" /></LineIcon>;
+}
+
 export function CheckIcon(props: IconProps) {
   return <LineIcon {...props} strokeWidth="2"><path d="m5 12.5 4.3 4.2L19 7.5" /></LineIcon>;
 }
