@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { createReadStream, existsSync, type Stats } from "node:fs";
+import { createReadStream, existsSync, lstatSync, realpathSync, type Stats } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { homedir } from "node:os";
@@ -7,7 +7,7 @@ import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { LOCAL_COORDINATION_ROLE, type PiMessage, type PromptImage, type SessionSummary, type ThinkingLevel } from "../shared/types.js";
 import { compareSessionsByLastUserPrompt } from "../shared/session-order.js";
 import { loadSessionCache, saveSessionCache, type SessionCacheEntry } from "./session-index-cache.js";
-import { SessionProjection, sessionFileFingerprint } from "./session-projection.js";
+import { MAX_SESSION_SNAPSHOT_BYTES, SessionProjection, sessionFileFingerprint } from "./session-projection.js";
 import { promptImages } from "./pi-data.js";
 
 interface SessionHeader {
@@ -36,13 +36,21 @@ export function sessionFileVersion(fileStat: Stats, fingerprint: string): Sessio
 }
 
 function isValidCachedSessionPath(root: string, path: string, id: string): boolean {
-  const normalized = resolve(path);
-  const withinRoot = relative(resolve(root), normalized);
-  return extname(normalized).toLowerCase() === ".jsonl"
-    && !isAbsolute(withinRoot)
-    && withinRoot !== ".."
-    && !withinRoot.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`)
-    && idForPath(normalized) === id;
+  try {
+    const normalized = resolve(path);
+    const rootReal = realpathSync(resolve(root));
+    const targetReal = realpathSync(normalized);
+    const withinRoot = relative(rootReal, targetReal);
+    const fileStat = lstatSync(normalized);
+    return fileStat.isFile()
+      && extname(normalized).toLowerCase() === ".jsonl"
+      && !isAbsolute(withinRoot)
+      && withinRoot !== ".."
+      && !withinRoot.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`)
+      && idForPath(normalized) === id;
+  } catch {
+    return false;
+  }
 }
 
 function sameSessionFileVersion(
@@ -196,6 +204,9 @@ function sessionEntriesFromContent(content: string): SessionEntry[] {
 }
 
 async function readSessionEntries(path: string): Promise<SessionEntry[]> {
+  const fileStat = await stat(path);
+  if (fileStat.size > MAX_SESSION_SNAPSHOT_BYTES)
+    throw new Error(`Session JSONL 超过 ${Math.round(MAX_SESSION_SNAPSHOT_BYTES / (1024 * 1024))} MB，无法一次载入`);
   return scanSessionEntries(path);
 }
 
@@ -520,6 +531,9 @@ export class SessionIndex {
     // restored only persisted summary metadata.
     for (const [id, cached] of this.snapshotCache) {
       if (resolve(this.pathsById.get(id) || "") !== path) continue;
+      // A large file may have grown beyond the cold snapshot budget. Do not
+      // route the sidebar inventory through that full-message projection.
+      if (fileStat.size > MAX_SESSION_SNAPSHOT_BYTES) continue;
       const result = await cached.projection.reconcile(fileStat);
       return {
         version: sessionFileVersion(result.stats, result.fingerprint),
@@ -813,6 +827,7 @@ export class SessionIndex {
       const cached = this.snapshotCache.get(id);
       const projection = cached?.projection || new SessionProjection<SessionEntry>(path, {
         retain: (value) => value as SessionEntry,
+        maxSourceBytes: MAX_SESSION_SNAPSHOT_BYTES,
       });
       let projected;
       try {

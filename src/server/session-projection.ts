@@ -6,6 +6,8 @@ import { resolve } from "node:path";
 const READ_CHUNK_BYTES = 256 * 1024;
 const FINGERPRINT_WINDOW_BYTES = 64 * 1024;
 const MAX_JSONL_ENTRY_BYTES = 65 * 1024 * 1024;
+/** A cold transcript must not materialize an unbounded JSONL into memory. */
+export const MAX_SESSION_SNAPSHOT_BYTES = 128 * 1024 * 1024;
 
 export type SessionProjectionKind = "none" | "append" | "rewrite";
 
@@ -18,6 +20,7 @@ export interface SessionProjectionReadEvent {
 export interface SessionProjectionOptions<Entry> {
   retain(value: Record<string, unknown>): Entry | null;
   observeRead?(event: SessionProjectionReadEvent): void;
+  maxSourceBytes?: number;
 }
 
 export interface SessionProjectionResult<Entry> {
@@ -259,6 +262,8 @@ export class SessionProjection<Entry> {
       // The open handle is authoritative if the caller's earlier inventory
       // stat raced an append, truncation, or atomic replacement.
       const targetBytes = current.size;
+      if (this.options.maxSourceBytes !== undefined && targetBytes > this.options.maxSourceBytes)
+        throw new Error(`Session JSONL 超过 ${Math.round(this.options.maxSourceBytes / (1024 * 1024))} MB，无法一次载入`);
       if (this.version && sameVersion(this.version, current)) {
         // Filesystems (and test doubles) may retain all stat anchors across an
         // in-place rewrite. Verify the bounded content key before returning a
