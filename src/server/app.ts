@@ -1937,6 +1937,17 @@ export class PiChatApp {
   private broadcastSessionActivity(sessionId = this.activeSessionId): void {
     if (!sessionId) return;
     const activity = this.sessionActivity(sessionId);
+    const runtime = this.runtimePool.get(sessionId);
+    const queue = runtime
+      ? this.publicQueue(runtime.promptQueue)
+      : sessionId === this.activeSessionId
+        ? this.publicQueue()
+        : [];
+    const queuePaused = runtime
+      ? runtime.queuePaused
+      : sessionId === this.activeSessionId
+        ? this.queuePaused
+        : false;
     this.broadcast({
       type: "pi_chat_session_status",
       piChatSessionId: sessionId,
@@ -1946,6 +1957,11 @@ export class PiChatApp {
       piChatRunEpoch: this.runEpoch,
       piChatRunGeneration: this.runGenerationsBySession.get(sessionId) || 0,
       activity,
+      // Queue and activity are sampled from the same Runtime-owned state. This
+      // cumulative snapshot lets the browser converge when a queue_update or
+      // queue_dispatch frame is coalesced by SSE backpressure.
+      queue,
+      paused: queuePaused,
       // Retained for existing streaming/cache consumers during the gradual migration.
       running:
         activity.execution === "running" ||

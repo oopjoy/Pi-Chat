@@ -99,6 +99,100 @@ test("queue SSE invalidates an older Session view before it can erase queue stat
   }
 });
 
+test("session status queue snapshots converge after queue frames are coalesced", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const queuedItem = {
+    id: "00000000-0000-4000-8000-000000000098",
+    message: "status snapshot dispatch",
+    imageCount: 0,
+    createdAt: 9,
+  };
+  let resolvePrompt!: (value: {
+    accepted: true;
+    queued: true;
+    id: string;
+    queue: typeof queuedItem[];
+  }) => void;
+  const pendingPrompt = new Promise<{
+    accepted: true;
+    queued: true;
+    id: string;
+    queue: typeof queuedItem[];
+  }>((resolve) => { resolvePrompt = resolve; });
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true },
+      queue: [],
+      queuePaused: true,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    prompt: async () => pendingPrompt,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, queuedItem.message);
+      textarea.dispatchEvent(new dom.window.InputEvent("input", {
+        bubbles: true,
+        inputType: "insertText",
+        data: queuedItem.message,
+      }));
+      dom.window.document.querySelector<HTMLButtonElement>(
+        ".queue-submit-button",
+      )!.click();
+      await Promise.resolve();
+    });
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => source.emitPi({
+      type: "pi_chat_session_status",
+      piChatSessionId: activeId,
+      piChatRunGeneration: 0,
+      activity: { execution: "queued", awaitingConfirmation: false },
+      queue: [queuedItem],
+      paused: true,
+    }));
+    assert.equal(
+      dom.window.document.querySelectorAll(".prompt-queue article").length,
+      1,
+    );
+    await act(async () => source.emitPi({
+      type: "pi_chat_session_status",
+      piChatSessionId: activeId,
+      piChatRunGeneration: 0,
+      activity: { execution: "running", awaitingConfirmation: false },
+      queue: [],
+      paused: false,
+    }));
+    assert.equal(
+      dom.window.document.querySelectorAll(".prompt-queue article").length,
+      0,
+      "the cumulative status snapshot clears a queue item when queue_dispatch was coalesced",
+    );
+    assert.equal(
+      dom.window.document.querySelectorAll(".message-user").length,
+      1,
+      "the same snapshot promotes the accepted local turn into the transcript",
+    );
+    resolvePrompt({ accepted: true, queued: true, id: queuedItem.id, queue: [queuedItem] });
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("agent settlement preserves a completed compaction status until its terminal event", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");

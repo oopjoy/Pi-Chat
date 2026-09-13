@@ -58,6 +58,60 @@ test("App preserves server-owned run timing through terminal SSE and activity sn
   }
 });
 
+test("Session activity carries a cumulative queue snapshot for backpressure recovery", async () => {
+  const rpc = {
+    onEvent: () => () => undefined,
+    send: async () => ({
+      type: "response",
+      success: true,
+      data: { model: null, isStreaming: false },
+    }),
+  } as unknown as PiRpcClient;
+  const app = new PiChatApp({
+    rpc,
+    sessions: {} as SessionIndex,
+    resources: {} as ResourceManager,
+    cwd: process.cwd(),
+    webRoot: process.cwd(),
+    runEpoch: "epoch-queue",
+  });
+  const frames: string[] = [];
+  const clients = (app as unknown as {
+    sseClients: Map<{ write: (frame: string) => boolean }, string>;
+  }).sseClients;
+  clients.set({ write: (frame) => { frames.push(frame); return true; } }, "client");
+  const internals = app as unknown as {
+    broadcastSessionActivity(sessionId: string): void;
+    activeSessionId: string;
+    promptQueue: Array<Record<string, unknown>>;
+    queuePaused: boolean;
+  };
+  internals.activeSessionId = SESSION_ID;
+  internals.promptQueue.push({
+    id: "queue-1",
+    message: "queued prompt",
+    imageCount: 0,
+    createdAt: 1,
+    images: [],
+  });
+  internals.queuePaused = true;
+  try {
+    internals.broadcastSessionActivity(SESSION_ID);
+    const status = payload(frames.at(-1) || "");
+    assert.deepEqual(status.queue, [{
+      id: "queue-1",
+      message: "queued prompt",
+      imageCount: 0,
+      createdAt: 1,
+    }]);
+    assert.equal(status.paused, true);
+    assert.equal(status.piChatSessionId, SESSION_ID);
+  } finally {
+    clients.clear();
+    await app.close();
+  }
+});
+
 test("App stamps browser SSE events with process epoch and Session generation", async () => {
   const rpc = {
     onEvent: () => () => undefined,

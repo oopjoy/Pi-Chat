@@ -3931,6 +3931,81 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         Boolean(eventSessionId) &&
         eventSessionId === viewedSessionIdRef.current &&
         viewedSessionIdRef.current === desiredSessionIdRef.current;
+      /**
+       * Session-status carries the same cumulative queue snapshot as the
+       * dedicated queue event. Keep one projection path for both so a
+       * coalesced/missed queue_dispatch cannot strand a local turn in FIFO.
+       */
+      const projectStatusQueue = (queue: QueuedPrompt[], paused: boolean): void => {
+        if (!eventSessionId) return;
+        const projection = acceptQueueProjection(
+          eventSessionId,
+          queue,
+          paused,
+          "event",
+        );
+        const currentQueue = projection.queue;
+        const localTurns = localUserTurnsRef.current.get(eventSessionId) || [];
+        for (const item of currentQueue)
+          bindQueuedAdmission(
+            localTurns,
+            item.id,
+            item.message,
+            item.imageCount,
+          );
+        const promotedTurns = promoteTurnsAbsentFromQueue(
+          localTurns,
+          new Set(currentQueue.map((item) => item.id)),
+          false,
+          true,
+          cancellingQueueIdsRef.current.get(eventSessionId),
+        );
+        const promotedForPane = viewingEventSession
+          ? promotedTurns.filter((candidate) => !candidate.renderedInTranscript)
+          : [];
+        for (const promoted of promotedForPane)
+          promoted.renderedInTranscript = true;
+        if (promotedForPane.length) {
+          if (viewingEventSession)
+            dispatchPane({
+              type: "QUEUE_UPDATED",
+              sessionId: eventSessionId,
+              queue: currentQueue,
+              paused: projection.paused,
+              messages: (current) => {
+                let next = current;
+                for (const promoted of promotedForPane) {
+                  if (!next.includes(promoted.message))
+                    next = [...next, promoted.message];
+                }
+                return next;
+              },
+            });
+          requestPromptReconcileRef.current(eventSessionId);
+        } else if (viewingEventSession) {
+          dispatchPane({
+            type: "QUEUE_UPDATED",
+            sessionId: eventSessionId,
+            queue: currentQueue,
+            paused: projection.paused,
+          });
+        }
+        setSessions((current) =>
+          current.map((session) =>
+            session.id === eventSessionId
+              ? applySidebarQueueProjection(
+                  session,
+                  currentQueue,
+                  projection.paused,
+                )
+              : session,
+          ),
+        );
+        patchSessionCache(eventSessionId, {
+          queue: currentQueue,
+          queuePaused: projection.paused,
+        });
+      };
       recordBrowserStateDiagnostic("sse", "admitted", {
         sessionId: eventSessionId,
         runGeneration: eventRunGeneration,
@@ -5171,6 +5246,11 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         ) {
           const next = activity as SessionActivityState;
           applySessionActivity(eventSessionId, next);
+          if (Array.isArray(event.queue))
+            projectStatusQueue(
+              event.queue as unknown as QueuedPrompt[],
+              event.paused === true,
+            );
           if (viewingEventSession) {
             dispatchPane({
               type: "RUN_TIMING_UPDATED",
@@ -5191,7 +5271,13 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
             next.execution === "idle" ||
             next.execution === "queued" ||
             next.execution === "failed";
-          if (terminalActivity && typeof eventRunGeneration === "number")
+          // `queued` closes the preceding visible turn but is not a settled
+          // generation: the scheduler can dispatch the next FIFO item under
+          // the same generation before its agent_start advances the counter.
+          // Marking queued as settled rejects that dispatch's queue snapshot.
+          const settledActivity =
+            next.execution === "idle" || next.execution === "failed";
+          if (settledActivity && typeof eventRunGeneration === "number")
             settledRunGenerationsRef.current.set(
               eventSessionId,
               Math.max(
