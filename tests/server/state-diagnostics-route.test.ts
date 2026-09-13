@@ -64,6 +64,9 @@ const ownerA = {
   "x-pi-chat-client": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
   "x-pi-chat-page": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
 };
+function ssePayload(frame: string): Record<string, unknown> {
+  return JSON.parse(frame.split("data: ")[1]?.trim() || "{}");
+}
 const ownerB = {
   "x-pi-chat-client": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
   "x-pi-chat-page": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
@@ -364,7 +367,7 @@ test("native retry lifecycle reuses the active Prompt identity and redacts provi
   const internals = target.app as unknown as {
     sseClients: Map<unknown, string>;
     activePromptDiagnostics: Map<string, { promptId: string; rpcGeneration: number }>;
-    broadcastPromptRetryLifecycle(
+    broadcastPromptFailureLifecycle(
       sessionId: string,
       event: Record<string, unknown>,
       runGeneration: number,
@@ -376,7 +379,7 @@ test("native retry lifecycle reuses the active Prompt identity and redacts provi
     await register(target.origin, ownerA);
     await fetch(`${target.origin}/api/bootstrap`, { headers: ownerA });
     internals.activePromptDiagnostics.set(target.id, { promptId, rpcGeneration: 7 });
-    internals.broadcastPromptRetryLifecycle(target.id, {
+    internals.broadcastPromptFailureLifecycle(target.id, {
       type: "auto_retry_start",
       attempt: 1,
       maxAttempts: 3,
@@ -387,17 +390,17 @@ test("native retry lifecycle reuses the active Prompt identity and redacts provi
     assert.equal(scheduled?.piChatPromptId, promptId);
     assert.equal(JSON.stringify(scheduled).includes("private provider error body"), false);
 
-    internals.broadcastPromptRetryLifecycle(target.id, { type: "agent_start" }, 4, 7);
+    internals.broadcastPromptFailureLifecycle(target.id, { type: "agent_start" }, 4, 7);
     const started = frames.map(ssePayload).find((event) => event.type === "pi_chat_prompt_retry_started");
     assert.equal(started?.piChatPromptId, promptId);
 
-    internals.broadcastPromptRetryLifecycle(target.id, {
+    internals.broadcastPromptFailureLifecycle(target.id, {
       type: "auto_retry_end",
       success: false,
       attempt: 1,
       finalError: "529 overloaded_error: Overloaded",
     }, 4, 7);
-    internals.broadcastPromptRetryLifecycle(target.id, {
+    internals.broadcastPromptFailureLifecycle(target.id, {
       type: "auto_retry_end",
       success: false,
       attempt: 1,
@@ -425,7 +428,7 @@ test("native retry false completion without finalError is not published as exhau
   const internals = target.app as unknown as {
     sseClients: Map<unknown, string>;
     activePromptDiagnostics: Map<string, { promptId: string; rpcGeneration: number; retryPending?: boolean }>;
-    broadcastPromptRetryLifecycle(sessionId: string, event: Record<string, unknown>, runGeneration: number, rpcGeneration: number): void;
+    broadcastPromptFailureLifecycle(sessionId: string, event: Record<string, unknown>, runGeneration: number, rpcGeneration: number): void;
   };
   internals.sseClients.set(client, "retry-cancel-client");
   try {
@@ -433,10 +436,10 @@ test("native retry false completion without finalError is not published as exhau
       promptId: "88888888-8888-4888-8888-888888888888",
       rpcGeneration: 7,
     });
-    internals.broadcastPromptRetryLifecycle(target.id, {
+    internals.broadcastPromptFailureLifecycle(target.id, {
       type: "auto_retry_start", attempt: 1, maxAttempts: 3, delayMs: 25,
     }, 4, 7);
-    internals.broadcastPromptRetryLifecycle(target.id, {
+    internals.broadcastPromptFailureLifecycle(target.id, {
       type: "auto_retry_end", success: false, attempt: 1,
     }, 4, 7);
     assert.equal(frames.some((frame) => frame.includes("pi_chat_prompt_retry_exhausted")), false);

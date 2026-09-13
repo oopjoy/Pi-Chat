@@ -3191,6 +3191,14 @@ export class PiChatApp {
       }, generation);
       return;
     }
+    const lifecyclePromptId = (type === "agent_start" || type === "agent_settled" || type === "pi_chat_process_error")
+      ? this.activePromptDiagnostic(runtime.id, generation)?.promptId
+      : undefined;
+    if (lifecyclePromptId)
+      transition.broadcastEvent = {
+        ...transition.broadcastEvent,
+        piChatPromptId: lifecyclePromptId,
+      };
     this.broadcastPromptFailureLifecycle(
       runtime.id,
       transition.broadcastEvent,
@@ -3817,6 +3825,14 @@ export class PiChatApp {
       }, generation);
       return;
     }
+    const lifecyclePromptId = (type === "agent_start" || type === "agent_settled" || type === "pi_chat_process_error")
+      ? this.activePromptDiagnostic(sessionId, generation)?.promptId
+      : undefined;
+    if (lifecyclePromptId)
+      transition.broadcastEvent = {
+        ...transition.broadcastEvent,
+        piChatPromptId: lifecyclePromptId,
+      };
     this.broadcastPromptFailureLifecycle(
       sessionId,
       transition.broadcastEvent,
