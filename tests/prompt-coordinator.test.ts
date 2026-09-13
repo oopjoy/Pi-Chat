@@ -36,6 +36,43 @@ test("PromptCoordinator binds Server identity and settles from explicit lifecycl
   assert.equal(coordinator.observeServerLifecycle("server-p1", "agent_start"), settled);
 });
 
+test("PromptCoordinator adopts a combined draft admission and replays earlier Server facts", () => {
+  const coordinator = new PromptCoordinator();
+  coordinator.observeServerLifecycle(
+    "server-draft",
+    "agent_start",
+    0,
+    input.sessionId,
+    "epoch-a",
+  );
+  coordinator.observeRetry(
+    "server-draft",
+    "scheduled",
+    0,
+    input.sessionId,
+    "epoch-a",
+    1,
+    3,
+  );
+  coordinator.adoptAccepted(
+    {
+      ...input,
+      promptId: "draft-operation",
+      runEpoch: "epoch-a",
+      runtimeGeneration: 0,
+    },
+    { type: "uncertain" },
+  );
+  const bound = coordinator.bindServerPromptId("draft-operation", "server-draft");
+  assert.equal(bound.phase, "running");
+  assert.equal(bound.serverPromptId, "server-draft");
+  assert.deepEqual(bound.retry, {
+    phase: "scheduled",
+    attempt: 1,
+    maxAttempts: 3,
+  });
+});
+
 test("PromptCoordinator fences an SSE lifecycle fact that beats HTTP identity binding", async () => {
   const coordinator = new PromptCoordinator();
   await coordinator.admit(input, async () => "ok");
@@ -134,6 +171,15 @@ test("PromptCoordinator projects retry metadata without changing Prompt phase", 
     coordinator.observeRetry("server-retry", "running", 9, input.sessionId)?.retry?.phase,
     "exhausted",
   );
+  assert.equal(
+    coordinator.observeRetry("server-retry", "exhausted", 9, input.sessionId, undefined, 2)?.retry?.attempt,
+    3,
+  );
+  coordinator.markSettled("p1");
+  assert.equal(
+    coordinator.observeRetry("server-retry", "scheduled", 9, input.sessionId)?.retry?.phase,
+    "exhausted",
+  );
 });
 
 test("PromptCoordinator replays a retry fact that beats HTTP identity binding", async () => {
@@ -147,6 +193,72 @@ test("PromptCoordinator replays a retry fact that beats HTTP identity binding", 
     maxAttempts: 3,
     delayMs: 25,
   });
+});
+
+test("PromptCoordinator keeps terminal lifecycle ahead of late retry metadata", async () => {
+  const coordinator = new PromptCoordinator();
+  await coordinator.admit(input, async () => "ok");
+  coordinator.bindServerPromptId("p1", "server-terminal-retry");
+  coordinator.observeRetry("server-terminal-retry", "exhausted", 9, input.sessionId, undefined, 3, 3);
+  const failed = coordinator.observeServerLifecycle(
+    "server-terminal-retry",
+    "pi_chat_process_error",
+    9,
+    input.sessionId,
+  );
+  assert.equal(failed?.phase, "failed");
+  assert.equal(
+    coordinator.observeRetry(
+      "server-terminal-retry",
+      "scheduled",
+      9,
+      input.sessionId,
+      undefined,
+      4,
+      3,
+    )?.retry?.phase,
+    "exhausted",
+  );
+  coordinator.clearTerminal();
+  assert.equal(
+    coordinator.observeRetry("server-terminal-retry", "scheduled", 9, input.sessionId),
+    undefined,
+  );
+});
+
+test("PromptCoordinator does not let an older pending retry attempt overwrite a newer fact", async () => {
+  const coordinator = new PromptCoordinator();
+  coordinator.observeRetry("server-pending-retry", "scheduled", 9, input.sessionId, undefined, 2, 3);
+  coordinator.observeRetry("server-pending-retry", "scheduled", 9, input.sessionId, undefined, 1, 3);
+  await coordinator.admit({ ...input, promptId: "pending-retry" }, async () => "ok");
+  coordinator.bindServerPromptId("pending-retry", "server-pending-retry");
+  assert.equal(coordinator.get("pending-retry")?.retry?.attempt, 2);
+});
+
+test("PromptCoordinator preserves terminal facts through a late HTTP admission", async () => {
+  const coordinator = new PromptCoordinator();
+  let resolveAdmission!: (value: string) => void;
+  const pendingAdmission = new Promise<string>((resolve) => {
+    resolveAdmission = resolve;
+  });
+  const request = coordinator.admit(
+    { ...input, promptId: "late-admission" },
+    async () => pendingAdmission,
+  );
+  await Promise.resolve();
+  coordinator.bindServerPromptId("late-admission", "server-late-admission");
+  const failed = coordinator.observeServerLifecycle(
+    "server-late-admission",
+    "pi_chat_process_error",
+    8,
+    input.sessionId,
+  );
+  assert.equal(failed?.phase, "failed");
+  coordinator.clearTerminal();
+  assert.equal(coordinator.get("late-admission")?.phase, "failed");
+  resolveAdmission("accepted-late");
+  assert.equal(await request, "accepted-late");
+  assert.equal(coordinator.get("late-admission"), undefined);
 });
 
 test("PromptCoordinator preserves unknown delivery as uncertain", async () => {

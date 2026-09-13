@@ -4088,6 +4088,35 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         const retryAttempts = typeof event.retryAttempts === "number" ? event.retryAttempts : undefined;
         const maxAttempts = typeof event.maxAttempts === "number" ? event.maxAttempts : undefined;
         const delayMs = typeof event.delayMs === "number" ? event.delayMs : undefined;
+        const isRetryLifecycle = type === "pi_chat_prompt_retry_scheduled"
+          || type === "pi_chat_prompt_retry_started"
+          || type === "pi_chat_prompt_retry_exhausted";
+        const serverPromptId = typeof event.piChatPromptId === "string"
+          ? event.piChatPromptId
+          : undefined;
+        const retryPhase = type === "pi_chat_prompt_retry_scheduled"
+          ? "scheduled" as const
+          : type === "pi_chat_prompt_retry_started"
+            ? "running" as const
+            : "exhausted" as const;
+        const observedRetry = isRetryLifecycle && serverPromptId && eventSessionId
+          ? promptCoordinatorRef.current.observeRetry(
+              serverPromptId,
+              retryPhase,
+              eventRunGeneration,
+              eventSessionId,
+              eventRunEpoch,
+              retryAttempt,
+              maxAttempts,
+              delayMs,
+            )
+          : undefined;
+        // Once a Server Prompt has a terminal lifecycle fact, a late retry frame
+        // must not repaint the Pane. Identity-less legacy frames keep the old
+        // projection path; identity-bearing frames require an active operation.
+        const projectRetry = !isRetryLifecycle
+          || !serverPromptId
+          || Boolean(observedRetry && !["settled", "failed", "aborted"].includes(observedRetry.phase));
         const status = type === "pi_chat_prompt_retry_scheduled"
           ? `Pi 正在等待重试${retryAttempt !== undefined && maxAttempts !== undefined ? `（第 ${retryAttempt}/${maxAttempts} 次）` : "…"}`
           : type === "pi_chat_prompt_retry_started"
@@ -4095,7 +4124,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
             : type === "pi_chat_prompt_retry_exhausted"
               ? "Pi 原生重试已耗尽"
               : "Pi Prompt 执行失败";
-        if (eventSessionId) {
+        if (projectRetry && eventSessionId) {
           patchSessionCache(eventSessionId, { toolStatus: status, isStreaming: type !== "pi_chat_prompt_failed" });
           if (viewingEventSession)
             dispatchPane({ type: "TOOL_STATUS_UPDATED", sessionId: eventSessionId, status });
@@ -6572,7 +6601,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
             const view = await api.newSession(input.cwd);
             if (!promptOperationIsInCurrentRun())
               throw new Error("服务已切换，已取消旧进程的新对话提交");
-            await api.prompt(
+            const promptResult = await api.prompt(
               input.message,
               input.images,
               view.session.id,
@@ -6587,6 +6616,10 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
               gateMode: view.gateMode || "strict",
               accepted: true as const,
               queued: false as const,
+              ...(promptResult.promptId ? { promptId: promptResult.promptId } : null),
+              ...(promptResult.deliveryUncertain
+                ? { deliveryUncertain: true }
+                : null),
             };
           });
         const initial = await submitNewSession({
@@ -6601,6 +6634,19 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         });
         if (!promptOperationIsInCurrentRun()) return;
         targetSessionId = initial.sessionId;
+        if (initial.promptId) {
+          promptCoordinatorRef.current.adoptAccepted(
+            {
+              promptId: promptOperationId,
+              sessionId: targetSessionId,
+              navigationEpoch: navigationEpochRef.current,
+              runEpoch: runEpochRef.current,
+              runtimeGeneration: sessionRunGenerationsRef.current.get(targetSessionId),
+              delivery: steering ? "steer" : "queue",
+            },
+            initial.deliveryUncertain ? { type: "uncertain" } : { type: "run" },
+          );
+        }
         // The draft's own failure reason is resolved once its first message is
         // accepted; the Session that now exists keeps its own entries.
         setLocalFailures((current) => forgetLocalFailuresForSession(current, DRAFT_FAILURE_SCOPE));

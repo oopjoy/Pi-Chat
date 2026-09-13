@@ -44,6 +44,11 @@ type ServerLifecycleFact = {
   runEpoch?: string;
   observedAt: number;
 };
+
+function retryPhaseRank(value: PromptRetryPhase): number {
+  return value === "scheduled" ? 0 : value === "running" ? 1 : 2;
+}
+
 type ServerRetryFact = {
   phase: PromptRetryPhase;
   attempt?: number;
@@ -57,6 +62,8 @@ type ServerRetryFact = {
 
 export class PromptCoordinator {
   private readonly operations = new Map<string, PromptOperation>();
+  /** Keep terminal facts alive until their in-flight HTTP admission settles. */
+  private readonly pendingAdmissions = new Set<string>();
   private readonly serverPromptIndex = new Map<string, string>();
   private readonly retiredServerPromptIds = new Set<string>();
   /** SSE can win the race against the HTTP response; retain only the latest fact per Server ID. */
@@ -152,16 +159,45 @@ export class PromptCoordinator {
     const operation = this.begin(input);
     this.transition(operation.promptId, { type: "admit" });
     this.transition(operation.promptId, { type: "dispatch" });
+    this.pendingAdmissions.add(operation.promptId);
     try {
       const result = await execute(this.operations.get(operation.promptId)!);
+      const current = this.operations.get(operation.promptId);
+      // A Runtime lifecycle may have settled/failed the operation while the
+      // HTTP acknowledgement was still in flight. Preserve that stronger fact
+      // and let the late response complete transport bookkeeping only.
+      if (!current || isPromptOperationTerminal(current)) return result;
       const phase = options.phaseForResult?.(result) || { type: "run" as const };
       this.transition(operation.promptId, phase);
       return result;
     } catch (error) {
-      const phase = options.phaseForError?.(error) || { type: "fail" as const };
-      this.transition(operation.promptId, phase);
+      const current = this.operations.get(operation.promptId);
+      if (current && !isPromptOperationTerminal(current)) {
+        const phase = options.phaseForError?.(error) || { type: "fail" as const };
+        this.transition(operation.promptId, phase);
+      }
       throw error;
+    } finally {
+      this.pendingAdmissions.delete(operation.promptId);
+      this.clearTerminal();
     }
+  }
+
+  /**
+   * Adopt a combined server transaction after it returned its accepted Prompt.
+   * New-draft creation owns Session allocation and prompt delivery in one HTTP
+   * request, so the browser cannot run the ordinary `admit()` wrapper around
+   * the transport. It still records the same operation lifecycle before
+   * binding the Server prompt identity and replaying any earlier SSE facts.
+   */
+  adoptAccepted(
+    input: PromptAdmissionInput,
+    phase: Extract<PromptOperationEvent, { type: "queue" | "run" | "uncertain" }>,
+  ): PromptOperation {
+    const operation = this.begin(input);
+    this.transition(operation.promptId, { type: "admit" });
+    this.transition(operation.promptId, { type: "dispatch" });
+    return this.transition(operation.promptId, phase);
   }
 
   /** Apply only the small lifecycle facts that Server explicitly exposes over SSE. */
@@ -251,6 +287,16 @@ export class PromptCoordinator {
     this.pruneUnboundServerLifecycle();
     const current = this.getByServerPromptId(serverPromptId);
     if (!current) {
+      const previousPending = this.unboundServerRetry.get(serverPromptId);
+      if (previousPending) {
+        if (retryPhaseRank(phase) < retryPhaseRank(previousPending.phase)) return undefined;
+        if (
+          retryPhaseRank(phase) === retryPhaseRank(previousPending.phase)
+          && attempt !== undefined
+          && previousPending.attempt !== undefined
+          && attempt < previousPending.attempt
+        ) return undefined;
+      }
       this.unboundServerRetry.set(serverPromptId, {
         phase,
         attempt,
@@ -276,11 +322,15 @@ export class PromptCoordinator {
       return current;
     const previousRetry = current.retry;
     if (previousRetry) {
-      const rank = (value: PromptRetryPhase): number =>
-        value === "scheduled" ? 0 : value === "running" ? 1 : 2;
       if (phase === "exhausted" && previousRetry.phase === "cancelled") return current;
       if (phase === "cancelled" && previousRetry.phase === "exhausted") return current;
-      if (rank(phase) < rank(previousRetry.phase)) return current;
+      if (retryPhaseRank(phase) < retryPhaseRank(previousRetry.phase)) return current;
+      if (
+        retryPhaseRank(phase) === retryPhaseRank(previousRetry.phase)
+        && attempt !== undefined
+        && previousRetry.attempt !== undefined
+        && attempt < previousRetry.attempt
+      ) return current;
     }
     const retry = {
       phase,
@@ -339,6 +389,7 @@ export class PromptCoordinator {
   }
 
   delete(promptId: string): void {
+    this.pendingAdmissions.delete(promptId);
     const operation = this.operations.get(promptId);
     this.operations.delete(promptId);
     if (operation?.serverPromptId) {
@@ -363,7 +414,8 @@ export class PromptCoordinator {
 
   clearTerminal(): void {
     for (const [promptId, operation] of this.operations)
-      if (isPromptOperationTerminal(operation)) this.delete(promptId);
+      if (isPromptOperationTerminal(operation) && !this.pendingAdmissions.has(promptId))
+        this.delete(promptId);
     this.pruneUnboundServerLifecycle();
   }
 }
