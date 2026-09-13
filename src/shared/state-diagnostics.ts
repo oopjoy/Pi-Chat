@@ -202,7 +202,6 @@ const STATIC_API_ROUTES = new Set([
   "/api/diagnostics/snapshot",
   "/api/events",
   "/api/extension-ui/respond",
-  "/api/extension/respond",
   "/api/health",
   "/api/local-files/pick",
   "/api/models",

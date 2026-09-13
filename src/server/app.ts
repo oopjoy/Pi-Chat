@@ -1865,8 +1865,6 @@ export class PiChatApp {
     if (pathname === "/api/chat/prompt") return "prompt.send";
     if (pathname === "/api/chat/steers/dequeue") return "prompt.abort";
     if (pathname === "/api/chat/abort") return "prompt.abort";
-    if (pathname === "/api/extension/respond") return "extension.respond";
-    if (/^\/api\/sessions\/[^/]+\/control$/.test(pathname)) return "control.takeover";
     return "navigation.request";
   }
 
