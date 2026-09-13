@@ -174,10 +174,18 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
     write({ type: "agent_start" });
     reply(command.id, {});
     const retrySmoke = typeof command.message === "string" && command.message.includes("retry identity smoke");
-    if (retrySmoke) {
+    const exhaustedRetrySmoke = typeof command.message === "string" && command.message.includes("retry exhausted smoke");
+    if (retrySmoke || exhaustedRetrySmoke) {
       write({ type: "auto_retry_start", attempt: 1, maxAttempts: 2, delayMs: 40, errorMessage: "controlled fixture failure" });
       setTimeout(() => write({ type: "auto_retry_start", attempt: 2, maxAttempts: 2, delayMs: 40, errorMessage: "controlled fixture failure" }), 40);
-      setTimeout(() => write({ type: "auto_retry_end", success: true, attempt: 2 }), 100);
+      setTimeout(() => write({ type: "auto_retry_end", success: !exhaustedRetrySmoke, attempt: 2, ...(exhaustedRetrySmoke ? { finalError: "controlled fixture failure" } : {}) }), 100);
+      if (exhaustedRetrySmoke) {
+        setTimeout(() => {
+          isStreaming = false;
+          write({ type: "pi_chat_process_error", error: "controlled fixture failure" });
+        }, 180);
+        return;
+      }
     }
     setTimeout(() => {
       const assistantMessage = { role: "assistant", provider: "test", model: "gpt-e2e", content: "Live response complete", timestamp: Date.now() };

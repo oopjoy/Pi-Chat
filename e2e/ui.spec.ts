@@ -67,6 +67,17 @@ test("bundled retry lifecycle keeps one Prompt identity in the browser", { tag: 
   await expect(page.locator(".message-user .message-content").filter({ hasText: "retry identity smoke" })).toHaveCount(1);
 });
 
+test("exhausted retry settles one Prompt without duplicating its User row", { tag: "@desktop-only" }, async ({ page }) => {
+  await page.goto("/");
+  const input = page.getByRole("textbox", { name: "消息输入" });
+  await input.fill("retry exhausted smoke");
+  await page.locator(".send-button").click();
+  await expect(page.locator(".message-user .message-content").filter({ hasText: "retry exhausted smoke" })).toHaveCount(1);
+  await page.waitForTimeout(500);
+  await page.reload();
+  await expect(page.locator(".message-user .message-content").filter({ hasText: "retry exhausted smoke" })).toHaveCount(1);
+});
+
 test("desktop session navigation keeps the left sidebar open", { tag: "@desktop-only" }, async ({ page }) => {
   await page.goto("/");
   const sidebar = page.locator(".sidebar");
