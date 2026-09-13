@@ -1,8 +1,8 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { createReadStream, existsSync, readFileSync, watch, type FSWatcher } from "node:fs";
-import { stat, unlink } from "node:fs/promises";
+import { lstat, realpath, stat, unlink } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { basename, dirname, extname, join, normalize, resolve } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, normalize, relative, resolve } from "node:path";
 import {
   appendTerminalMessage,
   assistantMessageRequestsTool,
@@ -5458,6 +5458,25 @@ export class PiChatApp {
     }
   }
 
+  private async validatedSessionDeletePath(path: string, sessionId: string): Promise<string> {
+    if (!isAbsolute(path)) throw new Error("会话文件路径必须是绝对路径");
+    const normalized = resolve(path);
+    const indexed = this.options.sessions.pathForId(sessionId);
+    if (indexed && resolve(indexed) !== normalized)
+      throw new Error("会话文件路径与索引不一致，已拒绝删除");
+    const fileStat = await lstat(normalized);
+    if (!fileStat.isFile()) throw new Error("会话文件不是普通文件，已拒绝删除");
+    const [rootReal, targetReal] = await Promise.all([
+      realpath(this.options.sessions.root),
+      realpath(normalized),
+    ]);
+    const withinRoot = relative(rootReal, targetReal);
+    if (withinRoot === ".." || withinRoot.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`))
+      throw new Error("会话文件不在 Session 目录内，已拒绝删除");
+    if (idForPath(normalized) !== sessionId) throw new Error("会话文件身份不一致，已拒绝删除");
+    return normalized;
+  }
+
   private async deleteSession(id: string): Promise<BootstrapData> {
     if (this.deletionOutcomePendingBySession.has(id)) {
       const fencedRuntime = this.runtimePool.get(id);
@@ -5564,7 +5583,10 @@ export class PiChatApp {
     const removedForkOrigin = await this.sessionRelations.getForkOrigin(id);
     await this.sessionRelations.removeDestination(id);
     try {
-      if (path && existsSync(path)) await unlink(path);
+      if (path && existsSync(path)) {
+        const safePath = await this.validatedSessionDeletePath(path, id);
+        await unlink(safePath);
+      }
     } catch (error) {
       if (removedForkOrigin) {
         try { await this.sessionRelations.recordFork(id, removedForkOrigin); }

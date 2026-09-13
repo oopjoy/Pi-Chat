@@ -121,6 +121,36 @@ test("external models.json changes refresh the Host catalogue and safely reload 
   }
 });
 
+test("session deletion rejects an indexed file outside the Session root", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-session-delete-root-"));
+  const outside = join(root, "..", "pi-chat-session-outside.jsonl");
+  await writeFile(outside, "{}\n");
+  const sessionId = idForPath(outside);
+  const primary = new FakeRpc("C:\\sessions\\primary.jsonl", "primary");
+  const sessions = {
+    root,
+    pathForId: (id: string) => id === sessionId ? outside : null,
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({
+    rpc: primary as unknown as PiRpcClient,
+    sessions,
+    resources: {} as ResourceManager,
+    cwd: process.cwd(),
+    webRoot: process.cwd(),
+  });
+  try {
+    await assert.rejects(
+      () => (app as unknown as { validatedSessionDeletePath: (path: string, id: string) => Promise<string> }).validatedSessionDeletePath(outside, sessionId),
+      /不在 Session 目录内/,
+    );
+    assert.equal(await readFile(outside, "utf8"), "{}\n");
+  } finally {
+    await app.close();
+    await rm(outside, { force: true });
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("workspace default change never restarts or rebinds a live Runtime", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-workspace-rollback-"));
   const previousCwd = join(root, "old");
