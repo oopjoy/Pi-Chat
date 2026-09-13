@@ -1,4 +1,4 @@
-import type { PiMessage, QueuedPrompt } from "../../shared/types";
+import type { PendingPromptProjection, PiMessage, QueuedPrompt } from "../../shared/types";
 
 /** A locally accepted user turn that JSONL has not yet exposed to a view read. */
 export interface LocalUserTurn {
@@ -55,6 +55,61 @@ function userInstructionIdentity(message: PiMessage): string {
 
 function sameUserInstruction(left: PiMessage, right: PiMessage): boolean {
   return left.role === "user" && right.role === "user" && userInstructionIdentity(left) === userInstructionIdentity(right);
+}
+
+/**
+ * Match the server's retained accepted-prompt projection to the local object
+ * created by the same submission. The HTTP acknowledgement and a later view
+ * may race, so the server ID is normally absent from the local object and the
+ * cumulative ordinal may be stale. A unique timestamp-near payload match is
+ * the safe fallback; two identical turns at the same time remain ambiguous.
+ */
+export function localTurnForPendingPrompt(
+  turns: readonly LocalUserTurn[],
+  pending: Pick<PendingPromptProjection, "message" | "expectedTurnTotal"> & { id?: string },
+): LocalUserTurn | undefined {
+  const byPendingId = pending.id
+    ? turns.find((turn) => turn.message.piChatPendingMessageId === pending.id)
+    : undefined;
+  if (byPendingId) return byPendingId;
+
+  const byOrdinal = turns.find(
+    (turn) =>
+      turn.expectedTurnTotal === pending.expectedTurnTotal
+      && sameUserInstruction(turn.message, pending.message),
+  );
+  if (byOrdinal) return byOrdinal;
+
+  const candidates = turns.filter((turn) => sameUserInstruction(turn.message, pending.message));
+  if (candidates.length !== 1) {
+    const pendingAt = pending.message.timestamp;
+    if (typeof pendingAt !== "number" || !Number.isFinite(pendingAt)) return undefined;
+    const ranked = candidates
+      .map((turn) => ({
+        turn,
+        distance:
+          typeof turn.message.timestamp === "number" && Number.isFinite(turn.message.timestamp)
+            ? Math.abs(turn.message.timestamp - pendingAt)
+            : Number.POSITIVE_INFINITY,
+      }))
+      .sort((left, right) => left.distance - right.distance);
+    return ranked.length > 0
+      && ranked[0].distance <= PERSISTED_ECHO_CLOCK_TOLERANCE_MS
+      && ranked[0].distance < (ranked[1]?.distance ?? Number.POSITIVE_INFINITY)
+      ? ranked[0].turn
+      : undefined;
+  }
+
+  const candidate = candidates[0];
+  const pendingAt = pending.message.timestamp;
+  const localAt = candidate.message.timestamp;
+  return typeof pendingAt === "number"
+    && Number.isFinite(pendingAt)
+    && typeof localAt === "number"
+    && Number.isFinite(localAt)
+    && Math.abs(localAt - pendingAt) <= PERSISTED_ECHO_CLOCK_TOLERANCE_MS
+    ? candidate
+    : undefined;
 }
 
 /**
@@ -521,19 +576,25 @@ export function protectTranscriptWithLocalTurns(
   const resolvedTurnTotal = transcriptTurnTotal(messages, turnTotal);
   const candidates = turns || [];
   const pendingTurns = candidates.filter((turn) => {
-    const keepWaitingAdmission =
-      turn.queueState === "waiting" &&
-      !turn.revealOnMessageStart &&
-      (!turn.queueId ||
-        turn.queueRetryPending ||
-        waitingQueueIds?.has(turn.queueId));
-    return keepWaitingAdmission || !transcriptConfirmsLocalTurn(
+    const confirmed = transcriptConfirmsLocalTurn(
       turn,
       messages,
       resolvedTurnTotal,
       messagesTruncated,
       samePayloadRank(candidates, turn),
     );
+    // Waiting is only a transport state. Once the authoritative transcript
+    // contains this turn, its persisted echo wins over a missing/late queue
+    // acknowledgement; otherwise an immediate prompt accidentally left in
+    // `waiting` would remain as a duplicate forever after settlement.
+    const keepWaitingAdmission =
+      !confirmed &&
+      turn.queueState === "waiting" &&
+      !turn.revealOnMessageStart &&
+      (!turn.queueId ||
+        turn.queueRetryPending ||
+        waitingQueueIds?.has(turn.queueId));
+    return keepWaitingAdmission || !confirmed;
   });
   if (!pendingTurns.length) {
     return { messages, messageTotal: resolvedMessageTotal, turnTotal: resolvedTurnTotal, pendingTurns };

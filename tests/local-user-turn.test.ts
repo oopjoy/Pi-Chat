@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { appendLocalTurnOnce, appendPendingUserMessage, bindQueuedAdmission, bindQueuedDispatch, consumeLocalSteeringTurn, diagnoseVisibleUserTurnDuplicates, markLocalTurnQueued, nextLocalTurnTotal, promoteTurnsAbsentFromQueue, protectTranscriptWithLocalTurns, queuedPromptFromLocalTurn, removeLocalTurnAndRebase, removePendingSteeringTurns, transcriptConfirmsLocalTurn, transcriptTurnTotal, type LocalUserTurn } from "../src/web/lib/local-user-turn";
+import { appendLocalTurnOnce, appendPendingUserMessage, bindQueuedAdmission, bindQueuedDispatch, consumeLocalSteeringTurn, diagnoseVisibleUserTurnDuplicates, localTurnForPendingPrompt, markLocalTurnQueued, nextLocalTurnTotal, promoteTurnsAbsentFromQueue, protectTranscriptWithLocalTurns, queuedPromptFromLocalTurn, removeLocalTurnAndRebase, removePendingSteeringTurns, transcriptConfirmsLocalTurn, transcriptTurnTotal, type LocalUserTurn } from "../src/web/lib/local-user-turn";
 import { SessionViewCache } from "../src/web/lib/session-view-cache";
 import type { PiMessage, SessionViewData } from "../src/shared/types";
 
@@ -713,6 +713,63 @@ test("an older identical echo cannot confirm a newer submission when the waterma
   const protectedTranscript = protectTranscriptWithLocalTurns([turn], window, 2, 1);
   assert.deepEqual(protectedTranscript.pendingTurns, [turn]);
   assert.deepEqual(protectedTranscript.messages, [...window, turn.message]);
+});
+
+test("a pending server view matches the existing local turn when its ordinal is stale", () => {
+  const localTurn: LocalUserTurn = {
+    sessionId: "session-a",
+    message: { role: "user", content: repeatedPrompt, timestamp: 9_000 },
+    // The browser's cached watermark drifted after the prompt was accepted.
+    expectedTurnTotal: 14,
+  };
+  const pending = {
+    id: "server-pending",
+    message: { role: "user" as const, content: repeatedPrompt, timestamp: 9_000 },
+    expectedTurnTotal: 12,
+  };
+  assert.equal(localTurnForPendingPrompt([localTurn], pending), localTurn);
+});
+
+test("ambiguous identical pending prompts are not collapsed by timestamp", () => {
+  const first: LocalUserTurn = {
+    sessionId: "session-a",
+    message: { role: "user", content: repeatedPrompt, timestamp: 9_000 },
+    expectedTurnTotal: 12,
+  };
+  const second: LocalUserTurn = {
+    sessionId: "session-a",
+    message: { role: "user", content: repeatedPrompt, timestamp: 9_000 },
+    expectedTurnTotal: 13,
+  };
+  const pending = {
+    id: "server-pending",
+    message: { role: "user" as const, content: repeatedPrompt, timestamp: 9_000 },
+    expectedTurnTotal: 11,
+  };
+  assert.equal(localTurnForPendingPrompt([first, second], pending), undefined);
+});
+
+test("a persisted echo releases an immediate turn left in waiting state", () => {
+  const waiting: LocalUserTurn = {
+    sessionId: "session-a",
+    message: { role: "user", content: repeatedPrompt, timestamp: 9_000 },
+    expectedTurnTotal: 2,
+    baselineTurnTotal: 1,
+    // A stale streaming snapshot classified this immediate prompt as waiting;
+    // it has no queue ID because it was never admitted to the FIFO.
+    queueState: "waiting",
+  };
+  const persisted = [
+    persistedUser(repeatedPrompt, 9_000, "entry-2:0"),
+  ];
+  const protectedTranscript = protectTranscriptWithLocalTurns(
+    [waiting],
+    persisted,
+    2,
+    2,
+  );
+  assert.deepEqual(protectedTranscript.pendingTurns, []);
+  assert.deepEqual(protectedTranscript.messages, persisted);
 });
 
 test("the persisted echo of this submission confirms even when it shares the submit millisecond", () => {

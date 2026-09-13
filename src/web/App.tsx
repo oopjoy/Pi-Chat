@@ -128,6 +128,7 @@ import {
   bindQueuedDispatch,
   consumeLocalSteeringTurn,
   localTurnBelongsInTranscript,
+  localTurnForPendingPrompt,
   markLocalTurnQueued,
   nextLocalTurnTotal,
   promoteTurnsAbsentFromQueue,
@@ -2036,13 +2037,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     const pending = view.pendingPrompt;
     if (!pending) return;
     const turns = localUserTurnsRef.current.get(view.session.id) || [];
-    const existing = turns.find(
-      (turn) => turn.message.piChatPendingMessageId === pending.id,
-    ) || turns.find(
-      (turn) =>
-        turn.expectedTurnTotal === pending.expectedTurnTotal &&
-        JSON.stringify(turn.message.content) === JSON.stringify(pending.message.content),
-    );
+    const existing = localTurnForPendingPrompt(turns, pending);
     if (existing) {
       existing.queueState = "dispatched";
       existing.queueRetryPending = false;
