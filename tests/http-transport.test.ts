@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { bodyJson, HttpRequestError } from "../src/server/http-transport";
+import { bodyJson, HttpRequestError, SECURITY_HEADERS } from "../src/server/http-transport";
+
+test("security policy allows only the exact GitHub release API used by update checks", () => {
+  assert.match(SECURITY_HEADERS["content-security-policy"], /connect-src 'self' https:\/\/api\.github\.com/);
+});
 
 function delayedBody(delayMs: number, value: string): AsyncIterable<Buffer> {
   return {
