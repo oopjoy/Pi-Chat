@@ -69,6 +69,21 @@ async function waitForCapabilityProbe(rpcLog: string, child: ReturnType<typeof s
   throw new Error("Pi RPC capability probe did not complete during startup smoke test");
 }
 
+function parseSsePayloads(buffer: string): Record<string, unknown>[] {
+  return buffer
+    .split(/\r?\n\r?\n/)
+    .flatMap((frame) => {
+      const data = frame.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim()).join("\n");
+      if (!data) return [];
+      try {
+        const value = JSON.parse(data) as unknown;
+        return value && typeof value === "object" ? [value as Record<string, unknown>] : [];
+      } catch {
+        return [];
+      }
+    });
+}
+
 const fakeRpcEntry = String.raw`
 import { appendFileSync } from "node:fs";
 import { createInterface } from "node:readline";
@@ -120,6 +135,8 @@ test("compiled server starts against fake RPC, probes capabilities, serves guard
     stdio: "ignore",
     windowsHide: true,
   });
+  let eventController: AbortController | undefined;
+  let eventPump: Promise<void> | undefined;
   try {
     const origin = `http://127.0.0.1:${port}`;
     const browserHeaders = {
@@ -144,12 +161,37 @@ test("compiled server starts against fake RPC, probes capabilities, serves guard
     assert.equal(guarded.status, 200);
     assert.equal((await guarded.json() as { service?: string }).service, "pi-chat");
     await waitForCapabilityProbe(rpcLog, child);
+    eventController = new AbortController();
+    const eventResponse = await fetch(
+      `${origin}/api/events?token=${encodeURIComponent(handshakeData.requestToken)}&client=${encodeURIComponent(browserHeaders["x-pi-chat-client"])}&page=${encodeURIComponent(browserHeaders["x-pi-chat-page"])}`,
+      { headers: guardedHeaders, signal: eventController.signal },
+    );
+    assert.equal(eventResponse.status, 200);
+    const eventReader = eventResponse.body?.getReader();
+    assert.ok(eventReader);
+    const firstEvent = await eventReader.read();
+    assert.match(new TextDecoder().decode(firstEvent.value), /event: ready/);
+    const eventFrames: Record<string, unknown>[] = [];
+    let eventBuffer = new TextDecoder().decode(firstEvent.value);
+    eventFrames.push(...parseSsePayloads(eventBuffer));
+    eventPump = (async () => {
+      while (true) {
+        const next = await eventReader.read();
+        if (next.done) return;
+        eventBuffer += new TextDecoder().decode(next.value);
+        eventFrames.splice(0, eventFrames.length, ...parseSsePayloads(eventBuffer));
+      }
+    })().catch((error) => {
+      if (!eventController?.signal.aborted) throw error;
+    });
     const prompt = await fetch(`${origin}/api/chat/prompt`, {
       method: "POST",
       headers: { ...guardedHeaders, "content-type": "application/json" },
       body: JSON.stringify({ sessionId: data.activeSessionId, message: "bundled retry fixture" }),
     });
     assert.equal(prompt.status, 202);
+    const promptBody = await prompt.json() as { promptId?: string };
+    assert.match(promptBody.promptId || "", /^[a-f0-9-]{36}$/);
     let promptFacts: string[] = [];
     let diagnosticEvidence: unknown;
     let diagnosticEntries: unknown;
@@ -171,7 +213,20 @@ test("compiled server starts against fake RPC, probes capabilities, serves guard
     assert.ok(promptFacts.includes("retry-scheduled"), JSON.stringify({ rpcCommands, diagnosticEvidence, diagnosticEntries }));
     assert.ok(promptFacts.includes("retry-started"), JSON.stringify({ promptFacts, diagnosticEvidence, diagnosticEntries }));
     assert.ok(promptFacts.includes("retry-exhausted"), JSON.stringify({ promptFacts, diagnosticEvidence, diagnosticEntries }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    eventController.abort();
+    await eventPump;
+    const retryEvents = eventFrames.filter((event) => typeof event.type === "string" && event.type.startsWith("pi_chat_prompt_retry_"));
+    assert.deepEqual(retryEvents.map((event) => event.type), [
+      "pi_chat_prompt_retry_scheduled",
+      "pi_chat_prompt_retry_started",
+      "pi_chat_prompt_retry_exhausted",
+    ]);
+    assert.ok(retryEvents.every((event) => event.piChatPromptId === promptBody.promptId));
+    assert.equal(JSON.stringify(retryEvents).includes("provider secret"), false);
   } finally {
+    eventController?.abort();
+    if (eventPump) await eventPump.catch(() => undefined);
     // Register before killing: on fast Windows exits, registering afterwards can
     // miss the event and make a successful graceful shutdown look like a timeout.
     const exited = child.exitCode === null ? once(child, "exit") : Promise.resolve();
