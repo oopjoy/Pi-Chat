@@ -96,6 +96,9 @@ test("an EventSource from an earlier generation cannot deliver queued callbacks 
 
     second.emit("ready", { type: "ready" });
     second.emit("pi", { type: "agent_start" });
+    second.onerror?.(new dom.window.Event("error") as unknown as Event);
+    second.onerror?.(new dom.window.Event("error") as unknown as Event);
+    assert.equal(errors.length, 1, "one EventSource reports one recovery error");
     assert.equal(readySources.length, 1);
     assert.equal(piSources.length, 1);
   } finally {

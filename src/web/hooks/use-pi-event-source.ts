@@ -64,6 +64,11 @@ export function usePiEventSource({ enabled, generation = 0, url, onReady, onPi, 
     if (!enabled) return;
     const source = new EventSource(url());
     let active = true;
+    // Browsers may deliver several error tasks while one EventSource is
+    // transitioning to CLOSED. The App replaces the source once; duplicate
+    // callbacks otherwise repeat the visible "connection lost" error and can
+    // start redundant recovery work.
+    let errorHandled = false;
     const ready = (event: Event) => {
       if (!active) return;
       const frame = diagnosticFrame((event as MessageEvent<unknown>).data);
@@ -91,7 +96,8 @@ export function usePiEventSource({ enabled, generation = 0, url, onReady, onPi, 
     source.addEventListener("ready", ready);
     source.addEventListener("pi", pi);
     source.onerror = () => {
-      if (!active) return;
+      if (!active || errorHandled) return;
+      errorHandled = true;
       recordBrowserStateDiagnostic("sse", "error", {
         details: { readyState: source.readyState },
       });
