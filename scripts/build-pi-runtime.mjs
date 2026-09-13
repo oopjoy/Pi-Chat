@@ -167,6 +167,17 @@ await cp(
   { recursive: true },
 );
 
+// Pi AI keeps OAuth flows behind runtime dynamic imports. In the bundled
+// runtime those imports resolve relative to package/dist, so copy the OAuth
+// modules and their relative Pi AI dependencies into the staged package.
+const piAiDist = resolve(sourcePackage.root, "node_modules", "@earendil-works", "pi-ai", "dist");
+await cp(resolve(piAiDist, "auth", "oauth"), resolve(packageDist, "auth", "oauth"), { recursive: true });
+await cp(resolve(piAiDist, "utils"), resolve(packageDist, "utils"), { recursive: true });
+await cp(resolve(piAiDist, "providers"), resolve(packageDist, "providers"), { recursive: true });
+for (const oauthName of ["anthropic", "github-copilot", "kimi-coding", "openai-codex", "openrouter", "radius", "xai"]) {
+  await writeFile(resolve(packageDist, `${oauthName}.js`), `export * from "./auth/oauth/${oauthName}.js";\n`);
+}
+
 const originalBin = sourcePackage.manifest.bin;
 const originalCliRelative = typeof originalBin === "string"
   ? originalBin

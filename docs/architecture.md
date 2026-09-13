@@ -181,7 +181,7 @@ Prefer small hooks and pure libs over growing `App.tsx` further.
 
 Prefer **RPC capability probe** over a hard Pi version allowlist.
 
-| Field | Value (0.4.1) |
+| Field | Value (0.4.6) |
 |---|---|
 | Required capabilities | `get_state`, `get_messages`, `get_available_models`, `get_commands`, `get_session_stats` |
 | Last verified Pi | 0.85.1 |
