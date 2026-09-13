@@ -21,6 +21,33 @@ export type FailureKind =
   | "server"
   | "unknown";
 
+/** Stable failure code used by state machines and diagnostics, not UI wording. */
+export type PromptFailureKind =
+  | "user-aborted"
+  | "auth-unavailable"
+  | "rate-limit"
+  | "overloaded"
+  | "timeout"
+  | "transport"
+  | "runtime-exit"
+  | "model-unavailable"
+  | "unknown";
+
+/** Structured failure metadata carried alongside the redacted full detail. */
+export interface PromptFailure {
+  kind: PromptFailureKind;
+  provider?: string;
+  model?: string;
+  api?: string;
+  status?: number;
+  retryAttempts?: number;
+  retryExhausted?: boolean;
+  requestId?: string;
+  incidentId?: string;
+  /** Complete provider/runtime detail after the boundary redaction policy. */
+  message: string;
+}
+
 /** One user-visible explanation of a failed model or Runtime attempt. */
 export interface AssistantErrorNotice {
   kind: FailureKind;
@@ -28,6 +55,8 @@ export interface AssistantErrorNotice {
   detail: string;
   /** provider · model · api of the attempt, when Pi recorded the route. */
   route?: string;
+  /** Stable machine-readable classification for state and test assertions. */
+  failure: PromptFailure;
 }
 
 /** One browser-local failure retained in the conversation body for its Session. */
@@ -90,6 +119,95 @@ export function visibleAssistantErrorDetail(raw: string): string {
   return redactSensitiveDetail(raw).replace(UNSAFE_ERROR_DISPLAY_CHARACTERS, "");
 }
 
+function safeFailureMetadata(value: unknown, maximum: number): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const cleaned = value.replace(UNSAFE_ERROR_DISPLAY_CHARACTERS, "").trim();
+  return cleaned ? cleaned.slice(0, maximum) : undefined;
+}
+
+function parseFailureStatus(raw: string): number | undefined {
+  const matches = [...raw.matchAll(HTTP_STATUS)];
+  const value = matches.at(-1)?.[1];
+  return value ? Number(value) : undefined;
+}
+
+function legacyFailureKind(raw: string): FailureKind {
+  const status = lastHttpStatus(raw);
+  const authority = /auth_unavailable|no auth available/i.test(raw);
+  const overloaded = /overloaded|server_is_overloaded/i.test(raw);
+  const aborted = /operation was aborted|request aborted/i.test(raw);
+  const interrupted = /request_timeout|stream disconnected|stream error|stream terminated|terminated by|protocol_error|unexpected eof|tls handshake|connection error|connection reset|socket hang up|upstream connect error|econnreset|etimedout|econnrefused|fetch failed|network error/i.test(raw);
+  const truncated = /stream ended before|ended before a terminal/i.test(raw);
+  const runtimeGone = /RPC 已退出|Runtime 已退出|进程已退出|Runtime 不可用|启动超时/i.test(raw);
+  if (aborted) return "aborted";
+  if (authority) return "authority";
+  if (overloaded) return "overloaded";
+  if (status === "429") return "rate-limit";
+  if (status === "401" || status === "403") return "credentials";
+  if (runtimeGone) return "runtime-gone";
+  if (interrupted || truncated) return "connection";
+  if (status.startsWith("5")) return "server";
+  return "unknown";
+}
+
+function promptFailureKind(raw: string, legacy: FailureKind, status?: number): PromptFailureKind {
+  if (legacy === "aborted") return "user-aborted";
+  if (legacy === "authority" || legacy === "credentials") return "auth-unavailable";
+  if (legacy === "rate-limit") return "rate-limit";
+  if (legacy === "overloaded") return "overloaded";
+  if (legacy === "runtime-gone") return "runtime-exit";
+  if (legacy === "connection") {
+    return /timeout|timed out|etimedout/i.test(raw) ? "timeout" : "transport";
+  }
+  if (status === 408 || status === 504) return "timeout";
+  return "unknown";
+}
+
+/** Normalize provider/runtime wording without making the wording authoritative. */
+export function normalizePromptFailure(
+  raw: string,
+  metadata: {
+    provider?: unknown;
+    model?: unknown;
+    api?: unknown;
+    status?: unknown;
+    retryAttempts?: unknown;
+    requestId?: unknown;
+    incidentId?: unknown;
+    aborted?: boolean;
+    runtimeExit?: boolean;
+    modelUnavailable?: boolean;
+  } = {},
+): PromptFailure {
+  const legacy = legacyFailureKind(raw);
+  const status = typeof metadata.status === "number" && Number.isSafeInteger(metadata.status)
+    ? metadata.status
+    : parseFailureStatus(raw);
+  const retryMatch = /retry failed after\s+(\d+)\s+attempts?/i.exec(raw);
+  const retryAttempts = typeof metadata.retryAttempts === "number" && Number.isSafeInteger(metadata.retryAttempts)
+    ? metadata.retryAttempts
+    : retryMatch ? Number(retryMatch[1]) : undefined;
+  let kind = promptFailureKind(raw, legacy, status);
+  if (metadata.aborted) kind = "user-aborted";
+  else if (metadata.runtimeExit) kind = "runtime-exit";
+  else if (metadata.modelUnavailable) kind = "model-unavailable";
+  const retryExhausted = retryAttempts !== undefined
+    ? retryAttempts > 0 && /retry failed|retry exhausted|after\s+\d+\s+attempts?/i.test(raw)
+    : /retry failed|retry exhausted/i.test(raw);
+  return {
+    kind,
+    ...(safeFailureMetadata(metadata.provider, 200) ? { provider: safeFailureMetadata(metadata.provider, 200) } : null),
+    ...(safeFailureMetadata(metadata.model, 400) ? { model: safeFailureMetadata(metadata.model, 400) } : null),
+    ...(safeFailureMetadata(metadata.api, 120) ? { api: safeFailureMetadata(metadata.api, 120) } : null),
+    ...(status !== undefined ? { status } : null),
+    ...(retryAttempts !== undefined ? { retryAttempts } : null),
+    ...(retryExhausted ? { retryExhausted: true } : null),
+    ...(safeFailureMetadata(metadata.requestId, 200) ? { requestId: safeFailureMetadata(metadata.requestId, 200) } : null),
+    ...(safeFailureMetadata(metadata.incidentId, 80) ? { incidentId: safeFailureMetadata(metadata.incidentId, 80) } : null),
+    message: visibleAssistantErrorDetail(raw),
+  };
+}
+
 /**
  * Classify one failure into a stable category while retaining the full provider
  * body. Categories stay provider-agnostic because Pi forwards upstream wording
@@ -118,6 +236,7 @@ export function classifyFailureReason(raw: string): AssistantErrorNotice {
     kind,
     title: status ? `${category}（HTTP ${status}）` : category,
     detail: visibleAssistantErrorDetail(raw),
+    failure: normalizePromptFailure(raw),
   };
 }
 
@@ -130,7 +249,12 @@ export function assistantErrorNotice(message: PiMessage): AssistantErrorNotice |
   if (message.role !== "assistant" || typeof message.errorMessage !== "string" || !message.errorMessage.trim()) return null;
   const notice = classifyFailureReason(message.errorMessage);
   const route = failureRoute(message.provider, message.model, message.api);
-  return route ? { ...notice, route } : notice;
+  const failure = normalizePromptFailure(message.errorMessage, {
+    provider: message.provider,
+    model: message.model,
+    api: message.api,
+  });
+  return route ? { ...notice, route, failure } : { ...notice, failure };
 }
 
 /**

@@ -7,6 +7,7 @@ import {
   isTranscriptWorthyFailure,
   isAssistantErrorStop,
   localFailureNotice,
+  normalizePromptFailure,
   withoutPersistedFailure,
 } from "../src/shared/assistant-error";
 import type { PiMessage } from "../src/shared/types";
@@ -139,10 +140,51 @@ test("upstream and Runtime failures earn a transcript entry while validation doe
 
 test("the classifier exposes a stable kind next to the provider wording", () => {
   assert.equal(classifyFailureReason("OpenAI API error (503): auth_unavailable").kind, "authority");
+  assert.equal(classifyFailureReason("OpenAI API error (503): auth_unavailable").failure.kind, "auth-unavailable");
   assert.equal(classifyFailureReason("OpenAI API error (429): rate limited").kind, "rate-limit");
   assert.equal(classifyFailureReason("Pi RPC 已退出").kind, "runtime-gone");
   assert.equal(classifyFailureReason("This operation was aborted").kind, "aborted");
   assert.equal(classifyFailureReason("something else entirely").kind, "unknown");
+});
+
+test("normalized failures retain route metadata and retry exhaustion", () => {
+  const failure = normalizePromptFailure(
+    'Retry failed after 3 attempts: OpenAI API error (503): server_is_overloaded',
+    {
+      provider: "cpa-proxy",
+      model: "gpt-6-astra",
+      api: "openai-responses",
+      requestId: "req-42",
+      incidentId: "PC-ABCDEFGH",
+    },
+  );
+  assert.deepEqual(
+    {
+      kind: failure.kind,
+      provider: failure.provider,
+      model: failure.model,
+      api: failure.api,
+      status: failure.status,
+      retryAttempts: failure.retryAttempts,
+      retryExhausted: failure.retryExhausted,
+      requestId: failure.requestId,
+      incidentId: failure.incidentId,
+    },
+    {
+      kind: "overloaded",
+      provider: "cpa-proxy",
+      model: "gpt-6-astra",
+      api: "openai-responses",
+      status: 503,
+      retryAttempts: 3,
+      retryExhausted: true,
+      requestId: "req-42",
+      incidentId: "PC-ABCDEFGH",
+    },
+  );
+  assert.match(failure.message, /server_is_overloaded/);
+  assert.equal(normalizePromptFailure("stream timed out", { aborted: true }).kind, "user-aborted");
+  assert.equal(normalizePromptFailure("Pi RPC 已退出", { runtimeExit: true }).kind, "runtime-exit");
 });
 
 test("a failed attempt shows the provider route it actually used", () => {

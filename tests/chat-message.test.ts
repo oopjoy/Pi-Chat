@@ -8,6 +8,7 @@ import { readFileSync } from "node:fs";
 import { ConversationProcess, formatRunDuration } from "../src/web/components/ConversationProcess";
 import { ErrorDetail, shouldFoldErrorDetail } from "../src/web/components/ErrorDetail";
 import { LocalFailureList } from "../src/web/components/LocalFailureList";
+import { localFailureNotice } from "../src/shared/assistant-error";
 import { assistantCopyText, assistantGeneratedAt, assistantModelLabel, assistantThinkingLabel, ChatMessage, shouldFoldUserText, userSentAt, USER_MESSAGE_FOLD_LINE_LIMIT } from "../src/web/components/ChatMessage";
 
 test("user messages stay literal instead of rendering incomplete Markdown or math", () => {
@@ -454,4 +455,49 @@ test("a retained Runtime failure card shows when it happened", () => {
     }],
   }));
   assert.match(html, /class="message-error-time">18:52</);
+});
+
+test("Codex overload and retry errors render word for word without a classifier summary", () => {
+  const reason = [
+    "Error: Codex error: Our servers are currently overloaded. Please try again later.",
+    "",
+    "Error: Retry failed after 3 attempts: Codex error: Our servers are currently overloaded. Please try again later.",
+  ].join("\n");
+  for (const streaming of [false, true]) {
+    const html = renderToStaticMarkup(createElement(ChatMessage, {
+      streaming,
+      message: {
+        role: "assistant",
+        content: [],
+        stopReason: "error",
+        errorMessage: reason,
+      },
+    }));
+    const fragment = JSDOM.fragment(html);
+    const card = fragment.querySelector(".message-error")!;
+    const detail = card.querySelector("pre.message-error-detail")!;
+    assert.equal(detail.textContent, reason, "the card must retain the exact received error, including retry wording");
+    assert.equal(card.textContent, reason, "no generated summary may replace or prefix the original error");
+    assert.equal(card.querySelector(".message-error-fold-toggle"), null, "short errors stay fully visible");
+  }
+});
+
+test("local error cards preserve literal diagnostic layout rather than Markdown or a summary", () => {
+  const reason = [
+    "  Error: Codex error: Our servers are currently overloaded. Please try again later.",
+    String.raw`    at request (C:\work\gateway.ts:42)`,
+    '{"message":"<upstream> & retry failed", "status":503}',
+    "**literal diagnostic, not Markdown**",
+    "",
+  ].join("\n");
+  const html = renderToStaticMarkup(createElement(LocalFailureList, {
+    failures: [localFailureNotice("aaaaaaaaaaaaaaaaaaaa", reason, undefined, 1)],
+  }));
+  const fragment = JSDOM.fragment(html);
+  const card = fragment.querySelector(".message-error")!;
+  const detail = card.querySelector("pre.message-error-detail")!;
+  assert.equal(detail.textContent, reason, "keep indentation, blank lines, paths, JSON and punctuation exactly");
+  assert.equal(card.querySelector(".message-error-title"), null);
+  assert.equal(card.textContent?.includes("模型服务暂时过载"), false);
+  assert.equal(detail.querySelector("strong, upstream, .markdown-body"), null, "diagnostic delimiters must not become markup");
 });
