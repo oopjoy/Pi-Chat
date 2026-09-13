@@ -4107,6 +4107,27 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
             toolStatus: WAITING_FOR_PI_STATUS,
             state: { isStreaming: true },
           });
+          // A queue-dispatch frame may be coalesced or missed while the socket
+          // is recovering. Once Pi proves execution has started, reconcile only
+          // the affected Session view so an already-running prompt cannot remain
+          // stranded in the waiting queue UI.
+          const knownQueue = latestQueueProjectionRef.current.get(eventSessionId);
+          if (knownQueue?.queue.length) {
+            const queueRequestRevision =
+              queueProjectionRevisionRef.current.get(eventSessionId) || 0;
+            const requestVersion =
+              sessionEventVersionRef.current.get(eventSessionId) || 0;
+            const authority = capturePaneAuthority(eventSessionId);
+            void fetchSessionView(eventSessionId)
+              .then((view) => {
+                if (
+                  (sessionEventVersionRef.current.get(eventSessionId) || 0) ===
+                  requestVersion
+                )
+                  applySessionView(view, authority, queueRequestRevision);
+              })
+              .catch(() => undefined);
+          }
         }
         if (viewingEventSession) {
           setRuntimeWarming(eventSessionId, false);
@@ -7970,6 +7991,8 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     queueMutationSequenceRef.current.delete(sessionId);
     appliedQueueMutationSequenceRef.current.delete(sessionId);
     sessionEventVersionRef.current.delete(sessionId);
+    sessionRunGenerationsRef.current.delete(sessionId);
+    settledRunGenerationsRef.current.delete(sessionId);
     lastSessionEventTypeRef.current.delete(sessionId);
     sourceTurnTotalsRef.current.delete(sessionId);
     sessionRunningOverridesRef.current.delete(sessionId);
@@ -7982,6 +8005,12 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     for (const key of diagnosticSseRejectionAtRef.current.keys())
       if (key.startsWith(`${sessionId}:`)) diagnosticSseRejectionAtRef.current.delete(key);
     warmingSessionIdsRef.current.delete(sessionId);
+    const promptBusyLease = promptBusyReleasesRef.current.get(sessionId);
+    if (promptBusyLease) {
+      promptBusyLease.markTerminal();
+      promptBusyLease.release();
+      promptBusyReleasesRef.current.delete(sessionId);
+    }
     busySessionCountsRef.current.delete(sessionId);
     stoppingOperationTokensRef.current.delete(sessionId);
     for (const childId of [...subagentAddressesRef.current.keys()]) {
