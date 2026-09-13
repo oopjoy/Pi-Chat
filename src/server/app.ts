@@ -8860,10 +8860,8 @@ export class PiChatApp {
               state.model?.id === body.modelId
             )
               throw new Error("请先切换到其他模型，再删除当前模型");
-            await this.applyResourceFileTransaction([snapshot], () =>
-              this.options.modelManager!.remove(body.provider, body.modelId),
-            );
-          }
+            await this.options.modelManager!.remove(body.provider, body.modelId);
+          });
           return this.bootstrap();
         },
       );
