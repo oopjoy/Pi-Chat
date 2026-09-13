@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync, lstatSync, realpathSync, type Stats } from "node:fs";
-import { readdir, stat } from "node:fs/promises";
+import { open, readdir, stat, type FileHandle } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { homedir } from "node:os";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
@@ -210,6 +210,97 @@ async function readSessionEntries(path: string): Promise<SessionEntry[]> {
   return scanSessionEntries(path);
 }
 
+const SESSION_TAIL_READ_CHUNK_BYTES = 256 * 1024;
+
+/**
+ * Read only the newest complete JSONL records when a cold Session exceeds the
+ * full-snapshot memory budget. The scan starts at EOF and stops after the
+ * requested number of User turns, so opening a large history never allocates a
+ * full in-memory transcript. Branch selection is still applied to the bounded
+ * suffix; an unresolved older parent is intentionally outside the visible
+ * recent window and does not get guessed.
+ */
+async function readSessionTailEntries(
+  path: string,
+  turnLimit: number,
+): Promise<{ entries: SessionEntry[]; bytesRead: number; sourceBytes: number }> {
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(path, "r");
+    const fileStat = await handle.stat();
+    const entriesReverse: SessionEntry[] = [];
+    let end = fileStat.size;
+    let boundary = Buffer.alloc(0);
+    let bytesRead = 0;
+    let userTurns = 0;
+    const requiredTurns = Math.max(1, Math.floor(turnLimit));
+    while (end > 0 && userTurns < requiredTurns) {
+      const start = Math.max(0, end - SESSION_TAIL_READ_CHUNK_BYTES);
+      const length = end - start;
+      const chunk = Buffer.allocUnsafe(length);
+      const result = await handle.read(chunk, 0, length, start);
+      if (!result.bytesRead) break;
+      bytesRead += result.bytesRead;
+      const combined = boundary.length
+        ? Buffer.concat([chunk.subarray(0, result.bytesRead), boundary])
+        : chunk.subarray(0, result.bytesRead);
+      let cursor = combined.length;
+      if (cursor > 0 && combined[cursor - 1] === 0x0a) cursor -= 1;
+      let completePrefix = 0;
+      while (cursor > 0 && userTurns < requiredTurns) {
+        const newline = combined.lastIndexOf(0x0a, cursor - 1);
+        if (newline < 0) {
+          completePrefix = cursor;
+          break;
+        }
+        const line = combined.subarray(newline + 1, cursor);
+        if (line.length && line.some((value) => value !== 0x20 && value !== 0x09 && value !== 0x0d)) {
+          try {
+            const entry = JSON.parse(line.toString("utf8")) as SessionEntry;
+            if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+              entriesReverse.push(entry);
+              if (entry.type === "message" && entry.message?.role === "user") userTurns += 1;
+            }
+          } catch {
+            // Ignore malformed/newly-written records exactly as the full reader does.
+          }
+        }
+        cursor = newline;
+      }
+      boundary = completePrefix ? combined.subarray(0, completePrefix) : Buffer.alloc(0);
+      end = start;
+      if (start === 0 && boundary.length) {
+        try {
+          const entry = JSON.parse(boundary.toString("utf8")) as SessionEntry;
+          if (entry && typeof entry === "object" && !Array.isArray(entry)) entriesReverse.push(entry);
+        } catch {
+          // An incomplete or malformed first record is not part of the window.
+        }
+        boundary = Buffer.alloc(0);
+      }
+    }
+    return { entries: entriesReverse.reverse(), bytesRead, sourceBytes: fileStat.size };
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function readSessionTailSnapshot(
+  path: string,
+  turnLimit: number,
+): Promise<SessionFileSnapshot & { sourceBytes: number; bytesRead: number }> {
+  const tail = await readSessionTailEntries(path, turnLimit);
+  const branch = activeSessionBranch(tail.entries);
+  const snapshot = sessionSnapshotFromBranch(branch);
+  return {
+    ...snapshot,
+    sourceBytes: tail.sourceBytes,
+    bytesRead: tail.bytesRead,
+    sourceMessagesTruncated: true,
+    usageComplete: false,
+  };
+}
+
 /** Sidebar scans retain branch identity and compact user facts, never full replies/tool payloads. */
 function outlineSessionEntry(entry: SessionEntry): SessionEntry | null {
   if (entry.type === "session") {
@@ -290,6 +381,13 @@ export interface SessionFileSnapshot {
   usage: SessionUsageSnapshot;
   /** Last model/thinking selections recorded by Pi on the active JSONL branch. */
   settings: SessionSettingsSnapshot;
+  /** Full-branch totals when the snapshot was intentionally windowed. */
+  sourceMessageTotal?: number;
+  sourceTurnTotal?: number;
+  /** True when messages contains only a bounded recent suffix. */
+  sourceMessagesTruncated?: boolean;
+  /** Partial tail snapshots must not be presented as cumulative usage. */
+  usageComplete?: boolean;
 }
 
 /** Parse one already-selected active branch into messages, usage, and settings. */
@@ -885,6 +983,36 @@ export class SessionIndex {
     finally { if (this.snapshotReads.get(id) === read) this.snapshotReads.delete(id); }
   }
 
+  /**
+   * Read a cold Session with a bounded recent suffix when its JSONL is larger
+   * than the full-snapshot budget. The sidebar summary remains the authority
+   * for cumulative message/turn totals; the tail reader supplies only the
+   * visible recent records.
+   */
+  async recentSnapshotForId(id: string, turnLimit = 10): Promise<SessionFileSnapshot | null> {
+    let path = this.pathForId(id);
+    if (!path) {
+      await this.cachedSummaryForId(id);
+      path = this.pathForId(id);
+    }
+    if (!path) return null;
+    let fileStat: Stats;
+    try { fileStat = await this.statFile(path); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
+    if (fileStat.size <= MAX_SESSION_SNAPSHOT_BYTES) return this.snapshotForId(id);
+    const summary = this.summaryForId(id) || await this.cachedSummaryForId(id);
+    if (!summary) return null;
+    const tail = await readSessionTailSnapshot(path, turnLimit);
+    return {
+      ...tail,
+      sourceMessageTotal: summary.messageCount,
+      sourceTurnTotal: summary.turnCount,
+    };
+  }
+
   /** Read one target's validated snapshot and its summary from the same projection. */
   async snapshotAndSummaryForId(id: string): Promise<{ snapshot: SessionFileSnapshot; summary: SessionSummary } | null> {
     const snapshot = await this.snapshotForId(id);
@@ -893,6 +1021,17 @@ export class SessionIndex {
     // from the same SessionProjection branch and file version.
     const summary = this.snapshotCache.get(id)?.summary;
     return summary ? { snapshot, summary: { ...summary, active: false } } : null;
+  }
+
+  /** Read one target's recent cold view and its cumulative summary. */
+  async recentSnapshotAndSummaryForId(
+    id: string,
+    turnLimit = 10,
+  ): Promise<{ snapshot: SessionFileSnapshot; summary: SessionSummary } | null> {
+    const snapshot = await this.recentSnapshotForId(id, turnLimit);
+    if (!snapshot) return null;
+    const summary = this.summaryForId(id) || await this.cachedSummaryForId(id);
+    return summary ? { snapshot, summary } : null;
   }
 
   /** Resolve one browser-visible persisted User message back to Pi's active-branch entry. */

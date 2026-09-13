@@ -131,6 +131,7 @@ import {
   localTurnBelongsInTranscript,
   localTurnForPendingPrompt,
   hasLocalTurnForPendingPayload,
+  sameUserInstructionForDiagnostic,
   markLocalTurnQueued,
   nextLocalTurnTotal,
   promoteTurnsAbsentFromQueue,
@@ -2038,6 +2039,27 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   };
   paneAuthorityDispatchRef.current = commitPaneIfCurrent;
 
+  const recordUserTurnLifecycle = (
+    phase: string,
+    sessionId: string,
+    turn: LocalUserTurn | undefined,
+    promptId?: string,
+    candidateCount?: number,
+  ): void => {
+    recordBrowserStateDiagnostic("projection", "user-turn-lifecycle", {
+      sessionId,
+      promptId,
+      details: {
+        userTurnPhase: phase,
+        ...(turn?.serverPromptId || promptId ? { identityBound: true } : null),
+        ...(typeof turn?.expectedTurnTotal === "number" ? { expectedTurnTotal: turn.expectedTurnTotal } : null),
+        ...(typeof turn?.baselineTurnTotal === "number" ? { baselineTurnTotal: turn.baselineTurnTotal } : null),
+        ...(typeof candidateCount === "number" ? { candidateCount } : null),
+        projectionSource: phase === "optimistic-created" ? "optimistic" : "pane-commit",
+      },
+    });
+  };
+
   /** Rehydrate a server-owned accepted turn after F5 without writing it to Pi. */
   const reconcileServerPendingPrompt = useCallback((view: SessionViewData): void => {
     const pending = view.pendingPrompt;
@@ -2050,6 +2072,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       bindLocalTurnPromptIdentity(existing, { serverPromptId, pendingPromptId });
       existing.queueState = "dispatched";
       existing.queueRetryPending = false;
+      recordUserTurnLifecycle("server-reconciled", view.session.id, existing, serverPromptId);
       return;
     }
     // A view can beat HTTP acknowledgement while two identical local Prompts
@@ -2057,7 +2080,10 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     // another LocalUserTurn here would create the local+persisted duplicate this
     // reconciliation path is meant to prevent. The existing local turns remain
     // authoritative until their acknowledgement supplies the Server identity.
-    if (hasLocalTurnForPendingPayload(turns, pending)) return;
+    if (hasLocalTurnForPendingPayload(turns, pending)) {
+      recordUserTurnLifecycle("ambiguous-suppressed", view.session.id, undefined, serverPromptId, turns.filter((turn) => sameUserInstructionForDiagnostic(turn.message, pending.message)).length);
+      return;
+    }
     const message = { ...pending.message };
     const turn: LocalUserTurn = {
       sessionId: view.session.id,
@@ -2075,6 +2101,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     };
     bindLocalTurnPromptIdentity(turn, { serverPromptId, pendingPromptId });
     localUserTurnsRef.current.set(view.session.id, [...turns, turn]);
+    recordUserTurnLifecycle("server-rehydrated", view.session.id, turn, serverPromptId);
   }, []);
 
   /** Rehydrate native Steers after F5 while keeping their server revision authoritative. */
@@ -6319,6 +6346,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         ? userMessage(message, images)
         : null;
     const localTurn = optimisticMessage || userMessage(message, images);
+    const promptOperationId = crypto.randomUUID();
     let targetSessionId = requestedTargetSessionId || viewedSessionIdRef.current;
     let promptQueueProjectionRevision = targetSessionId
       ? queueProjectionRevisionRef.current.get(targetSessionId) || 0
@@ -6364,6 +6392,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       protectedLocalTurn = {
         sessionId: targetSessionId,
         message: turn,
+        promptOperationId,
         expectedTurnTotal: nextLocalTurnTotal(messages, turnTotal, pending),
         baselineTurnTotal: authoritativeTurnTotal(targetSessionId),
         queueState:
@@ -6379,6 +6408,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         ...pending,
         protectedLocalTurn,
       ]);
+      recordUserTurnLifecycle("optimistic-created", targetSessionId, protectedLocalTurn);
       return protectedLocalTurn;
     };
     const localTurnEntry = (): LocalUserTurn | undefined =>
@@ -6739,8 +6769,10 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
             : result.queued && typeof result.id === "string"
               ? result.id
               : undefined;
-        if (serverPromptId)
+        if (serverPromptId) {
           bindLocalTurnPromptIdentity(acceptedLocalTurn, { serverPromptId });
+          recordUserTurnLifecycle("identity-bound", targetSessionId, acceptedLocalTurn, serverPromptId);
+        }
       }
       const promptNavigationIsCurrent = Boolean(
         promptAuthority &&

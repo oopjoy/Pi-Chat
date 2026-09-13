@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { appendFile, mkdtemp, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, mkdir, readFile, rename, rm, stat, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { SessionIndex, cleanPreview, idForPath, parseSession, readSessionMessages, readSessionUsage, textFromContent } from "../src/server/session-index";
-import { sessionFileFingerprint } from "../src/server/session-projection";
+import { MAX_SESSION_SNAPSHOT_BYTES, sessionFileFingerprint } from "../src/server/session-projection";
 import { LOCAL_COORDINATION_ROLE } from "../src/shared/types";
 
 test("session index refreshes files with bounded concurrency", async () => {
@@ -32,6 +32,55 @@ test("session index refreshes files with bounded concurrency", async () => {
     assert.equal((await sessions.list()).length, 8);
     assert.ok(maximum > 1, `expected concurrent file inspection, observed maximum ${maximum}`);
     assert.ok(maximum <= 4, `refresh exceeded its bounded concurrency, observed maximum ${maximum}`);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("large cold Sessions read only a bounded recent tail", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-session-tail-"));
+  try {
+    const path = join(root, "large.jsonl");
+    await writeFile(path, `${JSON.stringify({ type: "session", id: "large", cwd: root })}\n`);
+    await truncate(path, MAX_SESSION_SNAPSHOT_BYTES + 1);
+    const records = [
+      { type: "message", id: "u998", parentId: "older", message: { role: "user", content: "recent-998" } },
+      { type: "message", id: "a998", parentId: "u998", message: { role: "assistant", content: "answer-998" } },
+      { type: "message", id: "u999", parentId: "a998", message: { role: "user", content: "recent-999" } },
+      { type: "message", id: "a999", parentId: "u999", message: { role: "assistant", content: "answer-999" } },
+    ];
+    await appendFile(path, `\n${records.map(JSON.stringify).join("\n")}\n`);
+    const id = idForPath(path);
+    const summary = {
+      id,
+      sessionId: "large",
+      name: "Large",
+      preview: "older",
+      cwd: root,
+      updatedAt: 1,
+      messageCount: 2_000,
+      turnCount: 1_000,
+      active: false,
+    };
+    const index = new SessionIndex(root, join(root, "index.json"));
+    const internals = index as unknown as {
+      pathsById: Map<string, string>;
+      cache: Map<string, { summary: typeof summary }>;
+    };
+    internals.pathsById.set(id, path);
+    internals.cache = new Map([[path, { summary }]]);
+
+    const snapshot = await index.recentSnapshotForId(id, 2);
+    assert.deepEqual(snapshot?.messages.map((message) => message.content), [
+      "recent-998",
+      "answer-998",
+      "recent-999",
+      "answer-999",
+    ]);
+    assert.equal(snapshot?.sourceMessageTotal, 2_000);
+    assert.equal(snapshot?.sourceTurnTotal, 1_000);
+    assert.equal(snapshot?.sourceMessagesTruncated, true);
+    assert.equal(snapshot?.usageComplete, false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -84,6 +84,7 @@ const BOOLEAN_DETAIL_KEYS = new Set([
   "viewed",
   "viewing",
   "visible",
+  "identityBound",
 ]);
 
 const NUMBER_DETAIL_KEYS = new Set([
@@ -123,6 +124,9 @@ const NUMBER_DETAIL_KEYS = new Set([
   "transcriptCount",
   "duplicateCount",
   "duplicatePairCount",
+  "expectedTurnTotal",
+  "baselineTurnTotal",
+  "candidateCount",
   "localTurnCount",
   "localRowCount",
   "persistedCount",
@@ -313,6 +317,16 @@ const ENUM_DETAIL_VALUES: Record<string, ReadonlySet<string>> = {
   duplicateKind: new Set(["same-identity", "local-and-persisted", "same-content", "unknown"]),
   settlementSource: new Set(["agent-settled", "message-end", "session-view", "unknown"]),
   projectionSource: new Set(["pane-commit", "sse", "bootstrap", "session-view", "optimistic", "unknown"]),
+  userTurnPhase: new Set([
+    "optimistic-created",
+    "server-reconciled",
+    "server-rehydrated",
+    "ambiguous-suppressed",
+    "identity-bound",
+    "persisted-confirmed",
+    "removed",
+    "unknown",
+  ]),
   lastEventType: EVENT_TYPE_VALUES,
   viewSource: new Set(["browser-cache", "cold-jsonl", "hot-memory", "none", "unknown"]),
 };
@@ -350,6 +364,7 @@ const STATE_DIAGNOSTIC_EVENT_PAIRS = new Set([
   "projection:sidebar-session",
   "projection:ui-state",
   "projection:user-turn-duplicate",
+  "projection:user-turn-lifecycle",
   "projection:assistant-settlement-gap",
   "projection:upstream-stall",
   "render:first-assistant-paint-opportunity",

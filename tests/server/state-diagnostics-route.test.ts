@@ -623,6 +623,39 @@ test("retry end without a final error does not invent exhaustion or a terminal f
   }
 });
 
+test("abort during native retry settles one Prompt without inventing retry cancellation", async () => {
+  const target = await fixture();
+  const internals = target.app as unknown as {
+    broadcast: (event: Record<string, unknown>) => void;
+    promptRpcObserver: (rpc: unknown, sessionId: string, promptId: string) => unknown;
+    broadcastPromptFailureLifecycle: (sessionId: string, event: Record<string, unknown>, runGeneration: number, rpcGeneration: number) => void;
+  };
+  const captured: Record<string, unknown>[] = [];
+  const originalBroadcast = internals.broadcast;
+  internals.broadcast = (event) => { captured.push(event); };
+  try {
+    internals.promptRpcObserver({}, target.id, "prompt-abort-retry");
+    internals.broadcastPromptFailureLifecycle(target.id, {
+      type: "auto_retry_start", attempt: 1, maxAttempts: 3, errorMessage: "attempt failed",
+    }, 2, 1);
+    internals.broadcastPromptFailureLifecycle(target.id, {
+      type: "pi_chat_process_error",
+      error: "用户取消了请求",
+      failureKind: "user-aborted",
+    }, 2, 1);
+    assert.deepEqual(captured.map((event) => event.type), [
+      "pi_chat_prompt_retry_scheduled",
+      "pi_chat_prompt_failed",
+    ]);
+    assert.equal(captured.at(-1)?.piChatPromptId, "prompt-abort-retry");
+    assert.equal(captured.some((event) => event.type === "pi_chat_prompt_retry_exhausted"), false);
+    assert.equal(captured.some((event) => event.type === "pi_chat_prompt_retry_cancelled"), false);
+  } finally {
+    internals.broadcast = originalBroadcast;
+    await target.close();
+  }
+});
+
 test("server diagnostic failures do not perturb Runtime events or HTTP", async () => {
   const target = await fixture();
   const recorder = (target.app as unknown as {

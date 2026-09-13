@@ -5640,11 +5640,14 @@ export class PiChatApp {
   private coldSessionViewFromSnapshot(
     id: string,
     session: SessionSummary,
-    snapshot: Pick<SessionFileSnapshot, "messages" | "settings"> & { usage?: SessionUsageSnapshot },
+    snapshot: Pick<SessionFileSnapshot, "messages" | "settings" | "sourceMessageTotal" | "sourceTurnTotal" | "sourceMessagesTruncated" | "usageComplete"> & { usage?: SessionUsageSnapshot },
     turnLimit: number,
     clientId: string,
   ): SessionViewData {
     const windowed = messageWindow(snapshot.messages, turnLimit);
+    const messageTotal = snapshot.sourceMessageTotal ?? windowed.total;
+    const turnTotal = snapshot.sourceTurnTotal ?? windowed.turns;
+    const messagesTruncated = windowed.truncated || snapshot.sourceMessagesTruncated === true;
     const settings = snapshot.settings || {};
     return {
       session: {
@@ -5669,16 +5672,16 @@ export class PiChatApp {
         messageCount: session.messageCount,
       },
       messages: windowed.messages,
-      messageTotal: windowed.total,
-      turnTotal: windowed.turns,
+      messageTotal,
+      turnTotal,
       visibleTurnCount: windowed.visibleTurns,
-      messagesTruncated: windowed.truncated,
+      messagesTruncated,
       isActive: false,
       runtimeStatus: "view-only",
       isStreaming: false,
       // The target JSONL snapshot already includes usage. Cold first paint must
       // never wait on another index read or resource/settings disk probe.
-      stats: snapshot.usage
+      stats: snapshot.usage && snapshot.usageComplete !== false
         ? this.offlineStatsFromUsage(id, snapshot.usage)
         : undefined,
       // Gate is a fixed Pi Chat system control. Startup self-heals its adapter;
@@ -5824,11 +5827,18 @@ export class PiChatApp {
         snapshotAndSummaryForId?: (
           sessionId: string,
         ) => Promise<{ snapshot: SessionFileSnapshot; summary: SessionSummary } | null>;
+        recentSnapshotAndSummaryForId?: (
+          sessionId: string,
+          turnLimit: number,
+        ) => Promise<{ snapshot: SessionFileSnapshot; summary: SessionSummary } | null>;
       };
       // A target-only snapshot read already validates and parses the JSONL. Use
       // its summary projection too, avoiding a second stat/fingerprint/outline
-      // pass during a cold navigation.
-      const target = await index.snapshotAndSummaryForId?.(id);
+      // pass during a cold navigation. Large files take the bounded tail path.
+      const recentTarget = index.recentSnapshotAndSummaryForId
+        ? await index.recentSnapshotAndSummaryForId(id, turnLimit)
+        : null;
+      const target = recentTarget || await index.snapshotAndSummaryForId?.(id);
       if (target)
         return this.coldSessionViewFromSnapshot(id, target.summary, target.snapshot, turnLimit, clientId);
       // Prefer the target-only revalidating lookup as a compatibility fallback

@@ -63,6 +63,11 @@ function sameUserInstruction(left: PiMessage, right: PiMessage): boolean {
   return left.role === "user" && right.role === "user" && userInstructionIdentity(left) === userInstructionIdentity(right);
 }
 
+/** Read-only payload comparison for Browser projection diagnostics. */
+export function sameUserInstructionForDiagnostic(left: PiMessage, right: PiMessage): boolean {
+  return sameUserInstruction(left, right);
+}
+
 /**
  * Match the server's retained accepted-prompt projection to the local object
  * created by the same submission. The HTTP acknowledgement and a later view
