@@ -13,6 +13,39 @@ export type ConversationItem =
   | { kind: "coordination"; message: PiMessage; key: string }
   | { kind: "process"; entries: ProcessEntry[]; key: string; assistantHeader?: PiMessage };
 
+function sameProcessEntry(left: ProcessEntry, right: ProcessEntry): boolean {
+  if (left.kind !== right.kind) return false;
+  if (left.kind === "thinking" && right.kind === "thinking") return left.text === right.text;
+  if (left.kind === "note" && right.kind === "note") return left.text === right.text;
+  if (left.kind !== "tool" || right.kind !== "tool") return false;
+  return left.id === right.id
+    && left.name === right.name
+    && left.arguments === right.arguments
+    && left.result === right.result
+    && left.completed === right.completed
+    && left.isError === right.isError
+    && sameValue(left.editDiff, right.editDiff);
+}
+
+function reuseStableItems(items: ConversationItem[], previous: readonly ConversationItem[] | undefined): ConversationItem[] {
+  if (!previous?.length) return items;
+  const previousByKey = new Map(previous.map((item) => [item.key, item]));
+  return items.map((item) => {
+    const old = previousByKey.get(item.key);
+    if (!old || old.kind !== item.kind) return item;
+    if (item.kind === "process" && old.kind === "process") {
+      const entries = old.entries.length === item.entries.length
+        && old.entries.every((entry, index) => sameProcessEntry(entry, item.entries[index]!));
+      if (entries && old.assistantHeader === item.assistantHeader) return old;
+      return entries ? { ...item, entries: old.entries } : item;
+    }
+    if ((old.kind === "message" || old.kind === "coordination")
+      && (item.kind === "message" || item.kind === "coordination")
+      && old.message === item.message) return old;
+    return item;
+  });
+}
+
 /**
  * Stable list keys for React. Intentionally ignore growing thinking/note text so
  * streaming updates do not remount process cards or open/close state.
@@ -289,7 +322,7 @@ function mergeProcessEntries(entries: ProcessEntry[]): ProcessEntry[] {
   return merged;
 }
 
-export function groupConversation(messages: PiMessage[], options: { liveMessage?: PiMessage; preserveTrailingAssistantPlaceholder?: boolean } = {}): ConversationItem[] {
+export function groupConversation(messages: PiMessage[], options: { liveMessage?: PiMessage; preserveTrailingAssistantPlaceholder?: boolean; previousItems?: readonly ConversationItem[] } = {}): ConversationItem[] {
   const items: ConversationItem[] = [];
   const messageKeyOrdinals = new Map<string, number>();
   const uniqueMessageKey = (message: PiMessage): string => {
@@ -415,5 +448,5 @@ export function groupConversation(messages: PiMessage[], options: { liveMessage?
     }
   }
   flushProcess();
-  return items;
+  return reuseStableItems(items, options.previousItems);
 }

@@ -48,11 +48,9 @@ function useRunDuration(
 
 function summarize(entries: ProcessEntry[], streaming = false): string {
   const tools = entries.filter((entry): entry is Extract<ProcessEntry, { kind: "tool" }> => entry.kind === "tool");
-  const thinking = entries.some((entry) => entry.kind === "thinking");
   const failed = tools.filter((entry) => entry.isError).length;
   const subagents = tools.filter((entry) => entry.name === "subagent").length;
   const labels: string[] = [];
-  if (thinking) labels.push(streaming ? "思考中" : "思考");
   if (tools.length) labels.push(`${tools.length} 个工具`);
   if (subagents) labels.push(`${subagents} 个子任务`);
   if (!labels.length) labels.push(streaming ? "进行中" : `${entries.length} 个步骤`);
@@ -109,6 +107,7 @@ function PersistentDetails({ disclosureKey, className, children, footerCollapse 
 }
 
 function ThinkingEntry({ text, disclosureKey }: { text: string; disclosureKey: string }) {
+  // Thinking stays a collapsible process step: collapsed it shows only "思考".
   return <PersistentDetails className="process-entry process-thinking" disclosureKey={disclosureKey}>
     <summary>思考</summary>
     <pre>{text}</pre>

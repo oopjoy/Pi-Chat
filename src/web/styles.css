@@ -651,6 +651,8 @@ details.conversation-process { display: block; padding: 0; }
 .edit-tool-diff-body pre .is-delete { background: color-mix(in srgb, #d9485f, transparent 89%); color: color-mix(in srgb, #d9485f, var(--code-text) 28%); }
 .edit-tool-diff-note { margin: 0; padding: 8px; color: var(--muted); font-size: 10px; }
 .process-entry pre { max-height: 340px; margin: 0; overflow: auto; padding: 9px 10px; white-space: pre-wrap; overflow-wrap: anywhere; font: 12.5px/1.62 ui-monospace, Consolas, monospace; }
+.process-thinking { border-color: transparent; background: transparent; }
+.process-thinking pre { padding: 5px 10px; }
 .process-note { padding: 6px 8px; color: var(--muted); font-size: 12px; line-height: 1.6; }
 .process-note .markdown-body p { margin: .2em 0; }
 

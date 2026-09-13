@@ -23,6 +23,21 @@ test("unified edit Diff uses visible patch markers and wraps long lines", () => 
   assert.match(css, /\.edit-tool-diff-line\s*\{[^}]*grid-template-columns:\s*1\.5em minmax\(0, 1fr\);/s);
 });
 
+test("groupConversation reuses unchanged process entries across live snapshots", () => {
+  const messages: PiMessage[] = [
+    { role: "user", content: "hello", timestamp: 1 },
+    { role: "assistant", timestamp: 2, content: [{ type: "thinking", thinking: "thinking" }, { type: "toolCall", id: "tool-1", name: "read", arguments: { path: "a.txt" } }] },
+    { role: "toolResult", toolCallId: "tool-1", toolName: "read", content: "ok" },
+    { role: "assistant", timestamp: 3, content: "done" },
+  ];
+  const first = groupConversation(messages, { liveMessage: { role: "assistant", timestamp: 3, content: "done now" } });
+  const second = groupConversation(messages, { liveMessage: { role: "assistant", timestamp: 3, content: "done now, continued" }, previousItems: first });
+  const firstProcess = first.find((item) => item.kind === "process");
+  const secondProcess = second.find((item) => item.kind === "process");
+  assert.ok(firstProcess && secondProcess && firstProcess.kind === "process" && secondProcess.kind === "process");
+  assert.strictEqual(secondProcess.entries, firstProcess.entries);
+});
+
 test("conversation item keys prefer projected message identities", () => {
   assert.equal(
     messageItemKey({ role: "assistant", content: "answer", piChatLiveMessageId: "live-1" }),
@@ -32,6 +47,21 @@ test("conversation item keys prefer projected message identities", () => {
     messageItemKey({ role: "assistant", content: "answer", piChatPersistedMessageId: "entry-a:0" }),
     "message:persisted:entry-a:0:0",
   );
+});
+
+test("thinking stays collapsed to a 思考 row while tool and edit entries keep their fold", () => {
+  const html = renderToStaticMarkup(createElement(ConversationProcess, {
+    entries: [
+      { kind: "thinking", text: "先读取项目结构" },
+      { kind: "tool", id: "read-1", name: "read", arguments: "{}", completed: true },
+      { kind: "tool", id: "edit-1", name: "edit", arguments: "{}", completed: true },
+    ],
+  }));
+  assert.match(html, /<details class="process-entry process-thinking"/);
+  assert.match(html, /<summary>思考<\/summary>/);
+  assert.match(html, /先读取项目结构/);
+  assert.match(html, /<summary>.*read/);
+  assert.match(html, /<summary>.*edit/);
 });
 
 test("groups thinking, tool calls and matching tool results into one collapsed process", () => {
