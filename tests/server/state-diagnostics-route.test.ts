@@ -492,6 +492,137 @@ test("server-appended Runtime metadata remains the final diagnostic attribution"
   }
 });
 
+test("process failures are normalized and redacted at the SSE boundary", async () => {
+  const target = await fixture();
+  const internals = target.app as unknown as {
+    broadcast: (event: Record<string, unknown>) => void;
+    broadcastRpcEvent: (event: Record<string, unknown>, sessionId: string, runGeneration?: number) => void;
+    promptRpcObserver: (rpc: unknown, sessionId: string, promptId: string) => unknown;
+    broadcastPromptFailureLifecycle: (sessionId: string, event: Record<string, unknown>, runGeneration: number, rpcGeneration: number) => void;
+  };
+  const captured: Record<string, unknown>[] = [];
+  const originalBroadcast = internals.broadcast;
+  internals.broadcast = (event) => { captured.push(event); };
+  try {
+    internals.promptRpcObserver({}, target.id, "prompt-123");
+    internals.broadcastPromptFailureLifecycle(target.id, {
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [],
+        stopReason: "error",
+        errorMessage: "Retry failed after 3 attempts: OpenAI API error (503): server_is_overloaded",
+        provider: "cpa-proxy",
+        model: "gpt-6-astra",
+        api: "openai-responses",
+      },
+    }, 4, 3);
+    assert.equal(captured.length, 0);
+    internals.broadcastPromptFailureLifecycle(target.id, { type: "agent_settled" }, 4, 3);
+    assert.equal(captured.length, 2);
+    assert.equal(captured[0].type, "pi_chat_prompt_failed");
+    assert.equal(captured[1].type, "pi_chat_prompt_retry_exhausted");
+    assert.equal(captured[0].piChatSessionId, target.id);
+    assert.equal(captured[0].piChatRunGeneration, 4);
+    assert.equal(captured[0].piChatPromptId, "prompt-123");
+    assert.equal(captured[0].failureKind, "overloaded");
+    assert.equal(captured[0].retryAttempts, 3);
+    captured.length = 0;
+    internals.broadcastRpcEvent({
+      type: "pi_chat_process_error",
+      error: "OpenAI API error (503): server_is_overloaded sk-live-secret-value",
+      errorCode: "PI_PROVIDER_FAILURE",
+      incidentId: "PC-ABCDEFGH",
+      provider: "cpa-proxy",
+      model: "gpt-6-astra",
+      api: "openai-responses",
+    }, target.id, 3);
+    assert.equal(captured.length, 1);
+    assert.equal(captured[0].error?.includes("sk-live-secret-value"), false);
+    const failure = captured[0].failure as { kind?: string; provider?: string; model?: string; api?: string; status?: number };
+    assert.deepEqual(failure, {
+      kind: "overloaded",
+      provider: "cpa-proxy",
+      model: "gpt-6-astra",
+      api: "openai-responses",
+      status: 503,
+      incidentId: "PC-ABCDEFGH",
+      message: "OpenAI API error (503): server_is_overloaded [已隐藏]",
+    });
+  } finally {
+    internals.broadcast = originalBroadcast;
+    await target.close();
+  }
+});
+
+test("native retry lifecycle is projected once and never leaks raw error text", async () => {
+  const target = await fixture();
+  const internals = target.app as unknown as {
+    broadcast: (event: Record<string, unknown>) => void;
+    promptRpcObserver: (rpc: unknown, sessionId: string, promptId: string) => unknown;
+    broadcastPromptFailureLifecycle: (sessionId: string, event: Record<string, unknown>, runGeneration: number, rpcGeneration: number) => void;
+  };
+  const captured: Record<string, unknown>[] = [];
+  const originalBroadcast = internals.broadcast;
+  internals.broadcast = (event) => { captured.push(event); };
+  try {
+    internals.promptRpcObserver({}, target.id, "prompt-retry");
+    internals.broadcastPromptFailureLifecycle(target.id, {
+      type: "auto_retry_start", attempt: 1, maxAttempts: 2, delayMs: 25,
+      errorMessage: "provider secret sk-live-should-not-appear",
+    }, 2, 1);
+    internals.broadcastPromptFailureLifecycle(target.id, { type: "agent_start" }, 3, 1);
+    internals.broadcastPromptFailureLifecycle(target.id, {
+      type: "message_end", message: {
+        role: "assistant", content: [], stopReason: "error",
+        errorMessage: "attempt failed",
+      },
+    }, 3, 1);
+    internals.broadcastPromptFailureLifecycle(target.id, {
+      type: "auto_retry_end", success: false, attempt: 1, finalError: "final failed",
+    }, 3, 1);
+    internals.broadcastPromptFailureLifecycle(target.id, { type: "agent_settled" }, 3, 1);
+    assert.deepEqual(captured.map((event) => event.type), [
+      "pi_chat_prompt_retry_scheduled",
+      "pi_chat_prompt_retry_started",
+      "pi_chat_prompt_retry_exhausted",
+      "pi_chat_prompt_failed",
+    ]);
+    assert.equal(JSON.stringify(captured).includes("sk-live-should-not-appear"), false);
+    assert.equal(captured.filter((event) => event.type === "pi_chat_prompt_retry_exhausted").length, 1);
+    assert.equal(captured.at(-1)?.piChatPromptId, "prompt-retry");
+  } finally {
+    internals.broadcast = originalBroadcast;
+    await target.close();
+  }
+});
+
+test("retry end without a final error does not invent exhaustion or a terminal failure", async () => {
+  const target = await fixture();
+  const internals = target.app as unknown as {
+    broadcast: (event: Record<string, unknown>) => void;
+    promptRpcObserver: (rpc: unknown, sessionId: string, promptId: string) => unknown;
+    broadcastPromptFailureLifecycle: (sessionId: string, event: Record<string, unknown>, runGeneration: number, rpcGeneration: number) => void;
+  };
+  const captured: Record<string, unknown>[] = [];
+  const originalBroadcast = internals.broadcast;
+  internals.broadcast = (event) => { captured.push(event); };
+  try {
+    internals.promptRpcObserver({}, target.id, "prompt-inconclusive");
+    internals.broadcastPromptFailureLifecycle(target.id, {
+      type: "auto_retry_start", attempt: 1, maxAttempts: 2, errorMessage: "attempt failed",
+    }, 2, 1);
+    internals.broadcastPromptFailureLifecycle(target.id, {
+      type: "auto_retry_end", success: false, attempt: 1,
+    }, 2, 1);
+    internals.broadcastPromptFailureLifecycle(target.id, { type: "agent_settled" }, 2, 1);
+    assert.deepEqual(captured.map((event) => event.type), ["pi_chat_prompt_retry_scheduled"]);
+  } finally {
+    internals.broadcast = originalBroadcast;
+    await target.close();
+  }
+});
+
 test("server diagnostic failures do not perturb Runtime events or HTTP", async () => {
   const target = await fixture();
   const recorder = (target.app as unknown as {

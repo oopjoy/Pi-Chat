@@ -356,6 +356,10 @@ const SESSION_VIEW_INVALIDATING_EVENT_TYPES = new Set([
   "tool_execution_start",
   "tool_execution_end",
   "pi_chat_process_error",
+  "pi_chat_prompt_retry_scheduled",
+  "pi_chat_prompt_retry_started",
+  "pi_chat_prompt_retry_exhausted",
+  "pi_chat_prompt_failed",
   "pi_chat_queue_update",
   "pi_chat_queue_dispatch",
   "pi_chat_queue_error",
@@ -4014,6 +4018,40 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           navigationEpoch: navigationEpochRef.current,
         },
       });
+      if (type === "pi_chat_prompt_retry_scheduled"
+        || type === "pi_chat_prompt_retry_started"
+        || type === "pi_chat_prompt_retry_exhausted"
+        || type === "pi_chat_prompt_failed") {
+        const retryAttempt = typeof event.retryAttempt === "number" ? event.retryAttempt : undefined;
+        const retryAttempts = typeof event.retryAttempts === "number" ? event.retryAttempts : undefined;
+        const maxAttempts = typeof event.maxAttempts === "number" ? event.maxAttempts : undefined;
+        const delayMs = typeof event.delayMs === "number" ? event.delayMs : undefined;
+        const status = type === "pi_chat_prompt_retry_scheduled"
+          ? `Pi 正在等待重试${retryAttempt !== undefined && maxAttempts !== undefined ? `（第 ${retryAttempt}/${maxAttempts} 次）` : "…"}`
+          : type === "pi_chat_prompt_retry_started"
+            ? `Pi 正在重试${retryAttempt !== undefined && retryAttempts !== undefined ? `（第 ${retryAttempt}/${retryAttempts} 次）` : "…"}`
+            : type === "pi_chat_prompt_retry_exhausted"
+              ? "Pi 原生重试已耗尽"
+              : "Pi Prompt 执行失败";
+        if (eventSessionId) {
+          patchSessionCache(eventSessionId, { toolStatus: status, isStreaming: type !== "pi_chat_prompt_failed" });
+          if (viewingEventSession)
+            dispatchPane({ type: "TOOL_STATUS_UPDATED", sessionId: eventSessionId, status });
+        }
+        recordBrowserStateDiagnostic("retry", type, {
+          sessionId: eventSessionId,
+          runGeneration: eventRunGeneration,
+          details: {
+            retryAttempt,
+            retryAttempts,
+            maxAttempts,
+            delayMs,
+            provider: typeof event.provider === "string" ? event.provider : undefined,
+            model: typeof event.model === "string" ? event.model : undefined,
+            api: typeof event.api === "string" ? event.api : undefined,
+          },
+        });
+      }
       if (type === "pi_chat_native_steering_dequeued") {
         const ids = Array.isArray(event.ids)
           ? event.ids.filter((id): id is string =>

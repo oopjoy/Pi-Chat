@@ -25,7 +25,7 @@ export function canonicalMessageEndFromEvent(
 
 export function lifecycleFromEvent(event: Record<string, unknown>): ApplicationLifecycle {
   const value = event.lifecycle;
-  return value === "restarting" || value === "shutting-down" || value === "workspace-changing" || value === "resources-reloading" ? value : "idle";
+  return value === "restarting" || value === "shutting-down" || value === "workspace-changing" || value === "resources-reloading" || value === "models-refreshing" ? value : "idle";
 }
 
 export function assistantMessage(event: Record<string, unknown>): PiMessage | null {

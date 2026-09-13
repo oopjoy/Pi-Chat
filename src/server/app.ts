@@ -13,6 +13,7 @@ import { MAX_PROMPT_IMAGES_ENCODED_BYTES } from "../shared/rpc-contracts.js";
 import type { PromptEvidenceFactKind } from "../shared/prompt-evidence.js";
 import { decodeCanonicalMessageEndPayload } from "../shared/runtime-events.js";
 import { shouldRetainStateDiagnosticEvent } from "../shared/state-diagnostics.js";
+import { normalizePromptFailure, visibleAssistantErrorDetail, type PromptFailure } from "../shared/assistant-error.js";
 import type {
   ApplicationLifecycle,
   BackgroundSubagentSnapshot,
@@ -404,6 +405,13 @@ interface NativeSteeringAdmissions {
 interface ActivePromptDiagnostic {
   promptId: string;
   rpcGeneration: number;
+  route?: PromptSettingsSnapshot["model"];
+  failure?: PromptFailure;
+  retryAttempt?: number;
+  retryPending?: boolean;
+  retryExhausted?: boolean;
+  retryExhaustedPublished?: boolean;
+  terminalPublished?: boolean;
 }
 
 interface PendingAcceptedPrompt {
@@ -1407,6 +1415,142 @@ export class PiChatApp {
     this.activePromptDiagnostics.delete(sessionId);
   }
 
+  /** Project Pi's native retry lifecycle without becoming a retry authority. */
+  private broadcastPromptFailureLifecycle(
+    sessionId: string,
+    event: Record<string, unknown>,
+    runGeneration: number,
+    rpcGeneration: number,
+  ): void {
+    const active = this.activePromptDiagnostic(sessionId, rpcGeneration);
+    if (!active) return;
+    const route: Partial<NonNullable<PromptSettingsSnapshot["model"]>> = active.route || {};
+    const recordRetryFact = (kind: "retry-scheduled" | "retry-started" | "retry-exhausted", attempt?: number, maxAttempts?: number, delayMs?: number) => {
+      this.promptEvidence.record({
+        sessionId,
+        promptId: active.promptId,
+        kind,
+        rpcGeneration,
+        runGeneration,
+        ...(attempt !== undefined ? { attempt } : null),
+        ...(maxAttempts !== undefined ? { maxAttempts } : null),
+        ...(delayMs !== undefined ? { delayMs } : null),
+      });
+    };
+    const lifecycleFor = (failure: PromptFailure, retryAttempt?: number) => ({
+      piChatSessionId: sessionId,
+      piChatRunEpoch: this.runEpoch,
+      piChatRunGeneration: runGeneration,
+      piChatPromptId: active.promptId,
+      failureKind: failure.kind,
+      ...(failure.provider || route.provider ? { provider: failure.provider || route.provider } : null),
+      ...(failure.model || route.modelId ? { model: failure.model || route.modelId } : null),
+      ...(failure.api || route.api ? { api: failure.api || route.api } : null),
+      ...(failure.status !== undefined ? { status: failure.status } : null),
+      ...(failure.retryAttempts !== undefined ? { retryAttempts: failure.retryAttempts } : null),
+      ...(failure.requestId ? { requestId: failure.requestId } : null),
+      ...(failure.incidentId ? { incidentId: failure.incidentId } : null),
+      ...(retryAttempt !== undefined ? { retryAttempt } : null),
+    });
+    if (event.type === "auto_retry_start") {
+      const attempt = typeof event.attempt === "number" && Number.isSafeInteger(event.attempt) && event.attempt > 0 ? event.attempt : undefined;
+      if (attempt === undefined) return;
+      const raw = typeof event.errorMessage === "string" ? event.errorMessage : "模型请求失败";
+      const failure = normalizePromptFailure(raw, {
+        provider: route.provider,
+        model: route.modelId,
+        api: route.api,
+        retryAttempts: attempt,
+      });
+      active.retryPending = true;
+      active.retryAttempt = attempt;
+      active.failure = failure;
+      const delayMs = typeof event.delayMs === "number" ? event.delayMs : undefined;
+      const maxAttempts = typeof event.maxAttempts === "number" ? event.maxAttempts : undefined;
+      recordRetryFact("retry-scheduled", attempt, maxAttempts, delayMs);
+      this.broadcast({ type: "pi_chat_prompt_retry_scheduled", ...lifecycleFor(failure, attempt), ...(delayMs !== undefined ? { delayMs } : null), ...(maxAttempts !== undefined ? { maxAttempts } : null) });
+      return;
+    }
+    if (event.type === "auto_retry_end") {
+      active.retryPending = false;
+      const attempt = typeof event.attempt === "number" && Number.isSafeInteger(event.attempt) && event.attempt > 0 ? event.attempt : active.retryAttempt;
+      if (event.success === true) {
+        active.failure = undefined;
+        active.retryExhausted = false;
+        return;
+      }
+      const finalError = typeof event.finalError === "string" && event.finalError.trim()
+        ? event.finalError
+        : undefined;
+      // A failed native retry without its terminal reason is delivery evidence,
+      // not proof of exhaustion or cancellation. Wait for the authoritative
+      // process-error/assistant-error event instead of inventing a UI terminal.
+      if (!finalError) {
+        active.failure = undefined;
+        active.retryExhausted = false;
+        return;
+      }
+      const failure = normalizePromptFailure(finalError, {
+        provider: route.provider,
+        model: route.modelId,
+        api: route.api,
+        retryAttempts: attempt,
+      });
+      active.failure = failure;
+      active.retryExhausted = true;
+      recordRetryFact("retry-exhausted", attempt);
+      if (!active.retryExhaustedPublished) {
+        active.retryExhaustedPublished = true;
+        this.broadcast({ type: "pi_chat_prompt_retry_exhausted", ...lifecycleFor(failure, attempt), retryExhausted: true });
+      }
+      return;
+    }
+    if (event.type === "agent_start") {
+      if (!active.retryPending || !active.failure) return;
+      active.retryPending = false;
+      recordRetryFact("retry-started", active.retryAttempt);
+      this.broadcast({ type: "pi_chat_prompt_retry_started", ...lifecycleFor(active.failure, active.retryAttempt) });
+      return;
+    }
+    if (event.type === "message_end" && event.message && typeof event.message === "object") {
+      const message = event.message as PiMessage;
+      if (message.role !== "assistant" || typeof message.errorMessage !== "string" || !message.errorMessage.trim()) {
+        active.failure = undefined;
+        return;
+      }
+      active.failure = normalizePromptFailure(message.errorMessage, {
+        provider: message.provider || route.provider,
+        model: message.model || route.modelId,
+        api: message.api || route.api,
+      });
+      return;
+    }
+    if (event.type === "pi_chat_process_error") {
+      const raw = typeof event.error === "string" && event.error.trim() ? event.error : "Pi RPC 已退出";
+      active.failure = normalizePromptFailure(raw, {
+        provider: event.provider || route.provider,
+        model: event.model || route.modelId,
+        api: event.api || route.api,
+        status: event.status,
+        retryAttempts: event.retryAttempts,
+        requestId: event.requestId,
+        incidentId: event.incidentId,
+        aborted: event.failureKind === "user-aborted",
+        runtimeExit: event.errorCode === "RPC_CHILD_EXIT" || event.errorCode === "PI_RPC_EXIT_UNCONFIRMED",
+        modelUnavailable: event.errorCode === "MODEL_UNAVAILABLE",
+      });
+    }
+    if ((event.type === "agent_settled" || event.type === "pi_chat_process_error") && active.failure && !active.terminalPublished) {
+      active.terminalPublished = true;
+      const lifecycle = lifecycleFor(active.failure, active.retryAttempt);
+      this.broadcast({ type: "pi_chat_prompt_failed", ...lifecycle });
+      if ((active.retryExhausted || active.failure.retryExhausted) && !active.retryExhaustedPublished) {
+        active.retryExhaustedPublished = true;
+        this.broadcast({ type: "pi_chat_prompt_retry_exhausted", ...lifecycle, retryExhausted: true });
+      }
+    }
+  }
+
   private observePromptRpc(
     sessionId: string,
     promptId: string,
@@ -1454,7 +1598,11 @@ export class PiChatApp {
     promptId: string,
   ): (observation: RpcRequestObservation) => void {
     const rpcGeneration = rpc.currentGeneration?.() || 0;
-    this.activePromptDiagnostics.set(sessionId, { promptId, rpcGeneration });
+    this.activePromptDiagnostics.set(sessionId, {
+      promptId,
+      rpcGeneration,
+      route: this.currentPromptSettings(sessionId)?.model,
+    });
     return (observation) =>
       this.observePromptRpc(sessionId, promptId, observation);
   }
@@ -1602,6 +1750,9 @@ export class PiChatApp {
     // render them; forwarding every snapshot creates quadratic SSE traffic and
     // can freeze Chromium's main thread during long or self-referential output.
     if (event.type === "tool_execution_update") return;
+    // Native retries are projected by the correlated observer. Their raw error
+    // bodies must not bypass the Node error boundary or create a second UI path.
+    if (event.type === "auto_retry_start" || event.type === "auto_retry_end") return;
     const allowedEvent = event.type === "message_end"
       ? decodeCanonicalMessageEndPayload(event)
       : event;
@@ -1612,12 +1763,39 @@ export class PiChatApp {
       }, undefined, runGeneration);
       return;
     }
+    const eventForBrowser: Record<string, unknown> = allowedEvent.type === "pi_chat_process_error"
+      ? (() => {
+          const raw = typeof allowedEvent.error === "string"
+            ? allowedEvent.error
+            : "Pi RPC 已退出";
+          const failure = normalizePromptFailure(raw, {
+            provider: allowedEvent.provider,
+            model: allowedEvent.model,
+            api: allowedEvent.api,
+            status: allowedEvent.status,
+            retryAttempts: allowedEvent.retryAttempts,
+            requestId: allowedEvent.requestId,
+            incidentId: allowedEvent.incidentId,
+            aborted: allowedEvent.failureKind === "user-aborted",
+            runtimeExit: allowedEvent.errorCode === "RPC_CHILD_EXIT"
+              || allowedEvent.errorCode === "PI_RPC_EXIT_UNCONFIRMED",
+            modelUnavailable: allowedEvent.errorCode === "MODEL_UNAVAILABLE",
+          });
+          return {
+            ...allowedEvent,
+            // Node owns the browser boundary: never forward the unredacted
+            // transport error even though the complete redacted detail remains.
+            error: failure.message,
+            failure,
+          };
+        })()
+      : allowedEvent;
     const {
       piChatSessionId: _untrustedSessionId,
       piChatRunEpoch: _untrustedRunEpoch,
       piChatRunGeneration: _untrustedRunGeneration,
       ...runtimeEvent
-    } = allowedEvent;
+    } = eventForBrowser;
     const timing = this.eventRunTiming(
       sessionId,
       typeof runtimeEvent.type === "string" ? runtimeEvent.type : "",
@@ -1715,7 +1893,10 @@ export class PiChatApp {
         : typeof error === "string"
           ? error
           : "";
-    const message = raw.replace(/[\r\n\t]+/g, " ").replace(/\s{2,}/g, " ").trim();
+    const message = visibleAssistantErrorDetail(raw)
+      .replace(/[\r\n\t]+/g, " ")
+      .replace(/\s{2,}/g, " ")
+      .trim();
     if (message) this.runtimeFailureReasonsBySession.set(sessionId, message.slice(0, 280));
     const incidentId = incidentIdValue || incidentReference(error)?.incidentId;
     if (incidentId) this.runtimeIncidentIdsBySession.set(sessionId, incidentId);
@@ -3011,6 +3192,12 @@ export class PiChatApp {
       }, generation);
       return;
     }
+    this.broadcastPromptFailureLifecycle(
+      runtime.id,
+      transition.broadcastEvent,
+      transitionGeneration,
+      generation,
+    );
     this.runtimePool.touch(runtime);
     if (type === "agent_start")
       this.traceActivePrompt(
@@ -3631,6 +3818,12 @@ export class PiChatApp {
       }, generation);
       return;
     }
+    this.broadcastPromptFailureLifecycle(
+      sessionId,
+      transition.broadcastEvent,
+      transitionGeneration,
+      generation,
+    );
     if (type === "agent_start")
       this.traceActivePrompt(
         "agent-start",
