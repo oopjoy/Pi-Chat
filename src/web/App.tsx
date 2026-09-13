@@ -156,6 +156,7 @@ import { withStreamingAppendHints } from "./lib/streaming-append";
 import { SessionViewCache, type SessionViewSnapshot } from "./lib/session-view-cache";
 import { workspaceFileActivityParts, workspaceFileActivityRevisionFromParts } from "./lib/workspace-activity";
 import { windowPromptReconcileScheduler, type PromptReconcileScheduler } from "./lib/prompt-reconcile-scheduler";
+import { PromptCoordinator } from "./application/prompt-coordinator";
 import {
   composerStateForSelection,
   promptSettingsForSelection,
@@ -1116,6 +1117,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   const navigationStartedAtRef = useRef(new Map<number, number>());
   /** Accepted local user turns remain visible until a JSONL-derived view includes them. */
   const localUserTurnsRef = useRef(new Map<string, LocalUserTurn[]>());
+  const promptCoordinatorRef = useRef(new PromptCoordinator());
   const draftRestorationIntentSequenceRef = useRef(0);
   const appliedDraftRestorationSequencesRef = useRef(new Map<string, number>());
   const steerDequeueExpectedDraftRevisionRef = useRef(new Map<string, number>());
@@ -4051,14 +4053,14 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         });
       };
       if (
-        parsedEvent.promptId &&
+        event.piChatPromptId &&
         eventSessionId &&
         (type === "agent_start" ||
           type === "agent_settled" ||
           type === "pi_chat_process_error")
       ) {
         const observed = promptCoordinatorRef.current.observeServerLifecycle(
-          parsedEvent.promptId,
+          String(event.piChatPromptId),
           type,
           eventRunGeneration,
           eventSessionId,
@@ -6395,7 +6397,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     let promptAcceptedByEvent = false;
     let promptTerminalByEvent = false;
     let promptSubmitted = false;
-    let promptOperationId: string | null = crypto.randomUUID();
+    let promptOperationId = crypto.randomUUID();
     let serverPromptId: string | null = null;
     const protectLocalPrompt = (turn: PiMessage | null = localTurn) => {
       // A child transcript never receives optimistic parent turns, queue rows,
@@ -6409,7 +6411,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       )
         return protectedLocalTurn;
       const pending = localUserTurnsRef.current.get(targetSessionId) || [];
-      protectedLocalTurn = {
+      const nextLocalTurn: LocalUserTurn = {
         sessionId: targetSessionId,
         message: turn,
         promptOperationId,
@@ -6424,19 +6426,24 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           : null),
         confirmByPosition: images.length > 0,
       };
+      protectedLocalTurn = nextLocalTurn;
       localUserTurnsRef.current.set(targetSessionId, [
         ...pending,
-        protectedLocalTurn,
+        nextLocalTurn,
       ]);
-      recordUserTurnLifecycle("optimistic-created", targetSessionId, protectedLocalTurn);
-      return protectedLocalTurn;
+      recordUserTurnLifecycle("optimistic-created", targetSessionId, nextLocalTurn);
+      return nextLocalTurn;
     };
-    const localTurnEntry = (): LocalUserTurn | undefined =>
-      targetSessionId
-        ? (localUserTurnsRef.current.get(targetSessionId) || []).find(
-            (turn) => turn.message === localTurn,
-          )
-        : undefined;
+    const localTurnEntry = (): LocalUserTurn | undefined => {
+      if (!targetSessionId) return undefined;
+      const turns = localUserTurnsRef.current.get(targetSessionId) || [];
+      return turns.find(
+        (turn) =>
+          turn.promptOperationId === promptOperationId
+          || (serverPromptId && turn.serverPromptId === serverPromptId)
+          || turn.message === localTurn,
+      );
+    };
     dispatchPane({
       type: "PROMPT_STARTED",
       target: targetSessionId
@@ -6725,7 +6732,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           {
             promptId: promptOperationId!,
             sessionId: targetSessionId,
-            navigationEpoch: sessionCoordinatorRef.current.navigationEpoch,
+            navigationEpoch: navigationEpochRef.current,
             runEpoch: runEpochRef.current,
             runtimeGeneration: sessionRunGenerationsRef.current.get(targetSessionId),
             delivery: steering ? "steer" : "queue",
