@@ -355,7 +355,7 @@ export const api = {
   },
   shutdown: () => request<{ shuttingDown: true }>("/api/shutdown", { method: "POST" }),
   stateDiagnosticSnapshot: () => request<ServerStateDiagnosticSnapshot>("/api/diagnostics/snapshot"),
-  prompt: (message: string, images: PromptImage[] = [], sessionId: string, gateMode?: GateMode, delivery: PromptDelivery = "queue", settings?: PromptSettingsSnapshot, steerId?: string) => request<{ accepted: boolean; queued: boolean; steered?: boolean; /** Pi received the JSONL command but its response timed out; final execution remains event-confirmed. */ deliveryUncertain?: boolean; extension?: boolean; command?: string; description?: string; isStreaming?: boolean; id?: string; queue?: QueuedPrompt[] }>("/api/chat/prompt", {
+  prompt: (message: string, images: PromptImage[] = [], sessionId: string, gateMode?: GateMode, delivery: PromptDelivery = "queue", settings?: PromptSettingsSnapshot, steerId?: string) => request<{ accepted: boolean; queued: boolean; steered?: boolean; /** Pi received the JSONL command but its response timed out; final execution remains event-confirmed. */ deliveryUncertain?: boolean; extension?: boolean; command?: string; description?: string; isStreaming?: boolean; id?: string; promptId?: string; queue?: QueuedPrompt[] }>("/api/chat/prompt", {
     method: "POST",
     body: JSON.stringify({
       message,

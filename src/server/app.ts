@@ -416,6 +416,7 @@ interface ActivePromptDiagnostic {
 
 interface PendingAcceptedPrompt {
   id: string;
+  promptId: string;
   message: PiMessage;
   expectedTurnTotal: number;
   settings?: PromptSettingsSnapshot;
@@ -821,8 +822,8 @@ export class PiChatApp {
         broadcast: (event) => this.broadcast(event),
         publishSessionActivity: (sessionId) =>
           this.broadcastSessionActivity(sessionId),
-        onPrimaryPromptAccepted: (sessionId, promptAt, message, images, settings) => {
-          this.recordAcceptedPrompt(sessionId, promptAt, message, images, settings);
+        onPrimaryPromptAccepted: (sessionId, promptAt, message, images, settings, promptId) => {
+          this.recordAcceptedPrompt(sessionId, promptId || randomUUID(), promptAt, message, images, settings);
           this.warmPrimaryMessageSnapshot();
           this.broadcast({
             type: "pi_chat_sessions_changed",
@@ -830,8 +831,8 @@ export class PiChatApp {
             sessionId,
           });
         },
-        onSecondaryPromptAccepted: (runtime, promptAt, message, images, settings) => {
-          this.recordAcceptedPrompt(runtime.id, promptAt, message, images, settings);
+        onSecondaryPromptAccepted: (runtime, promptAt, message, images, settings, promptId) => {
+          this.recordAcceptedPrompt(runtime.id, promptId || randomUUID(), promptAt, message, images, settings);
           this.warmRuntimeMessageSnapshot(runtime);
           // Keep draftSession until agent_settled confirms JSONL has the user turn.
           // Mark prompted so sessionSummaries can inject a sidebar row immediately —
@@ -4493,6 +4494,7 @@ export class PiChatApp {
 
   private pendingPromptMessage(
     id: string,
+    promptId: string,
     message: string,
     images: PromptImage[],
     promptAt: number,
@@ -4512,6 +4514,7 @@ export class PiChatApp {
       content,
       timestamp: promptAt,
       piChatPendingMessageId: id,
+      piChatPromptId: promptId,
     };
   }
 
@@ -4587,6 +4590,7 @@ export class PiChatApp {
 
   private recordAcceptedPrompt(
     sessionId: string,
+    promptId: string,
     promptAt: number,
     message: string,
     images: PromptImage[],
@@ -4604,7 +4608,8 @@ export class PiChatApp {
     const id = randomUUID();
     const pending: PendingAcceptedPrompt = {
       id,
-      message: this.pendingPromptMessage(id, message, images, promptAt),
+      promptId,
+      message: this.pendingPromptMessage(id, promptId, message, images, promptAt),
       expectedTurnTotal: persisted.filter((item) => item.role === "user").length + existing.length + 1,
       ...(settings ? { settings } : null),
     };
@@ -7720,6 +7725,7 @@ export class PiChatApp {
               accepted: true,
               queued: true,
               id: queued.id,
+              promptId: queued.id,
               queue: this.publicQueue(secondaryRuntime.promptQueue),
             });
           }
@@ -7789,10 +7795,12 @@ export class PiChatApp {
                 message,
                 images,
                 requestedSettings,
+                promptId,
               );
               json(response, 202, {
                 accepted: true,
                 queued: false,
+                promptId,
                 deliveryUncertain: true,
               });
               return;
@@ -7803,8 +7811,9 @@ export class PiChatApp {
               message,
               images,
               requestedSettings,
+              promptId,
             );
-            json(response, 202, { accepted: true, queued: false });
+            json(response, 202, { accepted: true, queued: false, promptId });
           } catch (error) {
             secondaryRuntime.running = false;
             this.broadcastSessionActivity(secondaryRuntime.id);
@@ -7838,6 +7847,7 @@ export class PiChatApp {
             accepted: true,
             queued: true,
             id: queued.id,
+            promptId: queued.id,
             queue: this.publicQueue(),
           });
           return;
@@ -7858,6 +7868,7 @@ export class PiChatApp {
         json(response, 202, {
           accepted: true,
           queued: false,
+          promptId,
           ...(acceptance === "unknown" ? { deliveryUncertain: true } : null),
         });
         return;
@@ -8639,6 +8650,7 @@ export class PiChatApp {
                 initialMessage,
                 initialImages,
                 initialSettings,
+                promptId,
               );
             }
           } catch (error) {
@@ -8655,6 +8667,7 @@ export class PiChatApp {
                 initialMessage,
                 initialImages,
                 initialSettings,
+                promptId,
               );
             } else {
               runtime.running = false;
@@ -8679,6 +8692,7 @@ export class PiChatApp {
             },
             accepted: true,
             queued: false,
+            ...(promptId ? { promptId } : null),
             ...(deliveryUncertain ? { deliveryUncertain: true } : null),
             // A timed-out extension write has not been proven to execute; use
             // the ordinary uncertain-prompt UX instead of claiming success.

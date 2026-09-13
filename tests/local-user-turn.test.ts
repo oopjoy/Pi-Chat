@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { appendLocalTurnOnce, appendPendingUserMessage, bindQueuedAdmission, bindQueuedDispatch, consumeLocalSteeringTurn, diagnoseVisibleUserTurnDuplicates, localTurnForPendingPrompt, markLocalTurnQueued, nextLocalTurnTotal, promoteTurnsAbsentFromQueue, protectTranscriptWithLocalTurns, queuedPromptFromLocalTurn, removeLocalTurnAndRebase, removePendingSteeringTurns, transcriptConfirmsLocalTurn, transcriptTurnTotal, type LocalUserTurn } from "../src/web/lib/local-user-turn";
+import { appendLocalTurnOnce, appendPendingUserMessage, bindLocalTurnPromptIdentity, bindQueuedAdmission, bindQueuedDispatch, consumeLocalSteeringTurn, diagnoseVisibleUserTurnDuplicates, hasLocalTurnForPendingPayload, localTurnForPendingPrompt, markLocalTurnQueued, nextLocalTurnTotal, promoteTurnsAbsentFromQueue, protectTranscriptWithLocalTurns, queuedPromptFromLocalTurn, removeLocalTurnAndRebase, removePendingSteeringTurns, transcriptConfirmsLocalTurn, transcriptTurnTotal, type LocalUserTurn } from "../src/web/lib/local-user-turn";
 import { SessionViewCache } from "../src/web/lib/session-view-cache";
 import type { PiMessage, SessionViewData } from "../src/shared/types";
 
@@ -103,6 +103,22 @@ test("a late acknowledgement does not append an equivalent persisted user row", 
     appendLocalTurnOnce([previous, persisted], turn),
     [previous, persisted],
   );
+});
+
+test("a late acknowledgement cannot reappend a persisted row after ordinal drift", () => {
+  const persisted = [
+    persistedUser(repeatedPrompt, 1_000, "entry-1:0"),
+    persistedUser(repeatedPrompt, 2_000, "entry-2:0"),
+    persistedUser(repeatedPrompt, 3_000, "entry-3:0"),
+  ];
+  const turn: LocalUserTurn = {
+    sessionId: "session-a",
+    message: { role: "user", content: repeatedPrompt, timestamp: 3_000 },
+    expectedTurnTotal: 99,
+    baselineTurnTotal: 2,
+  };
+  assert.deepEqual(appendLocalTurnOnce(persisted, turn), persisted);
+  assert.deepEqual(protectTranscriptWithLocalTurns([turn], persisted, 3, 3).pendingTurns, []);
 });
 
 test("two distinct identical prompts remain two user turns", () => {
@@ -713,6 +729,49 @@ test("an older identical echo cannot confirm a newer submission when the waterma
   const protectedTranscript = protectTranscriptWithLocalTurns([turn], window, 2, 1);
   assert.deepEqual(protectedTranscript.pendingTurns, [turn]);
   assert.deepEqual(protectedTranscript.messages, [...window, turn.message]);
+});
+
+test("a pending server view binds by Server Prompt identity before ordinal fallback", () => {
+  const localTurn: LocalUserTurn = {
+    sessionId: "session-a",
+    message: { role: "user", content: "local copy", timestamp: 9_000 },
+    expectedTurnTotal: 14,
+    serverPromptId: "prompt-42",
+  };
+  const pending = {
+    id: "pending-42",
+    promptId: "prompt-42",
+    message: { role: "user" as const, content: "server copy", timestamp: 9_100 },
+    expectedTurnTotal: 12,
+  };
+  assert.equal(localTurnForPendingPrompt([localTurn], pending), localTurn);
+
+  const unbound: LocalUserTurn = {
+    sessionId: "session-a",
+    message: { role: "user", content: repeatedPrompt, timestamp: 9_000 },
+    expectedTurnTotal: 14,
+  };
+  bindLocalTurnPromptIdentity(unbound, {
+    serverPromptId: "prompt-42",
+    pendingPromptId: "pending-42",
+  });
+  assert.equal(unbound.message.piChatPromptId, "prompt-42");
+  assert.equal(unbound.message.piChatPendingMessageId, "pending-42");
+});
+
+test("an ambiguous pending view never rehydrates another local same-payload turn", () => {
+  const turns: LocalUserTurn[] = [
+    { sessionId: "session-a", message: { role: "user", content: repeatedPrompt, timestamp: 9_000 }, expectedTurnTotal: 12 },
+    { sessionId: "session-a", message: { role: "user", content: repeatedPrompt, timestamp: 9_000 }, expectedTurnTotal: 13 },
+  ];
+  const pending = {
+    id: "pending-42",
+    promptId: "prompt-42",
+    message: { role: "user" as const, content: repeatedPrompt, timestamp: 9_000 },
+    expectedTurnTotal: 11,
+  };
+  assert.equal(hasLocalTurnForPendingPayload(turns, pending), true);
+  assert.equal(localTurnForPendingPrompt(turns, pending), undefined);
 });
 
 test("a pending server view matches the existing local turn when its ordinal is stale", () => {

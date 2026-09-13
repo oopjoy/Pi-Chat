@@ -167,6 +167,8 @@ export interface PiMessage {
   piChatPersistedMessageId?: string;
   /** Server-only accepted-prompt projection; never written to Pi JSONL or provider payloads. */
   piChatPendingMessageId?: string;
+  /** Server-owned Prompt identity carried only by Pi Chat projections. */
+  piChatPromptId?: string;
   role: string;
   /** Metadata records such as compactionSummary legitimately omit content. */
   content?: string | PiContentBlock[];
@@ -301,6 +303,8 @@ export interface InitialPromptData extends SessionRuntimeReadyData {
   queued: false;
   /** Pi received the initial JSONL command but its response timed out. */
   deliveryUncertain?: boolean;
+  /** Server-owned identity of the admitted first Prompt. */
+  promptId?: string;
   extension?: boolean;
   command?: string;
   description?: string;
@@ -310,7 +314,10 @@ export interface InitialPromptData extends SessionRuntimeReadyData {
 }
 
 export interface PendingPromptProjection {
+  /** Browser-visible pending projection identity. */
   id: string;
+  /** Server-owned Prompt identity; queued prompts temporarily alias their queue ID. */
+  promptId?: string;
   message: PiMessage;
   expectedTurnTotal: number;
   settings?: PromptSettingsSnapshot;

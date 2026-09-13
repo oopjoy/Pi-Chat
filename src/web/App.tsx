@@ -123,12 +123,14 @@ import {
 } from "./lib/stream-observability";
 import {
   appendLocalTurnOnce,
+  bindLocalTurnPromptIdentity,
   bindQueuedAdmission,
   diagnoseVisibleUserTurnDuplicates,
   bindQueuedDispatch,
   consumeLocalSteeringTurn,
   localTurnBelongsInTranscript,
   localTurnForPendingPrompt,
+  hasLocalTurnForPendingPayload,
   markLocalTurnQueued,
   nextLocalTurnTotal,
   promoteTurnsAbsentFromQueue,
@@ -2042,15 +2044,26 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     if (!pending) return;
     const turns = localUserTurnsRef.current.get(view.session.id) || [];
     const existing = localTurnForPendingPrompt(turns, pending);
+    const serverPromptId = pending.promptId || pending.message.piChatPromptId;
+    const pendingPromptId = pending.id || pending.message.piChatPendingMessageId;
     if (existing) {
+      bindLocalTurnPromptIdentity(existing, { serverPromptId, pendingPromptId });
       existing.queueState = "dispatched";
       existing.queueRetryPending = false;
       return;
     }
+    // A view can beat HTTP acknowledgement while two identical local Prompts
+    // are still pending. Content alone is intentionally ambiguous: rehydrating
+    // another LocalUserTurn here would create the local+persisted duplicate this
+    // reconciliation path is meant to prevent. The existing local turns remain
+    // authoritative until their acknowledgement supplies the Server identity.
+    if (hasLocalTurnForPendingPayload(turns, pending)) return;
     const message = { ...pending.message };
     const turn: LocalUserTurn = {
       sessionId: view.session.id,
       message,
+      ...(serverPromptId ? { serverPromptId } : null),
+      ...(pendingPromptId ? { pendingPromptId } : null),
       expectedTurnTotal: pending.expectedTurnTotal,
       baselineTurnTotal:
         typeof view.turnTotal === "number" && Number.isFinite(view.turnTotal)
@@ -2060,6 +2073,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       confirmByPosition: Array.isArray(message.content),
       renderedInTranscript: false,
     };
+    bindLocalTurnPromptIdentity(turn, { serverPromptId, pendingPromptId });
     localUserTurnsRef.current.set(view.session.id, [...turns, turn]);
   }, []);
 
@@ -6718,6 +6732,16 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         protectedLocalTurn = null;
       }
       const acceptedLocalTurn = localTurnEntry();
+      if (acceptedLocalTurn && !result.steered) {
+        const serverPromptId =
+          typeof result.promptId === "string"
+            ? result.promptId
+            : result.queued && typeof result.id === "string"
+              ? result.id
+              : undefined;
+        if (serverPromptId)
+          bindLocalTurnPromptIdentity(acceptedLocalTurn, { serverPromptId });
+      }
       const promptNavigationIsCurrent = Boolean(
         promptAuthority &&
         promptAuthority.navigationEpoch === navigationEpochRef.current &&

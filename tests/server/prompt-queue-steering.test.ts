@@ -1086,16 +1086,22 @@ test("a timed-out Primary prompt returns deliveryUncertain and queues the next m
     await fetch(`${origin}/api/bootstrap`);
     const uncertain = await prompt("possibly accepted");
     assert.equal(uncertain.status, 202);
-    assert.deepEqual(await uncertain.json(), {
-      accepted: true,
-      queued: false,
-      deliveryUncertain: true,
-    });
+    const uncertainData = await uncertain.json() as {
+      accepted: boolean;
+      queued: boolean;
+      promptId?: string;
+      deliveryUncertain?: boolean;
+    };
+    assert.equal(uncertainData.accepted, true);
+    assert.equal(uncertainData.queued, false);
+    assert.equal(uncertainData.deliveryUncertain, true);
+    assert.match(uncertainData.promptId || "", /^[a-f0-9-]{36}$/);
     const diagnosticInternals = app as unknown as {
       activePromptDiagnostics: Map<string, { promptId: string; rpcGeneration: number }>;
       stateDiagnostics: { snapshot(): { entries: Array<{ category: string; name: string; promptId?: string }> } };
     };
     const uncertainPromptId = diagnosticInternals.activePromptDiagnostics.get(id)?.promptId;
+    assert.equal(uncertainData.promptId, uncertainPromptId);
     assert.match(uncertainPromptId || "", /^[a-f0-9-]{36}$/);
     assert.ok(
       diagnosticInternals.stateDiagnostics.snapshot().entries.some((entry) =>

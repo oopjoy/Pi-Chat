@@ -437,7 +437,7 @@ test("queued Secondary turns retain Gate mode until actual dispatch", async () =
 });
 
 test("successful queued Secondary dispatch performs acceptance bookkeeping with its admission time", async () => {
-  const accepted: Array<{ runtime: unknown; promptAt: number }> = [];
+  const accepted: Array<{ runtime: unknown; promptAt: number; promptId?: string }> = [];
   const rpc = { send: async () => ({ type: "response", success: true }), isRunning: () => true };
   const runtime = {
     id: "secondary",
@@ -464,13 +464,13 @@ test("successful queued Secondary dispatch performs acceptance bookkeeping with 
     syncGateMode: async () => {},
     broadcast: () => {},
     onPrimaryPromptAccepted: () => {},
-    onSecondaryPromptAccepted: (acceptedRuntime, promptAt) => accepted.push({ runtime: acceptedRuntime, promptAt }),
+    onSecondaryPromptAccepted: (acceptedRuntime, promptAt, _message, _images, _settings, promptId) => accepted.push({ runtime: acceptedRuntime, promptAt, promptId }),
   }));
   const queued = scheduler.enqueueRuntime(runtime as never, "accepted from queue", [], 1234);
 
   await scheduler.dispatchRuntimeNext(runtime as never);
 
-  assert.deepEqual(accepted, [{ runtime, promptAt: queued.createdAt }]);
+  assert.deepEqual(accepted, [{ runtime, promptAt: queued.createdAt, promptId: queued.id }]);
 });
 
 test("failed queued Secondary dispatch does not perform acceptance bookkeeping", async () => {

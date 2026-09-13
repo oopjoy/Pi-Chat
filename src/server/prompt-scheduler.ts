@@ -110,6 +110,7 @@ export interface PromptPublicationPort {
     message: string,
     images: PromptImage[],
     settings?: PromptSettingsSnapshot,
+    promptId?: string,
   ): void;
   onSecondaryPromptAccepted(
     runtime: SecondaryRuntime,
@@ -117,6 +118,7 @@ export interface PromptPublicationPort {
     message: string,
     images: PromptImage[],
     settings?: PromptSettingsSnapshot,
+    promptId?: string,
   ): void;
 }
 
@@ -347,6 +349,7 @@ export class PromptScheduler {
           message,
           images,
           acceptedSettings,
+          promptId,
         );
         return "confirmed";
       } catch (error) {
@@ -363,6 +366,7 @@ export class PromptScheduler {
             message,
             images,
             acceptedSettings,
+            promptId,
           );
           this.publication.publishSessionActivity?.(this.runtime.activeSessionId());
           return "unknown";
@@ -382,8 +386,9 @@ export class PromptScheduler {
     message = "",
     images: PromptImage[] = [],
     settings?: PromptSettingsSnapshot,
+    promptId?: string,
   ): void {
-    this.publication.onSecondaryPromptAccepted(runtime, promptAt, message, images, settings);
+    this.publication.onSecondaryPromptAccepted(runtime, promptAt, message, images, settings, promptId);
   }
 
   async dispatchPrimaryNext(): Promise<void> {
@@ -558,6 +563,7 @@ export class PromptScheduler {
         next.message,
         next.images,
         acceptedSettings,
+        next.id,
       );
     } catch (error) {
       // A write timeout can occur after the prompt JSONL command reached Pi
@@ -573,6 +579,7 @@ export class PromptScheduler {
           next.message,
           next.images,
           acceptedSettings,
+          next.id,
         );
         this.publication.broadcast({
           type: "pi_chat_prompt_delivery_uncertain",

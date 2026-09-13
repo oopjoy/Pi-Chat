@@ -4,6 +4,12 @@ import type { PendingPromptProjection, PiMessage, QueuedPrompt } from "../../sha
 export interface LocalUserTurn {
   sessionId: string;
   message: PiMessage;
+  /** Browser operation identity, when the submission path supplies one. */
+  promptOperationId?: string;
+  /** Server-owned Prompt identity; never inferred from payload content. */
+  serverPromptId?: string;
+  /** Server-owned pending projection identity used during the JSONL visibility gap. */
+  pendingPromptId?: string;
   /** Cumulative user-turn count at which this individual turn is persisted. */
   expectedTurnTotal: number;
   /**
@@ -66,12 +72,24 @@ function sameUserInstruction(left: PiMessage, right: PiMessage): boolean {
  */
 export function localTurnForPendingPrompt(
   turns: readonly LocalUserTurn[],
-  pending: Pick<PendingPromptProjection, "message" | "expectedTurnTotal"> & { id?: string },
+  pending: Pick<PendingPromptProjection, "message" | "expectedTurnTotal" | "promptId"> & { id?: string },
 ): LocalUserTurn | undefined {
-  const byPendingId = pending.id
-    ? turns.find((turn) => turn.message.piChatPendingMessageId === pending.id)
+  const pendingPromptId = pending.id || pending.message.piChatPendingMessageId;
+  const serverPromptId = pending.promptId || pending.message.piChatPromptId;
+  const byPendingId = pendingPromptId
+    ? turns.find((turn) =>
+        turn.pendingPromptId === pendingPromptId
+        || turn.message.piChatPendingMessageId === pendingPromptId,
+      )
     : undefined;
   if (byPendingId) return byPendingId;
+  const byServerPromptId = serverPromptId
+    ? turns.find((turn) =>
+        turn.serverPromptId === serverPromptId
+        || turn.message.piChatPromptId === serverPromptId,
+      )
+    : undefined;
+  if (byServerPromptId) return byServerPromptId;
 
   const byOrdinal = turns.find(
     (turn) =>
@@ -110,6 +128,29 @@ export function localTurnForPendingPrompt(
     && Math.abs(localAt - pendingAt) <= PERSISTED_ECHO_CLOCK_TOLERANCE_MS
     ? candidate
     : undefined;
+}
+
+/** True when a pending projection already has a local same-payload candidate. */
+export function hasLocalTurnForPendingPayload(
+  turns: readonly LocalUserTurn[],
+  pending: Pick<PendingPromptProjection, "message">,
+): boolean {
+  return turns.some((turn) => sameUserInstruction(turn.message, pending.message));
+}
+
+/** Bind Server identity to one existing local turn without rebinding it to a later Prompt. */
+export function bindLocalTurnPromptIdentity(
+  turn: LocalUserTurn,
+  identity: { serverPromptId?: string; pendingPromptId?: string },
+): void {
+  if (identity.serverPromptId && (!turn.serverPromptId || turn.serverPromptId === identity.serverPromptId)) {
+    turn.serverPromptId = identity.serverPromptId;
+    if (!turn.message.piChatPromptId) turn.message.piChatPromptId = identity.serverPromptId;
+  }
+  if (identity.pendingPromptId && (!turn.pendingPromptId || turn.pendingPromptId === identity.pendingPromptId)) {
+    turn.pendingPromptId = identity.pendingPromptId;
+    if (!turn.message.piChatPendingMessageId) turn.message.piChatPendingMessageId = identity.pendingPromptId;
+  }
 }
 
 /**
@@ -216,6 +257,50 @@ function authoritativeUserMatch(turn: LocalUserTurn, messages: PiMessage[], turn
     : undefined;
 }
 
+function persistedEchoForTurn(
+  turn: LocalUserTurn,
+  messages: PiMessage[],
+  turnTotal?: number,
+  payloadRank = 1,
+): PiMessage | undefined {
+  const baseline = turn.baselineTurnTotal;
+  const positional = authoritativeUserMatch(turn, messages, turnTotal);
+  if (positional?.piChatPersistedMessageId) {
+    if (typeof baseline !== "number" || !Number.isFinite(baseline)) return positional;
+    const users = messages.filter((message) => message.role === "user");
+    const firstOrdinal = transcriptTurnTotal(messages, turnTotal) - users.length + 1;
+    const positionalOrdinal = users.indexOf(positional) >= 0
+      ? firstOrdinal + users.indexOf(positional)
+      : Number.POSITIVE_INFINITY;
+    if (positionalOrdinal > baseline) return positional;
+  }
+
+  const baselineRows = persistedEchoRows(turn, messages, turnTotal);
+  if (baselineRows.length >= payloadRank) return baselineRows[payloadRank - 1];
+
+  const submittedAt = typeof turn.message.timestamp === "number" && Number.isFinite(turn.message.timestamp)
+    ? turn.message.timestamp
+    : undefined;
+  if (submittedAt === undefined) return undefined;
+  const recentRows = messages.filter((message) => {
+    if (message.role !== "user" || !message.piChatPersistedMessageId || !sameUserInstruction(message, turn.message)) return false;
+    if (submittedAt === undefined) return true;
+    return typeof message.timestamp === "number"
+      && Number.isFinite(message.timestamp)
+      && message.timestamp >= submittedAt;
+  });
+  if (typeof baseline === "number" && Number.isFinite(baseline)) {
+    const users = messages.filter((message) => message.role === "user");
+    const firstOrdinal = transcriptTurnTotal(messages, turnTotal) - users.length + 1;
+    const afterBaseline = recentRows.filter((message) => {
+      const ordinal = users.indexOf(message);
+      return ordinal >= 0 && firstOrdinal + ordinal > baseline;
+    });
+    return afterBaseline.length >= payloadRank ? afterBaseline[payloadRank - 1] : undefined;
+  }
+  return recentRows.length >= payloadRank ? recentRows[payloadRank - 1] : undefined;
+}
+
 function textAndImageCount(message: PiMessage): { text: string; imageCount: number } {
   if (typeof message.content === "string") return { text: message.content, imageCount: 0 };
   if (!Array.isArray(message.content)) return { text: "", imageCount: 0 };
@@ -284,7 +369,8 @@ export function queuedPromptFromLocalTurn(turn: LocalUserTurn): QueuedPrompt | u
 export function appendLocalTurnOnce(messages: PiMessage[], turn: LocalUserTurn | undefined): PiMessage[] {
   if (!turn || turn.renderedInTranscript) return messages;
   const authoritativeMatch = authoritativeUserMatch(turn, messages);
-  if (authoritativeMatch) {
+  const persistedMatch = persistedEchoForTurn(turn, messages);
+  if (authoritativeMatch?.piChatPersistedMessageId || persistedMatch?.piChatPersistedMessageId) {
     turn.renderedInTranscript = true;
     return messages;
   }
@@ -483,6 +569,10 @@ export function transcriptConfirmsLocalTurn(
   messagesTruncated = false,
   payloadRank = 1,
 ): boolean {
+  // A one-to-one persisted match wins even when the browser's ordinal watermark
+  // drifted. This is deliberately payload-rank scoped: two identical Prompts
+  // still consume two distinct persisted rows instead of global content dedup.
+  if (persistedEchoForTurn(turn, messages, total, payloadRank)) return true;
   // A known baseline makes persisted evidence authoritative: a windowed view
   // that shows no new persisted User row cannot confirm this turn, and a
   // payload match against an older row must not hide a genuinely pending one.
