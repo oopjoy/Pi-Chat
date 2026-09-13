@@ -4114,9 +4114,21 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         // Once a Server Prompt has a terminal lifecycle fact, a late retry frame
         // must not repaint the Pane. Identity-less legacy frames keep the old
         // projection path; identity-bearing frames require an active operation.
+        const retryIdentityMatchesEvent = Boolean(
+          observedRetry
+          && eventSessionId
+          && observedRetry.sessionId === eventSessionId
+          && (!eventRunEpoch
+            || !observedRetry.runEpoch
+            || observedRetry.runEpoch === eventRunEpoch),
+        );
         const projectRetry = !isRetryLifecycle
           || !serverPromptId
-          || Boolean(observedRetry && !["settled", "failed", "aborted"].includes(observedRetry.phase));
+          || Boolean(
+            observedRetry
+            && retryIdentityMatchesEvent
+            && !["settled", "failed", "aborted"].includes(observedRetry.phase),
+          );
         const status = type === "pi_chat_prompt_retry_scheduled"
           ? `Pi 正在等待重试${retryAttempt !== undefined && maxAttempts !== undefined ? `（第 ${retryAttempt}/${maxAttempts} 次）` : "…"}`
           : type === "pi_chat_prompt_retry_started"
