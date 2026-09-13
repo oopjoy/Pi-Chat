@@ -95,7 +95,7 @@ const streamBenchmarkHelperUrl = pathToFileURL(
 ).href;
 await writeFile(rpcEntry, String.raw`
 import { createInterface } from "node:readline";
-import { writeFile as writeBenchmarkReport } from "node:fs/promises";
+import { appendFile, writeFile as writeBenchmarkReport } from "node:fs/promises";
 import { basename, dirname, extname, join } from "node:path";
 import { readStreamingBenchmarkConfig, streamingBenchmarkDelay, streamingBenchmarkSnapshots } from ${JSON.stringify(streamBenchmarkHelperUrl)};
 const sessionIndex = process.argv.indexOf("--session");
@@ -105,9 +105,16 @@ let isStreaming = false;
 const write = (value) => process.stdout.write(JSON.stringify(value) + "\n");
 const reply = (id, data) => write({ type: "response", id, success: true, data });
 const sleep = (milliseconds) => new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+const persistedMessages = [];
+let lastMessageId = sessionId + "-assistant";
+let persistence = Promise.resolve();
+const persist = (entry) => {
+  persistence = persistence.then(() => appendFile(sessionFile, JSON.stringify(entry) + "\n"));
+  return persistence;
+};
 const handlers = {
   get_state: () => ({ model: { provider: "test", id: "gpt-e2e", name: "E2E Model", input: ["text"] }, isStreaming, sessionId, sessionFile }),
-  get_messages: () => ({ messages: [] }),
+  get_messages: () => ({ messages: persistedMessages }),
   get_available_models: () => ({ models: [
     { provider: "test", id: "gpt-e2e", name: "E2E Model", input: ["text"] },
     { provider: "test", id: "gpt-e2e-alt", name: "Alternate E2E Model", input: ["text"] },
@@ -115,7 +122,7 @@ const handlers = {
   get_commands: () => ({ commands: [] }),
   get_session_stats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }),
 };
-createInterface({ input: process.stdin }).on("line", (line) => {
+createInterface({ input: process.stdin }).on("line", async (line) => {
   const command = JSON.parse(line);
   if (command.type === "prompt") {
     isStreaming = true;
@@ -154,14 +161,44 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       });
       return;
     }
+    const userMessage = {
+      role: "user",
+      content: typeof command.message === "string" ? command.message : "",
+      timestamp: Date.now(),
+      ...(typeof command.piChatPromptId === "string" ? { piChatPromptId: command.piChatPromptId } : null),
+    };
+    persistedMessages.push(userMessage);
+    const userMessageId = sessionId + "-e2e-user-" + persistedMessages.length;
+    await persist({ type: "message", id: userMessageId, parentId: lastMessageId, timestamp: new Date(userMessage.timestamp).toISOString(), message: userMessage });
+    lastMessageId = userMessageId;
     write({ type: "agent_start" });
     reply(command.id, {});
+    const retrySmoke = typeof command.message === "string" && command.message.includes("retry identity smoke");
+    if (retrySmoke) {
+      write({ type: "auto_retry_start", attempt: 1, maxAttempts: 2, delayMs: 40, errorMessage: "controlled fixture failure" });
+      setTimeout(() => write({ type: "auto_retry_start", attempt: 2, maxAttempts: 2, delayMs: 40, errorMessage: "controlled fixture failure" }), 40);
+      setTimeout(() => write({ type: "auto_retry_end", success: true, attempt: 2 }), 100);
+    }
     setTimeout(() => {
-      write({ type: "message_start", message: { role: "assistant", provider: "test", model: "gpt-e2e", content: "Live response complete" } });
-      write({ type: "message_end", message: { role: "assistant", provider: "test", model: "gpt-e2e", content: "Live response complete" } });
-      isStreaming = false;
-      write({ type: "agent_settled" });
-    }, 80);
+      const assistantMessage = { role: "assistant", provider: "test", model: "gpt-e2e", content: "Live response complete", timestamp: Date.now() };
+      const assistantMessageId = sessionId + "-e2e-assistant-" + persistedMessages.length;
+      void (async () => {
+        try {
+          await persist({ type: "message", id: assistantMessageId, parentId: lastMessageId, timestamp: new Date(assistantMessage.timestamp).toISOString(), message: assistantMessage });
+          persistedMessages.push(assistantMessage);
+          lastMessageId = assistantMessageId;
+          write({ type: "message_start", message: assistantMessage });
+          write({ type: "message_end", message: assistantMessage });
+          isStreaming = false;
+          write({ type: "agent_end" });
+          write({ type: "agent_settled" });
+        } catch (error) {
+          process.stderr.write("E2E fixture persistence failed: " + (error?.stack || error) + "\n");
+          isStreaming = false;
+          write({ type: "pi_chat_process_error", error: "fixture persistence failed" });
+        }
+      })();
+    }, retrySmoke ? 650 : 80);
     return;
   }
   reply(command.id, handlers[command.type]?.() || {});

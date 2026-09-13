@@ -7,6 +7,66 @@ async function openSecondSession(page: import("@playwright/test").Page) {
   await expect(page.getByText("Final answer with")).toBeVisible();
 }
 
+test("accepted duplicate Prompts remain one row per Prompt across reload", { tag: "@desktop-only" }, async ({ page }) => {
+  await page.goto("/");
+  const input = page.getByRole("textbox", { name: "消息输入" });
+  const send = page.locator(".send-button");
+  const promptText = "browser identity smoke";
+  const sendPrompt = async () => {
+    await input.fill(promptText);
+    await send.click();
+    await expect(page.locator(".message-user .message-content").filter({ hasText: promptText })).toHaveCount(1);
+    await expect(page.getByText("Live response complete")).toBeVisible();
+  };
+  await sendPrompt();
+  await input.fill(promptText);
+  await expect(send).toBeEnabled();
+  await send.click();
+  await expect(page.locator(".message-user .message-content").filter({ hasText: promptText })).toHaveCount(2);
+  await expect(page.getByText("Live response complete")).toBeVisible();
+  await expect(page.locator(".message-user .message-content").filter({ hasText: promptText })).toHaveCount(2);
+  await page.waitForTimeout(300);
+  await page.reload();
+  await expect(page.locator(".message-user .message-content").filter({ hasText: promptText })).toHaveCount(2);
+});
+
+test("reconnect after an interrupted SSE connection does not duplicate persisted turns", { tag: "@desktop-only" }, async ({ page }) => {
+  let interruptNextStream = false;
+  let interrupted = false;
+  await page.route(/\/api\/events(?:\?|$)/, async (route) => {
+    if (interruptNextStream && !interrupted) {
+      interrupted = true;
+      await route.abort("failed");
+      return;
+    }
+    await route.continue();
+  });
+  interruptNextStream = true;
+  await page.goto("/");
+  await expect.poll(() => interrupted).toBe(true);
+  const input = page.getByRole("textbox", { name: "消息输入" });
+  await input.fill("reconnect identity smoke");
+  await page.locator(".send-button").click();
+  await expect(page.locator(".message-user .message-content").filter({ hasText: "reconnect identity smoke" })).toHaveCount(1);
+  await expect(page.getByText("Live response complete")).toBeVisible();
+  await page.waitForTimeout(300);
+  await page.reload();
+  await expect(page.locator(".message-user .message-content").filter({ hasText: "reconnect identity smoke" })).toHaveCount(1);
+});
+
+test("bundled retry lifecycle keeps one Prompt identity in the browser", { tag: "@desktop-only" }, async ({ page }) => {
+  await page.goto("/");
+  const input = page.getByRole("textbox", { name: "消息输入" });
+  await input.fill("retry identity smoke");
+  await page.locator(".send-button").click();
+  await expect(page.getByText(/Pi 正在等待重试/)).toBeVisible();
+  await expect(page.locator(".message-user .message-content").filter({ hasText: "retry identity smoke" })).toHaveCount(1);
+  await expect(page.getByText("Live response complete")).toBeVisible({ timeout: 10_000 });
+  await page.waitForTimeout(300);
+  await page.reload();
+  await expect(page.locator(".message-user .message-content").filter({ hasText: "retry identity smoke" })).toHaveCount(1);
+});
+
 test("desktop session navigation keeps the left sidebar open", { tag: "@desktop-only" }, async ({ page }) => {
   await page.goto("/");
   const sidebar = page.locator(".sidebar");
