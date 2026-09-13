@@ -766,6 +766,156 @@ test("a view that confirms a pending prompt before its acknowledgement leaves on
   }
 });
 
+test("repeated direct prompts converge to one visible row each across a late acknowledgement", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const firstPromptId = "00000000-0000-4000-8000-000000000801";
+  const secondPromptId = "00000000-0000-4000-8000-000000000802";
+  let promptCalls = 0;
+  let viewCalls = 0;
+  let resolveSecondPrompt!: (value: { accepted: true; queued: false; promptId: string }) => void;
+  const secondPrompt = new Promise<{ accepted: true; queued: false; promptId: string }>((resolve) => {
+    resolveSecondPrompt = resolve;
+  });
+  const firstAuthoritativeView: SessionViewData = {
+    ...draftView,
+    session: { ...bootstrap.sessions[0], running: false },
+    state: { ...bootstrap.state, isStreaming: false, messageCount: 1 },
+    messages: [{
+      role: "user",
+      content: "继续",
+      timestamp: 100,
+      piChatPromptId: firstPromptId,
+      piChatPersistedMessageId: "entry-1:0",
+    }],
+    messageTotal: 1,
+    turnTotal: 1,
+    visibleTurnCount: 1,
+    isActive: true,
+    runtimeStatus: "active",
+    isStreaming: false,
+    queue: [],
+    queuePaused: false,
+  };
+  const authoritativeView: SessionViewData = {
+    ...draftView,
+    session: { ...bootstrap.sessions[0], running: false },
+    state: { ...bootstrap.state, isStreaming: false, messageCount: 2 },
+    messages: [
+      {
+        role: "user",
+        content: "继续",
+        timestamp: 100,
+        piChatPromptId: firstPromptId,
+        piChatPersistedMessageId: "entry-1:0",
+      },
+      {
+        role: "user",
+        content: "继续",
+        timestamp: 200,
+        piChatPromptId: secondPromptId,
+        piChatPersistedMessageId: "entry-2:0",
+      },
+    ],
+    messageTotal: 2,
+    turnTotal: 2,
+    visibleTurnCount: 2,
+    isActive: true,
+    runtimeStatus: "active",
+    isStreaming: false,
+    queue: [],
+    queuePaused: false,
+  };
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: false },
+      messages: [],
+      messageTotal: 0,
+      turnTotal: 0,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    prompt: async () => {
+      promptCalls += 1;
+      if (promptCalls === 1)
+        return { accepted: true as const, queued: false as const, promptId: firstPromptId };
+      return secondPrompt;
+    },
+    viewSession: async () => {
+      viewCalls += 1;
+      return viewCalls === 1 ? firstAuthoritativeView : authoritativeView;
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    const submit = async () => {
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "继续");
+        textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "继续" }));
+        dom.window.document.querySelector<HTMLButtonElement>(".send-button, .queue-submit-button")!.click();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+    };
+    await submit();
+    assert.equal(promptCalls, 1);
+    assert.equal(dom.window.document.querySelectorAll(".message-user").length, 1);
+    await act(async () => {
+      FakeEventSource.instances.at(-1)!.emitPi({
+        type: "agent_settled",
+        piChatSessionId: activeId,
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await submit();
+    assert.equal(promptCalls, 2);
+    assert.equal(dom.window.document.querySelectorAll(".message-user").length, 2);
+
+    await act(async () => {
+      FakeEventSource.instances.at(-1)!.emitPi({
+        type: "agent_settled",
+        piChatSessionId: activeId,
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(
+      dom.window.document.querySelectorAll(".message-user").length,
+      2,
+      "the authoritative view must retain two real identical prompts, not local plus persisted duplicates",
+    );
+
+    await act(async () => {
+      resolveSecondPrompt({ accepted: true, queued: false, promptId: secondPromptId });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(
+      dom.window.document.querySelectorAll(".message-user").length,
+      2,
+      "a late acknowledgement must not append a third row after persisted identity is visible",
+    );
+    assert.deepEqual(
+      [...dom.window.document.querySelectorAll(".message-user .message-content")].map((row) => row.textContent),
+      ["继续", "继续"],
+    );
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("a prompt submitted during compaction remains visible while its delivery waits", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");
