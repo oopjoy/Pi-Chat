@@ -55,6 +55,9 @@ test("Primary and Secondary settlement dispatch every queued follow-up", async (
     for (const [id, rpc, prefix] of [[idA, primary, "primary"], [idB, secondary, "secondary"]] as const) {
       const first = await prompt(id, `${prefix}-A`);
       assert.equal(first.status, 202);
+      const firstBody = await first.json() as { queued?: boolean; promptId?: string };
+      assert.equal(firstBody.queued, false);
+      assert.match(firstBody.promptId || "", /^[a-f0-9-]{36}$/);
       const second = await prompt(id, `${prefix}-B`);
       const secondId = (await second.json() as { id: string }).id;
       const third = await prompt(id, `${prefix}-C`);
