@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer, request as httpRequest } from "node:http";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -55,15 +55,14 @@ test("paused Secondary queue does not block future-default workspace changes", a
   }
 });
 
-test("model file mutation rolls back and restores the primary Runtime when reload fails", async () => {
+test("model file mutation refreshes the Host catalogue without restarting the Runtime", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-model-rollback-"));
   const path = "C:\\sessions\\primary.jsonl";
   const primary = new FakeRpc(path, "primary");
   const models = new ModelManager(root);
   await models.add({ provider: "local", id: "old", baseUrl: "http://127.0.0.1:1", api: "openai-completions" });
   const before = await readFile(models.path, "utf8");
-  primary.restartFailures = 1;
-  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: {} as SessionIndex, resources: {} as ResourceManager, modelManager: models, cwd: process.cwd(), webRoot: process.cwd() });
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: { list: async () => [] } as unknown as SessionIndex, resources: {} as ResourceManager, modelManager: models, cwd: process.cwd(), webRoot: process.cwd() });
   const server = createServer((request, response) => void app.handle(request, response));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
@@ -75,13 +74,46 @@ test("model file mutation rolls back and restores the primary Runtime when reloa
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ provider: "local", id: "new", baseUrl: "http://127.0.0.1:1", api: "openai-completions" }),
     });
-    assert.equal(response.status, 500);
-    assert.match((await response.json() as { error: string }).error, /原配置已自动恢复/);
-    assert.equal(await readFile(models.path, "utf8"), before);
-    assert.equal(primary.restartCount, 2);
+    assert.equal(response.status, 200);
+    const body = await response.json() as { models: Array<{ id: string }> };
+    assert.ok(body.models.some((model) => model.id === "new"));
+    assert.notEqual(await readFile(models.path, "utf8"), before);
+    assert.equal(primary.restartCount, 0);
     assert.equal(primary.alive, true);
     const health = await fetch(`${origin}/api/health`);
     assert.equal((await health.json() as { lifecycle: string }).lifecycle, "idle");
+  } finally {
+    server.close();
+    await app.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("external models.json changes refresh the Host catalogue and safely reload idle Runtime", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-model-watch-"));
+  const path = "C:\\sessions\\primary.jsonl";
+  const primary = new FakeRpc(path, "primary");
+  const models = new ModelManager(root);
+  await models.add({ provider: "local", id: "old", baseUrl: "http://127.0.0.1:1", api: "openai-completions" });
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: { list: async () => [] } as unknown as SessionIndex, resources: {} as ResourceManager, modelManager: models, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    await models.add({ provider: "local", id: "watched", baseUrl: "http://127.0.0.1:1", api: "openai-completions" });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const bootstrap = await fetch(`${origin}/api/bootstrap`);
+    assert.equal(bootstrap.status, 200);
+    const body = await bootstrap.json() as { models: Array<{ id: string }> };
+    assert.ok(body.models.some((model) => model.id === "watched"));
+    await unlink(models.path);
+    await new Promise((resolve) => setTimeout(resolve, 180));
+    const afterDelete = await fetch(`${origin}/api/bootstrap`);
+    const deletedBody = await afterDelete.json() as { models: Array<{ id: string }> };
+    assert.equal(deletedBody.models.some((model) => model.id === "watched"), false);
+    assert.equal(primary.restartCount, 1);
   } finally {
     server.close();
     await app.close();
