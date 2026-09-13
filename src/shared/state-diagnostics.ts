@@ -227,7 +227,6 @@ const DYNAMIC_API_ROUTES: Array<[RegExp, string]> = [
   [/^\/api\/chat\/queue\/[a-f0-9-]{36}$/i, "/api/chat/queue/:queueId"],
   [/^\/api\/sessions\/[a-f0-9]{20}$/i, "/api/sessions/:sessionId"],
   [/^\/api\/sessions\/[a-f0-9]{20}\/activate$/i, "/api/sessions/:sessionId/activate"],
-  [/^\/api\/sessions\/[a-f0-9]{20}\/control$/i, "/api/sessions/:sessionId/control"],
   [/^\/api\/sessions\/[a-f0-9]{20}\/view$/i, "/api/sessions/:sessionId/view"],
   [/^\/api\/sessions\/[a-f0-9]{20}\/viewing$/i, "/api/sessions/:sessionId/viewing"],
   [/^\/api\/sessions\/[a-f0-9]{20}\/warm$/i, "/api/sessions/:sessionId/warm"],
