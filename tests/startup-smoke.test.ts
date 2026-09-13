@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { createServer } from "node:net";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -74,12 +74,22 @@ import { appendFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 const log = process.env.PI_CHAT_SMOKE_LOG;
 const reply = (id, data) => process.stdout.write(JSON.stringify({ type: "response", id, success: true, data }) + "\n");
+const emit = (event) => process.stdout.write(JSON.stringify(event) + "\n");
 const handlers = {
-  get_state: () => ({ model: null, isStreaming: false, sessionId: "fake", sessionFile: undefined }),
+  get_state: () => ({ model: null, isStreaming: false, sessionId: "fake", sessionFile: process.env.PI_CHAT_SMOKE_SESSION_FILE }),
   get_messages: () => ({ messages: [] }),
   get_available_models: () => ({ models: [] }),
   get_commands: () => ({ commands: [] }),
   get_session_stats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }),
+  prompt: () => {
+    setTimeout(() => {
+      emit({ type: "auto_retry_start", attempt: 1, maxAttempts: 2, delayMs: 1, errorMessage: "provider secret sk-bundled-fixture" });
+      emit({ type: "agent_start" });
+      emit({ type: "auto_retry_end", success: false, attempt: 1, finalError: "final provider failure" });
+      emit({ type: "agent_settled" });
+    }, 5);
+    return {};
+  },
 };
 createInterface({ input: process.stdin }).on("line", (line) => {
   const command = JSON.parse(line);
@@ -93,30 +103,74 @@ test("compiled server starts against fake RPC, probes capabilities, serves guard
   const rpcEntry = join(root, "fake-rpc.mjs");
   const rpcLog = join(root, "rpc.log");
   const agentDir = join(root, "agent");
+  const sessionFile = join(agentDir, "session.jsonl");
   const port = await freePort();
+  await mkdir(agentDir, { recursive: true });
+  await writeFile(sessionFile, `${JSON.stringify({ type: "session", id: "fake", cwd: root })}\n`, "utf8");
   await writeFile(rpcEntry, fakeRpcEntry, "utf8");
   const child = spawn(process.execPath, [join(compiledDist, "server", "server", "index.js"), "--host", "127.0.0.1", "--port", String(port), "--cwd", root], {
     cwd: projectRoot,
-    env: { ...process.env, PI_CHAT_PI_ENTRY: rpcEntry, PI_CODING_AGENT_DIR: agentDir, PI_CHAT_SMOKE_LOG: rpcLog },
+    env: {
+      ...process.env,
+      PI_CHAT_PI_ENTRY: rpcEntry,
+      PI_CODING_AGENT_DIR: agentDir,
+      PI_CHAT_SMOKE_LOG: rpcLog,
+      PI_CHAT_SMOKE_SESSION_FILE: sessionFile,
+    },
     stdio: "ignore",
     windowsHide: true,
   });
   try {
     const origin = `http://127.0.0.1:${port}`;
+    const browserHeaders = {
+      origin,
+      "x-pi-chat-client": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "x-pi-chat-page": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    };
     // Only the fixed-shape handshake is tokenless. The full bootstrap must
     // retain the request-token guard even during cold service startup.
     const handshake = await waitFor(`${origin}/api/bootstrap/handshake`, child);
     const handshakeData = await handshake.json() as { requestToken?: string };
     assert.equal(handshake.status, 200);
     assert.ok(handshakeData.requestToken);
-    const bootstrap = await fetch(`${origin}/api/bootstrap`, { headers: { origin, "x-pi-chat-token": handshakeData.requestToken } });
-    const data = await bootstrap.json() as { requestToken?: string };
+    assert.equal((await fetch(`${origin}/api/bootstrap/handshake`, { headers: browserHeaders })).status, 200);
+    const guardedHeaders = { ...browserHeaders, "x-pi-chat-token": handshakeData.requestToken };
+    const bootstrap = await fetch(`${origin}/api/bootstrap`, { headers: guardedHeaders });
+    const data = await bootstrap.json() as { requestToken?: string; activeSessionId?: string };
     assert.equal(bootstrap.status, 200);
     assert.equal(data.requestToken, handshakeData.requestToken);
-    const guarded = await fetch(`${origin}/api/health`, { headers: { origin, "x-pi-chat-token": data.requestToken } });
+    assert.ok(data.activeSessionId);
+    const guarded = await fetch(`${origin}/api/health`, { headers: guardedHeaders });
     assert.equal(guarded.status, 200);
     assert.equal((await guarded.json() as { service?: string }).service, "pi-chat");
     await waitForCapabilityProbe(rpcLog, child);
+    const prompt = await fetch(`${origin}/api/chat/prompt`, {
+      method: "POST",
+      headers: { ...guardedHeaders, "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: data.activeSessionId, message: "bundled retry fixture" }),
+    });
+    assert.equal(prompt.status, 202);
+    let promptFacts: string[] = [];
+    let diagnosticEvidence: unknown;
+    let diagnosticEntries: unknown;
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const diagnostics = await fetch(`${origin}/api/diagnostics/snapshot`, {
+        headers: guardedHeaders,
+      });
+      const diagnosticBody = await diagnostics.json() as {
+        entries?: unknown;
+        promptEvidence?: { records?: Array<{ facts?: string[] }> };
+      };
+      diagnosticEvidence = diagnosticBody.promptEvidence;
+      diagnosticEntries = diagnosticBody.entries;
+      promptFacts = (diagnosticBody.promptEvidence?.records || []).flatMap((record) => record.facts || []);
+      if (promptFacts.includes("retry-scheduled") && promptFacts.includes("retry-started") && promptFacts.includes("retry-exhausted")) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    const rpcCommands = await readFile(rpcLog, "utf8");
+    assert.ok(promptFacts.includes("retry-scheduled"), JSON.stringify({ rpcCommands, diagnosticEvidence, diagnosticEntries }));
+    assert.ok(promptFacts.includes("retry-started"), JSON.stringify({ promptFacts, diagnosticEvidence, diagnosticEntries }));
+    assert.ok(promptFacts.includes("retry-exhausted"), JSON.stringify({ promptFacts, diagnosticEvidence, diagnosticEntries }));
   } finally {
     // Register before killing: on fast Windows exits, registering afterwards can
     // miss the event and make a successful graceful shutdown look like a timeout.

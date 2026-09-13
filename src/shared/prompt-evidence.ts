@@ -242,6 +242,7 @@ export function reducePromptEvidenceRecord(
   ) return base;
   if (
     LIFECYCLE_FACTS.has(fact.kind)
+    && !RETRY_FACTS.has(fact.kind)
     && base.runGeneration !== undefined
     && runGeneration !== undefined
     && base.runGeneration !== runGeneration
