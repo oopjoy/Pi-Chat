@@ -1,4 +1,4 @@
-import { Fragment, Profiler, useMemo, type ComponentProps, type RefObject } from "react";
+import { Fragment, Profiler, useEffect, useMemo, useRef, type ComponentProps, type RefObject } from "react";
 import type { PendingSteer, PiMessage, PiState, SessionForkOrigin } from "../../shared/types";
 import { appendPendingUserMessage } from "../lib/local-user-turn";
 import type { LocalFailureNotice } from "../../shared/assistant-error";
@@ -6,7 +6,7 @@ import {
   reactRenderBenchmarkEnabled,
   recordReactRenderBenchmarkCommit,
 } from "../lib/benchmark-profiler";
-import { groupConversation } from "../lib/conversation-process";
+import { groupConversation, type ConversationItem } from "../lib/conversation-process";
 import { ChatInput } from "./ChatInput";
 import { AssistantMessageHeader, ChatMessage } from "./ChatMessage";
 import { CompactSelect } from "./CompactSelect";
@@ -119,17 +119,26 @@ export function ConversationPane({
   localFailures,
   chatInput,
 }: ConversationPaneProps) {
+  const paneKey = viewedSessionId || "draft";
+  const previousConversationItemsRef = useRef<ConversationItem[]>([]);
+  const previousConversationPaneKeyRef = useRef(paneKey);
   const conversationItems = useMemo(
     () => groupConversation(
       appendPendingUserMessage(messages, pendingUserMessage),
       {
         liveMessage: liveMessage || undefined,
         preserveTrailingAssistantPlaceholder: Boolean(liveMessage),
+        previousItems: previousConversationPaneKeyRef.current === paneKey
+          ? previousConversationItemsRef.current
+          : undefined,
       },
     ),
-    [messages, pendingUserMessage, liveMessage],
+    [messages, pendingUserMessage, liveMessage, paneKey],
   );
-  const paneKey = viewedSessionId || "draft";
+  useEffect(() => {
+    previousConversationItemsRef.current = conversationItems;
+    previousConversationPaneKeyRef.current = paneKey;
+  }, [conversationItems, paneKey]);
   const activeTurnStart = conversationItems.reduce(
     (latest, item, index) =>
       item.kind === "coordination"
