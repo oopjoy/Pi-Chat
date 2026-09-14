@@ -152,8 +152,20 @@ test("compiled server starts against fake RPC, probes capabilities, serves guard
     assert.ok(handshakeData.requestToken);
     assert.equal((await fetch(`${origin}/api/bootstrap/handshake`, { headers: browserHeaders })).status, 200);
     const guardedHeaders = { ...browserHeaders, "x-pi-chat-token": handshakeData.requestToken };
-    const bootstrap = await fetch(`${origin}/api/bootstrap`, { headers: guardedHeaders });
-    const data = await bootstrap.json() as { requestToken?: string; activeSessionId?: string };
+    // The listener can become healthy before the Primary readiness controller
+    // has copied its verified Session identity. Poll the same guarded bootstrap
+    // instead of treating that short startup window as a broken artifact.
+    let bootstrap: Response | undefined;
+    let data: { requestToken?: string; activeSessionId?: string } = {};
+    const bootstrapDeadline = Date.now() + 15_000;
+    while (Date.now() < bootstrapDeadline) {
+      bootstrap = await fetch(`${origin}/api/bootstrap`, { headers: guardedHeaders });
+      data = await bootstrap.json() as { requestToken?: string; activeSessionId?: string };
+      if (bootstrap.status === 200 && data.requestToken === handshakeData.requestToken && data.activeSessionId)
+        break;
+      await new Promise((resolve) => setTimeout(resolve, 80));
+    }
+    assert.ok(bootstrap);
     assert.equal(bootstrap.status, 200);
     assert.equal(data.requestToken, handshakeData.requestToken);
     assert.ok(data.activeSessionId);

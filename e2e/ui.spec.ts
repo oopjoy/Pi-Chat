@@ -14,6 +14,7 @@ test("accepted duplicate Prompts remain one row per Prompt across reload", { tag
   const promptText = "browser identity smoke";
   const sendPrompt = async () => {
     await input.fill(promptText);
+    await expect(send).toBeEnabled();
     await send.click();
     await expect(page.locator(".message-user .message-content").filter({ hasText: promptText })).toHaveCount(1);
     await expect(page.getByText("Live response complete")).toBeVisible();
@@ -46,6 +47,7 @@ test("reconnect after an interrupted SSE connection does not duplicate persisted
   await expect.poll(() => interrupted).toBe(true);
   const input = page.getByRole("textbox", { name: "消息输入" });
   await input.fill("reconnect identity smoke");
+  await expect(page.locator(".send-button")).toBeEnabled();
   await page.locator(".send-button").click();
   await expect(page.locator(".message-user .message-content").filter({ hasText: "reconnect identity smoke" })).toHaveCount(1);
   await expect(page.getByText("Live response complete")).toBeVisible();
@@ -58,6 +60,7 @@ test("bundled retry lifecycle keeps one Prompt identity in the browser", { tag: 
   await page.goto("/");
   const input = page.getByRole("textbox", { name: "消息输入" });
   await input.fill("retry identity smoke");
+  await expect(page.locator(".send-button")).toBeEnabled();
   await page.locator(".send-button").click();
   await expect(page.getByText(/Pi 正在等待重试/)).toBeVisible();
   await expect(page.locator(".message-user .message-content").filter({ hasText: "retry identity smoke" })).toHaveCount(1);
@@ -71,6 +74,7 @@ test("exhausted retry settles one Prompt without duplicating its User row", { ta
   await page.goto("/");
   const input = page.getByRole("textbox", { name: "消息输入" });
   await input.fill("retry exhausted smoke");
+  await expect(page.locator(".send-button")).toBeEnabled();
   await page.locator(".send-button").click();
   await expect(page.locator(".message-user .message-content").filter({ hasText: "retry exhausted smoke" })).toHaveCount(1);
   await page.waitForTimeout(500);
