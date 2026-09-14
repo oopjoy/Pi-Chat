@@ -1,5 +1,16 @@
 import { expect, test } from "./fixtures";
 
+async function openInitialSession(page: import("@playwright/test").Page) {
+  await page.goto("/");
+  // Do not type into the provisional startup Composer partition. The persisted
+  // First session must be committed before this test edits its draft.
+  await expect(page.getByText("First answer", { exact: true })).toBeVisible();
+  const input = page.getByRole("textbox", { name: "消息输入" });
+  const send = page.locator(".send-button");
+  await expect(input).toBeEnabled();
+  return { input, send };
+}
+
 async function openSecondSession(page: import("@playwright/test").Page) {
   await page.goto("/");
   await expect(page.locator(".session-item", { hasText: "Second session" })).toBeVisible();
@@ -8,9 +19,7 @@ async function openSecondSession(page: import("@playwright/test").Page) {
 }
 
 test("accepted duplicate Prompts remain one row per Prompt across reload", { tag: "@desktop-only" }, async ({ page }) => {
-  await page.goto("/");
-  const input = page.getByRole("textbox", { name: "消息输入" });
-  const send = page.locator(".send-button");
+  const { input, send } = await openInitialSession(page);
   const promptText = "browser identity smoke";
   const sendPrompt = async () => {
     await input.fill(promptText);
@@ -45,6 +54,7 @@ test("reconnect after an interrupted SSE connection does not duplicate persisted
   interruptNextStream = true;
   await page.goto("/");
   await expect.poll(() => interrupted).toBe(true);
+  await expect(page.getByText("First answer", { exact: true })).toBeVisible();
   const input = page.getByRole("textbox", { name: "消息输入" });
   await input.fill("reconnect identity smoke");
   await expect(page.locator(".send-button")).toBeEnabled();
@@ -57,11 +67,10 @@ test("reconnect after an interrupted SSE connection does not duplicate persisted
 });
 
 test("bundled retry lifecycle keeps one Prompt identity in the browser", { tag: "@desktop-only" }, async ({ page }) => {
-  await page.goto("/");
-  const input = page.getByRole("textbox", { name: "消息输入" });
+  const { input, send } = await openInitialSession(page);
   await input.fill("retry identity smoke");
-  await expect(page.locator(".send-button")).toBeEnabled();
-  await page.locator(".send-button").click();
+  await expect(send).toBeEnabled();
+  await send.click();
   await expect(page.getByText(/Pi 正在等待重试/)).toBeVisible();
   await expect(page.locator(".message-user .message-content").filter({ hasText: "retry identity smoke" })).toHaveCount(1);
   await expect(page.getByText("Live response complete")).toBeVisible({ timeout: 10_000 });
@@ -71,11 +80,10 @@ test("bundled retry lifecycle keeps one Prompt identity in the browser", { tag: 
 });
 
 test("exhausted retry settles one Prompt without duplicating its User row", { tag: "@desktop-only" }, async ({ page }) => {
-  await page.goto("/");
-  const input = page.getByRole("textbox", { name: "消息输入" });
+  const { input, send } = await openInitialSession(page);
   await input.fill("retry exhausted smoke");
-  await expect(page.locator(".send-button")).toBeEnabled();
-  await page.locator(".send-button").click();
+  await expect(send).toBeEnabled();
+  await send.click();
   await expect(page.locator(".message-user .message-content").filter({ hasText: "retry exhausted smoke" })).toHaveCount(1);
   await page.waitForTimeout(500);
   await page.reload();
