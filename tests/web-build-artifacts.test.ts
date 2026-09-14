@@ -14,6 +14,8 @@ test("build identity defaults to the checked-out Git revision", async () => {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     PI_CHAT_DIST_DIR: distRoot,
+    PI_CHAT_RELEASE_MODE: "0",
+    PI_CHAT_RELEASE_TAG: undefined,
     PI_CHAT_BUILD_REVISION: undefined,
   };
   try {
@@ -36,6 +38,8 @@ test("an explicit build revision overrides Git metadata", async () => {
   const env = {
     ...process.env,
     PI_CHAT_DIST_DIR: distRoot,
+    PI_CHAT_RELEASE_MODE: "0",
+    PI_CHAT_RELEASE_TAG: undefined,
     PI_CHAT_BUILD_REVISION: "release-candidate",
   };
   try {
