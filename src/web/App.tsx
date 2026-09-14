@@ -83,11 +83,15 @@ import {
 } from "./lib/gate-mode";
 import {
   assistantMessage,
-  canonicalMessageEndFromEvent,
   lifecycleFromEvent,
   parseEventData,
   userMessage,
 } from "./lib/pi-events";
+import {
+  admitStreamEvent,
+  invalidatesSessionViewVersion,
+  isSessionScopedEvent,
+} from "./application/stream-events";
 import {
   applyAppearance,
   loadAppearance,
@@ -334,54 +338,6 @@ type QueueAuthorityProjection = {
 };
 
 /** SSE events whose state can make an in-flight SessionViewData snapshot stale. */
-const GLOBAL_SSE_EVENT_TYPES = new Set([
-  "pi_chat_heartbeat",
-  "pi_chat_sse_resync",
-  "pi_chat_oversized_event",
-  "pi_chat_application_closing",
-  "pi_chat_application_lifecycle",
-  "pi_chat_active_session_changed",
-  "pi_chat_sessions_changed",
-  "pi_chat_primary_runtime_status",
-  "pi_chat_workspace_changed",
-  "pi_chat_models_updated",
-]);
-
-const SESSION_VIEW_INVALIDATING_EVENT_TYPES = new Set([
-  "agent_start",
-  "agent_settled",
-  "compaction_start",
-  "compaction_end",
-  "message_start",
-  "message_update",
-  MESSAGE_CHECKPOINT_EVENT,
-  MESSAGE_DELTA_EVENT,
-  "message_end",
-  "tool_execution_start",
-  "tool_execution_end",
-  "pi_chat_process_error",
-  "pi_chat_prompt_retry_scheduled",
-  "pi_chat_prompt_retry_started",
-  "pi_chat_prompt_retry_exhausted",
-  "pi_chat_prompt_failed",
-  "pi_chat_queue_update",
-  "pi_chat_queue_dispatch",
-  "pi_chat_queue_error",
-  "extension_ui_request",
-  "pi_chat_extension_request_resolved",
-  "pi_chat_fast_mode_changed",
-  "pi_chat_gate_mode_changed",
-  "pi_chat_session_control_changed",
-  "pi_chat_session_status",
-]);
-
-function invalidatesSessionViewVersion(type: string): boolean {
-  return SESSION_VIEW_INVALIDATING_EVENT_TYPES.has(type);
-}
-
-function isSessionScopedEvent(type: string): boolean {
-  return !GLOBAL_SSE_EVENT_TYPES.has(type);
-}
 
 /** Normalize every sidebar field to the browser's latest lifecycle fact. */
 function applySidebarRunningOverride(
@@ -3859,66 +3815,23 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   const handlePiEvent = useCallback(
     (rawEvent: Event, source: EventSource) => {
       lastEventFrameAtRef.current = Date.now();
-      const event = parseEventData(rawEvent);
-      if (!event) {
+      const admission = admitStreamEvent(rawEvent, runEpochRef.current);
+      if (!admission.accepted) {
         recordSseRejectionDiagnostic({
-          eventType: "unknown",
-          decisionReason: "malformed-json",
+          sessionId: admission.sessionId,
+          runGeneration: admission.runGeneration,
+          eventType: admission.eventType,
+          decisionReason: admission.reason,
         });
         return;
       }
-      const type = String(event.type || "");
+      const { event, type, sessionId: eventSessionId, runEpoch: eventRunEpoch, runGeneration: eventRunGeneration, terminalEvent } = admission.value;
       sseFloodCountRef.current = 0;
       if (type === "pi_chat_heartbeat") return;
       if (type === "pi_chat_sse_resync" || type === "pi_chat_oversized_event") {
         void refresh().catch(reportBackgroundRefreshError);
         return;
       }
-      const rawEventSessionId =
-        typeof event.piChatSessionId === "string"
-          ? event.piChatSessionId
-          : type === "pi_chat_session_control_changed" &&
-              typeof event.sessionId === "string"
-            ? event.sessionId
-            : "";
-      const rawEventRunGeneration =
-        typeof event.piChatRunGeneration === "number" &&
-        Number.isSafeInteger(event.piChatRunGeneration) &&
-        event.piChatRunGeneration >= 0
-          ? event.piChatRunGeneration
-          : undefined;
-      const terminalEvent = type === "message_end"
-        ? canonicalMessageEndFromEvent(event)
-        : null;
-      if (type === "message_end" && !terminalEvent) {
-        recordSseRejectionDiagnostic({
-          sessionId: rawEventSessionId,
-          runGeneration: rawEventRunGeneration,
-          eventType: type,
-          decisionReason: "malformed-critical-event",
-        });
-        return;
-      }
-      const eventSessionId = terminalEvent?.piChatSessionId || rawEventSessionId;
-      const eventRunEpoch = terminalEvent?.piChatRunEpoch ||
-        (typeof event.piChatRunEpoch === "string" ? event.piChatRunEpoch : "");
-      if (
-        eventRunEpoch &&
-        runEpochRef.current &&
-        eventRunEpoch !== runEpochRef.current
-      ) {
-        recordSseRejectionDiagnostic({
-          sessionId: eventSessionId,
-          eventType: type || "unknown",
-          decisionReason: "stale-run-epoch",
-        });
-        return;
-      }
-      const eventRunGeneration = terminalEvent?.piChatRunGeneration ??
-        (typeof event.piChatRunGeneration === "number" &&
-        Number.isFinite(event.piChatRunGeneration)
-          ? event.piChatRunGeneration
-          : undefined);
       const eventRunStartedAt = finiteRunMetric(event.piChatRunStartedAt);
       const eventRunDurationMs = finiteRunMetric(event.piChatRunDurationMs);
       if (eventSessionId && typeof eventRunGeneration === "number") {
