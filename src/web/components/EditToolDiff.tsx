@@ -47,6 +47,7 @@ function WorkspaceFiles({ sessionId, workspacePath, visible, activityRevision, l
   const panelRef = useRef<HTMLDivElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const splitResizeRef = useRef<{ pointerId: number; startY: number; startHeight: number } | null>(null);
+  const splitterRef = useRef<HTMLDivElement | null>(null);
   ownerRef.current = sessionId;
   selectedPathRef.current = selectedPath;
 
@@ -133,6 +134,7 @@ function WorkspaceFiles({ sessionId, workspacePath, visible, activityRevision, l
   };
   const startSplitResize = (event: ReactPointerEvent<HTMLDivElement>) => {
     event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
     splitResizeRef.current = { pointerId: event.pointerId, startY: event.clientY, startHeight: listRef.current?.getBoundingClientRect().height || 180 };
   };
 
@@ -145,7 +147,9 @@ function WorkspaceFiles({ sessionId, workspacePath, visible, activityRevision, l
       setListHeight(height);
     };
     const end = (event: PointerEvent) => {
-      if (splitResizeRef.current?.pointerId === event.pointerId) splitResizeRef.current = null;
+      if (splitResizeRef.current?.pointerId !== event.pointerId) return;
+      splitResizeRef.current = null;
+      if (splitterRef.current?.hasPointerCapture(event.pointerId)) splitterRef.current.releasePointerCapture(event.pointerId);
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", end);
@@ -176,7 +180,7 @@ function WorkspaceFiles({ sessionId, workspacePath, visible, activityRevision, l
       </button>)}
       {recent?.truncated && <p className="workspace-files-note">仅显示最近修改的 50 个文件。</p>}
     </div>
-    <div className="workspace-files-splitter" role="separator" aria-label="调整文件列表与预览高度" aria-orientation="horizontal" tabIndex={0}
+    <div ref={splitterRef} className="workspace-files-splitter" role="separator" aria-label="调整文件列表与预览高度" aria-orientation="horizontal" tabIndex={0}
       onPointerDown={startSplitResize}
       onKeyDown={(event) => {
         if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
