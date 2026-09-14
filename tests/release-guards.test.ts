@@ -100,6 +100,16 @@ test("release identity requires tag, HEAD and embedded identity to agree", () =>
   );
   assert.throws(
     () => assertReleaseIdentity({
+      buildIdentity: identity,
+      packageVersion: "0.4.7",
+      headRevision: "abc123",
+      tagRevision: "abc123",
+      tag: "v0.4.8",
+    }),
+    /does not match package version/,
+  );
+  assert.throws(
+    () => assertReleaseIdentity({
       buildIdentity: { ...identity, schemaVersion: 2 },
       packageVersion: "0.4.7",
       headRevision: "abc123",
@@ -187,6 +197,7 @@ test("release packaging creates a ZIP, portable checksum and identity manifest",
   try {
     await copy(join(repositoryRoot, "package.json"), join(fixtureRepo, "package.json"));
     await copy(join(repositoryRoot, "README.md"), join(fixtureRepo, "README.md"));
+    await copy(join(repositoryRoot, "SECURITY.md"), join(fixtureRepo, "SECURITY.md"));
     await copy(join(repositoryRoot, ".gitattributes"), join(fixtureRepo, ".gitattributes"));
     await copy(join(repositoryRoot, "resources"), join(fixtureRepo, "resources"), { recursive: true });
     for (const file of ["pi-chat-launch.cmd", "start-pi-chat.cmd", "start-pi-chat-ui.ps1"]) {
@@ -237,6 +248,7 @@ test("release packaging creates a ZIP, portable checksum and identity manifest",
     const entries = await archiveEntries(result.outputPath);
     for (const entry of [
       "pi-chat-windows-0.4.6/pi-chat-launch.cmd",
+      "pi-chat-windows-0.4.6/SECURITY.md",
       "pi-chat-windows-0.4.6/start-pi-chat-ui.ps1",
       "pi-chat-windows-0.4.6/scripts/pi-chat-launch-process.ps1",
       "pi-chat-windows-0.4.6/scripts/pi-chat-port-ready.ps1",
@@ -292,6 +304,31 @@ test("push diff policy distinguishes branch, tag and deleted-ref failures", asyn
   assert.match(workflow, /Cannot resolve github\.event\.before for a branch push/);
   assert.match(workflow, /node scripts\/check-committed-text\.mjs --all/);
   assert.match(workflow, /Unsupported push ref type/);
+});
+
+test("branch CI and tag release CI are separated and every third-party action is SHA pinned", async () => {
+  const workflowDirectory = join(repositoryRoot, ".github", "workflows");
+  const workflowNames = (await readdir(workflowDirectory)).filter((name) => name.endsWith(".yml") || name.endsWith(".yaml"));
+  assert.ok(workflowNames.includes("windows-ci.yml"));
+  assert.ok(workflowNames.includes("windows-release-ci.yml"));
+  const workflows = await Promise.all(workflowNames.map(async (name) => [
+    name,
+    await readFile(join(workflowDirectory, name), "utf8"),
+  ] as const));
+  const branch = workflows.find(([name]) => name === "windows-ci.yml")?.[1] || "";
+  const release = workflows.find(([name]) => name === "windows-release-ci.yml")?.[1] || "";
+  assert.match(branch, /push:\n\s+branches:\n\s+- main/);
+  assert.doesNotMatch(branch, /tags:/);
+  assert.match(release, /push:\n\s+tags:\n\s+- ["']?v\*/);
+  assert.match(release, /PI_CHAT_RELEASE_MODE: ["']?1/);
+  assert.match(release, /PI_CHAT_RELEASE_TAG: \$\{\{ github\.ref_name \}\}/);
+  for (const [name, workflow] of workflows) {
+    for (const match of workflow.matchAll(/uses:\s*([^\s#]+)/g)) {
+      const reference = match[1];
+      if (!reference.startsWith("actions/")) continue;
+      assert.match(reference, /@[0-9a-f]{40}$/, `${name} must pin ${reference} to a full commit SHA`);
+    }
+  }
 });
 
 test("the committed workflow blob is LF even when Windows checkout conversion is enabled", async () => {

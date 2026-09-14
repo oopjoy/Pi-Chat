@@ -575,6 +575,8 @@ React reducer
 SSE transport connection
 ```
 
+P0/P1 执行矩阵见 [`docs/v0.4.7-stability-matrix.md`](v0.4.7-stability-matrix.md)。
+
 v0.4.7 优先级：
 
 ```text

@@ -1,0 +1,66 @@
+name: Windows Release CI
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PI_CHAT_RELEASE_MODE: "1"
+  PI_CHAT_RELEASE_TAG: ${{ github.ref_name }}
+  PI_CHAT_BUILD_REVISION: ${{ github.sha }}
+
+jobs:
+  verify-release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22.19.0
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install chromium
+      - run: npm run typecheck
+      - run: npm run verify:unit
+      - run: npm run verify:e2e
+      - name: Verify release artifact
+        run: npm run verify:artifact
+      - name: Build and package release candidate
+        shell: pwsh
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP "pi-chat-release-dist"
+          $output = Join-Path $env:RUNNER_TEMP "pi-chat-release-output"
+          Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath $output -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $stage, $output | Out-Null
+          $env:PI_CHAT_DIST_DIR = $stage
+          npm run build
+          npm run test:artifact
+          node scripts/release-package.mjs --staging $stage --output $output --tag $env:PI_CHAT_RELEASE_TAG
+          $zip = Get-ChildItem -LiteralPath $output -Filter "*.zip" | Select-Object -First 1
+          if (-not $zip) { throw "Release package did not produce a ZIP" }
+          $hash = (Get-FileHash -LiteralPath $zip.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          $record = (Get-Content -LiteralPath "$($zip.FullName).sha256" -Raw).Trim()
+          if ($record -ne "$hash *$($zip.Name)") {
+            throw "Portable checksum does not match the generated ZIP"
+          }
+          $manifest = Get-Content -LiteralPath "$($zip.FullName).manifest.json" -Raw | ConvertFrom-Json
+          if ($manifest.tag -ne $env:PI_CHAT_RELEASE_TAG) { throw "Manifest tag does not match the pushed tag" }
+          if ($manifest.revision -ne $env:GITHUB_SHA) { throw "Manifest revision does not match the pushed commit" }
+          if ($manifest.zip.sha256 -ne $hash) { throw "Manifest checksum does not match the generated ZIP" }
+      - name: Upload verified release candidate
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: pi-chat-windows-${{ github.ref_name }}-verified
+          path: ${{ runner.temp }}/pi-chat-release-output/*
+          if-no-files-found: error

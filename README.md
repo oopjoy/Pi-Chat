@@ -76,7 +76,7 @@ Release ZIP 是 Windows-first 的可运行包；源码开发和从 checkout 运�
 
 当前稳定版本为 **0.4.6**。下一版本为 **0.4.7 稳定性版本**，继续聚焦启动确定性、流式与 reconnect、Session/Runtime fencing、Windows 启动诊断和底层可维护性；在稳定性达标前不会把大型新功能或 adoption release 提前改名为 0.5.0。
 
-路线与 authority 说明见 [`docs/architecture.md`](docs/architecture.md) 和 [`docs/web-architecture-roadmap.md`](docs/web-architecture-roadmap.md)。
+路线与 authority 说明见 [`docs/architecture.md`](docs/architecture.md)、[`docs/web-architecture-roadmap.md`](docs/web-architecture-roadmap.md) 和 [`v0.4.7 稳定性矩阵`](docs/v0.4.7-stability-matrix.md)。
 
 ## 环境要求
 

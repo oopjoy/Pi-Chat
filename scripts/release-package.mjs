@@ -11,6 +11,7 @@ const projectRoot = resolve(import.meta.dirname, "..");
 const packageFiles = [
   "package.json",
   "README.md",
+  "SECURITY.md",
   "pi-chat-launch.cmd",
   "start-pi-chat.cmd",
   "start-pi-chat-ui.ps1",
@@ -55,6 +56,9 @@ export function assertReleaseIdentity({ buildIdentity, packageVersion, headRevis
   }
   if (!/^[a-f0-9]{64}$/.test(buildIdentity?.fingerprint || "")) {
     throw new Error("Embedded build fingerprint must be 64 lowercase hexadecimal characters");
+  }
+  if (tag !== "HEAD" && tag !== `v${packageVersion}`) {
+    throw new Error(`Release tag ${tag} does not match package version ${packageVersion}`);
   }
   if (headRevision !== tagRevision) {
     throw new Error(`Release tag ${tag} does not match HEAD ${headRevision}`);

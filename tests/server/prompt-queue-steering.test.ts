@@ -13,6 +13,85 @@ import { ModelManager } from "../../src/server/model-manager";
 import type { SessionSummary } from "../../src/shared/types";
 import { FakeRpc } from "../helpers/server-app-fixture";
 
+test("ordinary prompts from two browser windows share one Session FIFO", async () => {
+  const path = "C:\\sessions\\multi-window-fifo.jsonl";
+  const id = idForPath(path);
+  const primary = new FakeRpc(path, "multi-window-fifo");
+  const summary = {
+    id,
+    sessionId: "multi-window-fifo",
+    name: "Shared FIFO",
+    preview: "",
+    cwd: process.cwd(),
+    updatedAt: 1,
+    messageCount: 1,
+    active: true,
+  };
+  const sessions = {
+    list: async () => [summary],
+    pathForId: (candidate: string) => candidate === id ? path : null,
+    summaryForId: () => summary,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({
+    rpc: primary as unknown as PiRpcClient,
+    sessions,
+    resources: {} as ResourceManager,
+    cwd: process.cwd(),
+    webRoot: process.cwd(),
+  });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const prompt = (clientId: string, message: string) => fetch(`${origin}/api/chat/prompt`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-pi-chat-client-id": clientId,
+    },
+    body: JSON.stringify({ sessionId: id, message }),
+  });
+  try {
+    await fetch(`${origin}/api/bootstrap`);
+    const first = await prompt("window-a", "from window A");
+    assert.equal(first.status, 202);
+    const firstBody = await first.json() as { queued: boolean; promptId: string };
+    assert.equal(firstBody.queued, false);
+
+    const second = await prompt("window-b", "from window B");
+    assert.equal(second.status, 202);
+    const secondBody = await second.json() as {
+      queued: boolean;
+      id?: string;
+      promptId?: string;
+      queue?: Array<{ id: string; message: string }>;
+    };
+    assert.equal(secondBody.queued, true);
+    assert.equal(secondBody.id, secondBody.promptId);
+    assert.notEqual(secondBody.promptId, firstBody.promptId);
+    assert.deepEqual(secondBody.queue?.map((item) => item.message), ["from window B"]);
+    assert.deepEqual(
+      primary.commands.filter((command) => command.type === "prompt").map((command) => command.message),
+      ["from window A"],
+      "the second window must enter the shared FIFO instead of racing Pi",
+    );
+
+    primary.streaming = false;
+    primary.emit({ type: "agent_settled" });
+    for (let attempt = 0; attempt < 20 && primary.commands.filter((command) => command.type === "prompt").length < 2; attempt += 1)
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.deepEqual(
+      primary.commands.filter((command) => command.type === "prompt").map((command) => command.message),
+      ["from window A", "from window B"],
+    );
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
 test("Primary and Secondary settlement dispatch every queued follow-up", async () => {
   const pathA = "C:\\sessions\\queue-primary.jsonl";
   const pathB = "C:\\sessions\\queue-secondary.jsonl";
