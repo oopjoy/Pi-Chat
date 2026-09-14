@@ -584,6 +584,7 @@ v0.4.7 优先级：
 2. 启动 bootstrap 未提交 Session identity 时禁用 Composer
 3. 用 shared-write FIFO 统一 README / architecture 的多窗口契约
 4. Windows-first 启动、诊断、安装路径和发布说明
+   - agent-side browser launcher 已完成 Windows-compatible 路径、profile、detached process/port readiness 和无 shell 启动；见 [`docs/windows-first-tooling.md`](windows-first-tooling.md)
 5. README 首页补充真实截图/GIF，并保持能力边界诚实
 6. 补齐 SECURITY.md、CI branch/tag 触发边界和发布卫生
 ```
