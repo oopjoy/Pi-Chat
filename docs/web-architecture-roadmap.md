@@ -524,7 +524,7 @@ focused tests
 
 如果发现一个 coordinator 开始拥有另一个领域的事实，应停止并重新拆边界。
 
-## 五、当前实施状态
+## 五、当前实施状态（v0.4.7 调整基线）
 
 当前 `main` 已完成并通过独立验证：
 
@@ -542,12 +542,14 @@ Retry lifecycle projection and terminal fencing
 Browser duplicate Prompt / reload / reconnect smoke
 ```
 
-最近的可回退 checkpoint：
+当前发布 checkpoint：
 
 ```text
-9c3a549  browser retry exhaustion projection
- e14ba25  isolate stream event admission
+bdcf5d3  test(e2e): wait for initial session bootstrap
+v0.4.6   GitHub main/tag CI、Release、Windows ZIP 与远端 checksum 已核验
 ```
+
+下一版本不是 adoption release，而是 **v0.4.7 稳定性版本**。本轮只接受能减少竞态、错误恢复成本或 Windows 使用摩擦的变更；不以文件大小或抽象数量为目标继续拆分 `App.tsx`。
 
 `e14ba25` 将以下逻辑从 `App.tsx` 提取为纯 admission boundary：
 
@@ -573,13 +575,18 @@ React reducer
 SSE transport connection
 ```
 
-下一项大型迁移候选：
+v0.4.7 优先级：
 
 ```text
-Session navigation coordinator
+1. 保护并复用 v0.4.6 发布 checkpoint，不移动旧 tag
+2. 启动 bootstrap 未提交 Session identity 时禁用 Composer
+3. 用 shared-write FIFO 统一 README / architecture 的多窗口契约
+4. Windows-first 启动、诊断、安装路径和发布说明
+5. README 首页补充真实截图/GIF，并保持能力边界诚实
+6. 补齐 SECURITY.md、CI branch/tag 触发边界和发布卫生
 ```
 
-迁移必须继续从当前 `main` 创建干净 checkpoint，并保持：
+任何后续协调迁移都必须从当前 `main` 创建干净 checkpoint，并保持：
 
 ```text
 Session ID + navigation epoch + committed pane revision
@@ -595,4 +602,7 @@ DSH plugin tree
 Runtime event effects 的整体搬迁
 App.tsx 一次性拆分
 dirty comparison worktree 的整体合并
+复杂 provisional-draft migration protocol
+真实 provider retry（先建隔离 mock provider）
+live deployment / live Runtime smoke（需单独授权）
 ```

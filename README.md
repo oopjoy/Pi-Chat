@@ -1,8 +1,47 @@
 # Pi Chat
 
-Pi Chat 是一个连接本机 Pi RPC 的 local-first Web/PWA 客户端。它提供浏览器中的聊天、会话管理与本地运行协调，不替代 Pi 的 agent、模型、工具或扩展内核。每个执行对话仍由独立 Node/Pi RPC 进程拥有；服务通过本地 HTTP API 与 SSE 连接浏览器，不捆绑 Electron/Chromium，也不把多个 Session 托管进同一个 Pi SDK 进程。Windows 构建包含一个与已验证 Pi 版本、构建配方及全部 Bundle 输入指纹严格匹配的 RPC 启动加速 Bundle；全局 Pi 仍是配置、资源、CLI 和兼容性 authority，任何版本、源码或产物不匹配都会在启动前回退原始全局 `rpc-entry.js`。
+> **Windows-first、local-first 的 Pi RPC 客户端。**
+>
+> 不重写 Agent loop，不引入第二套 Runtime，不暴露远程端口：让现有 Pi 用户获得一个可靠、可恢复、接近桌面应用体验的本地 Web/PWA 界面。
 
-## 当前基础版
+![Pi Chat conversation view](docs/screenshots/conversation.png)
+
+Pi Chat 连接本机 Pi RPC，负责聊天展示、Session 浏览、流式输出和本地窗口协调；Pi 仍然是 agent、模型、工具、Skills 和 Extensions 的唯一执行 authority。每个执行对话仍由独立 Node/Pi RPC 进程拥有，浏览器只通过 loopback HTTP API 与 SSE 接收事实投影。
+
+## 30 秒开始（Windows）
+
+1. 安装 Node.js 22.19+。
+2. 安装并完成认证的 Pi：
+   ```powershell
+   npm install -g @earendil-works/pi-coding-agent
+   pi --version
+   ```
+3. 从 [v0.4.6 Release](https://github.com/oopjoy/Pi-Chat/releases/tag/v0.4.6) 下载 `pi-chat-windows-0.4.6.zip`，解压后运行 `start-pi-chat.cmd`。
+4. 浏览器打开 `http://127.0.0.1:30170`，或运行 `start-pi-chat-ui.ps1` 使用独立窗口体验。
+
+Release ZIP 是 Windows-first 的可运行包；源码开发和从 checkout 运行仍需要 Node.js。Pi Chat 默认只监听本机回环地址，关闭浏览器窗口不会停止本地服务。
+
+## 为什么不是另一个 Pi Web UI？
+
+| 目标 | Pi Chat 的选择 |
+|---|---|
+| 执行一致性 | Pi 保留 agent loop、Runtime、Session JSONL 和工具执行 authority |
+| 可靠性 | Prompt identity、SSE reconnect、retry、F5 和 A → B → A navigation 都有明确 fencing |
+| 本地安全 | loopback + Host/Origin/token guard；不提供半成品远程访问开关 |
+| 成本控制 | 浏览冷 Session 不启动 Runtime；执行时才按 Session 准备独立 Pi RPC |
+| 并发模型 | 多窗口可共享提交，Prompt/Steer/Compact/queue/settings 进入 Session-scoped FIFO；破坏性 Rename/Delete 才需要 exclusive control |
+| 产品边界 | Windows-first、local-first；不捆绑 Electron，不重写 Pi，不做远程多用户平台 |
+
+![Pi Chat session and tools view](docs/screenshots/session-tools.png)
+
+## 适合谁？
+
+- 已经在本机使用 Pi，希望从浏览器或独立窗口使用它的人；
+- 经常切换多个 Session、需要保留冷历史和长对话的人；
+- 在意 reload、断线重连、重复 Prompt、Runtime 重启和多窗口竞态的人；
+- 希望保留 Pi 原生行为，而不是迁移到另一个 Agent runtime 的人。
+
+## 当前能力（详细）
 
 - 用户输入、可靠停止生成，以及生成中的可撤销 Follow-up 队列
 - Pi 模型流式输出
@@ -18,8 +57,8 @@ Pi Chat 是一个连接本机 Pi RPC 的 local-first Web/PWA 客户端。它提�
 - 长会话初始仅渲染最近 10 个用户发起的完整对话轮次（包含该轮后续回复与工具过程）；滚到顶部可点击“加载更早 10 轮”逐步展开历史；侧栏会话元数据使用持久化索引缓存，变更时增量更新
 - 对话右侧提供首条、上一条、下一条、最新的四格导航
 - 固定铺满动态视口，兼容窗口最大化/还原、Windows DPI、页面缩放和窄窗口
-- Session-first 历史会话列表、切换和新建：服务与界面先打开、读取并缓存 JSONL；Primary 会在后台启动并完成兼容性验证，未 ready 或验证失败时历史仍可浏览且不会探测 Primary RPC。选中、滚动、搜索或切换冷历史只读取 JSONL，不启动 Secondary Runtime；只有发送、Compact、Model/Thinking、接管或显式启动 Pi 等实际操作才会为该 Session 单飞准备专属 Runtime。服务的默认工作目录保持固定；需要不同目录时，在创建该条 New 草稿后使用“新对话工作路径”选择器单独修改，不会影响其他对话。新对话首条消息将 Runtime 创建、Model、Thinking、Gate 与 prompt 合并为一个服务事务。最多 7 个热对话（Primary + 6 个 Secondary），达到容量时优先 LRU 回收最久未使用的空闲 Secondary；若没有可回收的空闲对话则拒绝新的 Runtime 启动，正在显示的持久历史也可退回 view-only
-- 同一 Session 可在多个窗口观察，但同一时刻仅一个浏览器窗口可发送、停止、处理 Gate 或改队列；Model/Thinking 修改不会自动取得控制权，无 Owner 时可设置，存在其他窗口 Owner 时必须先显式接管
+- Session-first 历史会话列表、切换和新建：服务与界面先打开、读取并缓存 JSONL；Primary 会在后台启动并完成兼容性验证，未 ready 或验证失败时历史仍可浏览且不会探测 Primary RPC。选中、滚动、搜索或切换冷历史只读取 JSONL，不启动 Secondary Runtime；只有发送、Compact、Model/Thinking 或显式启动 Pi 等实际操作才会为该 Session 单飞准备专属 Runtime。服务的默认工作目录保持固定；需要不同目录时，在创建该条 New 草稿后使用“新对话工作路径”选择器单独修改，不会影响其他对话。新对话首条消息将 Runtime 创建、Model、Thinking、Gate 与 prompt 合并为一个服务事务。最多 7 个热对话（Primary + 6 个 Secondary），达到容量时优先 LRU 回收最久未使用的空闲 Secondary；若没有可回收的空闲对话则拒绝新的 Runtime 启动，正在显示的持久历史也可退回 view-only
+- 同一 Session 可在多个窗口观察和提交；Prompt、Steer、Compact、queue 与 settings mutation 由服务按 Session 排入 FIFO，并以请求 identity 和 Runtime generation fencing。Rename/Delete 等破坏性操作另行使用 exclusive-control 保护，不把普通 Prompt 操作建模成 takeover。
 - 文件权限 Gate：作为 Pi Chat 内置安全功能呈现；顶栏可切换“严格 / 放行”。严格模式始终确认 `write` / `edit`，并对可识别的高风险 Bash 做辅助确认；Bash 可运行任意脚本，副作用识别不构成完整 sandbox。随应用自动安装、校验和修复的极小 Pi 工具执行适配器仍在真实工具执行前运行
 - 侧栏提供独立刷新和“完整重启 Pi Chat 并应用更新”：应用级 Lifecycle Barrier 会在构建前同步阻止所有新写操作；新版本先在独立 staging 目录完成并验证，构建失败不会修改当前 `dist`，二次核验全部 Runtime、队列和确认状态通过后才提升产物并执行服务切换。维护期间历史、健康检查和只读 API 保持可用。网页与服务的 build identity 不一致时，普通修改会暂停，但“完整重启”与设置中的“关闭 Pi Chat”仍可请求服务端执行其最终 Busy 检查，避免客户端恢复路径被旧页面状态锁死。SSE/EventSource 是可重连传输，断开不会自动关闭 Pi Chat 服务或托管 RPC；关闭全部浏览器/PWA 页面也只释放窗口、Presence、Session 控制与可回收 Runtime，不再自动停止本地服务。需要停止服务时，使用设置中的“关闭 Pi Chat”显式请求，并由服务端执行全局 Busy 检查
 - 外观设置：主题、字体、字号、行距和对话宽度
@@ -32,6 +71,12 @@ Pi Chat 是一个连接本机 Pi RPC 的 local-first Web/PWA 客户端。它提�
 - Thinking 和工具调用折叠显示
 - Pi 扩展的 select / confirm / input / editor 对话框；模型可见的澄清类 Extension 可复用同一条 Session 控制、恢复和响应通道
 - 响应式桌面和移动端界面
+
+## 版本与路线
+
+当前稳定版本为 **0.4.6**。下一版本为 **0.4.7 稳定性版本**，继续聚焦启动确定性、流式与 reconnect、Session/Runtime fencing、Windows 启动诊断和底层可维护性；在稳定性达标前不会把大型新功能或 adoption release 提前改名为 0.5.0。
+
+路线与 authority 说明见 [`docs/architecture.md`](docs/architecture.md) 和 [`docs/web-architecture-roadmap.md`](docs/web-architecture-roadmap.md)。
 
 ## 环境要求
 
@@ -78,6 +123,12 @@ npm run dev
 默认地址：`http://127.0.0.1:30170`。没有已保存工作目录选择的新安装，New 草稿默认使用当前用户的桌面目录（Windows 下为 `C:\\Users\\<用户名>\\Desktop`）；`PI_CHAT_CWD` 或 `--cwd` 可提供启动回退目录，但已有的用户保存选择不会被自动覆盖。每个尚未提交的 New 草稿可单独修改其工作路径。
 
 ### 测试
+
+所有自动化测试使用隔离的临时 Session、Runtime 和构建目录；不会把验证流量发送到正在运行的 Pi Chat。发布前分开检查 source/typecheck、staged artifact、隔离浏览器和 GitHub CI。
+
+## 安全与许可证
+
+Pi Chat 默认只服务本机回环地址，不是远程多用户服务。安全问题请优先通过 GitHub 的私密安全报告渠道提交，详见 [`SECURITY.md`](SECURITY.md)。本仓库目前尚未选择并附带开源许可证；在许可证文件加入前，请不要将代码视为已授予 MIT、Apache-2.0 或其他再分发许可。
 
 快速聚焦验证通过 npm 别名直接进入官方 harness，不会触发 `npm test` 的 `pretest` 全量构建：
 

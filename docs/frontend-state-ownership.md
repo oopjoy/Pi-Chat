@@ -53,7 +53,7 @@ coordination layer:
    parallel because both consume generated `dist`.
 
 **Completed 3B convergence.** Prompt acknowledgement/rejection, draft picker,
-command projection, coalesced warm, and control takeover are covered by
+command projection, coalesced warm, and destructive-control projection are covered by
 explicit $A \to B \to A$ behavior tests. `COMMIT_VIEW` is coordinator-normalized;
 partial commands use the committed/cached projection only for the same Session,
 whereas an explicit empty inventory still clears them. All tuple-shaped pane
@@ -310,7 +310,7 @@ Only the already-authorized visible event becomes a reducer action. Examples:
 | `agent_settled` | `AGENT_SETTLED` clears streaming, compacting, tool status, live message, and prompt-starting together. |
 | queue update / dispatch / error | `QUEUE_UPDATED`, `QUEUE_DISPATCHED`, and `QUEUE_FAILED` update queue and transcript together when exclusivity requires it. |
 | extension request / resolution | `EXTENSION_REQUEST_CHANGED` / `EXTENSION_REQUEST_RESOLVED`. |
-| control change / confirmed takeover | `CONTROL_UPDATED`. |
+| destructive-control change | `CONTROL_UPDATED`. |
 | process error | `PROCESS_FAILED` clears streaming state and changes Runtime status without partially reviving the pane. |
 | completed stop | `STOP_COMPLETED` clears the visible stop transition in one action. |
 
@@ -348,7 +348,7 @@ paint Session B or a later revisit of A.
 `ConversationPane` receives:
 
 - the reducer state and derived presentation values;
-- stable callbacks for send, abort, queue cancel/resume, navigation, control takeover, model/thinking/Gate changes, draft workspace pick, settings, and diff sidebar toggle;
+- stable callbacks for send, abort, queue cancel/resume, navigation, destructive-control actions, model/thinking/Gate changes, draft workspace pick, settings, and diff sidebar toggle;
 - shell/inventory-derived context such as selected Session name, workspace, model inventory, Gate mode, loading state, and global mutation blockers.
 
 It owns no asynchronous work. It must preserve the existing `<main className="chat-shell">` subtree and keep one unkeyed `ChatInput` mounted.

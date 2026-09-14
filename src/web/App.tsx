@@ -8823,6 +8823,11 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   const anySessionQueued = sessions.some((session) => session.queued);
   const lifecycleBlocked = applicationLifecycle !== "idle";
   const mutationBlocked = lifecycleBlocked || buildIdentityMismatch;
+  // The initial pane has no Session identity until bootstrap commits one. Keep
+  // the provisional `session:none` Composer partition read-only so an early
+  // keystroke cannot disappear when the authoritative Session arrives. This
+  // does not block an already identified Session while its Runtime prepares.
+  const initialPaneUnresolved = loading && pane.identity.kind === "none";
   // A mismatched Web bundle may never change Session/Runtime state, but its two
   // lifecycle recovery actions remain available. Their endpoint remains guarded
   // by the server's live quiescence barrier; stale browser sidebar state must
@@ -9818,13 +9823,16 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           activelyStreaming: viewingSubagentSession ? false : state.isStreaming,
           stopping: viewingSubagentSession ? false : stoppingCurrentSession,
           // Editing is independent from runtime preparation, compaction, and
-          // foreign control. Those conditions pause only the accepted snapshot.
-          disabled: mutationBlocked,
+          // foreign control. Only the initial unaddressed pane is blocked so
+          // bootstrap cannot replace a provisional `session:none` draft.
+          disabled: mutationBlocked || initialPaneUnresolved,
           disabledPlaceholder: buildIdentityMismatch
             ? "网页与服务构建不一致；请刷新页面后再提交操作"
             : lifecycleBlocked
               ? "Pi Chat 正在执行全局维护，暂时不能提交新操作"
-              : undefined,
+              : initialPaneUnresolved
+                ? "正在恢复已保存的对话，请稍候…"
+                : undefined,
           acceptsImages:
             !viewingSubagentSession &&
             composerState.model?.input?.includes("image") === true,

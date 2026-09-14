@@ -11,6 +11,23 @@ async function openInitialSession(page: import("@playwright/test").Page) {
   return { input, send };
 }
 
+test("startup keeps the Composer read-only until the initial Session is committed", { tag: "@desktop-only" }, async ({ page }) => {
+  let releaseBootstrap!: () => void;
+  const bootstrapHeld = new Promise<void>((resolve) => {
+    releaseBootstrap = resolve;
+  });
+  await page.route(/\/api\/bootstrap(?:\?|$)/, async (route) => {
+    await bootstrapHeld;
+    await route.continue();
+  });
+  await page.goto("/");
+  const input = page.getByRole("textbox", { name: "消息输入" });
+  await expect(input).toBeDisabled();
+  releaseBootstrap();
+  await expect(page.getByText("First answer", { exact: true })).toBeVisible();
+  await expect(input).toBeEnabled();
+});
+
 async function openSecondSession(page: import("@playwright/test").Page) {
   await page.goto("/");
   await expect(page.locator(".session-item", { hasText: "Second session" })).toBeVisible();

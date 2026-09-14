@@ -77,7 +77,7 @@
 | warm Runtime | selected Session 前 | `commitPaneIfCurrent` | cached capability data | authority | stale warm A revisit |
 | model / thinking | `captureViewOperation` | `commitPaneIfCurrent` | staged prefs/cache; bounded advisory model catalogue | view operation | late model/thinking B isolation; startup catalogue pending/empty |
 | extension response / Gate auto-allow feedback | submitted extension 的 Session 前 / pending request admission point | `commitPaneIfCurrent`；feedback 先验证 authority | authoritative reread | same authority | stale extension failure、A/B feedback isolation |
-| takeover | selected Session 前 | `commitPaneIfCurrent` | Session summary | pane authority + event version | stale takeover / newer SSE |
+| destructive Session mutation | selected Session 前 | `commitPaneIfCurrent` | Session summary | pane authority + event version | stale mutation / newer SSE |
 | abort / queue cancel / resume | selected Session 前 | `commitPaneIfCurrent` / `applySessionView` | cache queue/turn overlay | view operation | late stop/queue B isolation |
 | draft workspace picker | current draft 前 | `commitDraftIfCurrent` | none | draft picker Symbol + draft authority | Draft 1 to Draft 2 |
 | default workspace picker | Settings request | global `workspaceCwd` only | none | default picker Symbol; independent from New | picker then New; later New inherits the committed default |
@@ -100,7 +100,7 @@ The remaining combinations of `paneAuthorityCanCommit()` with `sessionEventVersi
 
 | 字段或 token | 创建/递增者 | 读取者 | 防止的竞态 | 领域 | 覆盖 |
 |---|---|---|---|---|---|
-| `sessionEventVersionRef` | 已准入、会使 view 失效的 SSE frame 递增 | bootstrap/view/prompt/takeover reread | 旧 HTTP view 覆盖新 SSE control、queue、terminal 或 lifecycle overlay | Data | cache navigation、control SSE、prompt/takeover tests |
+| `sessionEventVersionRef` | 已准入、会使 view 失效的 SSE frame 递增 | bootstrap/view/prompt/destructive-mutation reread | 旧 HTTP view 覆盖新 SSE control、queue、terminal 或 lifecycle overlay | Data | cache navigation、control SSE、prompt/destructive-mutation tests |
 | `SessionViewCache` revision | authoritative store / transient patch | `revisionFor`、`mergeNavigation` | navigation 或 pagination 结果丢弃请求期间的新 overlay | Data | `session-view-cache.test.ts` navigation / overlay cases |
 | `requestStartRevision` | navigation、pagination request 发起时 | `mergeNavigation` | 返回 view 抹去 request 后的 transient fields | Data request authority | navigation / pagination regressions |
 | `requestVersion` | view/pagination/prompt reread 发起时读取 event version | response continuation | 旧 HTTP response 绘制或确认新 SSE 前状态 | Data request authority | stale view / terminal tail cases |

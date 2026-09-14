@@ -2,7 +2,7 @@
 
 ## Product identity
 
-Pi Chat is a **local-first Web/PWA client for Pi RPC**.
+Pi Chat is a **Windows-first, local-first Web/PWA client for Pi RPC**.
 
 It connects a browser (or installed standalone window) to a globally installed `pi --mode rpc` process through a loopback HTTP API and SSE. Pi remains the authority for agent loop, models, tools, skills, and extensions. Pi Chat provides presentation, session navigation, and the local coordination required for safe multi-window use.
 
@@ -36,7 +36,7 @@ The status of each current capability is tracked in [`feature-surface.md`](featu
 - Chat UI, streaming, markdown, attachments
 - Session-first list and cold JSONL history view; on-demand Runtime activation
 - At most 7 hot conversations total: Primary + at most 6 Secondary Runtimes
-- Multi-window observation with single-writer control
+- Multi-window shared-write FIFO for ordinary Session operations; exclusive control only for destructive mutations
 - Gate confirmation UX
 - Models list / custom models
 - Skills / Extensions / Packages management **as currently implemented** (maintain, do not deepen into a package platform)
@@ -155,7 +155,7 @@ Prefer small hooks and pure libs over growing `App.tsx` further.
 - Primary writes and crash recovery pass the readiness controller; every restart re-runs compatibility probing, so a failed probe cannot be bypassed by an implicit restart.
 - Cold history view: JSONL is returned first with gray/view-only status. Browsing, scrolling, search, pagination and cache navigation never start a Secondary Runtime.
 - Runtime preparation is a Session-scoped single-flight capability upgrade for explicit write/control intent. It never creates a blank Runtime or rebinds a process between Sessions.
-- Activation on real work: send, compact, model/thinking, taking control, or explicit activate. A send to an inactive Session awaits its shared readiness promise rather than a full activation view.
+- Activation on real work: send, compact, model/thinking, or explicit activate. A send to an inactive Session awaits its shared readiness promise rather than a full activation view.
 - A new draft's first user turn performs Runtime creation, Model, Thinking, conditional Gate synchronization, and prompt admission under one draft lease and one Session prompt-admission FIFO; it avoids browser-side sequential setup requests.
 - A late warm/activation response may update only its own pane cache; it must not repaint a newer selected Session. Runtime startup's successful `get_state` response is retained as `lastState`, and cached Session identity/path/cwd avoids a global SessionIndex scan; unknown IDs refresh once then fail closed.
 - Gate synchronization is conditional: an authoritative Runtime already in the requested mode receives no redundant `/gate` command.
@@ -171,7 +171,7 @@ Prefer small hooks and pure libs over growing `App.tsx` further.
 - Multi-window **shared write**: every live browser window submits prompts, Steer, Compact, queue operations, and settings into one Session-scoped FIFO; the single live Agent serializes them (Harness-aligned)
 - Observing banner only when a **live** foreign SSE owner exists
 - Sole live window auto-claims; never stuck behind a ghost owner
-- Disconnect grace defaults to 1.5s (reconnect safety without long takeover flash)
+- Disconnect grace defaults to 1.5s (reconnect safety without a transient control-state flash)
 - Frontend banner debounced (~400ms) to suppress reconnect flaps
 - Presence/viewing leases remain observation-only projections; they never gate writes
 - Rename and Delete retain the exclusive control lock as destructive operations
