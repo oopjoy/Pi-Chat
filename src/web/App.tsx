@@ -92,6 +92,7 @@ import {
   invalidatesSessionViewVersion,
   isSessionScopedEvent,
 } from "./application/stream-events";
+import { SessionNavigationCoordinator } from "./application/session-navigation-coordinator";
 import {
   applyAppearance,
   loadAppearance,
@@ -1013,7 +1014,6 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   const sessionRefreshRequestedRef = useRef(false);
   const loadAllSessionsGenerationRef = useRef<number | null>(null);
   const directoryLoadGenerationsRef = useRef(new Map<string, number>());
-  const desiredSessionIdRef = useRef("");
   /** DSH-style verified direct-parent address; identity never grants child mutation authority. */
   const subagentAddressesRef = useRef(
     new Map<string, { parentSessionId: string; label: string }>(),
@@ -1068,9 +1068,13 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     },
     [rehydrateSubagentAddressChain],
   );
-  const navigationEpochRef = useRef(0);
-  const navigationAbortRef = useRef<AbortController | null>(null);
-  const navigationStartedAtRef = useRef(new Map<number, number>());
+  const sessionNavigationCoordinatorRef = useRef<SessionNavigationCoordinator | null>(null);
+  if (sessionNavigationCoordinatorRef.current === null)
+    sessionNavigationCoordinatorRef.current = new SessionNavigationCoordinator();
+  const navigationEpochRef = sessionNavigationCoordinatorRef.current.navigationEpochRef;
+  const desiredSessionIdRef = sessionNavigationCoordinatorRef.current.desiredSessionIdRef;
+  const navigationAbortRef = sessionNavigationCoordinatorRef.current.navigationAbortRef;
+  const navigationStartedAtRef = sessionNavigationCoordinatorRef.current.navigationStartedAtRef;
   /** Accepted local user turns remain visible until a JSONL-derived view includes them. */
   const localUserTurnsRef = useRef(new Map<string, LocalUserTurn[]>());
   const promptCoordinatorRef = useRef(new PromptCoordinator());
@@ -1809,25 +1813,21 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
 
   /** Cancel only first-pane navigation work; background reconciliation is separately versioned. */
   const cancelPendingNavigation = useCallback((invalidate = true) => {
-    navigationAbortRef.current?.abort();
-    navigationAbortRef.current = null;
-    navigationStartedAtRef.current.clear();
-    if (invalidate) {
-      // Abort is advisory: a response that already resolved may still run its
-      // continuation. Move the generation and intent first so it cannot paint.
-      navigationEpochRef.current += 1;
-      desiredSessionIdRef.current = viewedSessionIdRef.current;
-    }
+    // Abort is advisory: the coordinator advances intent before any resolved
+    // continuation can paint, so A → B → A cannot reuse the old authority.
+    sessionNavigationCoordinatorRef.current!.cancel(
+      invalidate,
+      viewedSessionIdRef.current,
+    );
     setPaneLoading(null);
     setViewSwitching(false);
   }, []);
 
   const recordPaneCommit = useCallback((view: SessionViewData) => {
-    const startedAt = navigationStartedAtRef.current.get(
+    const startedAt = sessionNavigationCoordinatorRef.current!.consumeStartedAt(
       navigationEpochRef.current,
     );
     if (startedAt === undefined) return;
-    navigationStartedAtRef.current.delete(navigationEpochRef.current);
     const perf = window.performance;
     const elapsedMs = perf.now() - startedAt;
     const source = view.viewSource || "browser-cache";
@@ -7478,16 +7478,16 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     cancelPendingNavigation(false);
     for (const request of loadingEarlierRequestsRef.current.values())
       request.controller.abort();
-    const epoch = ++navigationEpochRef.current;
+    const navigation = sessionNavigationCoordinatorRef.current!.begin(
+      id,
+      window.performance.now(),
+    );
+    const { epoch, controller } = navigation;
     // Fence scroll-memory writes for the entire source→target replacement. The
     // source position was snapshotted above; all subsequent scroll events until
     // the target layout commit describe transitional/loading geometry.
     scrollMemoryFenceRef.current = { epoch, targetSessionId: id };
-    const controller = new AbortController();
-    navigationAbortRef.current = controller;
-    desiredSessionIdRef.current = id;
     const navigationAuthority = capturePaneAuthority(id);
-    navigationStartedAtRef.current.set(epoch, window.performance.now());
     setViewSwitching(true);
     setError("");
     // Keep the current conversation visible until the destination view has
@@ -7687,8 +7687,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           scrollMemoryFenceRef.current = null;
       }
     } finally {
-      if (navigationAbortRef.current === controller)
-        navigationAbortRef.current = null;
+      sessionNavigationCoordinatorRef.current!.finish(epoch, controller);
       if (navigationEpochRef.current === epoch) setViewSwitching(false);
     }
   };
