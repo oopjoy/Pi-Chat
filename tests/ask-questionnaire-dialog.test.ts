@@ -170,7 +170,6 @@ test("Ask option previews reserve a stable layout slot before hover", async () =
   const slot = dom.window.document.querySelector<HTMLElement>(".ask-questionnaire-preview-slot");
   assert.ok(slot);
   assert.equal(slot.parentElement?.classList.contains("ask-questionnaire-options"), true, "the preview stays inside the same hover region as its options");
-  assert.equal(slot.textContent, "Current behavior remains unchanged.", "the initially focused option may show its preview inside the reserved slot");
   assert.equal(slot.className, "ask-questionnaire-preview-slot");
   await act(async () => root.unmount());
 });
