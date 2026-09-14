@@ -45,7 +45,13 @@ jobs:
           New-Item -ItemType Directory -Path $stage, $output | Out-Null
           $env:PI_CHAT_DIST_DIR = $stage
           npm run build
+          $env:PI_CHAT_RELEASE_MODE = "0"
+          Remove-Item Env:PI_CHAT_RELEASE_TAG -ErrorAction SilentlyContinue
+          Remove-Item Env:PI_CHAT_BUILD_REVISION -ErrorAction SilentlyContinue
           npm run test:artifact
+          $env:PI_CHAT_RELEASE_MODE = "1"
+          $env:PI_CHAT_RELEASE_TAG = $env:GITHUB_REF_NAME
+          $env:PI_CHAT_BUILD_REVISION = $env:GITHUB_SHA
           node scripts/release-package.mjs --staging $stage --output $output --tag $env:PI_CHAT_RELEASE_TAG
           $zip = Get-ChildItem -LiteralPath $output -Filter "*.zip" | Select-Object -First 1
           if (-not $zip) { throw "Release package did not produce a ZIP" }
