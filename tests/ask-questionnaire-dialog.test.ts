@@ -141,6 +141,40 @@ test("rich Ask dialog keeps choices compact and replaces the custom prompt in pl
   await act(async () => root.unmount());
 });
 
+test("Ask option previews reserve a stable layout slot before hover", async () => {
+  const dom = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  const previewPlan = parseAskQuestionnaire("ask-preview", {
+    questions: [{
+      question: "Choose a plan?",
+      header: "Plan",
+      options: [
+        { label: "Safe", description: "Keep the current behavior", preview: "Current behavior remains unchanged." },
+        { label: "Fast", description: "Prefer the shorter path", preview: "The shorter path changes the execution order." },
+      ],
+      multiSelect: false,
+    }],
+  })!;
+  const pending = request("preview-input", "select", "[Plan] Choose a plan?", [
+    "1. Safe — Keep the current behavior",
+    "2. Fast — Prefer the shorter path",
+    "3. Type something.",
+  ]);
+  await act(async () => root.render(createElement(AskQuestionnaireDialog, {
+    plan: previewPlan,
+    request: pending,
+    onFallback: () => undefined,
+    onRespond: async () => true,
+  })));
+  const slot = dom.window.document.querySelector<HTMLElement>(".ask-questionnaire-preview-slot");
+  assert.ok(slot);
+  assert.equal(slot.parentElement?.classList.contains("ask-questionnaire-options"), true, "the preview stays inside the same hover region as its options");
+  assert.equal(slot.textContent, "Current behavior remains unchanged.", "the initially focused option may show its preview inside the reserved slot");
+  assert.equal(slot.className, "ask-questionnaire-preview-slot");
+  await act(async () => root.unmount());
+});
+
 test("rich Ask multi-select toggles in place and submits the retained set", async () => {
   const dom = installDom();
   const { createRoot } = await import("react-dom/client");

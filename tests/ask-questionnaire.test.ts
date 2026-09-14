@@ -83,6 +83,8 @@ test("questionnaire options use one natural text flow and a stable inline custom
   assert.match(css, /\.ask-questionnaire-option\.is-selected/);
   assert.match(css, /\.ask-questionnaire-option-copy \{[^}]*white-space: normal/);
   assert.match(css, /\.ask-questionnaire-option-copy small \{ display: inline;/);
+  assert.match(css, /\.ask-questionnaire-preview-slot \{ height: min\(180px, 24vh\); min-height: 96px; overflow: hidden; \}/);
+  assert.match(css, /\.ask-questionnaire-preview \{ box-sizing: border-box; width: 100%; height: 100%;/);
   assert.match(css, /\.ask-questionnaire-custom \{[^}]*height: 42px;[^}]*gap: 10px/);
   assert.match(css, /\.ask-questionnaire-custom\.is-selected \.ask-questionnaire-option-marker/);
   assert.match(css, /\.ask-questionnaire-custom-trigger \{ display: flex;[^}]*height: 30px;[^}]*gap: 10px/);

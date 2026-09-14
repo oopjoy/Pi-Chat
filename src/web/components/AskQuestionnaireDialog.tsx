@@ -204,7 +204,7 @@ export function AskQuestionnaireDialog({
             <span>{question.header}</span>
             <strong>问题 {activeIndex + 1} / {plan.questions.length}</strong>
           </div>
-          <div className="ask-questionnaire-options" role="group" aria-labelledby="extension-dialog-title">
+          <div className="ask-questionnaire-options" role="group" aria-labelledby="extension-dialog-title" onMouseLeave={() => setHoveredOption(null)}>
             {question.options.map((option, index) => {
               const selected = answer?.kind === "options" && answer.selected.includes(index);
               return (
@@ -215,7 +215,6 @@ export function AskQuestionnaireDialog({
                   aria-pressed={selected}
                   disabled={disabled}
                   onMouseEnter={() => setHoveredOption(index)}
-                  onMouseLeave={() => setHoveredOption(null)}
                   onFocus={() => setHoveredOption(index)}
                   onBlur={() => setHoveredOption(null)}
                   onClick={() => question.multiSelect ? toggleMulti(index) : selectSingle(index)}
@@ -231,7 +230,6 @@ export function AskQuestionnaireDialog({
             <div
               className={`ask-questionnaire-custom${answer?.kind === "custom" ? " is-selected" : ""}`}
               onMouseEnter={() => setHoveredOption("custom")}
-              onMouseLeave={() => setHoveredOption(null)}
             >
               {answer?.kind === "custom" ? (
                 <>
@@ -242,7 +240,6 @@ export function AskQuestionnaireDialog({
                     value={answer.value}
                     disabled={disabled}
                     onFocus={() => setHoveredOption("custom")}
-                    onBlur={() => setHoveredOption(null)}
                     onChange={(event) => updateAnswer({ kind: "custom", value: event.target.value })}
                     onKeyDown={(event) => {
                       if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
@@ -266,8 +263,12 @@ export function AskQuestionnaireDialog({
                 </button>
               )}
             </div>
+            {question.options.some((option) => option.preview) && (
+              <div className="ask-questionnaire-preview-slot" aria-live="polite" aria-atomic="true">
+                {selectedPreview && <pre className="ask-questionnaire-preview">{selectedPreview}</pre>}
+              </div>
+            )}
           </div>
-          {selectedPreview && <pre className="ask-questionnaire-preview">{selectedPreview}</pre>}
           {submitError && <p className="ask-questionnaire-error" role="alert">{submitError}</p>}
         </div>
       )}
