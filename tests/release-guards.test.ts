@@ -216,7 +216,7 @@ test("release packaging creates a ZIP, portable checksum and identity manifest",
     const { stdout: revisionOutput } = await execFile("git", ["rev-parse", "HEAD"], { cwd: fixtureRepo });
     await writeFile(join(staging, "build-identity.json"), JSON.stringify({
       schemaVersion: 1,
-      packageVersion: "0.4.6",
+      packageVersion: "0.4.7",
       revision: revisionOutput.trim(),
       fingerprint: "f".repeat(64),
     }), "utf8");
@@ -237,7 +237,7 @@ test("release packaging creates a ZIP, portable checksum and identity manifest",
       fingerprint: string;
       zip: { name: string; size: number; sha256: string };
     };
-    assert.equal(manifest.packageVersion, "0.4.6");
+    assert.equal(manifest.packageVersion, "0.4.7");
     assert.equal(manifest.tag, "HEAD");
     assert.equal(manifest.revision, revisionOutput.trim());
     assert.equal(manifest.fingerprint, "f".repeat(64));
@@ -247,13 +247,13 @@ test("release packaging creates a ZIP, portable checksum and identity manifest",
     assert.equal(manifest.zip.sha256, (await readFile(result.checksumPath, "utf8")).split(" ")[0]);
     const entries = await archiveEntries(result.outputPath);
     for (const entry of [
-      "pi-chat-windows-0.4.6/pi-chat-launch.cmd",
-      "pi-chat-windows-0.4.6/SECURITY.md",
-      "pi-chat-windows-0.4.6/start-pi-chat-ui.ps1",
-      "pi-chat-windows-0.4.6/scripts/pi-chat-launch-process.ps1",
-      "pi-chat-windows-0.4.6/scripts/pi-chat-port-ready.ps1",
-      "pi-chat-windows-0.4.6/resources/icons/pi-chat.ico",
-      "pi-chat-windows-0.4.6/dist/build-identity.json",
+      "pi-chat-windows-0.4.7/pi-chat-launch.cmd",
+      "pi-chat-windows-0.4.7/SECURITY.md",
+      "pi-chat-windows-0.4.7/start-pi-chat-ui.ps1",
+      "pi-chat-windows-0.4.7/scripts/pi-chat-launch-process.ps1",
+      "pi-chat-windows-0.4.7/scripts/pi-chat-port-ready.ps1",
+      "pi-chat-windows-0.4.7/resources/icons/pi-chat.ico",
+      "pi-chat-windows-0.4.7/dist/build-identity.json",
     ]) assert.ok(entries.includes(entry), `missing ZIP entry: ${entry}`);
     await writeFile(join(output, "pi-chat-windows-dirty.zip.sha256"), "stale\n", "utf8");
     await writeFile(join(output, "pi-chat-windows-dirty.zip.manifest.json"), "stale\n", "utf8");

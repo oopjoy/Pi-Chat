@@ -16,7 +16,7 @@ Pi Chat 连接本机 Pi RPC，负责聊天展示、Session 浏览、流式输出
    npm install -g @earendil-works/pi-coding-agent
    pi --version
    ```
-3. 从 [v0.4.6 Release](https://github.com/oopjoy/Pi-Chat/releases/tag/v0.4.6) 下载 `pi-chat-windows-0.4.6.zip`，解压后运行 `start-pi-chat.cmd`。
+3. 从 [v0.4.7 Release](https://github.com/oopjoy/Pi-Chat/releases/tag/v0.4.7) 下载 `pi-chat-windows-0.4.7.zip`，解压后运行 `start-pi-chat.cmd`。
 4. 浏览器打开 `http://127.0.0.1:30170`，或运行 `start-pi-chat-ui.ps1` 使用独立窗口体验。
 
 Release ZIP 是 Windows-first 的可运行包；源码开发和从 checkout 运行仍需要 Node.js。Pi Chat 默认只监听本机回环地址，关闭浏览器窗口不会停止本地服务。
@@ -74,7 +74,7 @@ Release ZIP 是 Windows-first 的可运行包；源码开发和从 checkout 运�
 
 ## 版本与路线
 
-当前稳定版本为 **0.4.6**。下一版本为 **0.4.7 稳定性版本**，继续聚焦启动确定性、流式与 reconnect、Session/Runtime fencing、Windows 启动诊断和底层可维护性；在稳定性达标前不会把大型新功能或 adoption release 提前改名为 0.5.0。
+当前发布版本为 **0.4.7**，定位为 Windows-first 稳定性版本，但仍是**半成品**，不应被理解为功能和平台边界已经最终定型的 1.0 或 adoption release。当前重点是启动确定性、流式与 reconnect、Session/Runtime fencing、Windows 启动诊断和底层可维护性；后续仍需继续调整真实 Pi Runtime retry、Windows 工具链、发布卫生和更多多窗口/恢复场景。在稳定性和产品边界进一步收口前，不推进 0.5.0 adoption release。完整限制见 [`release-notes-v0.4.7.md`](release-notes-v0.4.7.md)。
 
 路线与 authority 说明见 [`docs/architecture.md`](docs/architecture.md)、[`docs/web-architecture-roadmap.md`](docs/web-architecture-roadmap.md) 和 [`v0.4.7 稳定性矩阵`](docs/v0.4.7-stability-matrix.md)。
 

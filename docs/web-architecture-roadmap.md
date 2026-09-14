@@ -545,11 +545,11 @@ Browser duplicate Prompt / reload / reconnect smoke
 当前发布 checkpoint：
 
 ```text
-bdcf5d3  test(e2e): wait for initial session bootstrap
-v0.4.6   GitHub main/tag CI、Release、Windows ZIP 与远端 checksum 已核验
+v0.4.6   bdcf5d3；GitHub Release、Windows ZIP 与远端 checksum 已核验且旧 tag 不移动
+v0.4.7   当前 main 发布候选；仍是半成品稳定性版本，不是 1.0 或 adoption release
 ```
 
-下一版本不是 adoption release，而是 **v0.4.7 稳定性版本**。本轮只接受能减少竞态、错误恢复成本或 Windows 使用摩擦的变更；不以文件大小或抽象数量为目标继续拆分 `App.tsx`。
+v0.4.7 只接受能减少竞态、错误恢复成本或 Windows 使用摩擦的变更；不以文件大小或抽象数量为目标继续拆分 `App.tsx`。真实 Pi Runtime retry、Windows 工具链收口、更多多窗口/恢复矩阵和发布卫生仍需后续调整。
 
 `e14ba25` 将以下逻辑从 `App.tsx` 提取为纯 admission boundary：
 
@@ -580,7 +580,7 @@ P0/P1 执行矩阵见 [`docs/v0.4.7-stability-matrix.md`](v0.4.7-stability-matri
 v0.4.7 优先级：
 
 ```text
-1. 保护并复用 v0.4.6 发布 checkpoint，不移动旧 tag
+1. 保护并复用 v0.4.6 发布 checkpoint，不移动旧 tag；v0.4.7 发布包必须独立生成并绑定同一 source revision
 2. 启动 bootstrap 未提交 Session identity 时禁用 Composer
 3. 用 shared-write FIFO 统一 README / architecture 的多窗口契约
 4. Windows-first 启动、诊断、安装路径和发布说明
