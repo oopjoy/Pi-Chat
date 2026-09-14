@@ -526,28 +526,73 @@ focused tests
 
 ## 五、当前实施状态
 
-当前 worktree 已完成：
+当前 `main` 已完成并通过独立验证：
 
 ```text
 Application state contract
-Session navigation authority
+Session navigation/view authority baseline
 Session view cache ownership
 Session view reader
-Stream transport coordinator
-```
-
-下一项实施：
-
-```text
-Stream boundary hardening
+Stream transport lifecycle
+Stream event admission boundary
 Prompt operation model / authority contract
+PromptCoordinator admission facade
+Server-owned Prompt identity propagation
+Retry lifecycle projection and terminal fencing
+Browser duplicate Prompt / reload / reconnect smoke
 ```
 
-暂不开始：
+最近的可回退 checkpoint：
 
 ```text
-PromptCoordinator 全量迁移
+9c3a549  browser retry exhaustion projection
+ e14ba25  isolate stream event admission
+```
+
+`e14ba25` 将以下逻辑从 `App.tsx` 提取为纯 admission boundary：
+
+```text
+SSE JSON parsing result
+Session identity extraction
+Runtime epoch/generation extraction
+canonical terminal validation
+stale Runtime epoch rejection
+missing Session rejection
+global/scoped event classification
+Session-view invalidation classification
+```
+
+该 boundary 不拥有：
+
+```text
+Session cache
+Prompt operation
+Runtime lifecycle
+queue/retry executor
+React reducer
+SSE transport connection
+```
+
+下一项大型迁移候选：
+
+```text
+Session navigation coordinator
+```
+
+迁移必须继续从当前 `main` 创建干净 checkpoint，并保持：
+
+```text
+Session ID + navigation epoch + committed pane revision
+A → B → A fencing
+SessionViewCache / JSONL authority 不变
+```
+
+继续暂缓：
+
+```text
 全局 Store
 DSH plugin tree
-App.tsx 大规模一次性拆分
+Runtime event effects 的整体搬迁
+App.tsx 一次性拆分
+dirty comparison worktree 的整体合并
 ```
