@@ -291,7 +291,8 @@ export interface SessionCopyData {
 export interface InitialPromptRequest {
   message: string;
   images?: PromptImage[];
-  model?: { provider: string; modelId: string };
+  /** Exact route identity; API remains optional for legacy callers. */
+  model?: { provider: string; modelId: string; api?: string };
   thinkingLevel?: ThinkingLevel;
   gateMode?: GateMode;
 }

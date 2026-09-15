@@ -175,6 +175,10 @@ import {
   type SessionComposerSelection,
 } from "./lib/session-composer-selection";
 import {
+  loadSessionComposerSelections,
+  saveSessionComposerSelections,
+} from "./lib/session-composer-preferences";
+import {
   normalizeCwdKey,
   togglePinnedDirectory,
   togglePinnedSession,
@@ -246,7 +250,8 @@ function resultPendingError(cause: unknown): boolean {
  * the caller must drop the staged preference and fall back to the Runtime model.
  */
 function modelUnavailableError(cause: unknown): boolean {
-  return cause instanceof ApiRequestError && cause.code === "MODEL_UNAVAILABLE";
+  return cause instanceof ApiRequestError &&
+    (cause.code === "MODEL_UNAVAILABLE" || cause.code === "MODEL_ROUTE_AMBIGUOUS");
 }
 
 function finiteRunMetric(value: unknown): number | undefined {
@@ -1130,9 +1135,14 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
    * JSONL/Runtime fact used to label already-generated conversation content.
    */
   const pendingSessionPrefsRef = useRef(
-    new Map<string, SessionComposerSelection>(),
+    loadSessionComposerSelections(),
   );
   const [composerSelectionRevision, setComposerSelectionRevision] = useState(0);
+  // Desired next-turn selections survive F5 inside this browser tab only. They
+  // remain browser intent, never PiState or Server/JSONL authority.
+  useEffect(() => {
+    saveSessionComposerSelections(pendingSessionPrefsRef.current);
+  }, [composerSelectionRevision]);
   /** A cold Session's Gate preference is staged until its next real prompt. */
   const pendingGateModesRef = useRef(new Map<string, GateMode>());
   const [pendingGateModes, setPendingGateModes] = useState<
@@ -6467,6 +6477,11 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         ? DRAFT_PREFS_KEY
         : targetSessionId;
       const staged = pendingSessionPrefsRef.current.get(prefsKey);
+      // A draft has no Runtime-confirmed Gate state yet. Capture its explicit
+      // local intent with this first request without promoting it to authority.
+      const capturedDraftGateMode = localDraftRef.current
+        ? pendingGateModesRef.current.get(DRAFT_PREFS_KEY)
+        : undefined;
       const capturedSelection = staged
         ? {
             ...staged,
@@ -6555,6 +6570,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           // selection captured with this first prompt.
           model: capturedSelection?.model,
           thinkingLevel: capturedSelection?.thinkingLevel,
+          gateMode: capturedDraftGateMode,
         });
         if (!promptOperationIsInCurrentRun()) return;
         targetSessionId = initial.sessionId;
@@ -6624,6 +6640,27 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
             setComposerSelectionRevision((revision) => revision + 1);
           }
           pendingSessionPrefsRef.current.delete(DRAFT_PREFS_KEY);
+          saveSessionComposerSelections(pendingSessionPrefsRef.current);
+          // A Gate click after Send belongs to the next turn, just like a
+          // newer Model/Thinking choice. Move only a distinct local intent;
+          // the first request's captured value is already being confirmed.
+          const newestDraftGateMode = pendingGateModesRef.current.get(
+            DRAFT_PREFS_KEY,
+          );
+          if (
+            newestDraftGateMode &&
+            newestDraftGateMode !== capturedDraftGateMode
+          )
+            pendingGateModesRef.current.set(
+              targetSessionId,
+              newestDraftGateMode,
+            );
+          // This intent was fulfilled atomically by the initial request. The
+          // returned mode remains unconfirmed until the server response/SSE
+          // projection below; do not write it to gateModesRef.
+          pendingGateModesRef.current.delete(DRAFT_PREFS_KEY);
+          setComposerSelectionRevision((revision) => revision + 1);
+          setPendingGateModes(Object.fromEntries(pendingGateModesRef.current));
         }
         // Preserve the ordinary acknowledgement/optimistic-turn path below;
         // only the transport setup was collapsed into this first request.
@@ -7187,12 +7224,15 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
             cause instanceof ApiRequestError ? cause.incidentId : undefined,
           );
       }
-      if (modelUnavailableError(cause))
+      if (modelUnavailableError(cause)) {
         // The Runtime rejected this Model, so the staged selection can never be
         // applied to this Session by retrying the same prompt. Dropping it makes
         // the pane fall back to the Runtime-confirmed Model instead of failing
         // every later prompt the same way.
         pendingSessionPrefsRef.current.delete(targetSessionId || DRAFT_PREFS_KEY);
+        saveSessionComposerSelections(pendingSessionPrefsRef.current);
+        setComposerSelectionRevision((revision) => revision + 1);
+      }
       const stoppedSteerRejection = authoritativeStoppedSteerRejection(
         cause,
         steering,
@@ -7733,7 +7773,10 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     // Each New displays the current Runtime default. It does not inherit an
     // old Composer intent: only an explicit selection belongs to its next send.
     pendingSessionPrefsRef.current.delete(DRAFT_PREFS_KEY);
+    saveSessionComposerSelections(pendingSessionPrefsRef.current);
+    pendingGateModesRef.current.delete(DRAFT_PREFS_KEY);
     setComposerSelectionRevision((revision) => revision + 1);
+    setPendingGateModes(Object.fromEntries(pendingGateModesRef.current));
     // Each New starts from the current application default. Choosing a folder
     // below changes only this draft, never an already-running Session.
     commitPane({
@@ -7868,6 +7911,9 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       patch,
     );
     pendingSessionPrefsRef.current.set(key, next);
+    // Persist the click synchronously as browser-local intent so an immediate
+    // F5 cannot race React's post-commit storage effect.
+    saveSessionComposerSelections(pendingSessionPrefsRef.current);
     // This value is only a render invalidator. The selection itself remains
     // session-keyed in the ref so navigation never aliases one target's choice
     // onto another target's Composer.
@@ -8077,6 +8123,8 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     );
     pendingGateModesRef.current.delete(sessionId);
     pendingSessionPrefsRef.current.delete(sessionId);
+    saveSessionComposerSelections(pendingSessionPrefsRef.current);
+    setComposerSelectionRevision((revision) => revision + 1);
     composerDraftRevisionsRef.current.delete(keyId);
     appliedDraftRestorationSequencesRef.current.delete(keyId);
     steerDequeueExpectedDraftRevisionRef.current.delete(sessionId);
@@ -8717,7 +8765,15 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   const changeGate = async (mode: GateMode) => {
     const viewed = viewedSessionIdRef.current;
     const sessionId = composerTargetForViewedSession();
-    if (buildIdentityMismatch || !sessionId) return;
+    if (buildIdentityMismatch) return;
+    // A local New draft has no Runtime yet. Stage only its desired first-turn
+    // Gate value; the initial-submit FIFO applies it before the user prompt.
+    if (localDraftRef.current) {
+      stageGateMode(DRAFT_PREFS_KEY, mode);
+      setNotice(`已选择 ${mode === "open" ? "放行" : "严格"}，发送时生效`);
+      return;
+    }
+    if (!sessionId) return;
     const childOriginated = Boolean(viewed && viewed !== sessionId);
     // A child transcript is read-only. A child-originated Gate choice must
     // never be staged as a parent preference; reject it explicitly instead.
@@ -9048,8 +9104,11 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   const gateAvailable = gateAvailableOverride ?? true;
   // A staged value can describe the next prompt in a cold history pane, but
   // never alters gateModesRef, which is the only authority for auto-allow.
+  const gateSelectionKey = localDraft
+    ? DRAFT_PREFS_KEY
+    : composerTargetSessionId;
   const confirmedGateMode =
-    pendingGateModes[composerTargetSessionId] ?? gateModes[composerTargetSessionId];
+    pendingGateModes[gateSelectionKey] ?? gateModes[gateSelectionKey];
   // A local New draft has no existing Runtime whose prior open mode could be
   // hidden, so strict is its explicit security default. Existing Sessions keep
   // an absent projection distinct from a confirmed strict mode.

@@ -384,7 +384,15 @@ export const api = {
       initial: {
         message: input.message,
         images: input.images.map(({ type, data, mimeType }) => ({ type, data, mimeType })),
-        ...(input.model ? { model: { provider: input.model.provider, modelId: input.model.id } } : null),
+        ...(input.model
+          ? {
+              model: {
+                provider: input.model.provider,
+                modelId: input.model.id,
+                ...(input.model.api ? { api: input.model.api } : null),
+              },
+            }
+          : null),
         ...(input.thinkingLevel ? { thinkingLevel: input.thinkingLevel } : null),
         ...(input.gateMode ? { gateMode: input.gateMode } : null),
       },

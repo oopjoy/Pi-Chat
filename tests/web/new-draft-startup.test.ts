@@ -827,6 +827,92 @@ test("a New draft sends Model and Thinking only after an explicit Composer choic
   }
 });
 
+test("a New draft captures API-specific Model, Thinking, and Gate intent on its first submit", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const route = {
+    provider: "route",
+    id: "same",
+    name: "Responses route",
+    api: "openai-responses",
+    input: ["text"],
+    reasoning: true,
+  };
+  const submitted: Array<Record<string, unknown>> = [];
+  Object.assign(api, {
+    bootstrap: async () => ({ ...bootstrap, models: [...bootstrap.models, route] }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    clearSessionViewed: async () => ({ viewing: "" }),
+    submitNewSession: async (input: Record<string, unknown>) => {
+      submitted.push(input);
+      return {
+        sessionId: draftView.session.id,
+        session: draftView.session,
+        state: draftView.state,
+        gateMode: "open" as const,
+        accepted: true as const,
+        queued: false as const,
+      };
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const newButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.trim() === "New")!;
+    await act(async () => newButton.click());
+    const thinkingTrigger = dom.window.document.querySelector<HTMLButtonElement>(".thinking-control .compact-select-trigger")!;
+    await act(async () => { thinkingTrigger.click(); await Promise.resolve(); });
+    const low = [...dom.window.document.querySelectorAll<HTMLElement>(".thinking-control .compact-select-option")]
+      .find((option) => option.textContent?.trim() === "low");
+    assert.ok(low);
+    await act(async () => { low.click(); await Promise.resolve(); });
+    const modelTrigger = dom.window.document.querySelector<HTMLButtonElement>(".composer-model-select .compact-select-trigger")!;
+    await act(async () => { modelTrigger.click(); await Promise.resolve(); });
+    const modelOption = [...dom.window.document.querySelectorAll<HTMLElement>(".composer-model-option")]
+      .find((option) => option.textContent?.includes("Responses route"));
+    assert.ok(modelOption);
+    await act(async () => { modelOption.click(); await Promise.resolve(); });
+    assert.match(
+      thinkingTrigger.textContent || "",
+      /low/,
+      "switching the Model does not reset the explicit next-turn Thinking choice",
+    );
+    const gateTrigger = dom.window.document.querySelector<HTMLButtonElement>(".gate-control .compact-select-trigger")!;
+    assert.match(gateTrigger.textContent || "", /严格/);
+    await act(async () => { gateTrigger.click(); await Promise.resolve(); });
+    const open = [...dom.window.document.querySelectorAll<HTMLElement>(".gate-control .compact-select-option")]
+      .find((option) => option.textContent?.includes("放行"));
+    assert.ok(open);
+    await act(async () => { open.click(); await Promise.resolve(); });
+    assert.match(gateTrigger.textContent || "", /放行/, "the staged draft Gate paints before Runtime creation");
+    assert.equal(submitted.length, 0, "choosing a draft Gate does not materialize or mutate a Runtime");
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "first settings");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "first settings" }));
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.deepEqual(submitted, [{
+      cwd: bootstrap.workspaceCwd,
+      message: "first settings",
+      images: [],
+      model: route,
+      thinkingLevel: "low",
+      gateMode: "open",
+    }]);
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("a late first-draft completion cannot steal a replacement draft selection", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");

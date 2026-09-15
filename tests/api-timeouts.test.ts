@@ -7,6 +7,52 @@ class MemoryStorage {
   setItem(key: string, value: string): void { this.values.set(key, value); }
 }
 
+test("new-session API serialization retains the selected model API route", async () => {
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const previousFetch = globalThis.fetch;
+  let requestBody = "";
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      sessionStorage: new MemoryStorage(),
+      setTimeout: () => 1,
+      clearTimeout: () => undefined,
+    },
+  });
+  globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+    requestBody = String(init?.body || "");
+    return { ok: true, status: 200, json: async () => ({}) } as Response;
+  };
+  try {
+    const { api } = await import("../src/web/api");
+    await api.submitNewSession({
+      message: "first",
+      images: [],
+      model: {
+        provider: "route",
+        id: "same",
+        name: "Same",
+        api: "openai-responses",
+      },
+    });
+    assert.deepEqual(JSON.parse(requestBody), {
+      initial: {
+        message: "first",
+        images: [],
+        model: {
+          provider: "route",
+          modelId: "same",
+          api: "openai-responses",
+        },
+      },
+    });
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
+});
+
 test("Runtime-affecting browser mutations use the full preparation budget", async () => {
   const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
   const previousFetch = globalThis.fetch;

@@ -274,6 +274,183 @@ test("new-session initial submit accepts a >1 MB image body and performs model, 
   }
 });
 
+test("new-session initial submit rejects an API-specific route Pi cannot distinguish", async () => {
+  const primaryPath = "C:\\sessions\\initial-route-primary.jsonl";
+  const draftPath = "C:\\sessions\\initial-route-draft.jsonl";
+  const primaryId = idForPath(primaryPath);
+  class RouteRpc extends FakeRpc {
+    override async send(...args: Parameters<FakeRpc["send"]>) {
+      const [command] = args;
+      if (command.type === "get_available_models") {
+        this.commands.push(command);
+        return {
+          type: "response",
+          success: true,
+          data: {
+            models: [
+              { provider: "route", id: "same", name: "First", api: "openai-completions" },
+              { provider: "route", id: "same", name: "Exact", api: "openai-responses" },
+              { provider: "route", id: "unique", name: "Unique", api: "openai-responses" },
+            ],
+          },
+        };
+      }
+      return super.send(...args);
+    }
+  }
+  const primary = new FakeRpc(primaryPath, "initial-route-primary");
+  const draft = new RouteRpc(draftPath, "initial-route-draft");
+  const sessions = {
+    list: async () => [{ id: primaryId, sessionId: "initial-route-primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+    pathForId: () => primaryPath,
+    summaryForId: () => null,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, createRpc: () => draft as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    const response = await fetch(`${origin}/api/sessions/new`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ initial: {
+        message: "route exact",
+        model: { provider: "route", modelId: "same", api: "openai-responses" },
+      } }),
+    });
+    assert.equal(response.status, 409);
+    assert.equal(
+      (await response.json() as { code?: string }).code,
+      "MODEL_ROUTE_AMBIGUOUS",
+    );
+    assert.equal(
+      draft.commands.some((command) => command.type === "set_model"),
+      false,
+      "the server must not claim an exact route when Pi only accepts provider/modelId",
+    );
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("new-session initial submit rejects an ambiguous legacy provider/model route", async () => {
+  const primaryPath = "C:\\sessions\\initial-legacy-route-primary.jsonl";
+  const draftPath = "C:\\sessions\\initial-legacy-route-draft.jsonl";
+  const primaryId = idForPath(primaryPath);
+  class LegacyRouteRpc extends FakeRpc {
+    override async send(...args: Parameters<FakeRpc["send"]>) {
+      const [command] = args;
+      if (command.type === "get_available_models") {
+        this.commands.push(command);
+        return {
+          type: "response",
+          success: true,
+          data: {
+            models: [
+              { provider: "route", id: "same", name: "First", api: "openai-completions" },
+              { provider: "route", id: "same", name: "Second", api: "openai-responses" },
+            ],
+          },
+        };
+      }
+      return super.send(...args);
+    }
+  }
+  const primary = new FakeRpc(primaryPath, "initial-legacy-route-primary");
+  const draft = new LegacyRouteRpc(draftPath, "initial-legacy-route-draft");
+  const sessions = {
+    list: async () => [{ id: primaryId, sessionId: "initial-legacy-route-primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+    pathForId: () => primaryPath,
+    summaryForId: () => null,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, createRpc: () => draft as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    const response = await fetch(`${origin}/api/sessions/new`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ initial: {
+        message: "legacy route",
+        model: { provider: "route", modelId: "same" },
+      } }),
+    });
+    assert.equal(response.status, 409);
+    assert.equal((await response.json() as { code?: string }).code, "MODEL_ROUTE_AMBIGUOUS");
+    assert.equal(draft.commands.some((command) => command.type === "set_model"), false);
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("new-session initial submit retains API identity when Pi's provider/model route is unique", async () => {
+  const primaryPath = "C:\\sessions\\initial-unique-route-primary.jsonl";
+  const draftPath = "C:\\sessions\\initial-unique-route-draft.jsonl";
+  const primaryId = idForPath(primaryPath);
+  class UniqueRouteRpc extends FakeRpc {
+    override async send(...args: Parameters<FakeRpc["send"]>) {
+      const [command] = args;
+      if (command.type === "get_available_models") {
+        this.commands.push(command);
+        return {
+          type: "response",
+          success: true,
+          data: {
+            models: [{
+              provider: "route",
+              id: "unique",
+              name: "Unique",
+              api: "openai-responses",
+            }],
+          },
+        };
+      }
+      return super.send(...args);
+    }
+  }
+  const primary = new FakeRpc(primaryPath, "initial-unique-route-primary");
+  const draft = new UniqueRouteRpc(draftPath, "initial-unique-route-draft");
+  const sessions = {
+    list: async () => [{ id: primaryId, sessionId: "initial-unique-route-primary", name: "Primary", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+    pathForId: () => primaryPath,
+    summaryForId: () => null,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, createRpc: () => draft as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    const response = await fetch(`${origin}/api/sessions/new`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ initial: {
+        message: "unique route",
+        model: { provider: "route", modelId: "unique", api: "openai-responses" },
+      } }),
+    });
+    assert.equal(response.status, 202);
+    assert.equal(
+      (await response.json() as { state: { model: { api?: string } | null } }).state.model?.api,
+      "openai-responses",
+    );
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
 test("an initial draft prompt timeout stays uncertain and protects the following prompt", async () => {
   const primaryPath = "C:\\sessions\\initial-timeout-primary.jsonl";
   const draftPath = "C:\\sessions\\initial-timeout-draft.jsonl";

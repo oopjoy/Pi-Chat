@@ -209,6 +209,68 @@ test("a browser-cached model catalogue stays selectable across a restart bootstr
   }
 });
 
+test("an explicit Composer Thinking choice survives reload without mutating Pi", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const highBootstrap = {
+    ...bootstrap,
+    state: { ...bootstrap.state, thinkingLevel: "high" as const },
+  };
+  let promptSettings: unknown;
+  Object.assign(api, {
+    bootstrap: async () => highBootstrap,
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    prompt: async (...args: unknown[]) => {
+      promptSettings = args[5];
+      return { accepted: true, queued: false };
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const selectLow = async () => {
+      const trigger = dom.window.document.querySelector<HTMLButtonElement>(".thinking-control .compact-select-trigger")!;
+      await act(async () => { trigger.click(); await Promise.resolve(); });
+      const low = [...dom.window.document.querySelectorAll<HTMLElement>(".thinking-control .compact-select-option")]
+        .find((option) => option.textContent?.trim() === "low");
+      assert.ok(low);
+      await act(async () => { low.click(); await Promise.resolve(); });
+    };
+    await selectLow();
+    assert.match(
+      dom.window.document.querySelector<HTMLButtonElement>(".thinking-control .compact-select-trigger")!.textContent || "",
+      /low/,
+    );
+    await act(async () => root.unmount());
+    const reloaded = createRoot(dom.window.document.querySelector("#root")!);
+    try {
+      await act(async () => reloaded.render(createElement(App)));
+      assert.match(
+        dom.window.document.querySelector<HTMLButtonElement>(".thinking-control .compact-select-trigger")!.textContent || "",
+        /low/,
+        "browser-local next-turn intent outranks a conflicting Runtime display projection",
+      );
+      const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "preserve low");
+        textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "preserve low" }));
+        dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      assert.deepEqual(promptSettings, { thinkingLevel: "low" });
+    } finally {
+      await act(async () => reloaded.unmount());
+    }
+  } finally {
+    restoreApi();
+  }
+});
+
 test("a selected model without a new inventory retains the last selectable catalogue", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");

@@ -4247,6 +4247,26 @@ export class PiChatApp {
           `所选模型不可用：${settings.model.provider}/${settings.model.modelId} 不在当前会话 Pi Runtime 的模型列表中（该 Runtime 提供 ${available.length} 个模型）。请在模型菜单中改选该 Runtime 提供的模型；若你刚更新过模型配置，请重启该会话的 Pi Runtime 后重试。`,
           "MODEL_UNAVAILABLE",
         );
+      // Pi RPC's documented set_model command accepts only provider/modelId.
+      // Two advertised API routes sharing that pair cannot be selected
+      // deterministically by this Runtime version, so reject the ambiguous
+      // route instead of acknowledging a choice Pi cannot faithfully execute.
+      if (
+        new Set(
+          available
+            .filter(
+              (candidate) =>
+                candidate.provider === settings.model!.provider &&
+                candidate.id === settings.model!.modelId,
+            )
+            .map((candidate) => candidate.api || ""),
+        ).size > 1
+      )
+        throw new HttpRequestError(
+          409,
+          `所选模型路由当前 Pi Runtime 无法区分：${settings.model.provider}/${settings.model.modelId}${settings.model.api ? `（${settings.model.api}）` : ""}。请在 Pi Runtime 支持 API 路由选择前改用唯一模型 ID。`,
+          "MODEL_ROUTE_AMBIGUOUS",
+        );
       const outcomeToken = randomUUID();
       try {
         await rpc.send(
@@ -8528,7 +8548,9 @@ export class PiChatApp {
           typeof initial.model.provider !== "string" ||
           !initial.model.provider ||
           typeof initial.model.modelId !== "string" ||
-          !initial.model.modelId)
+          !initial.model.modelId ||
+          (initial.model.api !== undefined &&
+            (typeof initial.model.api !== "string" || !initial.model.api)))
       )
         return json(response, 400, { error: "新对话模型配置无效" });
       if (initial && !initialMessage && !initialImages.length)
@@ -8594,6 +8616,7 @@ export class PiChatApp {
                   model: {
                     provider: initial.model.provider,
                     modelId: initial.model.modelId,
+                    ...(initial.model.api ? { api: initial.model.api } : null),
                   },
                 }
               : null),
