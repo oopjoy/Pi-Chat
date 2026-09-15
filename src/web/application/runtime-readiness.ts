@@ -1,5 +1,10 @@
 import type { PrimaryRuntimeReadiness } from "../../shared/types";
 
+export interface PrimaryCapabilitySnapshot {
+  generation: number;
+  modelKeys: string[];
+}
+
 /**
  * Merge a Primary readiness observation without allowing an older generation,
  * or an equal-generation startup snapshot, to erase terminal/capability facts.

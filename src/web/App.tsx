@@ -93,7 +93,10 @@ import {
   isSessionScopedEvent,
 } from "./application/stream-events";
 import { SessionNavigationCoordinator } from "./application/session-navigation-coordinator";
-import { acceptPrimaryReadiness } from "./application/runtime-readiness";
+import {
+  acceptPrimaryReadiness,
+  type PrimaryCapabilitySnapshot,
+} from "./application/runtime-readiness";
 import {
   applyAppearance,
   loadAppearance,
@@ -736,20 +739,28 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     { status: "starting", generation: 0 },
   );
   /** The latest Bootstrap snapshot that has confirmed a particular model's input capability. */
-  const [primaryCapabilitySnapshot, setPrimaryCapabilitySnapshot] = useState<{
-    generation: number;
-    modelKeys: string[];
-  } | null>(null);
+  const [primaryCapabilitySnapshot, setPrimaryCapabilitySnapshot] =
+    useState<PrimaryCapabilitySnapshot | null>(null);
   // EventSource callbacks retain their transport identity across UI commits.
   // Read current capability facts from refs instead of re-subscribing on each render.
   const primaryRuntimeRef = useRef(primaryRuntime);
   primaryRuntimeRef.current = primaryRuntime;
   /** Single browser projection write boundary for Primary Runtime readiness. */
-  const publishPrimaryReadiness = (next: PrimaryRuntimeReadiness): void => {
-    primaryRuntimeRef.current = next;
-    setPrimaryRuntime(next);
-  };
+  const publishPrimaryReadiness = useCallback(
+    (next: PrimaryRuntimeReadiness): void => {
+      primaryRuntimeRef.current = next;
+      setPrimaryRuntime(next);
+    },
+    [],
+  );
   const primaryCapabilitySnapshotRef = useRef(primaryCapabilitySnapshot);
+  const publishPrimaryCapabilitySnapshot = useCallback(
+    (next: PrimaryCapabilitySnapshot | null): void => {
+      primaryCapabilitySnapshotRef.current = next;
+      setPrimaryCapabilitySnapshot(next);
+    },
+    [],
+  );
   primaryCapabilitySnapshotRef.current = primaryCapabilitySnapshot;
   /** Session IDs whose Pi Runtime is being prepared outside the reading path. */
   const [warmingSessionIds, setWarmingSessionIds] = useState<string[]>([]);
@@ -1477,8 +1488,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       generation: currentReadiness.generation,
     };
     publishPrimaryReadiness(starting);
-    primaryCapabilitySnapshotRef.current = null;
-    setPrimaryCapabilitySnapshot(null);
+    publishPrimaryCapabilitySnapshot(null);
     setModelInventoryConfirmed(false);
   }, [syncMutatingSessionIds]);
   const recordSourceTurnTotal = (sessionId: string, total: number): void => {
@@ -2281,8 +2291,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         generation: readiness.generation,
         modelKeys: [...new Set(modelKeys)],
       };
-      primaryCapabilitySnapshotRef.current = snapshot;
-      setPrimaryCapabilitySnapshot(snapshot);
+      publishPrimaryCapabilitySnapshot(snapshot);
     },
     [],
   );
@@ -3693,8 +3702,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         // A's high generation before B reports its own lower-generation state.
         const replacementReadiness = { status: "starting" as const, generation: 0 };
         publishPrimaryReadiness(replacementReadiness);
-        primaryCapabilitySnapshotRef.current = null;
-        setPrimaryCapabilitySnapshot(null);
+        publishPrimaryCapabilitySnapshot(null);
         setModelInventoryConfirmed(false);
         workspaceEpochRef.current =
           typeof ready.workspaceEpoch === "string"
@@ -3744,8 +3752,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
             generation: next.generation,
             modelKeys: [modelCapabilityKey(next.model)].filter(Boolean),
           };
-          primaryCapabilitySnapshotRef.current = snapshot;
-          setPrimaryCapabilitySnapshot(snapshot);
+          publishPrimaryCapabilitySnapshot(snapshot);
           dispatchPane({
             type: "RUNTIME_SETTINGS_ADOPTED",
             target,
@@ -4734,8 +4741,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
             // A new startup or failure invalidates the preceding generation's
             // ModelInfo.input assertion before a later ready can paint.
             if (next.status !== "ready") {
-              primaryCapabilitySnapshotRef.current = null;
-              setPrimaryCapabilitySnapshot(null);
+              publishPrimaryCapabilitySnapshot(null);
               // Fast is Runtime-generation state. Clear the old visible/cache
               // projection as soon as a Primary replacement starts; a later
               // current-generation extension event may explicitly re-enable it.
