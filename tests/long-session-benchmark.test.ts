@@ -129,8 +129,7 @@ test("benchmark output schema is machine-readable and descriptive-only", async (
 
 test("timing summary, RSS normalization, and browser metric contract remain stable", () => {
   assert.deepEqual(summarizeTimings([3, 1, 2, 4]), { iterations: 4, minMs: 1, medianMs: 2.5, meanMs: 2.5, maxMs: 4 });
-  assert.equal(normalizedMaxRssBytes(100, "win32"), 100);
-  assert.equal(normalizedMaxRssBytes(100, "linux"), 102_400);
+  assert.equal(normalizedMaxRssBytes(100), 102_400);
   assert.equal(browserScenarioContract.metricDefinitions.domNodeCount.includes("getElementsByTagName"), true);
   assert.equal(browserScenarioContract.metricDefinitions.longTasks.includes("PerformanceObserver"), true);
   assert.equal(browserScenarioContract.metricDefinitions.heapBytes.includes("usedJSHeapSize"), true);

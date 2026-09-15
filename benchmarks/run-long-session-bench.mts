@@ -23,7 +23,7 @@ export interface ServerBenchmarkResult {
     node: string;
     platform: NodeJS.Platform;
     arch: string;
-    /** Node resourceUsage().maxRSS normalized to bytes. */
+    /** Node resourceUsage().maxRSS (KiB) normalized to bytes. */
     runnerPeakRssBytes: number;
   };
   baselinePolicy: "descriptive-only";
@@ -105,9 +105,9 @@ function round(value: number): number {
   return Math.round(value * 1_000) / 1_000;
 }
 
-/** Node reports maxRSS in bytes on Windows and KiB on Unix platforms. */
-export function normalizedMaxRssBytes(maxRSS: number, platform = process.platform): number {
-  return platform === "win32" ? maxRSS : maxRSS * 1024;
+/** Node reports resourceUsage().maxRSS in KiB across supported platforms. */
+export function normalizedMaxRssBytes(maxRSS: number): number {
+  return maxRSS * 1024;
 }
 
 export function summarizeTimings(samples: number[]): TimingSummary {
