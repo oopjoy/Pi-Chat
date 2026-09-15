@@ -93,6 +93,7 @@ import {
   isSessionScopedEvent,
 } from "./application/stream-events";
 import { SessionNavigationCoordinator } from "./application/session-navigation-coordinator";
+import { acceptApplicationLifecycle } from "./application/application-lifecycle";
 import {
   acceptPrimaryReadiness,
   type PrimaryCapabilitySnapshot,
@@ -2371,7 +2372,12 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         readiness,
       );
       publishPrimaryReadiness(acceptedReadiness);
-      publishApplicationLifecycle(data.applicationLifecycle || "idle");
+      publishApplicationLifecycle(
+        acceptApplicationLifecycle(
+          applicationLifecycleRef.current,
+          data.applicationLifecycle || "idle",
+        ),
+      );
     },
     [applySidebarInventory, rememberConfirmedCommands],
   );
@@ -4822,9 +4828,10 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
             : "模型目录已更新。",
         );
       } else if (type === "pi_chat_application_lifecycle") {
-        const lifecycle = String(
+        const lifecycle = acceptApplicationLifecycle(
+          applicationLifecycleRef.current,
           event.lifecycle || "idle",
-        ) as ApplicationLifecycle;
+        );
         if (lifecycle !== "idle") cancelPendingNavigation();
         if (lifecycle === "resources-reloading" && !resourceReloadActiveRef.current) {
           resourceReloadActiveRef.current = true;
