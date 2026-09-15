@@ -1,9 +1,14 @@
 import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
-import type { SessionActivityState, SessionDirectorySummary, SessionSummary } from "../../shared/types";
+import type { SessionDirectorySummary, SessionSummary } from "../../shared/types";
+import {
+  buildSidebarViewModel,
+  sidebarSessionStatus,
+  sidebarWorkspaceResetRequired,
+  type SidebarWorkspaceAuthority,
+} from "../application/sidebar-view-model";
 import { SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN } from "../lib/preferences";
 import { ChevronRightIcon, CloseIcon, FolderIcon, PanelLeftIcon, PinIcon, PiMarkIcon, PlusIcon, RefreshIcon, SearchIcon } from "./Icons";
-import { groupSessionsForNavigation } from "../lib/session-navigation";
 
 function relativeTime(timestamp: number): string {
   const elapsed = Date.now() - timestamp;
@@ -13,45 +18,9 @@ function relativeTime(timestamp: number): string {
   return new Intl.DateTimeFormat("en-US", { month: "numeric", day: "numeric" }).format(timestamp);
 }
 
-type SessionStatus = "idle" | "unread" | "pending" | "running" | "error";
-
-type WorkspaceAuthority = { cwd: string; epoch: string; revision: number };
-
-export function workspaceAuthorityRequiresSidebarReset(previous: WorkspaceAuthority, current: WorkspaceAuthority): boolean {
-  return Boolean(
-    previous.epoch &&
-    previous.epoch === current.epoch &&
-    current.revision > previous.revision &&
-    previous.cwd !== current.cwd,
-  );
-}
-
-function legacyActivity(session: SessionSummary, failed: boolean): SessionActivityState {
-  return {
-    execution: failed ? "failed" : session.running ? "running" : session.queued ? "queued" : "idle",
-    awaitingConfirmation: session.pendingConfirmation === true,
-  };
-}
-
-/** Sidebar shows one coarse outcome; the Composer/queue supplies phase detail. */
-export function sessionStatus(session: SessionSummary, failed: boolean, hasUnseenReply: boolean): { kind: SessionStatus; label: string } {
-  const activity = session.activity || legacyActivity(session, failed);
-  // Failure is actionable even while an old Gate request remains visible.
-  if (activity.execution === "paused") return { kind: "error", label: "队列已暂停，需要恢复或撤销" };
-  if (activity.execution === "failed") {
-    const detail = typeof activity.error === "string" ? activity.error.trim() : "";
-    return {
-      kind: "error",
-      label: detail ? `会话运行异常：${detail}` : "会话运行异常",
-    };
-  }
-  if (activity.awaitingConfirmation) return { kind: "pending", label: "等待权限确认" };
-  if (activity.execution === "queued") return { kind: "running", label: "消息等待自动执行" };
-  if (activity.execution === "dispatching") return { kind: "running", label: "正在派发队列消息" };
-  if (activity.execution === "running") return { kind: "running", label: "正在生成" };
-  if (hasUnseenReply) return { kind: "unread", label: "有新回复" };
-  return { kind: "idle", label: "对话空闲" };
-}
+// Compatibility exports for existing consumers; policy is owned by the pure selector.
+export const workspaceAuthorityRequiresSidebarReset = sidebarWorkspaceResetRequired;
+export const sessionStatus = sidebarSessionStatus;
 
 function ResizeHandle({ width, onWidthChange }: { width: number; onWidthChange: (width: number) => void }) {
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -137,7 +106,7 @@ export function SessionSidebar({ sessions, sessionsTotal, sessionDirectories, in
   const sessionMenuRef = useRef<HTMLDivElement>(null);
   const sessionMenuTriggerRefs = useRef(new Map<string, HTMLButtonElement>());
   const searchInputRef = useRef<HTMLInputElement>(null);
-  const previousWorkspaceAuthorityRef = useRef({
+  const previousWorkspaceAuthorityRef = useRef<SidebarWorkspaceAuthority>({
     cwd: workspaceCwd,
     epoch: workspaceEpoch,
     revision: workspaceRevision,
@@ -197,7 +166,7 @@ export function SessionSidebar({ sessions, sessionsTotal, sessionDirectories, in
     // Bootstrap cwd. A replacement process can do the same. Neither is a user
     // workspace switch, so reset only when the authoritative revision advances
     // within one already-established server epoch.
-    if (!workspaceAuthorityRequiresSidebarReset(previous, {
+    if (!sidebarWorkspaceResetRequired(previous, {
       cwd: workspaceCwd,
       epoch: workspaceEpoch,
       revision: workspaceRevision,
@@ -206,20 +175,22 @@ export function SessionSidebar({ sessions, sessionsTotal, sessionDirectories, in
     setSessionMenuId("");
   }, [workspaceCwd, workspaceEpoch, workspaceRevision]);
   const menuSession = sessions.find((session) => session.id === sessionMenuId);
-  const searching = Boolean(searchQuery.trim());
-  const groups = groupSessionsForNavigation(
+  const {
+    searching,
+    groups,
+    visibleSessionCount,
+    visibleSessionIds,
+    pinnedSessionIds: pinnedIds,
+  } = buildSidebarViewModel({
     sessions,
+    sessionDirectories,
+    workspaceCwd,
+    searchQuery,
     pinnedSessionIds,
     pinnedDirectoryKeys,
     collapsedDirectoryKeys,
-    searchQuery,
-    sessionDirectories,
-    workspaceCwd,
     expandedDirectoryKeys,
-  );
-  const visibleSessionCount = groups.reduce((total, group) => total + group.sessions.length, 0);
-  const visibleSessionIds = new Set(groups.filter((group) => !group.collapsed).flatMap((group) => group.sessions.map((session) => session.id)));
-  const pinnedIds = new Set(pinnedSessionIds);
+  });
   useEffect(() => {
     if (sessionMenuId && !visibleSessionIds.has(sessionMenuId)) setSessionMenuId("");
   }, [sessionMenuId, visibleSessionIds]);
@@ -291,7 +262,7 @@ export function SessionSidebar({ sessions, sessionsTotal, sessionDirectories, in
                   const unavailable = viewBusy || session.id === viewedSessionId;
                   const failed = failedSessionIds.includes(session.id);
                   const mutating = mutatingSessionIds.includes(session.id);
-                  const status = sessionStatus(session, failed, unseenReplySessionIds.includes(session.id));
+                  const status = sidebarSessionStatus(session, failed, unseenReplySessionIds.includes(session.id));
                   const pinned = pinnedIds.has(session.id);
                   return <div className={`session-row ${session.id === viewedSessionId ? "is-active" : ""} ${status.kind !== "idle" ? "has-status" : ""} ${sessionMenuId === session.id ? "is-menu-open" : ""}`} key={session.id}>
                     <button
