@@ -744,6 +744,11 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   // Read current capability facts from refs instead of re-subscribing on each render.
   const primaryRuntimeRef = useRef(primaryRuntime);
   primaryRuntimeRef.current = primaryRuntime;
+  /** Single browser projection write boundary for Primary Runtime readiness. */
+  const publishPrimaryReadiness = (next: PrimaryRuntimeReadiness): void => {
+    primaryRuntimeRef.current = next;
+    setPrimaryRuntime(next);
+  };
   const primaryCapabilitySnapshotRef = useRef(primaryCapabilitySnapshot);
   primaryCapabilitySnapshotRef.current = primaryCapabilitySnapshot;
   /** Session IDs whose Pi Runtime is being prepared outside the reading path. */
@@ -992,6 +997,11 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   const sseFloodCountRef = useRef(0);
   const clearViewedPromiseRef = useRef<Promise<unknown> | null>(null);
   const applicationLifecycleRef = useRef<ApplicationLifecycle>("idle");
+  /** Single browser projection write boundary for application lifecycle. */
+  const publishApplicationLifecycle = (next: ApplicationLifecycle): void => {
+    applicationLifecycleRef.current = next;
+    setApplicationLifecycle(next);
+  };
   const resourceReloadActiveRef = useRef(false);
   const handoffWaitRef = useRef<Promise<void> | null>(null);
   const sessionRefreshTimerRef = useRef<number | null>(null);
@@ -1466,9 +1476,8 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       status: "starting",
       generation: currentReadiness.generation,
     };
-    primaryRuntimeRef.current = starting;
+    publishPrimaryReadiness(starting);
     primaryCapabilitySnapshotRef.current = null;
-    setPrimaryRuntime(starting);
     setPrimaryCapabilitySnapshot(null);
     setModelInventoryConfirmed(false);
   }, [syncMutatingSessionIds]);
@@ -2352,10 +2361,8 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         primaryRuntimeRef.current,
         readiness,
       );
-      primaryRuntimeRef.current = acceptedReadiness;
-      setPrimaryRuntime(acceptedReadiness);
-      applicationLifecycleRef.current = data.applicationLifecycle || "idle";
-      setApplicationLifecycle(data.applicationLifecycle || "idle");
+      publishPrimaryReadiness(acceptedReadiness);
+      publishApplicationLifecycle(data.applicationLifecycle || "idle");
     },
     [applySidebarInventory, rememberConfirmedCommands],
   );
@@ -3340,8 +3347,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       // Idle is authoritative lifecycle state even when the following bootstrap
       // is slow or rejected. Do not leave navigation and mutations locked on
       // stale maintenance state while JSONL fallback remains available.
-      applicationLifecycleRef.current = "idle";
-      setApplicationLifecycle("idle");
+      publishApplicationLifecycle("idle");
       setNotice("");
       const replacementBootstrapPending =
         replacementBootstrapPendingRef.current;
@@ -3686,9 +3692,8 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         // Primary readiness generations are local to one server process. Clear
         // A's high generation before B reports its own lower-generation state.
         const replacementReadiness = { status: "starting" as const, generation: 0 };
-        primaryRuntimeRef.current = replacementReadiness;
+        publishPrimaryReadiness(replacementReadiness);
         primaryCapabilitySnapshotRef.current = null;
-        setPrimaryRuntime(replacementReadiness);
         setPrimaryCapabilitySnapshot(null);
         setModelInventoryConfirmed(false);
         workspaceEpochRef.current =
@@ -3723,8 +3728,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       ) {
         const incoming = readyPrimary as PrimaryRuntimeReadiness;
         const next = acceptPrimaryReadiness(primaryRuntimeRef.current, incoming);
-        primaryRuntimeRef.current = next;
-        setPrimaryRuntime(next);
+        publishPrimaryReadiness(next);
         const acceptedReady =
           next.status === "ready" &&
           next.generation === incoming.generation &&
@@ -3753,8 +3757,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         }
       }
       if (lifecycleFromEvent(ready) === "restarting") {
-        applicationLifecycleRef.current = "restarting";
-        setApplicationLifecycle("restarting");
+        publishApplicationLifecycle("restarting");
         setNotice("Pi Chat 正在构建并重启，暂时停止接收新操作…");
         source.close();
         handoffWaitRef.current ||= api
@@ -3768,8 +3771,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       }
       const readyLifecycle = lifecycleFromEvent(ready);
       if (readyLifecycle !== "idle") {
-        applicationLifecycleRef.current = readyLifecycle;
-        setApplicationLifecycle(readyLifecycle);
+        publishApplicationLifecycle(readyLifecycle);
         if (readyLifecycle === "shutting-down") {
           source.close();
           setCloseComplete("application");
@@ -4728,7 +4730,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
             next.status !== current.status ||
             next.error !== current.error;
           if (acceptedTransition) {
-            primaryRuntimeRef.current = next;
+            publishPrimaryReadiness(next);
             // A new startup or failure invalidates the preceding generation's
             // ModelInfo.input assertion before a later ready can paint.
             if (next.status !== "ready") {
@@ -4752,7 +4754,6 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
                   });
               }
             }
-            setPrimaryRuntime(next);
             // Ready is now an adopted state/capability snapshot, not a request
             // to issue another bootstrap/get_state. Update only the exact
             // visible Primary pane or local draft; cold/Secondary panes keep
@@ -4825,8 +4826,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         } else if (lifecycle === "idle") {
           resourceReloadActiveRef.current = false;
         }
-        applicationLifecycleRef.current = lifecycle;
-        setApplicationLifecycle(lifecycle);
+        publishApplicationLifecycle(lifecycle);
         if (lifecycle === "restarting")
           setNotice("Pi Chat 正在构建并重启，暂时停止接收新操作…");
         else if (lifecycle === "workspace-changing")
