@@ -93,6 +93,7 @@ import {
   isSessionScopedEvent,
 } from "./application/stream-events";
 import { SessionNavigationCoordinator } from "./application/session-navigation-coordinator";
+import { acceptPrimaryReadiness } from "./application/runtime-readiness";
 import {
   applyAppearance,
   loadAppearance,
@@ -431,21 +432,6 @@ export function sessionViewConfirmsIdle(view: SessionViewData): boolean {
     && view.session.running !== true
     && !view.liveMessage
     && !view.toolStatus;
-}
-
-/** Ignore older generations and same-generation startup snapshots that arrive after a terminal SSE state. */
-function newerPrimaryReadiness(
-  current: PrimaryRuntimeReadiness,
-  incoming: PrimaryRuntimeReadiness,
-): PrimaryRuntimeReadiness {
-  if (incoming.generation > current.generation) return incoming;
-  if (incoming.generation < current.generation) return current;
-  if (incoming.status === "starting" && current.status !== "starting")
-    return current;
-  // SSE/legacy snapshots may omit adopted model/session fields. Equal-generation
-  // frames refine one readiness record; they must never erase capability proof
-  // that came from the controller's atomic adoption.
-  return { ...current, ...incoming };
 }
 
 function forkableUserMessageText(message: PiMessage): string {
@@ -2362,7 +2348,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         status: "starting" as const,
         generation: 0,
       };
-      const acceptedReadiness = newerPrimaryReadiness(
+      const acceptedReadiness = acceptPrimaryReadiness(
         primaryRuntimeRef.current,
         readiness,
       );
@@ -3736,7 +3722,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         typeof readyPrimary.generation === "number"
       ) {
         const incoming = readyPrimary as PrimaryRuntimeReadiness;
-        const next = newerPrimaryReadiness(primaryRuntimeRef.current, incoming);
+        const next = acceptPrimaryReadiness(primaryRuntimeRef.current, incoming);
         primaryRuntimeRef.current = next;
         setPrimaryRuntime(next);
         const acceptedReady =
@@ -4736,7 +4722,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         ) {
           const incoming = readiness as PrimaryRuntimeReadiness;
           const current = primaryRuntimeRef.current;
-          const next = newerPrimaryReadiness(current, incoming);
+          const next = acceptPrimaryReadiness(current, incoming);
           const acceptedTransition =
             next.generation !== current.generation ||
             next.status !== current.status ||
