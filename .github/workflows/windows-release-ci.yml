@@ -34,12 +34,19 @@ jobs:
       - run: npm run verify:unit
       - run: npm run verify:e2e
       - name: Verify release artifact
+        env:
+          PI_CHAT_RELEASE_MODE: "0"
+          PI_CHAT_RELEASE_TAG: ""
+          PI_CHAT_BUILD_REVISION: ""
         run: npm run verify:artifact
       - name: Build and package release candidate
         shell: pwsh
         run: |
-          $stage = Join-Path $env:RUNNER_TEMP "pi-chat-release-dist"
-          $output = Join-Path $env:RUNNER_TEMP "pi-chat-release-output"
+          $env:TEMP = $env:RUNNER_TEMP
+          $env:TMP = $env:RUNNER_TEMP
+          $nodeTemp = (node -e "process.stdout.write(require('node:os').tmpdir())").TrimEnd('\')
+          $stage = Join-Path $nodeTemp "pi-chat-release-dist"
+          $output = Join-Path $nodeTemp "pi-chat-release-output"
           Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
           Remove-Item -LiteralPath $output -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path $stage, $output | Out-Null
