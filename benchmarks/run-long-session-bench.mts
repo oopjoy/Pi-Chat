@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { messageWindow } from "../src/server/pi-data.js";
 import { SessionIndex, readSessionSnapshot } from "../src/server/session-index.js";
+import { MAX_SESSION_SNAPSHOT_BYTES } from "../src/server/session-projection.js";
 import { FIXTURE_SCENARIOS, generateFixture, type FixtureManifest, type FixtureScenario } from "./long-session-fixtures.mjs";
 
 export interface TimingSummary {
@@ -141,6 +142,11 @@ export async function runLongSessionBenchmark(options: {
   const minimumBytes = options.minimumBytes === undefined
     ? undefined
     : Math.max(1, Math.floor(options.minimumBytes));
+  if (minimumBytes !== undefined && minimumBytes > MAX_SESSION_SNAPSHOT_BYTES) {
+    throw new Error(
+      `The full-snapshot benchmark supports at most ${Math.round(MAX_SESSION_SNAPSHOT_BYTES / (1024 * 1024))} MiB; use a bounded-tail benchmark for larger fixtures`,
+    );
+  }
   const root = await mkdtemp(join(tmpdir(), "pi-chat-long-session-bench-"));
   const fixtureRoot = join(root, "sessions");
   const fixtures: FixtureManifest[] = [];
@@ -152,6 +158,11 @@ export async function runLongSessionBenchmark(options: {
     const measurements: ServerBenchmarkResult["measurements"] = [];
     let cacheSequence = 0;
     for (const fixture of fixtures) {
+      if (fixture.bytes > MAX_SESSION_SNAPSHOT_BYTES) {
+        throw new Error(
+          `Fixture ${fixture.fixtureName} is ${Math.round(fixture.bytes / (1024 * 1024))} MiB, above the ${Math.round(MAX_SESSION_SNAPSHOT_BYTES / (1024 * 1024))} MiB full-snapshot limit; use a bounded-tail benchmark for larger fixtures`,
+        );
+      }
       const isolatedRoot = join(root, `isolated-${fixture.scenario}`);
       const isolatedFixturePath = join(isolatedRoot, fixture.fixtureName);
       await generateFixture({ scenario: fixture.scenario, outputPath: isolatedFixturePath, minimumBytes: fixture.minimumBytes ?? undefined });

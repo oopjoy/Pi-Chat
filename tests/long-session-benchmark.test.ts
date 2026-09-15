@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { SessionIndex, readSessionSnapshot } from "../src/server/session-index";
+import { MAX_SESSION_SNAPSHOT_BYTES } from "../src/server/session-projection";
 import { generateFixture, validateFixture } from "../benchmarks/long-session-fixtures.mts";
 import { browserScenarioContract, normalizedMaxRssBytes, runLongSessionBenchmark, summarizeTimings } from "../benchmarks/run-long-session-bench.mts";
 import { compareLongSessionBaselines } from "../benchmarks/compare-long-session-baselines.mts";
@@ -95,6 +96,17 @@ test("1000-turn and content scenarios expose their requested benchmark dimension
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("full-snapshot benchmark rejects targets beyond the production memory guard", async () => {
+  await assert.rejects(
+    runLongSessionBenchmark({
+      scenarios: ["ordinary-50mib"],
+      minimumBytes: MAX_SESSION_SNAPSHOT_BYTES + 1,
+      iterations: 1,
+    }),
+    /full-snapshot benchmark supports at most 128 MiB/,
+  );
 });
 
 test("benchmark output schema is machine-readable and descriptive-only", async () => {
