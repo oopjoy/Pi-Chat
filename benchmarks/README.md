@@ -46,6 +46,18 @@ Run a focused, faster server scenario:
 node --import tsx benchmarks/run-long-session-bench.mts --scenario thousand-user-turns --iterations 1 --output ./tmp/1000-turns.json
 ```
 
+Record the $128$ MiB, $256$ MiB, or $512$ MiB server-side Session baseline with a padded deterministic fixture. This uses a private OS-temporary directory; it does not read a personal Session or use `dist`:
+
+```sh
+node --import tsx benchmarks/run-long-session-bench.mts --scenario ordinary-50mib --minimum-bytes 134217728 --iterations 3 --output ./tmp/long-session-128mib.json
+```
+
+The result records the Node runner peak RSS in bytes and cache-miss/cache-hit timing separately. RSS is process-level evidence for the runner, not a claim of total Pi Chat or browser memory. Compare two like-for-like results only when their fixture byte counts match; comparison is descriptive and deliberately never exits nonzero for a timing regression:
+
+```sh
+node --import tsx benchmarks/compare-long-session-baselines.mts --baseline ./tmp/long-session-128mib-before.json --candidate ./tmp/long-session-128mib-after.json --output ./tmp/long-session-comparison.json
+```
+
 Run the real Chromium fluency lane against an already-built staging dist:
 
 ```sh

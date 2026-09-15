@@ -19,7 +19,13 @@ export interface ServerBenchmarkResult {
   schemaVersion: 2;
   benchmark: "pi-chat-long-session";
   generatedAt: string;
-  environment: { node: string; platform: NodeJS.Platform; arch: string };
+  environment: {
+    node: string;
+    platform: NodeJS.Platform;
+    arch: string;
+    /** Node resourceUsage().maxRSS normalized to bytes. */
+    runnerPeakRssBytes: number;
+  };
   baselinePolicy: "descriptive-only";
   fixtures: FixtureManifest[];
   measurements: Array<{
@@ -99,6 +105,11 @@ function round(value: number): number {
   return Math.round(value * 1_000) / 1_000;
 }
 
+/** Node reports maxRSS in bytes on Windows and KiB on Unix platforms. */
+export function normalizedMaxRssBytes(maxRSS: number, platform = process.platform): number {
+  return platform === "win32" ? maxRSS : maxRSS * 1024;
+}
+
 export function summarizeTimings(samples: number[]): TimingSummary {
   if (!samples.length) throw new Error("At least one timing sample is required");
   const sorted = [...samples].sort((a, b) => a - b);
@@ -119,16 +130,24 @@ async function measure<T>(iterations: number, operation: () => Promise<T> | T): 
   return { summary: summarizeTimings(samples), value };
 }
 
-export async function runLongSessionBenchmark(options: { scenarios?: FixtureScenario[]; iterations?: number; outputPath?: string } = {}): Promise<ServerBenchmarkResult> {
+export async function runLongSessionBenchmark(options: {
+  scenarios?: FixtureScenario[];
+  iterations?: number;
+  minimumBytes?: number;
+  outputPath?: string;
+} = {}): Promise<ServerBenchmarkResult> {
   const scenarios = options.scenarios ?? [...FIXTURE_SCENARIOS];
   const iterations = Math.max(1, Math.floor(options.iterations ?? 3));
+  const minimumBytes = options.minimumBytes === undefined
+    ? undefined
+    : Math.max(1, Math.floor(options.minimumBytes));
   const root = await mkdtemp(join(tmpdir(), "pi-chat-long-session-bench-"));
   const fixtureRoot = join(root, "sessions");
   const fixtures: FixtureManifest[] = [];
   try {
     for (const scenario of scenarios) {
       const fixturePath = join(fixtureRoot, `${scenario}.jsonl`);
-      fixtures.push(await generateFixture({ scenario, outputPath: fixturePath }));
+      fixtures.push(await generateFixture({ scenario, outputPath: fixturePath, minimumBytes }));
     }
     const measurements: ServerBenchmarkResult["measurements"] = [];
     let cacheSequence = 0;
@@ -170,7 +189,12 @@ export async function runLongSessionBenchmark(options: { scenarios?: FixtureScen
       schemaVersion: 2,
       benchmark: "pi-chat-long-session",
       generatedAt: new Date().toISOString(),
-      environment: { node: process.version, platform: process.platform, arch: process.arch },
+      environment: {
+        node: process.version,
+        platform: process.platform,
+        arch: process.arch,
+        runnerPeakRssBytes: normalizedMaxRssBytes(process.resourceUsage().maxRSS),
+      },
       baselinePolicy: "descriptive-only",
       fixtures,
       measurements,
@@ -204,22 +228,24 @@ export function printSummary(result: ServerBenchmarkResult): void {
   }
 }
 
-function parseArgs(argv: string[]): { scenarios?: FixtureScenario[]; iterations?: number; outputPath?: string } {
-  const result: { scenarios?: FixtureScenario[]; iterations?: number; outputPath?: string } = {};
+function parseArgs(argv: string[]): { scenarios?: FixtureScenario[]; iterations?: number; minimumBytes?: number; outputPath?: string } {
+  const result: { scenarios?: FixtureScenario[]; iterations?: number; minimumBytes?: number; outputPath?: string } = {};
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--output") result.outputPath = argv[++index];
     else if (argument === "--iterations") result.iterations = Number(argv[++index]);
+    else if (argument === "--minimum-bytes") result.minimumBytes = Number(argv[++index]);
     else if (argument === "--scenario") {
       const scenario = argv[++index] as FixtureScenario;
       if (!FIXTURE_SCENARIOS.includes(scenario)) throw new Error(`Unknown scenario: ${scenario}`);
       result.scenarios = [...(result.scenarios ?? []), scenario];
     } else if (argument === "--help") {
-      console.log("Usage: node --import tsx benchmarks/run-long-session-bench.mts [--scenario NAME] [--iterations N] [--output result.json]");
+      console.log("Usage: node --import tsx benchmarks/run-long-session-bench.mts [--scenario NAME] [--iterations N] [--minimum-bytes N] [--output result.json]");
       process.exit(0);
     } else throw new Error(`Unknown argument: ${argument}`);
   }
   if (result.iterations !== undefined && (!Number.isFinite(result.iterations) || result.iterations < 1)) throw new Error("--iterations must be a positive number");
+  if (result.minimumBytes !== undefined && (!Number.isFinite(result.minimumBytes) || result.minimumBytes < 1)) throw new Error("--minimum-bytes must be a positive number");
   return result;
 }
 

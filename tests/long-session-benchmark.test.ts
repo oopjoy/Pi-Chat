@@ -5,7 +5,8 @@ import { join } from "node:path";
 import test from "node:test";
 import { SessionIndex, readSessionSnapshot } from "../src/server/session-index";
 import { generateFixture, validateFixture } from "../benchmarks/long-session-fixtures.mts";
-import { browserScenarioContract, runLongSessionBenchmark, summarizeTimings } from "../benchmarks/run-long-session-bench.mts";
+import { browserScenarioContract, normalizedMaxRssBytes, runLongSessionBenchmark, summarizeTimings } from "../benchmarks/run-long-session-bench.mts";
+import { compareLongSessionBaselines } from "../benchmarks/compare-long-session-baselines.mts";
 
 test("long-session generator emits deterministic scenario shape and valid JSONL", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-benchmark-shape-"));
@@ -105,6 +106,7 @@ test("benchmark output schema is machine-readable and descriptive-only", async (
     assert.equal(stored.schemaVersion, 2);
     assert.equal(stored.benchmark, "pi-chat-long-session");
     assert.equal(stored.baselinePolicy, "descriptive-only");
+    assert.ok(stored.environment.runnerPeakRssBytes > 0);
     assert.equal(stored.measurements.length, 1);
     assert.equal(stored.measurements[0].scenario, "thousand-user-turns");
     assert.equal(stored.measurements[0].userTurns, 1_000);
@@ -125,9 +127,22 @@ test("benchmark output schema is machine-readable and descriptive-only", async (
   }
 });
 
-test("timing summary and browser metric contract remain stable", () => {
+test("timing summary, RSS normalization, and browser metric contract remain stable", () => {
   assert.deepEqual(summarizeTimings([3, 1, 2, 4]), { iterations: 4, minMs: 1, medianMs: 2.5, meanMs: 2.5, maxMs: 4 });
+  assert.equal(normalizedMaxRssBytes(100, "win32"), 100);
+  assert.equal(normalizedMaxRssBytes(100, "linux"), 102_400);
   assert.equal(browserScenarioContract.metricDefinitions.domNodeCount.includes("getElementsByTagName"), true);
   assert.equal(browserScenarioContract.metricDefinitions.longTasks.includes("PerformanceObserver"), true);
   assert.equal(browserScenarioContract.metricDefinitions.heapBytes.includes("usedJSHeapSize"), true);
+});
+
+test("long-session comparison reports like-for-like descriptive deltas", async () => {
+  const baseline = await runLongSessionBenchmark({ scenarios: ["thousand-user-turns"], iterations: 1 });
+  const candidate = structuredClone(baseline);
+  candidate.environment.runnerPeakRssBytes += 512;
+  candidate.measurements[0].parseSnapshot.medianMs += 2;
+  const comparison = compareLongSessionBaselines(baseline, candidate);
+  assert.equal(comparison.baselinePolicy, "descriptive-only");
+  assert.equal(comparison.runnerPeakRssBytesDelta, 512);
+  assert.deepEqual(comparison.scenarios[0].medianMs.parseSnapshot.delta, 2);
 });
