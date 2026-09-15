@@ -9,6 +9,7 @@ import {
   reconcilePersistedHistory,
 } from "../shared/streaming-assistant.js";
 import { compareSessionsByLastUserPrompt } from "../shared/session-order.js";
+import { classifyNativeRetryEvent } from "../shared/retry-lifecycle.js";
 import { MAX_PROMPT_IMAGES_ENCODED_BYTES } from "../shared/rpc-contracts.js";
 import type { PromptEvidenceFactKind } from "../shared/prompt-evidence.js";
 import { decodeCanonicalMessageEndPayload } from "../shared/runtime-events.js";
@@ -1453,56 +1454,60 @@ export class PiChatApp {
       ...(failure.incidentId ? { incidentId: failure.incidentId } : null),
       ...(retryAttempt !== undefined ? { retryAttempt } : null),
     });
-    if (event.type === "auto_retry_start") {
-      const attempt = typeof event.attempt === "number" && Number.isSafeInteger(event.attempt) && event.attempt > 0 ? event.attempt : undefined;
-      if (attempt === undefined) return;
+    const retry = classifyNativeRetryEvent(event);
+    if (retry?.kind === "scheduled") {
       const raw = typeof event.errorMessage === "string" ? event.errorMessage : "模型请求失败";
       const failure = normalizePromptFailure(raw, {
         provider: route.provider,
         model: route.modelId,
         api: route.api,
-        retryAttempts: attempt,
+        retryAttempts: retry.attempt,
       });
       active.retryPending = true;
-      active.retryAttempt = attempt;
+      active.retryAttempt = retry.attempt;
       active.failure = failure;
-      const delayMs = typeof event.delayMs === "number" ? event.delayMs : undefined;
-      const maxAttempts = typeof event.maxAttempts === "number" ? event.maxAttempts : undefined;
-      recordRetryFact("retry-scheduled", attempt, maxAttempts, delayMs);
-      this.broadcast({ type: "pi_chat_prompt_retry_scheduled", ...lifecycleFor(failure, attempt), ...(delayMs !== undefined ? { delayMs } : null), ...(maxAttempts !== undefined ? { maxAttempts } : null) });
+      recordRetryFact(
+        "retry-scheduled",
+        retry.attempt,
+        retry.maxAttempts,
+        retry.delayMs,
+      );
+      this.broadcast({
+        type: "pi_chat_prompt_retry_scheduled",
+        ...lifecycleFor(failure, retry.attempt),
+        ...(retry.delayMs !== undefined ? { delayMs: retry.delayMs } : null),
+        ...(retry.maxAttempts !== undefined ? { maxAttempts: retry.maxAttempts } : null),
+      });
       return;
     }
-    if (event.type === "auto_retry_end") {
+    if (retry?.kind === "completed" || retry?.kind === "inconclusive" || retry?.kind === "exhausted") {
       active.retryPending = false;
-      const attempt = typeof event.attempt === "number" && Number.isSafeInteger(event.attempt) && event.attempt > 0 ? event.attempt : active.retryAttempt;
-      if (event.success === true) {
+      if (retry.kind === "completed" || retry.kind === "inconclusive") {
+        // A failed native retry without its terminal reason is delivery
+        // evidence, not proof of exhaustion or cancellation. Wait for the
+        // authoritative process-error/assistant-error event instead of
+        // inventing a UI terminal.
         active.failure = undefined;
         active.retryExhausted = false;
         return;
       }
-      const finalError = typeof event.finalError === "string" && event.finalError.trim()
-        ? event.finalError
-        : undefined;
-      // A failed native retry without its terminal reason is delivery evidence,
-      // not proof of exhaustion or cancellation. Wait for the authoritative
-      // process-error/assistant-error event instead of inventing a UI terminal.
-      if (!finalError) {
-        active.failure = undefined;
-        active.retryExhausted = false;
-        return;
-      }
+      const finalError = event.finalError as string;
       const failure = normalizePromptFailure(finalError, {
         provider: route.provider,
         model: route.modelId,
         api: route.api,
-        retryAttempts: attempt,
+        retryAttempts: retry.attempt,
       });
       active.failure = failure;
       active.retryExhausted = true;
-      recordRetryFact("retry-exhausted", attempt);
+      recordRetryFact("retry-exhausted", retry.attempt);
       if (!active.retryExhaustedPublished) {
         active.retryExhaustedPublished = true;
-        this.broadcast({ type: "pi_chat_prompt_retry_exhausted", ...lifecycleFor(failure, attempt), retryExhausted: true });
+        this.broadcast({
+          type: "pi_chat_prompt_retry_exhausted",
+          ...lifecycleFor(failure, retry.attempt),
+          retryExhausted: true,
+        });
       }
       return;
     }

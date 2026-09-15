@@ -450,6 +450,39 @@ test("native retry false completion without finalError is not published as exhau
   }
 });
 
+test("malformed native retry envelopes are ignored before lifecycle projection", async () => {
+  const target = await fixture();
+  const internals = target.app as unknown as {
+    broadcast: (event: Record<string, unknown>) => void;
+    promptRpcObserver: (rpc: unknown, sessionId: string, promptId: string) => unknown;
+    broadcastPromptFailureLifecycle: (sessionId: string, event: Record<string, unknown>, runGeneration: number, rpcGeneration: number) => void;
+    activePromptDiagnostics: Map<string, { promptId: string; rpcGeneration: number; retryPending?: boolean }>;
+  };
+  const captured: Record<string, unknown>[] = [];
+  const originalBroadcast = internals.broadcast;
+  internals.broadcast = (event) => { captured.push(event); };
+  try {
+    internals.promptRpcObserver({}, target.id, "prompt-malformed-retry");
+    internals.broadcastPromptFailureLifecycle(target.id, {
+      type: "auto_retry_start", attempt: 0, maxAttempts: 3,
+    }, 2, 1);
+    internals.broadcastPromptFailureLifecycle(target.id, {
+      type: "auto_retry_start", attempt: "1", maxAttempts: 3,
+    }, 2, 1);
+    internals.broadcastPromptFailureLifecycle(target.id, {
+      type: "auto_retry_end", success: false, finalError: "should be ignored",
+    }, 2, 1);
+    internals.broadcastPromptFailureLifecycle(target.id, {
+      type: "auto_retry_end", success: "true", attempt: 1,
+    }, 2, 1);
+    assert.deepEqual(captured, [], "malformed retry facts must not create browser lifecycle events");
+    assert.equal(internals.activePromptDiagnostics.get(target.id)?.retryPending, undefined);
+  } finally {
+    internals.broadcast = originalBroadcast;
+    await target.close();
+  }
+});
+
 test("current process failure settles and clears active prompt diagnostics", async () => {
   const target = await fixture();
   try {
