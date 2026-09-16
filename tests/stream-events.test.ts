@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { admitStreamEvent, invalidatesSessionViewVersion, isSessionScopedEvent } from "../src/web/application/stream-events";
+import {
+  admitStreamEvent,
+  invalidatesSessionViewVersion,
+  isSessionScopedEvent,
+  SESSION_VIEW_INVALIDATING_EVENT_TYPES,
+} from "../src/web/application/stream-events";
 
 function frame(value: unknown): Event {
   return { data: JSON.stringify(value) } as Event;
@@ -40,4 +45,11 @@ test("global stream frames remain unscoped while lifecycle frames invalidate Ses
   assert.equal(isSessionScopedEvent("message_update"), true);
   assert.equal(invalidatesSessionViewVersion("message_delta"), true);
   assert.equal(invalidatesSessionViewVersion("pi_chat_heartbeat"), false);
+});
+
+test("every Session-view invalidator remains Session-scoped", () => {
+  for (const type of SESSION_VIEW_INVALIDATING_EVENT_TYPES) {
+    assert.equal(isSessionScopedEvent(type), true, `${type} must carry Session scope`);
+    assert.equal(invalidatesSessionViewVersion(type), true);
+  }
 });
