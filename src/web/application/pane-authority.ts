@@ -44,6 +44,17 @@ export function canCommitPaneAuthority(
     && current.draftGeneration === authority.draftGeneration;
 }
 
+/**
+ * A stale navigation result may update the same-process cache, but a result
+ * from a replaced Runtime/process must not re-enter the new cache authority.
+ */
+export function canRememberPaneView(
+  authority: PaneAuthority,
+  currentRunEpochGeneration: number,
+): boolean {
+  return currentRunEpochGeneration === authority.runEpochGeneration;
+}
+
 /** Draft commits use the same lifecycle fences but intentionally have no Session ID. */
 export function canCommitDraftPaneAuthority(
   authority: DraftPaneAuthority,

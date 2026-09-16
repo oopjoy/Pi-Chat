@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   canCommitDraftPaneAuthority,
   canCommitPaneAuthority,
+  canRememberPaneView,
   type DraftPaneAuthority,
   type DraftPaneAuthorityState,
   type PaneAuthoritySnapshot,
@@ -70,6 +71,12 @@ test("pane authority rejects stale A to B to A continuations", () => {
 test("pane authority rejects an authority that was captured before its own desired target", () => {
   assert.equal(canCommitPaneAuthority(sessionAuthority({ desiredSessionId: "session-b" }), currentSession()), false);
   assert.equal(canCommitPaneAuthority(sessionAuthority({ sessionId: "" }), currentSession()), false);
+});
+
+test("a same-process stale navigation may update cache but a replacement result may not", () => {
+  const authority = sessionAuthority();
+  assert.equal(canRememberPaneView(authority, authority.runEpochGeneration), true);
+  assert.equal(canRememberPaneView(authority, authority.runEpochGeneration + 1), false);
 });
 
 test("draft authority accepts only the current draft generation and revision", () => {

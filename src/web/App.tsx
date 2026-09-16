@@ -96,6 +96,7 @@ import { SessionNavigationCoordinator } from "./application/session-navigation-c
 import {
   canCommitDraftPaneAuthority,
   canCommitPaneAuthority,
+  canRememberPaneView,
   type DraftPaneAuthority,
   type PaneAuthority,
   type PaneAuthoritySnapshot,
@@ -5425,7 +5426,8 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
                 if (!versionUnchanged) return;
                 if (paneAuthorityCanCommit(authority))
                   applySessionView(view, authority, queueRequestRevision);
-                else rememberSessionView(view);
+                else if (canRememberPaneView(authority, runEpochGenerationRef.current))
+                  rememberSessionView(view);
               })
               .catch(() => undefined);
           }
@@ -5505,7 +5507,8 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
                 if (!versionUnchanged) return;
                 if (paneAuthorityCanCommit(authority))
                   applySessionView(view, authority, queueRequestRevision);
-                else rememberSessionView(view);
+                else if (canRememberPaneView(authority, runEpochGenerationRef.current))
+                  rememberSessionView(view);
               })
               .catch(() => undefined);
           }
@@ -7327,7 +7330,8 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
               return;
             if (paneAuthorityCanCommit(authority))
               applySessionView(view, authority, queueRequestRevision);
-            else rememberSessionView(view);
+            else if (canRememberPaneView(authority, runEpochGenerationRef.current))
+              rememberSessionView(view);
           })
           .catch(() => undefined);
         scheduleSidebarRefresh();
