@@ -93,6 +93,13 @@ import {
   isSessionScopedEvent,
 } from "./application/stream-events";
 import { SessionNavigationCoordinator } from "./application/session-navigation-coordinator";
+import {
+  canCommitDraftPaneAuthority,
+  canCommitPaneAuthority,
+  type DraftPaneAuthority,
+  type PaneAuthority,
+  type PaneAuthoritySnapshot,
+} from "./application/pane-authority";
 import { acceptApplicationLifecycle } from "./application/application-lifecycle";
 import {
   acceptPrimaryReadiness,
@@ -316,19 +323,6 @@ function steeringClearedMessage(reason: string): string {
   }
 }
 
-type PaneAuthority = {
-  sessionId: string;
-  desiredSessionId: string;
-  runEpochGeneration: number;
-  navigationEpoch: number;
-  committedRevision: number;
-  draftGeneration: number;
-};
-
-type PaneAuthoritySnapshot = PaneAuthority & {
-  committedIdentity: ConversationPaneIdentity;
-};
-type DraftPaneAuthority = Omit<PaneAuthority, "sessionId" | "desiredSessionId">;
 /** Refresh metadata is valid only in this page, process, and navigation epoch. */
 type RefreshAuthority = Pick<
   PaneAuthority,
@@ -1922,18 +1916,25 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     [],
   );
   const paneAuthorityCanCommit = useCallback(
-    (authority: PaneAuthoritySnapshot) =>
-      Boolean(authority.sessionId) &&
-      authority.desiredSessionId === authority.sessionId &&
-      desiredSessionIdRef.current === authority.sessionId &&
-      runEpochGenerationRef.current === authority.runEpochGeneration &&
-      navigationEpochRef.current === authority.navigationEpoch &&
-      paneCommitRevisionRef.current === authority.committedRevision &&
-      committedPaneIdentityRef.current.kind ===
-        authority.committedIdentity.kind &&
-      committedPaneIdentityRef.current.sessionId ===
-        authority.committedIdentity.sessionId &&
-      draftGenerationRef.current === authority.draftGeneration,
+    (authority: PaneAuthoritySnapshot) => canCommitPaneAuthority(authority, {
+      sessionId: viewedSessionIdRef.current,
+      desiredSessionId: desiredSessionIdRef.current,
+      runEpochGeneration: runEpochGenerationRef.current,
+      navigationEpoch: navigationEpochRef.current,
+      committedRevision: paneCommitRevisionRef.current,
+      committedIdentity: committedPaneIdentityRef.current,
+      draftGeneration: draftGenerationRef.current,
+    }),
+    [],
+  );
+  const draftAuthorityCanCommit = useCallback(
+    (authority: DraftPaneAuthority) => canCommitDraftPaneAuthority(authority, {
+      runEpochGeneration: runEpochGenerationRef.current,
+      navigationEpoch: navigationEpochRef.current,
+      committedRevision: paneCommitRevisionRef.current,
+      committedIdentity: committedPaneIdentityRef.current,
+      draftGeneration: draftGenerationRef.current,
+    }),
     [],
   );
   const refreshAuthorityIsCurrent = useCallback(
@@ -1950,15 +1951,6 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       committedRevision: paneCommitRevisionRef.current,
       draftGeneration: draftGenerationRef.current,
     }),
-    [],
-  );
-  const draftAuthorityCanCommit = useCallback(
-    (authority: DraftPaneAuthority) =>
-      runEpochGenerationRef.current === authority.runEpochGeneration &&
-      navigationEpochRef.current === authority.navigationEpoch &&
-      draftGenerationRef.current === authority.draftGeneration &&
-      committedPaneIdentityRef.current.kind === "draft" &&
-      paneCommitRevisionRef.current === authority.committedRevision,
     [],
   );
 
