@@ -52,7 +52,16 @@ Record the $128$ MiB full-snapshot server-side Session baseline with a padded de
 node --import tsx benchmarks/run-long-session-bench.mts --scenario ordinary-50mib --minimum-bytes 134217728 --iterations 3 --output ./tmp/long-session-128mib.json
 ```
 
-The full-snapshot runner deliberately rejects fixtures larger than the production $128$ MiB `MAX_SESSION_SNAPSHOT_BYTES` contract. Do not pass $256$ MiB or $512$ MiB targets to this command; a separate bounded-tail benchmark is required for those sizes so the benchmark does not bypass the server's memory guard.
+The full-snapshot runner deliberately rejects fixtures larger than the production $128$ MiB `MAX_SESSION_SNAPSHOT_BYTES` contract. Do not pass $256$ MiB or $512$ MiB targets to this command; use the bounded-tail lane below so the benchmark does not bypass the server's memory guard.
+
+Measure a $256$ MiB or $512$ MiB Session through the production bounded recent-tail reader. The fixture puts a large deterministic history before a small recent suffix, and the runner verifies truncation, cumulative summary facts, exact persisted message identity, bounded bytes read, and four concurrent tail reads:
+
+```sh
+npm run benchmark:bounded-tail -- --minimum-bytes 268435456 --iterations 3 --output ./tmp/bounded-tail-256mib.json
+npm run benchmark:bounded-tail -- --minimum-bytes 536870912 --iterations 3 --output ./tmp/bounded-tail-512mib.json
+```
+
+This lane intentionally does not call the full `snapshotForId()` path for oversized files. It exercises `SessionIndex.recentSnapshotForId()`, which is the production bounded-tail contract for cold large Sessions. Results are descriptive and do not establish pass/fail thresholds.
 
 The result records the Node runner peak RSS in bytes and cache-miss/cache-hit timing separately. RSS is process-level evidence for the runner, not a claim of total Pi Chat or browser memory. Compare two like-for-like results only when their fixture byte counts match; comparison is descriptive and deliberately never exits nonzero for a timing regression:
 

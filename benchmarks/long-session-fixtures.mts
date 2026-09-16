@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { mkdir, open, readFile, stat } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
@@ -202,6 +203,12 @@ function encoded(record: JsonRecord): string {
   return `${JSON.stringify(record)}\n`;
 }
 
+async function fileSha256(path: string): Promise<string> {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(path)) hash.update(chunk);
+  return hash.digest("hex");
+}
+
 async function appendPadding(path: string, leafId: string, minimumBytes: number, startIndex: number): Promise<{ records: number; messages: number }> {
   const file = await open(path, "a");
   let current = (await file.stat()).size;
@@ -256,7 +263,7 @@ export async function generateFixture(options: FixtureOptions): Promise<FixtureM
     userTurns: shape.userTurns,
     toolCalls: shape.toolCalls,
     imageBlocks: shape.imageBlocks,
-    contentSha256: createHash("sha256").update(await readFile(outputPath)).digest("hex"),
+    contentSha256: await fileSha256(outputPath),
   };
 }
 

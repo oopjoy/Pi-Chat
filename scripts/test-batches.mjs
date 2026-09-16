@@ -28,6 +28,7 @@ export const BENCHMARK_TEST_PATHS = new Set([
   "tests/long-session-benchmark.test.ts",
   "tests/react-render-benchmark.test.ts",
   "tests/streaming-cadence-benchmark.test.ts",
+  "tests/bounded-tail-benchmark.test.ts",
 ]);
 
 const PROCESS_ISOLATION_PATHS = new Set([
