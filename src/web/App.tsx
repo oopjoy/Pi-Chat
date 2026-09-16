@@ -7435,15 +7435,16 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
                 view.queuePaused === true,
                 queueRequestRevision,
               );
-              rememberSessionView(
-                projection.known || projection.queue.length || projection.paused
-                  ? {
-                      ...view,
-                      queue: projection.queue,
-                      queuePaused: projection.paused,
-                    }
-                  : view,
-              );
+              if (canRememberPaneView(operation, runEpochGenerationRef.current))
+                rememberSessionView(
+                  projection.known || projection.queue.length || projection.paused
+                    ? {
+                        ...view,
+                        queue: projection.queue,
+                        queuePaused: projection.paused,
+                      }
+                    : view,
+                );
             }
           })
           .catch(() => undefined);
