@@ -68,6 +68,15 @@ export function processIsolatedTestFiles(files = sourceTestFiles()) {
   return files.filter(requiresProcessIsolation);
 }
 
+function manifestedTestFiles(discovered, manifest, label) {
+  const selected = discovered.filter((path) =>
+    manifest.has(repositoryRelativeTestPath(path)));
+  if (!selected.length) throw new Error(`No ${label} tests were discovered`);
+  if (selected.length !== manifest.size)
+    throw new Error(`The ${label} manifest does not match the discovered ${label} test set`);
+  return selected;
+}
+
 export function sourceTestFiles(discovered = discoverTestFiles()) {
   const source = discovered.filter((path) => {
     const relative = repositoryRelativeTestPath(path);
@@ -78,11 +87,26 @@ export function sourceTestFiles(discovered = discoverTestFiles()) {
 }
 
 export function benchmarkTestFiles(discovered = discoverTestFiles()) {
-  const benchmark = discovered.filter((path) => BENCHMARK_TEST_PATHS.has(repositoryRelativeTestPath(path)));
-  if (!benchmark.length) throw new Error("No benchmark tests were discovered");
-  if (benchmark.length !== BENCHMARK_TEST_PATHS.size)
-    throw new Error("The benchmark manifest does not match the discovered benchmark test set");
-  return benchmark;
+  return manifestedTestFiles(
+    discovered,
+    BENCHMARK_TEST_PATHS,
+    "benchmark",
+  );
+}
+
+export function artifactTestFiles(discovered = discoverTestFiles()) {
+  return manifestedTestFiles(
+    discovered,
+    ARTIFACT_TEST_PATHS,
+    "artifact",
+  );
+}
+
+export function testFilesForSuite(suite, discovered = discoverTestFiles()) {
+  if (suite === "source") return sourceTestFiles(discovered);
+  if (suite === "benchmark") return benchmarkTestFiles(discovered);
+  if (suite === "artifact") return artifactTestFiles(discovered);
+  throw new Error(`Unknown test suite: ${suite}`);
 }
 
 /**

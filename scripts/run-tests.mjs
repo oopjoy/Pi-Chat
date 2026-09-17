@@ -10,6 +10,7 @@ import {
   repositoryRoot,
   TestHarnessArgumentError,
 } from "./test-files.mjs";
+import { testFilesForSuite } from "./test-batches.mjs";
 
 // Keep the official test harness responsible for NODE_ENV=test: a few source
 // tests deliberately expose test-only hooks that must be impossible in Web
@@ -19,11 +20,25 @@ import {
 const originalArguments = process.argv.slice(2);
 let parsed;
 try {
-  parsed = parseTestArguments(originalArguments);
+  const suiteArguments = originalArguments.filter((argument) =>
+    argument.startsWith("--suite="));
+  if (suiteArguments.length > 1)
+    throw new TestHarnessArgumentError("--suite may be provided only once");
+  const suite = suiteArguments[0]?.slice("--suite=".length);
+  if (suite !== undefined && !["source", "benchmark", "artifact"].includes(suite))
+    throw new TestHarnessArgumentError(
+      "--suite must be source, benchmark, or artifact",
+    );
+  const harnessArguments = originalArguments.filter((argument) =>
+    !argument.startsWith("--suite="));
+  parsed = parseTestArguments(
+    harnessArguments,
+    suite ? testFilesForSuite(suite) : undefined,
+  );
 } catch (error) {
   if (!(error instanceof TestHarnessArgumentError)) throw error;
   console.error(`[Pi Chat] ${error.message}`);
-  console.error("Usage: node scripts/run-tests.mjs [--file tests/path/name.test.ts|--exclude-file tests/path/name.test.ts] [--test-name-pattern=<pattern>|--test-shard=<index>|--test-skip-pattern=<pattern>|--test-only]");
+  console.error("Usage: node scripts/run-tests.mjs [--suite=source|benchmark|artifact] [--file tests/path/name.test.ts|--exclude-file tests/path/name.test.ts] [--test-name-pattern=<pattern>|--test-shard=<index>|--test-skip-pattern=<pattern>|--test-only]");
   process.exit(2);
 }
 

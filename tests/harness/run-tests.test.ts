@@ -24,43 +24,69 @@ import {
 import {
   ARTIFACT_TEST_PATHS,
   BENCHMARK_TEST_PATHS,
+  artifactTestFiles,
   batchSummary,
   benchmarkTestFiles,
   partitionBenchmarkTests,
   partitionSourceTests,
   processIsolatedTestFiles,
   sourceTestFiles,
+  testFilesForSuite,
   verifySourcePartition,
 } from "../../scripts/test-batches.mjs";
 import { runSourceBatches } from "../../scripts/run-test-batches.mjs";
 
-test("source and benchmark lanes partition every discovered non-artifact file", () => {
+test("source, benchmark, and artifact lanes are disjoint and cover every test", () => {
   const discovered = discoverTestFiles();
   const source = sourceTestFiles(discovered);
   const benchmark = benchmarkTestFiles(discovered);
+  const artifact = artifactTestFiles(discovered);
+  const relative = (paths: string[]) =>
+    paths.map((path) => repositoryRelativeTestPath(path));
+  const sourceSet = new Set(relative(source));
+  const benchmarkSet = new Set(relative(benchmark));
+  const artifactSet = new Set(relative(artifact));
   const batches = partitionSourceTests(source, 20);
   const benchmarkBatches = partitionBenchmarkTests(benchmark, 5);
+
   assert.equal(batches.length, 20);
   assert.equal(benchmarkBatches.length, 5);
   assert.ok(batches.every((batch) => batch.length > 0));
   assert.equal(verifySourcePartition(batches.flat(), source), true);
   assert.equal(
-    batches.flat().some((path) => ARTIFACT_TEST_PATHS.has(repositoryRelativeTestPath(path))),
-    false,
-  );
-  assert.equal(
     batchSummary(batches).reduce((total, batch) => total + batch.tests, 0),
     source.reduce((total, path) => total + declaredTestNamePatterns(path).length, 0),
   );
+  for (const path of sourceSet) {
+    assert.equal(benchmarkSet.has(path), false, `${path} is in source and benchmark`);
+    assert.equal(artifactSet.has(path), false, `${path} is in source and artifact`);
+  }
+  for (const path of benchmarkSet)
+    assert.equal(artifactSet.has(path), false, `${path} is in benchmark and artifact`);
   assert.deepEqual(
-    new Set([...source, ...benchmark].map((path) => repositoryRelativeTestPath(path))),
-    new Set(discovered
-      .filter((path) => !ARTIFACT_TEST_PATHS.has(repositoryRelativeTestPath(path)))
-      .map((path) => repositoryRelativeTestPath(path))),
+    new Set([...sourceSet, ...benchmarkSet, ...artifactSet]),
+    new Set(relative(discovered)),
   );
-  assert.deepEqual(
-    new Set(benchmark.map((path) => repositoryRelativeTestPath(path))),
-    BENCHMARK_TEST_PATHS,
+  assert.deepEqual(benchmarkSet, BENCHMARK_TEST_PATHS);
+  assert.deepEqual(artifactSet, ARTIFACT_TEST_PATHS);
+  assert.equal(benchmarkSet.has("tests/bounded-tail-benchmark.test.ts"), true);
+  assert.equal(sourceSet.has("tests/bounded-tail-benchmark.test.ts"), false);
+  assert.deepEqual(relative(testFilesForSuite("source", discovered)), relative(source));
+  assert.deepEqual(relative(testFilesForSuite("benchmark", discovered)), relative(benchmark));
+  assert.deepEqual(relative(testFilesForSuite("artifact", discovered)), relative(artifact));
+});
+
+test("package scripts select source and artifact lanes from the shared manifest", async () => {
+  const packageJson = JSON.parse(
+    await readFile(join(repositoryRoot, "package.json"), "utf8"),
+  ) as { scripts: Record<string, string> };
+  assert.equal(
+    packageJson.scripts["test:source:single-process"],
+    "node scripts/run-tests.mjs --suite=source",
+  );
+  assert.equal(
+    packageJson.scripts["test:artifact"],
+    "node scripts/run-tests.mjs --suite=artifact",
   );
 });
 
