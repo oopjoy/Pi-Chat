@@ -131,7 +131,9 @@ The step 3 ownership boundary and staged migration are defined in [`frontend-sta
 
 | Module | Responsibility |
 |---|---|
-| `App.tsx` | UI state and business mapping of events |
+| `App.tsx` | Legacy integration boundary: API/SSE wiring, coordinator lifecycle connections, view composition, and migration glue; it is not a new domain authority |
+| `application/runtime-projection-writer.ts` | Sole browser write/freshness boundary for Primary readiness, confirmed capability evidence, and application lifecycle projections |
+| `application/session-view-cache-writer.ts` | Sole browser mutation boundary for Session-view cache entries, overlays, deletion fencing, and cache-generation invalidation |
 | `hooks/use-pi-event-source.ts` | EventSource lifecycle |
 | `hooks/use-live-message.ts` | Stream throttle |
 | `hooks/use-background-subagents.ts` | Abortable Session-scoped polling with bounded 500ms discovery retries, 750ms active cadence, 2s idle cadence, slower hidden-page cadence, and stale-row preservation on transient failure |
@@ -148,6 +150,7 @@ Prefer small hooks and pure libs over growing `App.tsx` further.
 
 - **Session view is the navigation authority.** A persisted JSONL Session can be opened and read while no corresponding Pi Runtime exists, while Primary is starting, or after Primary compatibility has failed.
 - Primary readiness is explicit (`starting` / `ready` / `failed`), not inferred from a spawned child process. Starting/failed read projections must issue zero Primary RPC requests.
+- Browser Primary readiness, confirmed capability evidence, and application lifecycle are projections admitted only by `RuntimeProjectionWriter`. Its process and projection generations fence replacement, resource reload, synchronous SSE observations, and asynchronous Bootstrap continuations; it does not own Runtime startup or ancillary Bootstrap metadata. See [`runtime-projection-writer-checkpoint.md`](runtime-projection-writer-checkpoint.md).
 - Compatibility is a process-wide capability of the configured local Pi launch plan: Primary is the single probe owner. The selected canonical entry path, backend, and child environment are resolved and frozen once per Pi Chat host, so Primary, Secondary, draft, and recovery clients never independently rediscover a different path or switch backend while the service remains alive. Replacing files inside a globally installed direct Pi path still requires a normal Pi Chat restart and is outside hot-update authority. A new or recovered Secondary therefore requires a ready Primary capability, but an already healthy Secondary remains independently usable if Primary later fails; Secondary startup still verifies its own `get_state` response.
 - Runtime acceleration never changes process ownership: every executing Session still has its own Node/Pi RPC child and its own confirmed-exit/duplicate-writer boundary. Pi Chat does not use Pi Web's in-process multi-Session SDK registry or a shared Runtime broker.
 - A bundled RPC entry is selected only when the installed Pi version, fixed build recipe/esbuild version, every esbuild bundled-input hash, and every generated output hash match the staged artifact. The transformed Extension loader uses Pi's bundled `VIRTUAL_MODULES` graph, so Extension imports share the active kernel rather than loading a second Pi API graph. Package-relative assets remain authoritative through the verified global `PI_PACKAGE_DIR`; image resize keeps a separately bundled worker and external Photon/WASM package. Any mismatch falls back to the frozen direct entry before a child starts.

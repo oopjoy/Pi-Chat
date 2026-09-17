@@ -64,7 +64,9 @@
 - **Pane projection** 必须经过上述 authority-checked pane commit API。
 - **Session-scoped feedback**（例如一个 Session 的 reconcile、Gate 自动放行反馈）不属于 reducer projection，但在 `setError` 或 `setNotice` 前必须验证同一 captured Pane authority。
 
-连接、application lifecycle 与 build identity 等 application-global feedback 不需要 Session pane authority。
+连接、application lifecycle 与 build identity 等 application-global feedback 不需要 Session pane authority。它们也不能因此无条件提交：Primary readiness、confirmed capability 与 application lifecycle 现在由独立的 `RuntimeProjectionWriter` 接纳，使用 `runEpochGeneration + runtimeProjectionGeneration` 判断异步 Bootstrap 是否仍新鲜。同步 SSE 的实际 projection 变化会推进后者；重复或 malformed fact 不推进。`SessionViewCacheWriter` 的 `cacheGeneration` 则独立保护 cache，三种 generation 不互相代替。
+
+Bootstrap coalescer 只允许 process/cache/Runtime generation 完全相同的 refresh 共用请求。Resource reload 或较新的 Runtime observation 之后，新 refresh 必须启动独立 Bootstrap，旧请求的 identity-guarded finalizer 也不能清掉新请求。完整契约和回归证据见 [`runtime-projection-writer-checkpoint.md`](runtime-projection-writer-checkpoint.md)。
 
 ### 已审计的异步调用点
 

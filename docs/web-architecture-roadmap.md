@@ -531,7 +531,8 @@ focused tests
 ```text
 Application state contract
 Session navigation/view authority baseline
-Session view cache ownership
+Session view cache ownership through `SessionViewCacheWriter`
+Primary readiness/capability/application lifecycle writes through `RuntimeProjectionWriter`
 Session view reader
 Stream transport lifecycle
 Stream event admission boundary
@@ -574,6 +575,30 @@ queue/retry executor
 React reducer
 SSE transport connection
 ```
+
+`e56ddcc` 完成当前 writer checkpoint：
+
+```text
+Session-view cache 只有一个 mutation façade
+Primary readiness / confirmed capability / application lifecycle 只有一个 browser writer
+process replacement 与 same-process Runtime projection 使用独立 generation
+Bootstrap coalescing 不能让旧 request 借用新 authority
+malformed lifecycle 不制造 idle 或任何 ready-frame side effect
+App.tsx 只保留 wiring / migration glue，不新增 domain authority
+```
+
+架构、验证与 `80aeac2 -> e56ddcc` 描述性性能 checkpoint 见
+[`runtime-projection-writer-checkpoint.md`](runtime-projection-writer-checkpoint.md)。
+
+下一有界阶段不是继续拆 `App.tsx`，而是：
+
+```text
+browser active-set revision fencing
+server hot Session-read operation admission / revalidation
+modelCatalogueRevision 的 HTTP/SSE 单调接纳
+```
+
+这三个事实不属于 `RuntimeProjectionWriter`，必须各自保留 owner 与 focused race test。
 
 P0/P1 执行矩阵见 [`docs/v0.4.7-stability-matrix.md`](v0.4.7-stability-matrix.md)。
 

@@ -69,6 +69,12 @@ The result records the Node runner peak RSS in bytes and cache-miss/cache-hit ti
 node --import tsx benchmarks/compare-long-session-baselines.mts --baseline ./tmp/long-session-128mib-before.json --candidate ./tmp/long-session-128mib-after.json --output ./tmp/long-session-comparison.json
 ```
 
+A retained checkpoint should stay outside the repository, record the exact
+source revision and command set, and include SHA-256 hashes for every result.
+Do not turn one small comparison into a release threshold. The concrete
+`80aeac2` to `e56ddcc` Runtime-projection checkpoint and its interpretation are
+recorded in [`docs/runtime-projection-writer-checkpoint.md`](../docs/runtime-projection-writer-checkpoint.md).
+
 Run the real Chromium fluency lane against an already-built staging dist:
 
 ```sh

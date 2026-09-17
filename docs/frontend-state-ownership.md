@@ -65,6 +65,30 @@ view commit; raw reducer dispatch is reserved for synchronous user intent and
 admitted SSE frames. This checkpoint does **not** authorize step 4 or further
 component extraction: the render boundaries remain frozen.
 
+## Post-3B writer convergence
+
+The later cache and Runtime projection checkpoints reduce writers without
+moving render state into another coordinator:
+
+- `SessionViewCacheWriter` is the only mutation façade for Session-view cache
+  data. Its cache generation and deletion guards are owner-side admission, so a
+  caller cannot re-authorize a stale prepared view.
+- `RuntimeProjectionWriter` is the only write façade for Primary readiness,
+  confirmed capability evidence, and application lifecycle. Its independent
+  projection generation fences same-process SSE/Bootstrap ordering while the
+  process generation fences service replacement.
+- Bootstrap request coalescing is authority-keyed. A held request can be shared
+  only by callers with the same process/cache/Runtime generations.
+- `App.tsx` wires those owners and renders their projections; it does not acquire
+  a new cache, Runtime lifecycle, retry, navigation, or recovery authority.
+
+The full Runtime contract, verification, descriptive before/after checkpoint,
+and explicit follow-up boundaries are recorded in
+[`runtime-projection-writer-checkpoint.md`](runtime-projection-writer-checkpoint.md).
+This convergence still does not make `App.tsx` mechanically splittable: the next
+work is the bounded active-Session projection and server hot-read admission
+phase, not another presentation extraction.
+
 The production-code watch set is `App.tsx`, `state/conversation-pane.ts`,
 `components/ConversationPane.tsx`, `components/SessionInventory.tsx`, and
 `components/AppShell.tsx`. Its line count is only an alarm; the acceptance
