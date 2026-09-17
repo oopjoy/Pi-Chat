@@ -109,6 +109,12 @@ import {
   RuntimeProjectionWriter,
   type RuntimeProjectionWriteAuthority,
 } from "./application/runtime-projection-writer";
+import {
+  ActiveSessionProjectionWriter,
+  type ActiveSessionDraftAuthority,
+  type ActiveSessionProjectionAuthority,
+  type ActiveSessionViewAuthority,
+} from "./application/active-session-projection-writer";
 import { isApplicationLifecycle } from "./application/application-lifecycle";
 import {
   applyAppearance,
@@ -332,9 +338,17 @@ function steeringClearedMessage(reason: string): string {
 type RefreshAuthority = Pick<
   PaneAuthority,
   "runEpochGeneration" | "cacheGeneration" | "navigationEpoch"
-> & Pick<RuntimeProjectionWriteAuthority, "runtimeProjectionGeneration"> & {
+> & Pick<RuntimeProjectionWriteAuthority, "runtimeProjectionGeneration">
+  & Pick<
+    ActiveSessionProjectionAuthority,
+    "activeSessionProjectionGeneration" | "activeSessionFullRevision"
+  > & {
   refreshEpoch: number;
 };
+type SessionViewCommitAuthority = PaneAuthoritySnapshot
+  & ActiveSessionViewAuthority;
+type DraftSessionViewCommitAuthority = DraftPaneAuthority
+  & ActiveSessionDraftAuthority;
 type ScheduledLiveMessage = {
   message: PiMessage;
   authority: PaneAuthoritySnapshot;
@@ -785,6 +799,20 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       (sessionId) => confirmedDeletedSessionIdsRef.current.has(sessionId),
     );
   const viewCacheWriter = viewCacheWriterRef.current;
+  const activeSessionProjectionWriterRef =
+    useRef<ActiveSessionProjectionWriter | null>(null);
+  if (!activeSessionProjectionWriterRef.current)
+    activeSessionProjectionWriterRef.current =
+      new ActiveSessionProjectionWriter(
+        (ids) => {
+          setActiveSessionIds(ids);
+          viewCacheWriter.setPinnedCurrent(ids);
+          setSessions((current) => applyActiveSessionIds(current, ids));
+        },
+        () => runEpochGenerationRef.current,
+      );
+  const activeSessionProjectionWriter =
+    activeSessionProjectionWriterRef.current;
   // Queue projections are event-owned and may be newer than an HTTP view. This
   // preparation callback runs only after the writer accepts process/deletion
   // authority, so a rejected async result cannot mutate queue projections.
@@ -1325,6 +1353,8 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     runEpochGeneration: number;
     cacheGeneration: number;
     runtimeProjectionGeneration: number;
+    activeSessionProjectionGeneration: number;
+    activeSessionFullRevision: number;
   } | null>(null);
   const handshakeInFlightRef = useRef<{
     refreshEpoch: number;
@@ -1501,6 +1531,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     busySessionCountsRef.current.clear();
     setBusySessionIds([]);
     runtimeProjectionWriter.resetForResourceReload();
+    activeSessionProjectionWriter.resetForReplacement();
     setModelInventoryConfirmed(false);
   }, [syncMutatingSessionIds]);
   const recordSourceTurnTotal = (sessionId: string, total: number): void => {
@@ -1911,10 +1942,16 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
    * A → B → A, an old A request must not replace the newer A pane.
    */
   const capturePaneAuthority = useCallback(
-    (sessionId = viewedSessionIdRef.current): PaneAuthoritySnapshot => ({
+    (
+      sessionId = viewedSessionIdRef.current,
+    ): SessionViewCommitAuthority => ({
       sessionId,
       desiredSessionId: desiredSessionIdRef.current,
       ...viewCacheWriter.captureAuthority(runEpochGenerationRef.current),
+      ...activeSessionProjectionWriter.captureViewAuthority(
+        runEpochGenerationRef.current,
+        sessionId,
+      ),
       navigationEpoch: navigationEpochRef.current,
       committedRevision: paneCommitRevisionRef.current,
       committedIdentity: committedPaneIdentityRef.current,
@@ -1949,12 +1986,16 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       refreshEpochRef.current === authority.refreshEpoch &&
       viewCacheWriter.isCurrent(authority) &&
       runtimeProjectionWriter.isCurrent(authority) &&
+      activeSessionProjectionWriter.isCurrent(authority) &&
       navigationEpochRef.current === authority.navigationEpoch,
     [],
   );
   const captureDraftPaneAuthority = useCallback(
-    (): DraftPaneAuthority => ({
+    (): DraftSessionViewCommitAuthority => ({
       ...viewCacheWriter.captureAuthority(runEpochGenerationRef.current),
+      ...activeSessionProjectionWriter.captureDraftAuthority(
+        runEpochGenerationRef.current,
+      ),
       navigationEpoch: navigationEpochRef.current,
       committedRevision: paneCommitRevisionRef.current,
       draftGeneration: draftGenerationRef.current,
@@ -2303,7 +2344,8 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   const applyBootstrapMetadata = useCallback(
     (
       data: BootstrapData,
-      authority?: RuntimeProjectionWriteAuthority,
+      authority?: RuntimeProjectionWriteAuthority
+        & ActiveSessionProjectionAuthority,
     ) => {
       applySidebarInventory(data);
       if (authority) {
@@ -2327,10 +2369,11 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         data.sessions.find((session) => session.active)?.id ||
         "";
       rememberConfirmedCommands(data.commands);
-      setActiveSessionId(activeId);
-      const hotIds = data.activeSessionIds || (activeId ? [activeId] : []);
-      setActiveSessionIds(hotIds);
-      viewCacheWriter.setPinnedCurrent(hotIds);
+      if (authority) {
+        setActiveSessionId(activeId);
+        const hotIds = data.activeSessionIds || (activeId ? [activeId] : []);
+        activeSessionProjectionWriter.commitBootstrap(hotIds, authority);
+      }
       // A recovering Runtime can briefly return an empty model inventory while
       // its selected Session model is already known. Retain the last usable
       // choices through that transient snapshot. A selected model alone is not
@@ -2689,7 +2732,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   const applySessionView = useCallback(
     (
       view: SessionViewData,
-      authority: ReturnType<typeof capturePaneAuthority> | DraftPaneAuthority,
+      authority: SessionViewCommitAuthority | DraftSessionViewCommitAuthority,
       queueRequestRevision?: number,
     ) => {
       recordBrowserStateDiagnostic("projection", "session-view-received", {
@@ -2742,20 +2785,43 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           decisionReason: "accepted",
         },
       });
+      // Browser cache entries carry historical Runtime facts. A fresh pane
+      // authority may select their transcript, but it must never launder cached
+      // `isActive` back into the server-owned hot Session projection.
+      const activeDecision = view.viewSource === "browser-cache"
+        ? activeSessionProjectionWriter.projectSessionView(view.session.id)
+        : activeSessionProjectionWriter.reconcileSessionView(
+            view.session.id,
+            view.isActive,
+            authority,
+          );
+      const activeNormalizedView: SessionViewData = {
+        ...view,
+        session: {
+          ...view.session,
+          writable: activeDecision.active,
+        },
+        isActive: activeDecision.active,
+        runtimeStatus: activeDecision.active
+          ? view.runtimeStatus === "view-only"
+            ? "active"
+            : view.runtimeStatus
+          : "view-only",
+      };
       // A compaction_end or settlement frame is terminal for the preceding UI
       // phase. Hot-memory views may still contain both `isCompacting: true` and
       // the pre-compaction tool's terminal label; neither may relock the composer
       // or resurrect a misleading “bash completed” banner. A later agent/tool
       // start clears this fence before its new status is admitted.
       const normalizedView = completedCompactionSessionIdsRef.current.has(
-        view.session.id,
+        activeNormalizedView.session.id,
       )
         ? {
-            ...view,
+            ...activeNormalizedView,
             toolStatus: "",
-            state: { ...view.state, isCompacting: false },
+            state: { ...activeNormalizedView.state, isCompacting: false },
           }
-        : view;
+        : activeNormalizedView;
       // Cache the source view before adding local UI overlays. A cached overlay has
       // a synthetic turnTotal and must never confirm that its own user message was
       // persisted when the user switches away and returns.
@@ -2963,10 +3029,12 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       // Session may restore before bootstrap; update an existing row, but do not
       // turn that one restored pane into a fake one-item sidebar. Addressed
       // Subagent transcripts are never ordinary inventory, even when non-empty.
-      const isSubagentView = subagentAddressesRef.current.has(view.session.id);
-      if (!isSubagentView && view.session.messageCount > 0) {
+      const isSubagentView = subagentAddressesRef.current.has(
+        resolvedView.session.id,
+      );
+      if (!isSubagentView && resolvedView.session.messageCount > 0) {
         const summary = applyLocalTurnCount(
-          normalizeSessionRunning(view.session),
+          normalizeSessionRunning(resolvedView.session),
         );
         setSessions((current) => {
           const known = current.some((session) => session.id === summary.id);
@@ -2982,10 +3050,6 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           );
         });
       }
-      if (!isSubagentView && view.isActive)
-        setActiveSessionIds((current) => [
-          ...new Set([...current, view.session.id]),
-        ]);
     },
     [
       capturePaneAuthority,
@@ -3055,6 +3119,10 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       && current.cacheGeneration === authority.cacheGeneration
       && current.runtimeProjectionGeneration ===
         authority.runtimeProjectionGeneration
+      && current.activeSessionProjectionGeneration ===
+        authority.activeSessionProjectionGeneration
+      && current.activeSessionFullRevision ===
+        authority.activeSessionFullRevision
     ) return current.request;
     // Never let a refresh authorized by a newer Runtime/cache observation join
     // a request that began before that projection existed. The old request is
@@ -3072,6 +3140,9 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       runEpochGeneration: authority.runEpochGeneration,
       cacheGeneration: authority.cacheGeneration,
       runtimeProjectionGeneration: authority.runtimeProjectionGeneration,
+      activeSessionProjectionGeneration:
+        authority.activeSessionProjectionGeneration,
+      activeSessionFullRevision: authority.activeSessionFullRevision,
     };
     return request;
   }, []);
@@ -3081,6 +3152,9 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       refreshEpoch: ++refreshEpochRef.current,
       ...viewCacheWriter.captureAuthority(runEpochGenerationRef.current),
       ...runtimeProjectionWriter.captureAuthority(
+        runEpochGenerationRef.current,
+      ),
+      ...activeSessionProjectionWriter.captureAuthority(
         runEpochGenerationRef.current,
       ),
       navigationEpoch: navigationEpochRef.current,
@@ -3775,6 +3849,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         // Primary readiness generations are local to one server process. Clear
         // A's high generation before B reports its own lower-generation state.
         runtimeProjectionWriter.resetForProcessReplacement();
+        activeSessionProjectionWriter.resetForReplacement();
         setModelInventoryConfirmed(false);
         workspaceEpochRef.current =
           typeof ready.workspaceEpoch === "string"
@@ -4797,9 +4872,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         scheduleSidebarRefresh();
       } else if (type === "pi_chat_active_session_changed") {
         const ids = activeSessionIdsFromEvent(event.activeSessionIds);
-        setActiveSessionIds(ids);
-        viewCacheWriter.setPinnedCurrent(ids);
-        setSessions((current) => applyActiveSessionIds(current, ids));
+        activeSessionProjectionWriter.observeSse(ids);
         const id = typeof event.sessionId === "string" ? event.sessionId : "";
         if (id === viewedSessionIdRef.current && !ids.includes(id))
           dispatchPane({
@@ -5796,6 +5869,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           // token recovery may have crossed a process boundary before any ready
           // frame could announce the replacement epoch.
           runtimeProjectionWriter.resetForProcessReplacement();
+          activeSessionProjectionWriter.resetForReplacement();
           setModelInventoryConfirmed(false);
           // A newly accepted transport token may belong to a replacement service
           // even when the old socket closed before delivering its changed epoch.
@@ -8303,7 +8377,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     setStoppingSessionIds((current) => current.filter((id) => id !== sessionId));
     setFailedSessionIds((current) => current.filter((id) => id !== sessionId));
     setUnseenReplySessionIds((current) => current.filter((id) => id !== sessionId));
-    setActiveSessionIds((current) => current.filter((id) => id !== sessionId));
+    activeSessionProjectionWriter.forgetCurrent(sessionId);
     setCopyingSessionIds((current) => current.filter((id) => id !== sessionId));
     setRestoredComposerDrafts((current) => {
       if (!(keyId in current)) return current;
