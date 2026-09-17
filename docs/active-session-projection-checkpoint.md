@@ -101,17 +101,16 @@ The phase did not use the live Pi Runtime, providers, live Sessions, port
 `30170`, deployment, or the repository/live `dist`. Package and lockfile
 identity remain `0.4.7`; published `v0.4.6` and `v0.4.7` tags did not move.
 
-## Remaining bounded work
+## Maintenance handoff
 
-This checkpoint does not claim whole-App convergence. Remaining independent
-work includes:
+The duplicated source-test exclusion lists were subsequently removed: the
+single-process, batched, benchmark, and artifact entry points now consume the
+shared lane manifests, with exact disjoint-union regression coverage.
 
-1. consolidate duplicated source-test exclusion lists, including the bounded
-   tail benchmark exclusion;
-2. continue owner-by-owner audits only where a concrete stale continuation or
-   duplicated writer is demonstrated;
-3. keep performance checkpoints descriptive rather than adding noisy CI
-   thresholds.
+This closes the planned authority-convergence phase. Active architecture work
+is frozen: future structural changes require a reproduced defect, release or
+security need, or measurement evidence. Performance checkpoints remain
+descriptive rather than noisy CI thresholds.
 
 Do not fold these owners into `RuntimeProjectionWriter`, and do not turn
 `App.tsx` wiring into a second hot-set, read-lifecycle, or catalogue authority.

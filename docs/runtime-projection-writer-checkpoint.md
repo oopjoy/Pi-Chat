@@ -165,6 +165,6 @@ The resulting contract and focused race validation are recorded in
 [`active-session-projection-checkpoint.md`](active-session-projection-checkpoint.md).
 These owners remain separate from `RuntimeProjectionWriter`.
 
-The remaining explicit cleanup is test-harness convergence so batched and
-single-process source selection do not maintain divergent benchmark exclusion
-lists.
+The final explicit cleanup is also complete: batched and single-process source
+selection consume the same generated lane manifest, and source, benchmark, and
+artifact membership has exact disjoint-union regression coverage.

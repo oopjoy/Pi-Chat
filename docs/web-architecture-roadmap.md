@@ -604,8 +604,21 @@ process replacement 重置 server catalogue revision floor，但拒绝 old-proce
 详细契约与验证见
 [`active-session-projection-checkpoint.md`](active-session-projection-checkpoint.md)。
 这些事实仍不属于 `RuntimeProjectionWriter`；`App.tsx` 只保留 owner wiring。
-下一步只处理已有证据的独立边界，近期明确项是统一 source-test exclusion list，
-而不是继续机械拆分 `App.tsx`。
+source-test exclusion list 已统一到共享 lane manifest，并有三组互斥、完整覆盖的
+回归证明。
+
+## 主动架构演进冻结
+
+上述 authority phase 与 test-harness 收尾完成后，主动架构演进正式冻结。
+不得以文件长度、命名整齐或抽象偏好为理由继续拆 `App.tsx`、增加 coordinator
+或迁移 owner。新的结构变更必须至少满足一项：
+
+- 可复现的正确性或 stale-continuation 缺陷；
+- 发布、安全或平台兼容性要求；
+- 可重复的测量证据表明现有边界造成实际问题。
+
+常规工作转入缺陷修复、发布工程、安全维护和测量驱动优化，并继续一次只提交
+一个 authority / lifecycle 边界。
 
 P0/P1 执行矩阵见 [`docs/v0.4.7-stability-matrix.md`](v0.4.7-stability-matrix.md)。
 

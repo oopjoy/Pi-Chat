@@ -8,13 +8,15 @@
 
 ## 当前基线
 
-本次审计基于当前 `main` 工作树：
+当前冻结候选基线：
 
-- 153 个 `tests/**/*.test.ts` 文件；
-- 由测试名称解析器识别出 1,103 个静态展开测试；
-- 核心 source lane 139 个文件、1,033 个静态展开测试；
-- benchmark lane 5 个文件、28 个测试声明；
-- artifact lane 9 个文件、42 个测试声明；
+- 177 个 `tests/**/*.test.ts` 文件；
+- 由测试名称解析器识别出 1,316 个静态展开测试；
+- 核心 source lane 162 个文件、1,241 个静态展开测试；完整执行为
+  1,249 个 Node tests（1,247 passed、2 个环境 skip）；
+- benchmark lane 6 个文件、33 个测试声明与执行；
+- artifact lane 9 个文件、42 个测试声明；隔离 Windows staging 执行为
+  41 passed、1 个环境 skip；
 - 核心 source lane 现在通过独立 Node batch 进程执行；
 - 测试 harness 固定 `--test-concurrency=1`、V8 old-space 2,048 MiB，Windows
   Job memory 3,072 MiB。
@@ -92,13 +94,18 @@ source suite 的进程级内存累积。
 
 ### Phase 3：日常测试与 Release 测试分层（已完成）
 
-- `test:source` 执行 139 个核心 source 文件；
-- `test:benchmark` 单独执行 5 个 benchmark 文件；
+- `test:source` 执行 162 个核心 source 文件；
+- `test:benchmark` 单独执行 6 个 benchmark 文件；
 - `test:source-and-benchmark` 是 unit/release 的完整非 artifact 测试入口；
 - benchmark 实现及其 contract 仍被保留，未从仓库删除；
 - `npm test`、nightly 和 release 仍执行 source、benchmark 和 artifact；
 - 不改变 `test:artifact` 的 9 个文件边界，继续保留 build、runtime、launcher
   和 live-dist 安全检查；
+- `test:source:single-process`、分批 source runner、benchmark runner 与 artifact
+  runner 共同使用 `scripts/test-batches.mjs` 的 lane manifest；不再在
+  `package.json` 维护第二套 `--exclude-file` / `--file` 清单；
+- 回归测试验证 source、benchmark、artifact 三组两两互斥，且 union 精确覆盖
+  每个 discovered test file；`bounded-tail-benchmark.test.ts` 只属于 benchmark；
 - `first-token-latency`、`streaming-cadence-config`、`react-render` 的安全配置
   contract 不因 benchmark lane 分流而消失；
 
