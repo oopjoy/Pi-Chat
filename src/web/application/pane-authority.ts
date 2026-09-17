@@ -4,6 +4,7 @@ export type PaneAuthority = {
   sessionId: string;
   desiredSessionId: string;
   runEpochGeneration: number;
+  cacheGeneration: number;
   navigationEpoch: number;
   committedRevision: number;
   draftGeneration: number;
@@ -37,22 +38,12 @@ export function canCommitPaneAuthority(
     && authority.desiredSessionId === authority.sessionId
     && current.desiredSessionId === authority.sessionId
     && current.runEpochGeneration === authority.runEpochGeneration
+    && current.cacheGeneration === authority.cacheGeneration
     && current.navigationEpoch === authority.navigationEpoch
     && current.committedRevision === authority.committedRevision
     && current.committedIdentity.kind === authority.committedIdentity.kind
     && current.committedIdentity.sessionId === authority.committedIdentity.sessionId
     && current.draftGeneration === authority.draftGeneration;
-}
-
-/**
- * A stale navigation result may update the same-process cache, but a result
- * from a replaced Runtime/process must not re-enter the new cache authority.
- */
-export function canRememberPaneView(
-  authority: PaneAuthority,
-  currentRunEpochGeneration: number,
-): boolean {
-  return currentRunEpochGeneration === authority.runEpochGeneration;
 }
 
 /** Draft commits use the same lifecycle fences but intentionally have no Session ID. */
@@ -61,6 +52,7 @@ export function canCommitDraftPaneAuthority(
   current: DraftPaneAuthorityState,
 ): boolean {
   return current.runEpochGeneration === authority.runEpochGeneration
+    && current.cacheGeneration === authority.cacheGeneration
     && current.navigationEpoch === authority.navigationEpoch
     && current.draftGeneration === authority.draftGeneration
     && current.committedIdentity.kind === "draft"

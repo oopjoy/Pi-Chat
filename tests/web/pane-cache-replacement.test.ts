@@ -122,3 +122,105 @@ for (const statusShape of ["activity", "legacy", "stop"] as const) {
     });
   }
 }
+
+test("resource reload retires a held terminal reconciliation cache write", async () => {
+  const { dom, FakeEventSource } = installAppDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const fixture = createBootstrapFixture();
+  const lateText = "Late response owned by the old Runtime";
+  const freshText = "Fresh response owned after resource reload";
+  const viewFor = (text: string): SessionViewData => ({
+    ...createSessionViewFixture(),
+    session: fixture.sessions[0],
+    state: fixture.state,
+    messages: [{ role: "assistant", content: text }],
+    messageTotal: 1,
+    viewSource: "hot-memory",
+  });
+  let bootstrapCalls = 0;
+  let viewCalls = 0;
+  let resolveOld!: (view: SessionViewData) => void;
+  let resolveFresh!: (view: SessionViewData) => void;
+  let resolveReloadBootstrap!: (data: BootstrapData) => void;
+  const pendingOld = new Promise<SessionViewData>((resolve) => { resolveOld = resolve; });
+  const pendingFresh = new Promise<SessionViewData>((resolve) => { resolveFresh = resolve; });
+  const pendingReloadBootstrap = new Promise<BootstrapData>((resolve) => {
+    resolveReloadBootstrap = resolve;
+  });
+  Object.assign(api, {
+    bootstrap: async () => {
+      bootstrapCalls += 1;
+      if (bootstrapCalls > 1) return pendingReloadBootstrap;
+      return {
+        ...fixture,
+        state: { ...fixture.state, isStreaming: true },
+        messages: [{ role: "assistant", content: "Initial Runtime history" }],
+      };
+    },
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async (id: string) => ({ viewing: id }),
+    clearSessionViewed: async () => ({ viewing: "" }),
+    invalidateHandshake: () => undefined,
+    renewPresence: async () => undefined,
+    sessions: async () => ({ sessions: fixture.sessions, total: fixture.sessions.length }),
+    abort: async (id: string) => {
+      assert.equal(id, activeSessionId);
+      return { isStreaming: false, queuePaused: false };
+    },
+    viewSession: async (id: string) => {
+      assert.equal(id, activeSessionId);
+      viewCalls += 1;
+      return viewCalls === 1 ? pendingOld : pendingFresh;
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    const stop = dom.window.document.querySelector<HTMLButtonElement>(".stop-button");
+    assert.ok(stop);
+    await act(async () => stop.click());
+    assert.equal(viewCalls, 1);
+
+    await act(async () => source.emitPi({
+      type: "pi_chat_application_lifecycle",
+      lifecycle: "resources-reloading",
+    }));
+    await act(async () => resolveOld(viewFor(lateText)));
+    await act(async () => source.emitPi({
+      type: "pi_chat_application_lifecycle",
+      lifecycle: "idle",
+    }));
+    assert.equal(bootstrapCalls, 2, "idle recovery remains held after the cache authority advances");
+
+    const newButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.trim() === "New");
+    assert.ok(newButton);
+    await act(async () => newButton.click());
+    const activeButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item")]
+      .find((button) => button.textContent?.includes("Active"));
+    assert.ok(activeButton);
+    const sources: string[] = [];
+    dom.window.addEventListener("pi-chat:pane-first-commit", ((event: CustomEvent) => {
+      sources.push(event.detail.source);
+    }) as EventListener);
+    await act(async () => activeButton.click());
+
+    assert.equal(viewCalls, 2, "reload-cleared history requires a fresh Session view");
+    assert.equal(sources.includes("browser-cache"), false);
+    assert.equal(dom.window.document.body.textContent?.includes(lateText), false);
+    await act(async () => resolveFresh(viewFor(freshText)));
+    assert.ok(dom.window.document.body.textContent?.includes(freshText));
+  } finally {
+    await act(async () => {
+      resolveOld(viewFor(lateText));
+      resolveFresh(viewFor(freshText));
+      resolveReloadBootstrap(fixture);
+      root.unmount();
+    });
+    restoreApi();
+  }
+});

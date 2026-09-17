@@ -96,11 +96,14 @@ import { SessionNavigationCoordinator } from "./application/session-navigation-c
 import {
   canCommitDraftPaneAuthority,
   canCommitPaneAuthority,
-  canRememberPaneView,
   type DraftPaneAuthority,
   type PaneAuthority,
   type PaneAuthoritySnapshot,
 } from "./application/pane-authority";
+import {
+  SessionViewCacheWriter,
+  type SessionViewCacheWriteAuthority,
+} from "./application/session-view-cache-writer";
 import { acceptApplicationLifecycle } from "./application/application-lifecycle";
 import {
   acceptPrimaryReadiness,
@@ -327,7 +330,7 @@ function steeringClearedMessage(reason: string): string {
 /** Refresh metadata is valid only in this page, process, and navigation epoch. */
 type RefreshAuthority = Pick<
   PaneAuthority,
-  "runEpochGeneration" | "navigationEpoch"
+  "runEpochGeneration" | "cacheGeneration" | "navigationEpoch"
 > & {
   refreshEpoch: number;
 };
@@ -777,16 +780,24 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   // Keep enough data-only panes to cover normal archive hopping; the server's
   // target snapshot cache has the same entry bound.
   const viewCacheRef = useRef(new SessionViewCache(32));
+  const runEpochRef = useRef("");
+  /** Increments only on a real replacement, invalidating old async cache writes. */
+  const runEpochGenerationRef = useRef(0);
   /** A structural delete is terminal even if a response is lost in transit. */
   const confirmedDeletedSessionIdsRef = useRef(new Set<string>());
-  // Late Runtime/view continuations may still settle after terminal deletion.
-  // They must never recreate a cache entry (or a transient overlay) for that ID.
-  const rememberSessionView = (view: SessionViewData) => {
-    if (confirmedDeletedSessionIdsRef.current.has(view.session.id))
-      return undefined;
-    // Historical/read-only views may intentionally omit queue authority. Do not
-    // turn an unknown queue into an authoritative empty array while caching.
-    if (!Array.isArray(view.queue)) return viewCacheRef.current.remember(view);
+  const viewCacheWriterRef = useRef<SessionViewCacheWriter | null>(null);
+  if (!viewCacheWriterRef.current)
+    viewCacheWriterRef.current = new SessionViewCacheWriter(
+      viewCacheRef.current,
+      () => runEpochGenerationRef.current,
+      (sessionId) => confirmedDeletedSessionIdsRef.current.has(sessionId),
+    );
+  const viewCacheWriter = viewCacheWriterRef.current;
+  // Queue projections are event-owned and may be newer than an HTTP view. This
+  // preparation callback runs only after the writer accepts process/deletion
+  // authority, so a rejected async result cannot mutate queue projections.
+  const prepareSessionViewCacheWrite = (view: SessionViewData): SessionViewData => {
+    if (!Array.isArray(view.queue)) return view;
     const sessionId = view.session.id;
     const filteredQueue = filterCancelledQueue(sessionId, view.queue);
     const latest = latestQueueProjectionRef.current.get(sessionId);
@@ -798,23 +809,27 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       queueProjectionSourceRef.current.set(sessionId, "view");
       advanceQueueProjectionRevision(sessionId);
     }
-    // A stale response may arrive after a newer queue event and still be
-    // cached for a later navigation. Keep the cache in the same authority
-    // domain as the event projection, including an explicit empty queue.
     const projection = latest || {
       queue: filteredQueue,
       paused: view.queuePaused === true,
     };
-    return viewCacheRef.current.remember({
+    return {
       ...view,
       queue: projection.queue,
       queuePaused: projection.paused,
-    });
+    };
   };
+  const commitSessionViewCache = (
+    view: SessionViewData,
+    authority: SessionViewCacheWriteAuthority,
+  ) => viewCacheWriter.remember(view, authority, prepareSessionViewCacheWrite);
   const refreshSessionCache = (id: string, patch: Partial<SessionViewData>) =>
-    confirmedDeletedSessionIdsRef.current.has(id)
-      ? undefined
-      : viewCacheRef.current.refresh(id, patch);
+    viewCacheWriter.refreshCurrent(id, patch);
+  const refreshSessionCacheForAuthority = (
+    id: string,
+    patch: Partial<SessionViewData>,
+    authority: SessionViewCacheWriteAuthority,
+  ) => viewCacheWriter.refresh(id, patch, authority);
   /**
    * Queue projections are event-owned and can be newer than a cached Session
    * view. Never let a stale cached view resurrect an item already removed by a
@@ -835,15 +850,15 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   };
   const patchSessionCache = (
     id: string,
-    patch: Parameters<SessionViewCache["patch"]>[1],
-  ) =>
-    confirmedDeletedSessionIdsRef.current.has(id)
-      ? undefined
-      : viewCacheRef.current.patch(id, patch);
+    patch: Parameters<SessionViewCacheWriter["patchCurrent"]>[1],
+  ) => viewCacheWriter.patchCurrent(id, patch);
+  const patchSessionCacheForAuthority = (
+    id: string,
+    patch: Parameters<SessionViewCacheWriter["patch"]>[1],
+    authority: SessionViewCacheWriteAuthority,
+  ) => viewCacheWriter.patch(id, patch, authority);
   const updateLiveSessionCache = (id: string, message: PiMessage) =>
-    confirmedDeletedSessionIdsRef.current.has(id)
-      ? undefined
-      : viewCacheRef.current.updateLive(id, message);
+    viewCacheWriter.updateLiveCurrent(id, message);
   /**
    * HTTP acknowledgements and SSE can both be lost during a reconnect. A later
    * authoritative Session view still contains the scheduler's queue, so bind
@@ -866,9 +881,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       );
   };
   const appendTerminalSessionCache = (id: string, message: PiMessage) =>
-    confirmedDeletedSessionIdsRef.current.has(id)
-      ? undefined
-      : viewCacheRef.current.appendTerminal(id, message);
+    viewCacheWriter.appendTerminalCurrent(id, message);
   const [pendingSteersBySession, setPendingSteersBySession] = useState<
     Record<string, PendingSteer[]>
   >({});
@@ -883,12 +896,18 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   const [gateModes, setGateModes] = useState<Record<string, GateMode>>({});
   const gateModesRef = useRef<Record<string, GateMode>>({});
   const updateGateMode = useCallback(
-    (sessionId: string, mode: GateMode | undefined) => {
+    (
+      sessionId: string,
+      mode: GateMode | undefined,
+      authority?: SessionViewCacheWriteAuthority,
+    ) => {
       const next = { ...gateModesRef.current };
       if (mode) next[sessionId] = mode;
       else delete next[sessionId];
       gateModesRef.current = next;
-      patchSessionCache(sessionId, { gateMode: mode });
+      if (authority)
+        patchSessionCacheForAuthority(sessionId, { gateMode: mode }, authority);
+      else patchSessionCache(sessionId, { gateMode: mode });
       setGateModes(next);
     },
     [],
@@ -1305,9 +1324,6 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       }
     >(),
   );
-  const runEpochRef = useRef("");
-  /** Increments only on a real replacement, invalidating pre-handoff early reads. */
-  const runEpochGenerationRef = useRef(0);
   const sessionRunGenerationsRef = useRef(new Map<string, number>());
   /** Terminal generations are final: late tool/status frames from them are stale. */
   const settledRunGenerationsRef = useRef(new Map<string, number>());
@@ -1379,7 +1395,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     latestQueueProjectionRef.current.clear();
     queueMutationSequenceRef.current.clear();
     appliedQueueMutationSequenceRef.current.clear();
-    viewCacheRef.current.clear();
+    viewCacheWriter.clearForReplacement();
     optimisticRenamesRef.current.clear();
     optimisticDeletesRef.current.clear();
     syncMutatingSessionIds();
@@ -1473,7 +1489,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     setConfirmedCommands([]);
     gateModesRef.current = {};
     setGateModes({});
-    viewCacheRef.current.clear();
+    viewCacheWriter.clearForReplacement();
     optimisticRenamesRef.current.clear();
     optimisticDeletesRef.current.clear();
     setCopyingSessionIds([]);
@@ -1908,7 +1924,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     (sessionId = viewedSessionIdRef.current): PaneAuthoritySnapshot => ({
       sessionId,
       desiredSessionId: desiredSessionIdRef.current,
-      runEpochGeneration: runEpochGenerationRef.current,
+      ...viewCacheWriter.captureAuthority(runEpochGenerationRef.current),
       navigationEpoch: navigationEpochRef.current,
       committedRevision: paneCommitRevisionRef.current,
       committedIdentity: committedPaneIdentityRef.current,
@@ -1920,7 +1936,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     (authority: PaneAuthoritySnapshot) => canCommitPaneAuthority(authority, {
       sessionId: viewedSessionIdRef.current,
       desiredSessionId: desiredSessionIdRef.current,
-      runEpochGeneration: runEpochGenerationRef.current,
+      ...viewCacheWriter.captureAuthority(runEpochGenerationRef.current),
       navigationEpoch: navigationEpochRef.current,
       committedRevision: paneCommitRevisionRef.current,
       committedIdentity: committedPaneIdentityRef.current,
@@ -1930,7 +1946,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   );
   const draftAuthorityCanCommit = useCallback(
     (authority: DraftPaneAuthority) => canCommitDraftPaneAuthority(authority, {
-      runEpochGeneration: runEpochGenerationRef.current,
+      ...viewCacheWriter.captureAuthority(runEpochGenerationRef.current),
       navigationEpoch: navigationEpochRef.current,
       committedRevision: paneCommitRevisionRef.current,
       committedIdentity: committedPaneIdentityRef.current,
@@ -1941,13 +1957,13 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   const refreshAuthorityIsCurrent = useCallback(
     (authority: RefreshAuthority) =>
       refreshEpochRef.current === authority.refreshEpoch &&
-      runEpochGenerationRef.current === authority.runEpochGeneration &&
+      viewCacheWriter.isCurrent(authority) &&
       navigationEpochRef.current === authority.navigationEpoch,
     [],
   );
   const captureDraftPaneAuthority = useCallback(
     (): DraftPaneAuthority => ({
-      runEpochGeneration: runEpochGenerationRef.current,
+      ...viewCacheWriter.captureAuthority(runEpochGenerationRef.current),
       navigationEpoch: navigationEpochRef.current,
       committedRevision: paneCommitRevisionRef.current,
       draftGeneration: draftGenerationRef.current,
@@ -1964,7 +1980,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   // ownership. Keep this narrower than pane authority on purpose.
   const viewOperationIsInCurrentRun = (
     operation: ReturnType<typeof capturePaneAuthority>,
-  ) => runEpochGenerationRef.current === operation.runEpochGeneration;
+  ) => viewCacheWriter.isCurrent(operation);
   const viewOperationIsCurrent = (
     operation: ReturnType<typeof capturePaneAuthority>,
   ) =>
@@ -2311,7 +2327,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       setActiveSessionId(activeId);
       const hotIds = data.activeSessionIds || (activeId ? [activeId] : []);
       setActiveSessionIds(hotIds);
-      viewCacheRef.current.setPinned(hotIds);
+      viewCacheWriter.setPinnedCurrent(hotIds);
       // A recovering Runtime can briefly return an empty model inventory while
       // its selected Session model is already known. Retain the last usable
       // choices through that transient snapshot. A selected model alone is not
@@ -2388,8 +2404,9 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   const applyBootstrap = useCallback(
     (
       data: BootstrapData,
-      authority?: PaneAuthoritySnapshot,
-      queueRequestRevision?: number,
+      authority: PaneAuthoritySnapshot | undefined,
+      queueRequestRevision: number | undefined,
+      cacheAuthority: SessionViewCacheWriteAuthority,
     ) => {
       if (authority && !paneAuthorityCanCommit(authority)) {
         recordBrowserStateDiagnostic("projection", "bootstrap-rejected", {
@@ -2447,7 +2464,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         (session) => session.id === activeViewId,
       );
       const sourceView = activeViewSession
-        ? rememberSessionView({
+        ? commitSessionViewCache({
             session: activeViewSession,
             state: data.state,
             messages: data.messages,
@@ -2469,8 +2486,20 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
             pendingPrompt: data.pendingPrompt,
             pendingSteers: data.pendingSteers,
             pendingSteerRevision: data.pendingSteerRevision,
-          })
+          }, authority || cacheAuthority)
         : null;
+      if (activeViewSession && !sourceView) {
+        recordBrowserStateDiagnostic("projection", "bootstrap-rejected", {
+          sessionId: activeViewId,
+          details: {
+            authorityPresent: true,
+            decisionReason: confirmedDeletedSessionIdsRef.current.has(activeViewId)
+              ? "session-deleted"
+              : "stale-cache-authority",
+          },
+        });
+        return;
+      }
       if (sourceView) {
         reconcileServerPendingPrompt(sourceView);
         reconcileServerPendingSteers(sourceView);
@@ -2521,7 +2550,8 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         queue: bootstrapQueue,
         queuePaused: bootstrapProjection.paused,
       });
-      if (activeViewId) updateGateMode(activeViewId, data.gateMode);
+      if (activeViewId)
+        updateGateMode(activeViewId, data.gateMode, authority || cacheAuthority);
       if (!activeViewId) {
         // A boot with no restored Session is the same user intent as pressing
         // New: keep history in the sidebar, but make the writable default cwd
@@ -2667,7 +2697,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   const applySessionView = useCallback(
     (
       view: SessionViewData,
-      authority?: ReturnType<typeof capturePaneAuthority> | DraftPaneAuthority,
+      authority: ReturnType<typeof capturePaneAuthority> | DraftPaneAuthority,
       queueRequestRevision?: number,
     ) => {
       recordBrowserStateDiagnostic("projection", "session-view-received", {
@@ -2767,7 +2797,8 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
               queuePaused: queueProjection.paused,
             }
           : normalizedView;
-      const sourceView = viewCacheRef.current.remember(queueFilteredView);
+      const sourceView = commitSessionViewCache(queueFilteredView, authority);
+      if (!sourceView) return;
       reconcileServerPendingPrompt(sourceView);
       reconcileServerPendingSteers(sourceView);
       // A normalized view is stronger than an earlier local abort intent. Do
@@ -2846,7 +2877,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         : sourceView;
       // A view reports the Runtime-confirmed value only. A staged cold choice
       // remains a display/send preference and must never gain Gate authority.
-      updateGateMode(sourceView.session.id, view.gateMode);
+      updateGateMode(sourceView.session.id, view.gateMode, authority);
       const nextRuntimeStatus =
         resolvedView.runtimeStatus ||
         (resolvedView.isActive ? "active" : "view-only");
@@ -3040,7 +3071,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   const refresh = useCallback(async () => {
     const refreshAuthority: RefreshAuthority = {
       refreshEpoch: ++refreshEpochRef.current,
-      runEpochGeneration: runEpochGenerationRef.current,
+      ...viewCacheWriter.captureAuthority(runEpochGenerationRef.current),
       navigationEpoch: navigationEpochRef.current,
     };
     const { refreshEpoch, runEpochGeneration, navigationEpoch } =
@@ -3299,6 +3330,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
             data,
             bootstrapAuthority,
             wantedQueueRequestRevision,
+            refreshAuthority,
           );
           throw cause;
         }
@@ -3340,11 +3372,21 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         // show a recovery state rather than the New welcome until history lands.
       }
       if (!refreshAuthorityIsCurrent(refreshAuthority)) return;
-      applyBootstrap(data, historyAuthority, historyQueueRequestRevision);
+      applyBootstrap(
+        data,
+        historyAuthority,
+        historyQueueRequestRevision,
+        refreshAuthority,
+      );
       setError((current) => (recoverableRefreshError(current) ? "" : current));
       return;
     }
-    applyBootstrap(data, bootstrapAuthority, wantedQueueRequestRevision);
+    applyBootstrap(
+      data,
+      bootstrapAuthority,
+      wantedQueueRequestRevision,
+      refreshAuthority,
+    );
     setError((current) => (recoverableRefreshError(current) ? "" : current));
   }, [
     applyBootstrap,
@@ -4718,7 +4760,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       } else if (type === "pi_chat_active_session_changed") {
         const ids = activeSessionIdsFromEvent(event.activeSessionIds);
         setActiveSessionIds(ids);
-        viewCacheRef.current.setPinned(ids);
+        viewCacheWriter.setPinnedCurrent(ids);
         setSessions((current) => applyActiveSessionIds(current, ids));
         const id = typeof event.sessionId === "string" ? event.sessionId : "";
         if (id === viewedSessionIdRef.current && !ids.includes(id))
@@ -4874,7 +4916,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           structuralSessionId &&
           ["deleted", "renamed"].includes(structuralAction)
         ) {
-          viewCacheRef.current.forget(structuralSessionId);
+          viewCacheWriter.forgetCurrent(structuralSessionId);
           if (structuralAction === "deleted") {
             completedCompactionSessionIdsRef.current.delete(structuralSessionId);
             const wasViewed = finalizeDeletedSession(structuralSessionId);
@@ -5426,8 +5468,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
                 if (!versionUnchanged) return;
                 if (paneAuthorityCanCommit(authority))
                   applySessionView(view, authority, queueRequestRevision);
-                else if (canRememberPaneView(authority, runEpochGenerationRef.current))
-                  rememberSessionView(view);
+                else commitSessionViewCache(view, authority);
               })
               .catch(() => undefined);
           }
@@ -5507,8 +5548,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
                 if (!versionUnchanged) return;
                 if (paneAuthorityCanCommit(authority))
                   applySessionView(view, authority, queueRequestRevision);
-                else if (canRememberPaneView(authority, runEpochGenerationRef.current))
-                  rememberSessionView(view);
+                else commitSessionViewCache(view, authority);
               })
               .catch(() => undefined);
           }
@@ -6090,7 +6130,12 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       const loadedView =
         eventVersion === requestVersion
           ? view
-          : viewCacheRef.current.mergeNavigation(view, requestStartRevision);
+          : viewCacheWriter.mergeNavigation(
+              view,
+              requestStartRevision,
+              authority,
+            );
+      if (!loadedView) return;
       applySessionView(loadedView, authority, queueRequestRevision);
       requestAnimationFrame(() => {
         if (!paneAuthorityCanCommit(authority)) return;
@@ -6429,7 +6474,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
             queueProjectionRevisionRef.current.get(authority.sessionId) || 0;
           const view = await api.activateSession(viewedSessionId);
           if (!viewOperationIsInCurrentRun(authority)) return;
-          viewCacheRef.current.forget(view.session.id);
+          viewCacheWriter.forget(view.session.id, authority);
           if (viewOperationIsCurrent(authority))
             applySessionView(view, authority, queueRequestRevision);
           else {
@@ -6439,7 +6484,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
               view.queuePaused === true,
               queueRequestRevision,
             );
-            rememberSessionView(
+            commitSessionViewCache(
               projection.known || projection.queue.length || projection.paused
                 ? {
                     ...view,
@@ -6447,6 +6492,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
                     queuePaused: projection.paused,
                   }
                 : view,
+              authority,
             );
           }
         }
@@ -6615,7 +6661,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
             status: WAITING_FOR_PI_STATUS,
             clearPending: true,
           });
-        } else rememberSessionView(initialView);
+        } else commitSessionViewCache(initialView, draftAuthority);
         // A choice made after Send started remains the draft's newer revision;
         // move it to the just-created ordinary target instead of dropping it.
         // A replacement New owns a newer draft authority and must keep its own
@@ -6809,7 +6855,11 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
             ? { thinkingLevel: capturedSelection.thinkingLevel }
             : null),
         };
-        patchSessionCache(targetSessionId, { state: displaySettings });
+        patchSessionCacheForAuthority(
+          targetSessionId,
+          { state: displaySettings },
+          promptAuthority!,
+        );
         commitPaneIfCurrent(promptAuthority!, {
           type: "RUNTIME_SETTINGS_ADOPTED",
           target: { kind: "session", sessionId: targetSessionId },
@@ -6991,10 +7041,14 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           viewedSessionIdRef.current === targetSessionId &&
           desiredSessionIdRef.current === targetSessionId
         ) {
-          patchSessionCache(targetSessionId, {
-            queue: acknowledgedQueue,
-            queuePaused: acknowledgedProjection?.paused,
-          });
+          patchSessionCacheForAuthority(
+            targetSessionId,
+            {
+              queue: acknowledgedQueue,
+              queuePaused: acknowledgedProjection?.paused,
+            },
+            promptAuthority!,
+          );
           const currentAuthority = capturePaneAuthority(targetSessionId);
           commitPaneIfCurrent(currentAuthority, {
             type: "PROMPT_ACKNOWLEDGED",
@@ -7023,7 +7077,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         const gateMode =
           result.command === "gate" ? gateModeFromCommand(message) : null;
         if (gateMode && targetSessionId)
-          updateGateMode(targetSessionId, gateMode);
+          updateGateMode(targetSessionId, gateMode, promptAuthority!);
         setNotice(
           extensionExecutionNotice(
             message,
@@ -7058,10 +7112,14 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         // the single transition that makes its local user bubble visible.
         const queuedTurn = localTurnEntry();
         if (acknowledgedQueue)
-          patchSessionCache(targetSessionId, {
-            queue: acknowledgedQueue,
-            queuePaused: acknowledgedProjection?.paused,
-          });
+          patchSessionCacheForAuthority(
+            targetSessionId,
+            {
+              queue: acknowledgedQueue,
+              queuePaused: acknowledgedProjection?.paused,
+            },
+            promptAuthority!,
+          );
         const removeQueuedTurn =
           queuedTurn?.queueState === "waiting" &&
           queuedTurn.renderedInTranscript;
@@ -7251,7 +7309,10 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         if (remaining.length)
           localUserTurnsRef.current.set(targetSessionId, remaining);
         else localUserTurnsRef.current.delete(targetSessionId);
-        viewCacheRef.current.forget(targetSessionId);
+        viewCacheWriter.forget(
+          targetSessionId,
+          promptAuthority || promptDraftAuthority!,
+        );
         if (localEntry.renderedInTranscript)
           rejectionMessages = (current) =>
             current.filter((candidate) => candidate !== localEntry.message);
@@ -7280,12 +7341,16 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
               : session,
           ),
         );
-        patchSessionCache(targetSessionId, {
-          isStreaming: false,
-          liveMessage: undefined,
-          toolStatus: "",
-          state: { isStreaming: false, isCompacting: false },
-        });
+        patchSessionCacheForAuthority(
+          targetSessionId,
+          {
+            isStreaming: false,
+            liveMessage: undefined,
+            toolStatus: "",
+            state: { isStreaming: false, isCompacting: false },
+          },
+          promptAuthority!,
+        );
         releasePromptBusy(targetSessionId, undefined, undefined, true);
         clearStoppingForSession(targetSessionId);
       }
@@ -7330,8 +7395,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
               return;
             if (paneAuthorityCanCommit(authority))
               applySessionView(view, authority, queueRequestRevision);
-            else if (canRememberPaneView(authority, runEpochGenerationRef.current))
-              rememberSessionView(view);
+            else commitSessionViewCache(view, authority);
           })
           .catch(() => undefined);
         scheduleSidebarRefresh();
@@ -7383,14 +7447,18 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         setNotice("已发送停止请求，Pi 正在结束当前操作");
         return;
       }
-      patchSessionCache(operation.sessionId, {
-        state: { isStreaming: result.isStreaming },
-        isStreaming: result.isStreaming,
-        queuePaused: result.queuePaused,
-        ...(result.isStreaming
-          ? null
-          : { liveMessage: undefined, toolStatus: "" }),
-      });
+      patchSessionCacheForAuthority(
+        operation.sessionId,
+        {
+          state: { isStreaming: result.isStreaming },
+          isStreaming: result.isStreaming,
+          queuePaused: result.queuePaused,
+          ...(result.isStreaming
+            ? null
+            : { liveMessage: undefined, toolStatus: "" }),
+        },
+        operation,
+      );
       if (!result.isStreaming) {
         clearStoppingForSession(operation.sessionId, operationToken);
         sessionRunningOverridesRef.current.set(operation.sessionId, false);
@@ -7435,16 +7503,16 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
                 view.queuePaused === true,
                 queueRequestRevision,
               );
-              if (canRememberPaneView(operation, runEpochGenerationRef.current))
-                rememberSessionView(
-                  projection.known || projection.queue.length || projection.paused
-                    ? {
-                        ...view,
-                        queue: projection.queue,
-                        queuePaused: projection.paused,
-                      }
-                    : view,
-                );
+              commitSessionViewCache(
+                projection.known || projection.queue.length || projection.paused
+                  ? {
+                      ...view,
+                      queue: projection.queue,
+                      queuePaused: projection.paused,
+                    }
+                  : view,
+                operation,
+              );
             }
           })
           .catch(() => undefined);
@@ -7611,7 +7679,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
                   reconciledView.queuePaused === true,
                 )
               : undefined;
-            const patched = refreshSessionCache(
+            const patched = refreshSessionCacheForAuthority(
               id,
               projection
                 ? {
@@ -7627,6 +7695,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
                     } = reconciledView;
                     return withoutQueueAuthority;
                   })(),
+              reconcileAuthority,
             );
             if (patched)
               applySessionView(
@@ -7695,10 +7764,12 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         return;
       }
       pendingScrollRestoreRef.current = id;
-      const committed = viewCacheRef.current.mergeNavigation(
+      const committed = viewCacheWriter.mergeNavigation(
         view,
         requestStartRevision,
+        navigationAuthority,
       );
+      if (!committed) return;
       applySessionView(committed, navigationAuthority, queueRequestRevision);
       joinWarmPane(id, capturePaneAuthority(id));
       // Cold history remains view-only after navigation. Explicit mutation or
@@ -7740,7 +7811,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       if (typeof oldest !== "string") break;
       subagentAddressesRef.current.delete(oldest);
     }
-    viewCacheRef.current.forget(childSessionId);
+    viewCacheWriter.forgetCurrent(childSessionId);
     void viewSession(childSessionId, label);
   };
 
@@ -7848,23 +7919,25 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       const existing = warmingRuntimeStartsRef.current.get(sessionId);
       if (existing) return existing;
       const runEpochGeneration = runEpochGenerationRef.current;
+      const cacheAuthority = viewCacheWriter.captureAuthority(
+        runEpochGeneration,
+      );
       setRuntimeWarming(sessionId, true);
       const start = api
         .warmSession(sessionId)
         .then((ready) => {
-          if (runEpochGenerationRef.current !== runEpochGeneration)
-            return ready;
+          if (!viewCacheWriter.isCurrent(cacheAuthority)) return ready;
           const cacheState = ready.state;
           // Warming does not apply a staged Gate choice. Keep the runtime's
           // confirmed mode separate so an unconfirmed "open" cannot auto-allow.
-          updateGateMode(sessionId, ready.gateMode);
-          refreshSessionCache(sessionId, {
+          updateGateMode(sessionId, ready.gateMode, cacheAuthority);
+          refreshSessionCacheForAuthority(sessionId, {
             state: cacheState,
             isActive: true,
             runtimeStatus: "active",
             isStreaming: ready.state.isStreaming,
             gateMode: ready.gateMode,
-          });
+          }, cacheAuthority);
           return ready;
         })
         .finally(() => {
@@ -8160,7 +8233,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       if (childId === sessionId || subagentAddressesRef.current.get(childId)?.parentSessionId === sessionId)
         subagentAddressesRef.current.delete(childId);
     }
-    viewCacheRef.current.forget(sessionId);
+    viewCacheWriter.forgetCurrent(sessionId);
     scrollMemoryRef.current.forget(sessionId);
     streamDiagnosticsRef.current?.deleteSession(sessionId);
     setPendingSteersBySession(Object.fromEntries(pendingSteersRef.current));
@@ -9263,10 +9336,14 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
             ),
           );
         }
-        patchSessionCache(operation.sessionId, {
-          queue: authoritativeQueue,
-          queuePaused: authoritativeProjection.paused,
-        });
+        patchSessionCacheForAuthority(
+          operation.sessionId,
+          {
+            queue: authoritativeQueue,
+            queuePaused: authoritativeProjection.paused,
+          },
+          operation,
+        );
         const restored = cancelled
           ? promptDraftFromMessage(cancelled.message, item.message)
           : { message: item.message, images: [] };
@@ -9351,10 +9428,14 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
               result.paused,
               "mutation",
             );
-        patchSessionCache(operation.sessionId, {
-          queue: resumedProjection.queue,
-          queuePaused: resumedProjection.paused,
-        });
+        patchSessionCacheForAuthority(
+          operation.sessionId,
+          {
+            queue: resumedProjection.queue,
+            queuePaused: resumedProjection.paused,
+          },
+          operation,
+        );
         setSessions((current) =>
           current.map((session) =>
             session.id === operation.sessionId
