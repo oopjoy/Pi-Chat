@@ -435,6 +435,8 @@ interface SettledSessionRunTiming {
   durationMs: number;
 }
 
+class StaleSessionViewRuntimeError extends Error {}
+
 class NativeSteeringResetError extends Error {
   readonly droppedCount: number;
 
@@ -5845,10 +5847,161 @@ export class PiChatApp {
     };
   }
 
+  private async coldSessionViewForId(
+    id: string,
+    turnLimit: number,
+    clientId: string,
+    includeForkOrigin = false,
+  ): Promise<SessionViewData | null> {
+    const index = this.options.sessions as SessionIndex & {
+      cachedSummaryForId?: (
+        sessionId: string,
+      ) => Promise<SessionSummary | null>;
+      snapshotAndSummaryForId?: (
+        sessionId: string,
+      ) => Promise<{ snapshot: SessionFileSnapshot; summary: SessionSummary } | null>;
+      recentSnapshotAndSummaryForId?: (
+        sessionId: string,
+        turnLimit: number,
+      ) => Promise<{ snapshot: SessionFileSnapshot; summary: SessionSummary } | null>;
+    };
+    const recentTarget = index.recentSnapshotAndSummaryForId
+      ? await index.recentSnapshotAndSummaryForId(id, turnLimit)
+      : null;
+    const target = recentTarget || await index.snapshotAndSummaryForId?.(id);
+    let view = target
+      ? this.coldSessionViewFromSnapshot(
+          id,
+          target.summary,
+          target.snapshot,
+          turnLimit,
+          clientId,
+        )
+      : null;
+    if (!view) {
+      let knownSession =
+        (await index.cachedSummaryForId?.(id)) ||
+        this.options.sessions.summaryForId?.(id);
+      // Compatibility fallback for older indexes/test doubles without a
+      // target-only summary projection. Production SessionIndex reaches this
+      // only after its bounded target lookup failed.
+      if (!knownSession)
+        knownSession = (
+          await this.options.sessions.list(
+            this.activeSessionPath,
+            this.currentCwd,
+          )
+        ).find((session) => session.id === id) || null;
+      view = knownSession
+        ? await this.coldSessionView(id, knownSession, turnLimit, clientId)
+        : null;
+    }
+    if (!view || !includeForkOrigin) return view;
+    return {
+      ...view,
+      forkOrigin: await this.forkOriginForSession(id),
+    };
+  }
+
   private async sessionView(
     id: string,
     turnLimit = RECENT_TURN_WINDOW_SIZE,
     clientId = "",
+    options: { fast?: boolean; includeForkOrigin?: boolean } = {},
+  ): Promise<SessionViewData | null> {
+    const primary = id === this.activeSessionId;
+    const secondary = primary ? undefined : this.runtimePool.get(id);
+    if (!primary && !secondary) {
+      const view = options.fast
+        ? this.hotMemoryView(id, turnLimit, clientId)
+        : await this.sessionViewFromCurrentProjection(id, turnLimit, clientId);
+      if (!view || !options.includeForkOrigin) return view;
+      return {
+        ...view,
+        forkOrigin: await this.forkOriginForSession(id),
+      };
+    }
+
+    let release: (() => void) | null = null;
+    let currentHotRuntime: () => boolean;
+    try {
+      if (primary) {
+        const lease = this.primaryOperationAdmission.acquire();
+        release = lease.release;
+        const rpcGeneration = this.options.rpc.currentGeneration?.() || 0;
+        currentHotRuntime = () =>
+          this.activeSessionId === id &&
+          this.primaryOperationAdmission.generation === lease.generation &&
+          (this.options.rpc.currentGeneration?.() || 0) === rpcGeneration &&
+          this.options.rpc.isRunning?.() !== false;
+      } else {
+        const runtime = secondary!;
+        release = this.runtimePool.acquireOperation(runtime);
+        const admissionGeneration = runtime.operationAdmission.generation;
+        const rpcGeneration = runtime.rpc.currentGeneration?.() || 0;
+        currentHotRuntime = () =>
+          this.runtimePool.get(id) === runtime &&
+          runtime.operationAdmission.generation === admissionGeneration &&
+          (runtime.rpc.currentGeneration?.() || 0) === rpcGeneration &&
+          runtime.rpc.isRunning?.() !== false;
+      }
+    } catch (error) {
+      if (!(error instanceof OperationAdmissionClosedError)) throw error;
+      return options.fast
+        ? null
+        : this.coldSessionViewForId(
+            id,
+            turnLimit,
+            clientId,
+            options.includeForkOrigin,
+          );
+    }
+
+    const assertCurrentHotRuntime = () => {
+      if (!currentHotRuntime()) throw new StaleSessionViewRuntimeError();
+    };
+    let view: SessionViewData | null = null;
+    let stale = false;
+    try {
+      view = options.fast
+        ? this.hotMemoryView(id, turnLimit, clientId)
+        : await this.sessionViewFromCurrentProjection(
+            id,
+            turnLimit,
+            clientId,
+            assertCurrentHotRuntime,
+          );
+      assertCurrentHotRuntime();
+      if (view && options.includeForkOrigin) {
+        view = {
+          ...view,
+          forkOrigin: await this.forkOriginForSession(id),
+        };
+        assertCurrentHotRuntime();
+      }
+    } catch (error) {
+      if (error instanceof StaleSessionViewRuntimeError) stale = true;
+      else throw error;
+    } finally {
+      release?.();
+    }
+    return stale
+      ? options.fast
+        ? null
+        : this.coldSessionViewForId(
+            id,
+            turnLimit,
+            clientId,
+            options.includeForkOrigin,
+          )
+      : view;
+  }
+
+  private async sessionViewFromCurrentProjection(
+    id: string,
+    turnLimit = RECENT_TURN_WINDOW_SIZE,
+    clientId = "",
+    assertCurrentHotRuntime?: () => void,
   ): Promise<SessionViewData | null> {
     const knownRuntime = this.runtimePool.get(id);
     const targetRuntimeBusy =
@@ -5861,34 +6014,11 @@ export class PiChatApp {
     // Cold history is a pure JSONL read. Avoid waking or querying the Primary RPC
     // and avoid rescanning every Session when the index already knows this ID.
     if (id !== this.activeSessionId && !knownRuntime) {
-      const index = this.options.sessions as SessionIndex & {
-        cachedSummaryForId?: (
-          sessionId: string,
-        ) => Promise<SessionSummary | null>;
-        snapshotAndSummaryForId?: (
-          sessionId: string,
-        ) => Promise<{ snapshot: SessionFileSnapshot; summary: SessionSummary } | null>;
-        recentSnapshotAndSummaryForId?: (
-          sessionId: string,
-          turnLimit: number,
-        ) => Promise<{ snapshot: SessionFileSnapshot; summary: SessionSummary } | null>;
-      };
       // A target-only snapshot read already validates and parses the JSONL. Use
       // its summary projection too, avoiding a second stat/fingerprint/outline
       // pass during a cold navigation. Large files take the bounded tail path.
-      const recentTarget = index.recentSnapshotAndSummaryForId
-        ? await index.recentSnapshotAndSummaryForId(id, turnLimit)
-        : null;
-      const target = recentTarget || await index.snapshotAndSummaryForId?.(id);
-      if (target)
-        return this.coldSessionViewFromSnapshot(id, target.summary, target.snapshot, turnLimit, clientId);
-      // Prefer the target-only revalidating lookup as a compatibility fallback
-      // for test doubles and older SessionIndex implementations.
-      const knownSession =
-        (await index.cachedSummaryForId?.(id)) ||
-        this.options.sessions.summaryForId?.(id);
-      if (knownSession)
-        return this.coldSessionView(id, knownSession, turnLimit, clientId);
+      const cold = await this.coldSessionViewForId(id, turnLimit, clientId);
+      if (cold) return cold;
     }
     // Browser /api/sessions/:id/view has a 65s client budget. Several default 30s
     // Pi RPC calls used to stack past that during compaction or long tool turns,
@@ -5924,10 +6054,12 @@ export class PiChatApp {
           state = asState(
             await this.options.rpc.send({ type: "get_state" }, SHORT_RPC_MS),
           );
+          assertCurrentHotRuntime?.();
           this.lastPrimaryState = state;
           this.running = state.isStreaming;
           this.bindPrimaryIdentity(state);
-        } catch {
+        } catch (error) {
+          if (error instanceof StaleSessionViewRuntimeError) throw error;
           state = this.running
             ? { ...this.lastPrimaryState, isStreaming: true }
             : this.lastPrimaryState;
@@ -5966,6 +6098,7 @@ export class PiChatApp {
       : null;
     if (!indexedSession && knownHotRuntime)
       indexedSession = await index.cachedSummaryForId?.(id) || null;
+    assertCurrentHotRuntime?.();
     if (!indexedSession && id === this.activeSessionId) {
       indexedSession = {
         id,
@@ -5987,6 +6120,7 @@ export class PiChatApp {
           ),
           clientId,
         );
+    assertCurrentHotRuntime?.();
     // A fresh New view is valid even though it is deliberately absent from the
     // sidebar until its first user message is persisted.
     const session =
@@ -6031,6 +6165,7 @@ export class PiChatApp {
         : null;
       if (!snapshot && !busy && sessionIndex.snapshotForId)
         snapshot = await sessionIndex.snapshotForId(id);
+      assertCurrentHotRuntime?.();
       const persistedRuntimeMessages =
         id === this.activeSessionId && this.lastPrimaryMessagesSessionId === id
           ? this.lastPrimaryMessages
@@ -6048,6 +6183,7 @@ export class PiChatApp {
           : typeof this.options.sessions.messagesForId === "function"
             ? await this.options.sessions.messagesForId(id)
             : null);
+      assertCurrentHotRuntime?.();
       let messages: PiMessage[] | null = persistedMessages
         ? reconcilePersistedHistory(persistedMessages, terminalTail).messages
         : terminalTail.length
@@ -6063,11 +6199,13 @@ export class PiChatApp {
         if (path) {
           try {
             persistedMessages = await readSessionMessages(path);
+            assertCurrentHotRuntime?.();
             messages = reconcilePersistedHistory(
               persistedMessages,
               terminalTail,
             ).messages;
-          } catch {
+          } catch (error) {
+            if (error instanceof StaleSessionViewRuntimeError) throw error;
             messages = null;
           }
         }
@@ -6106,10 +6244,12 @@ export class PiChatApp {
                   .send({ type: "get_commands" }, SHORT_RPC_MS)
                   .catch(() => null),
           ]);
+          assertCurrentHotRuntime?.();
           stateResponse = probes[0];
           statsResponse = probes[1];
           commandsResponse = probes[2];
-        } catch {
+        } catch (error) {
+          if (error instanceof StaleSessionViewRuntimeError) throw error;
           // Disk history + last known liveMessage still form a usable view.
         }
       }
@@ -6152,6 +6292,7 @@ export class PiChatApp {
               busy ? 3_000 : MESSAGES_RPC_MS,
             ),
           );
+          assertCurrentHotRuntime?.();
           messages = reconcilePersistedHistory(
             persistedMessages,
             terminalTail,
@@ -6195,6 +6336,7 @@ export class PiChatApp {
             ? await this.offlineStatsForId(id, snapshot.usage)
             : undefined
           : await this.offlineStatsForId(id, snapshot?.usage);
+      assertCurrentHotRuntime?.();
       const rememberedCommands =
         id === this.activeSessionId
           ? this.lastPrimaryCommands
@@ -6989,12 +7131,14 @@ export class PiChatApp {
     fast: boolean;
   }): Promise<SessionViewData | null> {
     // Reading a cold history is deliberately view-only; no Runtime is created.
-    const view = input.fast
-      ? this.hotMemoryView(input.sessionId, input.turns, input.clientId)
-      : await this.sessionView(input.sessionId, input.turns, input.clientId);
-    const projected = view
-      ? { ...view, forkOrigin: await this.forkOriginForSession(input.sessionId) }
-      : null;
+    // Hot views retain their operation lease through Fork-origin lookup so an
+    // awaited relation read cannot outlive the Runtime projection it decorates.
+    const projected = await this.sessionView(
+      input.sessionId,
+      input.turns,
+      input.clientId,
+      { fast: input.fast, includeForkOrigin: true },
+    );
     this.traceViewProjection(
       input.fast ? "session-view-fast" : "session-view",
       input.sessionId,
