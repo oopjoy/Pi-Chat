@@ -1434,6 +1434,11 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     transportRecoveryPendingRef.current = false;
     refreshEpochRef.current += 1;
     navigationEpochRef.current += 1;
+    // Browser requests are uncancellable. Detach the pre-reload coalescer so
+    // the next refresh cannot grant its held bootstrap new cache authority.
+    // The old request still settles only its stale refresh caller, while its
+    // ownership-guarded finally cannot clear the post-reload request.
+    bootstrapInFlightRef.current = null;
     sessionRunningOverridesRef.current.clear();
     completedCompactionSessionIdsRef.current.clear();
     cancelledQueueIdsRef.current.clear();
