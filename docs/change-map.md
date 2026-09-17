@@ -51,9 +51,11 @@
 | Application lifecycle 与 admitted mutation count | `ApplicationLifecycleCoordinator` | `PiChatApp` route/restart/resource operations | route adapter |
 | Primary readiness generation 与 compatibility | `PrimaryRuntimeReadinessController` | `PiChatApp` adoption | 浏览器 readiness UI |
 | Browser Primary readiness、confirmed capability 与 application lifecycle projection | `RuntimeProjectionWriter` | `App.tsx` API/SSE wiring | Runtime startup、Prompt、Session cache、ancillary Bootstrap metadata |
+| Browser hot Session-set projection | `ActiveSessionProjectionWriter` | Bootstrap/SSE/full set、authoritative HTTP per-Session refinement、cache consumer wiring | `RuntimeProjectionWriter`、cached `SessionViewData`、sidebar component |
+| Browser model catalogue ordering | `ModelCatalogueRevisionGate` | Bootstrap、model-management response、`pi_chat_models_updated` | selected Pane model、Runtime startup、catalogue UI storage |
 | Primary Session/child binding | `PiChatApp` | bound Session、RPC generation、recovery finalization | `runtime-event-transition.ts` |
 | Secondary Runtime map、capacity、reclaim | `RuntimePool` | 显式 host callback | HTTP/SSE layer |
-| Runtime operation admission | 每个 Runtime 对应的 `OperationAdmission` | mutation/reclaim/delete path | lifecycle 文档或 UI |
+| Runtime operation admission | 每个 Runtime 对应的 `OperationAdmission` | mutation/reclaim/delete path 与 hot Session read（含 Fork-origin await） | lifecycle 文档或 UI |
 | Presence 与 exclusive control | `SessionControl` | `PiChatApp` per-client projection | `SseHub` |
 | Prompt/follow-up queue 与 dispatch | `PromptScheduler` | Runtime leases 和 host callbacks | `RuntimePool` capacity policy |
 | SSE sockets、throttle、pending frames | `SseHub` | disconnect callback | `SessionControl` / lifecycle |
@@ -72,6 +74,8 @@
 | Pane authority | desired Session、navigation epoch、pane commit revision、committed identity、draft generation、浏览器 `runEpochGeneration` | 旧 Session、同 Session 重访、旧 draft 或旧服务进程的异步结果不得重绘当前 Pane | App coordinator |
 | Session data revision | Session event version、cache revision、request-start revision、cache generation | 较老 HTTP/JSONL response 不得覆盖较新的 SSE/cache fact 或 replacement cache | App coordinator 与 `SessionViewCacheWriter` |
 | Runtime projection revision | `runEpochGeneration`、`runtimeProjectionGeneration` | replacement 或较新 SSE/maintenance fact 之后，旧 Bootstrap 不得写 readiness/capability/lifecycle | `RuntimeProjectionWriter` |
+| Active-Session projection revision | process/full-set generation、full revision、per-Session revision | held Bootstrap/view/cache 不得复活 reclaimed/deleted hot Session；无关 Session read 不互相失效 | `ActiveSessionProjectionWriter` |
+| Model catalogue revision | server `modelCatalogueRevision`、local observation generation、catalogue process generation | lower/equal-stale HTTP 不得覆盖 ordered SSE；replacement 可从较低 revision 重新开始 | `ModelCatalogueRevisionGate` |
 | Request-local authority | pagination token、picker token、refresh epoch、`AbortController` | 一个旧 request 不得提交或清理新 request 的状态 | 对应 request owner |
 | Server process provenance | server `runEpoch` 与浏览器 accepted epoch/generation | replacement 前的 server event/continuation 不得影响新服务 | server entry / `PiChatApp` / App coordinator |
 | Session run provenance | per-Session run generation、settled generation | 较早或已 settle turn 的延迟 lifecycle/tool frame 不得恢复活动状态 | `PiChatApp` 与浏览器 event admission |
@@ -91,6 +95,9 @@
 | SSE 可见 projection | transport/run/session admission 后的 domain action | off-screen Session cache 与 activity 更新 | 将 raw SSE 直接交给组件 |
 | Off-screen Session | `SessionViewCacheWriter` 与 inventory owner | cache/activity update | 修改当前 reducer 或直接 mutation cache storage |
 | Primary Runtime core projection | `RuntimeProjectionWriter` + captured process/projection authority | ancillary Bootstrap metadata 仍由其现有 owner 处理 | mutation response 或旧 coalesced request 冒充 ordered Runtime refresh |
+| Hot Session-set projection | `ActiveSessionProjectionWriter` + full/per-Session authority；cache view 使用 consumer-only path | 同一 view 的 Pane/cache 可按各自 authority 提交 | cached `isActive` 取得新的 server authority |
+| Model catalogue projection | `ModelCatalogueRevisionGate` | accepted catalogue 后更新 browser catalogue/pending indicator | 仅按 HTTP completion order 或无 revision 覆盖 revisioned state |
+| Server hot Session read | Primary/Secondary `OperationAdmission` + awaited-boundary revalidation | stale normal read 可重新读取 cold JSONL | detached Runtime object 返回 active/writable projection |
 | Server Runtime mutation | lifecycle lease、Session control、Runtime operation lease（按操作需要） | Session activity publication | 在 admission barrier 外写 RPC |
 | Restart/resource/workspace operation | application lifecycle barrier 与最终 busy recheck | staging/rollback-owned filesystem work | 只检查一次 busy 后直接启动 |
 

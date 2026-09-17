@@ -148,19 +148,23 @@ C:/Users/opjoy/AppData/Local/Temp/pi-chat-benchmark-checkpoints/80aeac2
 C:/Users/opjoy/AppData/Local/Temp/pi-chat-benchmark-checkpoints/e56ddcc
 ```
 
-## Next bounded authority phase
+## Subsequent bounded authority phase
 
-The writer checkpoint does not claim whole-application async convergence. The
-next independent phase must address:
+This writer checkpoint does not claim whole-application async convergence. The
+three independent follow-up boundaries were completed at `9b8cccf`:
 
-1. a browser active-set revision so stale Bootstrap or Session-view results
-   cannot revive an SSE-reclaimed hot Session;
-2. server operation admission/revalidation for hot Primary and Secondary
-   Session reads that cross reclaim, shutdown, or resource reload;
-3. monotonic admission of Bootstrap and `pi_chat_models_updated` by the existing
-   server-owned model catalogue revision;
-4. later test-harness cleanup so batched and single-process source selection do
-   not maintain divergent benchmark exclude lists.
+1. `ActiveSessionProjectionWriter` fences Bootstrap, SSE, authoritative HTTP
+   views, cached-view consumers, deletion, and process replacement;
+2. Primary and Secondary hot reads hold Runtime operation admission and
+   revalidate after awaited probes and Fork-origin reads;
+3. `ModelCatalogueRevisionGate` admits Bootstrap, model-management, and
+   `pi_chat_models_updated` by process-local revision plus a same-revision local
+   observation fence.
 
-These items must not be folded back into `RuntimeProjectionWriter`: active-set,
-hot-read admission, and model-catalogue ordering are separate authorities.
+The resulting contract and focused race validation are recorded in
+[`active-session-projection-checkpoint.md`](active-session-projection-checkpoint.md).
+These owners remain separate from `RuntimeProjectionWriter`.
+
+The remaining explicit cleanup is test-harness convergence so batched and
+single-process source selection do not maintain divergent benchmark exclusion
+lists.

@@ -77,17 +77,30 @@ moving render state into another coordinator:
   confirmed capability evidence, and application lifecycle. Its independent
   projection generation fences same-process SSE/Bootstrap ordering while the
   process generation fences service replacement.
+- `ActiveSessionProjectionWriter` is the only hot Session-set mutation policy.
+  Full snapshots fence older Bootstrap/views, per-Session revisions isolate
+  unrelated reads, and cached views cannot promote historical writable state.
+- Hot Session reads hold Primary/Secondary operation admission through RPC,
+  disk, statistics, and Fork-origin awaits; a stale lease falls back to cold
+  JSONL instead of returning active state.
+- `ModelCatalogueRevisionGate` orders Bootstrap, model-management, and SSE
+  catalogue projections across lower revisions, same-revision refinements, and
+  process replacement.
 - Bootstrap request coalescing is authority-keyed. A held request can be shared
-  only by callers with the same process/cache/Runtime generations.
+  only by callers with the same process/cache/Runtime/active-set/catalogue
+  generations.
 - `App.tsx` wires those owners and renders their projections; it does not acquire
-  a new cache, Runtime lifecycle, retry, navigation, or recovery authority.
+  a new cache, Runtime lifecycle, hot-set, catalogue, retry, navigation, or
+  recovery authority.
 
 The full Runtime contract, verification, descriptive before/after checkpoint,
 and explicit follow-up boundaries are recorded in
 [`runtime-projection-writer-checkpoint.md`](runtime-projection-writer-checkpoint.md).
-This convergence still does not make `App.tsx` mechanically splittable: the next
-work is the bounded active-Session projection and server hot-read admission
-phase, not another presentation extraction.
+The subsequent Active-Session/read/catalogue checkpoint is recorded in
+[`active-session-projection-checkpoint.md`](active-session-projection-checkpoint.md).
+This convergence still does not make `App.tsx` mechanically splittable; future
+work remains owner-by-owner and must start from a demonstrated writer or stale
+continuation, not another presentation extraction.
 
 The production-code watch set is `App.tsx`, `state/conversation-pane.ts`,
 `components/ConversationPane.tsx`, `components/SessionInventory.tsx`, and

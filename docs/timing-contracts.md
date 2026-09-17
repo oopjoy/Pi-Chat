@@ -66,7 +66,11 @@
 
 连接、application lifecycle 与 build identity 等 application-global feedback 不需要 Session pane authority。它们也不能因此无条件提交：Primary readiness、confirmed capability 与 application lifecycle 现在由独立的 `RuntimeProjectionWriter` 接纳，使用 `runEpochGeneration + runtimeProjectionGeneration` 判断异步 Bootstrap 是否仍新鲜。同步 SSE 的实际 projection 变化会推进后者；重复或 malformed fact 不推进。`SessionViewCacheWriter` 的 `cacheGeneration` 则独立保护 cache，三种 generation 不互相代替。
 
-Bootstrap coalescer 只允许 process/cache/Runtime generation 完全相同的 refresh 共用请求。Resource reload 或较新的 Runtime observation 之后，新 refresh 必须启动独立 Bootstrap，旧请求的 identity-guarded finalizer 也不能清掉新请求。完整契约和回归证据见 [`runtime-projection-writer-checkpoint.md`](runtime-projection-writer-checkpoint.md)。
+Bootstrap coalescer 只允许 process/cache/Runtime/active-set/catalogue generation 完全相同的 refresh 共用请求。Resource reload 或较新的 Runtime、active-set、catalogue observation 之后，新 refresh 必须启动独立 Bootstrap，旧请求的 identity-guarded finalizer 也不能清掉新请求。Runtime writer 契约见 [`runtime-projection-writer-checkpoint.md`](runtime-projection-writer-checkpoint.md)。
+
+Hot Session set 使用独立 `ActiveSessionProjectionWriter`：full Bootstrap/SSE observation 推进 full-set generation，即使 SSE 的 ID set 与当前值相同；authoritative HTTP view 只推进目标 Session revision；browser-cache view 只能读取当前 membership。Model catalogue 使用 server revision + local observation generation + process generation，同 revision 的 ordered SSE 可 refinement，但 held HTTP 不能用旧 observation authority 覆盖它。
+
+Server hot view 在第一个 Runtime fact 前取得 Primary/Secondary `OperationAdmission`，并把 lease 保持到 RPC、disk、stats 与 Fork-origin await 完成。任一 await 后 Runtime/admission/RPC generation 不再一致时，normal read 丢弃 hot projection 并重读 cold JSONL，fast read 返回 unavailable。完整契约见 [`active-session-projection-checkpoint.md`](active-session-projection-checkpoint.md)。
 
 ### 已审计的异步调用点
 
@@ -77,7 +81,7 @@ Bootstrap coalescer 只允许 process/cache/Runtime generation 完全相同的 r
 | pagination | selected Session 前 | `applySessionView` | `mergeNavigation` | request token + authority | isolated history、old request revisit |
 | prompt acknowledgement/rejection/reconcile | submit 前；draft 转 Session 后重捕获 | `commitPaneIfCurrent` / draft variant、`applySessionView` | local-turn/cache | same authority | stale acknowledgement/rejection、fast settlement |
 | warm Runtime | selected Session 前 | `commitPaneIfCurrent` | cached capability data | authority | stale warm A revisit |
-| model / thinking | `captureViewOperation` | `commitPaneIfCurrent` | staged prefs/cache; bounded advisory model catalogue | view operation | late model/thinking B isolation; startup catalogue pending/empty |
+| model / thinking | `captureViewOperation` | `commitPaneIfCurrent` | staged prefs/cache；catalogue full projection 另经 `ModelCatalogueRevisionGate` | view operation + catalogue revision/observation generation | late model/thinking B isolation；held Bootstrap vs catalogue SSE |
 | extension response / Gate auto-allow feedback | submitted extension 的 Session 前 / pending request admission point | `commitPaneIfCurrent`；feedback 先验证 authority | authoritative reread | same authority | stale extension failure、A/B feedback isolation |
 | destructive Session mutation | selected Session 前 | `commitPaneIfCurrent` | Session summary | pane authority + event version | stale mutation / newer SSE |
 | abort / queue cancel / resume | selected Session 前 | `commitPaneIfCurrent` / `applySessionView` | cache queue/turn overlay | view operation | late stop/queue B isolation |
@@ -85,6 +89,7 @@ Bootstrap coalescer 只允许 process/cache/Runtime generation 完全相同的 r
 | default workspace picker | Settings request | global `workspaceCwd` only | none | default picker Symbol; independent from New | picker then New; later New inherits the committed default |
 | scheduled live message | SSE admission point | scheduler through `paneAuthorityDispatchRef` | live cache | authority | session navigation / streaming |
 | late view after deletion | request before delete | rejected before pane commit | deletion guard rejects cache writes | terminal deletion guard | deleted Session cannot return |
+| hot Session read vs reclaim/rest | Runtime lookup 后、任何 await 前 | current hot view 或 cold fallback | observational Runtime snapshots only while lease current | `OperationAdmission` + RPC/admission identity revalidation | Primary/Secondary drain、Fork-origin await、view-only fallback |
 
 The table records the existing behavior. It is not a license for future direct dispatches.
 

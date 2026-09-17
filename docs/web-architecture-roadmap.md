@@ -590,15 +590,22 @@ App.tsx 只保留 wiring / migration glue，不新增 domain authority
 架构、验证与 `80aeac2 -> e56ddcc` 描述性性能 checkpoint 见
 [`runtime-projection-writer-checkpoint.md`](runtime-projection-writer-checkpoint.md)。
 
-下一有界阶段不是继续拆 `App.tsx`，而是：
+`9b8cccf` 完成后续有界 authority phase：
 
 ```text
-browser active-set revision fencing
-server hot Session-read operation admission / revalidation
-modelCatalogueRevision 的 HTTP/SSE 单调接纳
+ActiveSessionProjectionWriter 独占 browser hot Session-set mutation/freshness policy
+cached view 只能消费当前 membership，不能复活 writable authority
+Primary/Secondary hot Session read 持有 OperationAdmission 到所有 await 与 Fork-origin 完成
+stale hot read 普通路径降级为 JSONL-only，fast path 返回 HOT_VIEW_UNAVAILABLE
+ModelCatalogueRevisionGate 单调接纳 HTTP/SSE，并允许同 revision 的 ordered refinement
+process replacement 重置 server catalogue revision floor，但拒绝 old-process authority
 ```
 
-这三个事实不属于 `RuntimeProjectionWriter`，必须各自保留 owner 与 focused race test。
+详细契约与验证见
+[`active-session-projection-checkpoint.md`](active-session-projection-checkpoint.md)。
+这些事实仍不属于 `RuntimeProjectionWriter`；`App.tsx` 只保留 owner wiring。
+下一步只处理已有证据的独立边界，近期明确项是统一 source-test exclusion list，
+而不是继续机械拆分 `App.tsx`。
 
 P0/P1 执行矩阵见 [`docs/v0.4.7-stability-matrix.md`](v0.4.7-stability-matrix.md)。
 
