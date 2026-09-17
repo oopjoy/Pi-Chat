@@ -52,7 +52,10 @@ export function ManagementPanel({ section, appearance, workspaceCwd, workspacePi
   onAppearance: (value: AppearancePreferences) => void;
   onPickWorkspace: () => void;
   onModel: (provider: string, id: string, api?: string) => void;
-  onModelsChanged: (data: Pick<BootstrapData, "models" | "state" | "modelRuntimeSyncPending">) => void;
+  onModelsChanged: (data: Pick<
+    BootstrapData,
+    "models" | "state" | "modelRuntimeSyncPending" | "modelCatalogueRevision"
+  >) => void;
   onExportDiagnostics: () => Promise<void>;
   onShutdown: () => void;
 }) {
@@ -303,7 +306,10 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
   browseBusy: boolean;
   onModel: (provider: string, id: string, api?: string) => void;
   onBrowseModels: () => void;
-  onModelsChanged: (data: { models: ModelInfo[]; state: PiState }) => void;
+  onModelsChanged: (data: Pick<
+    BootstrapData,
+    "models" | "state" | "modelRuntimeSyncPending" | "modelCatalogueRevision"
+  >) => void;
 }) {
   const [editingProvider, setEditingProvider] = useState<CustomProviderInput | null>(null);
   const [editingProviderKey, setEditingProviderKey] = useState("");

@@ -117,6 +117,10 @@ import {
 } from "./application/active-session-projection-writer";
 import { isApplicationLifecycle } from "./application/application-lifecycle";
 import {
+  ModelCatalogueRevisionGate,
+  type ModelCatalogueAuthority,
+} from "./application/model-catalogue-revision-gate";
+import {
   applyAppearance,
   loadAppearance,
   loadSessionNavigationPreferences,
@@ -342,7 +346,7 @@ type RefreshAuthority = Pick<
   & Pick<
     ActiveSessionProjectionAuthority,
     "activeSessionProjectionGeneration" | "activeSessionFullRevision"
-  > & {
+  > & ModelCatalogueAuthority & {
   refreshEpoch: number;
 };
 type SessionViewCommitAuthority = PaneAuthoritySnapshot
@@ -625,6 +629,11 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   // this process generation until Bootstrap/Runtime discovery confirms it.
   const [modelInventoryConfirmed, setModelInventoryConfirmed] = useState(false);
   const [modelRuntimeSyncPending, setModelRuntimeSyncPending] = useState(false);
+  const modelCatalogueRevisionGateRef =
+    useRef<ModelCatalogueRevisionGate | null>(null);
+  if (!modelCatalogueRevisionGateRef.current)
+    modelCatalogueRevisionGateRef.current = new ModelCatalogueRevisionGate();
+  const modelCatalogueRevisionGate = modelCatalogueRevisionGateRef.current;
   useEffect(() => {
     saveModelCatalog(models);
   }, [models]);
@@ -1355,6 +1364,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     runtimeProjectionGeneration: number;
     activeSessionProjectionGeneration: number;
     activeSessionFullRevision: number;
+    modelCatalogueGeneration: number;
   } | null>(null);
   const handshakeInFlightRef = useRef<{
     refreshEpoch: number;
@@ -2345,7 +2355,8 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     (
       data: BootstrapData,
       authority?: RuntimeProjectionWriteAuthority
-        & ActiveSessionProjectionAuthority,
+        & ActiveSessionProjectionAuthority
+        & ModelCatalogueAuthority,
     ) => {
       applySidebarInventory(data);
       if (authority) {
@@ -2374,34 +2385,41 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         const hotIds = data.activeSessionIds || (activeId ? [activeId] : []);
         activeSessionProjectionWriter.commitBootstrap(hotIds, authority);
       }
-      // A recovering Runtime can briefly return an empty model inventory while
-      // its selected Session model is already known. Retain the last usable
-      // choices through that transient snapshot. A selected model alone is not
-      // an inventory, so do not discard a previously selectable catalogue.
-      const modelInventoryPending =
-        typeof data.modelInventoryPending === "boolean"
-          ? data.modelInventoryPending
-          : data.primaryRuntime?.status !== "ready";
-      setModelRuntimeSyncPending(data.modelRuntimeSyncPending === true);
-      const discoveredModels = mergeModelCatalog([], data.models);
-      if (!modelInventoryPending) {
-        // A completed empty discovery is authoritative for this generation;
-        // stale cached alternatives must not remain presented as current.
-        setModels(
-          discoveredModels.length
-            ? discoveredModels
-            : data.state.model
-              ? mergeModelCatalog([], [data.state.model])
-              : [],
-        );
-      } else if (discoveredModels.length) {
-        // Startup-only custom models are useful immediately, but the Runtime
-        // may still publish more choices once it is ready.
-        setModels((current) => mergeModelCatalog(current, discoveredModels));
-      } else if (data.state.model) {
-        setModels((current) => mergeModelCatalog(current, [data.state.model!]));
+      if (
+        modelCatalogueRevisionGate.admitBootstrap(
+          data.modelCatalogueRevision,
+          authority,
+        )
+      ) {
+        // A recovering Runtime can briefly return an empty model inventory while
+        // its selected Session model is already known. Retain the last usable
+        // choices through that transient snapshot. A selected model alone is not
+        // an inventory, so do not discard a previously selectable catalogue.
+        const modelInventoryPending =
+          typeof data.modelInventoryPending === "boolean"
+            ? data.modelInventoryPending
+            : data.primaryRuntime?.status !== "ready";
+        setModelRuntimeSyncPending(data.modelRuntimeSyncPending === true);
+        const discoveredModels = mergeModelCatalog([], data.models);
+        if (!modelInventoryPending) {
+          // A completed empty discovery is authoritative for this generation;
+          // stale cached alternatives must not remain presented as current.
+          setModels(
+            discoveredModels.length
+              ? discoveredModels
+              : data.state.model
+                ? mergeModelCatalog([], [data.state.model])
+                : [],
+          );
+        } else if (discoveredModels.length) {
+          // Startup-only custom models are useful immediately, but the Runtime
+          // may still publish more choices once it is ready.
+          setModels((current) => mergeModelCatalog(current, discoveredModels));
+        } else if (data.state.model) {
+          setModels((current) => mergeModelCatalog(current, [data.state.model!]));
+        }
+        setModelInventoryConfirmed(!modelInventoryPending);
       }
-      setModelInventoryConfirmed(!modelInventoryPending);
       const workspaceEpoch =
         typeof data.workspaceEpoch === "string" ? data.workspaceEpoch : "";
       const workspaceRevision =
@@ -3123,6 +3141,8 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         authority.activeSessionProjectionGeneration
       && current.activeSessionFullRevision ===
         authority.activeSessionFullRevision
+      && current.modelCatalogueGeneration ===
+        authority.modelCatalogueGeneration
     ) return current.request;
     // Never let a refresh authorized by a newer Runtime/cache observation join
     // a request that began before that projection existed. The old request is
@@ -3143,6 +3163,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       activeSessionProjectionGeneration:
         authority.activeSessionProjectionGeneration,
       activeSessionFullRevision: authority.activeSessionFullRevision,
+      modelCatalogueGeneration: authority.modelCatalogueGeneration,
     };
     return request;
   }, []);
@@ -3157,6 +3178,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       ...activeSessionProjectionWriter.captureAuthority(
         runEpochGenerationRef.current,
       ),
+      ...modelCatalogueRevisionGate.captureAuthority(),
       navigationEpoch: navigationEpochRef.current,
     };
     const { refreshEpoch, runEpochGeneration, navigationEpoch } =
@@ -3850,6 +3872,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         // A's high generation before B reports its own lower-generation state.
         runtimeProjectionWriter.resetForProcessReplacement();
         activeSessionProjectionWriter.resetForReplacement();
+        modelCatalogueRevisionGate.resetForProcessReplacement();
         setModelInventoryConfirmed(false);
         workspaceEpochRef.current =
           typeof ready.workspaceEpoch === "string"
@@ -4966,6 +4989,13 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           setWorkspaceCwd(cwd);
         }
       } else if (type === "pi_chat_models_updated") {
+        if (!modelCatalogueRevisionGate.admitSse(event.revision)) {
+          recordSseRejectionDiagnostic({
+            eventType: type,
+            decisionReason: "stale-model-catalogue",
+          });
+          return;
+        }
         const nextModels = Array.isArray(event.models)
           ? mergeModelCatalog([], event.models as ModelInfo[])
           : [];
@@ -5870,6 +5900,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           // frame could announce the replacement epoch.
           runtimeProjectionWriter.resetForProcessReplacement();
           activeSessionProjectionWriter.resetForReplacement();
+          modelCatalogueRevisionGate.resetForProcessReplacement();
           setModelInventoryConfirmed(false);
           // A newly accepted transport token may belong to a replacement service
           // even when the old socket closed before delivering its changed epoch.
@@ -10160,9 +10191,15 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         onPickWorkspace={() => void pickDefaultWorkspace()}
         onModel={(provider, id, api) => void changeModel(provider, id, api)}
         onModelsChanged={(data) => {
-          setModels(data.models);
-          setModelRuntimeSyncPending(data.modelRuntimeSyncPending === true);
-          saveModelCatalog(data.models);
+          if (
+            modelCatalogueRevisionGate.admitBootstrap(
+              data.modelCatalogueRevision,
+            )
+          ) {
+            setModels(data.models);
+            setModelRuntimeSyncPending(data.modelRuntimeSyncPending === true);
+            saveModelCatalog(data.models);
+          }
           dispatchPane({ type: "RUNTIME_SETTINGS_ADOPTED", target: localDraftRef.current ? { kind: "draft" } : { kind: "session", sessionId: viewedSessionIdRef.current }, state: { model: data.state.model } });
         }}
         onExportDiagnostics={exportStateDiagnostics}
