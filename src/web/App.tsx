@@ -104,11 +104,12 @@ import {
   SessionViewCacheWriter,
   type SessionViewCacheWriteAuthority,
 } from "./application/session-view-cache-writer";
-import { acceptApplicationLifecycle } from "./application/application-lifecycle";
+import type { PrimaryCapabilitySnapshot } from "./application/runtime-readiness";
 import {
-  acceptPrimaryReadiness,
-  type PrimaryCapabilitySnapshot,
-} from "./application/runtime-readiness";
+  RuntimeProjectionWriter,
+  type RuntimeProjectionWriteAuthority,
+} from "./application/runtime-projection-writer";
+import { isApplicationLifecycle } from "./application/application-lifecycle";
 import {
   applyAppearance,
   loadAppearance,
@@ -331,7 +332,7 @@ function steeringClearedMessage(reason: string): string {
 type RefreshAuthority = Pick<
   PaneAuthority,
   "runEpochGeneration" | "cacheGeneration" | "navigationEpoch"
-> & {
+> & Pick<RuntimeProjectionWriteAuthority, "runtimeProjectionGeneration"> & {
   refreshEpoch: number;
 };
 type ScheduledLiveMessage = {
@@ -733,6 +734,9 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   const [eventSourceGeneration, setEventSourceGeneration] = useState(0);
   const [applicationLifecycle, setApplicationLifecycle] =
     useState<ApplicationLifecycle>("idle");
+  const runEpochRef = useRef("");
+  /** Increments only on a real replacement, invalidating old async projections. */
+  const runEpochGenerationRef = useRef(0);
   /** A stale Web bundle may read, but must not mutate a different Server build. */
   const [buildIdentityMismatch, setBuildIdentityMismatch] = useState(false);
   const [serverBuildIdentity, setServerBuildIdentity] =
@@ -745,27 +749,18 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   /** The latest Bootstrap snapshot that has confirmed a particular model's input capability. */
   const [primaryCapabilitySnapshot, setPrimaryCapabilitySnapshot] =
     useState<PrimaryCapabilitySnapshot | null>(null);
-  // EventSource callbacks retain their transport identity across UI commits.
-  // Read current capability facts from refs instead of re-subscribing on each render.
-  const primaryRuntimeRef = useRef(primaryRuntime);
-  primaryRuntimeRef.current = primaryRuntime;
-  /** Single browser projection write boundary for Primary Runtime readiness. */
-  const publishPrimaryReadiness = useCallback(
-    (next: PrimaryRuntimeReadiness): void => {
-      primaryRuntimeRef.current = next;
-      setPrimaryRuntime(next);
-    },
-    [],
-  );
-  const primaryCapabilitySnapshotRef = useRef(primaryCapabilitySnapshot);
-  const publishPrimaryCapabilitySnapshot = useCallback(
-    (next: PrimaryCapabilitySnapshot | null): void => {
-      primaryCapabilitySnapshotRef.current = next;
-      setPrimaryCapabilitySnapshot(next);
-    },
-    [],
-  );
-  primaryCapabilitySnapshotRef.current = primaryCapabilitySnapshot;
+  const runtimeProjectionWriterRef =
+    useRef<RuntimeProjectionWriter | null>(null);
+  if (!runtimeProjectionWriterRef.current)
+    runtimeProjectionWriterRef.current = new RuntimeProjectionWriter(
+      {
+        readiness: setPrimaryRuntime,
+        capability: setPrimaryCapabilitySnapshot,
+        lifecycle: setApplicationLifecycle,
+      },
+      () => runEpochGenerationRef.current,
+    );
+  const runtimeProjectionWriter = runtimeProjectionWriterRef.current;
   /** Session IDs whose Pi Runtime is being prepared outside the reading path. */
   const [warmingSessionIds, setWarmingSessionIds] = useState<string[]>([]);
   /** Browser-local notice: a background Session completed an assistant reply not yet opened here. */
@@ -780,9 +775,6 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   // Keep enough data-only panes to cover normal archive hopping; the server's
   // target snapshot cache has the same entry bound.
   const viewCacheRef = useRef(new SessionViewCache(32));
-  const runEpochRef = useRef("");
-  /** Increments only on a real replacement, invalidating old async cache writes. */
-  const runEpochGenerationRef = useRef(0);
   /** A structural delete is terminal even if a response is lost in transit. */
   const confirmedDeletedSessionIdsRef = useRef(new Set<string>());
   const viewCacheWriterRef = useRef<SessionViewCacheWriter | null>(null);
@@ -1027,12 +1019,6 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   const sseReconnectTimerRef = useRef<number | null>(null);
   const sseFloodCountRef = useRef(0);
   const clearViewedPromiseRef = useRef<Promise<unknown> | null>(null);
-  const applicationLifecycleRef = useRef<ApplicationLifecycle>("idle");
-  /** Single browser projection write boundary for application lifecycle. */
-  const publishApplicationLifecycle = (next: ApplicationLifecycle): void => {
-    applicationLifecycleRef.current = next;
-    setApplicationLifecycle(next);
-  };
   const resourceReloadActiveRef = useRef(false);
   const handoffWaitRef = useRef<Promise<void> | null>(null);
   const sessionRefreshTimerRef = useRef<number | null>(null);
@@ -1334,7 +1320,12 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   const initialReadyRecoveryRequestedRef = useRef(false);
   /** A replacement can announce maintenance before its first idle bootstrap. */
   const replacementBootstrapPendingRef = useRef(false);
-  const bootstrapInFlightRef = useRef<Promise<BootstrapData> | null>(null);
+  const bootstrapInFlightRef = useRef<{
+    request: Promise<BootstrapData>;
+    runEpochGeneration: number;
+    cacheGeneration: number;
+    runtimeProjectionGeneration: number;
+  } | null>(null);
   const handshakeInFlightRef = useRef<{
     refreshEpoch: number;
     runEpochGeneration: number;
@@ -1509,13 +1500,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     setWarmingSessionIds([]);
     busySessionCountsRef.current.clear();
     setBusySessionIds([]);
-    const currentReadiness = primaryRuntimeRef.current;
-    const starting: PrimaryRuntimeReadiness = {
-      status: "starting",
-      generation: currentReadiness.generation,
-    };
-    publishPrimaryReadiness(starting);
-    publishPrimaryCapabilitySnapshot(null);
+    runtimeProjectionWriter.resetForResourceReload();
     setModelInventoryConfirmed(false);
   }, [syncMutatingSessionIds]);
   const recordSourceTurnTotal = (sessionId: string, total: number): void => {
@@ -1963,6 +1948,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     (authority: RefreshAuthority) =>
       refreshEpochRef.current === authority.refreshEpoch &&
       viewCacheWriter.isCurrent(authority) &&
+      runtimeProjectionWriter.isCurrent(authority) &&
       navigationEpochRef.current === authority.navigationEpoch,
     [],
   );
@@ -2298,32 +2284,44 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
    * after a Bootstrap response has been committed for that same model.
    */
   const confirmPrimaryCapabilitySnapshot = useCallback(
-    (data: BootstrapData, committedModel: ModelInfo | null | undefined) => {
-      const readiness = data.primaryRuntime;
-      const committedModelKey = modelCapabilityKey(committedModel);
-      const modelKeys = [data.state.model, ...data.models]
-        .map(modelCapabilityKey)
-        .filter(Boolean);
-      if (
-        readiness?.status !== "ready" ||
-        primaryRuntimeRef.current.status !== "ready" ||
-        primaryRuntimeRef.current.generation !== readiness.generation ||
-        !committedModelKey ||
-        !modelKeys.includes(committedModelKey)
-      )
-        return;
-      const snapshot = {
-        generation: readiness.generation,
-        modelKeys: [...new Set(modelKeys)],
-      };
-      publishPrimaryCapabilitySnapshot(snapshot);
+    (
+      data: BootstrapData,
+      committedModel: ModelInfo | null | undefined,
+      authority: RuntimeProjectionWriteAuthority,
+    ) => {
+      runtimeProjectionWriter.confirmBootstrapCapability({
+        readiness: data.primaryRuntime,
+        committedModelKey: modelCapabilityKey(committedModel),
+        modelKeys: [data.state.model, ...data.models]
+          .map(modelCapabilityKey)
+          .filter(Boolean),
+      }, authority);
     },
     [],
   );
 
   const applyBootstrapMetadata = useCallback(
-    (data: BootstrapData) => {
+    (
+      data: BootstrapData,
+      authority?: RuntimeProjectionWriteAuthority,
+    ) => {
       applySidebarInventory(data);
+      if (authority) {
+        const readiness = data.primaryRuntime || {
+          status: "starting" as const,
+          generation: 0,
+        };
+        runtimeProjectionWriter.commitBootstrap(
+          {
+            readiness,
+            lifecycle:
+              data.applicationLifecycle === undefined
+                ? "idle"
+                : data.applicationLifecycle,
+          },
+          authority,
+        );
+      }
       const activeId =
         data.activeSessionId ||
         data.sessions.find((session) => session.active)?.id ||
@@ -2387,21 +2385,6 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       setServerBuildIdentity(identity);
       if (data.piVersion) setPiVersion(data.piVersion);
       setBuildIdentityMismatch(!buildIdentityMatches(identity));
-      const readiness = data.primaryRuntime || {
-        status: "starting" as const,
-        generation: 0,
-      };
-      const acceptedReadiness = acceptPrimaryReadiness(
-        primaryRuntimeRef.current,
-        readiness,
-      );
-      publishPrimaryReadiness(acceptedReadiness);
-      publishApplicationLifecycle(
-        acceptApplicationLifecycle(
-          applicationLifecycleRef.current,
-          data.applicationLifecycle || "idle",
-        ),
-      );
     },
     [applySidebarInventory, rememberConfirmedCommands],
   );
@@ -2411,7 +2394,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       data: BootstrapData,
       authority: PaneAuthoritySnapshot | undefined,
       queueRequestRevision: number | undefined,
-      cacheAuthority: SessionViewCacheWriteAuthority,
+      cacheAuthority: RefreshAuthority,
     ) => {
       if (authority && !paneAuthorityCanCommit(authority)) {
         recordBrowserStateDiagnostic("projection", "bootstrap-rejected", {
@@ -2554,7 +2537,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         sessions: bootstrapSessions,
         queue: bootstrapQueue,
         queuePaused: bootstrapProjection.paused,
-      });
+      }, cacheAuthority);
       if (activeViewId)
         updateGateMode(activeViewId, data.gateMode, authority || cacheAuthority);
       if (!activeViewId) {
@@ -2571,7 +2554,11 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         recordBrowserStateDiagnostic("projection", "bootstrap-committed", {
           details: { paneKind: "draft", decisionReason: "committed" },
         });
-        confirmPrimaryCapabilitySnapshot(data, data.state.model);
+        confirmPrimaryCapabilitySnapshot(
+          data,
+          data.state.model,
+          cacheAuthority,
+        );
         return;
       }
       const staged = pendingSessionPrefsRef.current.get(activeViewId);
@@ -2625,7 +2612,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         sessionId: activeViewId,
         details: { paneKind: "session", decisionReason: "committed" },
       });
-      confirmPrimaryCapabilitySnapshot(data, committedModel);
+      confirmPrimaryCapabilitySnapshot(data, committedModel, cacheAuthority);
     },
     [
       applyBootstrapMetadata,
@@ -3060,16 +3047,32 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     [],
   );
 
-  const loadBootstrap = useCallback(() => {
-    if (bootstrapInFlightRef.current) return bootstrapInFlightRef.current;
+  const loadBootstrap = useCallback((authority: RefreshAuthority) => {
+    const current = bootstrapInFlightRef.current;
+    if (
+      current
+      && current.runEpochGeneration === authority.runEpochGeneration
+      && current.cacheGeneration === authority.cacheGeneration
+      && current.runtimeProjectionGeneration ===
+        authority.runtimeProjectionGeneration
+    ) return current.request;
+    // Never let a refresh authorized by a newer Runtime/cache observation join
+    // a request that began before that projection existed. The old request is
+    // uncancellable; identity-guarded cleanup prevents it detaching the new one.
+    if (current) bootstrapInFlightRef.current = null;
     // api.bootstrap() performs the lightweight handshake only for the real
     // transport. Keeping this seam direct preserves test/local adapters that
     // supply a complete authenticated bootstrap projection themselves.
     const request = api.bootstrap().finally(() => {
-      if (bootstrapInFlightRef.current === request)
+      if (bootstrapInFlightRef.current?.request === request)
         bootstrapInFlightRef.current = null;
     });
-    bootstrapInFlightRef.current = request;
+    bootstrapInFlightRef.current = {
+      request,
+      runEpochGeneration: authority.runEpochGeneration,
+      cacheGeneration: authority.cacheGeneration,
+      runtimeProjectionGeneration: authority.runtimeProjectionGeneration,
+    };
     return request;
   }, []);
 
@@ -3077,6 +3080,9 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     const refreshAuthority: RefreshAuthority = {
       refreshEpoch: ++refreshEpochRef.current,
       ...viewCacheWriter.captureAuthority(runEpochGenerationRef.current),
+      ...runtimeProjectionWriter.captureAuthority(
+        runEpochGenerationRef.current,
+      ),
       navigationEpoch: navigationEpochRef.current,
     };
     const { refreshEpoch, runEpochGeneration, navigationEpoch } =
@@ -3155,7 +3161,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         })
         .catch(() => undefined);
     };
-    const bootstrapRequest = loadBootstrap();
+    const bootstrapRequest = loadBootstrap(refreshAuthority);
     // Normal reloads resolve bootstrap in a few milliseconds. Waiting briefly
     // prevents its Primary get_state from racing an unnecessary remembered view.
     // If startup is genuinely slow, cold JSONL still paints independently.
@@ -3217,7 +3223,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       viewedSessionIdRef.current === wantedId &&
       (sessionEventVersionRef.current.get(wantedId) || 0) !== requestVersion
     ) {
-      applyBootstrapMetadata(data);
+      applyBootstrapMetadata(data, refreshAuthority);
       return;
     }
     // A local New draft intentionally has no Pi Session yet. Reconnect/bootstrap
@@ -3251,10 +3257,14 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
             queue: filteredActiveQueue,
           }
         : data;
-      applyBootstrapMetadata(filteredData);
+      applyBootstrapMetadata(filteredData, refreshAuthority);
       // A local draft deliberately retains its own staged model. It may use the
       // refreshed capability snapshot only when it is the same model shape.
-      confirmPrimaryCapabilitySnapshot(data, paneModelRef.current);
+      confirmPrimaryCapabilitySnapshot(
+        data,
+        paneModelRef.current,
+        refreshAuthority,
+      );
       setError((current) => (recoverableRefreshError(current) ? "" : current));
       return;
     }
@@ -3300,7 +3310,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         if (
           (sessionEventVersionRef.current.get(wantedId) || 0) !== viewVersion
         ) {
-          applyBootstrapMetadata(data);
+          applyBootstrapMetadata(data, refreshAuthority);
           if (viewedSessionIdRef.current === wantedId)
             schedulePromptReconcile(
               wantedId,
@@ -3310,7 +3320,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         }
         // Commit metadata and the wanted view together. Do not render the Primary
         // draft in between: EventSource readiness also calls refresh after F5.
-        applyBootstrapMetadata(data);
+        applyBootstrapMetadata(data, refreshAuthority);
         applySessionView(view, viewAuthority, wantedQueueRequestRevision);
         setError((current) =>
           recoverableRefreshError(current) ? "" : current,
@@ -3324,7 +3334,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         if (
           refreshFailureKeepsCommittedView(cause, viewedSessionIdRef.current)
         ) {
-          applyBootstrapMetadata(data);
+          applyBootstrapMetadata(data, refreshAuthority);
           throw cause;
         }
         if (
@@ -3366,7 +3376,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           return;
         if (view.session.id !== activeId)
           throw new Error("已保存对话恢复结果与当前 Session 不一致");
-        applyBootstrapMetadata(data);
+        applyBootstrapMetadata(data, refreshAuthority);
         applySessionView(view, historyAuthority, historyQueueRequestRevision);
         if (view.historyPending || view.reconcilePending || view.isStreaming)
           requestPromptReconcileRef.current(activeId);
@@ -3412,7 +3422,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       // Idle is authoritative lifecycle state even when the following bootstrap
       // is slow or rejected. Do not leave navigation and mutations locked on
       // stale maintenance state while JSONL fallback remains available.
-      publishApplicationLifecycle("idle");
+      runtimeProjectionWriter.observeLifecycle("idle");
       setNotice("");
       const replacementBootstrapPending =
         replacementBootstrapPendingRef.current;
@@ -3697,6 +3707,14 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         });
         return;
       }
+      const readyLifecycle = lifecycleFromEvent(ready);
+      if (!readyLifecycle) {
+        recordSseRejectionDiagnostic({
+          eventType: "ready",
+          decisionReason: "malformed-lifecycle",
+        });
+        return;
+      }
       const readyRunEpoch =
         typeof ready.piChatRunEpoch === "string" ? ready.piChatRunEpoch : "";
       const serverEpochChanged = Boolean(
@@ -3756,9 +3774,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         setSessionDirectories([]);
         // Primary readiness generations are local to one server process. Clear
         // A's high generation before B reports its own lower-generation state.
-        const replacementReadiness = { status: "starting" as const, generation: 0 };
-        publishPrimaryReadiness(replacementReadiness);
-        publishPrimaryCapabilitySnapshot(null);
+        runtimeProjectionWriter.resetForProcessReplacement();
         setModelInventoryConfirmed(false);
         workspaceEpochRef.current =
           typeof ready.workspaceEpoch === "string"
@@ -3781,8 +3797,9 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         readyPrimary?.status === "ready" &&
         typeof readyPrimary.generation === "number" &&
         !readyPrimary.model &&
-        (primaryRuntimeRef.current.status !== "ready" ||
-          primaryRuntimeRef.current.generation !== readyPrimary.generation);
+        (runtimeProjectionWriter.currentReadiness().status !== "ready" ||
+          runtimeProjectionWriter.currentReadiness().generation !==
+            readyPrimary.generation);
       if (
         readyPrimary &&
         (readyPrimary.status === "starting" ||
@@ -3791,8 +3808,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         typeof readyPrimary.generation === "number"
       ) {
         const incoming = readyPrimary as PrimaryRuntimeReadiness;
-        const next = acceptPrimaryReadiness(primaryRuntimeRef.current, incoming);
-        publishPrimaryReadiness(next);
+        const { next } = runtimeProjectionWriter.observeTransportReady(incoming);
         const acceptedReady =
           next.status === "ready" &&
           next.generation === incoming.generation &&
@@ -3808,7 +3824,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
             generation: next.generation,
             modelKeys: [modelCapabilityKey(next.model)].filter(Boolean),
           };
-          publishPrimaryCapabilitySnapshot(snapshot);
+          runtimeProjectionWriter.publishReadyCapability(snapshot);
           dispatchPane({
             type: "RUNTIME_SETTINGS_ADOPTED",
             target,
@@ -3819,8 +3835,8 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           });
         }
       }
-      if (lifecycleFromEvent(ready) === "restarting") {
-        publishApplicationLifecycle("restarting");
+      if (readyLifecycle === "restarting") {
+        runtimeProjectionWriter.observeLifecycle("restarting");
         setNotice("Pi Chat 正在构建并重启，暂时停止接收新操作…");
         source.close();
         handoffWaitRef.current ||= api
@@ -3832,9 +3848,18 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           });
         return;
       }
-      const readyLifecycle = lifecycleFromEvent(ready);
       if (readyLifecycle !== "idle") {
-        publishApplicationLifecycle(readyLifecycle);
+        // A reconnect can miss the lifecycle edge and the reload marker. A
+        // maintenance ready snapshot must therefore be a self-contained
+        // replacement boundary before any held bootstrap can be reused.
+        if (
+          readyLifecycle === "resources-reloading"
+          && !resourceReloadActiveRef.current
+        ) {
+          resourceReloadActiveRef.current = true;
+          resetResourceReloadTransientState();
+        }
+        runtimeProjectionWriter.observeLifecycle(readyLifecycle);
         if (readyLifecycle === "shutting-down") {
           source.close();
           setCloseComplete("application");
@@ -3848,10 +3873,17 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         }
         return;
       }
+      // A ready snapshot can also be the first evidence that maintenance ended
+      // after a reconnect. Consume that boundary and require fresh metadata.
+      const completedRuntimeReload = resourceReloadActiveRef.current;
+      resourceReloadActiveRef.current = false;
       // Readiness already includes the adopted selected-model capability. A
       // lightweight metadata refresh can still discover commands/stats/models;
       // the server reuses its adopted state and does not issue another get_state.
-      startIdleRecovery(serverEpochChanged, readyNeedsMetadataRefresh);
+      startIdleRecovery(
+        serverEpochChanged,
+        readyNeedsMetadataRefresh || completedRuntimeReload,
+      );
     },
     [
       cancelPendingNavigation,
@@ -3859,6 +3891,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       recordSseRejectionDiagnostic,
       rememberObservedModel,
       resetProcessOwnedUiState,
+      resetResourceReloadTransientState,
       startIdleRecovery,
     ],
   );
@@ -4786,18 +4819,12 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           typeof readiness.generation === "number"
         ) {
           const incoming = readiness as PrimaryRuntimeReadiness;
-          const current = primaryRuntimeRef.current;
-          const next = acceptPrimaryReadiness(current, incoming);
-          const acceptedTransition =
-            next.generation !== current.generation ||
-            next.status !== current.status ||
-            next.error !== current.error;
-          if (acceptedTransition) {
-            publishPrimaryReadiness(next);
+          const { previous: current, next, committed } =
+            runtimeProjectionWriter.observeRuntimeStatus(incoming);
+          if (committed) {
             // A new startup or failure invalidates the preceding generation's
             // ModelInfo.input assertion before a later ready can paint.
             if (next.status !== "ready") {
-              publishPrimaryCapabilitySnapshot(null);
               // Fast is Runtime-generation state. Clear the old visible/cache
               // projection as soon as a Primary replacement starts; a later
               // current-generation extension event may explicitly re-enable it.
@@ -4878,18 +4905,27 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
             : "模型目录已更新。",
         );
       } else if (type === "pi_chat_application_lifecycle") {
-        const lifecycle = acceptApplicationLifecycle(
-          applicationLifecycleRef.current,
-          event.lifecycle || "idle",
-        );
-        if (lifecycle !== "idle") cancelPendingNavigation();
-        if (lifecycle === "resources-reloading" && !resourceReloadActiveRef.current) {
+        if (!isApplicationLifecycle(event.lifecycle)) {
+          recordSseRejectionDiagnostic({
+            eventType: type,
+            decisionReason: "malformed-lifecycle",
+          });
+          return;
+        }
+        const incomingLifecycle = event.lifecycle;
+        if (
+          incomingLifecycle === "resources-reloading"
+          && !resourceReloadActiveRef.current
+        ) {
           resourceReloadActiveRef.current = true;
           resetResourceReloadTransientState();
-        } else if (lifecycle === "idle") {
+        }
+        const lifecycle =
+          runtimeProjectionWriter.observeLifecycle(incomingLifecycle);
+        if (lifecycle !== "idle") cancelPendingNavigation();
+        if (lifecycle === "idle") {
           resourceReloadActiveRef.current = false;
         }
-        publishApplicationLifecycle(lifecycle);
         if (lifecycle === "restarting")
           setNotice("Pi Chat 正在构建并重启，暂时停止接收新操作…");
         else if (lifecycle === "workspace-changing")
@@ -4907,6 +4943,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         if (!resourceReloadActiveRef.current) {
           resourceReloadActiveRef.current = true;
           resetResourceReloadTransientState();
+          runtimeProjectionWriter.observeLifecycle("resources-reloading");
         }
         setNotice("配置已更新，正在确认新的 Pi Runtime…");
       } else if (type === "pi_chat_sessions_changed") {
@@ -5728,7 +5765,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   const handleEventSourceError = useCallback(
     (source: EventSource) => {
       source.close();
-      if (applicationLifecycleRef.current === "restarting") {
+      if (runtimeProjectionWriter.currentLifecycle() === "restarting") {
         handoffWaitRef.current ||= api
           .waitForApplicationHandoff()
           .then(() => window.location.reload())
@@ -5755,6 +5792,11 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           // ready frame. Invalidate old refresh commits and process-owned UI
           // leases before bootstrapping with the newly accepted transport token.
           runEpochGenerationRef.current += 1;
+          // Readiness generations are process-local. Conservatively reset here:
+          // token recovery may have crossed a process boundary before any ready
+          // frame could announce the replacement epoch.
+          runtimeProjectionWriter.resetForProcessReplacement();
+          setModelInventoryConfirmed(false);
           // A newly accepted transport token may belong to a replacement service
           // even when the old socket closed before delivering its changed epoch.
           // Detach every process-A sidebar scope before B's base inventory can
@@ -8769,7 +8811,8 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           return;
         }
         const finalizedViewed = finalizeDeletedSession(deletingId);
-        // Do not replace a newer user selection or local draft while the request settled.
+        // Delete responses may reconcile ancillary inventory, but they never
+        // carry refresh-order authority for core Runtime projections.
         applyBootstrapMetadata(data);
         selectDeletionFallback(deletingId, data.sessions, finalizedViewed);
         setNotice("对话已删除");

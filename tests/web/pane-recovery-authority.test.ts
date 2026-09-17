@@ -96,6 +96,86 @@ test("token recovery clears full inventory retained by the previous process", as
   }
 });
 
+test("token recovery resets process-local readiness before a lower replacement generation", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  let bootstrapCalls = 0;
+  let resolveRecoveredBootstrap!: (value: BootstrapData) => void;
+  const recoveredBootstrap = new Promise<BootstrapData>((resolve) => {
+    resolveRecoveredBootstrap = resolve;
+  });
+  Object.assign(api, {
+    bootstrap: async () => {
+      bootstrapCalls += 1;
+      if (bootstrapCalls === 1) {
+        return {
+          ...bootstrap,
+          primaryRuntime: {
+            status: "ready" as const,
+            generation: 9,
+            model: bootstrap.state.model,
+            sessionId: activeId,
+          },
+        };
+      }
+      return recoveredBootstrap;
+    },
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    recoverConnection: async () => undefined,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    assert.equal(
+      dom.window.document.querySelector(".primary-runtime-status"),
+      null,
+      "process A begins ready at its higher local generation",
+    );
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.onerror?.(new dom.window.Event("error"));
+      await new Promise((resolve) => dom.window.setTimeout(resolve, 0));
+      await new Promise((resolve) => dom.window.setTimeout(resolve, 0));
+    });
+    assert.equal(bootstrapCalls, 2);
+    assert.ok(
+      dom.window.document.querySelector(".primary-runtime-status.is-starting"),
+      "accepted recovery token retires process A readiness before B bootstrap",
+    );
+
+    await act(async () => {
+      resolveRecoveredBootstrap({
+        ...bootstrap,
+        primaryRuntime: {
+          status: "failed",
+          generation: 1,
+          error: "replacement Runtime generation one",
+        },
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.ok(
+      dom.window.document.querySelector(".primary-runtime-status.is-failed"),
+      "process B lower readiness generation is accepted without a ready frame",
+    );
+    assert.match(
+      dom.window.document.body.textContent || "",
+      /replacement Runtime generation one/,
+    );
+  } finally {
+    await act(async () => {
+      resolveRecoveredBootstrap(bootstrap);
+      root.unmount();
+    });
+    restoreApi();
+  }
+});
+
 test("transient SSE recovery keeps an active turn visible until fresh bootstrap authority arrives", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");

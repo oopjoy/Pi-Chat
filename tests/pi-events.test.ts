@@ -5,7 +5,10 @@ import { assistantMessage, canonicalMessageEndFromEvent, lifecycleFromEvent, par
 
 test("Pi event helpers normalize lifecycle and message payloads", () => {
   assert.equal(lifecycleFromEvent({ lifecycle: "resources-reloading" }), "resources-reloading");
-  assert.equal(lifecycleFromEvent({ lifecycle: "unknown" }), "idle");
+  assert.equal(lifecycleFromEvent({ lifecycle: "unknown" }), null);
+  assert.equal(lifecycleFromEvent({ lifecycle: "" }), null);
+  assert.equal(lifecycleFromEvent({}), null);
+  assert.equal(lifecycleFromEvent({ lifecycle: 1 }), null);
   assert.deepEqual(parseEventData({ data: '{"type":"ready"}' } as MessageEvent<string>), { type: "ready" });
   assert.equal(parseEventData({ data: '{' } as MessageEvent<string>), null);
   assert.equal(parseEventData({ data: '[]' } as MessageEvent<string>), null);

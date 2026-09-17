@@ -14,11 +14,16 @@ const applicationLifecycles = new Set<ApplicationLifecycle>([
  * state for an unknown server payload. Server lifecycle remains authoritative;
  * this is only projection input validation.
  */
+export function isApplicationLifecycle(
+  incoming: unknown,
+): incoming is ApplicationLifecycle {
+  return typeof incoming === "string"
+    && applicationLifecycles.has(incoming as ApplicationLifecycle);
+}
+
 export function acceptApplicationLifecycle(
   current: ApplicationLifecycle,
   incoming: unknown,
 ): ApplicationLifecycle {
-  return typeof incoming === "string" && applicationLifecycles.has(incoming as ApplicationLifecycle)
-    ? incoming as ApplicationLifecycle
-    : current;
+  return isApplicationLifecycle(incoming) ? incoming : current;
 }

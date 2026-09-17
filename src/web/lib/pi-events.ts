@@ -4,6 +4,7 @@ import {
 } from "../../shared/runtime-events";
 import { normalizeStreamingAssistantMessage } from "../../shared/streaming-assistant";
 import type { ApplicationLifecycle, PiMessage, PromptImage } from "../../shared/types";
+import { isApplicationLifecycle } from "../application/application-lifecycle";
 
 export function parseEventData(rawEvent: Event): Record<string, unknown> | null {
   try {
@@ -23,9 +24,10 @@ export function canonicalMessageEndFromEvent(
   return decodeCanonicalMessageEndEvent(event);
 }
 
-export function lifecycleFromEvent(event: Record<string, unknown>): ApplicationLifecycle {
-  const value = event.lifecycle;
-  return value === "restarting" || value === "shutting-down" || value === "workspace-changing" || value === "resources-reloading" || value === "models-refreshing" ? value : "idle";
+export function lifecycleFromEvent(
+  event: Record<string, unknown>,
+): ApplicationLifecycle | null {
+  return isApplicationLifecycle(event.lifecycle) ? event.lifecycle : null;
 }
 
 export function assistantMessage(event: Record<string, unknown>): PiMessage | null {
