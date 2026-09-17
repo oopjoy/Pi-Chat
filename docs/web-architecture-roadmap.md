@@ -524,7 +524,7 @@ focused tests
 
 如果发现一个 coordinator 开始拥有另一个领域的事实，应停止并重新拆边界。
 
-## 五、当前实施状态（v0.4.7 调整基线）
+## 五、当前实施状态（v0.4.8 维护基线）
 
 当前 `main` 已完成并通过独立验证：
 
@@ -546,11 +546,12 @@ Browser duplicate Prompt / reload / reconnect smoke
 当前发布 checkpoint：
 
 ```text
-v0.4.6   bdcf5d3；GitHub Release、Windows ZIP 与远端 checksum 已核验且旧 tag 不移动
-v0.4.7   当前 main 发布候选；仍是半成品稳定性版本，不是 1.0 或 adoption release
+v0.4.6   bdcf5d3；历史 GitHub Release 与 Windows ZIP，旧 tag 不移动
+v0.4.7   9665c7d；历史 stability preview，旧 tag 与资产不移动
+v0.4.8   当前正式维护发布候选，绑定独立 source revision 与 Windows artifact
 ```
 
-v0.4.7 只接受能减少竞态、错误恢复成本或 Windows 使用摩擦的变更；不以文件大小或抽象数量为目标继续拆分 `App.tsx`。真实 Pi Runtime retry、Windows 工具链收口、更多多窗口/恢复矩阵和发布卫生仍需后续调整。
+v0.4.8 只接受缺陷、发布、安全、平台兼容或测量驱动变更；不以文件大小或抽象数量为目标继续拆分 `App.tsx`。真实 Pi Runtime/provider failure field validation、Windows 工具链和发布卫生继续按维护需求推进。
 
 `e14ba25` 将以下逻辑从 `App.tsx` 提取为纯 admission boundary：
 
