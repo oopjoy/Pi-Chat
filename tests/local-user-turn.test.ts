@@ -121,6 +121,45 @@ test("a late acknowledgement cannot reappend a persisted row after ordinal drift
   assert.deepEqual(protectTranscriptWithLocalTurns([turn], persisted, 3, 3).pendingTurns, []);
 });
 
+test("Server Prompt identity settles a local turn across a stale fork watermark", () => {
+  const promptId = "00000000-0000-4000-8000-000000000099";
+  const optimistic: PiMessage = {
+    role: "user",
+    content: "restored fork prompt",
+    timestamp: 9_000,
+    piChatPromptId: promptId,
+  };
+  const turn: LocalUserTurn = {
+    sessionId: "fork-session",
+    message: optimistic,
+    serverPromptId: promptId,
+    expectedTurnTotal: 12,
+    baselineTurnTotal: 11,
+    renderedInTranscript: true,
+  };
+  const persisted: PiMessage = {
+    role: "user",
+    content: "restored fork prompt",
+    timestamp: 8_000,
+    piChatPromptId: promptId,
+    piChatPersistedMessageId: "entry-11:0",
+  };
+
+  const protectedTranscript = protectTranscriptWithLocalTurns(
+    [turn],
+    [persisted],
+    1,
+    11,
+  );
+  assert.deepEqual(protectedTranscript.pendingTurns, []);
+  assert.deepEqual(protectedTranscript.messages, [persisted]);
+  assert.deepEqual(
+    appendLocalTurnOnce([optimistic, persisted], turn),
+    [persisted],
+    "a late acknowledgement removes an already-painted optimistic duplicate",
+  );
+});
+
 test("two distinct identical prompts remain two user turns", () => {
   const first = { ...pending, expectedTurnTotal: 2 };
   const second: LocalUserTurn = {
@@ -198,6 +237,71 @@ test("queue update hides an optimistic turn before its HTTP acknowledgement", ()
   assert.equal(second.queueState, "waiting");
   assert.equal(bindQueuedDispatch(turns, "queue-1", "same", 0), first);
   assert.equal(first.queueState, "dispatched");
+});
+
+test("queue dispatch binds by Browser operation identity before identical-payload fallback", () => {
+  const first: LocalUserTurn = {
+    sessionId: "session-a",
+    message: { role: "user", content: "same" },
+    expectedTurnTotal: 2,
+    promptOperationId: "operation-first",
+  };
+  const second: LocalUserTurn = {
+    sessionId: "session-a",
+    message: { role: "user", content: "same" },
+    expectedTurnTotal: 2,
+    promptOperationId: "operation-second",
+  };
+  assert.equal(
+    bindQueuedDispatch(
+      [first, second],
+      "queue-second",
+      "same",
+      0,
+      "operation-second",
+    ),
+    second,
+  );
+  assert.equal(first.queueId, undefined);
+  assert.equal(second.queueId, "queue-second");
+});
+
+test("queue dispatch fails closed on reused or payload-mismatched Browser operations", () => {
+  const first: LocalUserTurn = {
+    sessionId: "session-a",
+    message: { role: "user", content: "first" },
+    expectedTurnTotal: 2,
+    promptOperationId: "operation-reused",
+  };
+  const second: LocalUserTurn = {
+    sessionId: "session-a",
+    message: { role: "user", content: "second" },
+    expectedTurnTotal: 3,
+    promptOperationId: "operation-reused",
+  };
+  assert.equal(
+    bindQueuedDispatch(
+      [first, second],
+      "queue-reused",
+      "second",
+      0,
+      "operation-reused",
+    ),
+    undefined,
+  );
+  second.promptOperationId = "operation-second";
+  assert.equal(
+    bindQueuedDispatch(
+      [first, second],
+      "queue-second",
+      "different payload",
+      0,
+      "operation-second",
+    ),
+    undefined,
+  );
+  assert.equal(first.queueId, undefined);
+  assert.equal(second.queueId, undefined);
 });
 
 test("queue dispatch binds to an unacknowledged local turn instead of duplicating it", () => {
@@ -759,6 +863,46 @@ test("a pending server view binds by Server Prompt identity before ordinal fallb
   assert.equal(unbound.message.piChatPendingMessageId, "pending-42");
 });
 
+test("a pending view binds the exact Browser operation among identical local prompts", () => {
+  const first: LocalUserTurn = {
+    sessionId: "session-a",
+    message: { role: "user", content: repeatedPrompt, timestamp: 9_000 },
+    expectedTurnTotal: 12,
+    promptOperationId: "operation-first",
+  };
+  const second: LocalUserTurn = {
+    sessionId: "session-a",
+    message: { role: "user", content: repeatedPrompt, timestamp: 9_000 },
+    expectedTurnTotal: 12,
+    promptOperationId: "operation-second",
+  };
+  const pending = {
+    id: "server-pending",
+    promptId: "server-prompt",
+    clientPromptOperationId: "operation-second",
+    message: { role: "user" as const, content: repeatedPrompt, timestamp: 9_000 },
+    expectedTurnTotal: 12,
+  };
+  assert.equal(localTurnForPendingPrompt([first, second], pending), second);
+});
+
+test("a foreign pending Browser operation cannot capture a same-payload local turn", () => {
+  const localTurn: LocalUserTurn = {
+    sessionId: "session-a",
+    message: { role: "user", content: repeatedPrompt, timestamp: 9_000 },
+    expectedTurnTotal: 12,
+    promptOperationId: "operation-local",
+  };
+  const pending = {
+    id: "server-pending",
+    promptId: "server-prompt",
+    clientPromptOperationId: "operation-other-window",
+    message: { role: "user" as const, content: repeatedPrompt, timestamp: 9_000 },
+    expectedTurnTotal: 12,
+  };
+  assert.equal(localTurnForPendingPrompt([localTurn], pending), undefined);
+});
+
 test("an ambiguous pending view never rehydrates another local same-payload turn", () => {
   const turns: LocalUserTurn[] = [
     { sessionId: "session-a", message: { role: "user", content: repeatedPrompt, timestamp: 9_000 }, expectedTurnTotal: 12 },
@@ -806,6 +950,54 @@ test("ambiguous identical pending prompts are not collapsed by timestamp", () =>
     expectedTurnTotal: 11,
   };
   assert.equal(localTurnForPendingPrompt([first, second], pending), undefined);
+});
+
+test("a conflicting persisted Prompt identity cannot settle another identical local turn", () => {
+  const first: LocalUserTurn = {
+    sessionId: "session-a",
+    message: { role: "user", content: repeatedPrompt, timestamp: 9_000 },
+    expectedTurnTotal: 1,
+    baselineTurnTotal: 0,
+    serverPromptId: "prompt-first",
+  };
+  const second: LocalUserTurn = {
+    sessionId: "session-a",
+    message: { role: "user", content: repeatedPrompt, timestamp: 9_001 },
+    expectedTurnTotal: 2,
+    baselineTurnTotal: 0,
+    serverPromptId: "prompt-second",
+  };
+  const firstPersisted = {
+    role: "user" as const,
+    content: repeatedPrompt,
+    timestamp: 9_010,
+    piChatPersistedMessageId: "entry-first:0",
+    piChatPromptId: "prompt-first",
+  };
+  const afterFirst = protectTranscriptWithLocalTurns(
+    [first, second],
+    [firstPersisted],
+    1,
+    1,
+  );
+  assert.deepEqual(afterFirst.pendingTurns, [second]);
+  assert.deepEqual(afterFirst.messages, [second.message, firstPersisted]);
+
+  const secondPersisted = {
+    role: "user" as const,
+    content: repeatedPrompt,
+    timestamp: 9_020,
+    piChatPersistedMessageId: "entry-second:0",
+    piChatPromptId: "prompt-second",
+  };
+  const afterSecond = protectTranscriptWithLocalTurns(
+    afterFirst.pendingTurns,
+    [firstPersisted, secondPersisted],
+    2,
+    2,
+  );
+  assert.deepEqual(afterSecond.pendingTurns, []);
+  assert.deepEqual(afterSecond.messages, [firstPersisted, secondPersisted]);
 });
 
 test("a persisted echo releases an immediate turn left in waiting state", () => {

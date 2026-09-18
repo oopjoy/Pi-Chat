@@ -359,6 +359,7 @@ failure card 行为不变
 2. queued 路径明确 queueItemId 与 promptId 当前 alias 的 contract
 3. Server 根据 activePromptDiagnostics 向 agent_start/agent_settled/process_error 注入 piChatPromptId
 4. Stream parser 校验并暴露 piChatPromptId
+5. accepted Prompt 只关联 admission 后出现的 JSONL row；服务端以 globally bounded projection cache 和 payload/timestamp fingerprint 将 promptId 重新附着到 persisted message ID，不修改 Pi JSONL。Browser strict UUID operation correlation 另行贯穿 admission、pending view 与 queue_dispatch，且仅在唯一、payload-compatible 时选择 originating optimistic object。Browser 用两种结构 identity 精确清理 optimistic row，并以全局有界 tombstone 阻止迟到 queue_dispatch 重建同一条 User 消息
 ```
 
 当前已验证 Primary direct/queued HTTP response 与 lifecycle SSE/settlement 的 identity 关联；queued 路径继续保持 `id === queueItemId === promptId`。普通 Session 的 Browser operation 现在会在 HTTP response 后绑定 Server promptId，并在显式 lifecycle SSE 上完成 settle/fail；旧 RPC generation 的 Server fencing 也已有覆盖。Retry 已完成 Server producer 与基础 Browser metadata projection，但最终失败/取消语义和更完整的 integrated smoke 仍保持为下一阶段：

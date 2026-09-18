@@ -1665,7 +1665,11 @@ test("changing Gate on cold history stages the next prompt without activating it
       1,
       "the first actual prompt may activate the Session",
     );
-    assert.deepEqual(promptCalls, [["first message", [], coldId, "open"]]);
+    assert.deepEqual(
+      promptCalls.map((call) => call.slice(0, 4)),
+      [["first message", [], coldId, "open"]],
+    );
+    assert.match(String(promptCalls[0]?.[7] || ""), /^[a-f0-9-]{36}$/i);
   } finally {
     await act(async () => root.unmount());
     restoreApi();
@@ -1817,12 +1821,14 @@ test("an explicit active Gate choice supersedes an older cold staged mode", asyn
       await Promise.resolve();
       await Promise.resolve();
     });
-    assert.deepEqual(promptCalls.at(-1), [
+    const lastPromptCall = promptCalls.at(-1) || [];
+    assert.deepEqual(lastPromptCall.slice(0, 4), [
       "continue strictly",
       [],
       coldId,
       "strict",
     ]);
+    assert.match(String(lastPromptCall[7] || ""), /^[a-f0-9-]{36}$/i);
   } finally {
     await act(async () => root.unmount());
     restoreApi();
@@ -2077,7 +2083,11 @@ test("the next turn carries the Gate mode shown after refresh", async () => {
         .querySelector<HTMLButtonElement>(".send-button")!
         .click(),
     );
-    assert.deepEqual(promptCalls, [["next turn", [], activeId, "strict"]]);
+    assert.deepEqual(
+      promptCalls.map((call) => call.slice(0, 4)),
+      [["next turn", [], activeId, "strict"]],
+    );
+    assert.match(String(promptCalls[0]?.[7] || ""), /^[a-f0-9-]{36}$/i);
   } finally {
     await act(async () => root.unmount());
     restoreApi();

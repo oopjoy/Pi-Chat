@@ -44,6 +44,8 @@ export interface RuntimeQueuedPrompt {
   gateMode?: GateMode;
   /** Exact Model/Thinking selection captured when this prompt was admitted. */
   settings?: PromptSettingsSnapshot;
+  /** Browser correlation only; never Prompt or queue authority. */
+  clientPromptOperationId?: string;
 }
 
 export interface DraftRuntimeLease {

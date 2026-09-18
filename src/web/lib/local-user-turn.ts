@@ -72,13 +72,22 @@ export function sameUserInstructionForDiagnostic(left: PiMessage, right: PiMessa
  * Match the server's retained accepted-prompt projection to the local object
  * created by the same submission. The HTTP acknowledgement and a later view
  * may race, so the server ID is normally absent from the local object and the
- * cumulative ordinal may be stale. A unique timestamp-near payload match is
- * the safe fallback; two identical turns at the same time remain ambiguous.
+ * cumulative ordinal may be stale. The original Browser operation identity is
+ * the first exact correlation; payload/timestamp remains legacy fallback only.
  */
 export function localTurnForPendingPrompt(
   turns: readonly LocalUserTurn[],
-  pending: Pick<PendingPromptProjection, "message" | "expectedTurnTotal" | "promptId"> & { id?: string },
+  pending: Pick<PendingPromptProjection, "message" | "expectedTurnTotal" | "promptId" | "clientPromptOperationId"> & { id?: string },
 ): LocalUserTurn | undefined {
+  if (pending.clientPromptOperationId) {
+    const operationMatches = turns.filter(
+      (turn) => turn.promptOperationId === pending.clientPromptOperationId,
+    );
+    return operationMatches.length === 1
+      && sameUserInstruction(operationMatches[0].message, pending.message)
+      ? operationMatches[0]
+      : undefined;
+  }
   const pendingPromptId = pending.id || pending.message.piChatPendingMessageId;
   const serverPromptId = pending.promptId || pending.message.piChatPromptId;
   const byPendingId = pendingPromptId
@@ -197,6 +206,7 @@ function persistedEchoRows(turn: LocalUserTurn, messages: PiMessage[], turnTotal
   for (let index = 0; index < users.length; index += 1) {
     const row = users[index];
     if (!row.piChatPersistedMessageId) continue;
+    if (!promptIdentityCompatible(turn, row)) continue;
     if (firstOrdinal + index <= baseline) continue;
     if (!turn.confirmByPosition && !sameUserInstruction(row, turn.message)) continue;
     if (
@@ -226,15 +236,29 @@ function samePayloadRank(turns: readonly LocalUserTurn[], turn: LocalUserTurn): 
   return rank;
 }
 
+function promptIdentityCompatible(turn: LocalUserTurn, message: PiMessage): boolean {
+  const serverPromptId = turn.serverPromptId || turn.message.piChatPromptId;
+  return !serverPromptId
+    || !message.piChatPromptId
+    || message.piChatPromptId === serverPromptId;
+}
+
 function authoritativeUserMatch(turn: LocalUserTurn, messages: PiMessage[], turnTotal?: number): PiMessage | undefined {
   const visibleUsers = messages.filter((message) => message.role === "user");
   const authoritativeTotal = transcriptTurnTotal(messages, turnTotal);
   const firstVisibleTurn = authoritativeTotal - visibleUsers.length + 1;
   const expectedIndex = turn.expectedTurnTotal - firstVisibleTurn;
   const positional = visibleUsers[expectedIndex];
-  if (positional && sameUserInstruction(positional, turn.message)) return positional;
+  if (
+    positional
+    && promptIdentityCompatible(turn, positional)
+    && sameUserInstruction(positional, turn.message)
+  ) return positional;
 
-  const matches = visibleUsers.filter((message) => sameUserInstruction(message, turn.message));
+  const matches = visibleUsers.filter((message) =>
+    promptIdentityCompatible(turn, message)
+    && sameUserInstruction(message, turn.message),
+  );
   const localTime = typeof turn.message.timestamp === "number" && Number.isFinite(turn.message.timestamp)
     ? turn.message.timestamp
     : undefined;
@@ -268,6 +292,16 @@ function persistedEchoForTurn(
   turnTotal?: number,
   payloadRank = 1,
 ): PiMessage | undefined {
+  const serverPromptId = turn.serverPromptId || turn.message.piChatPromptId;
+  if (serverPromptId) {
+    const identityMatch = messages.find((message) =>
+      message.role === "user"
+      && Boolean(message.piChatPersistedMessageId)
+      && message.piChatPromptId === serverPromptId,
+    );
+    if (identityMatch) return identityMatch;
+  }
+
   const baseline = turn.baselineTurnTotal;
   const positional = authoritativeUserMatch(turn, messages, turnTotal);
   if (positional?.piChatPersistedMessageId) {
@@ -288,7 +322,12 @@ function persistedEchoForTurn(
     : undefined;
   if (submittedAt === undefined) return undefined;
   const recentRows = messages.filter((message) => {
-    if (message.role !== "user" || !message.piChatPersistedMessageId || !sameUserInstruction(message, turn.message)) return false;
+    if (
+      message.role !== "user"
+      || !message.piChatPersistedMessageId
+      || !promptIdentityCompatible(turn, message)
+      || !sameUserInstruction(message, turn.message)
+    ) return false;
     if (submittedAt === undefined) return true;
     return typeof message.timestamp === "number"
       && Number.isFinite(message.timestamp)
@@ -315,8 +354,30 @@ function textAndImageCount(message: PiMessage): { text: string; imageCount: numb
   };
 }
 
-function bindQueuedTurn(turns: LocalUserTurn[], queueId: string, message: string, imageCount: number): LocalUserTurn | undefined {
+function bindQueuedTurn(
+  turns: LocalUserTurn[],
+  queueId: string,
+  message: string,
+  imageCount: number,
+  clientPromptOperationId?: string,
+): LocalUserTurn | undefined {
   if (!queueId) return undefined;
+  if (clientPromptOperationId) {
+    const operationMatches = turns.filter(
+      (turn) => turn.promptOperationId === clientPromptOperationId,
+    );
+    if (operationMatches.length !== 1) return undefined;
+    const byClientOperation = operationMatches[0];
+    const shape = textAndImageCount(byClientOperation.message);
+    if (
+      (byClientOperation.queueId && byClientOperation.queueId !== queueId)
+      || shape.text !== message
+      || shape.imageCount !== imageCount
+    )
+      return undefined;
+    byClientOperation.queueId = queueId;
+    return byClientOperation;
+  }
   const existing = turns.find((turn) => turn.queueId === queueId);
   if (existing) return existing;
   const candidate = turns.find((turn) => {
@@ -339,8 +400,14 @@ export function bindQueuedAdmission(turns: LocalUserTurn[], queueId: string, mes
 }
 
 /** Bind a dispatch that beat its HTTP acknowledgement to the existing local turn. */
-export function bindQueuedDispatch(turns: LocalUserTurn[], queueId: string, message: string, imageCount: number): LocalUserTurn | undefined {
-  const turn = bindQueuedTurn(turns, queueId, message, imageCount);
+export function bindQueuedDispatch(
+  turns: LocalUserTurn[],
+  queueId: string,
+  message: string,
+  imageCount: number,
+  clientPromptOperationId?: string,
+): LocalUserTurn | undefined {
+  const turn = bindQueuedTurn(turns, queueId, message, imageCount, clientPromptOperationId);
   if (turn) {
     turn.queueRetryPending = false;
     turn.queueState = "dispatched";
@@ -372,10 +439,20 @@ export function queuedPromptFromLocalTurn(turn: LocalUserTurn): QueuedPrompt | u
  * and removed this local turn. Render only the still-pending object once.
  */
 export function appendLocalTurnOnce(messages: PiMessage[], turn: LocalUserTurn | undefined): PiMessage[] {
-  if (!turn || turn.renderedInTranscript) return messages;
-  const authoritativeMatch = authoritativeUserMatch(turn, messages);
+  if (!turn) return messages;
   const persistedMatch = persistedEchoForTurn(turn, messages);
-  if (authoritativeMatch?.piChatPersistedMessageId || persistedMatch?.piChatPersistedMessageId) {
+  if (persistedMatch?.piChatPersistedMessageId) {
+    turn.renderedInTranscript = true;
+    // A persisted view can win before the HTTP acknowledgement binds the local
+    // Prompt identity. If the acknowledgement then arrives late, remove the
+    // already-painted optimistic object instead of leaving it beside its echo.
+    return messages.includes(turn.message)
+      ? messages.filter((message) => message !== turn.message)
+      : messages;
+  }
+  if (turn.renderedInTranscript) return messages;
+  const authoritativeMatch = authoritativeUserMatch(turn, messages);
+  if (authoritativeMatch?.piChatPersistedMessageId) {
     turn.renderedInTranscript = true;
     return messages;
   }
@@ -613,8 +690,11 @@ export function transcriptConfirmsLocalTurn(
   // longer be visible, but the later turn watermark proves it was persisted.
   if (turn.expectedTurnTotal < firstVisibleTurn) return messagesTruncated;
   const candidate = visibleUsers[turn.expectedTurnTotal - firstVisibleTurn];
-  return Boolean(candidate && (turn.confirmByPosition || sameUserInstruction(candidate, turn.message)))
-    || Boolean(authoritativeUserMatch(turn, messages, total)?.piChatPersistedMessageId);
+  return Boolean(
+    candidate
+    && promptIdentityCompatible(turn, candidate)
+    && (turn.confirmByPosition || sameUserInstruction(candidate, turn.message)),
+  ) || Boolean(authoritativeUserMatch(turn, messages, total)?.piChatPersistedMessageId);
 }
 
 export interface ProtectedTranscript {

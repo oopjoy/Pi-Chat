@@ -224,7 +224,20 @@ test("failed queued dispatch reports the requeued prompt for transcript rollback
     onPrimaryPromptAccepted: () => {},
     onSecondaryPromptAccepted: () => {},
   }));
-  const queued = scheduler.enqueuePrimary("later", []);
+  const clientPromptOperationId = "00000000-0000-4000-8000-000000000099";
+  const queued = scheduler.enqueuePrimary(
+    "later",
+    [],
+    1234,
+    undefined,
+    undefined,
+    clientPromptOperationId,
+  );
+  assert.equal(
+    "clientPromptOperationId" in scheduler.publicQueue()[0],
+    false,
+    "Browser correlation stays out of the public queue projection",
+  );
 
   await scheduler.dispatchPrimaryNext();
 
@@ -237,6 +250,10 @@ test("failed queued dispatch reports the requeued prompt for transcript rollback
   const dispatchIndex = events.findIndex((event) => event.type === "pi_chat_queue_dispatch");
   const errorIndex = events.findIndex((event) => event.type === "pi_chat_queue_error");
   assert.ok(dispatchIndex >= 0 && errorIndex > dispatchIndex);
+  assert.equal(
+    events[dispatchIndex].piChatClientPromptOperationId,
+    clientPromptOperationId,
+  );
   assert.deepEqual(events[errorIndex], {
     type: "pi_chat_queue_error",
     id: queued.id,

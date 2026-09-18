@@ -899,14 +899,17 @@ test("a New draft captures API-specific Model, Thinking, and Gate intent on its 
       await Promise.resolve();
       await Promise.resolve();
     });
-    assert.deepEqual(submitted, [{
+    assert.equal(submitted.length, 1);
+    const { clientPromptOperationId, ...submittedPrompt } = submitted[0];
+    assert.deepEqual(submittedPrompt, {
       cwd: bootstrap.workspaceCwd,
       message: "first settings",
       images: [],
       model: route,
       thinkingLevel: "low",
       gateMode: "open",
-    }]);
+    });
+    assert.match(String(clientPromptOperationId || ""), /^[a-f0-9-]{36}$/i);
   } finally {
     await act(async () => root.unmount());
     restoreApi();

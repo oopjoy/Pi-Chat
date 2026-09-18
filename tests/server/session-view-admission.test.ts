@@ -7,7 +7,7 @@ import type { PiRpcClient } from "../../src/server/rpc-client";
 import { RuntimePool } from "../../src/server/runtime-pool";
 import type { SessionRelationStore } from "../../src/server/session-relations";
 import { idForPath, type SessionIndex } from "../../src/server/session-index";
-import type { SessionSummary } from "../../src/shared/types";
+import type { PiMessage, SessionSummary } from "../../src/shared/types";
 import { FakeRpc } from "../helpers/server-app-fixture";
 
 class HeldStateRpc extends FakeRpc {
@@ -221,6 +221,147 @@ test("Fork-origin lookup remains inside Secondary view admission", async () => {
     assert.equal(originCalls, 2, "cold fallback re-reads provenance");
   } finally {
     server.close();
+    await app.close();
+  }
+});
+
+test("persisted Prompt identity survives a stale bounded-window ordinal", async () => {
+  const path = "C:\\sessions\\prompt-projection-identity.jsonl";
+  const id = idForPath(path);
+  const rpc = new FakeRpc(path, "prompt-projection-identity");
+  const older: PiMessage[] = Array.from({ length: 10 }, (_, index) => ({
+    role: "user",
+    // A recent identical row existed before admission. The stale-window
+    // fallback must never steal it for the newly accepted Prompt.
+    content: index === 9 ? "restored fork prompt" : `older-${index + 1}`,
+    timestamp: index === 9 ? 8_999 : index + 1,
+    piChatPersistedMessageId: `entry-${index + 1}:0`,
+  }));
+  const sessions = {
+    list: async () => [],
+    cachedSnapshotForId: () => ({ messages: older, settings: {} }),
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({
+    rpc: rpc as unknown as PiRpcClient,
+    sessions,
+    resources: {} as ResourceManager,
+    cwd: process.cwd(),
+    webRoot: process.cwd(),
+  });
+  const internals = app as unknown as {
+    recordAcceptedPrompt(
+      sessionId: string,
+      promptId: string,
+      promptAt: number,
+      message: string,
+      images: [],
+      settings?: undefined,
+      clientPromptOperationId?: string,
+    ): void;
+    reconcilePendingAcceptedPrompts(
+      sessionId: string,
+      messages: PiMessage[],
+    ): void;
+    pendingPromptForSession(sessionId: string): {
+      clientPromptOperationId?: string;
+    } | undefined;
+    rememberPersistedPromptId(
+      sessionId: string,
+      message: PiMessage,
+      promptId: string,
+    ): void;
+    persistedPromptIdsBySession: Map<string, Map<string, unknown>>;
+  };
+  const promptId = "00000000-0000-4000-8000-000000000098";
+  const clientPromptOperationId = "00000000-0000-4000-8000-000000000097";
+  const persisted: PiMessage = {
+    role: "user",
+    content: "restored fork prompt",
+    timestamp: 9_100,
+    piChatPersistedMessageId: "entry-251:0",
+  };
+  try {
+    internals.recordAcceptedPrompt(
+      id,
+      promptId,
+      9_000,
+      "restored fork prompt",
+      [],
+      undefined,
+      clientPromptOperationId,
+    );
+    assert.equal(
+      internals.pendingPromptForSession(id)?.clientPromptOperationId,
+      clientPromptOperationId,
+    );
+    const newlyVisibleOld: PiMessage = {
+      role: "user",
+      content: "restored fork prompt",
+      timestamp: 8_999,
+      piChatPersistedMessageId: "entry-old-hidden:0",
+    };
+    internals.reconcilePendingAcceptedPrompts(
+      id,
+      [...older, newlyVisibleOld],
+    );
+    assert.equal(
+      newlyVisibleOld.piChatPromptId,
+      undefined,
+      "a stale positional row from before admission cannot claim the Prompt",
+    );
+    assert.ok(
+      internals.pendingPromptForSession(id),
+      "the real persisted echo is still pending",
+    );
+
+    // The fixed-size tail dropped one old row while the cumulative ordinal
+    // remained ahead of its ten visible User rows.
+    const advancedWindow = [...older.slice(1), persisted];
+    internals.reconcilePendingAcceptedPrompts(id, advancedWindow);
+    assert.equal(persisted.piChatPromptId, promptId);
+    assert.equal(internals.pendingPromptForSession(id), undefined);
+
+    const reparsed = advancedWindow.map((message) => {
+      const { piChatPromptId: _projectionOnly, ...jsonlMessage } = message;
+      return { ...jsonlMessage };
+    });
+    internals.reconcilePendingAcceptedPrompts(id, reparsed);
+    assert.equal(
+      reparsed.at(-1)?.piChatPromptId,
+      promptId,
+      "the bounded projection cache reattaches identity after a fresh JSONL parse",
+    );
+
+    const rewritten = reparsed.map((message, index) => {
+      const { piChatPromptId: _projectionOnly, ...jsonlMessage } = message;
+      return index === reparsed.length - 1
+        ? { ...jsonlMessage, content: "externally rewritten content" }
+        : { ...jsonlMessage };
+    });
+    internals.reconcilePendingAcceptedPrompts(id, rewritten);
+    assert.equal(
+      rewritten.at(-1)?.piChatPromptId,
+      undefined,
+      "entry-ID reuse with changed content invalidates the cached Prompt identity",
+    );
+
+    internals.persistedPromptIdsBySession.clear();
+    for (let index = 0; index < 129; index += 1) {
+      internals.rememberPersistedPromptId(
+        `session-${index}`,
+        {
+          role: "user",
+          content: `prompt-${index}`,
+          timestamp: index,
+          piChatPersistedMessageId: `entry-${index}:0`,
+        },
+        `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+      );
+    }
+    assert.equal(internals.persistedPromptIdsBySession.size, 128);
+    assert.equal(internals.persistedPromptIdsBySession.has("session-0"), false);
+    assert.equal(internals.persistedPromptIdsBySession.has("session-128"), true);
+  } finally {
     await app.close();
   }
 });

@@ -11,9 +11,9 @@
 当前冻结候选基线：
 
 - 177 个 `tests/**/*.test.ts` 文件；
-- 由测试名称解析器识别出 1,316 个静态展开测试；
-- 核心 source lane 162 个文件、1,241 个静态展开测试；完整执行为
-  1,249 个 Node tests（1,247 passed、2 个环境 skip）；
+- 由测试名称解析器识别出 1,324 个静态展开测试；
+- 核心 source lane 162 个文件、1,249 个静态展开测试；完整执行为
+  1,257 个 Node tests（1,255 passed、2 个环境 skip）；
 - benchmark lane 6 个文件、33 个测试声明与执行；
 - artifact lane 9 个文件、42 个测试声明；隔离 Windows staging 执行为
   41 passed、1 个环境 skip；
@@ -35,7 +35,7 @@ source suite 的进程级内存累积。
 | --- | ---: | ---: | --- |
 | `tests/conversation-process.test.ts` | 43 | 763 | 单一投影域，但案例密集 |
 | `tests/web/composer-capabilities.test.ts`（已拆分） | 35 | 2,627 | 已按模型/Runtime、图片能力、delivery、Steer、Gate/layout 拆成 5 个职责文件 |
-| `tests/session-index.test.ts` | 35 | 945 | Index、缓存、分支、Session metadata 混合 |
+| `tests/session-index.test.ts` | 36 | 997 | Index、缓存、分支、Session metadata 混合 |
 | `tests/rpc-client.test.ts` | 30 | 789 | RPC framing、timeout、process ownership、late response 混合 |
 | `tests/web/pane-authority.test.ts`（已拆分） | 24 | 2,609 | 已按 Subagent、navigation、Prompt、Runtime control、recovery 拆成 5 个职责文件 |
 | `tests/web/app-replacement-recovery.test.ts`（已拆分） | 23 | 2,300 | 已按 workspace、generation、maintenance、bootstrap retry、history recovery 拆成 5 个职责文件 |

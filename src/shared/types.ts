@@ -295,6 +295,8 @@ export interface InitialPromptRequest {
   model?: { provider: string; modelId: string; api?: string };
   thinkingLevel?: ThinkingLevel;
   gateMode?: GateMode;
+  /** Browser correlation only; never Prompt or execution authority. */
+  clientPromptOperationId?: string;
 }
 
 export interface InitialPromptData extends SessionRuntimeReadyData {
@@ -319,6 +321,8 @@ export interface PendingPromptProjection {
   id: string;
   /** Server-owned Prompt identity; queued prompts temporarily alias their queue ID. */
   promptId?: string;
+  /** Original browser operation correlation; never Server Prompt authority. */
+  clientPromptOperationId?: string;
   message: PiMessage;
   expectedTurnTotal: number;
   settings?: PromptSettingsSnapshot;

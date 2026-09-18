@@ -304,6 +304,8 @@ test("session message reader follows only the current JSONL branch", async () =>
           content: "current answer",
           piChatLiveMessageId: "untrusted-live",
           piChatPersistedMessageId: "untrusted-persisted",
+          piChatPendingMessageId: "untrusted-pending",
+          piChatPromptId: "untrusted-prompt",
         },
       },
     ].map(JSON.stringify).join("\n"));
@@ -315,6 +317,8 @@ test("session message reader follows only the current JSONL branch", async () =>
       "projected message identity follows the active JSONL entry chain",
     );
     assert.equal(messages[2].piChatLiveMessageId, undefined);
+    assert.equal(messages[2].piChatPendingMessageId, undefined);
+    assert.equal(messages[2].piChatPromptId, undefined);
     assert.equal(messages[0].timestamp, Date.parse("2026-01-01T00:00:00Z"));
   } finally {
     await rm(root, { recursive: true, force: true });

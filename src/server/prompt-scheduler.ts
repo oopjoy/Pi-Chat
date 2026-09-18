@@ -51,6 +51,8 @@ export interface InternalQueuedPrompt extends QueuedPrompt {
   gateMode?: GateMode;
   /** Exact Model/Thinking selection captured at this prompt's admission. */
   settings?: PromptSettingsSnapshot;
+  /** Browser correlation only; never Prompt or queue authority. */
+  clientPromptOperationId?: string;
 }
 
 /** Runtime access and operation admission required to dispatch one queued turn. */
@@ -111,6 +113,7 @@ export interface PromptPublicationPort {
     images: PromptImage[],
     settings?: PromptSettingsSnapshot,
     promptId?: string,
+    clientPromptOperationId?: string,
   ): void;
   onSecondaryPromptAccepted(
     runtime: SecondaryRuntime,
@@ -119,6 +122,7 @@ export interface PromptPublicationPort {
     images: PromptImage[],
     settings?: PromptSettingsSnapshot,
     promptId?: string,
+    clientPromptOperationId?: string,
   ): void;
 }
 
@@ -237,6 +241,7 @@ export class PromptScheduler {
     createdAt = Date.now(),
     gateMode?: GateMode,
     settings?: PromptSettingsSnapshot,
+    clientPromptOperationId?: string,
   ): InternalQueuedPrompt {
     const queued: InternalQueuedPrompt = {
       id: randomUUID(),
@@ -246,6 +251,7 @@ export class PromptScheduler {
       createdAt,
       ...(gateMode ? { gateMode } : null),
       ...(settings ? { settings } : null),
+      ...(clientPromptOperationId ? { clientPromptOperationId } : null),
     };
     this.primaryQueue.push(queued);
     this.broadcastPrimaryQueue(queued.id);
@@ -259,6 +265,7 @@ export class PromptScheduler {
     createdAt = Date.now(),
     gateMode?: GateMode,
     settings?: PromptSettingsSnapshot,
+    clientPromptOperationId?: string,
   ): RuntimeQueuedPrompt {
     const queued: RuntimeQueuedPrompt = {
       id: randomUUID(),
@@ -268,6 +275,7 @@ export class PromptScheduler {
       createdAt,
       ...(gateMode ? { gateMode } : null),
       ...(settings ? { settings } : null),
+      ...(clientPromptOperationId ? { clientPromptOperationId } : null),
     };
     runtime.promptQueue.push(queued);
     this.broadcastRuntimeQueue(runtime, queued.id);
@@ -298,6 +306,7 @@ export class PromptScheduler {
     settings?: PromptSettingsSnapshot,
     consumeSupersededLegacy = false,
     expectedAbortGeneration?: number,
+    clientPromptOperationId?: string,
   ): Promise<PromptAcceptance> {
     const releaseOperation = this.runtime.acquirePrimaryOperation();
     const generation = expectedAbortGeneration ?? this.primaryAbortGeneration;
@@ -350,6 +359,7 @@ export class PromptScheduler {
           images,
           acceptedSettings,
           promptId,
+          clientPromptOperationId,
         );
         return "confirmed";
       } catch (error) {
@@ -367,6 +377,7 @@ export class PromptScheduler {
             images,
             acceptedSettings,
             promptId,
+            clientPromptOperationId,
           );
           this.publication.publishSessionActivity?.(this.runtime.activeSessionId());
           return "unknown";
@@ -387,8 +398,9 @@ export class PromptScheduler {
     images: PromptImage[] = [],
     settings?: PromptSettingsSnapshot,
     promptId?: string,
+    clientPromptOperationId?: string,
   ): void {
-    this.publication.onSecondaryPromptAccepted(runtime, promptAt, message, images, settings, promptId);
+    this.publication.onSecondaryPromptAccepted(runtime, promptAt, message, images, settings, promptId, clientPromptOperationId);
   }
 
   async dispatchPrimaryNext(): Promise<void> {
@@ -414,6 +426,7 @@ export class PromptScheduler {
       message: next.message,
       imageCount: next.imageCount,
       ...(next.settings ? { settings: next.settings } : null),
+      ...(next.clientPromptOperationId ? { piChatClientPromptOperationId: next.clientPromptOperationId } : null),
       piChatSessionId: this.runtime.activeSessionId(),
     });
     try {
@@ -424,6 +437,9 @@ export class PromptScheduler {
         next.gateMode,
         next.id,
         next.settings,
+        false,
+        undefined,
+        next.clientPromptOperationId,
       );
       if (acceptance === "unknown") {
         // Normal prompt acceptance is released by Pi's ordered agent_start
@@ -516,6 +532,7 @@ export class PromptScheduler {
       message: next.message,
       imageCount: next.imageCount,
       ...(next.settings ? { settings: next.settings } : null),
+      ...(next.clientPromptOperationId ? { piChatClientPromptOperationId: next.clientPromptOperationId } : null),
       piChatSessionId: runtime.id,
     });
     let acceptedSettings = next.settings;
@@ -564,6 +581,7 @@ export class PromptScheduler {
         next.images,
         acceptedSettings,
         next.id,
+        next.clientPromptOperationId,
       );
     } catch (error) {
       // A write timeout can occur after the prompt JSONL command reached Pi
@@ -580,6 +598,7 @@ export class PromptScheduler {
           next.images,
           acceptedSettings,
           next.id,
+          next.clientPromptOperationId,
         );
         this.publication.broadcast({
           type: "pi_chat_prompt_delivery_uncertain",

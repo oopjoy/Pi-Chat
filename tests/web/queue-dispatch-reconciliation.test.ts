@@ -394,6 +394,145 @@ test("queue update promotes an accepted turn when its dispatch SSE frame is miss
   }
 });
 
+test("a Browser Prompt operation identity fences dispatch before HTTP queue binding", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const queuedItem = {
+    id: "00000000-0000-4000-8000-000000000035",
+    message: "restored fork prompt",
+    imageCount: 0,
+    createdAt: 2,
+  };
+  let resolvePrompt!: (value: {
+    accepted: true;
+    queued: true;
+    id: string;
+    promptId: string;
+    queue: typeof queuedItem[];
+  }) => void;
+  const pendingPrompt = new Promise<{
+    accepted: true;
+    queued: true;
+    id: string;
+    promptId: string;
+    queue: typeof queuedItem[];
+  }>((resolve) => { resolvePrompt = resolve; });
+  const persistedMessage = {
+    role: "user" as const,
+    content: queuedItem.message,
+    timestamp: 3,
+    piChatPersistedMessageId: "persisted-entry-35",
+  };
+  let clientPromptOperationId = "";
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, isStreaming: true },
+      queue: [],
+      queuePaused: true,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    prompt: async (...args: unknown[]) => {
+      clientPromptOperationId = String(args[7] || "");
+      return pendingPrompt;
+    },
+    viewSession: async () => ({
+      ...draftView,
+      session: { ...draftView.session, id: activeId, sessionId: activeId },
+      state: { ...bootstrap.state, isStreaming: false },
+      messages: [persistedMessage],
+      messageTotal: 1,
+      turnTotal: 1,
+      messagesTruncated: false,
+      isActive: false,
+      isStreaming: false,
+      queue: [],
+      queuePaused: false,
+    }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, queuedItem.message);
+      textarea.dispatchEvent(new dom.window.InputEvent("input", {
+        bubbles: true,
+        inputType: "insertText",
+        data: queuedItem.message,
+      }));
+      dom.window.document.querySelector<HTMLButtonElement>(
+        ".queue-submit-button",
+      )!.click();
+      await Promise.resolve();
+    });
+    assert.match(clientPromptOperationId, /^[a-f0-9-]{36}$/i);
+
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      // The persisted view wins before either queue_dispatch or the HTTP
+      // response can bind the queue ID to the optimistic turn.
+      source.emitPi({
+        type: "agent_settled",
+        piChatSessionId: activeId,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    assert.equal(dom.window.document.querySelectorAll(".message-user").length, 1);
+    assert.equal(
+      dom.window.document.querySelectorAll(
+        "button[aria-label='在新对话中分叉']",
+      ).length,
+      1,
+      "the sole row is the persisted projection",
+    );
+
+    await act(async () => {
+      source.emitPi({
+        type: "pi_chat_queue_dispatch",
+        piChatSessionId: activeId,
+        id: queuedItem.id,
+        message: queuedItem.message,
+        imageCount: 0,
+        piChatClientPromptOperationId: clientPromptOperationId,
+      });
+    });
+    assert.equal(
+      dom.window.document.querySelectorAll(".message-user").length,
+      1,
+      "the late dispatch cannot recreate an identity-less local row",
+    );
+
+    await act(async () => {
+      resolvePrompt({
+        accepted: true,
+        queued: true,
+        id: queuedItem.id,
+        promptId: queuedItem.id,
+        queue: [queuedItem],
+      });
+      await Promise.resolve();
+    });
+    assert.equal(
+      dom.window.document.querySelectorAll(".message-user").length,
+      1,
+      "the later HTTP acknowledgement also preserves one row",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("a late dispatch after persisted-view confirmation does not append a duplicate", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");

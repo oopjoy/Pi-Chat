@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createReadStream, existsSync, readFileSync, watch, type FSWatcher } from "node:fs";
 import { lstat, realpath, stat, unlink } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -28,6 +28,7 @@ import type {
   ModelInfo,
   PiMessage,
   PiState,
+  PendingPromptProjection,
   PendingSteer,
   PrimaryRuntimeReadiness,
   PromptDelivery,
@@ -189,11 +190,16 @@ const SETTLEMENT_STATE_TIMEOUT_MS = 60_000;
 /** Bounded native steering backlog: Pi's queue, admissions, snapshots, and hidden local turns all grow with every accepted Steer. */
 const MAX_NATIVE_STEERING = 20;
 const MAX_NATIVE_STEERING_IMAGE_CHARS = MAX_PROMPT_IMAGES_ENCODED_BYTES;
+const MAX_PERSISTED_PROMPT_IDENTITIES_PER_SESSION = 64;
+const MAX_PERSISTED_PROMPT_IDENTITY_SESSIONS = 128;
+const MAX_PENDING_PROMPT_BASELINE_IDS = 256;
 // Pi may emit agent_settled before the new JSONL user record is visible to a
 // concurrent reader. Keep the draft's provisional sidebar summary only across
 // this small bounded visibility window.
 const DRAFT_PERSISTENCE_RETRY_DELAYS_MS = [40, 120, 300, 700];
 const SESSION_ID_PATTERN = /^[a-f0-9]{20}$/;
+const CLIENT_PROMPT_OPERATION_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const PROMPT_TRACE_EVIDENCE: Readonly<Partial<Record<string, PromptEvidenceFactKind>>> = {
   admitted: "admitted",
   queued: "queued",
@@ -415,11 +421,21 @@ interface ActivePromptDiagnostic {
   terminalPublished?: boolean;
 }
 
+interface PersistedPromptIdentity {
+  promptId: string;
+  payloadFingerprint: string;
+  timestamp?: number;
+}
+
 interface PendingAcceptedPrompt {
   id: string;
   promptId: string;
+  /** Browser correlation only; never Server Prompt authority. */
+  clientPromptOperationId?: string;
   message: PiMessage;
   expectedTurnTotal: number;
+  /** Persisted rows already visible at admission can never be this Prompt's echo. */
+  baselinePersistedUserIds: ReadonlySet<string>;
   settings?: PromptSettingsSnapshot;
 }
 
@@ -567,6 +583,15 @@ export class PiChatApp {
   private readonly lastUserPromptAtBySession = new Map<string, number>();
   /** Accepted ordinary turns survive a browser reload until their JSONL row is visible. */
   private readonly pendingAcceptedPromptsBySession = new Map<string, PendingAcceptedPrompt[]>();
+  /**
+   * Bounded process-local projection cache joining Server Prompt identity to
+   * the JSONL entry that eventually persisted it. This metadata is never
+   * written into Pi JSONL; it only makes browser reconciliation exact.
+   */
+  private readonly persistedPromptIdsBySession = new Map<
+    string,
+    Map<string, PersistedPromptIdentity>
+  >();
   /** Preserve arrival order even when two local requests share one Date.now() millisecond. */
   private lastPromptOrderAt = 0;
   /** Authoritative mode of the bundled Gate extension in the Primary Runtime. */
@@ -825,8 +850,8 @@ export class PiChatApp {
         broadcast: (event) => this.broadcast(event),
         publishSessionActivity: (sessionId) =>
           this.broadcastSessionActivity(sessionId),
-        onPrimaryPromptAccepted: (sessionId, promptAt, message, images, settings, promptId) => {
-          this.recordAcceptedPrompt(sessionId, promptId || randomUUID(), promptAt, message, images, settings);
+        onPrimaryPromptAccepted: (sessionId, promptAt, message, images, settings, promptId, clientPromptOperationId) => {
+          this.recordAcceptedPrompt(sessionId, promptId || randomUUID(), promptAt, message, images, settings, clientPromptOperationId);
           this.warmPrimaryMessageSnapshot();
           this.broadcast({
             type: "pi_chat_sessions_changed",
@@ -834,8 +859,8 @@ export class PiChatApp {
             sessionId,
           });
         },
-        onSecondaryPromptAccepted: (runtime, promptAt, message, images, settings, promptId) => {
-          this.recordAcceptedPrompt(runtime.id, promptId || randomUUID(), promptAt, message, images, settings);
+        onSecondaryPromptAccepted: (runtime, promptAt, message, images, settings, promptId, clientPromptOperationId) => {
+          this.recordAcceptedPrompt(runtime.id, promptId || randomUUID(), promptAt, message, images, settings, clientPromptOperationId);
           this.warmRuntimeMessageSnapshot(runtime);
           // Keep draftSession until agent_settled confirms JSONL has the user turn.
           // Mark prompted so sessionSummaries can inject a sidebar row immediately —
@@ -4573,23 +4598,123 @@ export class PiChatApp {
     ));
   }
 
+  private promptPayloadFingerprint(message: PiMessage): string {
+    return createHash("sha256").update(this.promptPayloadKey(message)).digest("hex");
+  }
+
+  private projectPersistedPromptIds(
+    sessionId: string,
+    messages: PiMessage[],
+  ): void {
+    const identities = this.persistedPromptIdsBySession.get(sessionId);
+    if (!identities?.size) return;
+    this.persistedPromptIdsBySession.delete(sessionId);
+    this.persistedPromptIdsBySession.set(sessionId, identities);
+    for (const message of messages) {
+      const persistedId = message.piChatPersistedMessageId;
+      if (!persistedId) continue;
+      const identity = identities.get(persistedId);
+      if (!identity) continue;
+      const timestamp = typeof message.timestamp === "number"
+        && Number.isFinite(message.timestamp)
+        ? message.timestamp
+        : undefined;
+      // Entry IDs can survive a canonical rewrite. Reattach projection-only
+      // identity only while both content and observed timestamp still match.
+      if (
+        identity.payloadFingerprint !== this.promptPayloadFingerprint(message)
+        || identity.timestamp !== timestamp
+      ) {
+        identities.delete(persistedId);
+        continue;
+      }
+      message.piChatPromptId = identity.promptId;
+    }
+    if (!identities.size) this.persistedPromptIdsBySession.delete(sessionId);
+  }
+
+  private rememberPersistedPromptId(
+    sessionId: string,
+    message: PiMessage,
+    promptId: string,
+  ): void {
+    const persistedId = message.piChatPersistedMessageId;
+    if (!persistedId) {
+      message.piChatPromptId = promptId;
+      return;
+    }
+    const timestamp = typeof message.timestamp === "number"
+      && Number.isFinite(message.timestamp)
+      ? message.timestamp
+      : undefined;
+    const identity: PersistedPromptIdentity = {
+      promptId,
+      payloadFingerprint: this.promptPayloadFingerprint(message),
+      ...(timestamp !== undefined ? { timestamp } : null),
+    };
+    const identities =
+      this.persistedPromptIdsBySession.get(sessionId)
+      || new Map<string, PersistedPromptIdentity>();
+    const existing = identities.get(persistedId);
+    // A persisted entry belongs to one Server Prompt. Fail closed rather than
+    // rebinding it if a malformed/stale projection ever claims otherwise.
+    if (
+      existing
+      && (
+        existing.promptId !== identity.promptId
+        || existing.payloadFingerprint !== identity.payloadFingerprint
+        || existing.timestamp !== identity.timestamp
+      )
+    )
+      return;
+    identities.delete(persistedId);
+    identities.set(persistedId, identity);
+    while (identities.size > MAX_PERSISTED_PROMPT_IDENTITIES_PER_SESSION)
+      identities.delete(identities.keys().next().value!);
+    this.persistedPromptIdsBySession.delete(sessionId);
+    this.persistedPromptIdsBySession.set(sessionId, identities);
+    while (
+      this.persistedPromptIdsBySession.size
+      > MAX_PERSISTED_PROMPT_IDENTITY_SESSIONS
+    )
+      this.persistedPromptIdsBySession.delete(
+        this.persistedPromptIdsBySession.keys().next().value!,
+      );
+    message.piChatPromptId = promptId;
+  }
+
   private pendingPromptPersisted(
     pending: PendingAcceptedPrompt,
     messages: PiMessage[],
-  ): boolean {
+    claimed: ReadonlySet<PiMessage>,
+  ): PiMessage | undefined {
     const users = messages.filter((message) => message.role === "user");
-    if (!users.length) return false;
-    const expectedTotal = pending.expectedTurnTotal;
-    // Reconciliation is called with the full persisted branch, not the
-    // windowed browser projection. A smaller persisted turn count proves that
-    // this accepted prompt is still absent; never mistake an older identical
-    // prompt for the newer one.
-    if (expectedTotal > users.length) return false;
-    const positional = users[expectedTotal - 1];
-    return Boolean(
-      positional &&
-      this.promptPayloadKey(positional) === this.promptPayloadKey(pending.message),
-    );
+    if (!users.length) return undefined;
+    const admittedAt = pending.message.timestamp;
+    if (typeof admittedAt !== "number" || !Number.isFinite(admittedAt))
+      return undefined;
+    const payloadKey = this.promptPayloadKey(pending.message);
+    const eligible = (message: PiMessage): boolean => {
+      const persistedId = message.piChatPersistedMessageId;
+      return Boolean(
+        persistedId
+        && !claimed.has(message)
+        && !pending.baselinePersistedUserIds.has(persistedId)
+        && (!message.piChatPromptId || message.piChatPromptId === pending.promptId)
+        && this.promptPayloadKey(message) === payloadKey
+        && typeof message.timestamp === "number"
+        && Number.isFinite(message.timestamp)
+        && message.timestamp >= admittedAt
+      );
+    };
+    const positional = users[pending.expectedTurnTotal - 1];
+    if (positional && eligible(positional)) return positional;
+
+    // Large/windowed or cold-start snapshots can carry a stale cumulative
+    // ordinal even though the new JSONL row is already visible. Correlate the
+    // ordered pending admission only to a post-admission row that was absent
+    // at admission; claimed rows make repeated identical Prompts one-to-one.
+    return users.find(eligible);
   }
 
   private reconcilePendingAcceptedPrompts(
@@ -4597,15 +4722,37 @@ export class PiChatApp {
     messages: PiMessage[] | null | undefined,
   ): void {
     if (!messages) return;
+    this.projectPersistedPromptIds(sessionId, messages);
     const pending = this.pendingAcceptedPromptsBySession.get(sessionId);
     if (!pending?.length) return;
-    const remaining = pending.filter((item) => !this.pendingPromptPersisted(item, messages));
+    const claimed = new Set<PiMessage>();
+    const remaining: PendingAcceptedPrompt[] = [];
+    for (const item of pending) {
+      const persisted = this.pendingPromptPersisted(item, messages, claimed);
+      if (!persisted) {
+        remaining.push(item);
+        continue;
+      }
+      claimed.add(persisted);
+      this.rememberPersistedPromptId(sessionId, persisted, item.promptId);
+    }
     if (remaining.length) this.pendingAcceptedPromptsBySession.set(sessionId, remaining);
     else this.pendingAcceptedPromptsBySession.delete(sessionId);
   }
 
-  private pendingPromptForSession(sessionId: string): PendingAcceptedPrompt | undefined {
-    return this.pendingAcceptedPromptsBySession.get(sessionId)?.at(-1);
+  private pendingPromptForSession(sessionId: string): PendingPromptProjection | undefined {
+    const pending = this.pendingAcceptedPromptsBySession.get(sessionId)?.at(-1);
+    if (!pending) return undefined;
+    return {
+      id: pending.id,
+      promptId: pending.promptId,
+      ...(pending.clientPromptOperationId
+        ? { clientPromptOperationId: pending.clientPromptOperationId }
+        : null),
+      message: pending.message,
+      expectedTurnTotal: pending.expectedTurnTotal,
+      ...(pending.settings ? { settings: pending.settings } : null),
+    };
   }
 
   private stateWithPendingPromptSettings(
@@ -4638,6 +4785,7 @@ export class PiChatApp {
     message: string,
     images: PromptImage[],
     settings?: PromptSettingsSnapshot,
+    clientPromptOperationId?: string,
   ): void {
     this.recordUserPrompt(sessionId, promptAt);
     if (!sessionId) return;
@@ -4654,7 +4802,15 @@ export class PiChatApp {
       promptId,
       message: this.pendingPromptMessage(id, promptId, message, images, promptAt),
       expectedTurnTotal: persisted.filter((item) => item.role === "user").length + existing.length + 1,
+      baselinePersistedUserIds: new Set(
+        persisted.flatMap((item) =>
+          item.role === "user" && item.piChatPersistedMessageId
+            ? [item.piChatPersistedMessageId]
+            : [],
+        ).slice(-MAX_PENDING_PROMPT_BASELINE_IDS),
+      ),
       ...(settings ? { settings } : null),
+      ...(clientPromptOperationId ? { clientPromptOperationId } : null),
     };
     this.pendingAcceptedPromptsBySession.set(sessionId, [...existing, pending]);
   }
@@ -4678,6 +4834,7 @@ export class PiChatApp {
     promptId: string = randomUUID(),
     settings?: PromptSettingsSnapshot,
     expectedAbortGeneration?: number,
+    clientPromptOperationId?: string,
   ): Promise<PromptAcceptance> {
     return this.scheduler.sendPrimaryPrompt(
       message,
@@ -4688,6 +4845,7 @@ export class PiChatApp {
       settings,
       true,
       expectedAbortGeneration,
+      clientPromptOperationId,
     );
   }
 
@@ -5646,6 +5804,7 @@ export class PiChatApp {
     });
     this.lastUserPromptAtBySession.delete(id);
     this.pendingAcceptedPromptsBySession.delete(id);
+    this.persistedPromptIdsBySession.delete(id);
     this.nativeSteeringProjectionRevisions.delete(id);
     this.runGenerationsBySession.delete(id);
     this.copyOutcomePendingSessionIds.delete(id);
@@ -5687,6 +5846,7 @@ export class PiChatApp {
     turnLimit: number,
     clientId: string,
   ): SessionViewData {
+    this.reconcilePendingAcceptedPrompts(id, snapshot.messages);
     const windowed = messageWindow(snapshot.messages, turnLimit);
     const messageTotal = snapshot.sourceMessageTotal ?? windowed.total;
     const turnTotal = snapshot.sourceTurnTotal ?? windowed.turns;
@@ -7522,6 +7682,15 @@ export class PiChatApp {
       const delivery: PromptDelivery =
         body.delivery === "steer" ? "steer" : "queue";
       const requestedSteerId = typeof body.steerId === "string" ? body.steerId : "";
+      const requestedClientPromptOperationId =
+        typeof body.clientPromptOperationId === "string"
+          ? body.clientPromptOperationId
+          : "";
+      if (
+        body.clientPromptOperationId !== undefined &&
+        !CLIENT_PROMPT_OPERATION_ID_PATTERN.test(requestedClientPromptOperationId)
+      )
+        return json(response, 400, { error: "Prompt 操作标识无效" });
       if (
         body.steerId !== undefined &&
         (delivery !== "steer" || !/^[a-f0-9-]{36}$/i.test(requestedSteerId))
@@ -7906,6 +8075,7 @@ export class PiChatApp {
               promptAt,
               requestedGateMode,
               requestedSettings,
+              requestedClientPromptOperationId || undefined,
             );
             // This snapshot is now durably admitted into the private FIFO, so
             // it supersedes only legacy settings that predated its admission.
@@ -7991,6 +8161,7 @@ export class PiChatApp {
                 images,
                 requestedSettings,
                 promptId,
+                requestedClientPromptOperationId || undefined,
               );
               json(response, 202, {
                 accepted: true,
@@ -8007,6 +8178,7 @@ export class PiChatApp {
               images,
               requestedSettings,
               promptId,
+              requestedClientPromptOperationId || undefined,
             );
             json(response, 202, { accepted: true, queued: false, promptId });
           } catch (error) {
@@ -8028,6 +8200,7 @@ export class PiChatApp {
             promptAt,
             requestedGateMode,
             requestedSettings,
+            requestedClientPromptOperationId || undefined,
           );
           // The queue owns the admitted immutable snapshot. A later legacy
           // mutation remains pending for a following row.
@@ -8057,6 +8230,7 @@ export class PiChatApp {
           promptId,
           requestedSettings,
           expectedPrimaryAbortGeneration,
+          requestedClientPromptOperationId || undefined,
         );
         if (acceptance === "unknown")
           this.tracePrompt("delivery-uncertain", this.activeSessionId, promptId);
@@ -8686,6 +8860,15 @@ export class PiChatApp {
           : undefined;
       if (initial?.gateMode !== undefined && !initialGateMode)
         return json(response, 400, { error: "无效的 Gate 模式" });
+      const initialClientPromptOperationId =
+        typeof initial?.clientPromptOperationId === "string"
+          ? initial.clientPromptOperationId
+          : "";
+      if (
+        initial?.clientPromptOperationId !== undefined &&
+        !CLIENT_PROMPT_OPERATION_ID_PATTERN.test(initialClientPromptOperationId)
+      )
+        return json(response, 400, { error: "Prompt 操作标识无效" });
       if (
         initial?.thinkingLevel !== undefined &&
         !THINKING_LEVELS.includes(initial.thinkingLevel)
@@ -8849,6 +9032,7 @@ export class PiChatApp {
                 initialImages,
                 initialSettings,
                 promptId,
+                initialClientPromptOperationId || undefined,
               );
             }
           } catch (error) {
@@ -8866,6 +9050,7 @@ export class PiChatApp {
                 initialImages,
                 initialSettings,
                 promptId,
+                initialClientPromptOperationId || undefined,
               );
             } else {
               runtime.running = false;

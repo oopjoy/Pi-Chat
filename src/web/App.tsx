@@ -233,6 +233,8 @@ const WAITING_FOR_PI_STATUS = "正在等待 Pi 处理…";
 /** Let the lightweight bootstrap establish the active Session before racing a cold JSONL view. */
 const EARLY_HISTORY_VIEW_DELAY_MS = 100;
 const MAX_DIRECTORY_PREFIX_SIZE = 5_000;
+const MAX_CONFIRMED_DISPATCH_IDS_PER_SESSION = 64;
+const MAX_CONFIRMED_DISPATCH_SESSIONS = 128;
 /** Bootstrap includes Primary capability probes; sidebar JSONL inventory has its own faster read path. */
 const EARLY_SIDEBAR_INVENTORY_DELAY_MS = 250;
 
@@ -1142,7 +1144,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   const queueProjectionSourceRef = useRef(
     new Map<string, "event" | "view" | "ack" | "mutation">(),
   );
-  /** Queue IDs whose user turn was already confirmed by a persisted view. */
+  /** Queue or Browser-operation IDs whose user turn was already confirmed by a persisted view. */
   const confirmedQueueDispatchIdsRef = useRef(new Map<string, Set<string>>());
   /** Latest queue projection per Session, independent of pane/cache residency. */
   const latestQueueProjectionRef = useRef(
@@ -1271,17 +1273,50 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           messagesTruncated,
         ),
     );
-    if (!confirmed.length) return;
-    const ids =
-      confirmedQueueDispatchIdsRef.current.get(sessionId) || new Set<string>();
+    const confirmedClientOperationIds = before.flatMap((turn) =>
+      turn.promptOperationId
+      && !pendingSet.has(turn)
+      && transcriptConfirmsLocalTurn(
+        turn,
+        messages,
+        turnTotal,
+        messagesTruncated,
+      )
+        ? [turn.promptOperationId]
+        : [],
+    );
+    const persistedPromptIds = messages.flatMap((message) =>
+      message.role === "user"
+      && message.piChatPersistedMessageId
+      && message.piChatPromptId
+        ? [message.piChatPromptId]
+        : [],
+    );
+    if (!confirmed.length && !confirmedClientOperationIds.length && !persistedPromptIds.length) return;
+    const existingIds = confirmedQueueDispatchIdsRef.current.get(sessionId);
+    if (existingIds) confirmedQueueDispatchIdsRef.current.delete(sessionId);
+    const ids = existingIds || new Set<string>();
     for (const turn of confirmed) {
       if (!turn.queueId) continue;
       ids.add(turn.queueId);
     }
+    for (const operationId of confirmedClientOperationIds) ids.add(operationId);
+    // A persisted Prompt identity is also an exact tombstone when its HTTP
+    // queue acknowledgement (and therefore local queueId binding) lost the
+    // race to this view. A delayed queue_dispatch must not synthesize it again.
+    for (const promptId of persistedPromptIds) ids.add(promptId);
     // This is only a late-event fence; keep it bounded and let a matching
     // dispatch consume each entry.
-    while (ids.size > 64) ids.delete(ids.values().next().value!);
+    while (ids.size > MAX_CONFIRMED_DISPATCH_IDS_PER_SESSION)
+      ids.delete(ids.values().next().value!);
     confirmedQueueDispatchIdsRef.current.set(sessionId, ids);
+    while (
+      confirmedQueueDispatchIdsRef.current.size
+      > MAX_CONFIRMED_DISPATCH_SESSIONS
+    )
+      confirmedQueueDispatchIdsRef.current.delete(
+        confirmedQueueDispatchIdsRef.current.keys().next().value!,
+      );
   };
   const clearEmptyQueuePause = (sessionId: string): void => {
     const projection = latestQueueProjectionRef.current.get(sessionId);
@@ -5208,6 +5243,10 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         }
         const dispatchedMessage =
           typeof event.message === "string" ? event.message : "";
+        const dispatchedClientPromptOperationId =
+          typeof event.piChatClientPromptOperationId === "string"
+            ? event.piChatClientPromptOperationId
+            : "";
         const imageCount =
           typeof event.imageCount === "number" &&
           Number.isFinite(event.imageCount)
@@ -5244,6 +5283,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           dispatchedId,
           dispatchedMessage,
           imageCount,
+          dispatchedClientPromptOperationId || undefined,
         );
         if (knownLocally) {
           knownLocally.queueState = "dispatched";
@@ -5268,10 +5308,16 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         if (eventSessionId && !knownLocally) {
           const confirmedIds = confirmedQueueDispatchIdsRef.current.get(eventSessionId);
           const wasAlreadyConfirmed = Boolean(
-            dispatchedId && confirmedIds?.has(dispatchedId),
+            (dispatchedId && confirmedIds?.has(dispatchedId))
+            || (
+              dispatchedClientPromptOperationId
+              && confirmedIds?.has(dispatchedClientPromptOperationId)
+            ),
           );
           if (wasAlreadyConfirmed && confirmedIds) {
-            confirmedIds.delete(dispatchedId);
+            if (dispatchedId) confirmedIds.delete(dispatchedId);
+            if (dispatchedClientPromptOperationId)
+              confirmedIds.delete(dispatchedClientPromptOperationId);
             if (!confirmedIds.size)
               confirmedQueueDispatchIdsRef.current.delete(eventSessionId);
           }
@@ -6729,6 +6775,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
             model?: ModelInfo | null;
             thinkingLevel?: ThinkingLevel;
             gateMode?: GateMode;
+            clientPromptOperationId?: string;
           }) => {
             const view = await api.newSession(input.cwd);
             if (!promptOperationIsInCurrentRun())
@@ -6740,6 +6787,8 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
               input.gateMode,
               "queue",
               promptSettingsForSelection(capturedSelection),
+              undefined,
+              input.clientPromptOperationId,
             );
             return {
               sessionId: view.session.id,
@@ -6764,6 +6813,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           model: capturedSelection?.model,
           thinkingLevel: capturedSelection?.thinkingLevel,
           gateMode: capturedDraftGateMode,
+          clientPromptOperationId: promptOperationId,
         });
         if (!promptOperationIsInCurrentRun()) return;
         targetSessionId = initial.sessionId;
@@ -6946,6 +6996,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
                 "steer",
                 undefined,
                 admittedLocalTurn?.queueId,
+                promptOperationId,
               )
             : capturedPromptSettings
               ? api.prompt(
@@ -6955,12 +7006,18 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
                   requestedGateMode,
                   "queue",
                   capturedPromptSettings,
+                  undefined,
+                  promptOperationId,
                 )
               : api.prompt(
                   message,
                   images,
                   targetSessionId,
                   requestedGateMode,
+                  "queue",
+                  undefined,
+                  undefined,
+                  promptOperationId,
                 ),
           {
             phaseForResult: (admission) => admission.deliveryUncertain
