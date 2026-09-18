@@ -19,6 +19,7 @@
 | 修改目标 | 首要生产入口 | 唯一策略所有者 | 首要测试 |
 |---|---|---|---|
 | Slash 指令联想与 Composer 能力 | `ChatInput.tsx`、`App.tsx` command projection | App coordinator 提交的 Pane commands；组件只渲染 | `web/composer-model-runtime.test.ts`、`session-view-cache.test.ts` |
+| Markdown / GFM / KaTeX 渲染与源码复制 | `MarkdownBody.tsx`、`markdown.ts`、`markdown-math-pipes.ts`、`markdown-source-copy.ts` | 渲染副本先用不含 GFM 的同一 `remark-math` 语法定位真实行内数学范围，再以每文档无冲突的等宽 marker 临时保护其中全部 pipe；GFM 固定列边界后在 mdast 与 `data.hChildren` 恢复原 LaTeX。最终源码复制仍映射到未经修改的模型输出，流式与终态共用同一准备逻辑 | `markdown-source-copy.test.ts`、`streaming-markdown.test.ts` |
 | Queue 排队、撤销与恢复 Composer | `App.tsx`、`local-user-turn.ts`、`prompt-scheduler.ts` | 浏览器 local-turn overlay；服务端 `PromptScheduler` | `web/queue-cancellation.test.ts`、`web/queue-cancellation-races.test.ts`、`web/queue-dispatch-reconciliation.test.ts`、`web/queue-view-settlement.test.ts`、`local-user-turn.test.ts`、`prompt-scheduler.test.ts` |
 | Prompt acknowledgement / delivery uncertain | `App.tsx`、`prompt-scheduler.ts`、`rpc-client.ts` | 服务端调度与 RPC outcome；浏览器 local-turn reconciliation | `web/prompt-consistency.test.ts`、`server/prompt-queue-steering.test.ts`、`prompt-scheduler.test.ts` |
 | Native Steer | `app.ts`、`App.tsx` | `PiChatApp` 的 generation-scoped admission/snapshot；Pi queue 是消费证据 | `server/prompt-queue-steering.test.ts`、`web/composer-steer.test.ts` |

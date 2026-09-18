@@ -4,6 +4,7 @@ import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
+import { remarkRestoreMarkdownMathPipes } from "./markdown-math-pipes";
 import { rehypeSourceRanges } from "./markdown-source-copy";
 
 type MarkdownPosition = { start?: { offset?: number }; end?: { offset?: number } };
@@ -72,7 +73,18 @@ const markdownSanitizeSchema = {
   strip: [...(defaultSchema.strip || []), "iframe", "object", "style", "form"],
 };
 
-export const markdownRemarkPlugins: ReactMarkdownOptions["remarkPlugins"] = [remarkGfm, remarkMath, remarkAdjacentStrongBoundary];
+export function createMarkdownRemarkPlugins(
+  tableMathPipeMarker?: string,
+): ReactMarkdownOptions["remarkPlugins"] {
+  return [
+    remarkGfm,
+    remarkMath,
+    ...(tableMathPipeMarker
+      ? [[remarkRestoreMarkdownMathPipes, { marker: tableMathPipeMarker }] as const]
+      : []),
+    remarkAdjacentStrongBoundary,
+  ] as ReactMarkdownOptions["remarkPlugins"];
+}
 
 const katexOptions = { throwOnError: false, strict: false as const };
 

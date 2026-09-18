@@ -4,11 +4,13 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { JSDOM } from "jsdom";
 import { MarkdownBody } from "../src/web/components/MarkdownBody";
-import { createMarkdownRehypePlugins, markdownRemarkPlugins } from "../src/web/lib/markdown";
+import { createMarkdownRehypePlugins, createMarkdownRemarkPlugins } from "../src/web/lib/markdown";
+import { prepareMarkdownMathPipes } from "../src/web/lib/markdown-math-pipes";
 import { normalizeDisplayMathWithSourceMap, selectionInsideSingleCodeBlock, sourceForSelection } from "../src/web/lib/markdown-source-copy";
 
 test("full Markdown keeps math plugins and source-range mapping", () => {
-  assert.equal(markdownRemarkPlugins.length, 3);
+  assert.equal(createMarkdownRemarkPlugins().length, 3);
+  assert.equal(createMarkdownRemarkPlugins("\uFDD0").length, 4);
   const finalPlugins = createMarkdownRehypePlugins((offset) => offset);
   assert.equal(finalPlugins.length, 4);
 });
@@ -50,6 +52,147 @@ test("rendered inline KaTeX maps back to exact LaTeX", () => {
   const katex = root.querySelector(".katex");
   assert.ok(katex);
   assert.equal(sourceForSelection(root, selectContents(dom, katex), markdown), formula);
+});
+
+test("raw absolute-value pipes inside inline math do not break GFM tables", () => {
+  const formula = String.raw`$\min|\psi|$`;
+  const markdown = String.raw`| 状态 😀 $t$ | $\min|\psi|$ | raw winding |
+|---:|---:|---:|
+| 500 | 0.887799 | 0 |
+| 1000 | $|0.862694|$ | 0 |`;
+  const { dom, root } = renderDom(markdown);
+  const table = root.querySelector("table");
+  assert.ok(table);
+  assert.equal(table.querySelectorAll("th").length, 3);
+  assert.equal(table.querySelectorAll("tbody tr").length, 2);
+  assert.deepEqual(
+    [...table.querySelectorAll("tbody tr")].map((row) => row.querySelectorAll("td").length),
+    [3, 3],
+  );
+  const formulaElement = table.querySelectorAll(".katex")[1];
+  assert.ok(formulaElement);
+  assert.equal(
+    formulaElement.querySelector("annotation")?.textContent,
+    String.raw`\min|\psi|`,
+  );
+  assert.equal(sourceForSelection(root, selectContents(dom, formulaElement), markdown), formula);
+  assert.equal(sourceForSelection(root, selectContents(dom, table), markdown), markdown);
+  assert.doesNotMatch(root.innerHTML, /\uFDD0/);
+
+  const streaming = renderToStaticMarkup(
+    React.createElement(MarkdownBody, { streaming: true }, markdown),
+  );
+  assert.match(streaming, /<table(?:\s|>)/);
+  assert.match(streaming, /<annotation encoding="application\/x-tex">\\min\|\\psi\|<\/annotation>/);
+  assert.doesNotMatch(streaming, /\uFDD0/);
+});
+
+test("escaped and raw math pipes retain distinct KaTeX semantics", () => {
+  const markdown = String.raw`kind | formula | note
+---|---|---
+norm | $\|\psi\|$ | keep
+absolute | $|\psi|$ | keep`.replace(/\n/g, "\r\n");
+  const { dom, root } = renderDom(markdown);
+  const table = root.querySelector("table");
+  assert.ok(table);
+  assert.equal(table.querySelectorAll("th").length, 3);
+  assert.deepEqual(
+    [...table.querySelectorAll("annotation")].map((node) => node.textContent),
+    [String.raw`\|\psi\|`, String.raw`|\psi|`],
+  );
+  assert.equal(table.querySelectorAll(".katex-error").length, 0);
+  assert.equal(sourceForSelection(root, selectContents(dom, table), markdown), markdown);
+});
+
+test("a table body row whose only pipes are math remains one logical cell", () => {
+  const markdown = String.raw`left | right
+---|---
+$|x|$`;
+  const { root } = renderDom(markdown);
+  const table = root.querySelector("table");
+  assert.ok(table);
+  assert.equal(table.querySelectorAll("th").length, 2);
+  assert.equal(table.querySelectorAll("tbody tr").length, 1);
+  assert.equal(table.querySelectorAll("tbody td").length, 2);
+  assert.equal(table.querySelector("annotation")?.textContent, "|x|");
+
+  const streaming = renderToStaticMarkup(
+    React.createElement(MarkdownBody, { streaming: true }, markdown),
+  );
+  assert.match(streaming, /<table(?:\s|>)/);
+  assert.match(streaming, /<annotation encoding="application\/x-tex">\|x\|<\/annotation>/);
+});
+
+test("pipe protection follows remark-math delimiter and escape behavior", () => {
+  const repeatedDelimiter = String.raw`a | formula | z
+---|---|---
+1 | $$x|y$$ | 3`;
+  const repeatedRoot = renderDom(repeatedDelimiter).root;
+  assert.equal(repeatedRoot.querySelectorAll("th").length, 3);
+  assert.equal(repeatedRoot.querySelector("annotation")?.textContent, "x|y");
+
+  const escapedClose = String.raw`a | formula | y | z
+---|---|---|---
+1 | $x\$ | y$ | 3`;
+  const escapedRoot = renderDom(escapedClose).root;
+  assert.equal(escapedRoot.querySelectorAll("th").length, 4);
+  assert.equal(escapedRoot.querySelectorAll("tbody td").length, 4);
+});
+
+test("one render chooses a collision-free marker and never rewrites source text", () => {
+  const originalMarker = "\uFDD0";
+  const markdown = `symbol | formula\n---|---\n${originalMarker} | $|x|$`;
+  const prepared = prepareMarkdownMathPipes(markdown);
+  assert.notEqual(prepared.tableMathPipeMarker, originalMarker);
+  assert.ok(prepared.markdown.includes(originalMarker));
+
+  const { dom, root } = renderDom(markdown);
+  const table = root.querySelector("table");
+  assert.ok(table);
+  assert.match(root.textContent || "", new RegExp(originalMarker));
+  assert.equal(table.querySelector("annotation")?.textContent, "|x|");
+  assert.equal(sourceForSelection(root, selectContents(dom, table), markdown), markdown);
+
+  const exhaustedMarkers = Array.from(
+    { length: 0xfdef - 0xfdd0 + 1 },
+    (_, index) => String.fromCharCode(0xfdd0 + index),
+  ).join("");
+  const unsupported = `${exhaustedMarkers} $|x|$`;
+  assert.deepEqual(prepareMarkdownMathPipes(unsupported), { markdown: unsupported });
+});
+
+test("a GFM bare URL restores protected pipes in both link text and href", () => {
+  const markdown = "https://example.com/$x|y$";
+  const { dom, root } = renderDom(markdown);
+  const link = root.querySelector("a");
+  assert.ok(link);
+  assert.equal(link.textContent, markdown);
+  assert.equal(decodeURIComponent(link.getAttribute("href") || ""), markdown);
+  assert.equal(sourceForSelection(root, selectContents(dom, link), markdown), markdown);
+
+  const streaming = renderToStaticMarkup(
+    React.createElement(MarkdownBody, { streaming: true }, markdown),
+  );
+  assert.match(streaming, /href="https:\/\/example\.com\/\$x%7Cy\$"/);
+  assert.doesNotMatch(streaming, /%EF%B7/);
+
+  const tableMarkdown = `link | note\n---|---\n${markdown} | keep`;
+  const tableLink = renderDom(tableMarkdown).root.querySelector("table a");
+  assert.ok(tableLink);
+  assert.equal(decodeURIComponent(tableLink.getAttribute("href") || ""), markdown);
+});
+
+test("table math protection leaves fenced and inline code literal", () => {
+  const markdown = [
+    "before `$x|y$` after",
+    "",
+    "```text",
+    "| $x|y$ | 1 |",
+    "```",
+  ].join("\n");
+  const { root } = renderDom(markdown);
+  assert.equal(root.querySelector(".inline-code")?.textContent, "$x|y$");
+  assert.match(root.querySelector(".code-block")?.textContent || "", /\| \$x\|y\$ \| 1 \|/);
 });
 
 test("one-line display math keeps exact original source", () => {

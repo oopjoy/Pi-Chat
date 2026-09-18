@@ -1,6 +1,6 @@
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
-import { createMarkdownRehypePlugins, markdownRemarkPlugins } from "../lib/markdown";
+import { createMarkdownRehypePlugins, createMarkdownRemarkPlugins } from "../lib/markdown";
 import { normalizeDisplayMathForRendering, normalizeDisplayMathWithSourceMap, registerSourceCopyRoot } from "../lib/markdown-source-copy";
 import {
   advanceStreamingMarkdown,
@@ -39,12 +39,17 @@ const markdownComponents = {
 const streamingRehypePlugins = createMarkdownRehypePlugins();
 
 const StreamingMarkdownSegment = memo(function StreamingMarkdownSegment({ children }: { children: string }) {
+  const prepared = useMemo(() => normalizeDisplayMathForRendering(children), [children]);
+  const remarkPlugins = useMemo(
+    () => createMarkdownRemarkPlugins(prepared.tableMathPipeMarker),
+    [prepared.tableMathPipeMarker],
+  );
   return <ReactMarkdown
-    remarkPlugins={markdownRemarkPlugins}
+    remarkPlugins={remarkPlugins}
     rehypePlugins={streamingRehypePlugins}
     components={markdownComponents}
   >
-    {normalizeDisplayMathForRendering(children)}
+    {prepared.markdown}
   </ReactMarkdown>;
 });
 
@@ -70,6 +75,10 @@ function FinalMarkdownBody({ children }: { children: string }) {
   const sourceMapped = useMemo(
     () => normalizeDisplayMathWithSourceMap(children),
     [children],
+  );
+  const remarkPlugins = useMemo(
+    () => createMarkdownRemarkPlugins(sourceMapped.tableMathPipeMarker),
+    [sourceMapped.tableMathPipeMarker],
   );
   const rehypePlugins = useMemo(
     () => createMarkdownRehypePlugins(sourceMapped.mapOffset),
@@ -99,7 +108,7 @@ function FinalMarkdownBody({ children }: { children: string }) {
   return (
     <div ref={rootRef} className="markdown-body markdown-source-copy">
       <ReactMarkdown
-        remarkPlugins={markdownRemarkPlugins}
+        remarkPlugins={remarkPlugins}
         rehypePlugins={rehypePlugins}
         components={markdownComponents}
       >

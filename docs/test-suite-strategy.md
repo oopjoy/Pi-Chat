@@ -11,9 +11,9 @@
 当前冻结候选基线：
 
 - 177 个 `tests/**/*.test.ts` 文件；
-- 由测试名称解析器识别出 1,324 个静态展开测试；
-- 核心 source lane 162 个文件、1,249 个静态展开测试；完整执行为
-  1,257 个 Node tests（1,255 passed、2 个环境 skip）；
+- 由测试名称解析器识别出 1,331 个静态展开测试；
+- 核心 source lane 162 个文件、1,256 个静态展开测试；完整执行为
+  1,264 个 Node tests（1,262 passed、2 个环境 skip）；
 - benchmark lane 6 个文件、33 个测试声明与执行；
 - artifact lane 9 个文件、42 个测试声明；隔离 Windows staging 执行为
   41 passed、1 个环境 skip；

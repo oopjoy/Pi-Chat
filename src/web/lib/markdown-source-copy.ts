@@ -1,3 +1,8 @@
+import {
+  prepareMarkdownMathPipes,
+  type PreparedMarkdownMathPipes,
+} from "./markdown-math-pipes";
+
 type SourcePoint = { offset?: number };
 type SourcePosition = { start?: SourcePoint; end?: SourcePoint };
 type HastNode = {
@@ -13,6 +18,7 @@ export interface SourceMappedMarkdown {
   markdown: string;
   source: string;
   mapOffset: (offset: number) => number;
+  tableMathPipeMarker?: string;
 }
 
 function identityOffset(offset: number): number {
@@ -144,12 +150,16 @@ function normalizeDisplayMath(source: string, trackOffsets: boolean): SourceMapp
 }
 
 export function normalizeDisplayMathWithSourceMap(source: string): SourceMappedMarkdown {
-  return normalizeDisplayMath(source, true);
+  const normalized = normalizeDisplayMath(source, true);
+  // Pipe protection is one UTF-16 code unit for one UTF-16 code unit, so the
+  // display-normalization boundary map remains exact.
+  const protectedMarkdown = prepareMarkdownMathPipes(normalized.markdown);
+  return { ...normalized, ...protectedMarkdown };
 }
 
 /** Keep malformed display-math boundaries local in streaming Markdown too. */
-export function normalizeDisplayMathForRendering(source: string): string {
-  return normalizeDisplayMath(source, false).markdown;
+export function normalizeDisplayMathForRendering(source: string): PreparedMarkdownMathPipes {
+  return prepareMarkdownMathPipes(normalizeDisplayMath(source, false).markdown);
 }
 
 const atomicTags = new Set([
