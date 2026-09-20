@@ -23,13 +23,14 @@ function formatFileSize(bytes: number): string {
   return `${bytes} B`;
 }
 
-function WorkspaceFiles({ sessionId, workspacePath, visible, activityRevision, listRecentFiles, readFile }: {
+function WorkspaceFiles({ sessionId, workspacePath, visible, activityRevision, listRecentFiles, readFile, openWorkspaceFile }: {
   sessionId: string;
   workspacePath: string;
   visible: boolean;
   activityRevision: string;
   listRecentFiles: (sessionId: string, signal?: AbortSignal) => Promise<WorkspaceRecentFilesData>;
   readFile: (sessionId: string, path: string, signal?: AbortSignal) => Promise<WorkspaceFileData>;
+  openWorkspaceFile: (sessionId: string, path: string) => Promise<unknown>;
 }) {
   const [recent, setRecent] = useState<WorkspaceRecentFilesData | null>(null);
   const [recentLoading, setRecentLoading] = useState(false);
@@ -38,12 +39,15 @@ function WorkspaceFiles({ sessionId, workspacePath, visible, activityRevision, l
   const [preview, setPreview] = useState<WorkspaceFileData | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState("");
+  const [openLoading, setOpenLoading] = useState(false);
+  const [openError, setOpenError] = useState("");
   const [listHeight, setListHeight] = useState<number | null>(null);
   const ownerRef = useRef(sessionId);
   const selectedPathRef = useRef(selectedPath);
   const workspaceGenerationRef = useRef(0);
   const recentRequestRef = useRef<AbortController | null>(null);
   const previewRequestRef = useRef<AbortController | null>(null);
+  const openRequestRef = useRef<object | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const splitResizeRef = useRef<{ pointerId: number; startY: number; startHeight: number } | null>(null);
@@ -68,6 +72,9 @@ function WorkspaceFiles({ sessionId, workspacePath, visible, activityRevision, l
         setSelectedPath("");
         setPreview(null);
         setPreviewError("");
+        openRequestRef.current = null;
+        setOpenLoading(false);
+        setOpenError("");
       }
     } catch (error) {
       if (!request.signal.aborted && recentRequestRef.current === request)
@@ -93,6 +100,9 @@ function WorkspaceFiles({ sessionId, workspacePath, visible, activityRevision, l
     setPreview(null);
     setPreviewLoading(false);
     setPreviewError("");
+    openRequestRef.current = null;
+    setOpenLoading(false);
+    setOpenError("");
   }, [sessionId, workspacePath]);
 
   useEffect(() => {
@@ -102,10 +112,15 @@ function WorkspaceFiles({ sessionId, workspacePath, visible, activityRevision, l
   useEffect(() => () => {
     recentRequestRef.current?.abort();
     previewRequestRef.current?.abort();
+    openRequestRef.current = null;
   }, []);
 
-  const openFile = async (path: string) => {
+  const previewFile = async (path: string) => {
     previewRequestRef.current?.abort();
+    // Opening is an external side effect and cannot be revoked, but its pending
+    // UI must not leak onto a different preview selected in the meantime.
+    openRequestRef.current = null;
+    setOpenLoading(false);
     const request = new AbortController();
     const generation = workspaceGenerationRef.current;
     previewRequestRef.current = request;
@@ -113,6 +128,7 @@ function WorkspaceFiles({ sessionId, workspacePath, visible, activityRevision, l
     setPreview(null);
     setPreviewLoading(true);
     setPreviewError("");
+    setOpenError("");
     try {
       const result = await readFile(sessionId, path, request.signal);
       if (previewRequestRef.current === request && ownerRef.current === sessionId && workspaceGenerationRef.current === generation) setPreview(result);
@@ -124,6 +140,27 @@ function WorkspaceFiles({ sessionId, workspacePath, visible, activityRevision, l
       if (previewRequestRef.current === request) {
         previewRequestRef.current = null;
         setPreviewLoading(false);
+      }
+    }
+  };
+
+  const openPreview = async () => {
+    if (!preview || openRequestRef.current) return;
+    const request = {};
+    const generation = workspaceGenerationRef.current;
+    const path = preview.path;
+    openRequestRef.current = request;
+    setOpenLoading(true);
+    setOpenError("");
+    try {
+      await openWorkspaceFile(sessionId, path);
+    } catch (error) {
+      if (openRequestRef.current === request && ownerRef.current === sessionId && workspaceGenerationRef.current === generation)
+        setOpenError(error instanceof Error ? error.message : "无法打开本地文件");
+    } finally {
+      if (openRequestRef.current === request) {
+        openRequestRef.current = null;
+        setOpenLoading(false);
       }
     }
   };
@@ -173,7 +210,7 @@ function WorkspaceFiles({ sessionId, workspacePath, visible, activityRevision, l
     <div className="workspace-files-list" ref={listRef} style={listHeight === null ? undefined : { height: `${listHeight}px`, flexBasis: `${listHeight}px` }} role="list" aria-label="当前对话最近修改的文件">
       {recentLoading && !recent && <p className="workspace-files-note">正在读取最近修改…</p>}
       {!recentLoading && recent && recent.files.length === 0 && <p className="workspace-files-note">当前对话还没有通过 Edit 或 Write 成功修改文件。</p>}
-      {recent?.files.map((file) => <button type="button" role="listitem" key={file.path} className={`workspace-file-row is-file${selectedPath === file.path ? " is-selected" : ""}`} title={file.path} onClick={() => void openFile(file.path)}>
+      {recent?.files.map((file) => <button type="button" role="listitem" key={file.path} className={`workspace-file-row is-file${selectedPath === file.path ? " is-selected" : ""}`} title={file.path} onClick={() => void previewFile(file.path)}>
         <FileIcon aria-hidden="true" />
         <span><strong>{file.name}</strong><small>{file.path}</small></span>
         <em>{file.operation === "edit" ? "Edit" : "Write"}</em>
@@ -193,7 +230,19 @@ function WorkspaceFiles({ sessionId, workspacePath, visible, activityRevision, l
       {previewError && <p className="workspace-files-error" role="status">{previewError}</p>}
       {!previewLoading && !previewError && !preview && <p className="workspace-files-note">选择最近修改的文件即可在此只读预览。</p>}
       {preview && <>
-        <header title={preview.path}><strong>{preview.path}</strong><span>{formatFileSize(preview.size)}</span></header>
+        <header title={preview.path}>
+          <strong>{preview.path}</strong>
+          <span>{formatFileSize(preview.size)}</span>
+          <button
+            type="button"
+            className="workspace-file-open"
+            disabled={openLoading}
+            aria-label={`使用系统默认应用打开 ${preview.path}`}
+            title="使用系统默认应用打开"
+            onClick={() => void openPreview()}
+          >{openLoading ? "打开中…" : "打开"}</button>
+        </header>
+        {openError && <p className="workspace-files-error" role="status">{openError}</p>}
         <pre tabIndex={0}><code>{preview.text || " "}</code></pre>
         {preview.truncated && <p className="workspace-files-warning">文件较大，仅显示前 256 KB。</p>}
       </>}
@@ -201,7 +250,7 @@ function WorkspaceFiles({ sessionId, workspacePath, visible, activityRevision, l
   </div>;
 }
 
-export function EditDiffSidebar({ open, width, sessionId, workspacePath, workspaceActivityRevision, listWorkspaceFiles, readWorkspaceFile, onOpenChange, onWidthChange }: {
+export function EditDiffSidebar({ open, width, sessionId, workspacePath, workspaceActivityRevision, listWorkspaceFiles, readWorkspaceFile, openWorkspaceFile, onOpenChange, onWidthChange }: {
   open: boolean;
   width: number;
   sessionId: string;
@@ -209,6 +258,7 @@ export function EditDiffSidebar({ open, width, sessionId, workspacePath, workspa
   workspaceActivityRevision: string;
   listWorkspaceFiles: (sessionId: string, signal?: AbortSignal) => Promise<WorkspaceRecentFilesData>;
   readWorkspaceFile: (sessionId: string, path: string, signal?: AbortSignal) => Promise<WorkspaceFileData>;
+  openWorkspaceFile: (sessionId: string, path: string) => Promise<unknown>;
   onOpenChange: (open: boolean) => void;
   onWidthChange: (width: number) => void;
 }) {
@@ -258,7 +308,7 @@ export function EditDiffSidebar({ open, width, sessionId, workspacePath, workspa
       </nav>
       <button type="button" onClick={() => onOpenChange(false)} aria-label="收起文件与变更侧栏">×</button>
     </header>
-    {tab === "files" ? <WorkspaceFiles sessionId={sessionId} workspacePath={workspacePath} visible={open} activityRevision={workspaceActivityRevision} listRecentFiles={listWorkspaceFiles} readFile={readWorkspaceFile} /> : <div className="workspace-changes-panel">
+    {tab === "files" ? <WorkspaceFiles key={`${sessionId}\u0000${workspacePath}`} sessionId={sessionId} workspacePath={workspacePath} visible={open} activityRevision={workspaceActivityRevision} listRecentFiles={listWorkspaceFiles} readFile={readWorkspaceFile} openWorkspaceFile={openWorkspaceFile} /> : <div className="workspace-changes-panel">
       {diff ? <>
         <header className="edit-diff-sidebar-header"><span title={diff.path}><strong>{compactEditPath(diff.path)}</strong><b>+{diff.additions}</b><i>-{diff.deletions}</i></span></header>
         <EditToolDiff diff={diff} />

@@ -1,7 +1,7 @@
 import { existsSync, statSync } from "node:fs";
-import { stat } from "node:fs/promises";
+import { lstat, stat } from "node:fs/promises";
 import { spawn } from "node:child_process";
-import { basename } from "node:path";
+import { basename, extname } from "node:path";
 
 const PICKER_SCRIPT = String.raw`
 Add-Type -AssemblyName System.Windows.Forms
@@ -231,6 +231,90 @@ export async function pickWorkspaceFolder(initialPath?: string): Promise<string 
   }
 }
 
+const BLOCKED_DEFAULT_OPEN_EXTENSIONS = new Set([
+  ".ade", ".adp", ".app", ".application", ".appref-ms", ".bat", ".cmd", ".com", ".cpl",
+  ".diagcab", ".dll", ".exe", ".gadget", ".hta", ".inf", ".ins", ".isp", ".jar", ".js",
+  ".jse", ".lnk", ".msc", ".msi", ".msp", ".mst", ".pif", ".pl", ".ps1", ".ps1xml",
+  ".ps2", ".ps2xml", ".psc1", ".psc2", ".psd1", ".psm1", ".py", ".pyw", ".rb", ".reg",
+  ".scf", ".scr", ".sct", ".sh", ".shb", ".shs", ".url", ".vb", ".vbe", ".vbs", ".ws",
+  ".wsc", ".wsf", ".wsh", ".xll",
+]);
+const WINDOWS_SHELL_TIMEOUT_MS = 10_000;
+const MAX_WINDOWS_SHELL_STDERR_CHARS = 16 * 1024;
+
+type WindowsShellProcess = {
+  stderr: { on(event: "data", listener: (chunk: Buffer | string) => void): unknown };
+  once(event: "error", listener: (error: Error) => void): unknown;
+  once(event: "exit", listener: (code: number | null) => void): unknown;
+  kill(): unknown;
+};
+
+export function isSafeDefaultApplicationFile(targetPath: string): boolean {
+  return !BLOCKED_DEFAULT_OPEN_EXTENSIONS.has(extname(targetPath).toLowerCase());
+}
+
+/** Bound a shell launcher so an OS-association failure cannot pin an API request forever. */
+export function waitForWindowsShellProcess(
+  child: WindowsShellProcess,
+  failureMessage: string,
+  timeoutMessage: string,
+  timeoutMs = WINDOWS_SHELL_TIMEOUT_MS,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let stderr = "";
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (error) reject(error);
+      else resolve();
+    };
+    child.stderr.on("data", (chunk) => {
+      const remaining = MAX_WINDOWS_SHELL_STDERR_CHARS - stderr.length;
+      if (remaining <= 0) return;
+      const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+      stderr += text.slice(0, remaining);
+    });
+    child.once("error", (error) => finish(error));
+    child.once("exit", (code) => finish(code === 0 ? undefined : new Error(stderr.trim() || failureMessage)));
+    timer = setTimeout(() => {
+      finish(new Error(timeoutMessage));
+      try { child.kill(); } catch { /* process may already have exited */ }
+    }, Math.max(1, timeoutMs));
+  });
+}
+
+/** Open one server-validated, non-executable file with its Windows default application. */
+export async function openWithDefaultApplication(
+  targetPath: string,
+  verifyTarget?: () => Promise<string>,
+): Promise<void> {
+  if (process.platform !== "win32") throw new Error("打开本地文件目前仅支持 Windows");
+  if (!isWindowsWorkspacePath(targetPath)) throw new Error("路径无效");
+  if (!isSafeDefaultApplicationFile(targetPath)) throw new Error("为安全起见，此文件类型不能直接打开");
+  if (verifyTarget && await verifyTarget() !== targetPath) throw new Error("文件路径在打开前发生变化");
+  let targetStat;
+  try { targetStat = await lstat(targetPath); }
+  catch { throw new Error("文件不存在"); }
+  if (targetStat.isSymbolicLink() || !targetStat.isFile()) throw new Error("文件不存在");
+  const child = spawn(
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-Command", "Start-Process -FilePath $env:PI_CHAT_OPEN_PATH"],
+    {
+      windowsHide: true,
+      env: { ...process.env, PI_CHAT_OPEN_PATH: targetPath },
+      stdio: ["ignore", "ignore", "pipe"],
+    },
+  );
+  await waitForWindowsShellProcess(
+    child as unknown as WindowsShellProcess,
+    "无法打开本地文件",
+    "打开本地文件超时",
+  );
+}
+
 /** Open a local file or folder through the Windows shell. Loopback-only helper for settings. */
 export async function revealInExplorer(targetPath: string): Promise<void> {
   if (process.platform !== "win32") throw new Error("打开本地目录目前仅支持 Windows");
@@ -243,15 +327,14 @@ export async function revealInExplorer(targetPath: string): Promise<void> {
   const script = isDir
     ? "Start-Process -FilePath $env:PI_CHAT_REVEAL_PATH"
     : "Start-Process -FilePath explorer.exe -ArgumentList ('/select,\"{0}\"' -f $env:PI_CHAT_REVEAL_PATH)";
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
-      windowsHide: true,
-      env: { ...process.env, PI_CHAT_REVEAL_PATH: targetPath },
-      stdio: ["ignore", "ignore", "pipe"],
-    });
-    let stderr = "";
-    child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); });
-    child.once("error", reject);
-    child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(stderr.trim() || "无法启动 Windows 资源管理器")));
+  const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+    windowsHide: true,
+    env: { ...process.env, PI_CHAT_REVEAL_PATH: targetPath },
+    stdio: ["ignore", "ignore", "pipe"],
   });
+  await waitForWindowsShellProcess(
+    child as unknown as WindowsShellProcess,
+    "无法启动 Windows 资源管理器",
+    "启动 Windows 资源管理器超时",
+  );
 }

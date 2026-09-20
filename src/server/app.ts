@@ -56,6 +56,8 @@ import {
   pickLocalFiles,
   readClipboardFiles,
   pickWorkspaceFolder,
+  isSafeDefaultApplicationFile,
+  openWithDefaultApplication,
   revealInExplorer,
 } from "./file-picker.js";
 import {
@@ -160,10 +162,16 @@ import {
 import { handleBootstrapRoute } from "./routes/bootstrap.js";
 import { handleSessionsReadRoute } from "./routes/sessions-read.js";
 import { handleSubagentsReadRoute } from "./routes/subagents-read.js";
+import { handleWorkspaceOpenRoute } from "./routes/workspace-open.js";
 import { handleWorkspaceReadRoute } from "./routes/workspace-read.js";
 import { SubagentStatusProvider } from "./subagent-status-provider.js";
 import { apiRouteAdmission, PROMPT_BODY_LIMIT } from "./api-route-admission.js";
-import { normalizeWorkspaceRelativePath, readWorkspaceFile, recentModifiedWorkspaceFiles } from "./workspace-files.js";
+import {
+  normalizeWorkspaceRelativePath,
+  readWorkspaceFile,
+  recentModifiedWorkspaceFiles,
+  workspaceFileTargetPath,
+} from "./workspace-files.js";
 
 export {
   messageWindow,
@@ -333,6 +341,8 @@ export interface PiChatAppOptions {
   webRoot: string;
   cwd: string;
   resources: ResourceManager;
+  /** Test seam for the explicit Workspace-preview Open action. */
+  openLocalFile?: (path: string, verifyTarget: () => Promise<string>) => Promise<void>;
   modelManager?: ModelManager;
   devMiddleware?: (
     request: IncomingMessage,
@@ -7224,7 +7234,9 @@ export class PiChatApp {
     return snapshot ? recentModifiedWorkspaceFiles(snapshot.messages, cwd) : null;
   }
 
-  private async workspaceFileRoute(input: { sessionId: string; path: string }): Promise<unknown | null> {
+  private async workspaceRecentFileContext(
+    input: { sessionId: string; path: string },
+  ): Promise<{ cwd: string; path: string } | null> {
     const cwd = await this.workspaceCwdForSession(input.sessionId);
     if (!cwd) return null;
     const snapshot = await this.options.sessions.snapshotForId(input.sessionId);
@@ -7232,7 +7244,27 @@ export class PiChatApp {
     const path = normalizeWorkspaceRelativePath(input.path);
     if (!recentModifiedWorkspaceFiles(snapshot.messages, cwd).files.some((file) => file.path === path))
       throw new HttpRequestError(404, "文件不在当前对话的最近修改列表中");
-    return readWorkspaceFile(cwd, path);
+    return { cwd, path };
+  }
+
+  private async workspaceFileRoute(input: { sessionId: string; path: string }): Promise<unknown | null> {
+    const context = await this.workspaceRecentFileContext(input);
+    return context ? readWorkspaceFile(context.cwd, context.path) : null;
+  }
+
+  private async workspaceOpenFileRoute(input: { sessionId: string; path: string }): Promise<unknown | null> {
+    const context = await this.workspaceRecentFileContext(input);
+    if (!context) return null;
+    // Re-validate the exact preview contract at click time before asking the OS
+    // to open anything; direct API callers cannot bypass text/symlink checks.
+    await readWorkspaceFile(context.cwd, context.path);
+    if (!isSafeDefaultApplicationFile(context.path))
+      throw new HttpRequestError(409, "为安全起见，此文件类型不能直接打开");
+    const target = await workspaceFileTargetPath(context.cwd, context.path);
+    const verifyTarget = () => workspaceFileTargetPath(context.cwd, context.path);
+    if (this.options.openLocalFile) await this.options.openLocalFile(target, verifyTarget);
+    else await openWithDefaultApplication(target, verifyTarget);
+    return { ok: true, path: context.path };
   }
 
   private async readOnlySessionPath(sessionId: string): Promise<string | null> {
@@ -7376,6 +7408,18 @@ export class PiChatApp {
           maxTurns: MAX_TURN_WINDOW_SIZE,
           turnIncrement: TURN_WINDOW_INCREMENT,
         },
+      )
+    )
+      return;
+    if (
+      await handleWorkspaceOpenRoute(
+        {
+          openWorkspaceFile: (input) => this.workspaceOpenFileRoute(input),
+        },
+        request,
+        response,
+        url,
+        preparedBody,
       )
     )
       return;

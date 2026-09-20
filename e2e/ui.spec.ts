@@ -578,7 +578,13 @@ test("directory groups collapse, search temporarily expands, and fixed state per
   await expect(restored.locator(".session-directory-toggle")).toHaveAttribute("aria-expanded", "false");
 });
 
-test("Files and Changes sidebar previews recent mutations with a resizable split and horizontal code scrolling", { tag: "@desktop-only" }, async ({ page }) => {
+test("Files and Changes sidebar previews and explicitly opens recent mutations with a resizable split", { tag: "@desktop-only" }, async ({ page }) => {
+  let openedPath = "";
+  await page.route("**/api/sessions/*/workspace/open", async (route) => {
+    const body = route.request().postDataJSON() as { path?: unknown };
+    openedPath = typeof body.path === "string" ? body.path : "";
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true, path: openedPath }) });
+  });
   await openSecondSession(page);
   await page.getByRole("button", { name: "展开文件与变更侧栏" }).click();
   const diff = page.locator(".edit-diff-sidebar");
@@ -602,6 +608,8 @@ test("Files and Changes sidebar previews recent mutations with a resizable split
   const preview = diff.locator(".workspace-file-preview pre");
   await expect(preview).toContainText("export const example");
   await expect.poll(() => preview.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
+  await diff.getByRole("button", { name: /使用系统默认应用打开 .*example\.ts/ }).click();
+  await expect.poll(() => openedPath).toMatch(/example\.ts$/);
   await diff.locator(".workspace-inspector-header > button").click();
 
   const process = page.locator(".conversation-process");

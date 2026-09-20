@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { PiMessage } from "../src/shared/types";
-import { readWorkspaceFile, recentModifiedWorkspaceFiles } from "../src/server/workspace-files";
+import { readWorkspaceFile, recentModifiedWorkspaceFiles, workspaceFileTargetPath } from "../src/server/workspace-files";
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-workspace-files-"));
@@ -76,6 +76,8 @@ test("workspace file reads remain bounded and reject traversal, secrets, generat
     const preview = await readWorkspaceFile(root, "src/app.ts");
     assert.equal(preview.path, "src/app.ts");
     assert.match(preview.text, /export const app/);
+    assert.equal(await workspaceFileTargetPath(root, "src/app.ts"), await realpath(join(root, "src", "app.ts")));
+    await assert.rejects(() => workspaceFileTargetPath(root, "../README.md"), /路径无效/);
     await assert.rejects(() => readWorkspaceFile(root, "../README.md"), /路径无效/);
     await assert.rejects(() => readWorkspaceFile(root, ".env"), /路径无效/);
     await assert.rejects(() => readWorkspaceFile(root, "github-token.txt"), /路径无效/);
@@ -96,6 +98,7 @@ test("workspace file reads reject symlinked paths even when their target stays i
       // without requiring Windows Developer Mode or administrator privileges.
       await symlink(join(root, "src"), join(root, "src-link"), "junction");
       await assert.rejects(() => readWorkspaceFile(root, "src-link/app.ts"), /符号链接/);
+      await assert.rejects(() => workspaceFileTargetPath(root, "src-link/app.ts"), /符号链接/);
 
       // Also cover file links when the machine permits creating them, but do
       // not turn a host privilege setting into a skipped security regression.
@@ -114,6 +117,7 @@ test("workspace file reads reject symlinked paths even when their target stays i
     await symlink(join(root, "src"), join(root, "src-link"), "dir");
     await assert.rejects(() => readWorkspaceFile(root, "readme-link.md"), /符号链接/);
     await assert.rejects(() => readWorkspaceFile(root, "src-link/app.ts"), /符号链接/);
+    await assert.rejects(() => workspaceFileTargetPath(root, "src-link/app.ts"), /符号链接/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -44,12 +44,14 @@ export function apiRouteAdmission(request: IncomingMessage, url: URL): ApiRouteA
     && /^\/api\/sessions\/[a-f0-9]{20}$/.test(url.pathname);
   const sessionCopyMutation =
     request.method === "POST" && /^\/api\/sessions\/[a-f0-9]{20}\/(clone|fork)$/.test(url.pathname);
+  const workspaceOpenMutation =
+    request.method === "POST" && /^\/api\/sessions\/[a-f0-9]{20}\/workspace\/open$/.test(url.pathname);
   const customModelMutation =
     request.method === "PUT" && /^\/api\/models\/[A-Za-z0-9._-]{1,80}\/[^/]{1,200}$/.test(url.pathname);
   const modelCatalogueMutation =
     (request.method === "POST" || request.method === "DELETE")
     && url.pathname === "/api/models";
-  if (sessionManagementMutation || sessionCopyMutation)
+  if (sessionManagementMutation || sessionCopyMutation || workspaceOpenMutation)
     return {
       bodyBeforeMutationLease: true,
       validateSessionId: false,

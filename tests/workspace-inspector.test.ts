@@ -61,6 +61,10 @@ test("Files tab lists recent Session mutations, previews text, and resizes its s
       workspaceActivityRevision: "edit-1",
       listWorkspaceFiles,
       readWorkspaceFile,
+      openWorkspaceFile: async (sessionId: string, path: string) => {
+        requests.push(`open=${sessionId}:${path}`);
+        throw new Error("无法启动默认应用");
+      },
       onOpenChange() {},
       onWidthChange() {},
     })));
@@ -71,6 +75,12 @@ test("Files tab lists recent Session mutations, previews text, and resizes its s
     await act(async () => dom.window.document.querySelector<HTMLButtonElement>("[title='src/app.ts']")!.click());
     await settle(() => (dom.window.document.querySelector(".workspace-file-preview pre")?.textContent || "").includes("export const value"));
     assert.ok(requests.includes("path=src/app.ts"));
+    const openButton = dom.window.document.querySelector<HTMLButtonElement>("[aria-label='使用系统默认应用打开 src/app.ts']")!;
+    assert.equal(openButton.textContent, "打开");
+    await act(async () => openButton.click());
+    assert.ok(requests.includes("open=0123456789abcdefabcd:src/app.ts"));
+    await settle(() => (dom.window.document.querySelector(".workspace-files-error")?.textContent || "").includes("无法启动默认应用"));
+    assert.equal(openButton.disabled, false);
     const preview = dom.window.document.querySelector<HTMLPreElement>(".workspace-file-preview pre")!;
     assert.equal(preview.tabIndex, 0);
     const splitter = dom.window.document.querySelector<HTMLElement>(".workspace-files-splitter")!;
@@ -104,6 +114,7 @@ test("a delayed recent-file response cannot overwrite a later revisit to the sam
     workspaceActivityRevision: "revision",
     listWorkspaceFiles,
     readWorkspaceFile: async (_sessionId: string, path: string) => ({ path, name: path, size: 0, text: "", truncated: false, encodingLossy: false }),
+    openWorkspaceFile: async () => undefined,
     onOpenChange() {},
     onWidthChange() {},
   }));
@@ -128,6 +139,8 @@ test("a delayed file preview cannot return after navigating away and revisiting"
   const sessionB = "bbbbbbbbbbbbbbbbbbbb";
   let resolveOld!: (value: { path: string; name: string; size: number; text: string; truncated: boolean; encodingLossy: boolean }) => void;
   const oldPreview = new Promise<{ path: string; name: string; size: number; text: string; truncated: boolean; encodingLossy: boolean }>((resolve) => { resolveOld = resolve; });
+  let previewCalls = 0;
+  const openRequests: string[] = [];
   const root = createRoot(dom.window.document.querySelector<HTMLElement>("#root")!);
   const render = (sessionId: string) => root.render(createElement(EditDiffSidebar, {
     open: true,
@@ -139,11 +152,22 @@ test("a delayed file preview cannot return after navigating away and revisiting"
       const name = sessionId === sessionA ? "a.txt" : "b.txt";
       return { files: [{ path: name, name, operation: "edit" }], truncated: false };
     },
-    readWorkspaceFile: async () => oldPreview,
+    readWorkspaceFile: async (_sessionId: string, path: string) => ++previewCalls === 1
+      ? { path, name: path, size: 7, text: "VISIBLE", truncated: false, encodingLossy: false }
+      : oldPreview,
+    openWorkspaceFile: async (owner: string, path: string) => { openRequests.push(`${owner}:${path}`); },
     onOpenChange() {},
     onWidthChange() {},
   }));
   try {
+    await act(async () => render(sessionA));
+    await settle(() => Boolean(dom.window.document.querySelector("[title='a.txt']")));
+    await act(async () => dom.window.document.querySelector<HTMLButtonElement>("[title='a.txt']")!.click());
+    await settle(() => (dom.window.document.querySelector(".workspace-file-preview pre")?.textContent || "").includes("VISIBLE"));
+    await act(async () => render(sessionB));
+    assert.equal(dom.window.document.querySelector(".workspace-file-preview pre"), null);
+    assert.equal(dom.window.document.querySelector(".workspace-file-open"), null);
+    assert.deepEqual(openRequests, []);
     await act(async () => render(sessionA));
     await settle(() => Boolean(dom.window.document.querySelector("[title='a.txt']")));
     await act(async () => dom.window.document.querySelector<HTMLButtonElement>("[title='a.txt']")!.click());

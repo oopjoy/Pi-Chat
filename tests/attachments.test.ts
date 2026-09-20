@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { createServer } from "node:http";
 import test from "node:test";
 import {
@@ -10,8 +11,10 @@ import {
 } from "../src/shared/rpc-contracts";
 import { PiChatApp, promptImages } from "../src/server/app";
 import {
+  isSafeDefaultApplicationFile,
   isWindowsWorkspacePath,
   parsePickerOutput,
+  waitForWindowsShellProcess,
 } from "../src/server/file-picker";
 import type { PiRpcClient } from "../src/server/rpc-client";
 import { idForPath, type SessionIndex } from "../src/server/session-index";
@@ -81,7 +84,7 @@ test("browser attachment preflight shares the ten-image and 40 MB budgets", () =
   assert.equal(promptImagesByteLength([{ data: "YQ==" }, { data: "", size: 7 }]), 8);
 });
 
-test("file attachments stay drive-only while workspaces accept canonical WSL UNC paths", () => {
+test("file attachments stay drive-only while workspaces accept canonical WSL UNC paths", async () => {
   const wslWorkspace = "\\\\wsl.localhost\\Ubuntu\\home\\brave\\projects";
   assert.deepEqual(parsePickerOutput('["C:\\\\Users\\\\me\\\\note.md","D:\\\\资料\\\\文档.pdf"]'), [
     "C:\\Users\\me\\note.md",
@@ -100,6 +103,29 @@ test("file attachments stay drive-only while workspaces accept canonical WSL UNC
   assert.equal(isWindowsWorkspacePath("\\\\wsl.localhost\\Ubuntu/home/brave/projects"), false);
   assert.equal(isWindowsWorkspacePath("\\\\wsl.localhost"), false);
   assert.equal(isWindowsWorkspacePath("\\\\wsl.localhost\\"), false);
+  assert.equal(isSafeDefaultApplicationFile("C:\\work\\notes.txt"), true);
+  assert.equal(isSafeDefaultApplicationFile("C:\\work\\run.cmd"), false);
+  assert.equal(isSafeDefaultApplicationFile("C:\\work\\script.js"), false);
+
+  let killed = 0;
+  const hung = Object.assign(new EventEmitter(), {
+    stderr: new EventEmitter(),
+    kill: () => { killed += 1; return true; },
+  });
+  await assert.rejects(
+    waitForWindowsShellProcess(hung, "failed", "timed out", 2),
+    /timed out/,
+  );
+  assert.equal(killed, 1);
+
+  const failed = Object.assign(new EventEmitter(), {
+    stderr: new EventEmitter(),
+    kill: () => true,
+  });
+  const failure = waitForWindowsShellProcess(failed, "failed", "timed out", 100);
+  failed.stderr.emit("data", "x".repeat(32 * 1024));
+  failed.emit("exit", 1);
+  await assert.rejects(failure, (error: Error) => error.message.length <= 16 * 1024);
 });
 
 test("attachment path helpers preserve Windows absolute paths without prompt boilerplate", () => {

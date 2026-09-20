@@ -165,6 +165,14 @@ export function recentModifiedWorkspaceFiles(messages: PiMessage[], cwd: string)
   return { files, truncated };
 }
 
+export async function workspaceFileTargetPath(cwd: string, rawPath: string): Promise<string> {
+  const path = normalizeWorkspaceRelativePath(rawPath);
+  const { target, targetStat } = await workspaceTarget(cwd, path);
+  if (!targetStat.isFile()) throw new HttpRequestError(404, "Workspace 文件不存在");
+  await assertStableTarget(cwd, path, target, targetStat);
+  return target;
+}
+
 export async function readWorkspaceFile(cwd: string, rawPath: string): Promise<WorkspaceFileData> {
   const path = normalizeWorkspaceRelativePath(rawPath);
   const { target, targetStat } = await workspaceTarget(cwd, path);

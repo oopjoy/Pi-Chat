@@ -10306,6 +10306,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         workspaceActivityRevision={workspaceActivityRevision}
         listWorkspaceFiles={api.workspaceFiles}
         readWorkspaceFile={api.workspaceFile}
+        openWorkspaceFile={api.openWorkspaceFile}
         onOpenChange={setDiffSidebarOpen}
         onWidthChange={setDiffSidebarWidth}
       />

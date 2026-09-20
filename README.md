@@ -56,6 +56,7 @@ Release ZIP 是 Windows-first 的可运行包；源码开发和从 checkout 运�
 - 当前 Session 若有 `pi-subagents` 后台步骤，顶栏会快速显示紧凑的“N 个子代理”入口：使用安全任务标签、活动与耗时投影，点击已验证条目可在现有聊天区打开对应子代理 JSONL（严格只读）；子 Session 不加入左侧会话，也不能启动、Steer、恢复、中断、停止或取得 SessionControl
 - 长会话初始仅渲染最近 10 个用户发起的完整对话轮次（包含该轮后续回复与工具过程）；滚到顶部可点击“加载更早 10 轮”逐步展开历史；侧栏会话元数据使用持久化索引缓存，变更时增量更新
 - 对话右侧提供首条、上一条、下一条、最新的四格导航
+- Files / Changes 检查器按当前 Session 的成功 Edit/Write 结果列出最近文件并提供有界只读预览；预览标题栏可经服务端重新验证后，用 Windows 默认应用显式打开该文件；已知会被 Shell 直接执行的脚本/快捷方式类型会拒绝打开
 - 固定铺满动态视口，兼容窗口最大化/还原、Windows DPI、页面缩放和窄窗口
 - Session-first 历史会话列表、切换和新建：服务与界面先打开、读取并缓存 JSONL；Primary 会在后台启动并完成兼容性验证，未 ready 或验证失败时历史仍可浏览且不会探测 Primary RPC。选中、滚动、搜索或切换冷历史只读取 JSONL，不启动 Secondary Runtime；只有发送、Compact、Model/Thinking 或显式启动 Pi 等实际操作才会为该 Session 单飞准备专属 Runtime。服务的默认工作目录保持固定；需要不同目录时，在创建该条 New 草稿后使用“新对话工作路径”选择器单独修改，不会影响其他对话。新对话首条消息将 Runtime 创建、Model、Thinking、Gate 与 prompt 合并为一个服务事务。最多 7 个热对话（Primary + 6 个 Secondary），达到容量时优先 LRU 回收最久未使用的空闲 Secondary；若没有可回收的空闲对话则拒绝新的 Runtime 启动，正在显示的持久历史也可退回 view-only
 - 同一 Session 可在多个窗口观察和提交；Prompt、Steer、Compact、queue 与 settings mutation 由服务按 Session 排入 FIFO，并以请求 identity 和 Runtime generation fencing。Rename/Delete 等破坏性操作另行使用 exclusive-control 保护，不把普通 Prompt 操作建模成 takeover。
