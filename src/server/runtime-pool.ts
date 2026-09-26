@@ -186,6 +186,8 @@ export class RuntimePool {
   private readonly orphanedStarts = new Set<SecondaryRuntime>();
   private readonly runtimeStops = new Map<string, Promise<void>>();
   private readonly draftStarts = new Map<string, Promise<DraftRuntimeLease>>();
+  /** Once shutdown begins, no pending start may publish a new Runtime. */
+  private lifecycleClosing = false;
   private runtimeCapacityTail: Promise<void> = Promise.resolve();
   /** Starts reserve capacity before spawning outside the short capacity lock. */
   private reservedStarts = 0;
@@ -204,6 +206,14 @@ export class RuntimePool {
   get stoppingCount(): number { return this.runtimeStops.size; }
   get transitioningCount(): number { return this.runtimeStarts.size + this.runtimeStops.size + this.orphanedStarts.size; }
   get reservedStartCount(): number { return this.reservedStarts; }
+
+  private isLifecycleClosing(): boolean {
+    return this.lifecycleClosing || this.options.isClosed();
+  }
+
+  private assertLifecycleOpen(): void {
+    if (this.isLifecycleClosing()) throw new OperationAdmissionClosedError("Pi Chat 正在关闭，请稍后重试");
+  }
 
   get(id: string): SecondaryRuntime | undefined { return this.runtimes.get(id); }
   has(id: string): boolean { return this.runtimes.has(id); }
@@ -438,6 +448,13 @@ export class RuntimePool {
         if (finished) return;
         // Publish and consume the reservation in one short critical section.
         // Capacity can never count this Runtime as both live and reserved.
+        // Shutdown may begin between the caller's preflight and this commit;
+        // fail closed here so no late Runtime can enter the live map.
+        if (publish && this.isLifecycleClosing()) {
+          this.reservedStarts = Math.max(0, this.reservedStarts - 1);
+          finished = true;
+          throw new OperationAdmissionClosedError("Pi Chat 正在关闭，请稍后重试");
+        }
         publish?.();
         this.reservedStarts = Math.max(0, this.reservedStarts - 1);
         finished = true;
@@ -835,6 +852,7 @@ export class RuntimePool {
   }
 
   async acquireDraft(clientId = "", cwd = this.options.cwd()): Promise<DraftRuntimeLease> {
+    this.assertLifecycleOpen();
     if (!this.options.createRpc) throw new Error("当前服务未启用多会话运行");
     const key = `${clientId}\u0000${cwd}`;
     const existingStart = this.draftStarts.get(key);
@@ -845,6 +863,10 @@ export class RuntimePool {
       const probes = new Map<SecondaryRuntime, Promise<boolean | null>>();
       const reusable = await this.findReusableDraft(clientId, cwd, probes);
       if (reusable) {
+        if (this.isLifecycleClosing()) {
+          reusable.release();
+          throw new OperationAdmissionClosedError("Pi Chat 正在关闭，请稍后重试");
+        }
         this.options.broadcast({ type: "pi_chat_active_session_changed", sessionId: reusable.runtime.id, activeSessionIds: this.options.activeSessionIds() });
         return reusable;
       }
@@ -873,7 +895,9 @@ export class RuntimePool {
         }
         if (hasMessages === false) await this.reclaim(draft.id, "capacity");
       }
+      this.assertLifecycleOpen();
       const reservation = await this.reserveStart(() => {
+        this.assertLifecycleOpen();
         const idleCount = [...this.runtimes.values()].filter((runtime) => this.isIdle(runtime)).length;
         if (idleCount >= this.maxIdleSecondaryRuntimes) {
           throw new RuntimeCapacityError(`已有 ${idleCount} 个窗口保留空白新对话，请先使用或关闭其中一个再新建`);
@@ -926,6 +950,7 @@ export class RuntimePool {
           turnCount: 0,
           active: false,
         };
+        this.assertLifecycleOpen();
         await reservation.commit(() => this.runtimes.set(runtime.id, runtime));
         // Protect the newly mapped empty draft through the same route handoff
         // window as a reused draft. It becomes view-pinned before release.
@@ -977,8 +1002,19 @@ export class RuntimePool {
   }
 
   /** Stop every secondary without reclaim broadcasts (reload / workspace / app close). */
-  async stopAll(options?: { cleanupDrafts?: boolean }): Promise<void> {
-    await Promise.allSettled(this.runtimeStarts.values());
+  async stopAll(options?: { cleanupDrafts?: boolean; terminal?: boolean }): Promise<void> {
+    // Fence every kind of replacement until the final child exit is proven.
+    // Resource reload may reopen only after the entire drain succeeds.
+    this.lifecycleClosing = true;
+    await this.stopAllFenced(options);
+    if (options?.terminal === false && !this.options.isClosed()) this.lifecycleClosing = false;
+  }
+
+  private async stopAllFenced(options?: { cleanupDrafts?: boolean }): Promise<void> {
+    await Promise.allSettled([
+      ...this.runtimeStarts.values(),
+      ...this.draftStarts.values(),
+    ]);
     await Promise.allSettled(this.runtimeStops.values());
     const runtimes = [
       ...new Set([...this.runtimes.values(), ...this.orphanedStarts]),

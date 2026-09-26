@@ -290,6 +290,83 @@ test("a new draft exposes a bounded startup error after both readiness attempts 
   assert.equal(targetPool.runtimes.size, 0, "failed draft startup must not retain an empty owner");
 });
 
+test("stopAll fences and drains an in-flight new draft before shutdown completes", async () => {
+  const start = deferred<{ type: string; success: boolean; data: { sessionFile: string; sessionId: string; isStreaming: boolean } }>();
+  let stopCount = 0;
+  let broadcasts = 0;
+  let created = false;
+  const targetPool = new RuntimePool({
+    now: () => 1,
+    cwd: () => process.cwd(),
+    refreshSessions: async () => {},
+    pathForId: () => null,
+    isClosed: () => false,
+    canSweep: () => true,
+    onSecondaryEvent: () => {},
+    activeSessionIds: () => [],
+    broadcast: () => { broadcasts += 1; },
+    createRpc: () => {
+      created = true;
+      return {
+        onEvent: () => () => {},
+        start: async () => start.promise,
+        stop: async () => { stopCount += 1; },
+        isRunning: () => true,
+        isExitConfirmed: () => true,
+        currentGeneration: () => 1,
+      } as never;
+    },
+  });
+
+  const acquiring = targetPool.acquireDraft("client-a");
+  for (let turn = 0; turn < 20 && !created; turn += 1)
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(created, true, "the draft child must be created before shutdown races its readiness");
+  const stopping = targetPool.stopAll();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(stopCount, 0, "shutdown waits for the held draft start instead of racing it");
+
+  start.resolve({
+    type: "response",
+    success: true,
+    data: { sessionFile: "C:\\sessions\\late-draft.jsonl", sessionId: "late-draft", isStreaming: false },
+  });
+  await assert.rejects(acquiring, /正在关闭/);
+  await stopping;
+  assert.equal(stopCount, 1, "the late draft child is stopped after the shutdown fence");
+  assert.equal(targetPool.size, 0, "a draft finishing during shutdown is never committed");
+  assert.equal(broadcasts, 0, "shutdown does not emit a late active-session broadcast");
+});
+
+test("resource reload stopAll keeps the RuntimePool reusable for replacement drafts", async () => {
+  let starts = 0;
+  const targetPool = pool(() => ({
+    onEvent: () => () => {},
+    start: async () => {
+      starts += 1;
+      return {
+        type: "response",
+        success: true,
+        data: {
+          sessionFile: `C:\\sessions\\replacement-draft-${starts}.jsonl`,
+          sessionId: `replacement-draft-${starts}`,
+          isStreaming: false,
+        },
+      };
+    },
+    stop: async () => {},
+    isRunning: () => true,
+    isExitConfirmed: () => true,
+    currentGeneration: () => starts,
+  }) as never);
+
+  await targetPool.stopAll({ terminal: false });
+  const lease = await targetPool.acquireDraft("client-a");
+  assert.equal(lease.created, true);
+  lease.release();
+  assert.equal(starts, 1);
+});
+
 test("a persisted Session exposes a bounded startup error after both readiness attempts time out", async () => {
   const path = "C:\\sessions\\slow-persisted.jsonl";
   const id = idForPath(path);

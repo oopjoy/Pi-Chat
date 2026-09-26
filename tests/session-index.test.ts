@@ -3,7 +3,18 @@ import { appendFile, mkdtemp, mkdir, readFile, rename, rm, stat, truncate, write
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { SessionIndex, cleanPreview, idForPath, parseSession, readSessionMessages, readSessionUsage, textFromContent } from "../src/server/session-index";
+import {
+  SESSION_TAIL_MAX_RETAINED_BYTES,
+  SESSION_TAIL_MAX_SCAN_BYTES,
+  SESSION_TAIL_READ_CHUNK_BYTES,
+  SessionIndex,
+  cleanPreview,
+  idForPath,
+  parseSession,
+  readSessionMessages,
+  readSessionUsage,
+  textFromContent,
+} from "../src/server/session-index";
 import { MAX_SESSION_SNAPSHOT_BYTES, sessionFileFingerprint } from "../src/server/session-projection";
 import { LOCAL_COORDINATION_ROLE } from "../src/shared/types";
 
@@ -81,6 +92,81 @@ test("large cold Sessions read only a bounded recent tail", async () => {
     assert.equal(snapshot?.sourceTurnTotal, 1_000);
     assert.equal(snapshot?.sourceMessagesTruncated, true);
     assert.equal(snapshot?.usageComplete, false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("large cold Sessions stop at the tail line budget instead of scanning an unbounded EOF line", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-session-tail-budget-"));
+  try {
+    const path = join(root, "giant-eof.jsonl");
+    await writeFile(path, `${JSON.stringify({ type: "session", id: "giant-eof", cwd: root })}\n`);
+    await truncate(path, MAX_SESSION_SNAPSHOT_BYTES + 1);
+    const id = idForPath(path);
+    const summary = {
+      id,
+      sessionId: "giant-eof",
+      name: "Giant EOF",
+      preview: "older",
+      cwd: root,
+      updatedAt: 1,
+      messageCount: 1,
+      turnCount: 1,
+      active: false,
+    };
+    const index = new SessionIndex(root, join(root, "index.json"));
+    const internals = index as unknown as {
+      pathsById: Map<string, string>;
+      cache: Map<string, { summary: typeof summary }>;
+    };
+    internals.pathsById.set(id, path);
+    internals.cache = new Map([[path, { summary }]]);
+
+    const snapshot = await index.recentSnapshotForId(id, 2);
+    assert.deepEqual(snapshot?.messages, []);
+    assert.ok((snapshot?.bytesRead ?? Infinity) <= SESSION_TAIL_MAX_RETAINED_BYTES + SESSION_TAIL_READ_CHUNK_BYTES);
+    assert.ok((snapshot?.bytesRead ?? Infinity) <= SESSION_TAIL_MAX_SCAN_BYTES);
+    assert.equal(snapshot?.sourceMessagesTruncated, true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("large cold Sessions do not retain a single oversized recent entry", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-session-tail-entry-budget-"));
+  try {
+    const path = join(root, "giant-entry.jsonl");
+    await writeFile(path, `${JSON.stringify({ type: "session", id: "giant-entry", cwd: root })}\n`);
+    await truncate(path, MAX_SESSION_SNAPSHOT_BYTES + 1);
+    await appendFile(path, `${JSON.stringify({
+      type: "message",
+      id: "giant-assistant",
+      message: { role: "assistant", content: "x".repeat(SESSION_TAIL_MAX_RETAINED_BYTES + 1) },
+    })}\n`);
+    const id = idForPath(path);
+    const summary = {
+      id,
+      sessionId: "giant-entry",
+      name: "Giant entry",
+      preview: "older",
+      cwd: root,
+      updatedAt: 1,
+      messageCount: 1,
+      turnCount: 1,
+      active: false,
+    };
+    const index = new SessionIndex(root, join(root, "index.json"));
+    const internals = index as unknown as {
+      pathsById: Map<string, string>;
+      cache: Map<string, { summary: typeof summary }>;
+    };
+    internals.pathsById.set(id, path);
+    internals.cache = new Map([[path, { summary }]]);
+
+    const snapshot = await index.recentSnapshotForId(id, 2);
+    assert.deepEqual(snapshot?.messages, []);
+    assert.ok((snapshot?.bytesRead ?? Infinity) <= SESSION_TAIL_MAX_SCAN_BYTES);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

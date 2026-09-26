@@ -1320,7 +1320,7 @@ export class PiChatApp {
     // resources so the caller can finish a bounded fail-closed shutdown.
     let runtimeStopFailure: unknown;
     try {
-      await this.runtimePool.stopAll({ cleanupDrafts: true });
+      await this.runtimePool.stopAll({ cleanupDrafts: true, terminal: true });
     } catch (error) {
       runtimeStopFailure = error;
     }
@@ -5396,7 +5396,7 @@ export class PiChatApp {
         advanceGeneration: true,
       });
     try {
-      await this.runtimePool.stopAll();
+      await this.runtimePool.stopAll({ terminal: false });
       await this.restartPrimaryRuntime(state.sessionFile);
     } catch (error) {
       this.rethrowResultPending(error, "配置重载");

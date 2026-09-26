@@ -5,7 +5,8 @@ import { resolve } from "node:path";
 
 const READ_CHUNK_BYTES = 256 * 1024;
 const FINGERPRINT_WINDOW_BYTES = 64 * 1024;
-const MAX_JSONL_ENTRY_BYTES = 65 * 1024 * 1024;
+/** Keep one JSONL record bounded even when a tool emits an unexpectedly large payload. */
+export const MAX_JSONL_ENTRY_BYTES = 65 * 1024 * 1024;
 /** A cold transcript must not materialize an unbounded JSONL into memory. */
 export const MAX_SESSION_SNAPSHOT_BYTES = 128 * 1024 * 1024;
 

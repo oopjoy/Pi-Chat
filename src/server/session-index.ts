@@ -7,7 +7,7 @@ import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { LOCAL_COORDINATION_ROLE, type PiMessage, type PromptImage, type SessionSummary, type ThinkingLevel } from "../shared/types.js";
 import { compareSessionsByLastUserPrompt } from "../shared/session-order.js";
 import { loadSessionCache, saveSessionCache, type SessionCacheEntry } from "./session-index-cache.js";
-import { MAX_SESSION_SNAPSHOT_BYTES, SessionProjection, sessionFileFingerprint } from "./session-projection.js";
+import { MAX_JSONL_ENTRY_BYTES, MAX_SESSION_SNAPSHOT_BYTES, SessionProjection, sessionFileFingerprint } from "./session-projection.js";
 import { promptImages } from "./pi-data.js";
 
 interface SessionHeader {
@@ -67,6 +67,15 @@ function sameSessionFileVersion(
     && cached.ino === current.ino
     && cached.fingerprint === current.fingerprint,
   );
+}
+
+function sameSessionFileStats(left: Stats, right: Stats): boolean {
+  return left.mtimeMs === right.mtimeMs
+    && left.ctimeMs === right.ctimeMs
+    && left.birthtimeMs === right.birthtimeMs
+    && left.size === right.size
+    && String(left.dev) === String(right.dev)
+    && String(left.ino) === String(right.ino);
 }
 
 interface SessionEntry {
@@ -210,15 +219,72 @@ async function readSessionEntries(path: string): Promise<SessionEntry[]> {
   return scanSessionEntries(path);
 }
 
-const SESSION_TAIL_READ_CHUNK_BYTES = 256 * 1024;
+export const SESSION_TAIL_READ_CHUNK_BYTES = 256 * 1024;
+/** Never scan an unbounded prefix while constructing a cold recent view. */
+export const SESSION_TAIL_MAX_SCAN_BYTES = MAX_SESSION_SNAPSHOT_BYTES;
+/** Keep the materialized recent branch well below the full snapshot budget. */
+export const SESSION_TAIL_MAX_RETAINED_BYTES = 8 * 1024 * 1024;
+
+function byteAt(parts: readonly Buffer[], offset: number): number {
+  let cursor = offset;
+  for (const part of parts) {
+    if (cursor < part.length) return part[cursor];
+    cursor -= part.length;
+  }
+  return -1;
+}
+
+function lastNewline(parts: readonly Buffer[], before: number): number {
+  const starts: number[] = [];
+  let offset = 0;
+  for (const part of parts) {
+    starts.push(offset);
+    offset += part.length;
+  }
+  for (let index = parts.length - 1; index >= 0; index -= 1) {
+    const part = parts[index];
+    const partStart = starts[index];
+    const partEnd = Math.min(part.length, before - partStart);
+    if (partEnd > 0) {
+      const newline = part.lastIndexOf(0x0a, partEnd - 1);
+      if (newline >= 0) return partStart + newline;
+    }
+  }
+  return -1;
+}
+
+function sliceParts(parts: readonly Buffer[], start: number, end: number): Buffer[] {
+  const result: Buffer[] = [];
+  let offset = 0;
+  for (const part of parts) {
+    const from = Math.max(0, start - offset);
+    const to = Math.min(part.length, end - offset);
+    if (to > from) result.push(part.subarray(from, to));
+    offset += part.length;
+    if (offset >= end) break;
+  }
+  return result;
+}
+
+function parseTailLine(parts: readonly Buffer[], start: number, end: number): SessionEntry | null {
+  const lineParts = sliceParts(parts, start, end);
+  const line = lineParts.length === 1 ? lineParts[0] : Buffer.concat(lineParts, end - start);
+  if (!line.some((value) => value !== 0x20 && value !== 0x09 && value !== 0x0d)) return null;
+  try {
+    const entry = JSON.parse(line.toString("utf8")) as SessionEntry;
+    return entry && typeof entry === "object" && !Array.isArray(entry) ? entry : null;
+  } catch {
+    // Ignore malformed/newly-written records exactly as the full reader does.
+    return null;
+  }
+}
 
 /**
  * Read only the newest complete JSONL records when a cold Session exceeds the
  * full-snapshot memory budget. The scan starts at EOF and stops after the
- * requested number of User turns, so opening a large history never allocates a
- * full in-memory transcript. Branch selection is still applied to the bounded
- * suffix; an unresolved older parent is intentionally outside the visible
- * recent window and does not get guessed.
+ * requested number of User turns, or any of the explicit scan/line/materialized
+ * budgets. Boundary fragments are retained as Buffer slices rather than being
+ * repeatedly concatenated, avoiding O(n²) copying for a giant EOF line.
  */
 async function readSessionTailEntries(
   path: string,
@@ -230,53 +296,61 @@ async function readSessionTailEntries(
     const fileStat = await handle.stat();
     const entriesReverse: SessionEntry[] = [];
     let end = fileStat.size;
-    let boundary = Buffer.alloc(0);
+    let boundaryParts: Buffer[] = [];
+    let boundaryBytes = 0;
     let bytesRead = 0;
+    let retainedBytes = 0;
     let userTurns = 0;
     const requiredTurns = Math.max(1, Math.floor(turnLimit));
-    while (end > 0 && userTurns < requiredTurns) {
-      const start = Math.max(0, end - SESSION_TAIL_READ_CHUNK_BYTES);
+    const scanLimit = Math.min(fileStat.size, SESSION_TAIL_MAX_SCAN_BYTES);
+
+    while (end > 0 && userTurns < requiredTurns && bytesRead < scanLimit) {
+      const start = Math.max(0, end - Math.min(SESSION_TAIL_READ_CHUNK_BYTES, scanLimit - bytesRead));
       const length = end - start;
       const chunk = Buffer.allocUnsafe(length);
       const result = await handle.read(chunk, 0, length, start);
       if (!result.bytesRead) break;
+      const readChunk = chunk.subarray(0, result.bytesRead);
       bytesRead += result.bytesRead;
-      const combined = boundary.length
-        ? Buffer.concat([chunk.subarray(0, result.bytesRead), boundary])
-        : chunk.subarray(0, result.bytesRead);
-      let cursor = combined.length;
-      if (cursor > 0 && combined[cursor - 1] === 0x0a) cursor -= 1;
-      let completePrefix = 0;
+      const parts = boundaryParts.length ? [readChunk, ...boundaryParts] : [readChunk];
+      const combinedLength = result.bytesRead + boundaryBytes;
+      let cursor = combinedLength;
+      if (cursor > 0 && byteAt(parts, cursor - 1) === 0x0a) cursor -= 1;
+      let budgetExceeded = false;
+
       while (cursor > 0 && userTurns < requiredTurns) {
-        const newline = combined.lastIndexOf(0x0a, cursor - 1);
-        if (newline < 0) {
-          completePrefix = cursor;
+        const newline = lastNewline(parts, cursor);
+        if (newline < 0) break;
+        const lineStart = newline + 1;
+        const lineBytes = cursor - lineStart;
+        if (lineBytes > MAX_JSONL_ENTRY_BYTES || lineBytes > SESSION_TAIL_MAX_RETAINED_BYTES - retainedBytes) {
+          budgetExceeded = true;
           break;
         }
-        const line = combined.subarray(newline + 1, cursor);
-        if (line.length && line.some((value) => value !== 0x20 && value !== 0x09 && value !== 0x0d)) {
-          try {
-            const entry = JSON.parse(line.toString("utf8")) as SessionEntry;
-            if (entry && typeof entry === "object" && !Array.isArray(entry)) {
-              entriesReverse.push(entry);
-              if (entry.type === "message" && entry.message?.role === "user") userTurns += 1;
-            }
-          } catch {
-            // Ignore malformed/newly-written records exactly as the full reader does.
-          }
+        const entry = parseTailLine(parts, lineStart, cursor);
+        if (entry) {
+          entriesReverse.push(entry);
+          retainedBytes += lineBytes + 1;
+          if (entry.type === "message" && entry.message?.role === "user") userTurns += 1;
         }
         cursor = newline;
       }
-      boundary = completePrefix ? combined.subarray(0, completePrefix) : Buffer.alloc(0);
+
+      if (
+        budgetExceeded
+        || cursor > MAX_JSONL_ENTRY_BYTES
+        || cursor > SESSION_TAIL_MAX_RETAINED_BYTES - retainedBytes
+      ) break;
+      boundaryParts = sliceParts(parts, 0, cursor);
+      boundaryBytes = cursor;
       end = start;
-      if (start === 0 && boundary.length) {
-        try {
-          const entry = JSON.parse(boundary.toString("utf8")) as SessionEntry;
-          if (entry && typeof entry === "object" && !Array.isArray(entry)) entriesReverse.push(entry);
-        } catch {
-          // An incomplete or malformed first record is not part of the window.
+      if (start === 0 && boundaryBytes) {
+        if (boundaryBytes <= MAX_JSONL_ENTRY_BYTES && boundaryBytes <= SESSION_TAIL_MAX_RETAINED_BYTES - retainedBytes) {
+          const entry = parseTailLine(boundaryParts, 0, boundaryBytes);
+          if (entry) entriesReverse.push(entry);
         }
-        boundary = Buffer.alloc(0);
+        boundaryParts = [];
+        boundaryBytes = 0;
       }
     }
     return { entries: entriesReverse.reverse(), bytesRead, sourceBytes: fileStat.size };
@@ -1006,14 +1080,52 @@ export class SessionIndex {
       throw error;
     }
     if (fileStat.size <= MAX_SESSION_SNAPSHOT_BYTES) return this.snapshotForId(id);
-    const summary = this.summaryForId(id) || await this.cachedSummaryForId(id);
-    if (!summary) return null;
-    const tail = await readSessionTailSnapshot(path, turnLimit);
-    return {
-      ...tail,
-      sourceMessageTotal: summary.messageCount,
-      sourceTurnTotal: summary.turnCount,
-    };
+
+    // The summary/cache and the bounded tail are separate reads for oversized
+    // Sessions. Revalidate the file after the tail read so an append or atomic
+    // rewrite cannot combine totals from version A with messages from version B.
+    // Production cache entries carry a full SessionFileVersion; the stat-only
+    // fallback keeps lightweight test/embedding caches safe as well.
+    let latestTail: (SessionFileSnapshot & { sourceBytes: number; bytesRead: number }) | null = null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const summary = this.summaryForId(id) || await this.cachedSummaryForId(id);
+      if (!summary) return null;
+      const cachedVersion = this.cache?.get(resolve(path));
+      const tail = await readSessionTailSnapshot(path, turnLimit);
+      latestTail = tail;
+      let currentStat: Stats;
+      try { currentStat = await this.statFile(path); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+        throw error;
+      }
+      const currentFingerprint = await sessionFileFingerprint(path);
+      const currentVersion = sessionFileVersion(currentStat, currentFingerprint);
+      const hasCachedVersion = Boolean(
+        cachedVersion
+        && typeof cachedVersion.fingerprint === "string"
+        && typeof cachedVersion.size === "number"
+        && cachedVersion.dev !== undefined
+        && cachedVersion.ino !== undefined,
+      );
+      const stable = hasCachedVersion
+        ? sameSessionFileVersion(cachedVersion, currentVersion)
+        : sameSessionFileStats(fileStat, currentStat);
+      if (stable)
+        return {
+          ...tail,
+          sourceMessageTotal: summary.messageCount,
+          sourceTurnTotal: summary.turnCount,
+        };
+      // Refresh the metadata cache before retrying; this also refreshes the
+      // summary if the file was rewritten with the same visible Session ID.
+      if (!await this.cachedSummaryForId(id)) return null;
+      fileStat = currentStat;
+    }
+    // A continuously-written Session may never provide a stable pair. Keep the
+    // bounded messages useful, but omit cumulative totals rather than claiming
+    // that they belong to the same physical file version.
+    return latestTail;
   }
 
   /** Read one target's validated snapshot and its summary from the same projection. */
@@ -1033,7 +1145,11 @@ export class SessionIndex {
   ): Promise<{ snapshot: SessionFileSnapshot; summary: SessionSummary } | null> {
     const snapshot = await this.recentSnapshotForId(id, turnLimit);
     if (!snapshot) return null;
-    const summary = this.summaryForId(id) || await this.cachedSummaryForId(id);
+    // An actively rewritten oversized Session may return a useful bounded tail
+    // without cumulative totals after the retry budget is exhausted. The cold
+    // view may still use the latest validated summary for identity/name, but
+    // the snapshot intentionally omits cross-version cumulative totals.
+    const summary = await this.cachedSummaryForId(id);
     return summary ? { snapshot, summary } : null;
   }
 
