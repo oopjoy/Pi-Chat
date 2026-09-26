@@ -27,26 +27,33 @@ export const THINKING_LEVELS: readonly ThinkingLevel[] = [
 ];
 const THINKING_LEVEL_SET = new Set(THINKING_LEVELS);
 
-/** Match Pi: null disables a level; only xhigh/max require an explicit mapping. */
+/** Reasoning models share seven user-facing semantic slots; only non-reasoning models lock to off. */
 export function thinkingLevelsForModel(
   model: ModelInfo | null | undefined,
 ): readonly ThinkingLevel[] {
-  if (model?.reasoning === false) return ["off"];
-  // Do not infer capabilities before an authoritative model is available.
-  if (model?.reasoning !== true) return THINKING_LEVELS;
-  return THINKING_LEVELS.filter((level) => {
-    const mapped = model.thinkingLevelMap?.[level];
-    if (mapped === null) return false;
-    return level === "xhigh" || level === "max" ? mapped !== undefined : true;
-  });
+  return model?.reasoning === false ? ["off"] : THINKING_LEVELS;
 }
 
-/** Pi searches upward first, then downward, rather than choosing the closest level. */
+function mappedThinkingLevelsForModel(
+  model: ModelInfo | null | undefined,
+): readonly ThinkingLevel[] {
+  if (model?.reasoning === false) return ["off"];
+  const map = model?.thinkingLevelMap;
+  if (!map || Object.keys(map).length === 0) return THINKING_LEVELS;
+  const supported = THINKING_LEVELS.filter(
+    (level) => typeof map[level] === "string",
+  );
+  // Contradictory metadata must not erase reasoning controls. Runtime readback
+  // remains authoritative if an adapter advertises reasoning but maps no level.
+  return supported.length ? supported : THINKING_LEVELS;
+}
+
+/** Map a semantic slot onto the model's real levels, searching upward before downward. */
 export function thinkingLevelForModel(
   model: ModelInfo | null | undefined,
   level: ThinkingLevel,
 ): ThinkingLevel {
-  const supported = thinkingLevelsForModel(model);
+  const supported = mappedThinkingLevelsForModel(model);
   if (supported.includes(level)) return level;
   const requestedIndex = THINKING_LEVELS.indexOf(level);
   return supported.find((candidate) => THINKING_LEVELS.indexOf(candidate) >= requestedIndex)

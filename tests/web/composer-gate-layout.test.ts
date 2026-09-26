@@ -106,7 +106,7 @@ test("Thinking chooser follows the selected model's exact provider level map", a
       [...dom.window.document.querySelectorAll(
         ".thinking-control .compact-select-option > span:last-of-type",
       )].map((node) => node.textContent),
-      ["low", "med", "high"],
+      ["off", "min", "low", "med", "high", "xhigh", "max"],
     );
   } finally {
     await act(async () => root.unmount());
@@ -193,6 +193,8 @@ test("conversation controls live in the composer while settings moves to the top
       "low",
       "med",
       "high",
+      "xhigh",
+      "max",
     ]);
     assert.ok(
       dom.window.document.querySelector(

@@ -8,6 +8,7 @@ import {
   thinkingLevelForModel,
   thinkingLevelsForModel,
   stageSessionComposerSelection,
+  THINKING_LEVELS,
 } from "../src/web/lib/session-composer-selection";
 
 const reasoningModel: ModelInfo = {
@@ -69,7 +70,7 @@ test("the first Model choice preserves an implicit Runtime reasoning level acros
   );
 });
 
-test("provider thinking maps expose and clamp only their real reasoning levels", () => {
+test("provider thinking maps normalize seven semantic levels to real reasoning values", () => {
   const gemini: ModelInfo = {
     provider: "cursor",
     id: "gemini-3.8-flash",
@@ -85,7 +86,7 @@ test("provider thinking maps expose and clamp only their real reasoning levels",
       max: null,
     },
   };
-  assert.deepEqual(thinkingLevelsForModel(gemini), ["low", "medium", "high"]);
+  assert.deepEqual(thinkingLevelsForModel(gemini), THINKING_LEVELS);
   assert.equal(thinkingLevelForModel(gemini, "off"), "low");
   assert.equal(thinkingLevelForModel(gemini, "xhigh"), "high");
 
@@ -103,21 +104,26 @@ test("provider thinking maps expose and clamp only their real reasoning levels",
   });
 });
 
-test("partial maps retain native defaults and unsupported levels clamp upward before downward", () => {
-  assert.deepEqual(thinkingLevelsForModel(reasoningModel), ["off", "minimal", "low", "medium", "high"]);
-  assert.deepEqual(thinkingLevelsForModel({ ...reasoningModel, thinkingLevelMap: { xhigh: "xhigh" } }), [
-    "off", "minimal", "low", "medium", "high", "xhigh",
-  ]);
+test("all reasoning models retain seven semantic slots while maps clamp upward before downward", () => {
+  assert.deepEqual(thinkingLevelsForModel(reasoningModel), THINKING_LEVELS);
+  assert.deepEqual(
+    thinkingLevelsForModel({ ...reasoningModel, thinkingLevelMap: {} }),
+    THINKING_LEVELS,
+  );
+  assert.deepEqual(
+    thinkingLevelsForModel({ ...reasoningModel, thinkingLevelMap: { xhigh: "xhigh" } }),
+    THINKING_LEVELS,
+  );
   const sparse: ModelInfo = {
     ...reasoningModel,
     thinkingLevelMap: { off: null, minimal: null, low: "low", medium: null, high: null, xhigh: null, max: "max" },
   };
   assert.equal(thinkingLevelForModel(sparse, "medium"), "max");
-  assert.equal(thinkingLevelForModel({ ...reasoningModel, thinkingLevelMap: {} }, "max"), "high");
-  assert.deepEqual(thinkingLevelsForModel({
+  assert.equal(thinkingLevelForModel({ ...reasoningModel, thinkingLevelMap: {} }, "max"), "max");
+  assert.equal(thinkingLevelForModel({
     ...reasoningModel,
     thinkingLevelMap: { off: null, minimal: null, low: null, medium: null, high: null, xhigh: null, max: null },
-  }), []);
+  }, "max"), "max");
 });
 
 test("a stale implicit off is not promoted to durable reasoning intent", () => {

@@ -5,7 +5,7 @@ This is a source-branch checkpoint, not a new release or a replacement for the p
 ## Reviewed changes
 
 - Preserve implicit and explicit Thinking intent across non-reasoning selections; rehydrate staged routes from the catalogue and project Runtime-confirmed clamps after model-bearing writes.
-- Follow native Pi Thinking-map semantics: explicit `null` disables a level; `xhigh` and `max` require mappings; unsupported requests search upward before downward.
+- Give every reasoning model the seven semantic Thinking slots; use an exact provider map only to normalize selected slots, searching upward before downward, while missing/empty maps preserve identity mapping.
 - Preserve unexposed Provider/model metadata and protect model references in every started Session.
 - Reconcile live/persisted assistant signatures without deduplicating ordinary repeated transcript rows.
 - Keep consumed Steer labels bounded, process-local and verified by native dequeue plus `message_start`; ignore JSONL-supplied delivery claims.
@@ -18,7 +18,7 @@ This is a source-branch checkpoint, not a new release or a replacement for the p
 
 Two new regression groups failed before correction and passed afterward:
 
-1. The previous nearest-distance Thinking clamp and string-only map filtering differed from Pi's native upward-first clamp and partial-map defaults.
+1. The previous nearest-distance Thinking clamp differed from Runtime's upward-first clamp. A follow-up regression check confirmed that the UI must retain all seven semantic slots even when a provider map only contains lower-level mappings.
 2. The previous link-authority regex admitted indented code and missed reference links/balanced parentheses. It is now based on Markdown syntax rather than text matching.
 
 ## Verification
