@@ -37,7 +37,7 @@ test("route admission preserves lifecycle and read exclusions", () => {
   assert.deepEqual(route("POST", "/api/restart"), { bodyBeforeMutationLease: false, validateSessionId: false, ordinaryMutation: false });
   assert.deepEqual(route("POST", "/api/workspace/set"), { bodyBeforeMutationLease: false, validateSessionId: false, ordinaryMutation: false });
   assert.deepEqual(route("POST", "/api/resources/browse"), { bodyBeforeMutationLease: false, validateSessionId: false, ordinaryMutation: false });
-  assert.deepEqual(route("POST", "/api/sessions/0123456789abcdefabcd/workspace/open"), {
+  for (const suffix of ["open", "open-link"]) assert.deepEqual(route("POST", `/api/sessions/0123456789abcdefabcd/workspace/${suffix}`), {
     bodyBeforeMutationLease: true,
     validateSessionId: false,
     bodyLimit: DEFAULT_MUTATION_BODY_LIMIT,

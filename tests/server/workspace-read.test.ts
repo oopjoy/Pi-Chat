@@ -18,7 +18,7 @@ async function listen(app: PiChatApp) {
   return { server, base: `http://127.0.0.1:${address.port}` };
 }
 
-function sessionContent(id: string, cwd: string, withTurn: boolean, paths = ["README.md"]) {
+function sessionContent(id: string, cwd: string, withTurn: boolean, paths = ["README.md"], linkedPaths: string[] = []) {
   const entries: Record<string, unknown>[] = [{ type: "session", id, cwd }];
   if (withTurn) {
     entries.push({ type: "message", id: `${id}-user`, parentId: null, message: { role: "user", content: "hello" } });
@@ -30,6 +30,12 @@ function sessionContent(id: string, cwd: string, withTurn: boolean, paths = ["RE
         { type: "message", id: `${id}-result-${index}`, parentId: messageId, message: { role: "toolResult", toolCallId: callId, toolName: "edit", content: "ok" } },
       );
     }
+    if (linkedPaths.length) entries.push({
+      type: "message",
+      id: `${id}-links`,
+      parentId: paths.length ? `${id}-result-${paths.length - 1}` : `${id}-user`,
+      message: { role: "assistant", content: linkedPaths.map((path) => `[${path}](${path})`).join("\n") },
+    });
   }
   return `${entries.map(JSON.stringify).join("\n")}\n`;
 }
@@ -54,8 +60,8 @@ test("cold persisted Workspace reads and explicit opens never start or query a R
     const coldPath = join(sessionsRoot, "cold.jsonl");
     const unsafePath = join(sessionsRoot, "unsafe.jsonl");
     await writeFile(activePath, sessionContent("active", workspace, true));
-    await writeFile(coldPath, sessionContent("cold", workspace, true));
-    await writeFile(unsafePath, sessionContent("unsafe", workspace, true, [...unsafeFiles, "hold.txt", "swap/file.txt"]));
+    await writeFile(coldPath, sessionContent("cold", workspace, true, ["README.md"], ["notes.txt"]));
+    await writeFile(unsafePath, sessionContent("unsafe", workspace, true, [...unsafeFiles, "hold.txt", "swap/file.txt"], unsafeFiles));
     const rpc = new FakeRpc(activePath, "active");
     const opened: string[] = [];
     let replaceBeforeFinalVerification = false;
@@ -109,8 +115,20 @@ test("cold persisted Workspace reads and explicit opens never start or query a R
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ path: "notes.txt" }),
-      })).status, 404);
-      assert.equal(opened.length, 1);
+      })).status, 404, "ordinary Workspace Open remains limited to successful Edit/Write projection");
+      const linkedOpen = await fetch(`${base}/api/sessions/${coldId}/workspace/open-link`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ path: "notes.txt" }),
+      });
+      assert.equal(linkedOpen.status, 200);
+      assert.deepEqual(await linkedOpen.json(), { ok: true, path: "notes.txt" });
+      assert.equal((await fetch(`${base}/api/sessions/${coldId}/workspace/open-link`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ path: "README.md" }),
+      })).status, 404, "a browser path must be backed by a persisted assistant link");
+      assert.equal(opened.length, 2);
       const unsafeId = idForPath(unsafePath);
       for (const path of unsafeFiles) {
         const response = await fetch(`${base}/api/sessions/${unsafeId}/workspace/open`, {
@@ -119,8 +137,14 @@ test("cold persisted Workspace reads and explicit opens never start or query a R
           body: JSON.stringify({ path }),
         });
         assert.equal(response.status, 409, `${path} must not reach the Windows shell`);
+        const linkedResponse = await fetch(`${base}/api/sessions/${unsafeId}/workspace/open-link`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ path }),
+        });
+        assert.equal(linkedResponse.status, 409, `${path} linked in a reply must still not reach the Windows shell`);
       }
-      assert.equal(opened.length, 1, "shell-active file extensions must never call the opener");
+      assert.equal(opened.length, 2, "shell-active file extensions must never call the opener");
 
       holdNextOpen = true;
       const heldRequest = fetch(`${base}/api/sessions/${unsafeId}/workspace/open`, {
@@ -146,7 +170,7 @@ test("cold persisted Workspace reads and explicit opens never start or query a R
         body: JSON.stringify({ path: "hold.txt" }),
       })).status, 503);
       lifecycle.end("restarting");
-      assert.equal(opened.length, 2, "maintenance must reject a new Open before it reaches the shell");
+      assert.equal(opened.length, 3, "maintenance must reject a new Open before it reaches the shell");
 
       replaceBeforeFinalVerification = true;
       const replaced = await fetch(`${base}/api/sessions/${unsafeId}/workspace/open`, {
@@ -155,11 +179,12 @@ test("cold persisted Workspace reads and explicit opens never start or query a R
         body: JSON.stringify({ path: "swap/file.txt" }),
       });
       assert.equal(replaced.status, 400);
-      assert.equal(opened.length, 2, "a path replaced before the shell handoff must fail final verification");
+      assert.equal(opened.length, 3, "a path replaced before the shell handoff must fail final verification");
       assert.equal(rpc.commands.length, before, "cold Workspace reads and opens must not send Pi RPC commands");
       assert.equal((await fetch(`${base}/api/sessions/ffffffffffffffffffff/workspace/files`)).status, 404);
       assert.equal((await fetch(`${base}/api/sessions/${coldId}/workspace/files`, { method: "POST" })).status, 405);
       assert.equal((await fetch(`${base}/api/sessions/${coldId}/workspace/open`)).status, 405);
+      assert.equal((await fetch(`${base}/api/sessions/${coldId}/workspace/open-link`)).status, 405);
     } finally {
       server.close();
       await app.close();

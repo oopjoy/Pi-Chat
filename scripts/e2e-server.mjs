@@ -42,7 +42,7 @@ const session = (path, id, name, prompt, answer, model = "gpt-test") => writeFil
   { type: "message", id: `${id}-assistant`, parentId: `${id}-user`, timestamp: "2026-01-01T00:00:02Z", message: { role: "assistant", provider: "test", model, content: answer, timestamp: Date.parse("2026-01-01T00:00:02Z") } },
 ].map(JSON.stringify).join("\n") + "\n", "utf8");
 
-await session(join(sessions, "first.jsonl"), "first", "First session", "Open first", "First answer");
+await session(join(sessions, "first.jsonl"), "first", "First session", "Open first", "First answer\n\n[Open README](README.md) · [Web reference](https://example.com/reference)");
 const streamBenchmarkSessions = [];
 if (streamBenchmarkConfig) {
   for (let index = 1; index <= 4; index += 1) {

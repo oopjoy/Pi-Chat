@@ -1,4 +1,4 @@
-import { Fragment, Profiler, useEffect, useMemo, useRef, type ComponentProps, type RefObject } from "react";
+import { Fragment, Profiler, useCallback, useEffect, useLayoutEffect, useMemo, useRef, type ComponentProps, type RefObject } from "react";
 import type { PendingSteer, PiMessage, PiState, SessionForkOrigin } from "../../shared/types";
 import { appendPendingUserMessage } from "../lib/local-user-turn";
 import type { LocalFailureNotice } from "../../shared/assistant-error";
@@ -22,6 +22,37 @@ import { TopBar } from "./TopBar";
 
 type NavigationDirection = "top" | "previous" | "next" | "bottom";
 type PaneLoading = { sessionId: string; name: string } | null;
+type FirstRunGuide = {
+  runtimeStatus: "starting" | "ready" | "failed";
+  piVersion?: string;
+};
+
+const MAX_REMEMBERED_PROCESS_DURATIONS = 1_000;
+
+function validRunDuration(value: number | null | undefined): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function processDurationKey(paneKey: string, itemKey: string): string {
+  return `${paneKey}\u0000${itemKey}`;
+}
+
+function rememberProcessDuration(
+  durations: Map<string, number>,
+  key: string,
+  durationMs: number,
+): void {
+  // One stable process key identifies one historical card. A later run can
+  // settle while this pane still has a stale/windowed transcript; never let its
+  // Session-level latest duration overwrite an already confirmed card.
+  if (durations.has(key)) return;
+  durations.set(key, durationMs);
+  while (durations.size > MAX_REMEMBERED_PROCESS_DURATIONS) {
+    const oldest = durations.keys().next().value;
+    if (typeof oldest !== "string") break;
+    durations.delete(oldest);
+  }
+}
 
 export interface ConversationPaneProps {
   topBar: ComponentProps<typeof TopBar>;
@@ -42,10 +73,13 @@ export interface ConversationPaneProps {
   /** Maintenance status takes precedence over the decorative New welcome. */
   suppressNewWelcome: boolean;
   newConversationPresentation: boolean;
+  /** Desktop-only first-run facts; omitted once any persisted Session exists. */
+  firstRunGuide?: FirstRunGuide;
   /** Sole conversation-body explanation for a retained or preparing prompt. */
   waitingForPiMessage: string;
   draftWorkspaceCwd: string;
   workspaceCwd: string;
+  openLinkedWorkspaceFile: (sessionId: string, path: string) => Promise<unknown>;
   workspacePicking: boolean;
   draftWorkspaceOptions: string[];
   onSelectDraftWorkspace: (cwd: string) => void;
@@ -93,9 +127,11 @@ export function ConversationPane({
   composerHasContent,
   suppressNewWelcome,
   newConversationPresentation,
+  firstRunGuide,
   waitingForPiMessage,
   draftWorkspaceCwd,
   workspaceCwd,
+  openLinkedWorkspaceFile,
   workspacePicking,
   draftWorkspaceOptions,
   onSelectDraftWorkspace,
@@ -120,8 +156,17 @@ export function ConversationPane({
   chatInput,
 }: ConversationPaneProps) {
   const paneKey = viewedSessionId || "draft";
+  const openLocalPath = useCallback(async (path: string) => {
+    if (localDraft || !viewedSessionId)
+      throw new Error("请先发送消息并保存当前对话，再打开本地文件");
+    await openLinkedWorkspaceFile(viewedSessionId, path);
+  }, [localDraft, openLinkedWorkspaceFile, viewedSessionId]);
   const previousConversationItemsRef = useRef<ConversationItem[]>([]);
   const previousConversationPaneKeyRef = useRef(paneKey);
+  // Runtime timing is Session-scoped and exposes only the latest completed run.
+  // Pin that duration to the process card while it is authoritative so starting
+  // the next turn cannot make an interrupted/completed card lose its elapsed time.
+  const processDurationsRef = useRef(new Map<string, number>());
   const conversationItems = useMemo(
     () => groupConversation(
       appendPendingUserMessage(messages, pendingUserMessage),
@@ -156,7 +201,32 @@ export function ConversationPane({
     (latest, item, index) => item.kind === "process" ? index : latest,
     -1,
   );
+  const latestProcess = latestProcessIndex >= 0
+    ? conversationItems[latestProcessIndex]
+    : undefined;
+  const latestProcessBelongsToLatestTurn = latestProcessIndex > activeTurnStart;
+  const latestProcessDurationKey = latestProcess?.kind === "process"
+    && latestProcessBelongsToLatestTurn
+    ? processDurationKey(paneKey, latestProcess.key)
+    : "";
+  useLayoutEffect(() => {
+    if (
+      state.isStreaming
+      || !latestProcessDurationKey
+      || !validRunDuration(lastRunDurationMs)
+    ) return;
+    rememberProcessDuration(
+      processDurationsRef.current,
+      latestProcessDurationKey,
+      lastRunDurationMs,
+    );
+  }, [lastRunDurationMs, latestProcessDurationKey, state.isStreaming]);
   const activeTurnItemStart = state.isStreaming ? activeTurnStart + 1 : -1;
+  const firstRunRuntimeLabel = firstRunGuide?.runtimeStatus === "ready"
+    ? "已就绪"
+    : firstRunGuide?.runtimeStatus === "starting"
+      ? "正在准备"
+      : "暂不可用（可先准备草稿）";
   let activeHeaderMessage: PiMessage | null = state.isStreaming ? liveMessage : null;
   if (state.isStreaming && !activeHeaderMessage) {
     for (let index = activeTurnItemStart; index < conversationItems.length; index += 1) {
@@ -205,6 +275,16 @@ export function ConversationPane({
             <span className="welcome-mark"><PiMarkIcon /></span>
             <h1>开始与 Pi 对话</h1>
             <p>支持流式输出、Markdown、KaTeX，以及复制原始 LaTeX 源码。</p>
+            {firstRunGuide && <aside className="desktop-first-run" aria-label="首次运行检查">
+              <strong>开始前检查</strong>
+              <dl>
+                <div><dt>Pi Runtime</dt><dd data-status={firstRunGuide.runtimeStatus}>{firstRunRuntimeLabel}</dd></div>
+                <div><dt>Pi 版本</dt><dd>{firstRunGuide.piVersion || "等待检测"}</dd></div>
+                <div><dt>当前模型</dt><dd>{state.model ? `${state.model.provider}/${state.model.id}` : "等待 Runtime 提供模型"}</dd></div>
+                <div><dt>工作路径</dt><dd title={draftWorkspaceCwd || workspaceCwd || undefined}>{draftWorkspaceCwd || workspaceCwd || "尚未选择"}</dd></div>
+              </dl>
+              <p>确认模型和工作路径后，在下方输入消息；首次发送时才会创建保存的对话。</p>
+            </aside>}
             <div className="draft-workspace">
               <span>新对话工作路径</span>
               <CompactSelect
@@ -249,15 +329,27 @@ export function ConversationPane({
                 : <Fragment key={itemKey}>{body}</Fragment>;
             }
             if (item.kind === "process") {
+              const durationKey = processDurationKey(paneKey, item.key);
+              const activeProcess = state.isStreaming && index >= activeTurnItemStart;
+              const rememberedDuration = processDurationsRef.current.get(durationKey);
+              const settledDuration = !activeProcess
+                ? rememberedDuration
+                  ?? (index === latestProcessIndex
+                    && latestProcessBelongsToLatestTurn
+                    && !state.isStreaming
+                    && validRunDuration(lastRunDurationMs)
+                      ? lastRunDurationMs
+                      : null)
+                : null;
               const body = <Fragment>
                 {activeHeader}
                 {!inActiveRunningTurn && item.assistantHeader && <AssistantMessageHeader message={item.assistantHeader} />}
                 <ConversationProcess
                   disclosureKey={`${paneKey}:${item.key}`}
                   entries={item.entries}
-                  streaming={state.isStreaming && index >= activeTurnItemStart}
-                  runStartedAt={index === latestProcessIndex ? runStartedAt : null}
-                  runDurationMs={index === latestProcessIndex ? lastRunDurationMs : null}
+                  streaming={activeProcess}
+                  runStartedAt={activeProcess && index === latestProcessIndex ? runStartedAt : null}
+                  runDurationMs={settledDuration}
                 />
               </Fragment>;
               return reactRenderBenchmarkEnabled
@@ -274,6 +366,8 @@ export function ConversationPane({
                 streaming={messageStreaming}
                 showAssistantMetadata={!inActiveRunningTurn && !item.hideAssistantMetadata}
                 showGeneratedAt={!inActiveRunningTurn}
+                workspacePath={workspaceCwd}
+                onOpenLocalPath={openLocalPath}
                 onForkUserMessage={onForkUserMessage}
                 forkUserMessageDisabled={forkUserMessageDisabled}
               />
@@ -287,15 +381,15 @@ export function ConversationPane({
             fallback={activeAssistantMetadata}
           />}
         </>}
-        {!state.isCompacting && waitingForPiMessage && <div className="agent-status is-waiting" role="status" aria-live="polite">
+        {!state.isCompacting && waitingForPiMessage && <div className="agent-status is-waiting" role="status" aria-live="polite" aria-atomic="true">
           <span className="loader small" />
           {waitingForPiMessage}
         </div>}
-        {state.isCompacting && <div className="agent-status is-compacting" role="status" aria-live="polite">
+        {state.isCompacting && <div className="agent-status is-compacting" role="status" aria-live="polite" aria-atomic="true">
           <span className="loader small" />
           {waitingForPiMessage || toolStatus || "正在压缩上下文，当前消息会在完成后继续发送…"}
         </div>}
-        {state.isStreaming && !state.isCompacting && toolStatus && <div className="agent-status">
+        {state.isStreaming && !state.isCompacting && toolStatus && <div className="agent-status" role="status" aria-live="polite" aria-atomic="true">
           <span className="loader small" />
           {toolStatus}
         </div>}

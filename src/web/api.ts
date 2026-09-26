@@ -436,6 +436,11 @@ export const api = {
       `/api/sessions/${id}/workspace/open`,
       { method: "POST", body: JSON.stringify({ path }), signal },
     ),
+  openLinkedWorkspaceFile: (id: string, path: string, signal?: AbortSignal) =>
+    request<{ ok: true; path: string }>(
+      `/api/sessions/${id}/workspace/open-link`,
+      { method: "POST", body: JSON.stringify({ path }), signal },
+    ),
   viewSession: (id: string, turns?: number, options: { fast?: boolean; signal?: AbortSignal } = {}) => {
     const query = new URLSearchParams();
     if (turns) query.set("turns", String(turns));

@@ -2,6 +2,7 @@ import type { CSSProperties } from "react";
 import type { ModelInfo, PiState, SessionStats, ThinkingLevel } from "../../shared/types";
 import { contextUsageTone } from "../lib/context-usage";
 import type { GateMode } from "../lib/gate-mode";
+import { thinkingLevelsForModel } from "../lib/session-composer-selection";
 import { LightbulbIcon, LightningIcon } from "./Icons";
 import { CompactSelect } from "./CompactSelect";
 import { ComposerModelSelect } from "./ComposerModelSelect";
@@ -14,7 +15,7 @@ function compactTokens(value: number | undefined | null): string {
   return String(Math.round(value));
 }
 
-const THINKING_LEVELS: Array<{ value: ThinkingLevel; label: string }> = [
+const THINKING_LEVEL_OPTIONS: Array<{ value: ThinkingLevel; label: string }> = [
   { value: "off", label: "off" },
   { value: "minimal", label: "min" },
   { value: "low", label: "low" },
@@ -74,10 +75,14 @@ export function ComposerControls({ state, models, modelInventoryPending = false,
   // local preference snapshot rather than a reason to freeze the controls.
   const controlsDisabled = disabled || primaryUnavailable;
   const unavailableTitle = "Pi Runtime 尚未就绪；历史仍可阅读，Runtime 恢复后可修改此设置";
+  const supportedThinkingLevels = thinkingLevelsForModel(state.model);
+  const thinkingOptions = THINKING_LEVEL_OPTIONS.filter((option) =>
+    supportedThinkingLevels.includes(option.value),
+  );
 
   return <div className="composer-controls" title={primaryUnavailable ? unavailableTitle : undefined}>
     <ComposerModelSelect value={state.model} models={models} inventoryPending={modelInventoryPending} disabled={controlsDisabled} onChange={onModel} />
-    <CompactSelect value={(state.thinkingLevel || "off") as ThinkingLevel} options={THINKING_LEVELS} disabled={controlsDisabled || !state.model || state.model.reasoning === false} ariaLabel="思考强度" title="思考强度" align="left" icon={<LightbulbIcon className={`thinking-icon${state.thinkingLevel && state.thinkingLevel !== "off" ? " is-active" : ""}`} />} checkPosition="start" className="thinking-control thinking-select" onChange={onThinking} />
+    <CompactSelect value={(state.thinkingLevel || "off") as ThinkingLevel} options={thinkingOptions} disabled={controlsDisabled || !state.model || state.model.reasoning === false} ariaLabel="思考强度" title="思考强度" align="left" icon={<LightbulbIcon className={`thinking-icon${state.thinkingLevel && state.thinkingLevel !== "off" ? " is-active" : ""}`} />} checkPosition="start" className="thinking-control thinking-select" onChange={onThinking} />
     {gateAvailable && <GateControl mode={gateMode} disabled={controlsDisabled} onChange={onGate} />}
     <UsageStats stats={stats} isCompacting={state.isCompacting} fastModeActive={state.fastModeActive} />
   </div>;

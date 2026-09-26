@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test, { beforeEach } from "node:test";
 import { act, createElement } from "react";
 import type { BootstrapData, SessionViewData } from "../../src/shared/types";
@@ -60,6 +61,13 @@ test("an empty unindexed Primary uses New presentation while keeping its real Se
     assert.ok(dom.window.document.querySelector(".welcome-mark"), "New must show the Pi bear mark");
     assert.match(dom.window.document.querySelector(".welcome")?.textContent || "", /新对话工作路径/);
     assert.match(dom.window.document.querySelector(".draft-workspace")?.textContent || "", /当前新对话已准备就绪/);
+    const firstRun = dom.window.document.querySelector<HTMLElement>(".desktop-first-run")!;
+    assert.ok(firstRun, "an empty first-run inventory exposes the desktop readiness checklist");
+    assert.equal(firstRun.getAttribute("aria-label"), "首次运行检查");
+    assert.match(firstRun.textContent || "", /开始前检查.*Pi Runtime.*已就绪.*当前模型.*test\/model.*工作路径.*C:\/work/s);
+    assert.equal(firstRun.querySelector('[data-status="ready"]')?.textContent, "已就绪");
+    const css = readFileSync(new URL("../../src/web/styles.css", import.meta.url), "utf8");
+    assert.match(css, /@media \(max-width: 760px\)[\s\S]*?\.desktop-first-run \{ display: none; \}/);
 
     const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
     await act(async () => {
@@ -323,6 +331,7 @@ test("New is instant and the first send shows Pi startup before materializing a 
     assert.ok(dom.window.document.querySelector(".welcome"), "a local New draft keeps the centered welcome while typing");
     assert.ok(dom.window.document.querySelector(".welcome-mark"), "a local New draft keeps the Pi mark while typing");
     assert.ok(dom.window.document.querySelector(".draft-workspace"), "a local New draft keeps the selected workspace path while typing");
+    assert.equal(dom.window.document.querySelector(".desktop-first-run"), null, "returning users keep the existing New experience");
     const send =
       dom.window.document.querySelector<HTMLButtonElement>(".send-button")!;
     assert.ok(send.querySelector("[data-icon='send']"));

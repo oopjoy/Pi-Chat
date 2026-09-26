@@ -128,14 +128,25 @@ test("model manager update renames provider/id, carries secrets and rejects coll
 test("provider editor returns a redacted key and updates the whole model directory", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-provider-editor-"));
   try {
-    await writeFile(join(root, "models.json"), JSON.stringify({ providers: { ds: { baseUrl: "https://api.example.com", api: "openai-responses", apiKey: "secret", models: [{ id: "one", name: "One" }, { id: "two", name: "Two" }] } } }));
+    await writeFile(join(root, "models.json"), JSON.stringify({ providers: { ds: { baseUrl: "https://api.example.com", api: "openai-responses", apiKey: "secret", models: [{ id: "one", name: "One", api: "anthropic-messages", reasoning: true, input: ["text", "image"], cost: { input: 1 }, compat: { supportsDeveloperRole: false } }, { id: "two", name: "Two" }] } } }));
     const manager = new ModelManager(root);
-    assert.deepEqual(await manager.getCustomProvider("ds"), { provider: "ds", baseUrl: "https://api.example.com", api: "openai-responses", apiKey: "", models: [{ id: "one", name: "One" }, { id: "two", name: "Two" }] });
-    await manager.updateProvider("ds", { provider: "ds", baseUrl: "https://new.example.com", api: "openai-completions", apiKey: "", models: [{ id: "one", name: "Renamed", contextWindow: 128000, maxTokens: 4096 }] });
+    assert.deepEqual(await manager.getCustomProvider("ds"), { provider: "ds", baseUrl: "https://api.example.com", api: "openai-responses", apiKey: "", models: [{ id: "one", originalId: "one", name: "One" }, { id: "two", originalId: "two", name: "Two" }] });
+    const updated = await manager.updateProvider("ds", { provider: "ds", baseUrl: "https://new.example.com", api: "openai-completions", apiKey: "", models: [{ id: "one-renamed", originalId: "one", name: "Renamed", contextWindow: 128000, maxTokens: 4096 }] });
+    assert.deepEqual(updated.models, [{ id: "one-renamed", originalId: "one-renamed", name: "Renamed", contextWindow: 128000, maxTokens: 4096 }]);
     const configured = JSON.parse(await readFile(join(root, "models.json"), "utf8"));
     assert.equal(configured.providers.ds.apiKey, "secret");
     assert.equal(configured.providers.ds.models.length, 1);
-    assert.equal(configured.providers.ds.models[0].name, "Renamed");
+    assert.deepEqual(configured.providers.ds.models[0], {
+      id: "one-renamed",
+      name: "Renamed",
+      api: "anthropic-messages",
+      reasoning: true,
+      input: ["text", "image"],
+      cost: { input: 1 },
+      compat: { supportsDeveloperRole: false },
+      contextWindow: 128000,
+      maxTokens: 4096,
+    });
     await manager.removeProvider("ds");
     assert.equal(JSON.parse(await readFile(join(root, "models.json"), "utf8")).providers.ds, undefined);
   } finally { await rm(root, { recursive: true, force: true }); }

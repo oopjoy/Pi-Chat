@@ -1,8 +1,10 @@
 import type { Stats } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
+import { workspaceRelativePathFromMarkdownDestination } from "../shared/local-file-link.js";
 import type { PiMessage, WorkspaceFileData, WorkspaceRecentFilesData } from "../shared/types.js";
 import { HttpRequestError } from "./http-transport.js";
+import { markdownLinkDestinations } from "./markdown-links.js";
 
 const MAX_RECENT_FILES = 50;
 const MAX_PREVIEW_BYTES = 256 * 1024;
@@ -124,6 +126,28 @@ function toolPathRelativeToWorkspace(cwd: string, rawPath: string): string | nul
   else if (isAbsolute(rawPath) || candidate.startsWith("/") || /^[a-z]:\//i.test(candidate) || candidate.startsWith("//")) return null;
   try { return normalizeWorkspaceRelativePath(relativePath); }
   catch { return null; }
+}
+
+function assistantText(message: PiMessage): string[] {
+  if (message.role !== "assistant") return [];
+  if (typeof message.content === "string") return message.content ? [message.content] : [];
+  return Array.isArray(message.content)
+    ? message.content.flatMap((block) => block.type === "text" && typeof block.text === "string" ? [block.text] : [])
+    : [];
+}
+
+/** Server-authoritative allowlist derived only from rendered persisted assistant links. */
+export function assistantLinkedWorkspaceFiles(messages: PiMessage[], cwd: string): Set<string> {
+  const result = new Set<string>();
+  for (const message of messages) {
+    for (const text of assistantText(message)) {
+      for (const destination of markdownLinkDestinations(text)) {
+        const path = workspaceRelativePathFromMarkdownDestination(destination, cwd);
+        if (path) result.add(process.platform === "win32" ? path.toLowerCase() : path);
+      }
+    }
+  }
+  return result;
 }
 
 export function recentModifiedWorkspaceFiles(messages: PiMessage[], cwd: string): WorkspaceRecentFilesData {

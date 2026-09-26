@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { PiMessage } from "../src/shared/types";
-import { readWorkspaceFile, recentModifiedWorkspaceFiles, workspaceFileTargetPath } from "../src/server/workspace-files";
+import { assistantLinkedWorkspaceFiles, readWorkspaceFile, recentModifiedWorkspaceFiles, workspaceFileTargetPath } from "../src/server/workspace-files";
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-workspace-files-"));
@@ -56,6 +56,42 @@ test("recent files project only successful Edit and Write results, newest first 
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("assistant-linked files require a real persisted Markdown link", () => {
+  const cwd = String.raw`C:\Users\opjoy`;
+  const linked = assistantLinkedWorkspaceFiles([
+    { role: "user", content: String.raw`[user](C:\Users\opjoy\Desktop\user.csv)` },
+    { role: "assistant", content: String.raw`[result](C:\Users\opjoy\Desktop\奖学金调整\result.csv)` + "\n\n`[code](Desktop/code.csv)`" },
+    { role: "assistant", content: "```text\n[fenced](Desktop/fenced.csv)\n```" },
+    { role: "assistant", content: "[outside](D:/outside.csv)" },
+  ], cwd);
+  const expected = process.platform === "win32"
+    ? "desktop/奖学金调整/result.csv"
+    : "Desktop/奖学金调整/result.csv";
+  assert.deepEqual([...linked], [expected]);
+});
+
+test("link authority excludes code, images, escaped labels and HTML comments", () => {
+  const sources = [
+    "    [indented](indented.txt)",
+    "![image](image.png)",
+    "<!-- [comment](comment.txt) -->",
+    "&#91;fake](entity.txt)",
+    String.raw`\[escaped](escaped.txt)`,
+    "> ```text\n> [quote code](quoted.txt)\n> ```",
+    "```text\n```not-a-closing-fence\n[still code](fenced.txt)\n```",
+  ];
+  for (const content of sources)
+    assert.deepEqual([...assistantLinkedWorkspaceFiles([{ role: "assistant", content }], "C:/work")], [], content);
+});
+
+test("link authority uses Markdown destinations including references and balanced parentheses", () => {
+  const content = "[report][saved]\n\n[saved]: <out/My Report.pdf>\n\n[version](out/report(2).pdf)";
+  const paths = [...assistantLinkedWorkspaceFiles([{ role: "assistant", content }], "C:/work")];
+  assert.deepEqual(paths, process.platform === "win32"
+    ? ["out/my report.pdf", "out/report(2).pdf"]
+    : ["out/My Report.pdf", "out/report(2).pdf"]);
 });
 
 test("recent file projection is bounded to fifty unique paths", () => {

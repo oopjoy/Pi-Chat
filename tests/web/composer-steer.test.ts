@@ -220,6 +220,11 @@ test("App reveals a Steer turn only when Pi consumes it", async () => {
       "a server-verified native steer consumption reveals the local Steer turn",
     );
     assert.equal(pendingSteer(), null, "verified consumption moves the Steer out of its waiting section");
+    const steerFooter = dom.window.document.querySelector(".message-user-actions")!;
+    const steerLabel = steerFooter.querySelector(".message-delivery-label");
+    const sentAt = steerFooter.querySelector(".message-sent-at");
+    assert.equal(steerLabel?.textContent, "Steer");
+    assert.ok(steerLabel && sentAt && steerLabel.nextElementSibling === sentAt);
   } finally {
     await act(async () => root.unmount());
     restoreApi();

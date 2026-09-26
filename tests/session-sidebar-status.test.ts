@@ -1,13 +1,41 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import test from "node:test";
 import type { SessionSummary } from "../src/shared/types";
-import { SessionSidebar, sessionStatus, workspaceAuthorityRequiresSidebarReset } from "../src/web/components/SessionSidebar";
+import {
+  SESSION_STATUS_SPIN_DURATION_MS,
+  SessionSidebar,
+  sessionStatus,
+  sessionStatusSpinDelay,
+  workspaceAuthorityRequiresSidebarReset,
+} from "../src/web/components/SessionSidebar";
 
 const session = (patch: Partial<SessionSummary>): SessionSummary => ({
   id: "session", sessionId: "session", name: "Session", preview: "", cwd: "C:/work", updatedAt: 0, messageCount: 1,
   ...patch,
+});
+
+test("running status rings stop under reduced-motion preference", () => {
+  const css = readFileSync(new URL("../src/web/styles.css", import.meta.url), "utf8");
+  assert.match(
+    css,
+    /@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\.session-status\.is-running\s*\{\s*animation:\s*none;\s*\}/,
+  );
+});
+
+test("running status rings share one wall-clock frequency and phase regardless of start time", () => {
+  const starts = [1_000, 1_387, 2_123];
+  const observedAt = 5_000;
+  const phases = starts.map((startedAt) => {
+    const delay = Number.parseInt(sessionStatusSpinDelay(startedAt), 10);
+    const localTime = observedAt - startedAt - delay;
+    return ((localTime % SESSION_STATUS_SPIN_DURATION_MS)
+      + SESSION_STATUS_SPIN_DURATION_MS) % SESSION_STATUS_SPIN_DURATION_MS;
+  });
+  assert.deepEqual(phases, starts.map(() => observedAt % SESSION_STATUS_SPIN_DURATION_MS));
+  assert.equal(sessionStatusSpinDelay(1_500), "0ms");
 });
 
 test("sidebar separates normal work from confirmation, paused work, failure, and unseen completion", () => {
@@ -90,6 +118,7 @@ test("sidebar renders directory hierarchy, status description, and session actio
   assert.match(html, /<section class="session-directory"[^>]*aria-label="c:\/work，1 个对话"/);
   assert.match(html, /aria-label="折叠目录 c:\/work，1 个对话"/);
   assert.match(html, /aria-label="正在生成"/);
+  assert.match(html, /class="session-status is-running"[^>]*animation-duration:750ms/);
   assert.match(html, /aria-label="Running Session 的操作菜单"/);
   assert.match(html, /aria-haspopup="menu"/);
 });

@@ -12,7 +12,7 @@ test("full Markdown keeps math plugins and source-range mapping", () => {
   assert.equal(createMarkdownRemarkPlugins().length, 3);
   assert.equal(createMarkdownRemarkPlugins("\uFDD0").length, 4);
   const finalPlugins = createMarkdownRehypePlugins((offset) => offset);
-  assert.equal(finalPlugins.length, 4);
+  assert.equal(finalPlugins.length, 5);
 });
 
 function renderDom(markdown: string) {

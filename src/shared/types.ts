@@ -105,6 +105,8 @@ export interface ModelInfo {
   /** Authentication is owned by Pi or by the models.json API-key config. */
   authMode?: "pi-managed" | "api-key";
   reasoning?: boolean;
+  /** Pi/provider mapping for the exact supported reasoning strengths. */
+  thinkingLevelMap?: Partial<Record<ThinkingLevel, string | null>>;
   input?: string[];
   contextWindow?: number;
   custom?: boolean;
@@ -131,6 +133,8 @@ export interface CustomModelConfig extends CustomModelInput {
 export interface CustomProviderModelInput {
   id: string;
   name: string;
+  /** Stable source key used to preserve non-editor models.json fields across an ID rename. */
+  originalId?: string;
   contextWindow?: number;
   maxTokens?: number;
 }
@@ -161,6 +165,8 @@ export const LOCAL_COORDINATION_ROLE = "localCoordination";
 export interface PiMessage {
   /** Pi Chat-only metadata for a localCoordination event. */
   localCoordination?: { source?: string };
+  /** Projection-only delivery label; never trusted from or written to Pi JSONL. */
+  piChatDelivery?: PromptDelivery;
   /** Stable identity of one server-projected Runtime message lifecycle. */
   piChatLiveMessageId?: string;
   /** Stable identity derived from the owning persisted JSONL entry. */

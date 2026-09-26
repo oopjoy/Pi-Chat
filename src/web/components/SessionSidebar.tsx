@@ -22,6 +22,45 @@ function relativeTime(timestamp: number): string {
 export const workspaceAuthorityRequiresSidebarReset = sidebarWorkspaceResetRequired;
 export const sessionStatus = sidebarSessionStatus;
 
+export const SESSION_STATUS_SPIN_DURATION_MS = 750;
+
+/** Anchor a newly-running ring to wall-clock phase instead of its mount time. */
+export function sessionStatusSpinDelay(now = Date.now()): string {
+  const phase = ((now % SESSION_STATUS_SPIN_DURATION_MS) + SESSION_STATUS_SPIN_DURATION_MS)
+    % SESSION_STATUS_SPIN_DURATION_MS;
+  return phase === 0 ? "0ms" : `-${phase}ms`;
+}
+
+function RunningSessionStatusIndicator({ label }: { label: string }) {
+  // This component mounts exactly when a Session enters `running`. Keep its
+  // initial phase immutable across unrelated Sidebar renders; leaving running
+  // unmounts it, so a later run receives a fresh wall-clock phase.
+  const [runningStyle] = useState<CSSProperties>(() => ({
+    animationDelay: sessionStatusSpinDelay(),
+    animationDuration: `${SESSION_STATUS_SPIN_DURATION_MS}ms`,
+  }));
+  return <span
+    className="session-status is-running"
+    role="img"
+    aria-label={label}
+    title={label}
+    style={runningStyle}
+  />;
+}
+
+function SessionStatusIndicator({ status }: {
+  status: ReturnType<typeof sidebarSessionStatus>;
+}) {
+  if (status.kind === "running")
+    return <RunningSessionStatusIndicator label={status.label} />;
+  return <span
+    className={`session-status is-${status.kind}`}
+    role="img"
+    aria-label={status.label}
+    title={status.label}
+  />;
+}
+
 function ResizeHandle({ width, onWidthChange }: { width: number; onWidthChange: (width: number) => void }) {
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -277,7 +316,7 @@ export function SessionSidebar({ sessions, sessionsTotal, sessionDirectories, in
                       <span className="session-meta">{relativeTime(session.updatedAt)}</span>
                     </button>
                     <div className={`session-item-actions${sessionMenuId === session.id ? " is-open" : ""}`}>
-                      <span className={`session-status is-${status.kind}`} role="img" aria-label={status.label} title={status.label} />
+                      <SessionStatusIndicator status={status} />
                       <button type="button" className="session-menu-trigger" ref={(element) => {
                         if (element) sessionMenuTriggerRefs.current.set(session.id, element);
                         else sessionMenuTriggerRefs.current.delete(session.id);

@@ -89,6 +89,45 @@ test("model file mutation refreshes the Host catalogue without restarting the Ru
   }
 });
 
+test("whole-Provider edits cannot remove the model selected by a started Session", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-provider-active-model-"));
+  const path = "C:\\sessions\\primary.jsonl";
+  const primary = new FakeRpc(path, "primary");
+  primary.model = { provider: "local", id: "active", name: "Active", api: "openai-responses" };
+  const models = new ModelManager(root);
+  await models.add({ provider: "local", id: "active", name: "Active", baseUrl: "https://api.example.com/v1", api: "openai-responses", reasoning: true, imageInput: true });
+  const app = new PiChatApp({ rpc: primary as unknown as PiRpcClient, sessions: { list: async () => [] } as unknown as SessionIndex, resources: {} as ResourceManager, modelManager: models, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const put = (body: object) => fetch(`${origin}/api/models/provider/local`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  try {
+    const rename = await put({ provider: "local", baseUrl: "https://api.example.com/v1", api: "openai-responses", models: [{ id: "renamed", originalId: "active", name: "Renamed" }] });
+    assert.equal(rename.status, 500);
+    assert.match((await rename.json() as { error: string }).error, /所有已启动对话/);
+    const unchanged = JSON.parse(await readFile(models.path, "utf8"));
+    assert.equal(unchanged.providers.local.models[0].id, "active");
+
+    const sameKey = await put({ provider: "local", baseUrl: "https://new.example.com/v1", api: "openai-responses", models: [{ id: "active", originalId: "active", name: "Renamed" }] });
+    assert.equal(sameKey.status, 200);
+    const configured = JSON.parse(await readFile(models.path, "utf8"));
+    assert.equal(configured.providers.local.baseUrl, "https://new.example.com/v1");
+    assert.equal(configured.providers.local.models[0].name, "Renamed");
+    assert.equal(configured.providers.local.models[0].reasoning, true);
+    assert.deepEqual(configured.providers.local.models[0].input, ["text", "image"]);
+  } finally {
+    server.close();
+    await app.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("external models.json changes refresh the Host catalogue and safely reload idle Runtime", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-model-watch-"));
   const path = "C:\\sessions\\primary.jsonl";

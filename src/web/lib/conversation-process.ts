@@ -91,6 +91,27 @@ function sameValue(left: unknown, right: unknown): boolean {
   catch { return left === right; }
 }
 
+/**
+ * Pi may attach transport-only reasoning/text signatures to the persisted
+ * JSONL copy but omit or regenerate them on the live SSE snapshot. Those
+ * fields are not visible content and must not make one assistant turn look
+ * like two turns during the live/persisted handoff.
+ */
+function semanticAssistantBlocks(message: PiMessage): PiContentBlock[] {
+  return blocks(message).map((block) => {
+    const {
+      textSignature: _textSignature,
+      thinkingSignature: _thinkingSignature,
+      ...semantic
+    } = block as PiContentBlock & Record<string, unknown>;
+    return semantic as PiContentBlock;
+  });
+}
+
+function sameAssistantContent(left: PiMessage, right: PiMessage): boolean {
+  return sameValue(semanticAssistantBlocks(left), semanticAssistantBlocks(right));
+}
+
 function cumulativeBlock(earlier: PiContentBlock, later: PiContentBlock): boolean {
   if (earlier.type !== later.type) return false;
   if (earlier.type === "thinking") return Boolean(earlier.thinking) && (later.thinking || "").startsWith(earlier.thinking || "");
@@ -163,7 +184,7 @@ function withLiveAssistantSnapshot(messages: PiMessage[], liveMessage?: PiMessag
   for (let index = messages.length - 1; index > lastUserIndex; index -= 1) {
     const candidate = messages[index];
     if (candidate?.role !== "assistant") continue;
-    if (sameValue(blocks(candidate), blocks(liveMessage))) return messages;
+    if (sameAssistantContent(candidate, liveMessage)) return messages;
     break;
   }
 
@@ -179,7 +200,7 @@ function withLiveAssistantSnapshot(messages: PiMessage[], liveMessage?: PiMessag
   for (let index = 0; index < messages.length; index += 1) {
     const candidate = messages[index];
     if (candidate.role !== "assistant" || candidate.timestamp !== target.timestamp) continue;
-    if (sameValue(blocks(candidate), blocks(target)) || cumulativeAssistantMessage(candidate, target)) matchingIndexes.push(index);
+    if (sameAssistantContent(candidate, target) || cumulativeAssistantMessage(candidate, target)) matchingIndexes.push(index);
   }
   if (!matchingIndexes.length) return [...messages, target];
   const firstMatch = matchingIndexes[0];

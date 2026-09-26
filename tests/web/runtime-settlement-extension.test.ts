@@ -14,7 +14,7 @@ beforeEach(() => {
   draftView = createSessionViewFixture();
 });
 
-test("a settled process card keeps the server-confirmed run duration", async () => {
+test("an interrupted process card keeps its server-confirmed duration after the next turn starts", async () => {
   const { dom, FakeEventSource } = installDom();
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../../src/web/api");
@@ -22,7 +22,13 @@ test("a settled process card keeps the server-confirmed run duration", async () 
   const restoreApi = captureApiSnapshot(api);
   const messages = [
     { role: "user" as const, content: "run" },
-    { role: "assistant" as const, timestamp: 1, content: [{ type: "thinking" as const, thinking: "working" }] },
+    {
+      role: "assistant" as const,
+      timestamp: 1,
+      content: [{ type: "thinking" as const, thinking: "working" }],
+      stopReason: "aborted" as const,
+      errorMessage: "This operation was aborted",
+    },
   ];
   bootstrap = {
     ...bootstrap,
@@ -56,6 +62,7 @@ test("a settled process card keeps the server-confirmed run duration", async () 
     eventsUrl: () => "/api/events",
     markSessionViewed: async () => ({ viewing: activeId }),
     viewSession: async () => settledView,
+    prompt: async () => ({ accepted: true, queued: false }),
   });
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {
@@ -78,6 +85,68 @@ test("a settled process card keeps the server-confirmed run duration", async () 
       dom.window.document.querySelector(".conversation-process-duration")?.textContent,
       "运行 · 00:02",
     );
+
+    // A later plain-text turn may settle in another window before this pane's
+    // transcript refresh exposes its new user boundary. Its Session-level timing
+    // must not overwrite the duration already pinned to the interrupted card.
+    await act(async () => {
+      source.emitPi({
+        type: "agent_start",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 2,
+        piChatRunStartedAt: Date.now() - 4_567,
+      });
+      source.emitPi({
+        type: "pi_chat_session_status",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 2,
+        activity: {
+          execution: "idle",
+          awaitingConfirmation: false,
+          lastRunDurationMs: 4_567,
+        },
+      });
+      await Promise.resolve();
+    });
+    assert.equal(
+      dom.window.document.querySelector(".conversation-process-duration")?.textContent,
+      "运行 · 00:02",
+    );
+
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='消息输入']",
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        dom.window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(textarea, "next run");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true }));
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+      source.emitPi({
+        type: "agent_start",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 3,
+        piChatRunStartedAt: Date.now() - 1_000,
+      });
+      source.emitPi({
+        type: "message_start",
+        piChatSessionId: activeId,
+        piChatRunGeneration: 3,
+        message: {
+          role: "assistant",
+          timestamp: 2,
+          content: [{ type: "thinking", thinking: "working again" }],
+        },
+      });
+      await new Promise((resolve) => dom.window.setTimeout(resolve, 80));
+    });
+    const durations = [...dom.window.document.querySelectorAll(
+      ".conversation-process-duration",
+    )].map((element) => element.textContent);
+    assert.equal(durations[0], "运行 · 00:02");
+    assert.match(durations[1] || "", /运行中 · \d{2}:\d{2}/);
   } finally {
     await act(async () => root.unmount());
     restoreApi();

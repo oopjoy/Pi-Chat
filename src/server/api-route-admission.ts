@@ -45,7 +45,7 @@ export function apiRouteAdmission(request: IncomingMessage, url: URL): ApiRouteA
   const sessionCopyMutation =
     request.method === "POST" && /^\/api\/sessions\/[a-f0-9]{20}\/(clone|fork)$/.test(url.pathname);
   const workspaceOpenMutation =
-    request.method === "POST" && /^\/api\/sessions\/[a-f0-9]{20}\/workspace\/open$/.test(url.pathname);
+    request.method === "POST" && /^\/api\/sessions\/[a-f0-9]{20}\/workspace\/(?:open|open-link)$/.test(url.pathname);
   const customModelMutation =
     request.method === "PUT" && /^\/api\/models\/[A-Za-z0-9._-]{1,80}\/[^/]{1,200}$/.test(url.pathname);
   const modelCatalogueMutation =

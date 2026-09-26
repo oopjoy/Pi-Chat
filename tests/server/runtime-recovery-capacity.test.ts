@@ -167,7 +167,12 @@ test("running Sessions stage model and thinking changes until their next prompt"
     const prompt = await post("/api/chat/prompt", { message: "next turn", sessionId: id });
     assert.equal(prompt.status, 202);
     const types = primary.commands.map((command) => command.type);
-    assert.deepEqual(types.slice(-3), ["set_model", "set_thinking_level", "prompt"]);
+    assert.deepEqual(types.slice(-4), [
+      "set_model",
+      "set_thinking_level",
+      "get_state",
+      "prompt",
+    ]);
   } finally {
     server.close();
     await app.close();

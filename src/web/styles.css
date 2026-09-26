@@ -438,6 +438,16 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .welcome-mark { width: 58px; height: 58px; font-size: 38px; border-radius: 17px; }
 .welcome h1 { margin: 18px 0 8px; color: var(--text); font-size: 25px; }
 .welcome p { max-width: 520px; margin: 0; font-size: 14px; line-height: 1.7; }
+.desktop-first-run { display: grid; box-sizing: border-box; width: min(100%, 520px); gap: 9px; margin: 16px auto 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--surface-soft), var(--surface) 36%); color: var(--text); text-align: left; }
+.desktop-first-run > strong { font-size: 12px; }
+.desktop-first-run dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px 14px; margin: 0; }
+.desktop-first-run dl > div { display: grid; min-width: 0; gap: 2px; }
+.desktop-first-run dt { color: var(--muted); font-size: 10px; }
+.desktop-first-run dd { min-width: 0; margin: 0; overflow: hidden; font: 11px/1.45 ui-monospace, Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.desktop-first-run dd[data-status="ready"] { color: var(--status-green); }
+.desktop-first-run dd[data-status="starting"] { color: var(--status-blue); }
+.desktop-first-run dd[data-status="failed"] { color: var(--danger); }
+.welcome .desktop-first-run > p { color: var(--muted); font-size: 11px; line-height: 1.55; }
 
 /* Keep every timeline row in normal layout. Scroll restoration depends on the
    browser's real cumulative geometry; content-visibility/contain-intrinsic-size
@@ -485,6 +495,7 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .message-user .message-content { display: flex; box-sizing: border-box; width: fit-content; max-width: 80%; margin-left: auto; padding: 10px 14px; flex-wrap: wrap; gap: 8px; border: 1px solid color-mix(in srgb, var(--accent), transparent 72%); border-radius: 14px 14px 4px 14px; background: var(--user); }
 .message-user.is-foldable .message-content { width: 80%; }
 .message-user-actions { display: flex; justify-content: flex-end; min-height: 25px; align-items: center; gap: 4px; margin-top: 3px; }
+.message-delivery-label { padding: 1px 5px; border: 1px solid color-mix(in srgb, var(--accent), transparent 66%); border-radius: 5px; background: color-mix(in srgb, var(--accent-soft), transparent 18%); color: var(--accent); font-size: 10.5px; font-weight: 600; line-height: 1.35; }
 .message-sent-at { min-width: 0; margin-right: 4px; overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .message-user-actions button { display: grid; width: 25px; height: 25px; place-items: center; padding: 0; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; }
 .message-user-actions button:hover:not(:disabled) { border-color: var(--line); background: var(--surface-hover); color: var(--accent); }
@@ -526,6 +537,10 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .markdown-body h2 { font-size: 1.23em; }
 .markdown-body h3 { font-size: 1.08em; }
 .markdown-body a { color: var(--accent); }
+.markdown-local-file-link.is-opening { cursor: wait; opacity: .72; }
+.markdown-local-file-link.is-opened { text-decoration-color: var(--status-green); }
+.markdown-local-file-link.is-error { text-decoration-color: var(--danger); }
+.markdown-link-error { display: inline-block; margin-left: 6px; color: var(--danger); font-size: 11px; }
 .markdown-body blockquote { margin-left: 0; padding: .08rem 1rem; border-left: 3px solid var(--line); color: var(--muted); }
 .markdown-body .inline-code { padding: .12em .34em; border-radius: 5px; background: color-mix(in srgb, var(--line), transparent 45%); font-family: ui-monospace, Consolas, monospace; font-size: .88em; }
 .markdown-body ul, .markdown-body ol { padding-left: 1.5em; }
@@ -933,6 +948,9 @@ details.conversation-process { display: block; padding: 0; }
 .model-provider-card { overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--surface), var(--panel) 18%); }
 .model-provider-head { display: flex; min-height: 46px; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 13px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--surface-muted), transparent 28%); cursor: pointer; font-family: var(--app-font); }
 .model-provider-head > div { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.model-provider-disclosure { display: flex; min-width: 0; flex: 1 1 auto; align-items: center; gap: 8px; padding: 5px 4px; border: 0; border-radius: 6px; background: transparent; color: var(--text); cursor: pointer; font: inherit; text-align: left; }
+.model-provider-disclosure:hover { background: color-mix(in srgb, var(--surface-hover), transparent 24%); }
+.model-provider-disclosure:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent), transparent 42%); outline-offset: 1px; }
 .model-provider-chevron { display: inline-flex; width: 16px; color: var(--muted); }
 .model-provider-chevron svg { width: 15px; height: 15px; }
 .model-provider-card.is-expanded .model-provider-head { background: color-mix(in srgb, var(--accent-soft), var(--surface-muted) 60%); }
@@ -1114,7 +1132,8 @@ button.ask-questionnaire-option:hover:not(:disabled) { background: var(--surface
   .sidebar,
   .sidebar-restore,
   .sidebar-scrim { transition: none !important; animation: none !important; will-change: auto; }
-  .extension-dialog-continuation > span { animation: none; }
+  .extension-dialog-continuation > span,
+  .session-status.is-running { animation: none; }
   .ask-questionnaire-option { transition: none; }
 }
 
@@ -1133,6 +1152,8 @@ button.ask-questionnaire-option:hover:not(:disabled) { background: var(--surface
 }
 
 @media (max-width: 760px) {
+  /* P3 onboarding is intentionally desktop-only; mobile behavior stays frozen. */
+  .desktop-first-run { display: none; }
   /* Touch targets stay usable without making desktop controls visually heavy. */
   .composer-actions { min-height: 44px; }
   .attachment-button, .send-button, .stop-button { width: 44px; height: 44px; min-width: 44px; }

@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { copyFile, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 const execFile = promisify(execFileCallback);
@@ -53,6 +54,26 @@ test("an explicit build revision overrides Git metadata", async () => {
     assert.equal(identity.revision, "release-candidate");
   } finally {
     await rm(distRoot, { recursive: true, force: true });
+  }
+});
+
+test("server link parser is relocatable without node_modules", { timeout: 120_000 }, async () => {
+  const distRoot = await mkdtemp(join(tmpdir(), "pi-chat-link-parser-build-"));
+  const isolated = await mkdtemp(join(tmpdir(), "pi-chat-link-parser-portable-"));
+  try {
+    await execFile(process.execPath, ["scripts/build-server.mjs"], {
+      cwd: projectRoot,
+      env: { ...process.env, PI_CHAT_DIST_DIR: distRoot },
+    });
+    const modulePath = join(isolated, "markdown-links.mjs");
+    await copyFile(join(distRoot, "server/server/markdown-links.js"), modulePath);
+    const script = `const { markdownLinkDestinations } = await import(${JSON.stringify(pathToFileURL(modulePath).href)});
+      console.log(JSON.stringify(markdownLinkDestinations('[report](out/report(2).pdf)')));`;
+    const { stdout } = await execFile(process.execPath, ["--input-type=module", "-e", script], { cwd: isolated });
+    assert.deepEqual(JSON.parse(stdout), ["out/report(2).pdf"]);
+  } finally {
+    await rm(distRoot, { recursive: true, force: true });
+    await rm(isolated, { recursive: true, force: true });
   }
 });
 

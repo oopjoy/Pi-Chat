@@ -514,7 +514,12 @@ export function consumeLocalSteeringTurn(
       (!shape.text && incoming.text === "请查看这些图片。");
     return sameText && shape.imageCount === incoming.imageCount;
   });
-  if (turn) turn.queueState = "dispatched";
+  if (turn) {
+    turn.queueState = "dispatched";
+    // Presentation metadata is attached only after the server verifies Pi's
+    // native dequeue. A same-text ordinary user message can never earn it.
+    turn.message.piChatDelivery = "steer";
+  }
   return turn;
 }
 

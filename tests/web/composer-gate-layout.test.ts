@@ -67,6 +67,52 @@ test("Gate control disables an unconfirmed existing Session instead of inventing
   }
 });
 
+test("Thinking chooser follows the selected model's exact provider level map", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { ComposerControls } = await import("../../src/web/components/ComposerControls");
+  const model = {
+    provider: "cursor",
+    id: "gemini-3.8-flash",
+    name: "Gemini 3.8 Flash",
+    reasoning: true,
+    thinkingLevelMap: {
+      off: null,
+      minimal: null,
+      low: "low",
+      medium: "medium",
+      high: "high",
+      xhigh: null,
+      max: null,
+    },
+  } as const;
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(ComposerControls, {
+      state: { model, thinkingLevel: "high", isStreaming: false },
+      models: [model],
+      disabled: false,
+      gateAvailable: false,
+      onGate: () => undefined,
+      onModel: () => undefined,
+      onThinking: () => undefined,
+    })));
+    const trigger = dom.window.document.querySelector<HTMLButtonElement>(
+      ".thinking-control .compact-select-trigger",
+    )!;
+    assert.equal(trigger.disabled, false);
+    await act(async () => trigger.click());
+    assert.deepEqual(
+      [...dom.window.document.querySelectorAll(
+        ".thinking-control .compact-select-option > span:last-of-type",
+      )].map((node) => node.textContent),
+      ["low", "med", "high"],
+    );
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
 test("conversation controls live in the composer while settings moves to the top bar", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");
@@ -147,8 +193,6 @@ test("conversation controls live in the composer while settings moves to the top
       "low",
       "med",
       "high",
-      "xhigh",
-      "max",
     ]);
     assert.ok(
       dom.window.document.querySelector(

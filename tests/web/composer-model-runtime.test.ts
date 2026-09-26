@@ -200,8 +200,11 @@ test("a browser-cached model catalogue stays selectable across a restart bootstr
     });
     assert.deepEqual(
       promptCalls[0]?.[5],
-      { model: { provider: "xwill", modelId: "gpt-5.6-terra" } },
-      "the cached choice is rechecked by the server at prompt admission",
+      {
+        model: { provider: "xwill", modelId: "gpt-5.6-terra" },
+        thinkingLevel: "medium",
+      },
+      "the cached choice and preserved Runtime thinking level are rechecked by the server at prompt admission",
     );
   } finally {
     await act(async () => root.unmount());

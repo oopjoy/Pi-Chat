@@ -233,6 +233,10 @@ export class ModelManager {
         return [{
           id: model.id,
           name: typeof model.name === "string" ? model.name : model.id,
+          // The editor intentionally exposes only common fields. Keep the
+          // original key so an ID rename can merge the edited values back into
+          // the full models.json record instead of erasing hidden Pi metadata.
+          originalId: model.id,
           ...(typeof model.contextWindow === "number" ? { contextWindow: model.contextWindow } : null),
           ...(typeof model.maxTokens === "number" ? { maxTokens: model.maxTokens } : null),
         }];
@@ -265,15 +269,22 @@ export class ModelManager {
       if (!rawModel || typeof rawModel !== "object" || Array.isArray(rawModel)) throw new Error("模型条目必须是对象");
       const model = rawModel as Record<string, unknown>;
       const id = validateName(String(model.id || ""), "Model ID", /^[^\s\u0000-\u001f]+$/, 200);
+      const originalId = nonEmptyString(model.originalId);
+      if (originalId) validateName(originalId, "原 Model ID", /^[^\s\u0000-\u001f]+$/, 200);
       const name = nonEmptyString(model.name) || id;
       const contextWindow = positiveInteger(model.contextWindow, "Context Window", 100_000_000);
       const maxTokens = positiveInteger(model.maxTokens, "Max Tokens", 10_000_000);
-      return { id, name, contextWindow, maxTokens };
+      return { id, name, ...(originalId ? { originalId } : null), contextWindow, maxTokens };
     });
     const ids = new Set<string>();
     if (models.some((model) => ids.has(model.id) || (ids.add(model.id), false))) throw new Error("模型 ID 不能重复");
+    const originalIds = new Set<string>();
+    if (models.some((model) => model.originalId && (originalIds.has(model.originalId) || (originalIds.add(model.originalId), false)))) throw new Error("原 Model ID 不能重复");
     const value = await this.read();
     const provider = value.providers?.[originalProvider];
+    const previousModels = provider && Array.isArray(provider.models)
+      ? provider.models.filter((model): model is Record<string, unknown> => Boolean(model) && typeof model === "object" && !Array.isArray(model))
+      : [];
     // A Runtime-discovered provider can be promoted into models.json by the
     // editor. Existing provider configuration is still updated in place.
     const targetProvider = provider && typeof provider === "object" && !Array.isArray(provider)
@@ -282,15 +293,26 @@ export class ModelManager {
     targetProvider.baseUrl = baseUrl;
     targetProvider.api = api;
     if (nonEmptyString(input.apiKey)) targetProvider.apiKey = String(input.apiKey).trim();
-    targetProvider.models = models.map((model) => ({
-      id: model.id,
-      name: model.name,
-
-      ...(model.contextWindow ? { contextWindow: model.contextWindow } : {}),
-      ...(model.maxTokens ? { maxTokens: model.maxTokens } : {}),
-    }));
+    targetProvider.models = models.map((model) => {
+      const sourceId = model.originalId || model.id;
+      const previous = previousModels.find((candidate) => candidate.id === sourceId);
+      // Preserve every field the compact Provider editor does not expose
+      // (reasoning, input, model-level api, cost, compat, headers, and future Pi
+      // metadata). Only explicit form fields are replaced or cleared.
+      const next: Record<string, unknown> = {
+        ...(previous || {}),
+        id: model.id,
+        name: model.name,
+      };
+      delete next.originalId;
+      if (model.contextWindow) next.contextWindow = model.contextWindow;
+      else delete next.contextWindow;
+      if (model.maxTokens) next.maxTokens = model.maxTokens;
+      else delete next.maxTokens;
+      return next;
+    });
     await this.write(value);
-    return { provider: originalProvider, baseUrl, api, apiKey: "", models };
+    return this.getCustomProvider(originalProvider);
   }
 
   async removeProvider(providerValue: unknown): Promise<void> {

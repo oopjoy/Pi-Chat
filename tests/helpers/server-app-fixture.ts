@@ -16,6 +16,7 @@ export class FakeRpc {
     source?: RpcEventSource,
   ) => void>();
   streaming = false;
+  model: { provider: string; id: string; name?: string; api?: string } | null = null;
   stopCount = 0;
   restartCount = 0;
   restartFailures = 0;
@@ -121,7 +122,7 @@ export class FakeRpc {
         type: "response",
         success: true,
         data: {
-          model: null,
+          model: this.model,
           sessionFile: this.path,
           sessionId: this.sessionId,
           isStreaming: this.streaming,

@@ -6,11 +6,11 @@ import { join } from "node:path";
 import test from "node:test";
 import { PiChatApp } from "../../src/server/app";
 import { RpcRequestTimeoutError, type PiRpcClient } from "../../src/server/rpc-client";
-import { idForPath } from "../../src/server/session-index";
+import { idForPath, readSessionSnapshotContent } from "../../src/server/session-index";
 import type { SessionIndex } from "../../src/server/session-index";
 import type { ResourceManager } from "../../src/server/resource-manager";
 import { ModelManager } from "../../src/server/model-manager";
-import type { SessionSummary } from "../../src/shared/types";
+import type { PiMessage, SessionSummary } from "../../src/shared/types";
 import { FakeRpc } from "../helpers/server-app-fixture";
 
 test("ordinary prompts from two browser windows share one Session FIFO", async () => {
@@ -587,7 +587,17 @@ test("only a verified dequeue consumes a Steer admission, never a same-text ordi
   const origin = `http://127.0.0.1:${address.port}`;
   const state = app as unknown as {
     nativeSteeringAdmissionsBySession: Map<string, { generation: number; items: Array<{ message: string; promptAt: number }> }>;
+    pendingConsumedSteersBySession: Map<string, Array<{
+      id: string;
+      payloadFingerprint: string;
+      promptAt: number;
+      timestamp?: number;
+      baselinePersistedUserIds: Set<string>;
+      baselinePersistedTailId?: string;
+    }>>;
+    reconcilePendingAcceptedPrompts(sessionId: string, messages: PiMessage[]): void;
     lastUserPromptAtBySession: Map<string, number>;
+    clearNativeSteeringState(sessionId: string, reason: string): number;
   };
   try {
     await fetch(`${origin}/api/bootstrap`);
@@ -610,13 +620,137 @@ test("only a verified dequeue consumes a Steer admission, never a same-text ordi
     // Pi consumes the steer: it dequeues (queue_update shrinks) immediately
     // before the consuming message_start.
     primary.emit({ type: "queue_update", steering: [], followUp: [] });
-    primary.emit({ type: "message_start", message: { role: "user", content: "继续" } });
+    const consumedAt = Date.now();
+    primary.emit({
+      type: "message_start",
+      message: { role: "user", content: "继续", timestamp: consumedAt },
+    });
     assert.equal(
       state.nativeSteeringAdmissionsBySession.get(id),
       undefined,
       "verified dequeue + message_start consumes the admission",
     );
+    assert.equal(state.pendingConsumedSteersBySession.get(id)?.length, 1);
+    const steerFingerprint = state.pendingConsumedSteersBySession.get(id)![0].payloadFingerprint;
+    const persisted: PiMessage[] = [{
+      role: "user",
+      content: "继续",
+      timestamp: consumedAt,
+      piChatPersistedMessageId: "steer-row:0",
+    }];
+    state.reconcilePendingAcceptedPrompts(id, persisted);
+    assert.equal(persisted[0].piChatDelivery, "steer");
+    assert.equal(state.pendingConsumedSteersBySession.get(id), undefined);
+    const freshProjection: PiMessage[] = [{
+      role: "user",
+      content: "继续",
+      timestamp: consumedAt,
+      piChatPersistedMessageId: "steer-row:0",
+    }];
+    state.reconcilePendingAcceptedPrompts(id, freshProjection);
+    assert.equal(
+      freshProjection[0].piChatDelivery,
+      "steer",
+      "the bounded server projection must restore the label on later Session views",
+    );
+    freshProjection[0].content = "rewritten ordinary row";
+    state.reconcilePendingAcceptedPrompts(id, freshProjection);
+    assert.equal(
+      freshProjection[0].piChatDelivery,
+      undefined,
+      "invalidating a trusted projection must also sanitize a reused message object",
+    );
+
+    state.pendingConsumedSteersBySession.set(id, [
+      {
+        id: "same-1",
+        payloadFingerprint: steerFingerprint,
+        promptAt: consumedAt + 1,
+        baselinePersistedUserIds: new Set(),
+        baselinePersistedTailId: "tail:0",
+      },
+      {
+        id: "same-2",
+        payloadFingerprint: steerFingerprint,
+        promptAt: consumedAt + 2,
+        baselinePersistedUserIds: new Set(),
+        baselinePersistedTailId: "tail:0",
+      },
+    ]);
+    const persistedSteerEntries = [
+      { type: "session", id: "steer-history", cwd: process.cwd() },
+      {
+        type: "message", id: "ordinary-old", parentId: null,
+        timestamp: new Date(consumedAt - 10_000).toISOString(),
+        message: { role: "user", content: "继续" },
+      },
+      {
+        type: "message", id: "tail", parentId: "ordinary-old",
+        timestamp: new Date(consumedAt - 1_000).toISOString(),
+        message: { role: "assistant", content: "baseline tail" },
+      },
+      {
+        type: "message", id: "steer-same-1", parentId: "tail",
+        timestamp: new Date(consumedAt + 1_000).toISOString(),
+        message: { role: "user", content: "继续" },
+      },
+      {
+        type: "message", id: "between", parentId: "steer-same-1",
+        timestamp: new Date(consumedAt + 2_000).toISOString(),
+        message: { role: "assistant", content: "between" },
+      },
+      {
+        type: "message", id: "steer-same-2", parentId: "between",
+        timestamp: new Date(consumedAt + 3_000).toISOString(),
+        message: { role: "user", content: "继续" },
+      },
+    ];
+    const firstPersistedWindow = readSessionSnapshotContent(
+      persistedSteerEntries.slice(0, 4).map(JSON.stringify).join("\n"),
+    ).messages;
+    state.reconcilePendingAcceptedPrompts(id, firstPersistedWindow);
+    assert.equal(firstPersistedWindow[0].piChatDelivery, undefined);
+    assert.equal(firstPersistedWindow[2].piChatDelivery, "steer");
+    assert.equal(state.pendingConsumedSteersBySession.get(id)?.length, 1);
+
+    const expandedPersistedView = readSessionSnapshotContent(
+      persistedSteerEntries.map(JSON.stringify).join("\n"),
+    ).messages;
+    state.reconcilePendingAcceptedPrompts(id, expandedPersistedView);
+    assert.equal(expandedPersistedView[0].piChatDelivery, undefined);
+    assert.equal(expandedPersistedView[2].piChatDelivery, "steer");
+    assert.equal(expandedPersistedView[4].piChatDelivery, "steer");
+    assert.equal(
+      state.pendingConsumedSteersBySession.get(id),
+      undefined,
+      "identical consumed Steers match distinct rows across windowed reconciliations",
+    );
     assert.equal(state.lastUserPromptAtBySession.has(id), true);
+
+    // A verified consumption whose JSONL row is not visible yet belongs to the
+    // old worker generation. Recovery must drop it before a later ordinary
+    // same-text prompt can be reconciled.
+    state.pendingConsumedSteersBySession.set(id, [{
+      id: "old-generation-steer",
+      payloadFingerprint: steerFingerprint,
+      promptAt: consumedAt + 10_000,
+      baselinePersistedUserIds: new Set(),
+      baselinePersistedTailId: "tail:0",
+    }]);
+    state.clearNativeSteeringState(id, "recovery");
+    assert.equal(
+      state.pendingConsumedSteersBySession.get(id),
+      undefined,
+      "recovery clears consumed Steer projections waiting for JSONL visibility",
+    );
+    const ordinaryAfterRecovery: PiMessage[] = [{
+      role: "user",
+      content: "继续",
+      timestamp: consumedAt + 11_000,
+      piChatPersistedMessageId: "ordinary-after-recovery",
+    }];
+    state.reconcilePendingAcceptedPrompts(id, ordinaryAfterRecovery);
+    assert.equal(ordinaryAfterRecovery[0].piChatDelivery, undefined);
   } finally {
     server.close();
     await app.close();

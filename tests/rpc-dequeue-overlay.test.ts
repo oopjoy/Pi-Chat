@@ -27,6 +27,24 @@ test("Pi Chat adds native dequeue only inside its RPC child", { skip: !resolvePi
   assert.equal(unchanged, original, "the global Pi installation must remain untouched");
 });
 
+test("the dequeue overlay accepts Pi RPC follow-up signatures before and after source attribution", async () => {
+  const overlay = await import(overlayUrl) as {
+    patchPiRpcModeSource(source: string): string;
+  };
+  const signatures = [
+    "                await session.followUp(command.message, command.images);",
+    '                await session.followUp(command.message, command.images, { source: "rpc" });',
+  ];
+
+  for (const followUp of signatures) {
+    const source = `            case "follow_up": {\n${followUp}\n                return success(id, "follow_up");\n            }\n            case "abort": {`;
+    const patched = overlay.patchPiRpcModeSource(source);
+    assert.match(patched, /case "dequeue"/);
+    assert.ok(patched.includes(followUp));
+    assert.equal(overlay.patchPiRpcModeSource(patched), patched);
+  }
+});
+
 test("a real Pi RPC child accepts the process-local native dequeue command", { skip: !resolvePiEntry(), timeout: 75_000 }, async () => {
   const piEntry = resolvePiEntry();
   assert.ok(piEntry);

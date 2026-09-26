@@ -7,8 +7,9 @@ import { visibleAssistantBlocksWithSourceIndex } from "../lib/assistant-text";
 import { reactRenderBenchmarkEnabled, recordReactRenderBenchmarkCommit } from "../lib/benchmark-profiler";
 import { streamingAppendHint } from "../lib/streaming-append";
 import { ErrorDetail } from "./ErrorDetail";
-import { CheckIcon, CopyIcon, ForkIcon } from "./Icons";
+import { AlertIcon, CheckIcon, CopyIcon, ForkIcon } from "./Icons";
 import { MarkdownBody } from "./MarkdownBody";
+import { writeClipboardText } from "../lib/clipboard";
 
 /** Fold only explicit source lines; visual wrapping stays device-dependent. */
 export const USER_MESSAGE_FOLD_LINE_LIMIT = 20;
@@ -133,8 +134,9 @@ export function AssistantMessageHeader({ message, fallback }: { message: PiMessa
   </header>;
 }
 
-export const ChatMessage = memo(function ChatMessage({ message, streaming = false, showAssistantMetadata = true, showGeneratedAt = true, assistantMetadataFallback, onForkUserMessage, forkUserMessageDisabled = false }: { message: PiMessage; streaming?: boolean; showAssistantMetadata?: boolean; showGeneratedAt?: boolean; assistantMetadataFallback?: AssistantMetadataFallback; onForkUserMessage?: (message: PiMessage) => void; forkUserMessageDisabled?: boolean }) {
+export const ChatMessage = memo(function ChatMessage({ message, streaming = false, showAssistantMetadata = true, showGeneratedAt = true, assistantMetadataFallback, workspacePath = "", onOpenLocalPath, onForkUserMessage, forkUserMessageDisabled = false }: { message: PiMessage; streaming?: boolean; showAssistantMetadata?: boolean; showGeneratedAt?: boolean; assistantMetadataFallback?: AssistantMetadataFallback; workspacePath?: string; onOpenLocalPath?: (path: string) => Promise<unknown>; onForkUserMessage?: (message: PiMessage) => void; forkUserMessageDisabled?: boolean }) {
   const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState(false);
   const [expandedUserText, setExpandedUserText] = useState(false);
   const [previewImage, setPreviewImage] = useState<{ src: string; alt: string; width: number; height: number } | null>(null);
   const copyTimerRef = useRef<number | null>(null);
@@ -186,22 +188,36 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
     Boolean(onForkUserMessage);
   const copyableUserMessage = message.role === "user" && Boolean(userCopyText);
   const sentAt = message.role === "user" ? userSentAt(message.timestamp) : null;
+  const steerDelivery = message.role === "user" && message.piChatDelivery === "steer";
   const generatedAt = message.role === "assistant" && !streaming && showGeneratedAt
     ? assistantGeneratedAt(message.timestamp)
     : null;
+  const showCopyResult = (success: boolean) => {
+    if (copyTimerRef.current) window.clearTimeout(copyTimerRef.current);
+    setCopied(success);
+    setCopyError(!success);
+    copyTimerRef.current = window.setTimeout(() => {
+      setCopied(false);
+      setCopyError(false);
+    }, success ? 1_600 : 2_400);
+  };
   const copyAnswer = async () => {
     if (!copyText) return;
-    await navigator.clipboard.writeText(copyText);
-    if (copyTimerRef.current) window.clearTimeout(copyTimerRef.current);
-    setCopied(true);
-    copyTimerRef.current = window.setTimeout(() => setCopied(false), 1_600);
+    try {
+      await writeClipboardText(copyText);
+      showCopyResult(true);
+    } catch {
+      showCopyResult(false);
+    }
   };
   const copyUserMessage = async () => {
     if (!userCopyText) return;
-    await navigator.clipboard.writeText(userCopyText);
-    if (copyTimerRef.current) window.clearTimeout(copyTimerRef.current);
-    setCopied(true);
-    copyTimerRef.current = window.setTimeout(() => setCopied(false), 1_600);
+    try {
+      await writeClipboardText(userCopyText);
+      showCopyResult(true);
+    } catch {
+      showCopyResult(false);
+    }
   };
 
   const body = (
@@ -231,6 +247,8 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
               key={index}
               streaming={streaming}
               appendHint={streaming ? streamingAppendHint(message, assistantContent[index]?.sourceIndex ?? index) : undefined}
+              workspacePath={workspacePath}
+              onOpenLocalPath={streaming ? undefined : onOpenLocalPath}
             >{block.text}</MarkdownBody>;
             if (block.type === "image" && block.data && block.mimeType) return <img className="message-image" key={index} src={`data:${block.mimeType};base64,${block.data}`} alt="用户附加图片" />;
             return null;
@@ -271,14 +289,15 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
           />
         </section>
       </div>, document.body)}
-      {(sentAt || forkableUserMessage || copyableUserMessage) && <footer className="message-user-actions">
+      {(steerDelivery || sentAt || forkableUserMessage || copyableUserMessage) && <footer className="message-user-actions">
+        {steerDelivery && <span className="message-delivery-label" title="运行过程中发送并已被 Pi 接收的 Steer 指令">Steer</span>}
         {sentAt && <time className="message-sent-at" dateTime={sentAt.dateTime} title={sentAt.title}>{sentAt.label}</time>}
         {copyableUserMessage && <button
           type="button"
           onClick={() => void copyUserMessage()}
-          aria-label={copied ? "用户消息已复制" : "复制用户消息"}
-          title={copied ? "已复制用户消息文本" : userImageBlocks.length ? "复制用户消息文本（不含图片）" : "复制用户消息"}
-        >{copied ? <CheckIcon /> : <CopyIcon />}</button>}
+          aria-label={copyError ? "复制用户消息失败" : copied ? "用户消息已复制" : "复制用户消息"}
+          title={copyError ? "复制失败，请检查浏览器权限" : copied ? "已复制用户消息文本" : userImageBlocks.length ? "复制用户消息文本（不含图片）" : "复制用户消息"}
+        >{copyError ? <AlertIcon /> : copied ? <CheckIcon /> : <CopyIcon />}</button>}
         {forkableUserMessage && <button
           type="button"
           disabled={forkUserMessageDisabled}
@@ -289,8 +308,8 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
       </footer>}
       {message.role === "assistant" && (generatedAt || copyText) && <footer className="message-footer">
         {generatedAt && <time className="message-generated-at" dateTime={generatedAt.dateTime} title={generatedAt.title}>{generatedAt.label}</time>}
-        {copyText && <button type="button" onClick={() => void copyAnswer()} aria-label={copied ? "回答已复制" : "复制整个回答"} title={copied ? "已复制" : "复制整个回答"}>
-          {copied ? <CheckIcon /> : <CopyIcon />}
+        {copyText && <button type="button" onClick={() => void copyAnswer()} aria-label={copyError ? "复制回答失败" : copied ? "回答已复制" : "复制整个回答"} title={copyError ? "复制失败，请检查浏览器权限" : copied ? "已复制" : "复制整个回答"}>
+          {copyError ? <AlertIcon /> : copied ? <CheckIcon /> : <CopyIcon />}
         </button>}
       </footer>}
     </article>

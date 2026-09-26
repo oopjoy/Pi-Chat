@@ -40,6 +40,26 @@ test("user messages place their send time before Copy and Fork", () => {
   assert.equal(userSentAt(Number.NaN), null);
 });
 
+test("a consumed Steer labels the user instruction immediately before its send time", () => {
+  const timestamp = Date.now();
+  const html = renderToStaticMarkup(React.createElement(ChatMessage, {
+    message: {
+      role: "user",
+      content: "change direction",
+      timestamp,
+      piChatDelivery: "steer",
+    },
+  }));
+  const labelAt = html.indexOf('class="message-delivery-label"');
+  const sentAt = html.indexOf('class="message-sent-at"');
+  assert.ok(labelAt >= 0 && labelAt < sentAt);
+  assert.match(html, /class="message-delivery-label"[^>]*>Steer<\/span>/);
+  const ordinary = renderToStaticMarkup(React.createElement(ChatMessage, {
+    message: { role: "user", content: "ordinary", timestamp },
+  }));
+  assert.doesNotMatch(ordinary, /message-delivery-label|>Steer<\/span>/);
+});
+
 test("persisted User messages expose Fork, including image prompts, and all user text exposes Copy", () => {
   const persisted = renderToStaticMarkup(React.createElement(ChatMessage, {
     message: {

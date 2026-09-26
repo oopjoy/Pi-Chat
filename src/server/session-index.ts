@@ -432,6 +432,7 @@ function sessionSnapshotFromBranch(branch: SessionEntry[]): SessionFileSnapshot 
       piChatPersistedMessageId: _untrustedPersistedMessageId,
       piChatPendingMessageId: _untrustedPendingMessageId,
       piChatPromptId: _untrustedPromptId,
+      piChatDelivery: _untrustedDelivery,
       ...persistedMessage
     } = entry.message;
     const message = persistedMessage as unknown as Record<string, unknown>;

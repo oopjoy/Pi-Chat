@@ -356,6 +356,7 @@ test("native steering stays hidden until Pi consumes it and clears safely before
     steering,
   );
   assert.equal(steering.queueState, "dispatched");
+  assert.equal(steering.message.piChatDelivery, "steer");
   const sameTextDifferentSteer: LocalUserTurn = {
     sessionId: "session-a",
     message: { role: "user", content: "redirect now" },
@@ -373,6 +374,7 @@ test("native steering stays hidden until Pi consumes it and clears safely before
     sameTextDifferentSteer,
     "the server-provided steer ID must win over text matching",
   );
+  assert.equal(sameTextDifferentSteer.message.piChatDelivery, "steer");
   assert.deepEqual(
     protectTranscriptWithLocalTurns([steering], [previous], 1, 1).messages,
     [previous, steering.message],

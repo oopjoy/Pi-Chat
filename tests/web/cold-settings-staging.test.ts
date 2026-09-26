@@ -103,8 +103,11 @@ test("cold history settings stage immediately and survive until send", async () 
     assert.deepEqual(directSettingCalls, [], "the Composer does not split a next-turn selection into pre-prompt Runtime mutations");
     assert.deepEqual(
       promptCalls[0]?.[5],
-      { model: { provider: "xwill", modelId: "gpt-5.6-terra" } },
-      "the cold prompt receives the exact Model snapshot captured at Send",
+      {
+        model: { provider: "xwill", modelId: "gpt-5.6-terra" },
+        thinkingLevel: "medium",
+      },
+      "the cold prompt carries the exact Model and implicit Runtime thinking snapshot captured at Send",
     );
   } finally {
     await act(async () => root.unmount());
@@ -266,6 +269,83 @@ test("one active-session Composer selection stays local until its prompt capture
       },
       "one prompt carries one immutable complete selection rather than split setting requests",
     );
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
+test("Composer off preserves an implicit Runtime thinking level when switching back", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const reasoningModel = {
+    ...bootstrap.state.model!,
+    reasoning: true,
+  };
+  const composerModel = {
+    provider: "cursor",
+    id: "composer-2.5",
+    name: "Composer 2.5",
+    api: "cursor-sdk",
+    input: ["text", "image"],
+    reasoning: false,
+  };
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      state: { ...bootstrap.state, model: reasoningModel, thinkingLevel: "medium" as const },
+      models: [reasoningModel, composerModel],
+      primaryRuntime: {
+        ...bootstrap.primaryRuntime,
+        model: reasoningModel,
+        thinkingLevel: "medium" as const,
+      },
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    viewSession: async () => draftView,
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+
+    const thinkingTrigger = () => dom.window.document.querySelector<HTMLButtonElement>(".thinking-control .compact-select-trigger")!;
+    assert.match(
+      thinkingTrigger().textContent || "",
+      /med/,
+      "the starting level comes only from Runtime state, without a browser-local Thinking choice",
+    );
+
+    const chooseModel = async (label: string) => {
+      const trigger = dom.window.document.querySelector<HTMLButtonElement>(".composer-model-select .compact-select-trigger")!;
+      await act(async () => { trigger.click(); await Promise.resolve(); });
+      const option = [...dom.window.document.querySelectorAll<HTMLElement>(".composer-model-option")]
+        .find((candidate) => candidate.textContent?.includes(label));
+      assert.ok(option, `${label} is listed`);
+      await act(async () => { option.click(); await Promise.resolve(); await Promise.resolve(); });
+    };
+
+    await chooseModel("Composer 2.5");
+    assert.equal(thinkingTrigger().disabled, true);
+    assert.match(thinkingTrigger().textContent || "", /off/);
+
+    await chooseModel("Model");
+    assert.equal(thinkingTrigger().disabled, false, "reasoning model immediately unlocks thinking");
+    assert.match(
+      thinkingTrigger().textContent || "",
+      /med/,
+      "the non-reasoning model's temporary off does not destroy the implicit Runtime reasoning level",
+    );
+
+    await act(async () => { thinkingTrigger().click(); await Promise.resolve(); });
+    const high = [...dom.window.document.querySelectorAll<HTMLElement>(".thinking-control .compact-select-option")]
+      .find((candidate) => candidate.textContent?.trim() === "high");
+    assert.ok(high);
+    await act(async () => { high.click(); await Promise.resolve(); });
+    assert.match(thinkingTrigger().textContent || "", /high/);
   } finally {
     await act(async () => root.unmount());
     restoreApi();

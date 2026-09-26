@@ -136,7 +136,13 @@ export function ManagementPanel({ section, appearance, workspaceCwd, workspacePi
             <nav className="settings-nav" aria-label="设置分类">
               <div className="settings-nav-tabs">
                 {SETTINGS_TABS.map((tab) => (
-                  <button type="button" key={tab.id} className={settingsTab === tab.id ? "is-active" : ""} onClick={() => setSettingsTab(tab.id)}>
+                  <button
+                    type="button"
+                    key={tab.id}
+                    className={settingsTab === tab.id ? "is-active" : ""}
+                    aria-current={settingsTab === tab.id ? "page" : undefined}
+                    onClick={() => setSettingsTab(tab.id)}
+                  >
                     {tab.label}
                   </button>
                 ))}
@@ -338,10 +344,14 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
     setEditingProvider({ provider: "", baseUrl: "", api: "openai-completions", apiKey: "", models: [{ id: "", name: "" }] });
     setError(""); setNotice("");
   };
-  const beginEditProvider = async (provider: string, custom: boolean) => {
+  const beginEditProvider = async (
+    provider: string,
+    custom: boolean,
+    forceOpen = false,
+  ) => {
     if (saving) return;
     if (expandedProvider === provider) {
-      closeProvider();
+      if (!forceOpen) closeProvider();
       return;
     }
     const sequence = ++providerLoadSequence.current;
@@ -409,7 +419,60 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
     <div className="settings-resource-heading"><div className="settings-resource-title"><h3>模型<span className="count-badge">{models.length}</span></h3><p>按 Provider 管理自定义连接和模型目录。内置登录 Provider 由 Pi Runtime 管理。</p><span className={`model-runtime-status ${modelRuntimeSyncPending ? "is-pending" : "is-ready"}`}>{modelRuntimeSyncPending ? "Runtime 等待同步" : "Runtime 已同步"}</span></div><div className="models-panel-actions"><button type="button" className="model-add-button" disabled={busy || saving} onClick={beginAddProvider}>添加自定义提供方</button><button type="button" className="resource-browse-root" title="打开 models.json 所在目录" aria-label="打开 models.json 所在目录" disabled={browseBusy} onClick={onBrowseModels}><FolderIcon /></button></div></div>
     {error && <div className="resource-error">{error}</div>}{notice && !error && <div className="resource-notice">{notice}</div>}
     {expandedProvider === "__new__" && providerEditor}
-    <div className="model-provider-list">{modelGroups.map(([provider, providerModels]) => { const custom = providerModels.some((model) => model.source === "models-json" || model.custom); const expanded = expandedProvider === provider; return <section className={`model-provider-card ${expanded ? "is-expanded" : ""}`} key={provider}><header className="model-provider-head" role="button" tabIndex={0} onClick={() => void beginEditProvider(provider, custom)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") void beginEditProvider(provider, custom); }}><div><span className="model-provider-chevron">{expanded ? <ChevronDownIcon /> : <ChevronRightIcon />}</span><strong>{provider}</strong>{custom && <span className="model-custom-badge">自定义</span>}<i className="model-health-dot" title="已发现" /></div><div className="model-provider-actions"><span className="model-provider-count">{providerModels.length} 个模型</span>{custom ? <><button type="button" disabled={saving} onClick={(event) => { event.stopPropagation(); void beginEditProvider(provider, custom); }}>编辑</button><button type="button" className="model-delete-action" disabled={busy || saving} onClick={(event) => { event.stopPropagation(); void removeProvider(provider); }}>删除</button></> : <span className="model-provider-managed">{providerModels.some((model) => model.authMode === "pi-managed") ? "Pi 登录管理" : "Pi Runtime 管理"}</span>}</div></header>{expanded && (editingProviderKey === provider && editingProvider ? providerEditor : custom ? <p className="model-provider-loading">正在读取 Provider 配置…</p> : <><p className="model-provider-readonly">这是 Pi 内置登录 Provider，地址、密钥和模型目录由 Pi Runtime 管理。</p><div className="model-provider-rows">{providerModels.map((model) => { const active = state.model?.provider === model.provider && state.model?.id === model.id; return <article className={`model-provider-row ${active ? "is-active" : ""}`} key={`${model.provider}/${model.id}/${model.api || ""}`}><button type="button" className="model-select-row" disabled={busy || active} onClick={() => onModel(model.provider, model.id, model.api)} title={`${model.provider}/${model.id}`}><code>{model.id}</code><span>{model.name !== model.id ? model.name : ""}</span>{model.api && <small>{model.api}</small>}{model.contextWindow && <em>{Math.round(model.contextWindow / 1000)}k</em>}</button></article>; })}</div></>)}</section>; })}{!models.length && <p className="resource-loading">当前没有可用模型</p>}</div>
+    <div className="model-provider-list">{modelGroups.map(([provider, providerModels], providerIndex) => {
+      const custom = providerModels.some((model) => model.source === "models-json" || model.custom);
+      const expanded = expandedProvider === provider;
+      const panelId = `model-provider-panel-${providerIndex}`;
+      return <section className={`model-provider-card ${expanded ? "is-expanded" : ""}`} key={provider}>
+        <header
+          className="model-provider-head"
+          onClick={(event) => {
+            // Preserve the existing broad pointer target (including narrow
+            // layouts) without making the header itself a second keyboard
+            // control or nesting Edit/Delete inside the disclosure button.
+            if ((event.target as HTMLElement).closest("button")) return;
+            void beginEditProvider(provider, custom);
+          }}
+        >
+          <button
+            type="button"
+            className="model-provider-disclosure"
+            aria-expanded={expanded}
+            aria-controls={panelId}
+            onClick={() => void beginEditProvider(provider, custom)}
+          >
+            <span className="model-provider-chevron" aria-hidden="true">{expanded ? <ChevronDownIcon /> : <ChevronRightIcon />}</span>
+            <strong>{provider}</strong>
+            {custom && <span className="model-custom-badge">自定义</span>}
+            <i className="model-health-dot" title="已发现" />
+          </button>
+          <div className="model-provider-actions">
+            <span className="model-provider-count">{providerModels.length} 个模型</span>
+            {custom ? <>
+              <button type="button" disabled={saving} onClick={() => void beginEditProvider(provider, custom, true)}>编辑</button>
+              <button type="button" className="model-delete-action" disabled={busy || saving} onClick={() => void removeProvider(provider)}>删除</button>
+            </> : <span className="model-provider-managed">{providerModels.some((model) => model.authMode === "pi-managed") ? "Pi 登录管理" : "Pi Runtime 管理"}</span>}
+          </div>
+        </header>
+        {expanded && <div id={panelId} className="model-provider-panel">
+          {editingProviderKey === provider && editingProvider
+            ? providerEditor
+            : custom
+              ? <p className="model-provider-loading">正在读取 Provider 配置…</p>
+              : <>
+                  <p className="model-provider-readonly">这是 Pi 内置登录 Provider，地址、密钥和模型目录由 Pi Runtime 管理。</p>
+                  <div className="model-provider-rows">{providerModels.map((model) => {
+                    const active = state.model?.provider === model.provider && state.model?.id === model.id;
+                    return <article className={`model-provider-row ${active ? "is-active" : ""}`} key={`${model.provider}/${model.id}/${model.api || ""}`}>
+                      <button type="button" className="model-select-row" disabled={busy || active} onClick={() => onModel(model.provider, model.id, model.api)} title={`${model.provider}/${model.id}`}>
+                        <code>{model.id}</code><span>{model.name !== model.id ? model.name : ""}</span>{model.api && <small>{model.api}</small>}{model.contextWindow && <em>{Math.round(model.contextWindow / 1000)}k</em>}
+                      </button>
+                    </article>;
+                  })}</div>
+                </>}
+        </div>}
+      </section>;
+    })}{!models.length && <p className="resource-loading">当前没有可用模型</p>}</div>
   </div>;
 }
 

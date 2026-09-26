@@ -167,6 +167,7 @@ import { handleWorkspaceReadRoute } from "./routes/workspace-read.js";
 import { SubagentStatusProvider } from "./subagent-status-provider.js";
 import { apiRouteAdmission, PROMPT_BODY_LIMIT } from "./api-route-admission.js";
 import {
+  assistantLinkedWorkspaceFiles,
   normalizeWorkspaceRelativePath,
   readWorkspaceFile,
   recentModifiedWorkspaceFiles,
@@ -201,6 +202,8 @@ const MAX_NATIVE_STEERING_IMAGE_CHARS = MAX_PROMPT_IMAGES_ENCODED_BYTES;
 const MAX_PERSISTED_PROMPT_IDENTITIES_PER_SESSION = 64;
 const MAX_PERSISTED_PROMPT_IDENTITY_SESSIONS = 128;
 const MAX_PENDING_PROMPT_BASELINE_IDS = 256;
+const MAX_CONSUMED_STEER_PROJECTIONS_PER_SESSION = 64;
+const MAX_CONSUMED_STEER_PROJECTION_SESSIONS = 128;
 // Pi may emit agent_settled before the new JSONL user record is visible to a
 // concurrent reader. Keep the draft's provisional sidebar summary only across
 // this small bounded visibility window.
@@ -416,7 +419,25 @@ interface NativeSteeringAdmissions {
     promptAt: number;
     imageChars: number;
     imageCount?: number;
+    /** Persisted User rows visible before admission can never be this Steer. */
+    baselinePersistedUserIds: Set<string>;
+    /** Last visible persisted row; timestamp-less matching must follow this anchor. */
+    baselinePersistedTailId?: string;
   }>;
+}
+
+interface PendingConsumedSteer {
+  id: string;
+  payloadFingerprint: string;
+  promptAt: number;
+  timestamp?: number;
+  baselinePersistedUserIds: Set<string>;
+  baselinePersistedTailId?: string;
+}
+
+interface PersistedSteerProjection {
+  payloadFingerprint: string;
+  timestamp?: number;
 }
 
 interface ActivePromptDiagnostic {
@@ -628,6 +649,16 @@ export class PiChatApp {
   private readonly nativeSteeringAdmissionsBySession = new Map<
     string,
     NativeSteeringAdmissions
+  >();
+  /** Verified consumed Steers waiting for their persisted User row to become visible. */
+  private readonly pendingConsumedSteersBySession = new Map<
+    string,
+    PendingConsumedSteer[]
+  >();
+  /** Bounded process-local Steer labels reattached to matching JSONL projections. */
+  private readonly persistedSteerProjectionsBySession = new Map<
+    string,
+    Map<string, PersistedSteerProjection>
   >();
   /** Monotonic browser-facing revision for the native Steer projection. */
   private readonly nativeSteeringProjectionRevisions = new Map<string, number>();
@@ -2861,6 +2892,10 @@ export class PiChatApp {
     );
     this.pendingNativeSteeringBySession.delete(sessionId);
     this.nativeSteeringAdmissionsBySession.delete(sessionId);
+    // A consumed Steer may be waiting for its JSONL User row. That projection
+    // belongs to the worker generation that verified dequeue + message_start;
+    // retaining it across recovery could label a later ordinary same-text row.
+    this.pendingConsumedSteersBySession.delete(sessionId);
     this.nativeSteeringResetAfterSettlement.delete(sessionId);
     const revision = droppedCount > 0
       ? this.advanceNativeSteeringProjection(sessionId)
@@ -2978,6 +3013,44 @@ export class PiChatApp {
     return items;
   }
 
+  /** Retain only server-verified Steer provenance until JSONL exposes its User row. */
+  private rememberConsumedNativeSteer(
+    sessionId: string,
+    event: Record<string, unknown>,
+    admission: NativeSteeringAdmissions["items"][number],
+  ): void {
+    const message = event.message && typeof event.message === "object"
+      ? event.message as PiMessage
+      : null;
+    if (!message || message.role !== "user") return;
+    const timestamp = typeof message.timestamp === "number"
+      && Number.isFinite(message.timestamp)
+      ? message.timestamp
+      : undefined;
+    const pending = this.pendingConsumedSteersBySession.get(sessionId) || [];
+    pending.push({
+      id: admission.id,
+      payloadFingerprint: this.promptPayloadFingerprint(message),
+      promptAt: admission.promptAt,
+      ...(timestamp !== undefined ? { timestamp } : null),
+      baselinePersistedUserIds: admission.baselinePersistedUserIds,
+      ...(admission.baselinePersistedTailId
+        ? { baselinePersistedTailId: admission.baselinePersistedTailId }
+        : null),
+    });
+    while (pending.length > MAX_CONSUMED_STEER_PROJECTIONS_PER_SESSION)
+      pending.shift();
+    this.pendingConsumedSteersBySession.delete(sessionId);
+    this.pendingConsumedSteersBySession.set(sessionId, pending);
+    while (
+      this.pendingConsumedSteersBySession.size
+      > MAX_CONSUMED_STEER_PROJECTION_SESSIONS
+    )
+      this.pendingConsumedSteersBySession.delete(
+        this.pendingConsumedSteersBySession.keys().next().value!,
+      );
+  }
+
   /**
    * Returns true when this user message_start is a *verified* native steer
    * consumption: Pi dequeued the matching steering message (queue_update
@@ -3017,6 +3090,7 @@ export class PiChatApp {
     this.nativeSteeringResetAfterSettlement.delete(sessionId);
     this.advanceNativeSteeringProjection(sessionId);
     this.noteUserPrompt(sessionId, consumed.promptAt);
+    this.rememberConsumedNativeSteer(sessionId, event, consumed);
     return consumed.id;
   }
 
@@ -4332,8 +4406,12 @@ export class PiChatApp {
       }
       this.rememberModelContextWindows([model]);
       applied.model = model;
+      // Pi clamps every non-reasoning model to off as part of set_model. Record
+      // that known side effect and do not issue an incompatible follow-up
+      // strength that would make the hot display diverge from Runtime state.
+      if (model.reasoning === false) applied.thinkingLevel = "off";
     }
-    if (settings.thinkingLevel) {
+    if (settings.thinkingLevel && applied.model?.reasoning !== false) {
       const outcomeToken = randomUUID();
       try {
         await rpc.send(
@@ -4357,6 +4435,31 @@ export class PiChatApp {
         throw error;
       }
       applied.thinkingLevel = settings.thinkingLevel;
+    }
+    const appliedModel = applied.model;
+    if (
+      settings.model &&
+      appliedModel &&
+      appliedModel.reasoning !== false
+    ) {
+      try {
+        const state = asState(await rpc.send({ type: "get_state" }));
+        const thinkingLevel = state.thinkingLevel as ThinkingLevel | undefined;
+        if (
+          state.model?.provider === appliedModel.provider &&
+          state.model.id === appliedModel.id &&
+          thinkingLevel &&
+          THINKING_LEVELS.includes(thinkingLevel)
+        )
+          applied.thinkingLevel = thinkingLevel;
+      } catch (error) {
+        // Model/Thinking writes were already acknowledged. A failed read must
+        // neither make the following Prompt ambiguous nor claim an unconfirmed
+        // clamped value; the next Runtime refresh can repair the projection.
+        console.warn(
+          `[Pi Chat] 切换模型后无法确认 Thinking 强度${sessionId ? `（Session ${sessionId}）` : ""}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
     return applied;
   }
@@ -4693,6 +4796,131 @@ export class PiChatApp {
     message.piChatPromptId = promptId;
   }
 
+  private projectPersistedSteerDeliveries(
+    sessionId: string,
+    messages: PiMessage[],
+  ): void {
+    // Pi/JSONL never owns this metadata. Clear labels left on reusable message
+    // objects before consulting the bounded trusted projection on every read.
+    for (const message of messages) delete message.piChatDelivery;
+    const projections = this.persistedSteerProjectionsBySession.get(sessionId);
+    if (!projections?.size) return;
+    this.persistedSteerProjectionsBySession.delete(sessionId);
+    this.persistedSteerProjectionsBySession.set(sessionId, projections);
+    for (const message of messages) {
+      const persistedId = message.piChatPersistedMessageId;
+      if (!persistedId) continue;
+      const projection = projections.get(persistedId);
+      if (!projection) continue;
+      const timestamp = typeof message.timestamp === "number"
+        && Number.isFinite(message.timestamp)
+        ? message.timestamp
+        : undefined;
+      if (
+        projection.payloadFingerprint !== this.promptPayloadFingerprint(message)
+        || projection.timestamp !== timestamp
+      ) {
+        projections.delete(persistedId);
+        continue;
+      }
+      message.piChatDelivery = "steer";
+    }
+    if (!projections.size)
+      this.persistedSteerProjectionsBySession.delete(sessionId);
+  }
+
+  private rememberPersistedSteerDelivery(
+    sessionId: string,
+    message: PiMessage,
+  ): void {
+    const persistedId = message.piChatPersistedMessageId;
+    if (!persistedId) return;
+    const timestamp = typeof message.timestamp === "number"
+      && Number.isFinite(message.timestamp)
+      ? message.timestamp
+      : undefined;
+    const projection: PersistedSteerProjection = {
+      payloadFingerprint: this.promptPayloadFingerprint(message),
+      ...(timestamp !== undefined ? { timestamp } : null),
+    };
+    const projections = this.persistedSteerProjectionsBySession.get(sessionId)
+      || new Map<string, PersistedSteerProjection>();
+    const existing = projections.get(persistedId);
+    if (
+      existing
+      && (
+        existing.payloadFingerprint !== projection.payloadFingerprint
+        || existing.timestamp !== projection.timestamp
+      )
+    ) return;
+    projections.delete(persistedId);
+    projections.set(persistedId, projection);
+    while (projections.size > MAX_CONSUMED_STEER_PROJECTIONS_PER_SESSION)
+      projections.delete(projections.keys().next().value!);
+    this.persistedSteerProjectionsBySession.delete(sessionId);
+    this.persistedSteerProjectionsBySession.set(sessionId, projections);
+    while (
+      this.persistedSteerProjectionsBySession.size
+      > MAX_CONSUMED_STEER_PROJECTION_SESSIONS
+    )
+      this.persistedSteerProjectionsBySession.delete(
+        this.persistedSteerProjectionsBySession.keys().next().value!,
+      );
+    message.piChatDelivery = "steer";
+  }
+
+  private reconcileConsumedSteerProjections(
+    sessionId: string,
+    messages: PiMessage[],
+  ): void {
+    this.projectPersistedSteerDeliveries(sessionId, messages);
+    const pending = this.pendingConsumedSteersBySession.get(sessionId);
+    if (!pending?.length) return;
+    const users = messages
+      .map((message, index) => ({ message, index }))
+      .filter(({ message }) => message.role === "user");
+    const claimed = new Set<PiMessage>();
+    const remaining: PendingConsumedSteer[] = [];
+    for (const item of pending) {
+      const anchorIndex = item.baselinePersistedTailId
+        ? messages.findIndex(
+            (message) => message.piChatPersistedMessageId === item.baselinePersistedTailId,
+          )
+        : -1;
+      const persisted = users.find(({ message, index }) => {
+        const persistedId = message.piChatPersistedMessageId;
+        if (
+          !persistedId
+          || claimed.has(message)
+          || message.piChatDelivery === "steer"
+          || item.baselinePersistedUserIds.has(persistedId)
+          || this.promptPayloadFingerprint(message) !== item.payloadFingerprint
+        ) return false;
+        if (item.baselinePersistedTailId && (anchorIndex < 0 || index <= anchorIndex))
+          return false;
+        const timestamp = typeof message.timestamp === "number"
+          && Number.isFinite(message.timestamp)
+          ? message.timestamp
+          : undefined;
+        // Without Pi's exact consumed timestamp or a visible pre-admission tail
+        // anchor, payload equality alone must never claim an ordinary old row.
+        return item.timestamp !== undefined
+          ? timestamp === item.timestamp
+          : Boolean(item.baselinePersistedTailId)
+            && (timestamp === undefined || timestamp >= item.promptAt);
+      })?.message;
+      if (!persisted) {
+        remaining.push(item);
+        continue;
+      }
+      claimed.add(persisted);
+      this.rememberPersistedSteerDelivery(sessionId, persisted);
+    }
+    if (remaining.length)
+      this.pendingConsumedSteersBySession.set(sessionId, remaining);
+    else this.pendingConsumedSteersBySession.delete(sessionId);
+  }
+
   private pendingPromptPersisted(
     pending: PendingAcceptedPrompt,
     messages: PiMessage[],
@@ -4733,6 +4961,7 @@ export class PiChatApp {
   ): void {
     if (!messages) return;
     this.projectPersistedPromptIds(sessionId, messages);
+    this.reconcileConsumedSteerProjections(sessionId, messages);
     const pending = this.pendingAcceptedPromptsBySession.get(sessionId);
     if (!pending?.length) return;
     const claimed = new Set<PiMessage>();
@@ -5815,6 +6044,8 @@ export class PiChatApp {
     this.lastUserPromptAtBySession.delete(id);
     this.pendingAcceptedPromptsBySession.delete(id);
     this.persistedPromptIdsBySession.delete(id);
+    this.pendingConsumedSteersBySession.delete(id);
+    this.persistedSteerProjectionsBySession.delete(id);
     this.nativeSteeringProjectionRevisions.delete(id);
     this.runGenerationsBySession.delete(id);
     this.copyOutcomePendingSessionIds.delete(id);
@@ -7247,9 +7478,33 @@ export class PiChatApp {
     return { cwd, path };
   }
 
+  private async workspaceLinkedFileContext(
+    input: { sessionId: string; path: string },
+  ): Promise<{ cwd: string; path: string } | null> {
+    const cwd = await this.workspaceCwdForSession(input.sessionId);
+    if (!cwd) return null;
+    const snapshot = await this.options.sessions.snapshotForId(input.sessionId);
+    if (!snapshot) return null;
+    const path = normalizeWorkspaceRelativePath(input.path);
+    const key = process.platform === "win32" ? path.toLowerCase() : path;
+    if (!assistantLinkedWorkspaceFiles(snapshot.messages, cwd).has(key))
+      throw new HttpRequestError(404, "文件链接不在当前对话的已保存回复中");
+    return { cwd, path };
+  }
+
   private async workspaceFileRoute(input: { sessionId: string; path: string }): Promise<unknown | null> {
     const context = await this.workspaceRecentFileContext(input);
     return context ? readWorkspaceFile(context.cwd, context.path) : null;
+  }
+
+  private async openValidatedWorkspaceFile(context: { cwd: string; path: string }): Promise<{ ok: true; path: string }> {
+    if (!isSafeDefaultApplicationFile(context.path))
+      throw new HttpRequestError(409, "为安全起见，此文件类型不能直接打开");
+    const target = await workspaceFileTargetPath(context.cwd, context.path);
+    const verifyTarget = () => workspaceFileTargetPath(context.cwd, context.path);
+    if (this.options.openLocalFile) await this.options.openLocalFile(target, verifyTarget);
+    else await openWithDefaultApplication(target, verifyTarget);
+    return { ok: true, path: context.path };
   }
 
   private async workspaceOpenFileRoute(input: { sessionId: string; path: string }): Promise<unknown | null> {
@@ -7258,13 +7513,12 @@ export class PiChatApp {
     // Re-validate the exact preview contract at click time before asking the OS
     // to open anything; direct API callers cannot bypass text/symlink checks.
     await readWorkspaceFile(context.cwd, context.path);
-    if (!isSafeDefaultApplicationFile(context.path))
-      throw new HttpRequestError(409, "为安全起见，此文件类型不能直接打开");
-    const target = await workspaceFileTargetPath(context.cwd, context.path);
-    const verifyTarget = () => workspaceFileTargetPath(context.cwd, context.path);
-    if (this.options.openLocalFile) await this.options.openLocalFile(target, verifyTarget);
-    else await openWithDefaultApplication(target, verifyTarget);
-    return { ok: true, path: context.path };
+    return this.openValidatedWorkspaceFile(context);
+  }
+
+  private async workspaceOpenLinkedFileRoute(input: { sessionId: string; path: string }): Promise<unknown | null> {
+    const context = await this.workspaceLinkedFileContext(input);
+    return context ? this.openValidatedWorkspaceFile(context) : null;
   }
 
   private async readOnlySessionPath(sessionId: string): Promise<string | null> {
@@ -7415,6 +7669,7 @@ export class PiChatApp {
       await handleWorkspaceOpenRoute(
         {
           openWorkspaceFile: (input) => this.workspaceOpenFileRoute(input),
+          openLinkedWorkspaceFile: (input) => this.workspaceOpenLinkedFileRoute(input),
         },
         request,
         response,
@@ -7822,12 +8077,33 @@ export class PiChatApp {
             });
           const steeringMessage = message || "请查看这些图片。";
           const steerId = requestedSteerId || randomUUID();
+          const persistedAtAdmission = requestedIsPrimary
+            && this.lastPrimaryMessagesSessionId === requestedSessionId
+              ? this.lastPrimaryMessages
+              : steeringRuntime?.messageSnapshot
+                || this.options.sessions.cachedSnapshotForId?.(requestedSessionId)?.messages
+                || [];
+          const baselinePersistedUserIds = new Set(
+            persistedAtAdmission
+              .filter((item) => item.role === "user" && item.piChatPersistedMessageId)
+              .slice(-MAX_PENDING_PROMPT_BASELINE_IDS)
+              .map((item) => item.piChatPersistedMessageId!),
+          );
+          let baselinePersistedTailId: string | undefined;
+          for (let index = persistedAtAdmission.length - 1; index >= 0; index -= 1) {
+            const persistedId = persistedAtAdmission[index]?.piChatPersistedMessageId;
+            if (!persistedId) continue;
+            baselinePersistedTailId = persistedId;
+            break;
+          }
           currentAdmissions.items.push({
             id: steerId,
             message: steeringMessage,
             promptAt,
             imageChars: incomingImageChars,
             imageCount: images.length,
+            baselinePersistedUserIds,
+            ...(baselinePersistedTailId ? { baselinePersistedTailId } : null),
           });
           this.nativeSteeringAdmissionsBySession.set(
             requestedSessionId,
@@ -9186,6 +9462,24 @@ export class PiChatApp {
       if (request.method === "PUT") {
         const result = await this.withLifecycle("models-refreshing", "更新 Provider 配置", async () => {
           const body = preparedBody || (await bodyJson(request));
+          const primaryState = await this.options.rpc.send({ type: "get_state" });
+          const secondaryStates = await this.runtimePool.rpcStatesForQuiescence();
+          const proposedModels = body && typeof body === "object"
+            ? (body as Record<string, unknown>).models
+            : undefined;
+          const proposedIds = Array.isArray(proposedModels)
+            ? new Set(proposedModels.flatMap((model) => model && typeof model === "object" && typeof (model as Record<string, unknown>).id === "string" ? [(model as Record<string, unknown>).id as string] : []))
+            : null;
+          // The whole-Provider editor can rename/delete rows. Never leave any
+          // started Session pointing at a key that the same transaction removes;
+          // switching first gives Pi a durable model_change anchor.
+          const invalidatesActiveModel = proposedIds && [primaryState, ...secondaryStates].some((response) => {
+            if (!response) return false;
+            const model = asState(response).model;
+            return model?.provider === provider && !proposedIds.has(model.id);
+          });
+          if (invalidatesActiveModel)
+            throw new Error("请先在所有已启动对话中切换到其他模型，再重命名或删除当前模型");
           await this.applyModelFileTransaction(() => this.options.modelManager!.updateProvider(provider, body));
           return this.bootstrap();
         });

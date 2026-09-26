@@ -151,6 +151,271 @@ test("ordinary prompt applies its captured Model and Thinking snapshot immediate
   }
 });
 
+test("a non-reasoning prompt model ignores a stale thinking strength and projects off", async () => {
+  class NonReasoningRpc extends FakeRpc {
+    override async send(command: Record<string, unknown>, timeoutMs?: number, options?: Parameters<FakeRpc["send"]>[2]) {
+      if (command.type !== "get_available_models")
+        return super.send(command, timeoutMs, options);
+      await super.send(command, timeoutMs, options);
+      return {
+        type: "response",
+        success: true,
+        data: {
+          models: [{
+            provider: "cursor",
+            id: "composer-2.5",
+            name: "Composer 2.5",
+            api: "cursor-sdk",
+            reasoning: false,
+          }],
+        },
+      };
+    }
+  }
+  const path = "C:\\sessions\\non-reasoning-prompt-settings.jsonl";
+  const sessionId = idForPath(path);
+  const rpc = new NonReasoningRpc(path, "non-reasoning-prompt-settings");
+  const sessions = {
+    list: async () => [{ id: sessionId, sessionId: "non-reasoning-prompt-settings", name: "Composer", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+    pathForId: (id: string) => (id === sessionId ? path : null),
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: rpc as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    await fetch(`${origin}/api/bootstrap`);
+    const response = await fetch(`${origin}/api/chat/prompt`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        sessionId,
+        message: "use Composer",
+        settings: {
+          model: { provider: "cursor", modelId: "composer-2.5", api: "cursor-sdk" },
+          thinkingLevel: "high",
+        },
+      }),
+    });
+    assert.equal(response.status, 202);
+    assert.deepEqual(
+      rpc.commands
+        .filter((command) => ["set_model", "set_thinking_level", "prompt"].includes(String(command.type)))
+        .map((command) => command.type),
+      ["set_model", "prompt"],
+      "the server never replays a stale thinking strength onto a non-reasoning model",
+    );
+    const hot = await (await fetch(`${origin}/api/bootstrap`)).json() as { state: { thinkingLevel?: string } };
+    assert.equal(hot.state.thinkingLevel, "off");
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("a model-only reasoning switch projects Pi's restored thinking level instead of stale off", async () => {
+  class RestoringReasoningRpc extends FakeRpc {
+    private currentModel = {
+      provider: "cursor",
+      id: "composer-2.5",
+      name: "Composer 2.5",
+      api: "cursor-sdk",
+      reasoning: false,
+    };
+    private currentThinking = "off";
+
+    override async send(command: Record<string, unknown>, timeoutMs?: number, options?: Parameters<FakeRpc["send"]>[2]) {
+      if (command.type === "get_available_models") {
+        await super.send(command, timeoutMs, options);
+        return {
+          type: "response",
+          success: true,
+          data: {
+            models: [
+              this.currentModel,
+              {
+                provider: "cursor",
+                id: "grok-4.6",
+                name: "Grok 4.6",
+                api: "cursor-sdk",
+                reasoning: true,
+              },
+            ],
+          },
+        };
+      }
+      if (command.type === "set_model") {
+        const response = await super.send(command, timeoutMs, options);
+        this.currentModel = {
+          provider: "cursor",
+          id: "grok-4.6",
+          name: "Grok 4.6",
+          api: "cursor-sdk",
+          reasoning: true,
+        };
+        // Pi setModel restores its configured/default level even when the
+        // preceding non-reasoning model had clamped live state to off.
+        this.currentThinking = "high";
+        return response;
+      }
+      if (command.type === "get_state") {
+        await super.send(command, timeoutMs, options);
+        return {
+          type: "response",
+          success: true,
+          data: {
+            model: this.currentModel,
+            thinkingLevel: this.currentThinking,
+            sessionFile: this.path,
+            sessionId: this.sessionId,
+            isStreaming: this.streaming,
+          },
+        };
+      }
+      return super.send(command, timeoutMs, options);
+    }
+  }
+
+  const path = "C:\\sessions\\restore-reasoning-thinking.jsonl";
+  const sessionId = idForPath(path);
+  const rpc = new RestoringReasoningRpc(path, "restore-reasoning-thinking");
+  const sessions = {
+    list: async () => [{ id: sessionId, sessionId: "restore-reasoning-thinking", name: "Restore reasoning", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+    pathForId: (id: string) => (id === sessionId ? path : null),
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: rpc as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    await fetch(`${origin}/api/bootstrap`);
+    const response = await fetch(`${origin}/api/chat/prompt`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        sessionId,
+        message: "switch back to reasoning",
+        settings: {
+          model: { provider: "cursor", modelId: "grok-4.6", api: "cursor-sdk" },
+        },
+      }),
+    });
+    assert.equal(response.status, 202);
+    assert.deepEqual(
+      rpc.commands
+        .filter((command) => ["set_model", "get_state", "set_thinking_level", "prompt"].includes(String(command.type)))
+        .slice(-3)
+        .map((command) => command.type),
+      ["set_model", "get_state", "prompt"],
+    );
+    const hot = await (await fetch(`${origin}/api/bootstrap`)).json() as {
+      state: { model?: { id?: string } | null; thinkingLevel?: string };
+    };
+    assert.equal(hot.state.model?.id, "grok-4.6");
+    assert.equal(
+      hot.state.thinkingLevel,
+      "high",
+      "the hot projection uses Runtime-confirmed post-switch state, not Composer's old off",
+    );
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
+test("a provider-clamped reasoning strength is projected from Runtime instead of the stale request", async () => {
+  class ClampingReasoningRpc extends FakeRpc {
+    private currentThinking = "high";
+    private readonly currentModel = {
+      provider: "cursor",
+      id: "gemini-3.8-flash",
+      name: "Gemini 3.8 Flash",
+      api: "cursor-sdk",
+      reasoning: true,
+      thinkingLevelMap: {
+        off: null,
+        minimal: null,
+        low: "low",
+        medium: "medium",
+        high: "high",
+        xhigh: null,
+        max: null,
+      },
+    };
+
+    override async send(command: Record<string, unknown>, timeoutMs?: number, options?: Parameters<FakeRpc["send"]>[2]) {
+      if (command.type === "get_available_models") {
+        await super.send(command, timeoutMs, options);
+        return { type: "response", success: true, data: { models: [this.currentModel] } };
+      }
+      if (command.type === "set_thinking_level") {
+        const response = await super.send(command, timeoutMs, options);
+        this.currentThinking = command.level === "off" ? "low" : String(command.level);
+        return response;
+      }
+      if (command.type === "get_state") {
+        await super.send(command, timeoutMs, options);
+        return {
+          type: "response",
+          success: true,
+          data: {
+            model: this.currentModel,
+            thinkingLevel: this.currentThinking,
+            sessionFile: this.path,
+            sessionId: this.sessionId,
+            isStreaming: this.streaming,
+          },
+        };
+      }
+      return super.send(command, timeoutMs, options);
+    }
+  }
+
+  const path = "C:\\sessions\\clamped-reasoning-thinking.jsonl";
+  const sessionId = idForPath(path);
+  const rpc = new ClampingReasoningRpc(path, "clamped-reasoning-thinking");
+  const sessions = {
+    list: async () => [{ id: sessionId, sessionId: "clamped-reasoning-thinking", name: "Clamp reasoning", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: true }],
+    pathForId: (id: string) => (id === sessionId ? path : null),
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const app = new PiChatApp({ rpc: rpc as unknown as PiRpcClient, sessions, resources: {} as ResourceManager, cwd: process.cwd(), webRoot: process.cwd() });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    await fetch(`${origin}/api/bootstrap`);
+    const response = await fetch(`${origin}/api/chat/prompt`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        sessionId,
+        message: "clamp stale off",
+        settings: {
+          model: { provider: "cursor", modelId: "gemini-3.8-flash", api: "cursor-sdk" },
+          thinkingLevel: "off",
+        },
+      }),
+    });
+    assert.equal(response.status, 202);
+    const hot = await (await fetch(`${origin}/api/bootstrap`)).json() as {
+      state: { thinkingLevel?: string };
+    };
+    assert.equal(hot.state.thinkingLevel, "low");
+  } finally {
+    server.close();
+    await app.close();
+  }
+});
+
 test("an unknown prompt Model write fences later mutations as RESULT_PENDING", async () => {
   const path = "C:\\sessions\\unknown-prompt-model.jsonl";
   const sessionId = idForPath(path);

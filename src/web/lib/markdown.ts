@@ -4,11 +4,16 @@ import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
+import {
+  encodeLocalFileMarkdownDestination,
+  isLocalFileMarkdownDestination,
+} from "../../shared/local-file-link";
 import { remarkRestoreMarkdownMathPipes } from "./markdown-math-pipes";
 import { rehypeSourceRanges } from "./markdown-source-copy";
 
 type MarkdownPosition = { start?: { offset?: number }; end?: { offset?: number } };
 type MarkdownNode = { type: string; value?: string; children?: MarkdownNode[]; position?: MarkdownPosition };
+type RehypeNode = { type?: string; tagName?: string; properties?: Record<string, unknown>; children?: RehypeNode[] };
 
 /**
  * CommonMark intentionally rejects some adjacent delimiter runs; notably,
@@ -88,10 +93,26 @@ export function createMarkdownRemarkPlugins(
 
 const katexOptions = { throwOnError: false, strict: false as const };
 
+/** Rewrite local destinations before rehype-sanitize removes unsafe protocols. */
+export function rehypeLocalFileLinks() {
+  return (tree: RehypeNode) => {
+    const visit = (node: RehypeNode): void => {
+      const href = node.tagName === "a" && typeof node.properties?.href === "string"
+        ? node.properties.href
+        : "";
+      if (href && isLocalFileMarkdownDestination(href))
+        node.properties!.href = encodeLocalFileMarkdownDestination(href);
+      for (const child of node.children || []) visit(child);
+    };
+    visit(tree);
+  };
+}
+
 /** Streaming skips source-range mapping; final render attaches exact copy offsets. */
 export function createMarkdownRehypePlugins(mapOffset?: (offset: number) => number): ReactMarkdownOptions["rehypePlugins"] {
   return [
     rehypeRaw,
+    rehypeLocalFileLinks,
     [rehypeSanitize, markdownSanitizeSchema],
     ...(mapOffset ? [[rehypeSourceRanges, { mapOffset }] as const] : []),
     [rehypeKatex, katexOptions],

@@ -1,16 +1,19 @@
 const RPC_MODE_SUFFIX = "/@earendil-works/pi-coding-agent/dist/modes/rpc/rpc-mode.js";
 
-const FOLLOW_UP_CASE = `            case "follow_up": {
+const FOLLOW_UP_CASES = [
+  `            case "follow_up": {
                 await session.followUp(command.message, command.images);
                 return success(id, "follow_up");
             }
-            case "abort": {`;
+            case "abort": {`,
+  `            case "follow_up": {
+                await session.followUp(command.message, command.images, { source: "rpc" });
+                return success(id, "follow_up");
+            }
+            case "abort": {`,
+];
 
-const DEQUEUE_CASE = `            case "follow_up": {
-                await session.followUp(command.message, command.images);
-                return success(id, "follow_up");
-            }
-            case "dequeue": {
+const DEQUEUE_CASE = `            case "dequeue": {
                 const queues = session.clearQueue();
                 output({
                     type: "pi_chat_queue_dequeued",
@@ -24,12 +27,16 @@ const DEQUEUE_CASE = `            case "follow_up": {
 
 export function patchPiRpcModeSource(source) {
   if (source.includes('type: "pi_chat_queue_dequeued"')) return source;
-  if (!source.includes(FOLLOW_UP_CASE)) {
+  const matches = FOLLOW_UP_CASES.filter((candidate) => source.includes(candidate));
+  if (matches.length !== 1) {
     throw new Error(
       "当前 Pi RPC 实现与 Steer 撤回适配器不兼容；未修改全局 Pi，请更新 Pi Chat 适配器",
     );
   }
-  return source.replace(FOLLOW_UP_CASE, DEQUEUE_CASE);
+  return source.replace(
+    matches[0],
+    matches[0].replace('            case "abort": {', DEQUEUE_CASE),
+  );
 }
 
 export async function load(url, context, nextLoad) {

@@ -226,7 +226,12 @@ test("coordination fold toggle expands and collapses the full message", async ()
   const dom = new JSDOM("<div id=\"root\"></div>", { pretendToBeVisual: true });
   const previousWindow = globalThis.window;
   const previousDocument = globalThis.document;
-  Object.assign(globalThis, { window: dom.window, document: dom.window.document });
+  const previousActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT;
+  Object.assign(globalThis, {
+    window: dom.window,
+    document: dom.window.document,
+    IS_REACT_ACT_ENVIRONMENT: true,
+  });
   const root = createRoot(dom.window.document.querySelector("#root")!);
   const content = Array.from(
     { length: COORDINATION_MESSAGE_FOLD_LINE_LIMIT + 1 },
@@ -244,7 +249,11 @@ test("coordination fold toggle expands and collapses the full message", async ()
     assert.equal(toggle.textContent, "收起");
   } finally {
     await act(async () => root.unmount());
-    Object.assign(globalThis, { window: previousWindow, document: previousDocument });
+    Object.assign(globalThis, {
+      window: previousWindow,
+      document: previousDocument,
+      IS_REACT_ACT_ENVIRONMENT: previousActEnvironment,
+    });
   }
 });
 
@@ -351,6 +360,16 @@ test("visible assistant commentary remains a real boundary between processes", (
   assert.deepEqual(items.map((item) => item.kind), ["process", "message", "process"]);
 });
 
+test("a consumed Steer remains a user timeline boundary between process segments", () => {
+  const items = groupConversation([
+    { role: "assistant", content: [{ type: "thinking", thinking: "first" }] },
+    { role: "user", content: "redirect", timestamp: 2, piChatDelivery: "steer" },
+    { role: "assistant", content: [{ type: "thinking", thinking: "second" }] },
+  ]);
+  assert.deepEqual(items.map((item) => item.kind), ["process", "message", "process"]);
+  assert.equal(items[1]?.kind === "message" && items[1].message.piChatDelivery, "steer");
+});
+
 test("only an explicitly live trailing empty assistant keeps a metadata placeholder", () => {
   assert.deepEqual(groupConversation([{ role: "assistant", content: "" }]), []);
   const live = groupConversation([{ role: "assistant", content: "", timestamp: 10 }], { preserveTrailingAssistantPlaceholder: true });
@@ -407,6 +426,28 @@ test("an intentionally repeated persisted assistant turn remains visible", () =>
     { role: "assistant", content: answer, timestamp: 30 },
   ]);
   assert.equal(items.filter((item) => item.kind === "message").length, 3);
+});
+
+test("live handoff ignores persisted-only reasoning signatures", () => {
+  const persisted: PiMessage[] = [{
+    role: "assistant",
+    timestamp: 100,
+    content: [{
+      type: "thinking",
+      thinking: "plan",
+      thinkingSignature: "persisted-provider-signature",
+    }],
+  }];
+  const live: PiMessage = {
+    role: "assistant",
+    timestamp: 200,
+    content: [{ type: "thinking", thinking: "plan" }],
+  };
+  const items = groupConversation(persisted, { liveMessage: live });
+  assert.equal(items.length, 1);
+  assert.equal(items[0]?.kind, "process");
+  if (items[0]?.kind !== "process") throw new Error("Expected process");
+  assert.deepEqual(items[0].entries, [{ kind: "thinking", text: "plan" }]);
 });
 
 test("only the explicit live snapshot is coalesced among same-timestamp messages", () => {

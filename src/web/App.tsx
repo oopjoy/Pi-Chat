@@ -191,6 +191,7 @@ import { windowPromptReconcileScheduler, type PromptReconcileScheduler } from ".
 import { PromptCoordinator } from "./application/prompt-coordinator";
 import {
   composerStateForSelection,
+  modelSelectionPatch,
   promptSettingsForSelection,
   stageSessionComposerSelection,
   validateSelectedRoute,
@@ -6729,6 +6730,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         : undefined;
       const capturedPromptSettings = promptSettingsForSelection(
         capturedSelection,
+        models,
       );
       if (capturedSelection?.model && modelInventoryConfirmed) {
         const route = validateSelectedRoute(
@@ -6786,7 +6788,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
               view.session.id,
               input.gateMode,
               "queue",
-              promptSettingsForSelection(capturedSelection),
+              capturedPromptSettings,
               undefined,
               input.clientPromptOperationId,
             );
@@ -6811,7 +6813,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           // Runtime must mutate Model/Thinking solely for an explicit Composer
           // selection captured with this first prompt.
           model: capturedSelection?.model,
-          thinkingLevel: capturedSelection?.thinkingLevel,
+          thinkingLevel: capturedPromptSettings?.thinkingLevel,
           gateMode: capturedDraftGateMode,
           clientPromptOperationId: promptOperationId,
         });
@@ -8229,7 +8231,18 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       return;
     }
     if (!model) return;
-    stageSessionPref({ model });
+    const selectionKey = localDraftRef.current
+      ? DRAFT_PREFS_KEY
+      : targetSessionId;
+    stageComposerSelection(
+      selectionKey,
+      modelSelectionPatch(
+        state,
+        pendingSessionPrefsRef.current.get(selectionKey),
+        model,
+        models,
+      ),
+    );
     setError("");
   };
 
@@ -9209,8 +9222,8 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     ? pendingSessionPrefsRef.current.get(composerSelectionKey)
     : undefined;
   const composerState = useMemo(
-    () => composerStateForSelection(state, composerSelection),
-    [state, composerSelection, composerSelectionRevision],
+    () => composerStateForSelection(state, composerSelection, models),
+    [state, composerSelection, composerSelectionRevision, models],
   );
   // A selected Runtime model can arrive before the complete catalogue. Keep it
   // as a temporary option so the control remains usable and can be reconciled
@@ -10101,9 +10114,14 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         composerHasContent={composerHasContent}
         suppressNewWelcome={lifecycleBlocked}
         newConversationPresentation={newConversationPresentation}
+        firstRunGuide={newConversationPresentation && sessionsTotal === 0 ? {
+          runtimeStatus: primaryRuntime.status,
+          ...(piVersion ? { piVersion } : null),
+        } : undefined}
         waitingForPiMessage={waitingForPiMessage}
         draftWorkspaceCwd={draftWorkspaceCwd}
         workspaceCwd={conversationWorkspace}
+        openLinkedWorkspaceFile={api.openLinkedWorkspaceFile}
         workspacePicking={workspacePicking}
         draftWorkspaceOptions={draftWorkspaceOptions}
         onSelectDraftWorkspace={selectDraftWorkspace}

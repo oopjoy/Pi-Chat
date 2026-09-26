@@ -361,6 +361,29 @@ test("a mismatched Web artifact blocks mutations but keeps guarded recovery acti
   await expect(page.getByRole("button", { name: "关闭 Pi Chat" })).toBeEnabled();
 });
 
+test("Provider disclosure exposes native desktop keyboard semantics", { tag: "@desktop-only" }, async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "设置" }).click();
+  await page.getByRole("button", { name: "Models" }).click();
+
+  const providerCard = page.locator(".model-provider-card", { hasText: "test" });
+  const disclosure = providerCard.locator(".model-provider-disclosure");
+  await expect(disclosure).toHaveAttribute("aria-expanded", "false");
+  await expect(providerCard.locator(".model-provider-head")).not.toHaveAttribute("role", "button");
+  await expect(disclosure.locator("button")).toHaveCount(0);
+
+  await disclosure.focus();
+  await page.keyboard.press("Enter");
+  await expect(disclosure).toHaveAttribute("aria-expanded", "true");
+  const panelId = await disclosure.getAttribute("aria-controls");
+  expect(panelId).toBeTruthy();
+  await expect(page.locator(`#${panelId}`)).toBeVisible();
+  await expect(providerCard).toContainText("Pi Runtime 管理");
+
+  await page.keyboard.press("Space");
+  await expect(disclosure).toHaveAttribute("aria-expanded", "false");
+});
+
 test("cold navigation uses a target-labelled loading pane before replacing the source transcript", { tag: "@desktop-only" }, async ({ page }) => {
   await page.goto("/");
   await expect(page.getByText("First answer")).toBeVisible();
@@ -626,6 +649,24 @@ test("Files and Changes sidebar previews and explicitly opens recent mutations w
   await expect(process).not.toHaveAttribute("open", "");
 });
 
+test("assistant local-file links use the Session-addressed opener while Web links stay external", { tag: "@desktop-only" }, async ({ page }) => {
+  let openedPath = "";
+  await page.route("**/api/sessions/*/workspace/open-link", async (route) => {
+    const body = route.request().postDataJSON() as { path?: unknown };
+    openedPath = typeof body.path === "string" ? body.path : "";
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true, path: openedPath }) });
+  });
+  await page.goto("/");
+  const local = page.getByRole("link", { name: "Open README" });
+  await expect(local).toHaveAttribute("href", "#");
+  await local.click();
+  await expect.poll(() => openedPath).toBe("README.md");
+  await expect(local).toHaveClass(/is-opened/);
+  const external = page.getByRole("link", { name: "Web reference" });
+  await expect(external).toHaveAttribute("href", "https://example.com/reference");
+  await expect(external).toHaveAttribute("target", "_blank");
+});
+
 test("answer footer shows the producing model and copies the complete visible answer", { tag: "@desktop-only" }, async ({ page }) => {
   await openSecondSession(page);
   const answer = page.locator(".message-assistant", { hasText: "Final answer with" });
@@ -633,4 +674,30 @@ test("answer footer shows the producing model and copies the complete visible an
   await answer.getByRole("button", { name: "复制整个回答" }).click();
   await expect(answer.getByRole("button", { name: "回答已复制" })).toBeVisible();
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe("Final **answer** with `$x = 1$`.");
+});
+
+test("clipboard permission failures are visible and a later copy can recover", { tag: "@desktop-only" }, async ({ page }) => {
+  await openSecondSession(page);
+  const answer = page.locator(".message-assistant", { hasText: "Final answer with" });
+  const originalWriteText = await page.evaluateHandle(() => navigator.clipboard.writeText);
+  await page.evaluate(() => {
+    Object.defineProperty(navigator.clipboard, "writeText", {
+      configurable: true,
+      value: async () => { throw new DOMException("Permission denied", "NotAllowedError"); },
+    });
+  });
+
+  await answer.getByRole("button", { name: "复制整个回答" }).click();
+  const failed = answer.getByRole("button", { name: "复制回答失败" });
+  await expect(failed).toBeVisible();
+  await expect(failed).toHaveAttribute("title", "复制失败，请检查浏览器权限");
+
+  await page.evaluate((writeText) => {
+    Object.defineProperty(navigator.clipboard, "writeText", {
+      configurable: true,
+      value: writeText,
+    });
+  }, originalWriteText);
+  await failed.click();
+  await expect(answer.getByRole("button", { name: "回答已复制" })).toBeVisible();
 });
