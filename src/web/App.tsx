@@ -1065,6 +1065,8 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   const sessionRefreshInFlightRef = useRef(false);
   const sessionRefreshGenerationRef = useRef<number | null>(null);
   const sessionRefreshRequestedRef = useRef(false);
+  /** A structural Session mutation upgrades a coalesced refresh to a full scan. */
+  const sessionRefreshRequestedFullRef = useRef(false);
   const loadAllSessionsGenerationRef = useRef<number | null>(null);
   const directoryLoadGenerationsRef = useRef(new Map<string, number>());
   /** DSH-style verified direct-parent address; identity never grants child mutation authority. */
@@ -3308,7 +3310,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     earlySidebarInventoryTimer = window.setTimeout(() => {
       if (bootstrapSucceeded || sidebarInventoryReadyRef.current) return;
       void api
-        .sessions(showAllSessionsRef.current)
+        .sessions(showAllSessionsRef.current, [], true)
         .then((result) => {
           if (
             refreshEpochRef.current !== refreshEpoch ||
@@ -3600,11 +3602,12 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     [refresh, rehydrateSubagentAddressChain, reportBackgroundRefreshError],
   );
 
-  const refreshSidebarSessions = useCallback(async () => {
+  const refreshSidebarSessions = useCallback(async (forceFull = false) => {
     const runEpochGeneration = runEpochGenerationRef.current;
     if (sessionRefreshInFlightRef.current) {
       if (sessionRefreshGenerationRef.current === runEpochGeneration) {
         sessionRefreshRequestedRef.current = true;
+        sessionRefreshRequestedFullRef.current ||= forceFull;
         return;
       }
       // A replacement does not cancel browser requests. Detach A's coalescer so
@@ -3612,11 +3615,12 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       sessionRefreshInFlightRef.current = false;
       sessionRefreshGenerationRef.current = null;
       sessionRefreshRequestedRef.current = false;
+      sessionRefreshRequestedFullRef.current = false;
     }
     sessionRefreshInFlightRef.current = true;
     sessionRefreshGenerationRef.current = runEpochGeneration;
     try {
-      const full = showAllSessionsRef.current;
+      const full = forceFull || showAllSessionsRef.current;
       const fullBarrier = sidebarCommittedFullSequenceRef.current;
       const fullRequestSequence = full
         ? ++sidebarFullRequestSequenceRef.current
@@ -3624,6 +3628,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       const result = await api.sessions(
         full,
         full ? [] : sessionNavigationRef.current.pinnedSessionIds,
+        forceFull,
       );
       if (runEpochGenerationRef.current !== runEpochGeneration) return;
       for (const session of result.sessions) {
@@ -3658,7 +3663,9 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       sessionRefreshGenerationRef.current = null;
       if (sessionRefreshRequestedRef.current) {
         sessionRefreshRequestedRef.current = false;
-        void refreshSidebarSessions().catch(reportBackgroundRefreshError);
+        const requestedFull = sessionRefreshRequestedFullRef.current;
+        sessionRefreshRequestedFullRef.current = false;
+        void refreshSidebarSessions(requestedFull).catch(reportBackgroundRefreshError);
       }
     }
   }, [reportBackgroundRefreshError]);
@@ -3766,14 +3773,17 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     [],
   );
 
-  const scheduleSidebarRefresh = useCallback(() => {
+  const scheduleSidebarRefresh = useCallback((forceFull = false) => {
     const runEpochGeneration = runEpochGenerationRef.current;
+    if (forceFull) sessionRefreshRequestedFullRef.current = true;
     if (sessionRefreshTimerRef.current !== null)
       window.clearTimeout(sessionRefreshTimerRef.current);
     sessionRefreshTimerRef.current = window.setTimeout(() => {
       sessionRefreshTimerRef.current = null;
       if (runEpochGenerationRef.current !== runEpochGeneration) return;
-      void refreshSidebarSessions().catch(reportBackgroundRefreshError);
+      const requestedFull = sessionRefreshRequestedFullRef.current;
+      sessionRefreshRequestedFullRef.current = false;
+      void refreshSidebarSessions(requestedFull).catch(reportBackgroundRefreshError);
     }, 180);
   }, [refreshSidebarSessions, reportBackgroundRefreshError]);
 
@@ -3877,6 +3887,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         sessionRefreshInFlightRef.current = false;
         sessionRefreshGenerationRef.current = null;
         sessionRefreshRequestedRef.current = false;
+        sessionRefreshRequestedFullRef.current = false;
         loadAllSessionsGenerationRef.current = null;
         directoryLoadGenerationsRef.current.clear();
         directorySessionCoverageRef.current.clear();
@@ -5093,6 +5104,12 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
         const structuralAction = String(event.action || "");
         const structuralSessionId =
           typeof event.sessionId === "string" ? event.sessionId : "";
+        const requiresFullInventory = [
+          "deleted",
+          "renamed",
+          "cloned",
+          "forked",
+        ].includes(structuralAction);
         if (
           structuralSessionId &&
           ["deleted", "renamed"].includes(structuralAction)
@@ -5111,7 +5128,12 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           }
           // A renamed SSE has no resulting name; await authoritative metadata.
         }
-        scheduleSidebarRefresh();
+        // A structural mutation is a replacement boundary for the sidebar. A
+        // base prefix can intentionally retain older loaded rows, but it cannot
+        // prove that an externally deleted row still exists. Re-read the full
+        // physical inventory for these low-frequency events so deleted rows
+        // cannot survive a missed/late projection.
+        scheduleSidebarRefresh(requiresFullInventory);
       } else if (type === "pi_chat_queue_update") {
         // Queue updates are complete server snapshots. A malformed frame must
         // not be interpreted as an empty queue, or every accepted local turn
@@ -5959,6 +5981,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
           sessionRefreshInFlightRef.current = false;
           sessionRefreshGenerationRef.current = null;
           sessionRefreshRequestedRef.current = false;
+          sessionRefreshRequestedFullRef.current = false;
           loadAllSessionsGenerationRef.current = null;
           directoryLoadGenerationsRef.current.clear();
           directorySessionCoverageRef.current.clear();

@@ -1231,6 +1231,54 @@ test("session rename uses Pi RPC and delete stops the worker before removing JSO
   }
 });
 
+test("deleting an already-absent cold Session is an idempotent no-op", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-delete-stale-row-"));
+  try {
+    const primaryPath = join(root, "primary.jsonl");
+    const stalePath = join(root, "already-deleted.jsonl");
+    await writeFile(primaryPath, [
+      { type: "session", id: "primary", cwd: process.cwd() },
+      { type: "message", id: "m1", parentId: null, message: { role: "user", content: "keep" } },
+    ].map(JSON.stringify).join("\\n") + "\\n");
+    await writeFile(stalePath, [
+      { type: "session", id: "stale", cwd: process.cwd() },
+      { type: "message", id: "m1", parentId: null, message: { role: "user", content: "already deleted" } },
+    ].map(JSON.stringify).join("\\n") + "\\n");
+    const staleId = idForPath(stalePath);
+    const worker = new SessionWorker(primaryPath);
+    const app = new PiChatApp({
+      rpc: worker as unknown as PiRpcClient,
+      sessions: new SessionIndex(root, join(root, "cache.json")),
+      resources: {} as ResourceManager,
+      cwd: process.cwd(),
+      webRoot: process.cwd(),
+    });
+    const server = createServer((request, response) => void app.handle(request, response));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const origin = `http://127.0.0.1:${address.port}`;
+    try {
+      await fetch(`${origin}/api/bootstrap`);
+      await rm(stalePath);
+      const recovered = await fetch(`${origin}/api/bootstrap`);
+      assert.equal(recovered.status, 200);
+      const recoveredData = await recovered.json() as { sessions: Array<{ id: string }> };
+      assert.equal(recoveredData.sessions.some((session) => session.id === staleId), false);
+      const deleted = await fetch(`${origin}/api/sessions/${staleId}`, { method: "DELETE" });
+      assert.equal(deleted.status, 200);
+      const data = await deleted.json() as { sessions: Array<{ id: string }> };
+      assert.equal(data.sessions.some((session) => session.id === staleId), false);
+      assert.equal(existsSync(stalePath), false);
+    } finally {
+      server.close();
+      await app.close();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("a running Session rename acknowledges without waiting for the SessionIndex refresh", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-running-rename-"));
   try {

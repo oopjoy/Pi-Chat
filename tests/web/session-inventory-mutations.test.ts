@@ -2060,6 +2060,69 @@ test("manual refresh requests one fresh full inventory and keeps it expanded", a
   }
 });
 
+test("a structural sidebar mutation replaces retained rows with a fresh full inventory", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const stale = {
+    ...bootstrap.sessions[0],
+    id: "abcdef0123456789abcd",
+    sessionId: "already-deleted",
+    name: "Already deleted",
+    active: false,
+    writable: false,
+  };
+  const calls: Array<{ all: boolean; fresh: boolean }> = [];
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      sessions: [...bootstrap.sessions, stale],
+      sessionsTotal: 2,
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: activeId }),
+    sessions: async (
+      all = false,
+      _includeIds: string[] = [],
+      fresh = false,
+    ) => {
+      calls.push({ all, fresh });
+      return {
+        sessions: bootstrap.sessions,
+        total: bootstrap.sessions.length,
+      };
+    },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    assert.match(dom.window.document.body.textContent || "", /Already deleted/);
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.emitPi({
+        type: "pi_chat_sessions_changed",
+        action: "renamed",
+        sessionId: stale.id,
+      });
+      await new Promise((resolve) => dom.window.setTimeout(resolve, 230));
+    });
+    assert.equal(
+      calls.some((call) => call.all && call.fresh),
+      true,
+      "structural changes must bypass the cached/base sidebar projection",
+    );
+    assert.doesNotMatch(
+      dom.window.document.body.textContent || "",
+      /Already deleted/,
+    );
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("App collapses duplicate Session IDs from bootstrap to one latest sidebar row", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");

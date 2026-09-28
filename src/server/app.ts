@@ -5967,7 +5967,32 @@ export class PiChatApp {
       : runtime?.sessionPath ||
         runtime?.draftSessionPath ||
         this.options.sessions.pathForId(id);
-    if (!isPrimary && !path && !runtime) throw new Error("会话不存在");
+    if (!isPrimary && !path && !runtime) {
+      // Delete is idempotent for a stale sidebar row. The Session Index has just
+      // performed a fresh physical scan, so absence is authoritative: do not
+      // turn an already-deleted conversation into a red transport error.
+      await this.sessionRelations.removeDestination(id);
+      this.deletionOutcomePendingBySession.delete(id);
+      this.clearSessionRuntimeTransientState(id, "deleted", {
+        removeGatePreference: true,
+      });
+      this.lastUserPromptAtBySession.delete(id);
+      this.pendingAcceptedPromptsBySession.delete(id);
+      this.persistedPromptIdsBySession.delete(id);
+      this.pendingConsumedSteersBySession.delete(id);
+      this.persistedSteerProjectionsBySession.delete(id);
+      this.nativeSteeringProjectionRevisions.delete(id);
+      this.runGenerationsBySession.delete(id);
+      this.copyOutcomePendingSessionIds.delete(id);
+      this.copyProjectionPendingSessionIds.delete(id);
+      this.sessionControl.clearSession(id);
+      this.broadcast({
+        type: "pi_chat_sessions_changed",
+        action: "deleted",
+        sessionId: id,
+      });
+      return this.bootstrap();
+    }
     if (isPrimary) {
       if (
         this.primaryTurnActive() ||
@@ -7074,8 +7099,12 @@ export class PiChatApp {
     const pendingPrompt = this.pendingPromptForSession(this.activeSessionId);
     const pendingSteerProjection = this.pendingSteerProjection(this.activeSessionId);
     const windowedMessages = messageWindow(messages || []);
+    // Bootstrap is the browser's recovery boundary. It must revalidate the
+    // physical Session inventory instead of returning the short-lived cached
+    // list: another window/process may have removed a JSONL since the cache was
+    // populated, and a stale row would otherwise survive reload/reconnect.
     const sidebar = this.sidebarSessions(
-      await this.cachedSessionList(activeSessionPath),
+      await this.options.sessions.list(activeSessionPath),
       clientId,
     );
     this.primarySummarySnapshot =
