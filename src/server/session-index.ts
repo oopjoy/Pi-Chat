@@ -671,6 +671,7 @@ export class SessionIndex {
   private readonly snapshotCacheMaxEntries = 32;
   private readonly snapshotCacheMaxBytes = 64 * 1024 * 1024;
   private readonly snapshotReads = new Map<string, Promise<SessionFileSnapshot | null>>();
+  private forkNameOverrideReader?: (sessionId: string) => Promise<string | null>;
 
   constructor(
     root?: string,
@@ -683,6 +684,43 @@ export class SessionIndex {
     this.statFile = statFile;
     this.parseFile = parseFile;
     this.incrementalProjectionEnabled = parseFile === parseSession;
+  }
+
+  /** Attach Pi Chat's sidecar-backed explicit Fork rename projection. */
+  setForkNameOverrideReader(reader: (sessionId: string) => Promise<string | null>): void {
+    this.forkNameOverrideReader = reader;
+    this.latestList = null;
+  }
+
+  /** Update already-cached summaries after a successful explicit Fork rename. */
+  applyForkNameOverride(sessionId: string, name: string): void {
+    if (!sessionId || !name) return;
+    for (const [path, entry] of this.cache || []) {
+      if (entry.summary?.id !== sessionId) continue;
+      entry.summary = { ...entry.summary, name };
+      this.cache?.set(path, entry);
+    }
+    for (const [path, cached] of this.snapshotCache) {
+      if (cached.summary?.id !== sessionId) continue;
+      cached.summary = { ...cached.summary, name };
+      this.snapshotCache.set(path, cached);
+    }
+    if (this.latestList)
+      this.latestList = {
+        ...this.latestList,
+        sessions: this.latestList.sessions.map((session) =>
+          session.id === sessionId ? { ...session, name } : session,
+        ),
+      };
+  }
+
+  private async applyForkNameOverrideToSummary(
+    path: string,
+    summary: Omit<SessionSummary, "active"> | null,
+  ): Promise<Omit<SessionSummary, "active"> | null> {
+    if (!summary || !this.forkNameOverrideReader) return summary;
+    const override = await this.forkNameOverrideReader(summary.id);
+    return override ? { ...summary, name: cleanPreview(override, 120) } : summary;
   }
 
   private async projectSummary(path: string, fileStat: Stats): Promise<Omit<SessionSummary, "active"> | null> {
@@ -839,9 +877,10 @@ export class SessionIndex {
           refreshResults[index] = { normalized, missing: true };
           continue;
         }
-        const summary = projected.summary && isSubagentSession(normalized, projected.summary.name)
+        const namedSummary = await this.applyForkNameOverrideToSummary(normalized, projected.summary);
+        const summary = namedSummary && isSubagentSession(normalized, namedSummary.name)
           ? null
-          : projected.summary;
+          : namedSummary;
         refreshResults[index] = { normalized, version: projected.version, summary };
       }
     };
@@ -941,7 +980,8 @@ export class SessionIndex {
         return null;
       }
       const currentVersion = sessionFileVersion(fileStat, fingerprint);
-      let summary = entry.summary;
+      let summary = await this.applyForkNameOverrideToSummary(normalized, entry.summary);
+      if (!summary) return null;
       if (isSubagentSession(normalized, summary.name)) {
         this.cache.delete(path);
         this.pathsById.delete(id);
@@ -949,7 +989,10 @@ export class SessionIndex {
         return null;
       }
       if (!sameSessionFileVersion(entry, currentVersion)) {
-        const refreshed = await this.projectSummary(normalized, fileStat);
+        const refreshed = await this.applyForkNameOverrideToSummary(
+          normalized,
+          await this.projectSummary(normalized, fileStat),
+        );
         this.cache.set(normalized, { ...currentVersion, summary: refreshed });
         if (normalized !== path) this.cache.delete(path);
         await saveSessionCache(this.cachePath, this.cache);
@@ -1164,6 +1207,10 @@ export class SessionIndex {
     const cached = this.snapshotCache.get(id);
     if (!cached) return null;
     const branch = activeSessionBranch([...cached.projection.entries]);
+    // Pi receives this entry ID as the actual fork boundary. Never infer a
+    // different entry from visible ordering or message text: a copied/Fork
+    // projection with stale IDs must fail closed rather than fork the wrong
+    // branch and restore an editor prompt from another User turn.
     const entry = branch.find((candidate) => candidate.id === match[1]);
     if (entry?.type !== "message" || entry.message?.role !== "user") return null;
     const text = textFromContent(entry.message.content);
@@ -1177,7 +1224,7 @@ export class SessionIndex {
     } catch {
       return null;
     }
-    return text.trim() || images.length ? { entryId: match[1], text, images } : null;
+    return text.trim() || images.length ? { entryId: entry.id!, text, images } : null;
   }
 
   async messagesForId(id: string): Promise<PiMessage[] | null> {

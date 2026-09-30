@@ -41,6 +41,25 @@ test("Session Fork provenance persists atomically and serializes concurrent muta
   }
 });
 
+test("explicit Fork name overrides persist without removing provenance", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-session-relations-name-"));
+  const path = join(root, "relations.json");
+  try {
+    const store = new SessionRelationStore(path);
+    await store.recordFork(firstDestination, relation("user-1:0", 10));
+    assert.equal(await store.setNameOverride(firstDestination, "Braun实验对比"), true);
+    assert.equal(await store.getNameOverride(firstDestination), "Braun实验对比");
+    const restarted = new SessionRelationStore(path);
+    assert.equal(await restarted.getNameOverride(firstDestination), "Braun实验对比");
+    assert.deepEqual(await restarted.getForkOrigin(firstDestination), relation("user-1:0", 10));
+    assert.equal(await restarted.setNameOverride(secondDestination, "not a Fork"), false);
+    await restarted.removeDestination(firstDestination);
+    assert.equal(await restarted.getNameOverride(firstDestination), null);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Session Fork provenance fails closed on malformed files and rejects invalid relations", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-session-relations-invalid-"));
   const path = join(root, "relations.json");

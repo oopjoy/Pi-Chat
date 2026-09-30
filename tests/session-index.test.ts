@@ -3,6 +3,7 @@ import { appendFile, mkdtemp, mkdir, readFile, rename, rm, stat, truncate, write
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import type { PiMessage } from "../src/shared/types";
 import {
   SESSION_TAIL_MAX_RETAINED_BYTES,
   SESSION_TAIL_MAX_SCAN_BYTES,
@@ -226,6 +227,28 @@ test("session index marks a persisted fork/clone with a distinguishable suffix",
   }
 });
 
+test("explicit Fork rename overrides the derived suffix after index restart and cache reuse", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-derived-session-rename-"));
+  try {
+    const path = join(root, "fork.jsonl");
+    const cachePath = join(root, "index.json");
+    await writeFile(path, [
+      { type: "session", version: 3, id: "forked", cwd: root, parentSession: join(root, "source.jsonl") },
+      { type: "message", id: "u1", message: { role: "user", content: "Braun prompt" } },
+      { type: "session_info", id: "name", name: "Braun实验对比（Fork）" },
+    ].map(JSON.stringify).join("\n") + "\n");
+    const overrideReader = async (id: string) => id === idForPath(path) ? "Braun实验对比" : null;
+    const firstIndex = new SessionIndex(root, cachePath);
+    firstIndex.setForkNameOverrideReader(overrideReader);
+    assert.equal((await firstIndex.list())[0].name, "Braun实验对比");
+    const restarted = new SessionIndex(root, cachePath);
+    restarted.setForkNameOverrideReader(overrideReader);
+    assert.equal((await restarted.list())[0].name, "Braun实验对比");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("session index orders active streams by their last user instruction rather than JSONL mtime", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-session-prompt-order-"));
   try {
@@ -441,6 +464,26 @@ test("fork targets resolve persisted text and image User messages on the active 
     assert.equal(await index.forkTargetForId(session.id, "abandoned:0"), null);
     assert.equal(await index.forkTargetForId(session.id, "a1:0"), null);
     assert.equal(await index.forkTargetForId(session.id, "u2:1"), null);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("fork targets fail closed when a visible copied identity is not an exact active-branch entry", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-fork-visible-identity-"));
+  try {
+    const path = join(root, "forked.jsonl");
+    await writeFile(path, [
+      { type: "session", id: "forked", cwd: root },
+      { type: "message", id: "u1", parentId: null, message: { role: "user", content: "visible" } },
+    ].map(JSON.stringify).join("\n") + "\n");
+    const index = new SessionIndex(root, join(root, "cache.json"));
+    const [session] = await index.list();
+    await index.snapshotForId(session.id);
+    const internals = index as unknown as { snapshotCache: Map<string, { snapshot: { messages: PiMessage[] } }> };
+    const cached = internals.snapshotCache.get(session.id)!;
+    (cached.snapshot.messages[0] as PiMessage).piChatPersistedMessageId = "copied-u:0";
+    assert.equal(await index.forkTargetForId(session.id, "copied-u:0"), null);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -1,8 +1,8 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createReadStream, existsSync, readFileSync, watch, type FSWatcher } from "node:fs";
-import { lstat, realpath, stat, unlink } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { basename, dirname, extname, isAbsolute, join, normalize, relative, resolve } from "node:path";
+import { basename, dirname, extname, join, normalize, resolve } from "node:path";
 import {
   appendTerminalMessage,
   assistantMessageRequestsTool,
@@ -12,7 +12,6 @@ import { compareSessionsByLastUserPrompt } from "../shared/session-order.js";
 import { classifyNativeRetryEvent } from "../shared/retry-lifecycle.js";
 import { MAX_PROMPT_IMAGES_ENCODED_BYTES } from "../shared/rpc-contracts.js";
 import type { PromptEvidenceFactKind } from "../shared/prompt-evidence.js";
-import { decodeCanonicalMessageEndPayload } from "../shared/runtime-events.js";
 import { shouldRetainStateDiagnosticEvent } from "../shared/state-diagnostics.js";
 import { normalizePromptFailure, visibleAssistantErrorDetail, type PromptFailure } from "../shared/assistant-error.js";
 import type {
@@ -24,7 +23,6 @@ import type {
   GateMode,
   HealthData,
   InitialPromptData,
-  InitialPromptRequest,
   ModelInfo,
   PiMessage,
   PiState,
@@ -58,7 +56,6 @@ import {
   pickWorkspaceFolder,
   isSafeDefaultApplicationFile,
   openWithDefaultApplication,
-  revealInExplorer,
 } from "./file-picker.js";
 import {
   type FileSnapshot,
@@ -164,6 +161,70 @@ import { handleSessionsReadRoute } from "./routes/sessions-read.js";
 import { handleSubagentsReadRoute } from "./routes/subagents-read.js";
 import { handleWorkspaceOpenRoute } from "./routes/workspace-open.js";
 import { handleWorkspaceReadRoute } from "./routes/workspace-read.js";
+import { handleResourcesReadRoute } from "./routes/resources-read.js";
+import { handleDiagnosticsReadRoute } from "./routes/diagnostics-read.js";
+import { handleLifecycleControlRoute } from "./routes/lifecycle-control.js";
+import { handleLocalFilesWorkspaceRoute } from "./routes/local-files-and-workspace.js";
+import { dequeueNativeSteering } from "./services/native-steering-dequeue.js";
+import {
+  admitNativeSteering,
+  type NativeSteeringAdmissions,
+} from "./services/native-steering-admission.js";
+import { renameSession } from "./services/session-rename-service.js";
+import { validateSessionDeletePath } from "./services/session-delete-path.js";
+import { prepareSessionDeletionRuntime } from "./services/session-delete-runtime.js";
+import { finalizeSessionDelete } from "./services/session-delete-finalize.js";
+import { finalizeSessionCopy } from "./services/session-copy-finalize.js";
+import { validateSessionCopyPreparation } from "./services/session-copy-preparation.js";
+import {
+  executeSessionCopyRpc,
+  validateCopiedSessionIdentity,
+} from "./services/session-copy-transaction.js";
+import { applyModelFileTransaction } from "./services/model-file-transaction.js";
+import { projectColdSessionView, projectHotMemoryView } from "./services/session-view-projection.js";
+import { readColdSessionView } from "./services/cold-session-view.js";
+import { readSessionView, StaleSessionViewRuntimeError } from "./services/session-view-service.js";
+import { forwardRuntimeEvent } from "./services/runtime-event-bridge.js";
+import { projectPromptFailureLifecycle } from "./services/prompt-failure-lifecycle.js";
+import { drainSecondaryAfterSettlement as drainSecondaryAfterSettlementService } from "./services/secondary-settlement-drain.js";
+import { drainPrimaryAfterSettlement as drainPrimaryAfterSettlementService } from "./services/primary-settlement-drain.js";
+import { finalizeAcceptedRuntimeEvent } from "./services/runtime-event-lifecycle.js";
+import { abortRuntime } from "./services/runtime-abort.js";
+import { admitPromptExtension } from "./services/prompt-extension-admission.js";
+import { admitPromptToQueue } from "./services/prompt-queue-admission.js";
+import { sessionViewFromCurrentProjection } from "./services/session-hot-view.js";
+import { bootstrap as bootstrapPrimary } from "./services/primary-bootstrap.js";
+import { dispatchSecondaryPrompt } from "./services/prompt-secondary-dispatch.js";
+import { dispatchPrimaryPrompt } from "./services/prompt-primary-dispatch.js";
+import {
+  compactRuntime,
+  type RuntimeCompactionResult,
+} from "./services/runtime-compaction.js";
+import { respondToExtension } from "./services/extension-response.js";
+import { createProviderManagement } from "./services/provider-management.js";
+import { createCustomModelManagement } from "./services/custom-model-management.js";
+import { createRuntimeSettingsService } from "./services/runtime-settings.js";
+import { assertApplicationQuiescent, verifyApplicationQuiescent } from "./services/application-quiescence.js";
+import {
+  reloadPrimaryResources,
+  restartPrimaryRuntime as restartPrimaryRuntimeService,
+} from "./services/primary-runtime-lifecycle.js";
+import { handleSessionMutationsRoute } from "./routes/session-mutations.js";
+import { handleSessionRuntimeControlRoute } from "./routes/session-runtime-control.js";
+import { handleQueueControlRoute } from "./routes/queue-control.js";
+import { handleWorkspaceControlRoute } from "./routes/workspace-control.js";
+import { parseNewSessionInput } from "./routes/new-session-input.js";
+import { dispatchNewDraftFirstTurn } from "./services/new-draft-first-turn.js";
+import { prepareNewDraftRuntime } from "./services/new-draft-preparation.js";
+import { handleModelManagementRoute } from "./routes/model-management.js";
+import { handleNewSessionRoute } from "./routes/new-session.js";
+import { handleExtensionResponseRoute } from "./routes/extension-response.js";
+import {
+  THINKING_LEVELS,
+  requiredSessionId,
+} from "./routes/request-validation.js";
+import { parsePromptRouteInput } from "./routes/prompt-input.js";
+import { handleWindowControlRoute } from "./routes/window-control.js";
 import { SubagentStatusProvider } from "./subagent-status-provider.js";
 import { apiRouteAdmission, PROMPT_BODY_LIMIT } from "./api-route-admission.js";
 import {
@@ -208,9 +269,6 @@ const MAX_CONSUMED_STEER_PROJECTION_SESSIONS = 128;
 // concurrent reader. Keep the draft's provisional sidebar summary only across
 // this small bounded visibility window.
 const DRAFT_PERSISTENCE_RETRY_DELAYS_MS = [40, 120, 300, 700];
-const SESSION_ID_PATTERN = /^[a-f0-9]{20}$/;
-const CLIENT_PROMPT_OPERATION_ID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const PROMPT_TRACE_EVIDENCE: Readonly<Partial<Record<string, PromptEvidenceFactKind>>> = {
   admitted: "admitted",
   queued: "queued",
@@ -258,68 +316,6 @@ function gateModeFromNotice(message: unknown): GateMode | null {
   const match = /^Gate mode:\s*(strict|open)\b/im.exec(value);
   if (match) return match[1] as GateMode;
   return null;
-}
-
-/** Existing-session mutations must never infer a mutable Primary target. */
-function requiredSessionId(body: Record<string, unknown>): string {
-  const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
-  if (!SESSION_ID_PATTERN.test(sessionId)) {
-    throw new HttpRequestError(400, "sessionId 必须是有效的会话标识");
-  }
-  return sessionId;
-}
-
-const THINKING_LEVELS: ThinkingLevel[] = [
-  "off",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-];
-
-/** Parse the immutable next-turn selection attached to one ordinary prompt. */
-function promptSettingsSnapshot(body: Record<string, unknown>): PromptSettingsSnapshot | undefined {
-  if (body.settings === undefined) return undefined;
-  if (!body.settings || typeof body.settings !== "object" || Array.isArray(body.settings))
-    throw new HttpRequestError(400, "消息设置格式无效");
-  const raw = body.settings as Record<string, unknown>;
-  const rawModel = raw.model;
-  let model: PromptSettingsSnapshot["model"];
-  if (rawModel !== undefined) {
-    if (!rawModel || typeof rawModel !== "object" || Array.isArray(rawModel))
-      throw new HttpRequestError(400, "模型设置格式无效");
-    const candidate = rawModel as Record<string, unknown>;
-    const provider = typeof candidate.provider === "string" ? candidate.provider.trim() : "";
-    const modelId = typeof candidate.modelId === "string" ? candidate.modelId.trim() : "";
-    const api = typeof candidate.api === "string" ? candidate.api.trim() : "";
-    if (
-      !provider ||
-      !modelId ||
-      provider.length > 80 ||
-      modelId.length > 200 ||
-      api.length > 120 ||
-      /[\u0000-\u001f]/.test(provider) ||
-      /[\u0000-\u001f]/.test(modelId) ||
-      /[\u0000-\u001f]/.test(api)
-    )
-      throw new HttpRequestError(400, "模型设置无效");
-    model = { provider, modelId, ...(api ? { api } : null) };
-  }
-  const thinkingLevel =
-    typeof raw.thinkingLevel === "string" &&
-    THINKING_LEVELS.includes(raw.thinkingLevel as ThinkingLevel)
-      ? (raw.thinkingLevel as ThinkingLevel)
-      : undefined;
-  if (raw.thinkingLevel !== undefined && !thinkingLevel)
-    throw new HttpRequestError(400, "无效的 Thinking 强度");
-  if (!model && !thinkingLevel)
-    throw new HttpRequestError(400, "消息设置不能为空");
-  return {
-    ...(model ? { model } : null),
-    ...(thinkingLevel ? { thinkingLevel } : null),
-  };
 }
 
 export interface PreparedApplicationRestart {
@@ -410,22 +406,6 @@ interface NativeSteeringSnapshot {
   dequeued: string[];
 }
 
-/** Accepted native steers waiting for Pi consumption, scoped to one worker generation. */
-interface NativeSteeringAdmissions {
-  generation: number;
-  items: Array<{
-    id: string;
-    message: string;
-    promptAt: number;
-    imageChars: number;
-    imageCount?: number;
-    /** Persisted User rows visible before admission can never be this Steer. */
-    baselinePersistedUserIds: Set<string>;
-    /** Last visible persisted row; timestamp-less matching must follow this anchor. */
-    baselinePersistedTailId?: string;
-  }>;
-}
-
 interface PendingConsumedSteer {
   id: string;
   payloadFingerprint: string;
@@ -482,7 +462,6 @@ interface SettledSessionRunTiming {
   durationMs: number;
 }
 
-class StaleSessionViewRuntimeError extends Error {}
 
 class NativeSteeringResetError extends Error {
   readonly droppedCount: number;
@@ -725,6 +704,9 @@ export class PiChatApp {
       : join(options.cwd, ".pi-chat-session-index.json");
     this.sessionRelations = options.sessionRelations || new SessionRelationStore(
       join(dirname(sessionCachePath), "pi-chat-session-relations.json"),
+    );
+    this.options.sessions.setForkNameOverrideReader?.((sessionId) =>
+      this.sessionRelations.getNameOverride(sessionId),
     );
     this.currentCwd = resolve(options.cwd);
     this.primaryRuntimeCwd = this.currentCwd;
@@ -1262,29 +1244,25 @@ export class PiChatApp {
   }
 
   private assertApplicationQuiescent(action: string): void {
-    const busyCount = this.busyConversationCount();
-    const transitioningCount = this.runtimePool.transitioningCount;
-    if (busyCount || transitioningCount || this.activeMutationRequests) {
-      throw new ApplicationBusyError(
-        `仍有 ${busyCount + transitioningCount} 个对话正在执行、启动、停止、排队或等待确认，请处理完成后再${action}`,
-      );
-    }
+    assertApplicationQuiescent({
+      busyConversationCount: () => this.busyConversationCount(),
+      transitioningCount: () => this.runtimePool.transitioningCount,
+      activeMutationRequests: () => this.activeMutationRequests,
+      primaryReadReady: () => this.primaryReadReady(),
+      primaryState: async () => this.options.rpc.send({ type: "get_state" }),
+      secondaryStates: () => this.runtimePool.rpcStatesForQuiescence(),
+    }, action);
   }
 
   private async verifyApplicationQuiescent(action: string): Promise<void> {
-    this.assertApplicationQuiescent(action);
-    const primaryState = this.primaryReadReady()
-      ? await this.options.rpc.send({ type: "get_state" })
-      : null;
-    const secondaryStates = await this.runtimePool.rpcStatesForQuiescence();
-    if (
-      [primaryState, ...secondaryStates].some(
-        (response) => response && asState(response).isStreaming,
-      )
-    ) {
-      throw new ApplicationBusyError(`仍有对话正在执行，请完成后再${action}`);
-    }
-    this.assertApplicationQuiescent(action);
+    await verifyApplicationQuiescent({
+      busyConversationCount: () => this.busyConversationCount(),
+      transitioningCount: () => this.runtimePool.transitioningCount,
+      activeMutationRequests: () => this.activeMutationRequests,
+      primaryReadReady: () => this.primaryReadReady(),
+      primaryState: async () => this.options.rpc.send({ type: "get_state" }),
+      secondaryStates: () => this.runtimePool.rpcStatesForQuiescence(),
+    }, action);
   }
 
   async close(): Promise<void> {
@@ -1494,135 +1472,17 @@ export class PiChatApp {
   ): void {
     const active = this.activePromptDiagnostic(sessionId, rpcGeneration);
     if (!active) return;
-    const route: Partial<NonNullable<PromptSettingsSnapshot["model"]>> = active.route || {};
-    const recordRetryFact = (kind: "retry-scheduled" | "retry-started" | "retry-exhausted", attempt?: number, maxAttempts?: number, delayMs?: number) => {
-      this.promptEvidence.record({
-        sessionId,
-        promptId: active.promptId,
-        kind,
-        rpcGeneration,
-        runGeneration,
-        ...(attempt !== undefined ? { attempt } : null),
-        ...(maxAttempts !== undefined ? { maxAttempts } : null),
-        ...(delayMs !== undefined ? { delayMs } : null),
-      });
-    };
-    const lifecycleFor = (failure: PromptFailure, retryAttempt?: number) => ({
-      piChatSessionId: sessionId,
-      piChatRunEpoch: this.runEpoch,
-      piChatRunGeneration: runGeneration,
-      piChatPromptId: active.promptId,
-      failureKind: failure.kind,
-      ...(failure.provider || route.provider ? { provider: failure.provider || route.provider } : null),
-      ...(failure.model || route.modelId ? { model: failure.model || route.modelId } : null),
-      ...(failure.api || route.api ? { api: failure.api || route.api } : null),
-      ...(failure.status !== undefined ? { status: failure.status } : null),
-      ...(failure.retryAttempts !== undefined ? { retryAttempts: failure.retryAttempts } : null),
-      ...(failure.requestId ? { requestId: failure.requestId } : null),
-      ...(failure.incidentId ? { incidentId: failure.incidentId } : null),
-      ...(retryAttempt !== undefined ? { retryAttempt } : null),
+    projectPromptFailureLifecycle({
+      active,
+      sessionId,
+      event,
+      runGeneration,
+      rpcGeneration,
+    }, {
+      runEpoch: () => this.runEpoch,
+      broadcast: (next) => this.broadcast(next),
+      recordEvidence: (fact) => this.promptEvidence.record(fact),
     });
-    const retry = classifyNativeRetryEvent(event);
-    if (retry?.kind === "scheduled") {
-      const raw = typeof event.errorMessage === "string" ? event.errorMessage : "模型请求失败";
-      const failure = normalizePromptFailure(raw, {
-        provider: route.provider,
-        model: route.modelId,
-        api: route.api,
-        retryAttempts: retry.attempt,
-      });
-      active.retryPending = true;
-      active.retryAttempt = retry.attempt;
-      active.failure = failure;
-      recordRetryFact(
-        "retry-scheduled",
-        retry.attempt,
-        retry.maxAttempts,
-        retry.delayMs,
-      );
-      this.broadcast({
-        type: "pi_chat_prompt_retry_scheduled",
-        ...lifecycleFor(failure, retry.attempt),
-        ...(retry.delayMs !== undefined ? { delayMs: retry.delayMs } : null),
-        ...(retry.maxAttempts !== undefined ? { maxAttempts: retry.maxAttempts } : null),
-      });
-      return;
-    }
-    if (retry?.kind === "completed" || retry?.kind === "inconclusive" || retry?.kind === "exhausted") {
-      active.retryPending = false;
-      if (retry.kind === "completed" || retry.kind === "inconclusive") {
-        // A failed native retry without its terminal reason is delivery
-        // evidence, not proof of exhaustion or cancellation. Wait for the
-        // authoritative process-error/assistant-error event instead of
-        // inventing a UI terminal.
-        active.failure = undefined;
-        active.retryExhausted = false;
-        return;
-      }
-      const finalError = event.finalError as string;
-      const failure = normalizePromptFailure(finalError, {
-        provider: route.provider,
-        model: route.modelId,
-        api: route.api,
-        retryAttempts: retry.attempt,
-      });
-      active.failure = failure;
-      active.retryExhausted = true;
-      recordRetryFact("retry-exhausted", retry.attempt);
-      if (!active.retryExhaustedPublished) {
-        active.retryExhaustedPublished = true;
-        this.broadcast({
-          type: "pi_chat_prompt_retry_exhausted",
-          ...lifecycleFor(failure, retry.attempt),
-          retryExhausted: true,
-        });
-      }
-      return;
-    }
-    if (event.type === "agent_start") {
-      if (!active.retryPending || !active.failure) return;
-      active.retryPending = false;
-      recordRetryFact("retry-started", active.retryAttempt);
-      this.broadcast({ type: "pi_chat_prompt_retry_started", ...lifecycleFor(active.failure, active.retryAttempt) });
-      return;
-    }
-    if (event.type === "message_end" && event.message && typeof event.message === "object") {
-      const message = event.message as PiMessage;
-      if (message.role !== "assistant" || typeof message.errorMessage !== "string" || !message.errorMessage.trim()) {
-        active.failure = undefined;
-        return;
-      }
-      active.failure = normalizePromptFailure(message.errorMessage, {
-        provider: message.provider || route.provider,
-        model: message.model || route.modelId,
-        api: message.api || route.api,
-      });
-      return;
-    }
-    if (event.type === "pi_chat_process_error") {
-      const raw = typeof event.error === "string" && event.error.trim() ? event.error : "Pi RPC 已退出";
-      active.failure = normalizePromptFailure(raw, {
-        provider: event.provider || route.provider,
-        model: event.model || route.modelId,
-        api: event.api || route.api,
-        status: event.status,
-        retryAttempts: event.retryAttempts,
-        requestId: event.requestId,
-        incidentId: event.incidentId,
-        aborted: event.failureKind === "user-aborted",
-        runtimeExit: event.errorCode === "RPC_CHILD_EXIT" || event.errorCode === "PI_RPC_EXIT_UNCONFIRMED",
-        modelUnavailable: event.errorCode === "MODEL_UNAVAILABLE",
-      });
-    }
-    if ((event.type === "agent_settled" || event.type === "pi_chat_process_error") && active.failure && !active.terminalPublished) {
-      active.terminalPublished = true;
-      const lifecycle = lifecycleFor(active.failure, active.retryAttempt);
-      this.broadcast({ type: "pi_chat_prompt_failed", ...lifecycle });
-      if ((active.retryExhausted || active.failure.retryExhausted) && !active.retryExhaustedPublished) {
-        active.retryExhaustedPublished = true;
-        this.broadcast({ type: "pi_chat_prompt_retry_exhausted", ...lifecycle, retryExhausted: true });
-      }
-    }
   }
 
   private observePromptRpc(
@@ -1820,72 +1680,19 @@ export class PiChatApp {
     sessionId: string,
     runGeneration?: number,
   ): void {
-    // Pi emits cumulative tool partialResult snapshots. The web client does not
-    // render them; forwarding every snapshot creates quadratic SSE traffic and
-    // can freeze Chromium's main thread during long or self-referential output.
-    if (event.type === "tool_execution_update") return;
-    // Native retries are projected by the correlated observer. Their raw error
-    // bodies must not bypass the Node error boundary or create a second UI path.
-    if (event.type === "auto_retry_start" || event.type === "auto_retry_end") return;
-    const allowedEvent = event.type === "message_end"
-      ? decodeCanonicalMessageEndPayload(event)
-      : event;
-    if (!allowedEvent) {
-      this.traceState("rpc-event", "rejected", sessionId, {
-        eventType: "message_end",
-        decisionReason: "malformed-critical-event",
-      }, undefined, runGeneration);
-      return;
-    }
-    const eventForBrowser: Record<string, unknown> = allowedEvent.type === "pi_chat_process_error"
-      ? (() => {
-          const raw = typeof allowedEvent.error === "string"
-            ? allowedEvent.error
-            : "Pi RPC 已退出";
-          const failure = normalizePromptFailure(raw, {
-            provider: allowedEvent.provider,
-            model: allowedEvent.model,
-            api: allowedEvent.api,
-            status: allowedEvent.status,
-            retryAttempts: allowedEvent.retryAttempts,
-            requestId: allowedEvent.requestId,
-            incidentId: allowedEvent.incidentId,
-            aborted: allowedEvent.failureKind === "user-aborted",
-            runtimeExit: allowedEvent.errorCode === "RPC_CHILD_EXIT"
-              || allowedEvent.errorCode === "PI_RPC_EXIT_UNCONFIRMED",
-            modelUnavailable: allowedEvent.errorCode === "MODEL_UNAVAILABLE",
-          });
-          return {
-            ...allowedEvent,
-            // Node owns the browser boundary: never forward the unredacted
-            // transport error even though the complete redacted detail remains.
-            error: failure.message,
-            failure,
-          };
-        })()
-      : allowedEvent;
-    const {
-      piChatSessionId: _untrustedSessionId,
-      piChatRunEpoch: _untrustedRunEpoch,
-      piChatRunGeneration: _untrustedRunGeneration,
-      ...runtimeEvent
-    } = eventForBrowser;
-    const timing = this.eventRunTiming(
-      sessionId,
-      typeof runtimeEvent.type === "string" ? runtimeEvent.type : "",
-      runGeneration,
-    );
-    this.broadcast({
-      ...runtimeEvent,
-      piChatSessionId: sessionId,
-      piChatRunEpoch: this.runEpoch,
-      ...(typeof runGeneration === "number"
-        ? { piChatRunGeneration: runGeneration }
-        : null),
-      ...(timing.startedAt !== undefined ? { piChatRunStartedAt: timing.startedAt } : null),
-      ...(timing.durationMs !== undefined ? { piChatRunDurationMs: timing.durationMs } : null),
-      ...(timing.endedAt !== undefined ? { piChatRunEndedAt: timing.endedAt } : null),
-    });
+    forwardRuntimeEvent({
+      runEpoch: () => this.runEpoch,
+      traceRejected: (decisionReason, id, generation) => this.traceState(
+        "rpc-event",
+        "rejected",
+        id,
+        { eventType: "message_end", decisionReason },
+        undefined,
+        generation,
+      ),
+      eventRunTiming: (id, type, generation) => this.eventRunTiming(id, type, generation),
+      broadcast: (next) => this.broadcast(next),
+    }, event, sessionId, runGeneration);
   }
 
   private broadcastControlState(sessionId: string): void {
@@ -3290,124 +3097,55 @@ export class PiChatApp {
       event,
       generation,
     );
-    const transition = this.applyRuntimeEventTransition(
-      runtime.id,
-      runtime,
-      event,
-    );
-    const transitionGeneration = transition.state.runGeneration;
-    if (type === "agent_start" || type === "tool_execution_start")
-      this.beginSessionRunTiming(runtime.id, transitionGeneration);
-    else if (type === "agent_settled" || type === "pi_chat_process_error")
-      this.finishSessionRunTiming(runtime.id, transitionGeneration);
-    if (!transition.broadcastEvent) {
-      this.traceState("rpc-event", "rejected", runtime.id, {
-        eventType: type || "unknown",
+    finalizeAcceptedRuntimeEvent({
+      transition: () => this.applyRuntimeEventTransition(runtime.id, runtime, event),
+      beginRunTiming: (runGeneration) => this.beginSessionRunTiming(runtime.id, runGeneration),
+      finishRunTiming: (runGeneration) => this.finishSessionRunTiming(runtime.id, runGeneration),
+      traceRejected: (eventType) => this.traceState("rpc-event", "rejected", runtime.id, {
+        eventType: eventType || "unknown",
         decisionReason: "malformed-critical-event",
-      }, generation);
-      return;
-    }
-    const lifecyclePromptId = (type === "agent_start" || type === "agent_settled" || type === "pi_chat_process_error")
-      ? this.activePromptDiagnostic(runtime.id, generation)?.promptId
-      : undefined;
-    if (lifecyclePromptId)
-      transition.broadcastEvent = {
-        ...transition.broadcastEvent,
-        piChatPromptId: lifecyclePromptId,
-      };
-    this.broadcastPromptFailureLifecycle(
-      runtime.id,
-      transition.broadcastEvent,
-      transitionGeneration,
-      generation,
-    );
-    this.runtimePool.touch(runtime);
-    if (type === "agent_start")
-      this.traceActivePrompt(
-        "agent-start",
-        runtime.id,
-        generation,
-        transition.state.runGeneration,
-      );
-    else if (type === "pi_chat_process_error") {
-      const promptId = this.traceActivePrompt(
-        "process-failed",
-        runtime.id,
-        generation,
-        transition.state.runGeneration,
-      );
-      if (promptId) this.clearPromptDiagnostic(runtime.id, promptId);
-    }
-    if (consumedSteering || droppedNativeSteering > 0)
-      transition.broadcastEvent = {
-        ...transition.broadcastEvent,
-        ...(consumedSteering
-          ? { nativeSteeringConsumed: true, nativeSteeringId: consumedSteering }
-          : null),
-        ...(droppedNativeSteering > 0
-          ? { nativeSteeringDroppedCount: droppedNativeSteering }
-          : null),
-      };
-    this.broadcastRpcEvent(
-      transition.broadcastEvent,
-      runtime.id,
-      transition.state.runGeneration,
-    );
-    if (transition.effects.some((effect) => effect.type === "session-created"))
-      this.broadcast({
+      }, generation),
+      activePromptId: () => this.activePromptDiagnostic(runtime.id, generation)?.promptId,
+      broadcastPromptFailure: (broadcastEvent, runGeneration) =>
+        this.broadcastPromptFailureLifecycle(runtime.id, broadcastEvent, runGeneration, generation),
+      touch: () => this.runtimePool.touch(runtime),
+      tracePrompt: (phase, runGeneration) =>
+        this.traceActivePrompt(phase, runtime.id, generation, runGeneration),
+      clearPrompt: (promptId) => this.clearPromptDiagnostic(runtime.id, promptId),
+      broadcastRpc: (broadcastEvent, runGeneration) =>
+        this.broadcastRpcEvent(broadcastEvent, runtime.id, runGeneration),
+      broadcastSessionCreated: () => this.broadcast({
         type: "pi_chat_sessions_changed",
         action: "created",
         sessionId: runtime.id,
-      });
-    const settled = transition.effects.some(
-      (effect) => effect.type === "settled",
-    );
-    if (settled) {
-      this.scheduleModelRuntimeSync();
-      const promptId = this.traceActivePrompt(
-        "settled",
-        runtime.id,
-        generation,
-        transition.state.runGeneration,
-      );
-      void this.finalizePersistedDraftWhenVisible(runtime);
-      setTimeout(() => this.warmRuntimeMessageSnapshot(runtime), 0);
-      if (this.hasNativeSteeringPending(runtime.id, generation))
-        this.nativeSteeringResetAfterSettlement.set(runtime.id, generation);
-      // Pi's RPC event schema has no run ID. Its JSONL stdout ordering is the
-      // only usable ordering contract, so place a response barrier after the
-      // terminal event before admitting another prompt. Frames preceding this
-      // get_state response must be handled while this generation is still the
-      // current one; a delayed old settled frame can therefore never clear the
-      // following turn or dispatch its queue early.
-      if (!runtime.dispatching) {
-        runtime.dispatching = true;
+      }),
+      scheduleModelRuntimeSync: () => this.scheduleModelRuntimeSync(),
+      afterSettled: () => {
+        void this.finalizePersistedDraftWhenVisible(runtime);
+        setTimeout(() => this.warmRuntimeMessageSnapshot(runtime), 0);
+      },
+      hasNativeSteeringPending: () => this.hasNativeSteeringPending(runtime.id, generation),
+      noteNativeSteeringReset: () =>
+        this.nativeSteeringResetAfterSettlement.set(runtime.id, generation),
+      isDispatching: () => runtime.dispatching,
+      beginSettlementDispatch: () => { runtime.dispatching = true; },
+      broadcastActivity: () => this.broadcastSessionActivity(runtime.id),
+      drainAfterSettlement: (promptId) => {
+        // Pi stdout supplies no run id. Keep a FIFO state barrier after the
+        // terminal event before this Runtime may dispatch another prompt.
+        void this.drainSecondaryAfterSettlement(runtime, runtime.rpcGeneration, promptId);
+      },
+      releaseAfterProcessFailure: () => {
+        runtime.dispatching = false;
+        runtime.queuePaused = queuePausedBeforeEvent;
+        this.broadcastQueue(runtime.id);
         this.broadcastSessionActivity(runtime.id);
-        void this.drainSecondaryAfterSettlement(
-          runtime,
-          runtime.rpcGeneration,
-          promptId,
-        );
-      }
-    } else if (
-      type === "agent_start" ||
-      type === "tool_execution_start" ||
-      type === "tool_execution_end"
-    ) {
-      this.broadcastSessionActivity(runtime.id);
-    } else if (type === "pi_chat_process_error") {
-      // The raw error frame opens the pane-level error; this activity frame
-      // retains the concise reason in sidebar/cache snapshots too. A crash
-      // while dispatching or waiting on a settlement barrier must not leave
-      // this Session's queue permanently stuck: release the dispatch lock and
-      // unpause so the next mutation can recover and continue.
-      runtime.dispatching = false;
-      runtime.queuePaused = queuePausedBeforeEvent;
-      // transitionRuntimeEvent published its conservative paused state before
-      // this crash cleanup. Publish the released state as the final authority.
-      this.broadcastQueue(runtime.id);
-      this.broadcastSessionActivity(runtime.id);
-    }
+      },
+    }, {
+      eventType: type,
+      consumedNativeSteering: consumedSteering,
+      droppedNativeSteering,
+    });
   }
 
   /**
@@ -3421,96 +3159,46 @@ export class PiChatApp {
     sourceGeneration = runtime.rpcGeneration,
     promptId?: string,
   ): Promise<void> {
-    try {
-      const state = asState(
-        await runtime.rpc.send(
-          { type: "get_state" },
-          SETTLEMENT_STATE_TIMEOUT_MS,
-          // A short ordinary reader may already own get_state. This barrier
-          // must be a later FIFO command, not a coalesced waiter that inherits
-          // that reader's caller timeout.
-          { independentRead: true },
-        ),
-      );
-      if (this.closed) return;
-      if (
-        this.runtimePool.get(runtime.id) !== runtime ||
-        sourceGeneration !== runtime.rpcGeneration
-      )
-        return;
-      if (promptId && this.activePromptDiagnostic(runtime.id, sourceGeneration)?.promptId === promptId) {
-        this.tracePrompt(
-          "settlement-barrier",
-          runtime.id,
-          promptId,
-          sourceGeneration,
-        );
-        this.clearPromptDiagnostic(runtime.id, promptId);
-      }
-      runtime.lastState = state;
-      runtime.running = state.isStreaming;
-      if (
-        !runtime.running &&
-        this.nativeSteeringResetAfterSettlement.get(runtime.id) ===
-          sourceGeneration &&
-        this.hasNativeSteeringPending(runtime.id, sourceGeneration)
-      ) {
-        await this.resetNativeSteering(
-          runtime.id,
-          runtime,
-          "settled-before-consumption",
-        );
-        runtime.dispatching = false;
-        this.broadcastSessionActivity(runtime.id);
-        void this.dispatchRuntimeNext(runtime);
-        void this.runtimePool.sweep();
-        return;
-      }
-      runtime.dispatching = false;
-      this.broadcastSessionActivity(runtime.id);
-      if (!runtime.running) {
-        void this.dispatchRuntimeNext(runtime);
-        void this.runtimePool.sweep();
-      }
-    } catch (error) {
-      if (this.closed) return;
-      if (
-        this.runtimePool.get(runtime.id) !== runtime ||
-        sourceGeneration !== runtime.rpcGeneration
-      )
-        return;
-      if (promptId && this.activePromptDiagnostic(runtime.id, sourceGeneration)?.promptId === promptId) {
-        this.tracePromptDiagnosticOnly("process-failed", runtime.id, promptId, sourceGeneration);
-        this.clearPromptDiagnostic(runtime.id, promptId);
-      }
-      runtime.dispatching = false;
-      runtime.failed = true;
-      runtime.queuePaused = runtime.promptQueue.length > 0;
-      const message = `Pi 结算同步失败：${error instanceof Error ? error.message : String(error)}`;
-      const incident = this.reportIncident(error, {
-        sessionId: runtime.id,
-        runtimeKind: "secondary",
-        rpcGeneration: runtime.rpcGeneration,
-        childPid: runtime.rpc.currentPid?.() || undefined,
-        operation: "runtime.settlement",
-        queueLength: runtime.promptQueue.length,
-        outcome: "failed",
-        errorCode: "SETTLEMENT_SYNC_FAILED",
-      });
-      this.recordRuntimeFailure(runtime.id, message, incident.incidentId);
-      this.broadcastQueue(runtime.id);
-      this.broadcast({
-        type: "pi_chat_process_error",
-        piChatSessionId: runtime.id,
-        error: message,
-        errorCode: "SETTLEMENT_SYNC_FAILED",
-        incidentId: incident.incidentId,
-        ...(error instanceof NativeSteeringResetError
-          ? { nativeSteeringDroppedCount: error.droppedCount }
-          : null),
-      });
-      this.broadcastSessionActivity(runtime.id);
-    }
+    await drainSecondaryAfterSettlementService({
+      closed: () => this.closed,
+      isCurrent: (candidate, generation) => this.runtimePool.get(candidate.id) === candidate && generation === candidate.rpcGeneration,
+      activePromptId: (sessionId, generation) => this.activePromptDiagnostic(sessionId, generation)?.promptId,
+      traceSettled: (sessionId, id, generation) => this.tracePrompt("settlement-barrier", sessionId, id, generation),
+      traceFailure: (sessionId, id, generation) => this.tracePromptDiagnosticOnly("process-failed", sessionId, id, generation),
+      clearPrompt: (sessionId, id) => this.clearPromptDiagnostic(sessionId, id),
+      adoptState: (candidate, state) => { candidate.lastState = state; candidate.running = state.isStreaming; },
+      shouldResetSteering: (sessionId, generation) =>
+        this.nativeSteeringResetAfterSettlement.get(sessionId) === generation && this.hasNativeSteeringPending(sessionId, generation),
+      resetSteering: (candidate) => this.resetNativeSteering(candidate.id, candidate, "settled-before-consumption"),
+      broadcastActivity: (sessionId) => this.broadcastSessionActivity(sessionId),
+      dispatchNext: (candidate) => { void this.dispatchRuntimeNext(candidate); },
+      sweep: () => { void this.runtimePool.sweep(); },
+      timeoutMs: () => SETTLEMENT_STATE_TIMEOUT_MS,
+      markSettlementFailure: (candidate, error) => {
+        const message = `Pi 结算同步失败：${error instanceof Error ? error.message : String(error)}`;
+        const incident = this.reportIncident(error, {
+          sessionId: candidate.id,
+          runtimeKind: "secondary",
+          rpcGeneration: candidate.rpcGeneration,
+          childPid: candidate.rpc.currentPid?.() || undefined,
+          operation: "runtime.settlement",
+          queueLength: candidate.promptQueue.length,
+          outcome: "failed",
+          errorCode: "SETTLEMENT_SYNC_FAILED",
+        });
+        this.recordRuntimeFailure(candidate.id, message, incident.incidentId);
+        this.broadcastQueue(candidate.id);
+        this.broadcast({
+          type: "pi_chat_process_error",
+          piChatSessionId: candidate.id,
+          error: message,
+          errorCode: "SETTLEMENT_SYNC_FAILED",
+          incidentId: incident.incidentId,
+          ...(error instanceof NativeSteeringResetError ? { nativeSteeringDroppedCount: error.droppedCount } : null),
+        });
+        this.broadcastSessionActivity(candidate.id);
+      },
+    }, runtime, sourceGeneration, promptId);
   }
 
   private async drainPrimaryAfterSettlement(
@@ -3518,8 +3206,8 @@ export class PiChatApp {
     sourceGeneration = this.primaryRpcGeneration,
     promptId?: string,
   ): Promise<void> {
-    try {
-      const state = asState(
+    await drainPrimaryAfterSettlementService({
+      readState: async () => asState(
         await this.options.rpc.send(
           { type: "get_state" },
           SETTLEMENT_STATE_TIMEOUT_MS,
@@ -3527,81 +3215,246 @@ export class PiChatApp {
           // short-budget state read is currently in flight.
           { independentRead: true },
         ),
-      );
-      if (this.closed) return;
-      if (
-        sessionId !== this.primaryBoundSessionId ||
-        sourceGeneration !== this.primaryRpcGeneration
-      )
-        return;
-      if (promptId && this.activePromptDiagnostic(sessionId, sourceGeneration)?.promptId === promptId) {
-        this.tracePrompt(
-          "settlement-barrier",
-          sessionId,
-          promptId,
-          sourceGeneration,
-        );
-        this.clearPromptDiagnostic(sessionId, promptId);
-      }
-      this.lastPrimaryState = state;
-      this.running = state.isStreaming;
-      if (
-        !this.running &&
-        this.nativeSteeringResetAfterSettlement.get(sessionId) ===
-          sourceGeneration &&
-        this.hasNativeSteeringPending(sessionId, sourceGeneration)
-      ) {
-        await this.resetNativeSteering(
-          sessionId,
-          undefined,
-          "settled-before-consumption",
-        );
-        this.dispatching = false;
-        this.broadcastSessionActivity(sessionId);
-        void this.dispatchNext();
-        return;
-      }
-      this.dispatching = false;
-      this.broadcastSessionActivity(sessionId);
-      if (!this.running) void this.dispatchNext();
-    } catch (error) {
-      if (this.closed) return;
-      if (
-        sessionId !== this.primaryBoundSessionId ||
-        sourceGeneration !== this.primaryRpcGeneration
-      )
-        return;
-      if (promptId && this.activePromptDiagnostic(sessionId, sourceGeneration)?.promptId === promptId) {
-        this.tracePromptDiagnosticOnly("process-failed", sessionId, promptId, sourceGeneration);
-        this.clearPromptDiagnostic(sessionId, promptId);
-      }
-      this.dispatching = false;
-      this.primaryFailed = true;
-      this.queuePaused = this.promptQueue.length > 0;
-      const message = `Pi 结算同步失败：${error instanceof Error ? error.message : String(error)}`;
-      const incident = this.reportIncident(error, {
-        sessionId,
-        runtimeKind: "primary",
-        rpcGeneration: sourceGeneration,
-        childPid: this.options.rpc.currentPid?.() || undefined,
-        operation: "runtime.settlement",
-        queueLength: this.promptQueue.length,
-        outcome: "failed",
-        errorCode: "SETTLEMENT_SYNC_FAILED",
+      ),
+      closed: () => this.closed,
+      isCurrent: (id, generation) =>
+        id === this.primaryBoundSessionId && generation === this.primaryRpcGeneration,
+      activePromptId: (id, generation) =>
+        this.activePromptDiagnostic(id, generation)?.promptId,
+      traceSettled: (id, prompt, generation) =>
+        this.tracePrompt("settlement-barrier", id, prompt, generation),
+      traceFailure: (id, prompt, generation) =>
+        this.tracePromptDiagnosticOnly("process-failed", id, prompt, generation),
+      clearPrompt: (id, prompt) => this.clearPromptDiagnostic(id, prompt),
+      adoptState: (state) => {
+        this.lastPrimaryState = state;
+        this.running = state.isStreaming;
+      },
+      isRunning: () => this.running,
+      shouldResetSteering: (id, generation) =>
+        this.nativeSteeringResetAfterSettlement.get(id) === generation &&
+        this.hasNativeSteeringPending(id, generation),
+      resetSteering: (id) =>
+        this.resetNativeSteering(id, undefined, "settled-before-consumption"),
+      releaseDispatch: () => { this.dispatching = false; },
+      broadcastActivity: (id) => this.broadcastSessionActivity(id),
+      dispatchNext: () => { void this.dispatchNext(); },
+      markSettlementFailure: (id, error) => {
+        this.primaryFailed = true;
+        this.queuePaused = this.promptQueue.length > 0;
+        const message = `Pi 结算同步失败：${error instanceof Error ? error.message : String(error)}`;
+        const incident = this.reportIncident(error, {
+          sessionId: id,
+          runtimeKind: "primary",
+          rpcGeneration: sourceGeneration,
+          childPid: this.options.rpc.currentPid?.() || undefined,
+          operation: "runtime.settlement",
+          queueLength: this.promptQueue.length,
+          outcome: "failed",
+          errorCode: "SETTLEMENT_SYNC_FAILED",
+        });
+        this.recordRuntimeFailure(id, message, incident.incidentId);
+        this.broadcastQueue();
+        this.broadcast({
+          type: "pi_chat_process_error",
+          piChatSessionId: id,
+          error: message,
+          errorCode: "SETTLEMENT_SYNC_FAILED",
+          incidentId: incident.incidentId,
+          ...(error instanceof NativeSteeringResetError
+            ? { nativeSteeringDroppedCount: error.droppedCount }
+            : null),
+        });
+        this.broadcastSessionActivity(id);
+      },
+    }, sessionId, sourceGeneration, promptId);
+  }
+
+  /** Abort one Secondary through the owner-held operation lease. */
+  private async abortSecondaryRuntime(
+    sessionId: string,
+    runtime: SecondaryRuntime,
+    present: (result: { ok: true; isStreaming: boolean; queuePaused: boolean; abortPending?: boolean }) => void,
+  ): Promise<void> {
+    runtime.abortGeneration += 1;
+    const release = this.runtimePool.acquireOperation(runtime);
+    try {
+      this.runtimePool.touch(runtime);
+      const result = await abortRuntime({
+        pauseQueueForAbort: () => {
+          if (runtime.promptQueue.length || runtime.dispatching) runtime.queuePaused = true;
+        },
+        queuePaused: () => runtime.queuePaused,
+        unavailable: () => runtime.failed || runtime.rpc.isRunning?.() === false,
+        unavailableResult: () => ({
+          ok: true,
+          isStreaming: false,
+          queuePaused: runtime.queuePaused,
+        }),
+        steeringGeneration: () => runtime.rpcGeneration,
+        hasNativeSteeringPending: (generation) =>
+          this.hasNativeSteeringPending(sessionId, generation),
+        armNativeSteeringReset: (generation) =>
+          this.nativeSteeringResetAfterSettlement.set(sessionId, generation),
+        sendAbort: async () => { await runtime.rpc.send({ type: "abort" }, 5_000); },
+        abortOutcomeUnknown: (error) =>
+          error instanceof RpcRequestTimeoutError &&
+          error.outcomeUnknown &&
+          error.requestType === "abort",
+        running: () => runtime.running,
+        broadcastUncertainAbort: () => {
+          this.broadcastQueue(sessionId);
+          this.broadcastSessionActivity(sessionId);
+        },
+        broadcastBeforeStateProbe: () => {},
+        readState: async () => asState(
+          await runtime.rpc.send({ type: "get_state" }, 2_000),
+        ),
+        setRunning: (running) => { runtime.running = running; },
+        resetNativeSteering: () => this.resetNativeSteering(sessionId, runtime, "abort"),
+        broadcastStoppedAbort: () => {
+          this.broadcastQueue(sessionId);
+          this.broadcastSessionActivity(sessionId);
+        },
       });
-      this.recordRuntimeFailure(sessionId, message, incident.incidentId);
-      this.broadcastQueue();
-      this.broadcast({
-        type: "pi_chat_process_error",
-        piChatSessionId: sessionId,
-        error: message,
-        errorCode: "SETTLEMENT_SYNC_FAILED",
-        incidentId: incident.incidentId,
-        ...(error instanceof NativeSteeringResetError
-          ? { nativeSteeringDroppedCount: error.droppedCount }
-          : null),
+      // Keep the response write inside the operation lease: a Session
+      // reclaim/delete must not overtake the abort acknowledgement.
+      present(result);
+    } finally {
+      release();
+    }
+  }
+
+  /** Abort the Primary through its owner-held operation lease. */
+  private async abortPrimaryRuntime(
+    sessionId: string,
+    present: (result: { ok: true; isStreaming: boolean; queuePaused: boolean; abortPending?: boolean }) => void,
+  ): Promise<void> {
+    this.scheduler.primaryAbortGeneration += 1;
+    const release = this.primaryOperationAdmission.acquire().release;
+    try {
+      const result = await abortRuntime({
+        pauseQueueForAbort: () => {
+          if (this.promptQueue.length || this.dispatching) this.queuePaused = true;
+        },
+        queuePaused: () => this.queuePaused,
+        unavailable: () => this.primaryFailed || this.options.rpc.isRunning?.() === false,
+        unavailableResult: () => {
+          this.broadcastQueue();
+          this.broadcastSessionActivity(sessionId);
+          return { ok: true, isStreaming: false, queuePaused: this.queuePaused };
+        },
+        steeringGeneration: () => this.primaryRpcGeneration,
+        hasNativeSteeringPending: (generation) =>
+          this.hasNativeSteeringPending(sessionId, generation),
+        armNativeSteeringReset: (generation) =>
+          this.nativeSteeringResetAfterSettlement.set(sessionId, generation),
+        sendAbort: async () => { await this.options.rpc.send({ type: "abort" }, 5_000); },
+        abortOutcomeUnknown: (error) =>
+          error instanceof RpcRequestTimeoutError &&
+          error.outcomeUnknown &&
+          error.requestType === "abort",
+        running: () => this.running,
+        broadcastUncertainAbort: () => {
+          this.broadcastQueue();
+          this.broadcastSessionActivity(sessionId);
+        },
+        broadcastBeforeStateProbe: () => this.broadcastQueue(),
+        readState: async () => asState(
+          await this.options.rpc.send({ type: "get_state" }, 2_000),
+        ),
+        setRunning: (running) => { this.running = running; },
+        resetNativeSteering: () => this.resetNativeSteering(sessionId, undefined, "abort"),
+        broadcastStoppedAbort: () => this.broadcastSessionActivity(sessionId),
       });
-      this.broadcastSessionActivity(sessionId);
+      // Same response-write boundary as Secondary abort.
+      present(result);
+    } finally {
+      release();
+    }
+  }
+
+  /** Compact a Session behind its prompt/admission and Runtime ownership fences. */
+  private async compactSession(
+    sessionId: string,
+    customInstructions: string,
+    present: (result: RuntimeCompactionResult) => void,
+  ): Promise<void> {
+    const releasePromptAdmission = await this.beginPromptAdmission(sessionId);
+    let releaseRuntimeOperation: (() => void) | null = null;
+    try {
+      // A cold/reclaimed persisted Session is neither Primary nor an error.
+      // Bind Primary identity before allocating a Secondary so restoration,
+      // Gate, recovery, fast mode, and RuntimePool capacity stay App-owned.
+      let secondaryRuntime = this.runtimePool.get(sessionId) || null;
+      if (!secondaryRuntime && !this.activeSessionId) {
+        try {
+          await this.ensurePrimaryIdentity();
+        } catch (error) {
+          this.rethrowResultPending(error, "准备压缩运行时", false);
+        }
+      }
+      const requestedIsPrimary = sessionId === this.activeSessionId;
+      if (!requestedIsPrimary && !secondaryRuntime) {
+        try {
+          secondaryRuntime = await this.ensureRuntime(sessionId);
+        } catch (error) {
+          if (error instanceof SessionNotFoundError) {
+            present({ kind: "conflict", error: "该会话尚未启用" });
+            return;
+          }
+          throw error;
+        }
+      }
+      if (secondaryRuntime) {
+        releaseRuntimeOperation = this.runtimePool.acquireOperation(secondaryRuntime);
+        this.runtimePool.touch(secondaryRuntime);
+        if (this.secondaryNeedsRecovery(secondaryRuntime))
+          await this.recoverRuntime(secondaryRuntime);
+      } else {
+        releaseRuntimeOperation = this.primaryOperationAdmission.acquire().release;
+        try {
+          await this.ensurePrimaryRuntime();
+        } catch (error) {
+          this.rethrowResultPending(error, "准备压缩运行时", false);
+        }
+      }
+      const targetRpc = secondaryRuntime?.rpc || this.options.rpc;
+      const result = await compactRuntime({
+        outcomePending: () =>
+          this.compactionPendingBySession.has(sessionId) ||
+          this.sessionMutationOutcomePending(sessionId),
+        busy: () => secondaryRuntime
+          ? this.scheduler.runtimeBusyForQueue(secondaryRuntime)
+          : this.scheduler.primaryBusyForQueue(),
+        newOutcomeToken: () => randomUUID(),
+        sendCompact: async (command, outcomeToken) => rpcData<Record<string, unknown>>(
+          await targetRpc.send(
+            command,
+            PROMPT_PREPARE_TIMEOUT_MS,
+            {
+              onLateResponse: this.lateRpcOutcomeHandler(
+                sessionId,
+                outcomeToken,
+                "compact",
+              ),
+            },
+          ),
+        ),
+        outcomeUnknown: (error) => this.rpcOutcomeUnknown(error),
+        markOutcomePending: (error, token) =>
+          this.markRpcOutcomePending(sessionId, error, token),
+        markUncertainCompaction: () => this.uncertainCompactionBySession.add(sessionId),
+        broadcastActivity: () => this.broadcastSessionActivity(sessionId),
+        rethrowResultPending: (error) => this.rethrowResultPending(error, "上下文压缩"),
+      }, customInstructions);
+      // Preserve the response-write-before-admission-release boundary. A
+      // same-Session Prompt may not pass this compact transaction until its
+      // caller has received the compact outcome.
+      present(result);
+    } finally {
+      releaseRuntimeOperation?.();
+      releasePromptAdmission();
     }
   }
 
@@ -3924,110 +3777,50 @@ export class PiChatApp {
       event,
       generation,
     );
-    const transition = this.applyRuntimeEventTransition(
-      sessionId,
-      undefined,
-      event,
-    );
-    const transitionGeneration = transition.state.runGeneration;
-    if (type === "agent_start" || type === "tool_execution_start")
-      this.beginSessionRunTiming(sessionId, transitionGeneration);
-    else if (type === "agent_settled" || type === "pi_chat_process_error")
-      this.finishSessionRunTiming(sessionId, transitionGeneration);
-    if (!transition.broadcastEvent) {
-      this.traceState("rpc-event", "rejected", sessionId, {
-        eventType: type || "unknown",
+    finalizeAcceptedRuntimeEvent({
+      transition: () => this.applyRuntimeEventTransition(sessionId, undefined, event),
+      beginRunTiming: (runGeneration) => this.beginSessionRunTiming(sessionId, runGeneration),
+      finishRunTiming: (runGeneration) => this.finishSessionRunTiming(sessionId, runGeneration),
+      traceRejected: (eventType) => this.traceState("rpc-event", "rejected", sessionId, {
+        eventType: eventType || "unknown",
         decisionReason: "malformed-critical-event",
-      }, generation);
-      return;
-    }
-    const lifecyclePromptId = (type === "agent_start" || type === "agent_settled" || type === "pi_chat_process_error")
-      ? this.activePromptDiagnostic(sessionId, generation)?.promptId
-      : undefined;
-    if (lifecyclePromptId)
-      transition.broadcastEvent = {
-        ...transition.broadcastEvent,
-        piChatPromptId: lifecyclePromptId,
-      };
-    this.broadcastPromptFailureLifecycle(
-      sessionId,
-      transition.broadcastEvent,
-      transitionGeneration,
-      generation,
-    );
-    if (type === "agent_start")
-      this.traceActivePrompt(
-        "agent-start",
-        sessionId,
-        generation,
-        transition.state.runGeneration,
-      );
-    else if (type === "pi_chat_process_error") {
-      const promptId = this.traceActivePrompt(
-        "process-failed",
-        sessionId,
-        generation,
-        transition.state.runGeneration,
-      );
-      if (promptId) this.clearPromptDiagnostic(sessionId, promptId);
-    }
-    if (consumedSteering || droppedNativeSteering > 0)
-      transition.broadcastEvent = {
-        ...transition.broadcastEvent,
-        ...(consumedSteering
-          ? { nativeSteeringConsumed: true, nativeSteeringId: consumedSteering }
-          : null),
-        ...(droppedNativeSteering > 0
-          ? { nativeSteeringDroppedCount: droppedNativeSteering }
-          : null),
-      };
-    this.broadcastRpcEvent(
-      transition.broadcastEvent,
-      sessionId,
-      transition.state.runGeneration,
-    );
-    if (transition.effects.some((effect) => effect.type === "session-created"))
-      this.broadcast({
+      }, generation),
+      activePromptId: () => this.activePromptDiagnostic(sessionId, generation)?.promptId,
+      broadcastPromptFailure: (broadcastEvent, runGeneration) =>
+        this.broadcastPromptFailureLifecycle(sessionId, broadcastEvent, runGeneration, generation),
+      touch: () => {},
+      tracePrompt: (phase, runGeneration) =>
+        this.traceActivePrompt(phase, sessionId, generation, runGeneration),
+      clearPrompt: (promptId) => this.clearPromptDiagnostic(sessionId, promptId),
+      broadcastRpc: (broadcastEvent, runGeneration) =>
+        this.broadcastRpcEvent(broadcastEvent, sessionId, runGeneration),
+      broadcastSessionCreated: () => this.broadcast({
         type: "pi_chat_sessions_changed",
         action: "created",
         sessionId,
-      });
-    const settled = transition.effects.some(
-      (effect) => effect.type === "settled",
-    );
-    if (settled) {
-      this.scheduleModelRuntimeSync();
-      const promptId = this.traceActivePrompt(
-        "settled",
-        sessionId,
-        generation,
-        transition.state.runGeneration,
-      );
-      setTimeout(() => this.warmPrimaryMessageSnapshot(), 0);
-      if (this.hasNativeSteeringPending(sessionId, generation))
-        this.nativeSteeringResetAfterSettlement.set(sessionId, generation);
-      if (!this.dispatching) {
-        this.dispatching = true;
+      }),
+      scheduleModelRuntimeSync: () => this.scheduleModelRuntimeSync(),
+      afterSettled: () => setTimeout(() => this.warmPrimaryMessageSnapshot(), 0),
+      hasNativeSteeringPending: () => this.hasNativeSteeringPending(sessionId, generation),
+      noteNativeSteeringReset: () =>
+        this.nativeSteeringResetAfterSettlement.set(sessionId, generation),
+      isDispatching: () => this.dispatching,
+      beginSettlementDispatch: () => { this.dispatching = true; },
+      broadcastActivity: () => this.broadcastSessionActivity(sessionId),
+      drainAfterSettlement: (promptId) => {
+        void this.drainPrimaryAfterSettlement(sessionId, sourceGeneration, promptId);
+      },
+      releaseAfterProcessFailure: () => {
+        this.dispatching = false;
+        this.queuePaused = queuePausedBeforeEvent;
+        this.broadcastQueue(sessionId);
         this.broadcastSessionActivity(sessionId);
-        void this.drainPrimaryAfterSettlement(
-          sessionId,
-          sourceGeneration,
-          promptId,
-        );
-      }
-    } else if (
-      type === "agent_start" ||
-      type === "tool_execution_start" ||
-      type === "tool_execution_end"
-    ) this.broadcastSessionActivity(sessionId);
-    else if (type === "pi_chat_process_error") {
-      // Never leave the Primary queue stuck behind a stale dispatch lock after
-      // the live child exits (see the Secondary branch for the same contract).
-      this.dispatching = false;
-      this.queuePaused = queuePausedBeforeEvent;
-      this.broadcastQueue(sessionId);
-      this.broadcastSessionActivity(sessionId);
-    }
+      },
+    }, {
+      eventType: type,
+      consumedNativeSteering: consumedSteering,
+      droppedNativeSteering,
+    });
   }
 
   private browserPrimaryReadiness(
@@ -5328,65 +5121,27 @@ export class PiChatApp {
     sessionFile?: string,
     cwd = this.primaryRuntimeCwd,
   ): Promise<void> {
-    if (this.closed) throw new Error("Pi Chat 已关闭");
-    if (cwd !== this.primaryRuntimeCwd)
-      throw new Error("Primary Runtime 工作目录不可在原进程上重绑定");
-    if (this.options.primaryRuntime) {
-      this.options.rpc.setDiagnosticSessionId?.(
-        sessionFile ? idForPath(sessionFile) : this.activeSessionId,
-      );
-      await this.recoverPrimaryRuntimeWithQueueFence(
-        this.options.primaryRuntime,
-        sessionFile,
-        cwd,
-      );
-      // The production controller exposes setAdopter(). Test/embedding bridges
-      // may implement the optional method without installing an adopter, so
-      // only the concrete controller uses this early return.
-      if (this.options.primaryRuntime instanceof PrimaryRuntimeReadinessController)
-        return;
-    } else await this.options.rpc.restart(sessionFile, cwd);
-    if (this.closed) return;
-    // Legacy embedding bridges have no adoption callback; preserve their old
-    // post-restart Gate synchronization without affecting production.
-    const desiredGateMode = sessionFile
-      ? this.gateModesBySession.get(this.activeSessionId) ||
-        this.primaryGateMode
-      : "strict";
-    if (desiredGateMode !== "strict") {
-      const outcomeToken = randomUUID();
-      try {
-        await this.options.rpc.send(
-          { type: "prompt", message: `/gate ${desiredGateMode}` },
-          PROMPT_PREPARE_TIMEOUT_MS,
-          {
-            onLateResponse: this.lateRpcOutcomeHandler(
-              this.activeSessionId,
-              outcomeToken,
-              "generic",
-            ),
-          },
-        );
-      } catch (error) {
-        this.markRpcOutcomePending(this.activeSessionId, error, outcomeToken);
-        if (this.rpcOutcomeUnknown(error))
-          this.primaryOperationAdmission.fence();
-        throw error;
-      }
-      if (this.closed) return;
-    }
-    this.primaryGateMode = desiredGateMode;
+    await restartPrimaryRuntimeService({
+      closed: () => this.closed,
+      primaryRuntime: this.options.primaryRuntime,
+      isConcreteReadinessController: () => this.options.primaryRuntime instanceof PrimaryRuntimeReadinessController,
+      rpc: this.options.rpc,
+      primaryRuntimeCwd: () => this.primaryRuntimeCwd,
+      activeSessionId: () => this.activeSessionId,
+      currentGateMode: () => this.gateModesBySession.get(this.activeSessionId) || this.primaryGateMode,
+      recoverPrimary: (runtime, file, runtimeCwd) => this.recoverPrimaryRuntimeWithQueueFence(runtime, file, runtimeCwd),
+      legacyRestart: async (file, runtimeCwd) => { await this.options.rpc.restart(file, runtimeCwd); },
+      lateRpcOutcomeHandler: (id, token) => this.lateRpcOutcomeHandler(id, token, "generic"),
+      markRpcOutcomePending: (id, error, token) => this.markRpcOutcomePending(id, error, token),
+      isOutcomeUnknown: (error) => this.rpcOutcomeUnknown(error),
+      fencePrimaryOperation: () => this.primaryOperationAdmission.fence(),
+      setPrimaryGateMode: (mode) => { this.primaryGateMode = mode; },
+    }, sessionFile, cwd);
   }
 
   private async reloadRpc(knownState?: PiState): Promise<void> {
     this.assertApplicationQuiescent("修改资源配置");
-    const state =
-      knownState || asState(await this.options.rpc.send({ type: "get_state" }));
-    if (state.isStreaming)
-      throw new Error("请先停止所有并行生成，再修改资源配置");
-    // Resource reload replaces every child process. Clear the old process
-    // projections before stopping them, and advance each Session generation so
-    // a late frame from the old worker cannot be accepted by the replacement.
+    const state = knownState || asState(await this.options.rpc.send({ type: "get_state" }));
     const replacedSessionIds = new Set([
       this.activeSessionId,
       ...this.runtimePool.runtimes.keys(),
@@ -5395,13 +5150,13 @@ export class PiChatApp {
       this.clearSessionRuntimeTransientState(sessionId, "resources-reloading", {
         advanceGeneration: true,
       });
-    try {
-      await this.runtimePool.stopAll({ terminal: false });
-      await this.restartPrimaryRuntime(state.sessionFile);
-    } catch (error) {
-      this.rethrowResultPending(error, "配置重载");
-    }
-    this.broadcast({ type: "pi_chat_reloaded" });
+    await reloadPrimaryResources({
+      getPrimaryState: async () => state,
+      stopSecondaryRuntimes: () => this.runtimePool.stopAll({ terminal: false }),
+      restartPrimary: (sessionFile) => this.restartPrimaryRuntime(sessionFile),
+      rethrowResultPending: (error, operation) => this.rethrowResultPending(error, operation),
+      broadcastReloaded: () => this.broadcast({ type: "pi_chat_reloaded" }),
+    }, state);
   }
 
   private async applyResourceFileTransaction<T>(
@@ -5450,26 +5205,92 @@ export class PiChatApp {
     }
   }
 
-  /** Mutate models.json without replacing any Pi Runtime. The host catalogue is
-   * refreshed atomically; active requests keep their existing Runtime snapshot. */
+  /** Compatibility wrapper; the transaction owner lives in the model service. */
   private async applyModelFileTransaction<T>(mutation: () => Promise<T>): Promise<T> {
     if (!this.options.modelManager) throw new Error("模型管理不可用");
-    const snapshot = await snapshotFile(this.options.modelManager.path);
-    let changed = false;
-    try {
-      const result = await mutation();
-      changed = true;
-      this.refreshHostModelCatalogue();
-      return result;
-    } catch (error) {
-      if (changed) {
-        await restoreSnapshots([snapshot]);
-        this.refreshHostModelCatalogue();
-        throw new Error(`模型配置失败，原配置已自动恢复：${error instanceof Error ? error.message : String(error)}`);
-      }
-      this.rethrowResultPending(error, "更新模型配置", false);
-      throw error;
-    }
+    return applyModelFileTransaction(
+      {
+        snapshot: () => snapshotFile(this.options.modelManager!.path),
+        restore: (snapshot) => restoreSnapshots([snapshot]),
+        invalidateCatalogue: () => this.refreshHostModelCatalogue(),
+        rethrowResultPending: (error, operation) => this.rethrowResultPending(error, operation, false),
+      },
+      "更新模型配置",
+      mutation,
+    );
+  }
+
+  private providerManagementService() {
+    if (!this.options.modelManager) throw new Error("模型管理不可用");
+    return createProviderManagement({
+      manager: this.options.modelManager,
+      withLifecycle: (description, mutation) =>
+        this.withLifecycle("models-refreshing", description, mutation),
+      withModelFileTransaction: (mutation) => this.applyModelFileTransaction(mutation),
+      primaryState: async () => this.options.rpc.send({ type: "get_state" }),
+      secondaryStates: () => this.runtimePool.rpcStatesForQuiescence(),
+      bootstrap: () => this.bootstrap(),
+    });
+  }
+
+  private runtimeSettingsService() {
+    return createRuntimeSettingsService({
+      activeSessionId: () => this.activeSessionId,
+      primaryRpc: () => this.options.rpc,
+      primaryRunning: () => this.running,
+      secondaryRuntime: (sessionId) => this.runtimePool.get(sessionId) || null,
+      ensurePrimaryRuntime: () => this.ensurePrimaryRuntime(),
+      recoverSecondary: (runtime) => this.recoverRuntime(runtime),
+      withSecondaryOperation: (runtime, operation) => this.runtimePool.withOperation(runtime, operation),
+      acquirePrimaryOperation: () => this.primaryOperationAdmission.acquire().release,
+      mutationOutcomePending: (sessionId) => this.sessionMutationOutcomePending(sessionId),
+      availableModels: async (rpc) => asModels(await rpc.send({ type: "get_available_models" })),
+      lateRpcOutcomeHandler: (sessionId, token) => this.lateRpcOutcomeHandler(sessionId, token, "generic"),
+      markRpcOutcomePending: (sessionId, error, token) => this.markRpcOutcomePending(sessionId, error, token),
+      rethrowResultPending: (error, operation, fence = true) => this.rethrowResultPending(error, operation, fence),
+      rememberRuntimeModel: (runtime, model) => this.rememberRuntimeDisplaySettings(runtime, { model }),
+      rememberPrimaryModel: (model) => this.rememberPrimaryDisplaySettings({ model }),
+      stagePrimaryModel: (provider, modelId) => { this.pendingTurnSettings.model = { provider, modelId }; },
+      rememberRuntimeThinking: (runtime, level) => this.rememberRuntimeDisplaySettings(runtime, { thinkingLevel: level }),
+      rememberPrimaryThinking: (level) => this.rememberPrimaryDisplaySettings({ thinkingLevel: level }),
+      stagePrimaryThinking: (level) => { this.pendingTurnSettings.thinkingLevel = level; },
+      updateRuntimeState: (runtime, state) => {
+        runtime.lastState = state;
+        runtime.running = state.isStreaming;
+      },
+      updatePrimaryState: (state) => {
+        this.lastPrimaryState = state;
+        this.running = state.isStreaming;
+      },
+    });
+  }
+
+  private customModelManagementService() {
+    if (!this.options.modelManager) throw new Error("模型管理不可用");
+    return createCustomModelManagement({
+      manager: this.options.modelManager,
+      withLifecycle: (description, mutation) =>
+        this.withLifecycle("models-refreshing", description, mutation),
+      withModelFileTransaction: (mutation) => this.applyModelFileTransaction(mutation),
+      primaryState: async () => asState(await this.options.rpc.send({ type: "get_state" })),
+      primaryTurnActive: () => this.primaryTurnActive(),
+      setPrimaryModel: async (provider, modelId) => {
+        const outcomeToken = randomUUID();
+        try {
+          await this.options.rpc.send(
+            { type: "set_model", provider, modelId },
+            undefined,
+            { onLateResponse: this.lateRpcOutcomeHandler(this.activeSessionId, outcomeToken, "generic") },
+          );
+        } catch (error) {
+          if (this.rpcOutcomeUnknown(error)) {
+            this.markRpcOutcomePending(this.activeSessionId, error, outcomeToken);
+            this.rethrowResultPending(error, "确认重命名模型");
+          }
+        }
+      },
+      bootstrap: () => this.bootstrap(),
+    });
   }
 
   /** Changes only the persisted default/index context for future drafts. Existing
@@ -5524,82 +5345,6 @@ export class PiChatApp {
     }
   }
 
-  private async renameSession(
-    id: string,
-    name: string,
-  ): Promise<{ id: string; name: string }> {
-    if (this.sessionMutationOutcomePending(id))
-      throw new HttpRequestError(
-        409,
-        "上一次操作结果尚未确认；请刷新页面核对，不要重复修改会话名称",
-        "RESULT_PENDING",
-        true,
-      );
-    const isPrimary = id === this.activeSessionId;
-    const knownRuntime = this.runtimePool.get(id);
-    const draft = knownRuntime?.draftSession;
-    if (draft)
-      throw new Error("空白新对话会在发送第一条消息后保存，届时才能重命名");
-    // A hot Runtime is already bound to this persisted Session. Avoid a global
-    // index scan on its mutation response path; a cold target still gets the
-    // existing ensureRuntime() lookup/retry before it can be written.
-    const existingRuntime = isPrimary ? null : knownRuntime || null;
-    const wasOpen = isPrimary || Boolean(existingRuntime);
-    const runtime = isPrimary
-      ? null
-      : existingRuntime || (await this.ensureRuntime(id));
-    const releaseRuntimeOperation = runtime
-      ? this.runtimePool.acquireOperation(runtime)
-      : this.primaryOperationAdmission.acquire().release;
-    const outcomeToken = randomUUID();
-    try {
-      try {
-        await (runtime?.rpc || this.options.rpc).send(
-          {
-            type: "set_session_name",
-            name,
-          },
-          undefined,
-          {
-            onLateResponse: this.lateRpcOutcomeHandler(
-              id,
-              outcomeToken,
-              "generic",
-            ),
-          },
-        );
-      } catch (error) {
-        this.markRpcOutcomePending(id, error, outcomeToken);
-        this.rethrowResultPending(error, "重命名");
-      }
-    } finally {
-      releaseRuntimeOperation();
-    }
-    // A Runtime created only to rename a cold Session is not retained. Its
-    // dedicated process is safely reclaimed after its mutation lease releases.
-    if (!wasOpen && runtime && !runtime.running) {
-      this.clearNativeSteeringState(id, "reclaim");
-      try {
-        await this.runtimePool.reclaim(id, "idle");
-      } catch (error) {
-        this.rethrowResultPending(error, "回收会话运行时");
-      }
-    }
-    // JSONL indexing is read projection, not mutation authority. Do not make
-    // a confirmed Pi write wait for a recursive SessionIndex scan or bootstrap;
-    // the existing sessions-changed SSE refresh converges it asynchronously.
-    if (id === this.activeSessionId && this.primarySummarySnapshot)
-      this.primarySummarySnapshot = { ...this.primarySummarySnapshot, name };
-    else if (existingRuntime?.summarySnapshot)
-      existingRuntime.summarySnapshot = { ...existingRuntime.summarySnapshot, name };
-    this.broadcast({
-      type: "pi_chat_sessions_changed",
-      action: "renamed",
-      sessionId: id,
-    });
-    return { id, name };
-  }
-
   private reportSessionRelationFailure(operation: string, error: unknown): void {
     console.error(`[Pi Chat] Session relation ${operation} failed: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -5636,110 +5381,35 @@ export class PiChatApp {
     knownSessionIds: ReadonlySet<string>;
   }): Promise<{ sessionId: string; sessionPath: string; piSessionId: string; warning?: string }> {
     const rpc = input.runtime?.rpc || this.options.rpc;
-    const outcomeToken = randomUUID();
-    let mutationOutcomeUnknown = false;
-    let copyMayHaveCommitted = false;
-    let cancelled = false;
     let committed: { sessionId: string; sessionPath: string; piSessionId: string; warning?: string } | null = null;
     this.copyingSessionIds.add(input.id);
     try {
-      try {
-        const result = rpcData<{ cancelled?: boolean }>(
-          await rpc.send(
-            input.mode === "clone"
-              ? { type: "clone" }
-              : { type: "fork", entryId: input.entryId },
-            PROMPT_PREPARE_TIMEOUT_MS,
-            {
-              onLateResponse: this.lateRpcOutcomeHandler(
-                input.id,
-                outcomeToken,
-                "copy",
-              ),
-            },
-          ),
-        );
-        cancelled = result.cancelled === true;
-        copyMayHaveCommitted = !cancelled;
-      } catch (error) {
-        if (!(error instanceof RpcRequestTimeoutError) || !error.outcomeUnknown)
-          throw error;
-        mutationOutcomeUnknown = true;
-        this.copyOutcomePendingSessionIds.add(input.id);
-        this.markRpcOutcomePending(input.id, error, outcomeToken);
-      }
-
-      let state: PiState;
-      try {
-        state = asState(
-          await rpc.send(
-            { type: "get_state" },
-            30_000,
-            { independentRead: true },
-          ),
-        );
-      } catch (error) {
-        if (mutationOutcomeUnknown || copyMayHaveCommitted) {
-          if (!mutationOutcomeUnknown)
-            this.installRpcOutcomeFence(input.id, outcomeToken);
-          throw new HttpRequestError(
-            409,
-            "复制结果尚未确认；请刷新对话列表核对，不要重复操作",
-            "RESULT_PENDING",
-            true,
-            true,
-          );
-        }
-        throw error;
-      }
-      const sourcePath = resolve(input.sourcePath);
-      const sessionPath = typeof state.sessionFile === "string"
-        ? resolve(state.sessionFile)
-        : "";
-      const sessionId = sessionPath ? idForPath(sessionPath) : "";
-      const switched = Boolean(
-        sessionPath &&
-        extname(sessionPath).toLowerCase() === ".jsonl" &&
-        sessionPath.toLowerCase() !== sourcePath.toLowerCase() &&
-        sessionId !== input.id,
-      );
-      if (cancelled) {
-        if (switched)
-          throw new Error("Pi 取消复制后仍切换了会话身份");
-        throw new HttpRequestError(
-          409,
-          input.mode === "clone"
-            ? "扩展取消了复制新对话"
-            : "扩展取消了分叉新对话",
-        );
-      }
-      if (!switched) {
-        if (mutationOutcomeUnknown || copyMayHaveCommitted) {
-          if (!mutationOutcomeUnknown)
-            this.installRpcOutcomeFence(input.id, outcomeToken);
-          throw new HttpRequestError(
-            409,
-            "复制结果尚未确认；请刷新对话列表核对，不要重复操作",
-            "RESULT_PENDING",
-            true,
-            true,
-          );
-        }
-        throw new Error("Pi 未返回有效的新会话文件");
-      }
-      if (
-        input.knownSessionIds.has(sessionId) ||
-        this.runtimePool.has(sessionId) ||
-        sessionId === this.activeSessionId ||
-        typeof state.sessionId !== "string" ||
-        !state.sessionId
-      )
-        throw new HttpRequestError(409, "Pi 返回的新会话身份与现有会话冲突");
-      committed = {
-        sessionId,
-        sessionPath,
-        piSessionId: state.sessionId,
-      };
+      const copyResult = await executeSessionCopyRpc({
+        host: {
+          lateRpcOutcomeHandler: (id, token) => this.lateRpcOutcomeHandler(id, token, "copy"),
+          markRpcOutcomePending: (id, error, token) => this.markRpcOutcomePending(id, error, token),
+          installOutcomeFence: (id, token) => this.installRpcOutcomeFence(id, token),
+          addCopyOutcomePending: (id) => this.copyOutcomePendingSessionIds.add(id),
+        },
+        rpc,
+        sourceSessionId: input.id,
+        mode: input.mode,
+        entryId: input.entryId,
+      });
+      committed = validateCopiedSessionIdentity({
+        sourcePath: input.sourcePath,
+        sourceSessionId: input.id,
+        sessionIdForPath: (path) => idForPath(path),
+        state: copyResult.state,
+        knownSessionIds: input.knownSessionIds,
+        liveRuntimeIds: new Set(this.runtimePool.runtimes.keys()),
+        activeSessionId: this.activeSessionId,
+        cancelled: copyResult.cancelled,
+        mutationOutcomeUnknown: copyResult.mutationOutcomeUnknown,
+        copyMayHaveCommitted: copyResult.copyMayHaveCommitted,
+        installOutcomeFence: () => this.installRpcOutcomeFence(input.id, copyResult.outcomeToken),
+        mode: input.mode,
+      });
       return committed;
     } finally {
       this.copyingSessionIds.delete(input.id);
@@ -5782,48 +5452,32 @@ export class PiChatApp {
       let runtime = this.runtimePool.get(id);
       const primary = id === this.activeSessionId && !runtime;
       if (!primary && !runtime) runtime = await this.ensureRuntime(id);
-      if (runtime?.draftSession)
-        throw new HttpRequestError(409, "空白新对话发送第一条消息后才能复制");
-      const sourcePath = runtime?.sessionPath ||
-        this.options.sessions.pathForId(id) ||
-        (primary ? this.lastPrimaryState.sessionFile : undefined);
-      const summary = runtime?.summarySnapshot ||
-        this.options.sessions.summaryForId(id) ||
-        (primary ? this.primarySummarySnapshot || undefined : undefined);
-      if (!sourcePath || !summary)
-        throw new HttpRequestError(404, "会话不存在或尚未持久化");
-
-      if (primary) {
-        if (
-          this.primaryTurnActive() ||
-          this.dispatching ||
-          this.promptQueue.length > 0 ||
-          this.queuePaused ||
-          Boolean(this.pendingExtensionRequest) ||
-          this.lastPrimaryState.isCompacting === true
-        )
-          throw new HttpRequestError(
-            409,
-            "请等待当前生成、压缩、确认和队列全部结束后再复制会话",
-          );
-      } else if (runtime && (!this.runtimePool.isIdle(runtime) || runtime.failed)) {
-        throw new HttpRequestError(
-          409,
-          "请等待当前生成、压缩、确认和队列全部结束后再复制会话",
-        );
-      }
-
+      const candidateSourcePath = runtime?.sessionPath
+        || this.options.sessions.pathForId(id)
+        || (primary ? this.lastPrimaryState.sessionFile : undefined);
+      const candidateSummary = runtime?.summarySnapshot
+        || this.options.sessions.summaryForId(id)
+        || (primary ? this.primarySummarySnapshot || undefined : undefined);
       const target = mode === "fork"
-        ? await this.options.sessions.forkTargetForId(
-            id,
-            persistedMessageId || "",
-          )
+        ? await this.options.sessions.forkTargetForId(id, persistedMessageId || "")
         : null;
-      if (mode === "fork" && !target)
-        throw new HttpRequestError(
-          409,
-          "只能从当前分支中已持久化的文字或图片 User 消息创建新对话",
-        );
+      const copyPreparation = validateSessionCopyPreparation({
+        mode,
+        sourcePath: candidateSourcePath,
+        summary: candidateSummary,
+        draft: Boolean(runtime?.draftSession),
+        primary,
+        primaryBusy: this.primaryTurnActive()
+          || this.dispatching
+          || this.promptQueue.length > 0
+          || this.queuePaused
+          || Boolean(this.pendingExtensionRequest)
+          || this.lastPrimaryState.isCompacting === true,
+        secondaryBusy: Boolean(runtime && (!this.runtimePool.isIdle(runtime) || runtime.failed)),
+        forkTargetAvailable: Boolean(target),
+      });
+      const sourcePath = copyPreparation.sourcePath;
+      const summary = copyPreparation.summary;
 
       const operationAdmission = runtime
         ? runtime.operationAdmission
@@ -5845,79 +5499,41 @@ export class PiChatApp {
         operationAdmission.reopen(operationGeneration);
       }
 
-      let forkOrigin: SessionForkOrigin | undefined;
-      let copyWarning = copied.warning || "";
-      if (target && persistedMessageId) {
-        const storedOrigin = {
-          sourceSessionId: id,
-          sourceName: summary.name,
-          sourcePersistedMessageId: persistedMessageId,
-          createdAt: this.now(),
-        };
-        try {
-          await this.sessionRelations.recordFork(copied.sessionId, storedOrigin);
-          forkOrigin = { ...storedOrigin, sourceAvailable: true };
-        } catch (error) {
-          this.reportSessionRelationFailure("write", error);
-          copyWarning ||= "新对话已创建，但分叉来源关系尚未保存；请勿重复操作";
-        }
-      }
-      try { await this.options.sessions.list(); }
-      catch {
-        this.copyProjectionPendingSessionIds.add(id);
-        throw new HttpRequestError(409, "新对话已创建，但列表索引尚未确认；请刷新页面核对，不要重复操作");
-      }
-      const session = this.options.sessions.summaryForId(copied.sessionId);
-      const indexedPath = this.options.sessions.pathForId(copied.sessionId);
-      if (
-        !session ||
-        !indexedPath ||
-        resolve(indexedPath).toLowerCase() !== copied.sessionPath.toLowerCase() ||
-        session.sessionId !== copied.piSessionId
-      ) {
-        this.copyProjectionPendingSessionIds.add(id);
-        throw new HttpRequestError(409, "新对话已创建，但列表索引尚未确认；请刷新页面核对，不要重复操作");
-      }
-      // State plus SessionIndex identity is the verified copy outcome. Release
-      // the transport fence only after this projection boundary, never merely
-      // because the RPC response arrived late.
-      this.copyOutcomePendingSessionIds.delete(id);
-      this.rpcOutcomePendingBySession.delete(id);
-      this.rpcOutcomeTokensBySession.delete(id);
-      this.broadcast({
-        type: "pi_chat_sessions_changed",
-        action: mode === "clone" ? "cloned" : "forked",
-        sessionId: session.id,
+      return finalizeSessionCopy({
+        host: {
+          now: () => this.now(),
+          recordFork: (destinationSessionId, origin) => this.sessionRelations.recordFork(destinationSessionId, origin),
+          reportRelationFailure: (operation, error) => this.reportSessionRelationFailure(operation, error),
+          listSessions: () => this.options.sessions.list(),
+          summaryForId: (sessionId) => this.options.sessions.summaryForId(sessionId),
+          pathForId: (sessionId) => this.options.sessions.pathForId(sessionId),
+          markProjectionPending: (sourceSessionId) => this.copyProjectionPendingSessionIds.add(sourceSessionId),
+          clearOutcome: (sourceSessionId) => {
+            this.copyOutcomePendingSessionIds.delete(sourceSessionId);
+            this.rpcOutcomePendingBySession.delete(sourceSessionId);
+            this.rpcOutcomeTokensBySession.delete(sourceSessionId);
+          },
+          broadcastCopied: ({ action, sessionId, sourceSessionId }) =>
+            this.broadcast({ type: "pi_chat_sessions_changed", action, sessionId, sourceSessionId }),
+        },
         sourceSessionId: id,
+        sourceName: summary.name,
+        mode,
+        copied,
+        ...(target ? { forkTarget: target } : null),
+        ...(persistedMessageId ? { persistedMessageId } : null),
       });
-      return {
-        session,
-        ...(target ? { editorText: target.text, editorImages: target.images } : null),
-        ...(forkOrigin ? { forkOrigin } : null),
-        ...(copyWarning ? { warning: copyWarning } : null),
-      };
     } finally {
       releasePromptAdmission();
     }
   }
 
+  /** Test/embedding compatibility wrapper around the destructive path guard. */
   private async validatedSessionDeletePath(path: string, sessionId: string): Promise<string> {
-    if (!isAbsolute(path)) throw new Error("会话文件路径必须是绝对路径");
-    const normalized = resolve(path);
-    const indexed = this.options.sessions.pathForId(sessionId);
-    if (indexed && resolve(indexed) !== normalized)
-      throw new Error("会话文件路径与索引不一致，已拒绝删除");
-    const fileStat = await lstat(normalized);
-    if (!fileStat.isFile()) throw new Error("会话文件不是普通文件，已拒绝删除");
-    const [rootReal, targetReal] = await Promise.all([
-      realpath(this.options.sessions.root),
-      realpath(normalized),
-    ]);
-    const withinRoot = relative(rootReal, targetReal);
-    if (withinRoot === ".." || withinRoot.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`))
-      throw new Error("会话文件不在 Session 目录内，已拒绝删除");
-    if (idForPath(normalized) !== sessionId) throw new Error("会话文件身份不一致，已拒绝删除");
-    return normalized;
+    return validateSessionDeletePath({
+      sessionRoot: () => this.options.sessions.root,
+      indexedPath: (candidate) => this.options.sessions.pathForId(candidate),
+    }, path, sessionId);
   }
 
   private async deleteSession(id: string): Promise<BootstrapData> {
@@ -5955,134 +5571,82 @@ export class PiChatApp {
       }
     }
     await this.options.sessions.list(undefined, this.currentCwd);
-    const isPrimary = id === this.activeSessionId;
-    const state = isPrimary
-      ? asState(await this.options.rpc.send({ type: "get_state" }, 12_000))
-      : null;
-    // Prefer the live worker path. A brand-new Session may still be absent from
-    // SessionIndex when the user deletes it from the sidebar or current view.
     const runtime = this.runtimePool.get(id);
-    const path = isPrimary
-      ? state?.sessionFile
-      : runtime?.sessionPath ||
-        runtime?.draftSessionPath ||
-        this.options.sessions.pathForId(id);
-    if (!isPrimary && !path && !runtime) {
-      // Delete is idempotent for a stale sidebar row. The Session Index has just
-      // performed a fresh physical scan, so absence is authoritative: do not
-      // turn an already-deleted conversation into a red transport error.
-      await this.sessionRelations.removeDestination(id);
-      this.deletionOutcomePendingBySession.delete(id);
-      this.clearSessionRuntimeTransientState(id, "deleted", {
-        removeGatePreference: true,
-      });
-      this.lastUserPromptAtBySession.delete(id);
-      this.pendingAcceptedPromptsBySession.delete(id);
-      this.persistedPromptIdsBySession.delete(id);
-      this.pendingConsumedSteersBySession.delete(id);
-      this.persistedSteerProjectionsBySession.delete(id);
-      this.nativeSteeringProjectionRevisions.delete(id);
-      this.runGenerationsBySession.delete(id);
-      this.copyOutcomePendingSessionIds.delete(id);
-      this.copyProjectionPendingSessionIds.delete(id);
-      this.sessionControl.clearSession(id);
-      this.broadcast({
-        type: "pi_chat_sessions_changed",
-        action: "deleted",
-        sessionId: id,
-      });
-      return this.bootstrap();
+    const indexedPath = runtime?.sessionPath || runtime?.draftSessionPath || this.options.sessions.pathForId(id);
+    const finalize = (path: string | undefined) => finalizeSessionDelete({
+      getForkOrigin: (sessionId) => this.sessionRelations.getForkOrigin(sessionId),
+      removeForkDestination: (sessionId) => this.sessionRelations.removeDestination(sessionId),
+      restoreForkOrigin: (sessionId, origin) => this.sessionRelations.recordFork(sessionId, origin as SessionForkOrigin),
+      reportRelationFailure: (operation, error) => this.reportSessionRelationFailure(operation, error),
+      validateDeletePath: (candidatePath, sessionId) => validateSessionDeletePath({
+        sessionRoot: () => this.options.sessions.root,
+        indexedPath: (candidate) => this.options.sessions.pathForId(candidate),
+      }, candidatePath, sessionId),
+      clearDeletedSessionState: (sessionId) => {
+        this.deletionOutcomePendingBySession.delete(sessionId);
+        this.clearSessionRuntimeTransientState(sessionId, "deleted", { removeGatePreference: true });
+        this.lastUserPromptAtBySession.delete(sessionId);
+        this.pendingAcceptedPromptsBySession.delete(sessionId);
+        this.persistedPromptIdsBySession.delete(sessionId);
+        this.pendingConsumedSteersBySession.delete(sessionId);
+        this.persistedSteerProjectionsBySession.delete(sessionId);
+        this.nativeSteeringProjectionRevisions.delete(sessionId);
+        this.runGenerationsBySession.delete(sessionId);
+        this.copyOutcomePendingSessionIds.delete(sessionId);
+        this.copyProjectionPendingSessionIds.delete(sessionId);
+        this.sessionControl.clearSession(sessionId);
+      },
+      refreshSessions: async () => { await this.options.sessions.list(this.activeSessionPath, this.currentCwd); },
+      broadcastDeleted: (sessionId) => this.broadcast({ type: "pi_chat_sessions_changed", action: "deleted", sessionId }),
+      bootstrap: () => this.bootstrap(),
+    }, id, path) as Promise<BootstrapData>;
+    if (id !== this.activeSessionId && !indexedPath && !runtime) {
+      // The fresh SessionIndex scan above proved that this is a stale sidebar
+      // row. Delete is idempotent: retire its projections rather than showing
+      // an error for a JSONL another process already removed.
+      return finalize(undefined);
     }
-    if (isPrimary) {
-      if (
-        this.primaryTurnActive() ||
-        this.promptQueue.length ||
-        this.pendingExtensionRequest
-      )
-        throw new Error(
-          "请先停止当前生成、处理权限确认并清空队列，再删除此会话",
-        );
-      let result: { cancelled: boolean };
-      const outcomeToken = randomUUID();
-      try {
-        result = rpcData<{ cancelled: boolean }>(
-          await this.options.rpc.send(
-            { type: "new_session" },
-            30_000,
-            {
-              onLateResponse: this.lateRpcOutcomeHandler(
-                id,
-                outcomeToken,
-                "delete",
-              ),
-            },
-          ),
-        );
-      } catch (error) {
-        if (this.rpcOutcomeUnknown(error)) {
-          this.deletionOutcomePendingBySession.add(id);
-          this.markRpcOutcomePending(id, error, outcomeToken);
+    const deletionRuntime = await prepareSessionDeletionRuntime({
+      activeSessionId: () => this.activeSessionId,
+      primaryState: async () => asState(await this.options.rpc.send({ type: "get_state" }, 12_000)),
+      primaryTurnActive: () => this.primaryTurnActive(),
+      primaryQueueLength: () => this.promptQueue.length,
+      primaryExtensionPending: () => Boolean(this.pendingExtensionRequest),
+      resetPrimarySession: async () => {
+        const outcomeToken = randomUUID();
+        try {
+          return rpcData<{ cancelled: boolean }>(
+            await this.options.rpc.send(
+              { type: "new_session" },
+              30_000,
+              { onLateResponse: this.lateRpcOutcomeHandler(id, outcomeToken, "delete") },
+            ),
+          );
+        } catch (error) {
+          if (this.rpcOutcomeUnknown(error)) {
+            this.deletionOutcomePendingBySession.add(id);
+            this.markRpcOutcomePending(id, error, outcomeToken);
+          }
+          this.rethrowResultPending(error, "删除会话");
         }
-        this.rethrowResultPending(error, "删除会话");
-      }
-      if (result.cancelled)
-        throw new Error("扩展取消了新建会话，无法删除当前会话");
-    } else if (runtime) {
-      // releaseForDeletion owns admission close-and-drain; do not hold a normal
-      // operation lease here or it would correctly block its own stop.
-      if (
-        this.runtimeTurnActive(runtime) ||
-        runtime.promptQueue.length ||
-        runtime.extensionUiPending
-      )
-        throw new Error(
-          "请先停止该会话的生成、处理权限确认并清空队列，再删除对话",
-        );
-      let released: SecondaryRuntime | undefined;
-      try {
-        released = await this.runtimePool.releaseForDeletion(id);
-      } catch (error) {
-        if (error instanceof RpcProcessExitUnconfirmedError)
-          this.deletionOutcomePendingBySession.add(id);
-        this.rethrowResultPending(error, "删除会话");
-      }
-      if (!released) throw new Error("该会话正在执行其他操作，请稍后重试删除");
-    }
-    const removedForkOrigin = await this.sessionRelations.getForkOrigin(id);
-    await this.sessionRelations.removeDestination(id);
-    try {
-      if (path && existsSync(path)) {
-        const safePath = await this.validatedSessionDeletePath(path, id);
-        await unlink(safePath);
-      }
-    } catch (error) {
-      if (removedForkOrigin) {
-        try { await this.sessionRelations.recordFork(id, removedForkOrigin); }
-        catch (restoreError) { this.reportSessionRelationFailure("delete-rollback", restoreError); }
-      }
-      throw error;
-    }
-    this.deletionOutcomePendingBySession.delete(id);
-    this.clearSessionRuntimeTransientState(id, "deleted", {
-      removeGatePreference: true,
-    });
-    this.lastUserPromptAtBySession.delete(id);
-    this.pendingAcceptedPromptsBySession.delete(id);
-    this.persistedPromptIdsBySession.delete(id);
-    this.pendingConsumedSteersBySession.delete(id);
-    this.persistedSteerProjectionsBySession.delete(id);
-    this.nativeSteeringProjectionRevisions.delete(id);
-    this.runGenerationsBySession.delete(id);
-    this.copyOutcomePendingSessionIds.delete(id);
-    this.copyProjectionPendingSessionIds.delete(id);
-    this.sessionControl.clearSession(id);
-    await this.options.sessions.list(this.activeSessionPath, this.currentCwd);
-    this.broadcast({
-      type: "pi_chat_sessions_changed",
-      action: "deleted",
-      sessionId: id,
-    });
-    return this.bootstrap();
+      },
+      runtime: () => runtime,
+      indexedSessionPath: (sessionId) => this.options.sessions.pathForId(sessionId),
+      runtimeSessionPath: (candidate) => candidate.sessionPath || candidate.draftSessionPath,
+      runtimeTurnActive: (candidate) => this.runtimeTurnActive(candidate),
+      runtimeQueueLength: (candidate) => candidate.promptQueue.length,
+      runtimeExtensionPending: (candidate) => candidate.extensionUiPending,
+      releaseRuntimeForDeletion: async (sessionId) => {
+        try {
+          return Boolean(await this.runtimePool.releaseForDeletion(sessionId));
+        } catch (error) {
+          if (error instanceof RpcProcessExitUnconfirmedError)
+            this.deletionOutcomePendingBySession.add(sessionId);
+          this.rethrowResultPending(error, "删除会话");
+        }
+      },
+    }, id);
+    return finalize(deletionRuntime.path);
   }
 
   private async coldSessionView(
@@ -6113,58 +5677,14 @@ export class PiChatApp {
     clientId: string,
   ): SessionViewData {
     this.reconcilePendingAcceptedPrompts(id, snapshot.messages);
-    const windowed = messageWindow(snapshot.messages, turnLimit);
-    const messageTotal = snapshot.sourceMessageTotal ?? windowed.total;
-    const turnTotal = snapshot.sourceTurnTotal ?? windowed.turns;
-    const messagesTruncated = windowed.truncated || snapshot.sourceMessagesTruncated === true;
-    const settings = snapshot.settings || {};
-    return {
-      session: {
-        ...session,
-        active: false,
-        writable: false,
-        running: false,
-        queued: false,
-        activity: this.sessionActivity(id),
-      },
-      // Never borrow Primary's active settings for history. Pi persists these
-      // change events in each JSONL, so reading them keeps cold views truthful.
-      state: {
-        model: this.modelFromSessionSettings(settings),
-        thinkingLevel: settings.thinkingLevel,
-        fastModeActive: false,
-        isStreaming: false,
-        isCompacting: false,
-        sessionFile: undefined,
-        sessionId: session.sessionId,
-        sessionName: session.name,
-        messageCount: session.messageCount,
-      },
-      messages: windowed.messages,
-      messageTotal,
-      turnTotal,
-      visibleTurnCount: windowed.visibleTurns,
-      messagesTruncated,
-      isActive: false,
-      runtimeStatus: "view-only",
-      isStreaming: false,
-      // The target JSONL snapshot already includes usage. Cold first paint must
-      // never wait on another index read or resource/settings disk probe.
-      stats: snapshot.usage && snapshot.usageComplete !== false
-        ? this.offlineStatsFromUsage(id, snapshot.usage)
-        : undefined,
-      // Gate is a fixed Pi Chat system control. Startup self-heals its adapter;
-      // a cold history read does not need to rediscover that resource on disk.
-      gateAvailable: true,
-      // A cold Session has no live Runtime to report its Gate; report the
-      // process-remembered mode (or the safe strict default) until activation
-      // replaces it with the Runtime-confirmed value.
-      gateMode: this.currentGateMode(id),
-      commands: [],
-      viewSource: "cold-jsonl",
-      pendingExtensionRequest: this.pendingRequestForSession(id),
-      ...this.controlState(id, clientId),
-    };
+    return projectColdSessionView({
+      modelFromSettings: (settings) => this.modelFromSessionSettings(settings),
+      sessionActivity: (sessionId) => this.sessionActivity(sessionId),
+      offlineStats: (sessionId, usage) => this.offlineStatsFromUsage(sessionId, usage),
+      currentGateMode: (sessionId) => this.currentGateMode(sessionId),
+      pendingRequest: (sessionId) => this.pendingRequestForSession(sessionId),
+      controlState: (sessionId, browserId) => this.controlState(sessionId, browserId),
+    }, { id, session, snapshot, turnLimit, clientId });
   }
 
   private hotMemoryView(
@@ -6172,11 +5692,9 @@ export class PiChatApp {
     turnLimit: number,
     clientId: string,
   ): SessionViewData | null {
-    const runtime =
-      id === this.activeSessionId ? null : this.runtimePool.get(id);
+    const runtime = id === this.activeSessionId ? null : this.runtimePool.get(id);
     const primary = id === this.activeSessionId && this.primaryReadReady();
     if (!runtime && !primary) return null;
-    if (runtime) this.runtimePool.touch(runtime);
     const summary = primary
       ? this.primarySummarySnapshot || {
           id,
@@ -6191,86 +5709,59 @@ export class PiChatApp {
       : runtime!.summarySnapshot || runtime!.draftSession;
     if (!summary) return null;
     const persisted = primary
-      ? this.lastPrimaryMessagesSessionId === id
-        ? this.lastPrimaryMessages
-        : undefined
+      ? this.lastPrimaryMessagesSessionId === id ? this.lastPrimaryMessages : undefined
       : runtime!.messageSnapshot;
     const tail = primary
-      ? this.primaryPendingTerminalSessionId === id
-        ? this.primaryPendingTerminalMessages
-        : []
+      ? this.primaryPendingTerminalSessionId === id ? this.primaryPendingTerminalMessages : []
       : runtime!.pendingTerminalMessages;
-    const messages = reconcilePersistedHistory(persisted || [], tail).messages;
-    this.reconcilePendingAcceptedPrompts(id, persisted || []);
-    const pendingPrompt = this.pendingPromptForSession(id);
-    const pendingSteerProjection = this.pendingSteerProjection(id);
-    const windowed = messageWindow(messages, turnLimit);
     const state = this.stateWithPendingPromptSettings(
       id,
-      primary
-        ? this.lastPrimaryState
-        : runtime!.lastState || { model: null, isStreaming: runtime!.running },
+      primary ? this.lastPrimaryState : runtime!.lastState || { model: null, isStreaming: runtime!.running },
     );
     const streaming = primary
       ? this.primaryTurnActive()
       : this.runtimeTurnActive(runtime!) || runtime!.dispatching;
-    return {
-      session: {
-        ...summary,
-        active: true,
-        writable: true,
-        running: streaming,
-        queued: primary
-          ? this.promptQueue.length > 0
-          : runtime!.promptQueue.length > 0,
-        activity: this.sessionActivity(id),
-      },
-      state: this.stateWithFastMode(id, { ...state, isStreaming: streaming }),
-      messages: windowed.messages,
-      messageTotal: windowed.total,
-      turnTotal: windowed.turns,
-      visibleTurnCount: windowed.visibleTurns,
-      messagesTruncated: windowed.truncated,
-      isActive: true,
-      runtimeStatus: "active",
-      isStreaming: streaming,
-      liveMessage: primary ? this.liveMessage : runtime!.liveMessage,
-      toolStatus: primary ? this.toolStatus : runtime!.toolStatus,
-      stats: primary
-        ? this.lastPrimaryStats?.sessionId === id
-          ? this.lastPrimaryStats.value
-          : undefined
-        : runtime!.lastStats,
-      queue: primary
-        ? this.publicQueue()
-        : this.publicQueue(runtime!.promptQueue),
-      queuePaused: primary ? this.queuePaused : runtime!.queuePaused,
-      commands: primary
-        ? this.lastPrimaryCommands.length
-          ? [...BUILTIN_COMMANDS, ...this.lastPrimaryCommands]
-          : undefined
-        : runtime!.commands?.length
-          ? [...BUILTIN_COMMANDS, ...runtime!.commands]
-          : undefined,
-      gateMode: primary ? this.primaryGateMode : runtime!.gateMode,
-      pendingExtensionRequest: this.pendingRequestForSession(id),
-      ...(pendingPrompt ? { pendingPrompt } : null),
-      ...(this.runtimePool.get(id) || id === this.activeSessionId
-        ? {
-            pendingSteers: pendingSteerProjection.items,
-            pendingSteerRevision: pendingSteerProjection.revision,
-          }
-        : null),
-      historyPending: !persisted,
-      reconcilePending:
-        !persisted ||
-        tail.length > 0 ||
-        (primary
+    return projectHotMemoryView({
+      modelFromSettings: (settings) => this.modelFromSessionSettings(settings),
+      sessionActivity: (sessionId) => this.sessionActivity(sessionId),
+      offlineStats: (sessionId, usage) => this.offlineStatsFromUsage(sessionId, usage),
+      currentGateMode: (sessionId) => this.currentGateMode(sessionId),
+      pendingRequest: (sessionId) => this.pendingRequestForSession(sessionId),
+      controlState: (sessionId, browserId) => this.controlState(sessionId, browserId),
+      touch: (sessionId) => { const target = this.runtimePool.get(sessionId); if (target) this.runtimePool.touch(target); },
+      reconcilePendingPrompts: (sessionId, messages) => this.reconcilePendingAcceptedPrompts(sessionId, messages),
+      pendingPrompt: (sessionId) => this.pendingPromptForSession(sessionId),
+      pendingSteers: (sessionId) => this.pendingSteerProjection(sessionId),
+      stateWithPendingPromptSettings: (sessionId, next) => this.stateWithPendingPromptSettings(sessionId, next),
+      stateWithFastMode: (sessionId, next) => this.stateWithFastMode(sessionId, next),
+    }, {
+      id,
+      turnLimit,
+      clientId,
+      primary,
+      source: {
+        summary,
+        persisted,
+        terminalTail: tail,
+        state,
+        streaming,
+        liveMessage: primary ? this.liveMessage : runtime!.liveMessage,
+        toolStatus: primary ? this.toolStatus : runtime!.toolStatus,
+        stats: primary
+          ? this.lastPrimaryStats?.sessionId === id ? this.lastPrimaryStats.value : undefined
+          : runtime!.lastStats,
+        queue: primary ? this.publicQueue() : this.publicQueue(runtime!.promptQueue),
+        queuePaused: primary ? this.queuePaused : runtime!.queuePaused,
+        commands: primary
+          ? this.lastPrimaryCommands.length ? [...BUILTIN_COMMANDS, ...this.lastPrimaryCommands] : undefined
+          : runtime!.commands?.length ? [...BUILTIN_COMMANDS, ...runtime!.commands] : undefined,
+        gateMode: primary ? this.primaryGateMode : runtime!.gateMode,
+        historyPending: !persisted,
+        reconcilePending: !persisted || tail.length > 0 || (primary
           ? this.lastPrimaryStats?.sessionId !== id
           : !runtime!.statsKnown || !runtime!.commandsKnown),
-      viewSource: "hot-memory",
-      ...this.controlState(id, clientId),
-    };
+      },
+    });
   }
 
   private async coldSessionViewForId(
@@ -6279,54 +5770,16 @@ export class PiChatApp {
     clientId: string,
     includeForkOrigin = false,
   ): Promise<SessionViewData | null> {
-    const index = this.options.sessions as SessionIndex & {
-      cachedSummaryForId?: (
-        sessionId: string,
-      ) => Promise<SessionSummary | null>;
-      snapshotAndSummaryForId?: (
-        sessionId: string,
-      ) => Promise<{ snapshot: SessionFileSnapshot; summary: SessionSummary } | null>;
-      recentSnapshotAndSummaryForId?: (
-        sessionId: string,
-        turnLimit: number,
-      ) => Promise<{ snapshot: SessionFileSnapshot; summary: SessionSummary } | null>;
-    };
-    const recentTarget = index.recentSnapshotAndSummaryForId
-      ? await index.recentSnapshotAndSummaryForId(id, turnLimit)
-      : null;
-    const target = recentTarget || await index.snapshotAndSummaryForId?.(id);
-    let view = target
-      ? this.coldSessionViewFromSnapshot(
-          id,
-          target.summary,
-          target.snapshot,
-          turnLimit,
-          clientId,
-        )
-      : null;
-    if (!view) {
-      let knownSession =
-        (await index.cachedSummaryForId?.(id)) ||
-        this.options.sessions.summaryForId?.(id);
-      // Compatibility fallback for older indexes/test doubles without a
-      // target-only summary projection. Production SessionIndex reaches this
-      // only after its bounded target lookup failed.
-      if (!knownSession)
-        knownSession = (
-          await this.options.sessions.list(
-            this.activeSessionPath,
-            this.currentCwd,
-          )
-        ).find((session) => session.id === id) || null;
-      view = knownSession
-        ? await this.coldSessionView(id, knownSession, turnLimit, clientId)
-        : null;
-    }
-    if (!view || !includeForkOrigin) return view;
-    return {
-      ...view,
-      forkOrigin: await this.forkOriginForSession(id),
-    };
+    return readColdSessionView({
+      index: this.options.sessions,
+      activeSessionPath: () => this.activeSessionPath,
+      currentCwd: () => this.currentCwd,
+      projectSnapshot: (sessionId, session, snapshot, limit, browserId) =>
+        this.coldSessionViewFromSnapshot(sessionId, session, snapshot, limit, browserId),
+      projectMessages: (sessionId, session, limit, browserId) =>
+        this.coldSessionView(sessionId, session, limit, browserId),
+      forkOrigin: (sessionId) => this.forkOriginForSession(sessionId),
+    }, id, turnLimit, clientId, includeForkOrigin);
   }
 
   private async sessionView(
@@ -6335,92 +5788,43 @@ export class PiChatApp {
     clientId = "",
     options: { fast?: boolean; includeForkOrigin?: boolean } = {},
   ): Promise<SessionViewData | null> {
-    const primary = id === this.activeSessionId;
-    const secondary = primary ? undefined : this.runtimePool.get(id);
-    if (!primary && !secondary) {
-      const view = options.fast
-        ? this.hotMemoryView(id, turnLimit, clientId)
-        : await this.sessionViewFromCurrentProjection(id, turnLimit, clientId);
-      if (!view || !options.includeForkOrigin) return view;
-      return {
-        ...view,
-        forkOrigin: await this.forkOriginForSession(id),
-      };
-    }
-
-    let release: (() => void) | null = null;
-    let currentHotRuntime: () => boolean;
-    try {
-      if (primary) {
+    return readSessionView({
+      isPrimary: (sessionId) => sessionId === this.activeSessionId,
+      secondaryExists: (sessionId) => this.runtimePool.has(sessionId),
+      acquirePrimary: () => {
         const lease = this.primaryOperationAdmission.acquire();
-        release = lease.release;
-        const rpcGeneration = this.options.rpc.currentGeneration?.() || 0;
-        currentHotRuntime = () =>
-          this.activeSessionId === id &&
-          this.primaryOperationAdmission.generation === lease.generation &&
-          (this.options.rpc.currentGeneration?.() || 0) === rpcGeneration &&
-          this.options.rpc.isRunning?.() !== false;
-      } else {
-        const runtime = secondary!;
-        release = this.runtimePool.acquireOperation(runtime);
-        const admissionGeneration = runtime.operationAdmission.generation;
-        const rpcGeneration = runtime.rpc.currentGeneration?.() || 0;
-        currentHotRuntime = () =>
-          this.runtimePool.get(id) === runtime &&
-          runtime.operationAdmission.generation === admissionGeneration &&
-          (runtime.rpc.currentGeneration?.() || 0) === rpcGeneration &&
-          runtime.rpc.isRunning?.() !== false;
-      }
-    } catch (error) {
-      if (!(error instanceof OperationAdmissionClosedError)) throw error;
-      return options.fast
-        ? null
-        : this.coldSessionViewForId(
-            id,
-            turnLimit,
-            clientId,
-            options.includeForkOrigin,
-          );
-    }
-
-    const assertCurrentHotRuntime = () => {
-      if (!currentHotRuntime()) throw new StaleSessionViewRuntimeError();
-    };
-    let view: SessionViewData | null = null;
-    let stale = false;
-    try {
-      view = options.fast
-        ? this.hotMemoryView(id, turnLimit, clientId)
-        : await this.sessionViewFromCurrentProjection(
-            id,
-            turnLimit,
-            clientId,
-            assertCurrentHotRuntime,
-          );
-      assertCurrentHotRuntime();
-      if (view && options.includeForkOrigin) {
-        view = {
-          ...view,
-          forkOrigin: await this.forkOriginForSession(id),
+        return { ...lease, rpcGeneration: this.options.rpc.currentGeneration?.() || 0 };
+      },
+      primaryCurrent: (sessionId, lease) =>
+        this.activeSessionId === sessionId
+        && this.primaryOperationAdmission.generation === lease.generation
+        && (this.options.rpc.currentGeneration?.() || 0) === lease.rpcGeneration
+        && this.options.rpc.isRunning?.() !== false,
+      acquireSecondary: (sessionId) => {
+        const runtime = this.runtimePool.get(sessionId)!;
+        const release = this.runtimePool.acquireOperation(runtime);
+        return {
+          generation: runtime.operationAdmission.generation,
+          rpcGeneration: runtime.rpc.currentGeneration?.() || 0,
+          release,
         };
-        assertCurrentHotRuntime();
-      }
-    } catch (error) {
-      if (error instanceof StaleSessionViewRuntimeError) stale = true;
-      else throw error;
-    } finally {
-      release?.();
-    }
-    return stale
-      ? options.fast
-        ? null
-        : this.coldSessionViewForId(
-            id,
-            turnLimit,
-            clientId,
-            options.includeForkOrigin,
-          )
-      : view;
+      },
+      secondaryCurrent: (sessionId, lease) => {
+        const runtime = this.runtimePool.get(sessionId);
+        return Boolean(
+          runtime
+          && runtime.operationAdmission.generation === lease.generation
+          && (runtime.rpc.currentGeneration?.() || 0) === lease.rpcGeneration
+          && runtime.rpc.isRunning?.() !== false,
+        );
+      },
+      hotView: (sessionId, limit, browserId) => this.hotMemoryView(sessionId, limit, browserId),
+      currentProjection: (sessionId, limit, browserId, assertCurrent) =>
+        this.sessionViewFromCurrentProjection(sessionId, limit, browserId, assertCurrent),
+      coldView: (sessionId, limit, browserId, includeForkOrigin) =>
+        this.coldSessionViewForId(sessionId, limit, browserId, includeForkOrigin),
+      forkOrigin: (sessionId) => this.forkOriginForSession(sessionId),
+    }, id, turnLimit, clientId, options);
   }
 
   private async sessionViewFromCurrentProjection(
@@ -6429,401 +5833,56 @@ export class PiChatApp {
     clientId = "",
     assertCurrentHotRuntime?: () => void,
   ): Promise<SessionViewData | null> {
-    const knownRuntime = this.runtimePool.get(id);
-    const targetRuntimeBusy =
-      id === this.activeSessionId
-        ? this.primaryTurnActive()
-        : Boolean(
-            knownRuntime &&
-            (this.runtimeTurnActive(knownRuntime) || knownRuntime.dispatching),
-          );
-    // Cold history is a pure JSONL read. Avoid waking or querying the Primary RPC
-    // and avoid rescanning every Session when the index already knows this ID.
-    if (id !== this.activeSessionId && !knownRuntime) {
-      // A target-only snapshot read already validates and parses the JSONL. Use
-      // its summary projection too, avoiding a second stat/fingerprint/outline
-      // pass during a cold navigation. Large files take the bounded tail path.
-      const cold = await this.coldSessionViewForId(id, turnLimit, clientId);
-      if (cold) return cold;
-    }
-    // Browser /api/sessions/:id/view has a 65s client budget. Several default 30s
-    // Pi RPC calls used to stack past that during compaction or long tool turns,
-    // producing a late red "请求超时（65 秒）" even after compaction finished.
-    const SHORT_RPC_MS = 4_000;
-    const MESSAGES_RPC_MS = 6_000;
-    const primaryAvailable =
-      this.applicationLifecycle === "idle" && this.primaryReadReady();
-    let state: PiState = this.lastPrimaryState;
-    if (
-      primaryAvailable &&
-      !(id !== this.activeSessionId && targetRuntimeBusy)
-    ) {
-      // Controller-managed startup already adopted the exact state response
-      // that certified this child. A view must never reopen authority binding
-      // with another get_state; retain a legacy fallback only when no adopted
-      // generation exists.
-      const currentPrimaryGeneration =
-        this.options.rpc.currentGeneration?.() || 0;
-      const canSkipStateProbe =
-        Boolean(this.activeSessionId) &&
-        Boolean(this.activeSessionPath) &&
-        (currentPrimaryGeneration
-          ? this.primaryRpcGeneration === currentPrimaryGeneration
-          : this.primaryTurnActive());
-      if (canSkipStateProbe) {
-        state = {
-          ...this.lastPrimaryState,
-          isStreaming: targetRuntimeBusy,
-        };
-      } else {
-        try {
-          state = asState(
-            await this.options.rpc.send({ type: "get_state" }, SHORT_RPC_MS),
-          );
-          assertCurrentHotRuntime?.();
-          this.lastPrimaryState = state;
-          this.running = state.isStreaming;
-          this.bindPrimaryIdentity(state);
-        } catch (error) {
-          if (error instanceof StaleSessionViewRuntimeError) throw error;
-          state = this.running
-            ? { ...this.lastPrimaryState, isStreaming: true }
-            : this.lastPrimaryState;
-        }
-      }
-    } else {
-      state = { model: null, isStreaming: false };
-    }
-    const secondaryRuntime = knownRuntime;
-    const knownBusy =
-      id === this.activeSessionId
-        ? this.primaryTurnActive()
-        : Boolean(
-            secondaryRuntime &&
-            (this.runtimeTurnActive(secondaryRuntime) ||
-              secondaryRuntime.dispatching),
-          );
-    // An already-open Runtime has stable target identity in memory or in the
-    // persisted metadata cache. Opening its idle view must not wait behind a
-    // global JSONL inventory refresh.
-    const index = this.options.sessions as SessionIndex & {
-      cachedSummaryForId?: (
-        sessionId: string,
-      ) => Promise<SessionSummary | null>;
-    };
-    const knownHotRuntime =
-      id === this.activeSessionId || Boolean(secondaryRuntime);
-    let indexedSession = knownHotRuntime
-      ? this.options.sessions.summaryForId?.(id) ||
-        (id === this.activeSessionId && this.primarySummarySnapshot?.id === id
-          ? this.primarySummarySnapshot
-          : null) ||
-        secondaryRuntime?.summarySnapshot ||
-        secondaryRuntime?.draftSession ||
-        null
-      : null;
-    if (!indexedSession && knownHotRuntime)
-      indexedSession = await index.cachedSummaryForId?.(id) || null;
-    assertCurrentHotRuntime?.();
-    if (!indexedSession && id === this.activeSessionId) {
-      indexedSession = {
-        id,
-        sessionId: state.sessionId || id,
-        name: state.sessionName || "当前对话",
-        preview: state.sessionName || "当前对话",
-        cwd: this.currentCwd,
-        updatedAt: this.now(),
-        messageCount: state.messageCount || 0,
-        active: true,
-      };
-    }
-    const sessions = indexedSession
-      ? this.sessionSummaries([{ ...indexedSession, active: true }], clientId)
-      : this.sessionSummaries(
-          await this.options.sessions.list(
-            this.activeSessionPath,
-            this.currentCwd,
-          ),
-          clientId,
-        );
-    assertCurrentHotRuntime?.();
-    // A fresh New view is valid even though it is deliberately absent from the
-    // sidebar until its first user message is persisted.
-    const session =
-      sessions.find((item) => item.id === id) || secondaryRuntime?.draftSession;
-    if (!session) return null;
-    const secondaryReadable =
-      this.applicationLifecycle === "idle" &&
-      secondaryRuntime &&
-      !secondaryRuntime.failed &&
-      secondaryRuntime.rpc.isRunning?.() !== false
-        ? secondaryRuntime
-        : null;
-    const runtime =
-      id === this.activeSessionId && primaryAvailable
-        ? {
-            rpc: this.options.rpc,
-            running: this.running,
-            liveMessage: this.liveMessage,
-            toolStatus: this.toolStatus,
-          }
-        : secondaryReadable;
-    if (runtime) {
-      if (id !== this.activeSessionId)
-        this.runtimePool.touch(runtime as SecondaryRuntime);
-      const busy =
-        runtime.running ||
-        Boolean(runtime.liveMessage) ||
-        Boolean(runtime.toolStatus) ||
-        Boolean((runtime as SecondaryRuntime).dispatching);
-      const sessionIndex = this.options.sessions as SessionIndex & {
-        cachedSnapshotForId?: (
-          sessionId: string,
-        ) => import("./session-index.js").SessionFileSnapshot | null;
-        snapshotForId?: (
-          sessionId: string,
-        ) => Promise<import("./session-index.js").SessionFileSnapshot | null>;
-      };
-      // For an already-open streaming Session, use the last parsed JSONL branch
-      // immediately. The live assistant snapshot arrives separately over SSE.
-      let snapshot = busy
-        ? (sessionIndex.cachedSnapshotForId?.(id) ?? null)
-        : null;
-      if (!snapshot && !busy && sessionIndex.snapshotForId)
-        snapshot = await sessionIndex.snapshotForId(id);
-      assertCurrentHotRuntime?.();
-      const persistedRuntimeMessages =
-        id === this.activeSessionId && this.lastPrimaryMessagesSessionId === id
-          ? this.lastPrimaryMessages
-          : (secondaryRuntime?.messageSnapshot ?? null);
-      const terminalTail =
-        id === this.activeSessionId
-          ? this.primaryPendingTerminalSessionId === id
-            ? this.primaryPendingTerminalMessages
-            : []
-          : secondaryRuntime?.pendingTerminalMessages || [];
-      let persistedMessages: PiMessage[] | null =
-        snapshot?.messages ??
-        (busy
-          ? persistedRuntimeMessages
-          : typeof this.options.sessions.messagesForId === "function"
-            ? await this.options.sessions.messagesForId(id)
-            : null);
-      assertCurrentHotRuntime?.();
-      let messages: PiMessage[] | null = persistedMessages
-        ? reconcilePersistedHistory(persistedMessages, terminalTail).messages
-        : terminalTail.length
-          ? reconcilePersistedHistory([], terminalTail).messages
-          : null;
-      if (!messages && !busy) {
-        const path =
-          (typeof this.options.sessions.pathForId === "function"
-            ? this.options.sessions.pathForId(id)
-            : null) ||
-          (runtime as SecondaryRuntime).sessionPath ||
-          (runtime as SecondaryRuntime).draftSessionPath;
-        if (path) {
-          try {
-            persistedMessages = await readSessionMessages(path);
-            assertCurrentHotRuntime?.();
-            messages = reconcilePersistedHistory(
-              persistedMessages,
-              terminalTail,
-            ).messages;
-          } catch (error) {
-            if (error instanceof StaleSessionViewRuntimeError) throw error;
-            messages = null;
-          }
-        }
-      }
-      let stateResponse: Record<string, unknown> | null = null;
-      let statsResponse: Record<string, unknown> | null = null;
-      let commandsResponse: Record<string, unknown> | null = null;
-      const terminalCandidate = terminalTail.at(-1);
-      const terminalIdleProbe = Boolean(
-        busy &&
-          !runtime.liveMessage &&
-          terminalCandidate?.role === "assistant" &&
-          !assistantMessageRequestsTool(terminalCandidate),
-      );
-      if (!busy || terminalIdleProbe) {
-        try {
-          const primaryAdopted =
-            id === this.activeSessionId &&
-            Boolean(this.primaryRpcGeneration) &&
-            this.primaryRpcGeneration ===
-              (this.options.rpc.currentGeneration?.() || 0);
-          const probes = await Promise.all([
-            primaryAdopted && !terminalIdleProbe
-              ? Promise.resolve(null)
-              : runtime.rpc
-                  .send({ type: "get_state" }, SHORT_RPC_MS)
-                  .catch(() => null),
-            terminalIdleProbe
-              ? Promise.resolve(null)
-              : runtime.rpc
-                  .send({ type: "get_session_stats" }, SHORT_RPC_MS)
-                  .catch(() => null),
-            terminalIdleProbe
-              ? Promise.resolve(null)
-              : runtime.rpc
-                  .send({ type: "get_commands" }, SHORT_RPC_MS)
-                  .catch(() => null),
-          ]);
-          assertCurrentHotRuntime?.();
-          stateResponse = probes[0];
-          statsResponse = probes[1];
-          commandsResponse = probes[2];
-        } catch (error) {
-          if (error instanceof StaleSessionViewRuntimeError) throw error;
-          // Disk history + last known liveMessage still form a usable view.
-        }
-      }
-      const rememberedState =
-        id === this.activeSessionId
-          ? this.lastPrimaryState
-          : secondaryRuntime?.lastState || { model: null };
-      const liveState = stateResponse
-        ? asState(stateResponse)
-        : ({
-            ...rememberedState,
-            isStreaming: busy,
-          } satisfies PiState);
-      const terminalProbeConfirmedIdle = Boolean(
-        terminalIdleProbe && stateResponse && !liveState.isStreaming,
-      );
-      if (stateResponse && id === this.activeSessionId) {
-        this.lastPrimaryState = liveState;
-        // A missing agent_settled frame must not let a read route release the
-        // server's FIFO run authority. The browser may present the confirmed
-        // idle state, while the owner still queues writes until Pi's lifecycle
-        // frame (or recovery) closes the generation.
-        if (!terminalIdleProbe) this.running = liveState.isStreaming;
-      } else if (stateResponse && secondaryRuntime) {
-        secondaryRuntime.lastState = liveState;
-        if (!terminalIdleProbe) secondaryRuntime.running = liveState.isStreaming;
-      }
-      if (secondaryRuntime && commandsResponse) {
-        secondaryRuntime.commands = asCommands(commandsResponse);
-        secondaryRuntime.commandsKnown = true;
-      }
-      // Only hit get_messages when disk is empty. Never wait on a busy worker
-      // when terminal SSE rows or a persisted snapshot already form a view.
-      if (!messages && busy) messages = [];
-      if (!messages) {
-        try {
-          persistedMessages = asMessages(
-            await runtime.rpc.send(
-              { type: "get_messages" },
-              busy ? 3_000 : MESSAGES_RPC_MS,
-            ),
-          );
-          assertCurrentHotRuntime?.();
-          messages = reconcilePersistedHistory(
-            persistedMessages,
-            terminalTail,
-          ).messages;
-        } catch (error) {
-          throw error;
-        }
-      }
-      if (!messages) throw new Error("无法读取会话消息");
-      this.reconcilePendingAcceptedPrompts(id, persistedMessages || messages);
-      if (persistedMessages) {
-        const reconciled = reconcilePersistedHistory(
-          persistedMessages,
-          terminalTail,
-        );
-        if (id === this.activeSessionId) {
-          this.lastPrimaryMessages = persistedMessages;
-          this.lastPrimaryMessagesSessionId = id;
-          // Keep the final terminal as bounded repair evidence while the server
-          // still awaits lifecycle settlement. Otherwise one transient state
-          // probe can reconcile it out of the tail and make every later view
-          // revive the stale Stop button permanently.
-          this.primaryPendingTerminalMessages = terminalIdleProbe
-            ? terminalTail
-            : reconciled.pending;
-        } else if (secondaryRuntime) {
-          secondaryRuntime.messageSnapshot = persistedMessages;
-          secondaryRuntime.pendingTerminalMessages = terminalIdleProbe
-            ? terminalTail
-            : reconciled.pending;
-        }
-        messages = reconciled.messages;
-      }
-      const pendingPrompt = this.pendingPromptForSession(id);
-      const pendingSteerProjection = this.pendingSteerProjection(id);
-      const windowed = messageWindow(messages, turnLimit);
-      const stats = statsResponse
-        ? await this.statsForSession(id, statsResponse)
-        : busy
-          ? snapshot
-            ? await this.offlineStatsForId(id, snapshot.usage)
-            : undefined
-          : await this.offlineStatsForId(id, snapshot?.usage);
-      assertCurrentHotRuntime?.();
-      const rememberedCommands =
-        id === this.activeSessionId
-          ? this.lastPrimaryCommands
-          : secondaryRuntime?.commands;
-      if (secondaryRuntime) {
-        secondaryRuntime.summarySnapshot = session;
-        secondaryRuntime.lastStats = stats;
-        secondaryRuntime.statsKnown =
-          Boolean(statsResponse) || secondaryRuntime.statsKnown;
-      } else if (id === this.activeSessionId)
-        this.primarySummarySnapshot = session;
-      const presentationBusy = terminalProbeConfirmedIdle ? false : busy;
-      const visibleQueue =
-        id === this.activeSessionId
-          ? this.publicQueue()
-          : this.publicQueue((runtime as SecondaryRuntime).promptQueue);
-      const visibleQueuePaused = visibleQueue.length > 0 && (
-        id === this.activeSessionId
-          ? this.queuePaused
-          : (runtime as SecondaryRuntime).queuePaused
-      );
-      return {
-        session: {
-          ...session,
-          running: presentationBusy,
-          activity: this.sessionActivity(id),
-        },
-        state: this.stateWithFastMode(id, {
-          ...this.stateWithPendingPromptSettings(id, liveState),
-          isStreaming: presentationBusy || liveState.isStreaming,
-        }),
-        messages: windowed.messages,
-        messageTotal: windowed.total,
-        turnTotal: windowed.turns,
-        visibleTurnCount: windowed.visibleTurns,
-        messagesTruncated: windowed.truncated,
-        isActive: true,
-        runtimeStatus: "active",
-        isStreaming: presentationBusy || liveState.isStreaming,
-        liveMessage: terminalProbeConfirmedIdle ? undefined : runtime.liveMessage,
-        toolStatus: terminalProbeConfirmedIdle ? "" : runtime.toolStatus,
-        stats,
-        queue: visibleQueue,
-        queuePaused: visibleQueuePaused,
-        commands: commandsResponse
-          ? [...BUILTIN_COMMANDS, ...asCommands(commandsResponse)]
-          : rememberedCommands?.length
-            ? [...BUILTIN_COMMANDS, ...rememberedCommands]
-            : undefined,
-        gateMode:
-          id === this.activeSessionId
-            ? this.primaryGateMode
-            : (runtime as SecondaryRuntime).gateMode,
-        pendingExtensionRequest: this.pendingRequestForSession(id),
-        ...(pendingPrompt ? { pendingPrompt } : null),
-        pendingSteers: pendingSteerProjection.items,
-        pendingSteerRevision: pendingSteerProjection.revision,
-        ...this.controlState(id, clientId),
-      };
-    }
-    return this.coldSessionView(id, session, turnLimit, clientId);
+    const owner = this;
+    return sessionViewFromCurrentProjection({
+      index: this.options.sessions,
+      primaryRpc: this.options.rpc,
+      builtinCommands: BUILTIN_COMMANDS,
+      secondaryForId: (sessionId) => this.runtimePool.get(sessionId),
+      touchSecondary: (runtime) => this.runtimePool.touch(runtime),
+      get activeSessionId() { return owner.activeSessionId; },
+      get activeSessionPath() { return owner.activeSessionPath; },
+      get applicationLifecycle() { return owner.applicationLifecycle; },
+      get currentCwd() { return owner.currentCwd; },
+      get primaryRpcGeneration() { return owner.primaryRpcGeneration; },
+      get lastPrimaryState() { return owner.lastPrimaryState; },
+      set lastPrimaryState(state) { owner.lastPrimaryState = state; },
+      get running() { return owner.running; },
+      set running(running) { owner.running = running; },
+      get primarySummarySnapshot() { return owner.primarySummarySnapshot; },
+      set primarySummarySnapshot(summary) { owner.primarySummarySnapshot = summary; },
+      get liveMessage() { return owner.liveMessage; },
+      get toolStatus() { return owner.toolStatus; },
+      get lastPrimaryMessagesSessionId() { return owner.lastPrimaryMessagesSessionId; },
+      set lastPrimaryMessagesSessionId(id) { owner.lastPrimaryMessagesSessionId = id; },
+      get lastPrimaryMessages() { return owner.lastPrimaryMessages; },
+      set lastPrimaryMessages(messages) { owner.lastPrimaryMessages = messages; },
+      get primaryPendingTerminalSessionId() { return owner.primaryPendingTerminalSessionId; },
+      get primaryPendingTerminalMessages() { return owner.primaryPendingTerminalMessages; },
+      set primaryPendingTerminalMessages(messages) { owner.primaryPendingTerminalMessages = messages; },
+      get lastPrimaryCommands() { return owner.lastPrimaryCommands; },
+      get primaryGateMode() { return owner.primaryGateMode; },
+      get queuePaused() { return owner.queuePaused; },
+      now: () => this.now(),
+      primaryTurnActive: () => this.primaryTurnActive(),
+      runtimeTurnActive: (runtime) => this.runtimeTurnActive(runtime),
+      primaryReadReady: () => this.primaryReadReady(),
+      bindPrimaryIdentity: (state) => this.bindPrimaryIdentity(state),
+      coldSessionViewForId: (id, limit, client) => this.coldSessionViewForId(id, limit, client),
+      coldSessionView: (id, session, limit, client) => this.coldSessionView(id, session, limit, client),
+      sessionSummaries: (sessions, client) => this.sessionSummaries(sessions, client),
+      reconcilePendingAcceptedPrompts: (id, messages) => this.reconcilePendingAcceptedPrompts(id, messages),
+      pendingPromptForSession: (id) => this.pendingPromptForSession(id),
+      pendingSteerProjection: (id) => this.pendingSteerProjection(id),
+      statsForSession: (id, response) => this.statsForSession(id, response),
+      offlineStatsForId: (id, usage) => this.offlineStatsForId(id, usage),
+      stateWithFastMode: (id, state) => this.stateWithFastMode(id, state),
+      stateWithPendingPromptSettings: (id, state) => this.stateWithPendingPromptSettings(id, state),
+      sessionActivity: (id) => this.sessionActivity(id),
+      controlState: (id, client) => this.controlState(id, client),
+      publicQueue: (queue) => this.publicQueue(queue),
+      pendingRequestForSession: (id) => this.pendingRequestForSession(id),
+    }, id, turnLimit, clientId, assertCurrentHotRuntime);
   }
 
   /**
@@ -6933,245 +5992,73 @@ export class PiChatApp {
     };
   }
 
-  private async bootstrap(
-    clientId = "",
-    coherenceRetry = 0,
-  ): Promise<BootstrapData> {
-    const readinessAtStart = this.primaryReadiness();
-    if (
-      this.applicationLifecycle !== "idle" &&
-      (this.primaryFailed || this.options.rpc.isRunning?.() === false)
-    ) {
-      throw new ApplicationLifecycleConflictError(
-        this.applicationLifecycle,
-        this.lifecycleMessage(),
-      );
-    }
-    // Bootstrap is a Session directory/read projection, not permission to make
-    // the service wait for a stopped Primary. A healthy existing worker still
-    // provides its current state, while a missing/crashed worker is recovered
-    // only at the first real write (or an explicit activation).
-    const primaryAvailable =
-      readinessAtStart.status === "ready" &&
-      !this.primaryFailed &&
-      this.options.rpc.isRunning?.() !== false;
-    const primaryStateAdopted = Boolean(
-      this.primaryBoundSessionId &&
-        this.primaryRpcGeneration &&
-        this.primaryRpcGeneration ===
-          (this.options.rpc.currentGeneration?.() || this.primaryRpcGeneration),
-    );
-    let state = this.lastPrimaryState;
-    // An empty list is meaningful only after this generation has completed its
-    // read-only discovery. While Primary is starting/busy, retain any cached
-    // catalogue on the browser and keep the UI explicitly pending.
-    let modelInventoryPending = true;
-    let currentBootstrapStats: SessionStats | undefined;
-    if (
-      primaryAvailable &&
-      !primaryStateAdopted &&
-      !(this.primaryTurnActive() && this.activeSessionPath)
-    ) {
-      try {
-        state = asState(
-          await this.options.rpc.send(
-            { type: "get_state" },
-            this.activeSessionPath ? 4_000 : 12_000,
-          ),
-        );
-        this.lastPrimaryState = state;
-        this.running = state.isStreaming;
-        this.bindPrimaryIdentity(state);
-      } catch (error) {
-        if (!this.activeSessionPath) throw error;
-        state = {
-          ...this.lastPrimaryState,
-          isStreaming: this.primaryTurnActive(),
-        };
-      }
-    } else if (this.primaryTurnActive() && this.activeSessionPath)
-      state = { ...state, isStreaming: true };
-
-    const busy = this.primaryTurnActive() || state.isStreaming;
-    if (busy && !state.isStreaming) state = { ...state, isStreaming: true };
-    if (!this.lastAvailableModels.length && state.model) {
-      this.rememberModelContextWindows([state.model]);
-      this.lastAvailableModels = [state.model];
-    }
-    // During a cold start the controller may have bound the authoritative
-    // Session state before app.activeSessionPath is copied. The state response
-    // carries the same verified JSONL path; use it to avoid returning an empty
-    // transcript for an already-existing Session.
-    const activeSessionPath = this.activeSessionPath || state.sessionFile;
-    const diskSnapshot = activeSessionPath
-      ? await readSessionSnapshot(activeSessionPath).catch(() => null)
-      : null;
-    const diskMessages = diskSnapshot?.messages ?? null;
-    let messages: PiMessage[] | null = null;
-    const primaryTerminalTail =
-      this.primaryPendingTerminalSessionId === this.activeSessionId
-        ? this.primaryPendingTerminalMessages
-        : [];
-    if (diskMessages) {
-      const reconciled = reconcilePersistedHistory(
-        diskMessages,
-        primaryTerminalTail,
-      );
-      this.lastPrimaryMessages = diskMessages;
-      this.primaryPendingTerminalMessages = reconciled.pending;
-      this.lastPrimaryMessagesSessionId = this.activeSessionId;
-      messages = reconciled.messages;
-    } else if (this.lastPrimaryMessagesSessionId === this.activeSessionId) {
-      messages = reconcilePersistedHistory(
-        this.lastPrimaryMessages,
-        primaryTerminalTail,
-      ).messages;
-    }
-    // JSONL is authoritative enough for an immediately readable bootstrap.
-    // An empty brand-new busy Session can render its live/optimistic message;
-    // never hold the whole shell open waiting for get_messages.
-    if (primaryAvailable && !messages && !busy) {
-      const rpcMessages = asMessages(
-        await this.options.rpc.send({ type: "get_messages" }, 12_000),
-      );
-      const reconciled = reconcilePersistedHistory(
-        rpcMessages,
-        primaryTerminalTail,
-      );
-      this.lastPrimaryMessages = rpcMessages;
-      this.primaryPendingTerminalMessages = reconciled.pending;
-      this.lastPrimaryMessagesSessionId = this.activeSessionId;
-      messages = reconciled.messages;
-    }
-
-    if (primaryAvailable && !busy) {
-      const [modelsResponse, commandsResponse, statsResponse] =
-        await Promise.all([
-          this.options.rpc
-            .send({ type: "get_available_models" }, 8_000)
-            .catch(() => null),
-          this.options.rpc
-            .send({ type: "get_commands" }, 8_000)
-            .catch(() => null),
-          this.options.rpc
-            .send({ type: "get_session_stats" }, 8_000)
-            .catch(() => null),
-        ]);
-      if (modelsResponse) {
-        const models = this.options.modelManager
-          ? await this.options.modelManager.annotate(asModels(modelsResponse))
-          : asModels(modelsResponse);
-        this.rememberModelContextWindows(models);
-        this.lastAvailableModels = models;
-        // Preserve the legacy wildcard only for Host rows that truly omit API.
-        // Once a row declares an API route, the Runtime must confirm the same
-        // provider + model + api identity before clearing pending sync.
-        if (this.startupModels.every((configured) =>
-          models.some((loaded) => this.modelRouteKey(loaded) === this.modelRouteKey(configured)
-            || (!configured.api
-              && loaded.provider === configured.provider
-              && loaded.id === configured.id))))
-          this.modelRuntimeSyncPending = false;
-        modelInventoryPending = false;
-      }
-      if (commandsResponse)
-        this.lastPrimaryCommands = asCommands(commandsResponse);
-      if (statsResponse) {
-        currentBootstrapStats = await this.statsForSession(
-          this.activeSessionId,
-          statsResponse,
-          diskSnapshot?.usage,
-        );
-        this.lastPrimaryStats = {
-          sessionId: this.activeSessionId,
-          value: currentBootstrapStats,
-        };
-      }
-    }
-    const availableModels = this.mergeHostAndRuntimeModels(
-      this.lastAvailableModels.length ? this.lastAvailableModels : [],
-      this.startupModels,
-    );
-    this.reconcilePendingAcceptedPrompts(
-      this.activeSessionId,
-      messages || [],
-    );
-    const pendingPrompt = this.pendingPromptForSession(this.activeSessionId);
-    const pendingSteerProjection = this.pendingSteerProjection(this.activeSessionId);
-    const windowedMessages = messageWindow(messages || []);
-    // Bootstrap is the browser's recovery boundary. It must revalidate the
-    // physical Session inventory instead of returning the short-lived cached
-    // list: another window/process may have removed a JSONL since the cache was
-    // populated, and a stale row would otherwise survive reload/reconnect.
-    const sidebar = this.sidebarSessions(
-      await this.options.sessions.list(activeSessionPath),
-      clientId,
-    );
-    this.primarySummarySnapshot =
-      sidebar.sessions.find((session) => session.id === this.activeSessionId) ||
-      this.primarySummarySnapshot;
-    const readinessAtEnd = this.primaryReadiness();
-    if (
-      coherenceRetry < 1 &&
-      (readinessAtEnd.generation !== readinessAtStart.generation ||
-        readinessAtEnd.status !== readinessAtStart.status)
-    ) {
-      // Startup/recovery crossed this request while independent Session/JSONL
-      // work was awaiting. Never return old state with a newer ready marker (or
-      // the reverse); rebuild once from the already-adopted generation. This
-      // does not send another get_state for a controller-owned Primary.
-      return this.bootstrap(clientId, coherenceRetry + 1);
-    }
-    const forkOrigin = this.activeSessionId
-      ? await this.forkOriginForSession(this.activeSessionId)
-      : undefined;
-    return {
+  private async bootstrap(clientId = "", coherenceRetry = 0): Promise<BootstrapData> {
+    const owner = this;
+    const bootstrapPorts: any = {
+      options: this.options,
+      builtinCommands: BUILTIN_COMMANDS,
+      get activeSessionId() { return owner.activeSessionId; },
+      get activeSessionPath() { return owner.activeSessionPath; },
+      get applicationLifecycle() { return owner.applicationLifecycle; },
+      get primaryFailed() { return owner.primaryFailed; },
+      get lastPrimaryState() { return owner.lastPrimaryState; },
+      set lastPrimaryState(state) { owner.lastPrimaryState = state; },
+      get running() { return owner.running; },
+      set running(value) { owner.running = value; },
+      get primaryBoundSessionId() { return owner.primaryBoundSessionId; },
+      get primaryRpcGeneration() { return owner.primaryRpcGeneration; },
+      get lastAvailableModels() { return owner.lastAvailableModels; },
+      set lastAvailableModels(value) { owner.lastAvailableModels = value; },
+      get lastPrimaryMessagesSessionId() { return owner.lastPrimaryMessagesSessionId; },
+      set lastPrimaryMessagesSessionId(value) { owner.lastPrimaryMessagesSessionId = value; },
+      get lastPrimaryMessages() { return owner.lastPrimaryMessages; },
+      set lastPrimaryMessages(value) { owner.lastPrimaryMessages = value; },
+      get primaryPendingTerminalSessionId() { return owner.primaryPendingTerminalSessionId; },
+      get primaryPendingTerminalMessages() { return owner.primaryPendingTerminalMessages; },
+      set primaryPendingTerminalMessages(value) { owner.primaryPendingTerminalMessages = value; },
+      get primarySummarySnapshot() { return owner.primarySummarySnapshot; },
+      set primarySummarySnapshot(value) { owner.primarySummarySnapshot = value; },
+      get lastPrimaryStats() { return owner.lastPrimaryStats; },
+      set lastPrimaryStats(value) { owner.lastPrimaryStats = value; },
+      get lastPrimaryCommands() { return owner.lastPrimaryCommands; },
+      set lastPrimaryCommands(value) { owner.lastPrimaryCommands = value; },
+      get primaryGateMode() { return owner.primaryGateMode; },
+      get queuePaused() { return owner.queuePaused; },
+      get liveMessage() { return owner.liveMessage; },
+      get toolStatus() { return owner.toolStatus; },
+      get modelRuntimeSyncPending() { return owner.modelRuntimeSyncPending; },
+      set modelRuntimeSyncPending(value) { owner.modelRuntimeSyncPending = value; },
+      get modelCatalogueRevision() { return owner.modelCatalogueRevision; },
+      get workspaceRevision() { return owner.workspaceRevision; },
+      get startupModels() { return owner.startupModels; },
+      currentCwd: this.currentCwd,
+      runEpoch: this.runEpoch,
       buildIdentity: this.buildIdentity,
-      ...(this.options.piVersion ? { piVersion: this.options.piVersion } : null),
-      ...(forkOrigin ? { forkOrigin } : null),
-      state: this.stateWithFastMode(
-        this.activeSessionId,
-        this.stateWithPendingPromptSettings(this.activeSessionId, state),
-      ),
-      ...(pendingPrompt ? { pendingPrompt } : null),
-      pendingSteers: pendingSteerProjection.items,
-      pendingSteerRevision: pendingSteerProjection.revision,
-      messages: windowedMessages.messages,
-      messageTotal: windowedMessages.total,
-      turnTotal: windowedMessages.turns,
-      visibleTurnCount: windowedMessages.visibleTurns,
-      messagesTruncated: windowedMessages.truncated,
-      activeSessionId: this.activeSessionId,
-      activeSessionIds: this.activeSessionIds(),
-      liveMessage: this.liveMessage,
-      toolStatus: this.toolStatus,
-      stats: currentBootstrapStats
-        ?? (diskSnapshot?.usage
-          ? this.offlineStatsFromUsage(this.activeSessionId, diskSnapshot.usage)
-          : this.lastPrimaryStats?.sessionId === this.activeSessionId
-            ? this.lastPrimaryStats.value
-            : await this.offlineStatsForId(this.activeSessionId)),
-      models: availableModels,
-      modelInventoryPending,
-      modelCatalogueRevision: this.modelCatalogueRevision,
-      modelRuntimeSyncPending: this.modelRuntimeSyncPending,
-      commands: [...BUILTIN_COMMANDS, ...this.lastPrimaryCommands],
-      queue: this.publicQueue(),
-      queuePaused: this.queuePaused,
-      pendingExtensionRequest: this.pendingRequestForSession(
-        this.activeSessionId,
-      ),
-      gateMode: this.primaryGateMode,
-      ...this.controlState(this.activeSessionId, clientId),
-      workspaceCwd: this.currentCwd,
-      workspaceEpoch: this.runEpoch,
-      workspaceRevision: this.workspaceRevision,
-      sessions: sidebar.sessions,
-      sessionDirectories: sidebar.directories,
-      sessionsTotal: sidebar.total,
-      applicationLifecycle: this.applicationLifecycle,
-      primaryRuntime: readinessAtStart,
+      primaryReadiness: () => this.primaryReadiness(),
+      primaryTurnActive: () => this.primaryTurnActive(),
+      bindPrimaryIdentity: (state: any) => this.bindPrimaryIdentity(state),
+      rememberModelContextWindows: (models: any) => this.rememberModelContextWindows(models),
+      modelRouteKey: (model: any) => this.modelRouteKey(model),
+      mergeHostAndRuntimeModels: (models: any, startup: any) => this.mergeHostAndRuntimeModels(models, startup),
+      statsForSession: (id: string, response: any, usage: any) => this.statsForSession(id, response, usage),
+      offlineStatsFromUsage: (id: string, usage: any) => this.offlineStatsFromUsage(id, usage),
+      offlineStatsForId: (id: string) => this.offlineStatsForId(id),
+      reconcilePendingAcceptedPrompts: (id: string, messages: any) => this.reconcilePendingAcceptedPrompts(id, messages),
+      pendingPromptForSession: (id: string) => this.pendingPromptForSession(id),
+      pendingSteerProjection: (id: string) => this.pendingSteerProjection(id),
+      sidebarSessions: (sessions: any, client: string) => this.sidebarSessions(sessions, client),
+      sessionActivity: (id: string) => this.sessionActivity(id),
+      controlState: (id: string, client: string) => this.controlState(id, client),
+      stateWithFastMode: (id: string, state: any) => this.stateWithFastMode(id, state),
+      stateWithPendingPromptSettings: (id: string, state: any) => this.stateWithPendingPromptSettings(id, state),
+      publicQueue: () => this.publicQueue(),
+      pendingRequestForSession: (id: string) => this.pendingRequestForSession(id),
+      activeSessionIds: () => this.activeSessionIds(),
+      forkOriginForSession: (id: string) => this.forkOriginForSession(id),
+      lifecycleMessage: () => this.lifecycleMessage(),
+      bootstrap: (id: string, retry: number) => this.bootstrap(id, retry),
     };
+    return bootstrapPrimary(bootstrapPorts, clientId, coherenceRetry);
   }
 
   async handle(
@@ -7416,6 +6303,7 @@ export class PiChatApp {
     }
   }
 
+
   private async listSessionsRoute(input: {
     clientId: string;
     all: boolean;
@@ -7591,12 +6479,43 @@ export class PiChatApp {
       input.turns,
       input.clientId,
     );
+    const running = target.status === "running";
+    const attention = target.status === "attention";
+    const execution: SessionActivityState["execution"] = running
+      ? "running"
+      : attention
+        ? "paused"
+        : target.status === "waiting"
+          ? "queued"
+          : target.status === "failed"
+            ? "failed"
+            : "idle";
+    const activity: SessionActivityState = {
+      execution,
+      awaitingConfirmation: attention,
+      ...(running ? { runStartedAt: target.startedAt } : null),
+      ...(!running && ["complete", "failed", "cancelled"].includes(target.status)
+        ? { lastRunDurationMs: target.elapsedMs }
+        : null),
+    };
+    const liveView: SessionViewData = {
+      ...view,
+      session: {
+        ...view.session,
+        running,
+        queued: target.status === "waiting",
+        activity,
+      },
+      state: { ...view.state, isStreaming: running },
+      isStreaming: running,
+      ...(target.activity || running ? { toolStatus: target.activity || "正在运行" } : null),
+    };
     this.traceViewProjection(
       "subagent-session-view",
       input.childSessionId,
-      view,
+      liveView,
     );
-    return view;
+    return liveView;
   }
 
   private async sessionViewRoute(input: {
@@ -7629,22 +6548,19 @@ export class PiChatApp {
     preparedBody?: Record<string, unknown>,
   ): Promise<void> {
     const clientId = requestClientId(request);
-    if (url.pathname === "/api/diagnostics/snapshot") {
-      if (request.method !== "GET") return methodNotAllowed(response);
-      const pageId = requestPageId(request);
-      if (!clientId || !pageId)
-        return json(response, 400, {
-          error: "导出诊断需要浏览器窗口与页面标识",
-          code: "DIAGNOSTIC_CLIENT_REQUIRED",
-        });
-      if (this.connectedPageClients.get(pageId) !== clientId)
-        return json(response, 409, {
-          error: "当前页面已关闭或尚未完成连接，无法导出诊断",
-          code: "DIAGNOSTIC_PAGE_NOT_REGISTERED",
-        });
-      this.streamDiagnostics.checkpoint();
-      return json(response, 200, this.stateDiagnostics.snapshot());
-    }
+    if (
+      await handleDiagnosticsReadRoute(
+        {
+          isRegisteredWindowPage: (client, page) => this.connectedPageClients.get(page) === client,
+          checkpoint: () => this.streamDiagnostics.checkpoint(),
+          snapshot: () => this.stateDiagnostics.snapshot(),
+        },
+        request,
+        response,
+        url,
+      )
+    )
+      return;
     if (
       await handleBootstrapRoute(
         {
@@ -7720,6 +6636,18 @@ export class PiChatApp {
     )
       return;
     if (
+      await handleResourcesReadRoute(
+        {
+          resources: this.options.resources,
+          primaryRuntimeCwd: () => this.primaryRuntimeCwd,
+        },
+        request,
+        response,
+        url,
+      )
+    )
+      return;
+    if (
       await handleSessionsReadRoute(
         {
           listSessions: (input) => this.listSessionsRoute(input),
@@ -7736,6 +6664,77 @@ export class PiChatApp {
           directoryLimit: DEFAULT_DIRECTORY_SESSION_LIST_SIZE,
           maxDirectoryLimit: MAX_DIRECTORY_SESSION_LIST_SIZE,
         },
+      )
+    )
+      return;
+
+    if (
+      await handleWindowControlRoute(
+        {
+          assertIdle: () => {
+            if (this.applicationLifecycle !== "idle")
+              throw new ApplicationLifecycleConflictError(
+                this.applicationLifecycle,
+                this.lifecycleMessage(),
+              );
+          },
+          isConnectedWindowPage: (client, page) => this.isConnectedWindowPage(client, page),
+          noteClientPresence: (client, page, revision, foreground) =>
+            foreground
+              ? this.sessionControl.noteClientPresence(client, page, revision)
+              : this.sessionControl.noteClientBackground(client, page, revision),
+          isClientPresent: (client) => this.sessionControl.isClientPresent(client),
+          closeWindowClient: (client, page) => this.closeWindowClient(client, page),
+          openWindowCount: () => this.openWindowCount(),
+          activeMutationRequests: () => this.activeMutationRequests,
+          runtimeStartingCount: () => this.runtimePool.startingCount,
+          restSessionAfterWindowClose: (sessionId) => this.restSessionAfterWindowClose(sessionId),
+          scheduleLastWindowShutdown: () => this.scheduleLastWindowShutdown(),
+          lastWindowAutoShutdownEnabled: () => this.lastWindowAutoShutdownEnabled,
+          applicationShutdownAvailable: () => Boolean(this.options.applicationShutdown),
+        },
+        request,
+        response,
+        url,
+      )
+    )
+      return;
+
+    if (
+      await handleLifecycleControlRoute(
+        {
+          applicationShutdownAvailable: () => Boolean(this.options.applicationShutdown),
+          applicationRestartAvailable: () => Boolean(this.options.applicationRestart),
+          isConnectedWindowPage: (client, page) => this.isConnectedWindowPage(client, page),
+          beginLifecycle: (lifecycle) => this.beginLifecycle(lifecycle),
+          endLifecycle: (lifecycle) => this.endLifecycle(lifecycle),
+          verifyApplicationQuiescent: (reason) => this.verifyApplicationQuiescent(reason),
+          broadcast: (event) => this.broadcast(event),
+          shutdown: (reason) => this.options.applicationShutdown?.(reason as ApplicationShutdownReason),
+          restart: () => this.options.applicationRestart!(),
+          reportIncident: (error, input) => this.reportIncident(
+            error,
+            input as Parameters<PiChatApp["reportIncident"]>[1],
+          ),
+        },
+        request,
+        response,
+        url,
+      )
+    )
+      return;
+
+    if (
+      await handleLocalFilesWorkspaceRoute(
+        {
+          pickLocalFiles: () => pickLocalFiles(),
+          readClipboardFiles: (files) => readClipboardFiles(files),
+          pickWorkspaceFolder: (cwd) => (this.options.pickWorkspaceFolder || pickWorkspaceFolder)(cwd),
+          currentCwd: () => this.currentCwd,
+        },
+        request,
+        response,
+        url,
       )
     )
       return;
@@ -7781,252 +6780,52 @@ export class PiChatApp {
       return;
     }
 
-    if (url.pathname === "/api/presence") {
-      if (request.method !== "POST") return methodNotAllowed(response);
-      const pageId = requestPageId(request);
-      if (!clientId || !pageId)
-        return json(response, 400, { error: "浏览器页面标识无效" });
-      const body = await bodyJson(request);
-      const revision = body.revision;
-      if (typeof body.foreground !== "boolean")
-        return json(response, 400, { error: "浏览器前台状态无效" });
-      if (
-        typeof revision !== "number" ||
-        !Number.isSafeInteger(revision) ||
-        revision < 1
-      )
-        return json(response, 400, { error: "浏览器前台状态序号无效" });
-      // Presence is page-scoped, not just client-scoped. A stale renderer or
-      // handshake-only helper must not mutate the foreground lease of a live page.
-      if (!this.isConnectedWindowPage(clientId, pageId)) {
-        return json(response, 409, { error: "当前页面的事件连接已断开，正在重新连接" });
-      }
-      const accepted = body.foreground
-        ? this.sessionControl.noteClientPresence(clientId, pageId, revision)
-        : this.sessionControl.noteClientBackground(clientId, pageId, revision);
-      if (!accepted) {
-        return json(response, 409, { error: "事件连接已断开，正在重新连接" });
-      }
-      json(response, 200, { present: this.sessionControl.isClientPresent(clientId) });
-      return;
-    }
-
-    if (url.pathname === "/api/window/close") {
-      if (request.method !== "POST") return methodNotAllowed(response);
-      if (!clientId)
-        return json(response, 400, { error: "缺少窗口标识，无法安全关闭" });
-      if (this.applicationLifecycle !== "idle")
-        throw new ApplicationLifecycleConflictError(
-          this.applicationLifecycle,
-          this.lifecycleMessage(),
-        );
-      const pageId = requestPageId(request) || clientId;
-      // `unload` is also emitted for discarded/frozen background renderers on
-      // some Chromium/PWA paths. Only a beacon that explicitly says it came
-      // from the foreground, backed by the server's still-fresh presence lease,
-      // may request service-lifetime shutdown.
-      const foregroundCloseIntent =
-        url.searchParams.get("foreground") === "1" &&
-        this.sessionControl.isClientPresent(clientId);
-      const viewedSessionId = this.closeWindowClient(clientId, pageId);
-      const otherWindowCount = this.openWindowCount();
-      // A Prompt may already hold an admission lease while its request body is
-      // still arriving. Do not stop any Runtime until all admitted mutations finish.
-      const rested =
-        otherWindowCount > 0 &&
-        this.activeMutationRequests === 0 &&
-        this.runtimePool.startingCount === 0
-          ? await this.restSessionAfterWindowClose(viewedSessionId)
-          : false;
-      if (otherWindowCount === 0 && foregroundCloseIntent)
-        this.scheduleLastWindowShutdown();
-      json(response, 200, {
-        shuttingDown: false,
-        closeWindow: true,
-        sessionId: viewedSessionId || undefined,
-        rested,
-        remainingWindows: otherWindowCount,
-        ...(otherWindowCount === 0 &&
-        foregroundCloseIntent &&
-        this.lastWindowAutoShutdownEnabled &&
-        this.options.applicationShutdown
-          ? { autoShutdownPending: true }
-          : {}),
-      });
-      return;
-    }
-
-    if (url.pathname === "/api/restart" || url.pathname === "/api/shutdown") {
-      if (request.method !== "POST") return methodNotAllowed(response);
-      const shuttingDown = url.pathname === "/api/shutdown";
-      const lifecycle = shuttingDown ? "shutting-down" : "restarting";
-      if (shuttingDown && !this.options.applicationShutdown)
-        return json(response, 501, {
-          error: "当前启动方式不支持从网页关闭 Pi Chat；请关闭服务进程。",
-        });
-      if (!shuttingDown && !this.options.applicationRestart)
-        return json(response, 501, {
-          error:
-            "当前启动方式不支持应用更新并重启；请在 Pi Chat 项目目录运行 npm run build 后重启服务。",
-        });
-      const lifecyclePageId = requestPageId(request);
-      if (!clientId || !lifecyclePageId)
-        return json(response, 400, {
-          error: "重启或关闭必须由当前 Pi Chat 页面显式发起",
-          code: "LIFECYCLE_CLIENT_REQUIRED",
-        });
-      if (!this.isConnectedWindowPage(clientId, lifecyclePageId)) {
-        const error = new Error("生命周期请求页面没有活动事件连接");
-        const incident = this.reportIncident(error, {
-          browserId: clientId,
-          pageId: lifecyclePageId,
-          operation: shuttingDown ? "lifecycle.shutdown" : "lifecycle.restart",
-          controlState: "no-browser-identity",
-          outcome: "rejected",
-          errorCode: "LIFECYCLE_PAGE_NOT_CONNECTED",
-        });
-        return json(response, 409, {
-          error: "当前页面尚未完成连接或已断开，无法安全重启或关闭 Pi Chat",
-          code: "LIFECYCLE_PAGE_NOT_CONNECTED",
-          incidentId: incident.incidentId,
-        });
-      }
-      this.beginLifecycle(lifecycle);
-      try {
-        await this.verifyApplicationQuiescent(
-          shuttingDown ? "关闭 Pi Chat" : "应用更新并重启",
-        );
-        if (shuttingDown) {
-          this.broadcast({ type: "pi_chat_application_closing" });
-          json(response, 202, { shuttingDown: true });
-          this.options.applicationShutdown?.("api-shutdown");
-          return;
-        }
-        const prepared = await this.options.applicationRestart!();
-        try {
-          // Defense in depth: no request admitted after the barrier may have made
-          // the application busy, but internal runtime work must also be quiescent.
-          await this.verifyApplicationQuiescent("完成重启");
-          // Promotion is still reversible on failure and happens before the HTTP
-          // response. The irreversible process handoff begins only after 202.
-          await prepared.promote();
-        } catch (error) {
-          await prepared.discard();
-          throw error;
-        }
-        json(response, 202, { restarting: true });
-        prepared.handoff();
-        return;
-      } catch (error) {
-        this.endLifecycle(lifecycle);
-        throw error;
-      }
-    }
-
     if (url.pathname === "/api/chat/steers/dequeue") {
       if (request.method !== "POST") return methodNotAllowed(response);
       const body = preparedBody || (await bodyJson(request));
       const requestedSessionId = requiredSessionId(body);
-      const releasePromptAdmission = await this.beginPromptAdmission(requestedSessionId);
-      let releaseRuntimeAdmission: (() => void) | null = null;
-      const dequeueId = randomUUID();
-      try {
-        const requestedIsPrimary =
-          Boolean(this.activeSessionId) && requestedSessionId === this.activeSessionId;
-        const steeringRuntime = requestedIsPrimary
-          ? null
-          : this.runtimePool.get(requestedSessionId) || null;
-        if (!requestedIsPrimary && !steeringRuntime)
-          return json(response, 409, {
-            error: "当前对话没有可撤回的原生 Steer 队列",
-            code: "STEER_RUNTIME_NOT_HOT",
-          });
-        const targetRpc = steeringRuntime?.rpc || this.options.rpc;
-        const targetGeneration = requestedIsPrimary
-          ? this.primaryRpcGeneration
-          : (steeringRuntime?.rpcGeneration || 0);
-        if (targetRpc.isRunning?.() === false)
-          return json(response, 409, {
-            error: "Pi 已退出，无法撤回 Steer",
-            code: "STEER_RUNTIME_NOT_RUNNING",
-          });
-        releaseRuntimeAdmission = steeringRuntime
-          ? this.runtimePool.acquireOperation(steeringRuntime)
-          : this.primaryOperationAdmission.acquire().release;
-        let result: Record<string, unknown> | null = null;
-        try {
-          result = await targetRpc.send(
-            { type: "dequeue", dequeueId },
-            10_000,
-          );
-        } catch (error) {
-          const completed = this.nativeSteeringDequeueResults.get(dequeueId);
-          if (!(error instanceof RpcRequestTimeoutError && error.outcomeUnknown && completed))
-            throw error;
-        }
-        let completed = this.nativeSteeringDequeueResults.get(dequeueId);
-        if (!completed && result) {
-          const data = rpcData<{ steering?: unknown }>(result);
-          this.settleNativeSteeringDequeue(
-            requestedSessionId,
-            {
-              dequeueId,
-              steering: Array.isArray(data.steering) ? data.steering : [],
-            },
-            targetGeneration,
-          );
-          completed = this.nativeSteeringDequeueResults.get(dequeueId);
-        }
-        this.nativeSteeringDequeueResults.delete(dequeueId);
-        const items =
-          completed?.sessionId === requestedSessionId &&
-          completed.generation === targetGeneration
-            ? completed.items
-            : [];
-        return json(response, 200, { items, count: items.length });
-      } finally {
-        releaseRuntimeAdmission?.();
-        releasePromptAdmission();
-      }
+      const result = await dequeueNativeSteering(
+        {
+          beginPromptAdmission: (sessionId) => this.beginPromptAdmission(sessionId),
+          resolveTarget: (sessionId) => {
+            const requestedIsPrimary = Boolean(this.activeSessionId) && sessionId === this.activeSessionId;
+            const runtime = requestedIsPrimary ? null : this.runtimePool.get(sessionId) || null;
+            if (!requestedIsPrimary && !runtime) return null;
+            return {
+              rpc: runtime?.rpc || this.options.rpc,
+              generation: requestedIsPrimary ? this.primaryRpcGeneration : (runtime?.rpcGeneration || 0),
+              releaseRuntimeAdmission: runtime
+                ? this.runtimePool.acquireOperation(runtime)
+                : this.primaryOperationAdmission.acquire().release,
+            };
+          },
+          completed: (dequeueId) => this.nativeSteeringDequeueResults.get(dequeueId),
+          settle: (sessionId, dequeueId, items, generation) => this.settleNativeSteeringDequeue(
+            sessionId,
+            { dequeueId, steering: items },
+            generation,
+          ),
+          forget: (dequeueId) => this.nativeSteeringDequeueResults.delete(dequeueId),
+        },
+        requestedSessionId,
+      );
+      return json(response, 200, result);
     }
 
     if (url.pathname === "/api/chat/prompt") {
       if (request.method !== "POST") return methodNotAllowed(response);
       const body = preparedBody || (await bodyJson(request, PROMPT_BODY_LIMIT));
-      const message =
-        typeof body.message === "string" ? body.message.trim() : "";
-      const requestedSessionId = requiredSessionId(body);
-      const requestedGateMode: GateMode | undefined =
-        body.gateMode === "strict" || body.gateMode === "open"
-          ? body.gateMode
-          : undefined;
-      const requestedSettings = promptSettingsSnapshot(body);
-      if (
-        body.delivery !== undefined &&
-        body.delivery !== "queue" &&
-        body.delivery !== "steer"
-      )
-        return json(response, 400, { error: "消息交付方式无效" });
-      const delivery: PromptDelivery =
-        body.delivery === "steer" ? "steer" : "queue";
-      const requestedSteerId = typeof body.steerId === "string" ? body.steerId : "";
-      const requestedClientPromptOperationId =
-        typeof body.clientPromptOperationId === "string"
-          ? body.clientPromptOperationId
-          : "";
-      if (
-        body.clientPromptOperationId !== undefined &&
-        !CLIENT_PROMPT_OPERATION_ID_PATTERN.test(requestedClientPromptOperationId)
-      )
-        return json(response, 400, { error: "Prompt 操作标识无效" });
-      if (
-        body.steerId !== undefined &&
-        (delivery !== "steer" || !/^[a-f0-9-]{36}$/i.test(requestedSteerId))
-      )
-        return json(response, 400, { error: "Steer 标识无效" });
-      const images = promptImages(body.images);
-      if (!message && !images.length)
-        return json(response, 400, { error: "消息或图片不能为空" });
+      const promptInput = parsePromptRouteInput(body);
+      const {
+        message,
+        sessionId: requestedSessionId,
+        gateMode: requestedGateMode,
+        settings: requestedSettings,
+        delivery,
+        steerId: requestedSteerId,
+        clientPromptOperationId: requestedClientPromptOperationId,
+        images,
+      } = promptInput;
       const promptAt = this.nextUserPromptAt();
       const admittedSessionId = requestedSessionId;
       const releasePromptAdmission =
@@ -8069,144 +6868,39 @@ export class PiChatApp {
           releaseRuntimeAdmission = steeringRuntime
             ? this.runtimePool.acquireOperation(steeringRuntime)
             : this.primaryOperationAdmission.acquire().release;
-          if (message.startsWith("/"))
-            return json(response, 400, {
-              error: "Slash 指令不能作为 Steer 消息发送",
-            });
-          if (requestedSettings)
-            return json(response, 400, {
-              error: "Steer 消息不能修改下一轮模型设置",
-            });
-          // Bounded native steering backlog: Pi's own queue, this admission
-          // bookkeeping, the text snapshot, and the browser's hidden local
-          // turns all grow with every accepted Steer. Reuse the queue caps so
-          // a long tool call cannot accumulate an unbounded steer backlog.
-          const existingAdmissions =
-            this.nativeSteeringAdmissionsBySession.get(requestedSessionId);
-          const currentAdmissions =
-            existingAdmissions &&
-            existingAdmissions.generation === targetGeneration
-              ? existingAdmissions
-              : { generation: targetGeneration, items: [] };
-          if (currentAdmissions.items.length >= MAX_NATIVE_STEERING)
-            return json(response, 409, {
-              error: `Steer 队列已满，最多保留 ${MAX_NATIVE_STEERING} 条未执行的 Steer`,
-            });
-          const incomingImageChars = images.reduce(
-            (sum, image) => sum + image.data.length,
-            0,
-          );
-          const queuedImageChars = currentAdmissions.items.reduce(
-            (sum, admission) => sum + admission.imageChars,
-            0,
-          );
-          if (queuedImageChars + incomingImageChars > MAX_NATIVE_STEERING_IMAGE_CHARS)
-            return json(response, 409, {
-              error: "Steer 排队图片总量超限",
-            });
-          const steeringMessage = message || "请查看这些图片。";
-          const steerId = requestedSteerId || randomUUID();
-          const persistedAtAdmission = requestedIsPrimary
-            && this.lastPrimaryMessagesSessionId === requestedSessionId
-              ? this.lastPrimaryMessages
-              : steeringRuntime?.messageSnapshot
-                || this.options.sessions.cachedSnapshotForId?.(requestedSessionId)?.messages
-                || [];
-          const baselinePersistedUserIds = new Set(
-            persistedAtAdmission
-              .filter((item) => item.role === "user" && item.piChatPersistedMessageId)
-              .slice(-MAX_PENDING_PROMPT_BASELINE_IDS)
-              .map((item) => item.piChatPersistedMessageId!),
-          );
-          let baselinePersistedTailId: string | undefined;
-          for (let index = persistedAtAdmission.length - 1; index >= 0; index -= 1) {
-            const persistedId = persistedAtAdmission[index]?.piChatPersistedMessageId;
-            if (!persistedId) continue;
-            baselinePersistedTailId = persistedId;
-            break;
-          }
-          currentAdmissions.items.push({
-            id: steerId,
-            message: steeringMessage,
-            promptAt,
-            imageChars: incomingImageChars,
-            imageCount: images.length,
-            baselinePersistedUserIds,
-            ...(baselinePersistedTailId ? { baselinePersistedTailId } : null),
-          });
-          this.nativeSteeringAdmissionsBySession.set(
-            requestedSessionId,
-            currentAdmissions,
-          );
-          this.advanceNativeSteeringProjection(requestedSessionId);
-          let deliveryUncertain = false;
-          try {
-            await targetRpc.send(
-              {
+          const result = await admitNativeSteering({
+            getAdmissions: () => this.nativeSteeringAdmissionsBySession.get(requestedSessionId),
+            setAdmissions: (admissions) => {
+              if (admissions)
+                this.nativeSteeringAdmissionsBySession.set(requestedSessionId, admissions);
+              else this.nativeSteeringAdmissionsBySession.delete(requestedSessionId);
+            },
+            advanceProjection: () => this.advanceNativeSteeringProjection(requestedSessionId),
+            persistedMessages: () => requestedIsPrimary
+              && this.lastPrimaryMessagesSessionId === requestedSessionId
+                ? this.lastPrimaryMessages
+                : steeringRuntime?.messageSnapshot
+                  || this.options.sessions.cachedSnapshotForId?.(requestedSessionId)?.messages
+                  || [],
+            send: async (steeringMessage, steeringImages) => {
+              await targetRpc.send({
                 type: "steer",
                 message: steeringMessage,
-                ...(images.length ? { images } : {}),
-              },
-              PROMPT_PREPARE_TIMEOUT_MS,
-            );
-          } catch (error) {
-            if (error instanceof RpcRequestTimeoutError && error.outcomeUnknown) {
-              // The steer JSONL command may already be in Pi stdin (and Pi may
-              // even have emitted queue_update). Retain its admission so later
-              // dequeue/clear events can settle the hidden local turn.
-              deliveryUncertain = true;
-            } else {
-              const current =
-                this.nativeSteeringAdmissionsBySession.get(requestedSessionId);
-              if (current && current.generation === targetGeneration) {
-                const index = current.items.findIndex(
-                  (admission) => admission.id === steerId,
-                );
-                if (index >= 0) current.items.splice(index, 1);
-                if (current.items.length)
-                  this.nativeSteeringAdmissionsBySession.set(
-                    requestedSessionId,
-                    current,
-                  );
-                else
-                  this.nativeSteeringAdmissionsBySession.delete(
-                    requestedSessionId,
-                  );
-                this.advanceNativeSteeringProjection(requestedSessionId);
-              }
-              throw error;
-            }
-          }
-          // Auxiliary probe only: a timeout must not rewrite an already
-          // accepted Steer into a 500. A dead worker, however, can never
-          // deliver it, so clean up and reject instead.
-          let probeState: ReturnType<typeof asState> | null = null;
-          try {
-            probeState = asState(
-              await targetRpc.send({ type: "get_state" }, 2_000),
-            );
-          } catch (error) {
-            if (error instanceof RpcRequestTimeoutError) {
-              probeState = null;
-            } else {
-              this.clearNativeSteeringState(requestedSessionId, "process-error");
-              return json(response, 409, {
-                error: "Pi 已退出，Steer 消息未执行",
-              });
-            }
-          }
-          if (
-            probeState &&
-            !probeState.isStreaming &&
-            this.hasNativeSteeringPending(requestedSessionId, targetGeneration)
-          ) {
-            await this.resetNativeSteering(
+                ...(steeringImages.length ? { images: steeringImages } : {}),
+              }, PROMPT_PREPARE_TIMEOUT_MS);
+            },
+            readStreaming: async () =>
+              asState(await targetRpc.send({ type: "get_state" }, 2_000)).isStreaming,
+            clearOnProcessError: () => this.clearNativeSteeringState(requestedSessionId, "process-error"),
+            hasPending: (generation) => this.hasNativeSteeringPending(requestedSessionId, generation),
+            reset: () => this.resetNativeSteering(
               requestedSessionId,
               steeringRuntime || undefined,
               "settled-before-consumption",
-            );
-            if (steeringRuntime) {
-              if (steeringRuntime.abortGeneration === targetAbortGeneration) {
+            ),
+            afterReset: () => {
+              if (steeringRuntime) {
+                if (steeringRuntime.abortGeneration !== targetAbortGeneration) return;
                 this.broadcastQueue(steeringRuntime.id);
                 this.broadcastSessionActivity(steeringRuntime.id);
                 if (
@@ -8214,36 +6908,26 @@ export class PiChatApp {
                   !steeringRuntime.dispatching &&
                   !steeringRuntime.queuePaused
                 )
-                  setTimeout(
-                    () => void this.dispatchRuntimeNext(steeringRuntime),
-                    0,
-                  );
+                  setTimeout(() => void this.dispatchRuntimeNext(steeringRuntime), 0);
+              } else if (this.scheduler.primaryAbortGeneration === targetAbortGeneration) {
+                this.broadcastQueue(requestedSessionId);
+                this.broadcastSessionActivity(requestedSessionId);
+                if (!this.primaryTurnActive() && !this.dispatching && !this.queuePaused)
+                  setTimeout(() => void this.dispatchNext(), 0);
               }
-            } else if (
-              this.scheduler.primaryAbortGeneration === targetAbortGeneration
-            ) {
-              this.broadcastQueue(requestedSessionId);
-              this.broadcastSessionActivity(requestedSessionId);
-              if (
-                !this.primaryTurnActive() &&
-                !this.dispatching &&
-                !this.queuePaused
-              )
-                setTimeout(() => void this.dispatchNext(), 0);
-            }
-            return json(response, 409, {
-              error: "当前对话已结束，Steer 消息未执行",
-              code: "STEER_ALREADY_SETTLED",
-            });
-          }
-          json(response, 202, {
-            accepted: true,
-            queued: false,
-            steered: true,
-            ...(requestedSteerId ? { id: steerId } : null),
-            ...(deliveryUncertain ? { deliveryUncertain: true } : null),
+            },
+          }, {
+            generation: targetGeneration,
+            message,
+            images,
+            requestedSteerId,
+            hasSettings: Boolean(requestedSettings),
+            promptAt,
+            maxPending: MAX_NATIVE_STEERING,
+            maxImageChars: MAX_NATIVE_STEERING_IMAGE_CHARS,
+            maxBaselineIds: MAX_PENDING_PROMPT_BASELINE_IDS,
           });
-          return;
+          return json(response, result.status, result.body);
         }
         // Production readiness must bind the primary before allocating a worker;
         // legacy in-process test hosts have no startup controller and retain the
@@ -8334,506 +7018,289 @@ export class PiChatApp {
         )
           throw new Error("消息发送已取消");
         if (extensionCommand) {
-          if (images.length)
-            return json(response, 400, {
-              error: "Extension 指令不能同时附加图片",
-            });
-          // Extension commands are not one ordinary Agent run. If a caller
-          // bypasses the normal browser busy guard, abandon ambiguous
-          // observation rather than attributing its events to an older prompt.
-          this.clearPromptDiagnostic(
-            secondaryRuntime?.id || this.activeSessionId,
-          );
-          const outcomeToken = randomUUID();
-          try {
-            await targetRpc.send(
-              { type: "prompt", message },
-              PROMPT_PREPARE_TIMEOUT_MS,
-              {
-                onLateResponse: this.lateRpcOutcomeHandler(
-                  targetSessionId,
-                  outcomeToken,
-                  "generic",
-                ),
-              },
-            );
-          } catch (error) {
-            if (this.rpcOutcomeUnknown(error)) {
-              this.markRpcOutcomePending(targetSessionId, error, outcomeToken);
-              this.rethrowResultPending(error, "Extension 指令");
-            }
-            throw error;
-          }
-          const requestedGateMode =
-            extensionCommand.name === "gate"
-              ? gateModeFromCommand(message)
-              : null;
-          if (requestedGateMode)
-            this.setGateMode(
-              secondaryRuntime?.id || this.activeSessionId,
-              requestedGateMode,
-            );
-          this.noteUserPrompt(
-            secondaryRuntime?.id || this.activeSessionId,
-            promptAt,
-          );
-          let extensionStateResponse: Record<string, unknown>;
-          try {
-            extensionStateResponse = await targetRpc.send({ type: "get_state" });
-          } catch (error) {
-            // This is a read-only post-command confirmation. Do not turn its
-            // timeout into a new mutation fence after the Extension write was
-            // already acknowledged.
-            if (this.rpcOutcomeUnknown(error))
-              this.rethrowResultPending(error, "确认 Extension 指令", false);
-            throw error;
-          }
-          const state = asState(extensionStateResponse);
-          if (secondaryRuntime) {
-            secondaryRuntime.running = state.isStreaming;
-            secondaryRuntime.prompted = true;
-            await this.finalizePersistedDraft(secondaryRuntime);
-            this.broadcast({
-              type: "pi_chat_sessions_changed",
-              action: "created",
-              sessionId: secondaryRuntime.id,
-            });
-          } else this.running = state.isStreaming;
-          json(response, 202, {
-            accepted: true,
-            queued: false,
-            extension: true,
-            command: extensionCommand.name,
-            description: extensionCommand.description,
-            isStreaming: state.isStreaming,
-          });
-          return;
-        }
-        if (secondaryRuntime) {
-          if (this.scheduler.runtimeBusyForQueue(secondaryRuntime)) {
-            const enqueueError = this.scheduler.assertCanEnqueue(
-              secondaryRuntime.promptQueue,
-              images,
-            );
-            if (enqueueError)
-              return json(response, 409, { error: enqueueError });
-            const queued = this.scheduler.enqueueRuntime(
-              secondaryRuntime,
-              message,
-              images,
-              promptAt,
-              requestedGateMode,
-              requestedSettings,
-              requestedClientPromptOperationId || undefined,
-            );
-            // This snapshot is now durably admitted into the private FIFO, so
-            // it supersedes only legacy settings that predated its admission.
-            this.supersedePendingTurnSettings(
-              secondaryRuntime.pendingTurnSettings,
-              requestedSettings,
-            );
-            this.tracePrompt("admitted", secondaryRuntime.id, queued.id);
-            this.tracePrompt("queued", secondaryRuntime.id, queued.id);
-            this.noteUserPrompt(secondaryRuntime.id, promptAt);
-            return json(response, 202, {
-              accepted: true,
-              queued: true,
-              id: queued.id,
-              promptId: queued.id,
-              queue: this.publicQueue(secondaryRuntime.promptQueue),
-            });
-          }
-          const promptId = randomUUID();
-          const generation =
-            expectedSecondaryAbortGeneration ?? secondaryRuntime.abortGeneration;
-          try {
-            let appliedSettings: AppliedTurnSettings;
-            try {
-              appliedSettings = await this.applyPromptSettings(
-                secondaryRuntime.rpc,
-                secondaryRuntime.pendingTurnSettings,
-                requestedSettings,
-                true,
-                secondaryRuntime.id,
-              );
-            } catch (error) {
-              if (error instanceof PartialTurnSettingsError)
-                this.rememberRuntimeAppliedTurnSettings(
-                  secondaryRuntime,
-                  error.applied,
-                );
-              throw error;
-            }
-            this.rememberRuntimeAppliedTurnSettings(
-              secondaryRuntime,
-              appliedSettings,
-            );
-            if (
-              generation !== secondaryRuntime.abortGeneration ||
-              this.applicationLifecycle !== "idle"
-            )
-              throw new Error("消息发送已取消");
-            await this.syncGateMode(
-              secondaryRuntime.rpc,
-              secondaryRuntime.id,
-              requestedGateMode,
-            );
-            if (
-              generation !== secondaryRuntime.abortGeneration ||
-              this.applicationLifecycle !== "idle"
-            )
-              throw new Error("消息发送已取消");
-            secondaryRuntime.running = true;
-            this.tracePrompt("admitted", secondaryRuntime.id, promptId);
-            this.broadcastSessionActivity(secondaryRuntime.id);
-            try {
-              await this.sendPromptRpc(
-                secondaryRuntime.rpc,
-                secondaryRuntime.id,
-                promptId,
+          const result = await admitPromptExtension({
+            clearPromptDiagnostic: (sessionId) => this.clearPromptDiagnostic(sessionId),
+            newOutcomeToken: () => randomUUID(),
+            sendPrompt: async (extensionMessage, outcomeToken) => {
+              await targetRpc.send(
+                { type: "prompt", message: extensionMessage },
+                PROMPT_PREPARE_TIMEOUT_MS,
                 {
-                  type: "prompt",
-                  message: message || "请查看这些图片。",
-                  ...(images.length ? { images } : {}),
+                  onLateResponse: this.lateRpcOutcomeHandler(
+                    targetSessionId,
+                    outcomeToken,
+                    "generic",
+                  ),
                 },
               );
-            } catch (error) {
-              // The command may already be buffered in Pi stdin. Preserve the
-              // running state and let its lifecycle event decide; treating this
-              // as a definite failure can race/duplicate a following prompt.
-              if (!(error instanceof RpcRequestTimeoutError) || !error.outcomeUnknown) throw error;
-              this.tracePrompt("delivery-uncertain", secondaryRuntime.id, promptId);
-              this.scheduler.notifySecondaryPromptAccepted(
-                secondaryRuntime,
-                promptAt,
-                message,
-                images,
-                requestedSettings,
-                promptId,
-                requestedClientPromptOperationId || undefined,
-              );
-              json(response, 202, {
-                accepted: true,
-                queued: false,
-                promptId,
-                deliveryUncertain: true,
-              });
-              return;
-            }
-            this.scheduler.notifySecondaryPromptAccepted(
-              secondaryRuntime,
-              promptAt,
-              message,
-              images,
-              requestedSettings,
-              promptId,
-              requestedClientPromptOperationId || undefined,
-            );
-            json(response, 202, { accepted: true, queued: false, promptId });
-          } catch (error) {
-            secondaryRuntime.running = false;
-            this.broadcastSessionActivity(secondaryRuntime.id);
-            throw error;
-          }
-          return;
-        }
-        if (this.scheduler.primaryBusyForQueue()) {
-          const enqueueError = this.scheduler.assertCanEnqueue(
-            this.promptQueue,
+            },
+            outcomeUnknown: (error) => this.rpcOutcomeUnknown(error),
+            markOutcomePending: (sessionId, error, token) =>
+              this.markRpcOutcomePending(sessionId, error, token),
+            rethrowResultPending: (error, operation, fence) =>
+              this.rethrowResultPending(error, operation, fence),
+            requestedGateMode: (extensionMessage, commandName) =>
+              commandName === "gate" ? gateModeFromCommand(extensionMessage) : null,
+            setGateMode: (mode) => this.setGateMode(targetSessionId, mode),
+            noteUserPrompt: (at) => this.noteUserPrompt(targetSessionId, at),
+            readState: async () => asState(await targetRpc.send({ type: "get_state" })),
+            confirmState: async (state) => {
+              if (secondaryRuntime) {
+                secondaryRuntime.running = state.isStreaming;
+                secondaryRuntime.prompted = true;
+                await this.finalizePersistedDraft(secondaryRuntime);
+                this.broadcast({
+                  type: "pi_chat_sessions_changed",
+                  action: "created",
+                  sessionId: secondaryRuntime.id,
+                });
+              } else this.running = state.isStreaming;
+            },
+          }, {
+            sessionId: targetSessionId,
+            message,
             images,
-          );
-          if (enqueueError) return json(response, 409, { error: enqueueError });
-          const queued = this.scheduler.enqueuePrimary(
+            commandName: extensionCommand.name,
+            commandDescription: extensionCommand.description || "",
+            promptAt,
+          });
+          return json(response, result.status, result.body);
+        }
+        if (secondaryRuntime) {
+          const queuedAdmission = admitPromptToQueue({
+            isBusy: () => this.scheduler.runtimeBusyForQueue(secondaryRuntime),
+            assertCanEnqueue: (queuedImages) =>
+              this.scheduler.assertCanEnqueue(secondaryRuntime.promptQueue, queuedImages),
+            enqueue: (queuedMessage, queuedImages, queuedAt, gateMode, settings, operationId) =>
+              this.scheduler.enqueueRuntime(
+                secondaryRuntime,
+                queuedMessage,
+                queuedImages,
+                queuedAt,
+                gateMode,
+                settings,
+                operationId,
+              ),
+            supersedePendingSettings: (settings) =>
+              this.supersedePendingTurnSettings(secondaryRuntime.pendingTurnSettings, settings),
+            publicQueue: () => this.publicQueue(secondaryRuntime.promptQueue),
+            traceAdmitted: (queueId) => this.tracePrompt("admitted", secondaryRuntime.id, queueId),
+            traceQueued: (queueId) => this.tracePrompt("queued", secondaryRuntime.id, queueId),
+            noteUserPrompt: (queuedAt) => this.noteUserPrompt(secondaryRuntime.id, queuedAt),
+          }, {
             message,
             images,
             promptAt,
-            requestedGateMode,
-            requestedSettings,
-            requestedClientPromptOperationId || undefined,
-          );
-          // The queue owns the admitted immutable snapshot. A later legacy
-          // mutation remains pending for a following row.
-          this.supersedePendingTurnSettings(
-            this.pendingTurnSettings,
-            requestedSettings,
-          );
-          this.tracePrompt("admitted", this.activeSessionId, queued.id);
-          this.tracePrompt("queued", this.activeSessionId, queued.id);
-          this.noteUserPrompt(this.activeSessionId, promptAt);
+            gateMode: requestedGateMode,
+            settings: requestedSettings,
+            clientPromptOperationId: requestedClientPromptOperationId || undefined,
+          });
+          if (queuedAdmission.kind === "conflict")
+            return json(response, 409, { error: queuedAdmission.error });
+          if (queuedAdmission.kind === "queued")
+            return json(response, 202, {
+              accepted: true,
+              queued: true,
+              id: queuedAdmission.item.id,
+              promptId: queuedAdmission.item.id,
+              queue: queuedAdmission.queue,
+            });
+          const promptId = randomUUID();
+          const generation =
+            expectedSecondaryAbortGeneration ?? secondaryRuntime.abortGeneration;
+          const result = await dispatchSecondaryPrompt({
+            applySettings: () => this.applyPromptSettings(
+              secondaryRuntime.rpc,
+              secondaryRuntime.pendingTurnSettings,
+              requestedSettings,
+              true,
+              secondaryRuntime.id,
+            ),
+            isPartialSettingsError: (error): error is PartialTurnSettingsError =>
+              error instanceof PartialTurnSettingsError,
+            rememberPartialSettings: (applied) =>
+              this.rememberRuntimeAppliedTurnSettings(secondaryRuntime, applied),
+            rememberSettings: (applied) =>
+              this.rememberRuntimeAppliedTurnSettings(secondaryRuntime, applied),
+            assertCurrent: () => {
+              if (
+                generation !== secondaryRuntime.abortGeneration ||
+                this.applicationLifecycle !== "idle"
+              ) throw new Error("消息发送已取消");
+            },
+            syncGate: () => this.syncGateMode(
+              secondaryRuntime.rpc,
+              secondaryRuntime.id,
+              requestedGateMode,
+            ),
+            setRunning: (running) => { secondaryRuntime.running = running; },
+            traceAdmitted: () => this.tracePrompt("admitted", secondaryRuntime.id, promptId),
+            broadcastActivity: () => this.broadcastSessionActivity(secondaryRuntime.id),
+            sendPrompt: (promptMessage, promptImages) => this.sendPromptRpc(
+              secondaryRuntime.rpc,
+              secondaryRuntime.id,
+              promptId,
+              {
+                type: "prompt",
+                message: promptMessage,
+                ...(promptImages.length ? { images: promptImages } : {}),
+              },
+            ).then(() => undefined),
+            outcomeUnknown: (error) => this.rpcOutcomeUnknown(error),
+            traceDeliveryUncertain: () =>
+              this.tracePrompt("delivery-uncertain", secondaryRuntime.id, promptId),
+            notifyAccepted: (settings) => this.scheduler.notifySecondaryPromptAccepted(
+              secondaryRuntime,
+              promptAt,
+              message,
+              images,
+              settings,
+              promptId,
+              requestedClientPromptOperationId || undefined,
+            ),
+            onFailure: () => {
+              secondaryRuntime.running = false;
+              this.broadcastSessionActivity(secondaryRuntime.id);
+            },
+          }, {
+            message,
+            images,
+            promptId,
+            settings: requestedSettings,
+          });
+          return json(response, result.status, result.body);
+        }
+        const queuedAdmission = admitPromptToQueue({
+          isBusy: () => this.scheduler.primaryBusyForQueue(),
+          assertCanEnqueue: (queuedImages) =>
+            this.scheduler.assertCanEnqueue(this.promptQueue, queuedImages),
+          enqueue: (queuedMessage, queuedImages, queuedAt, gateMode, settings, operationId) =>
+            this.scheduler.enqueuePrimary(
+              queuedMessage,
+              queuedImages,
+              queuedAt,
+              gateMode,
+              settings,
+              operationId,
+            ),
+          supersedePendingSettings: (settings) =>
+            this.supersedePendingTurnSettings(this.pendingTurnSettings, settings),
+          publicQueue: () => this.publicQueue(),
+          traceAdmitted: (queueId) => this.tracePrompt("admitted", this.activeSessionId, queueId),
+          traceQueued: (queueId) => this.tracePrompt("queued", this.activeSessionId, queueId),
+          noteUserPrompt: (queuedAt) => this.noteUserPrompt(this.activeSessionId, queuedAt),
+        }, {
+          message,
+          images,
+          promptAt,
+          gateMode: requestedGateMode,
+          settings: requestedSettings,
+          clientPromptOperationId: requestedClientPromptOperationId || undefined,
+        });
+        if (queuedAdmission.kind === "conflict")
+          return json(response, 409, { error: queuedAdmission.error });
+        if (queuedAdmission.kind === "queued") {
           json(response, 202, {
             accepted: true,
             queued: true,
-            id: queued.id,
-            promptId: queued.id,
-            queue: this.publicQueue(),
+            id: queuedAdmission.item.id,
+            promptId: queuedAdmission.item.id,
+            queue: queuedAdmission.queue,
           });
           return;
         }
         const promptId = randomUUID();
-        this.tracePrompt("admitted", this.activeSessionId, promptId);
-        const acceptance = await this.sendPrompt(
-          message,
-          images,
-          promptAt,
-          requestedGateMode,
-          promptId,
-          requestedSettings,
-          expectedPrimaryAbortGeneration,
-          requestedClientPromptOperationId || undefined,
-        );
-        if (acceptance === "unknown")
-          this.tracePrompt("delivery-uncertain", this.activeSessionId, promptId);
-        json(response, 202, {
-          accepted: true,
-          queued: false,
-          promptId,
-          ...(acceptance === "unknown" ? { deliveryUncertain: true } : null),
-        });
-        return;
+        const result = await dispatchPrimaryPrompt({
+          sendPrompt: () => this.sendPrompt(
+            message,
+            images,
+            promptAt,
+            requestedGateMode,
+            promptId,
+            requestedSettings,
+            expectedPrimaryAbortGeneration,
+            requestedClientPromptOperationId || undefined,
+          ),
+          traceAdmitted: () => this.tracePrompt("admitted", this.activeSessionId, promptId),
+          traceDeliveryUncertain: () => this.tracePrompt("delivery-uncertain", this.activeSessionId, promptId),
+        }, promptId);
+        return json(response, result.status, result.body);
       } finally {
         releaseRuntimeAdmission?.();
         releasePromptAdmission();
       }
     }
 
-    const queueCancelMatch = /^\/api\/chat\/queue\/([a-f0-9-]{36})$/.exec(
-      url.pathname,
-    );
-    if (queueCancelMatch) {
-      if (request.method !== "DELETE") return methodNotAllowed(response);
-      const body = preparedBody || (await bodyJson(request));
-      const sessionId = requiredSessionId(body);
-      const runtime = this.runtimePool.get(sessionId);
-      if (!runtime && sessionId !== this.activeSessionId)
-        return json(response, 409, {
-          error: "该会话尚未恢复运行，请刷新页面后重试",
-        });
-      if (runtime) this.runtimePool.touch(runtime);
-      const queue = runtime?.promptQueue || this.promptQueue;
-      const index = queue.findIndex((item) => item.id === queueCancelMatch[1]);
-      if (index < 0)
-        return json(response, 404, { error: "队列消息不存在或已经开始执行" });
-      this.tracePrompt("cancelled", sessionId, queueCancelMatch[1]);
-      queue.splice(index, 1);
-      if (runtime) {
-        if (!queue.length) runtime.queuePaused = false;
-      } else if (!queue.length) this.queuePaused = false;
-      this.broadcastQueue(sessionId);
-      json(response, 200, {
-        queue: this.publicQueue(queue),
-        paused: runtime?.queuePaused ?? this.queuePaused,
-      });
-      return;
-    }
+    if (
+      await handleQueueControlRoute(
+        {
+          target: (sessionId) => {
+            const runtime = this.runtimePool.get(sessionId);
+            if (runtime)
+              return {
+                queue: runtime.promptQueue,
+                getPaused: () => runtime.queuePaused,
+                setPaused: (paused) => { runtime.queuePaused = paused; },
+                touch: () => this.runtimePool.touch(runtime),
+                recover: this.secondaryNeedsRecovery(runtime)
+                  ? () => this.recoverRuntime(runtime)
+                  : undefined,
+                dispatch: () => { void this.dispatchRuntimeNext(runtime); },
+              };
+            if (sessionId !== this.activeSessionId) return null;
+            return {
+              queue: this.promptQueue,
+              getPaused: () => this.queuePaused,
+              setPaused: (paused) => { this.queuePaused = paused; },
+              touch: () => {},
+              dispatch: () => { void this.dispatchNext(); },
+            };
+          },
+          publicQueue: (queue) => this.publicQueue(queue),
+          traceCancelled: (sessionId, queueId) =>
+            this.tracePrompt("cancelled", sessionId, queueId),
+          broadcastQueue: (sessionId) => this.broadcastQueue(sessionId),
+        },
+        request,
+        response,
+        url,
+        preparedBody,
+      )
+    ) return;
 
-    if (url.pathname === "/api/chat/queue/resume") {
-      if (request.method !== "POST") return methodNotAllowed(response);
-      const body = preparedBody || (await bodyJson(request));
-      const sessionId = requiredSessionId(body);
-      const runtime = this.runtimePool.get(sessionId);
-      if (!runtime && sessionId !== this.activeSessionId)
-        return json(response, 409, {
-          error: "该会话尚未恢复运行，请刷新页面后重试",
-        });
-      if (runtime) {
-        this.runtimePool.touch(runtime);
-        if (this.secondaryNeedsRecovery(runtime))
-          await this.recoverRuntime(runtime);
-        runtime.queuePaused = false;
-        this.broadcastQueue(sessionId);
-        void this.dispatchRuntimeNext(runtime);
-        return json(response, 200, {
-          queue: this.publicQueue(runtime.promptQueue),
-          paused: false,
-        });
-      }
-      this.queuePaused = false;
-      this.broadcastQueue();
-      void this.dispatchNext();
-      json(response, 200, { queue: this.publicQueue(), paused: false });
-      return;
-    }
-
-    if (url.pathname === "/api/local-files/pick") {
-      if (request.method !== "POST") return methodNotAllowed(response);
-      json(response, 200, { paths: await pickLocalFiles() });
-      return;
-    }
-
-    if (url.pathname === "/api/local-files/clipboard") {
-      if (request.method !== "POST") return methodNotAllowed(response);
-      const body = await bodyJson(request);
-      const expected = Array.isArray(body?.files)
-        ? body.files.filter((item: unknown): item is { name: string; size: number } => Boolean(
-          item && typeof item === "object"
-          && typeof (item as { name?: unknown }).name === "string"
-          && Number.isSafeInteger((item as { size?: unknown }).size)
-          && (item as { size: number }).size >= 0,
-        )).slice(0, 10)
-        : [];
-      json(response, 200, { paths: await readClipboardFiles(expected) });
-      return;
-    }
-
-    if (url.pathname === "/api/workspace/draft-pick") {
-      if (request.method !== "POST") return methodNotAllowed(response);
-      // This selects the cwd for a local, not-yet-materialized draft only. It
-      // does not touch Primary or any existing Runtime, so concurrent Sessions
-      // remain safe and uninterrupted.
-      const selected = await (
-        this.options.pickWorkspaceFolder || pickWorkspaceFolder
-      )(this.currentCwd);
-      if (!selected) return json(response, 200, { cancelled: true });
-      if (!(await stat(resolve(selected))).isDirectory())
-        return json(response, 400, { error: "所选工作目录不存在或不是文件夹" });
-      json(response, 200, { cancelled: false, cwd: resolve(selected) });
-      return;
-    }
-
-    if (url.pathname === "/api/workspace/pick") {
-      if (request.method !== "POST") return methodNotAllowed(response);
-      // The native picker waits without an admission lease. Its returned path
-      // commits through changeWorkspace(), which serializes and rechecks the
-      // lifecycle immediately before persistence.
-      const selected = await (
-        this.options.pickWorkspaceFolder || pickWorkspaceFolder
-      )(this.currentCwd);
-      if (!selected) return json(response, 200, { cancelled: true });
-      await this.changeWorkspace(selected);
-      // Bootstrap outside the short commit lease, then use its one authoritative
-      // snapshot for both legacy and revision-aware browser response fields.
-      // A later picker commit therefore cannot split old and new clients.
-      const data = await this.bootstrap();
-      json(response, 200, {
-        cancelled: false,
-        workspaceName: basename(data.workspaceCwd),
-        cwd: data.workspaceCwd,
-        workspaceEpoch: data.workspaceEpoch,
-        workspaceRevision: data.workspaceRevision,
-        data,
-      });
-      return;
-    }
-
-    // Local/automation path only (scripts, future local CLI). The browser UI
-    // chooses defaults through /api/workspace/pick. Not a remote-access surface;
-    // the service itself is loopback-only.
-    if (url.pathname === "/api/workspace/set") {
-      if (request.method !== "POST") return methodNotAllowed(response);
-      const body = await bodyJson(request);
-      const selected = typeof body.path === "string" ? body.path.trim() : "";
-      if (!selected) return json(response, 400, { error: "path 必填" });
-      const result = await this.changeWorkspace(selected);
-      json(response, 200, { cancelled: false, ...result });
-      return;
-    }
+    if (
+      await handleWorkspaceControlRoute(
+        {
+          currentCwd: () => this.currentCwd,
+          pickWorkspaceFolder: (cwd) =>
+            (this.options.pickWorkspaceFolder || pickWorkspaceFolder)(cwd),
+          changeWorkspace: (path) => this.changeWorkspace(path),
+          bootstrap: () => this.bootstrap(),
+        },
+        request,
+        response,
+        url,
+        preparedBody,
+      )
+    ) return;
 
     if (url.pathname === "/api/chat/compact") {
       if (request.method !== "POST") return methodNotAllowed(response);
       const body = preparedBody || (await bodyJson(request));
       const sessionId = requiredSessionId(body);
-      // Compact changes the target Runtime's context outside PromptScheduler's
-      // ordinary-turn FIFO. Serialize its target resolution, idle proof, and
-      // RPC write with prompt admission so a concurrent send cannot pass the
-      // idle check and start against a newly compacted context.
-      const releasePromptAdmission = await this.beginPromptAdmission(sessionId);
-      let releaseRuntimeOperation: (() => void) | null = null;
-      try {
-        // A cold/reclaimed persisted Session is neither the Primary nor an
-        // error. Bind Primary identity before allocating a new Secondary, then
-        // use the App-owned restoration path so Gate, recovery, fast mode, and
-        // RuntimePool capacity/reclaim ownership remain authoritative here.
-        let secondaryRuntime = this.runtimePool.get(sessionId) || null;
-        if (!secondaryRuntime && !this.activeSessionId) {
-          try {
-            await this.ensurePrimaryIdentity();
-          } catch (error) {
-            this.rethrowResultPending(error, "准备压缩运行时", false);
-          }
-        }
-        const requestedIsPrimary = sessionId === this.activeSessionId;
-        if (!requestedIsPrimary && !secondaryRuntime) {
-          try {
-            secondaryRuntime = await this.ensureRuntime(sessionId);
-          } catch (error) {
-            if (error instanceof SessionNotFoundError)
-              return json(response, 409, { error: "该会话尚未启用" });
-            throw error;
-          }
-        }
-        if (secondaryRuntime) {
-          releaseRuntimeOperation =
-            this.runtimePool.acquireOperation(secondaryRuntime);
-          this.runtimePool.touch(secondaryRuntime);
-          if (this.secondaryNeedsRecovery(secondaryRuntime))
-            await this.recoverRuntime(secondaryRuntime);
-        } else {
-          releaseRuntimeOperation =
-            this.primaryOperationAdmission.acquire().release;
-          try {
-            await this.ensurePrimaryRuntime();
-          } catch (error) {
-            this.rethrowResultPending(error, "准备压缩运行时", false);
-          }
-        }
-        if (
-          this.compactionPendingBySession.has(sessionId) ||
-          this.sessionMutationOutcomePending(sessionId)
-        )
-          return json(response, 409, {
-            error: "上一次操作结果尚未确认；请刷新页面核对，不要重复压缩",
-            code: "RESULT_PENDING",
+      const customInstructions =
+        typeof body.customInstructions === "string"
+          ? body.customInstructions.trim()
+          : "";
+      await this.compactSession(sessionId, customInstructions, (result) => {
+        if (result.kind === "conflict")
+          json(response, 409, {
+            error: result.error,
+            ...(result.code ? { code: result.code } : null),
           });
-        if (
-          secondaryRuntime
-            ? this.scheduler.runtimeBusyForQueue(secondaryRuntime)
-            : this.scheduler.primaryBusyForQueue()
-        )
-          return json(response, 409, {
-            error: "请先停止该会话的生成并清空队列",
-          });
-        const customInstructions =
-          typeof body.customInstructions === "string"
-            ? body.customInstructions.trim()
-            : "";
-        let result: Record<string, unknown>;
-        const outcomeToken = randomUUID();
-        try {
-          result = rpcData<Record<string, unknown>>(
-            await (secondaryRuntime?.rpc || this.options.rpc).send(
-              {
-                type: "compact",
-                ...(customInstructions ? { customInstructions } : {}),
-              },
-              PROMPT_PREPARE_TIMEOUT_MS,
-              {
-                onLateResponse: this.lateRpcOutcomeHandler(
-                  sessionId,
-                  outcomeToken,
-                  "compact",
-                ),
-              },
-            ),
-          );
-        } catch (error) {
-          if (this.rpcOutcomeUnknown(error)) {
-            this.markRpcOutcomePending(sessionId, error, outcomeToken);
-            this.compactionPendingBySession.add(sessionId);
-            // A compact RPC may have emitted compaction_start before its
-            // acknowledgement timed out. That event proves activity, not the
-            // command result; keep ordinary prompts fenced until the outcome
-            // is settled by a terminal Runtime event.
-            this.uncertainCompactionBySession.add(sessionId);
-            this.broadcastSessionActivity(sessionId);
-          }
-          this.rethrowResultPending(error, "上下文压缩");
-        }
-        json(response, 200, { result });
-        return;
-      } finally {
-        releaseRuntimeOperation?.();
-        releasePromptAdmission();
-      }
+        else json(response, 200, { result: result.result });
+      });
+      return;
     }
 
     if (url.pathname === "/api/chat/abort") {
@@ -8842,1173 +7309,205 @@ export class PiChatApp {
       const sessionId = requiredSessionId(body);
       const runtime = this.runtimePool.get(sessionId);
       if (runtime) {
-        // Invalidate any in-flight settings/Gate preflight before attempting
-        // the operation lease. The lease protects reclaim, not cancellation;
-        // abort must be observable while another mutation is awaiting RPC.
-        runtime.abortGeneration += 1;
-        const releaseRuntimeOperation =
-          this.runtimePool.acquireOperation(runtime);
-        try {
-          this.runtimePool.touch(runtime);
-          if (runtime.failed || runtime.rpc.isRunning?.() === false)
-            return json(response, 200, {
-              ok: true,
-              isStreaming: false,
-              queuePaused: runtime.queuePaused,
-            });
-          if (runtime.promptQueue.length || runtime.dispatching)
-            runtime.queuePaused = true;
-          const steeringGeneration = runtime.rpcGeneration;
-          if (this.hasNativeSteeringPending(sessionId, steeringGeneration))
-            this.nativeSteeringResetAfterSettlement.set(
-              sessionId,
-              steeringGeneration,
-            );
-          try {
-            await runtime.rpc.send({ type: "abort" }, 5_000);
-          } catch (error) {
-            if (
-              !(error instanceof RpcRequestTimeoutError) ||
-              !error.outcomeUnknown ||
-              error.requestType !== "abort"
-            )
-              throw error;
-            // Pi has received abort but may still be waiting for its agent/tool
-            // stack to become idle. An agent_settled event can beat this timeout,
-            // so preserve the event-owned running state instead of reviving it.
-            const abortPending = runtime.running;
-            this.broadcastQueue(sessionId);
-            this.broadcastSessionActivity(sessionId);
-            return json(response, 200, {
-              ok: true,
-              abortPending,
-              isStreaming: abortPending,
-              queuePaused: runtime.queuePaused,
-            });
-          }
-          // Abort itself is enough; a long get_state after abort was a common freeze.
-          // Prefer a short probe, then fall back to "stopped" and let agent_settled finish.
-          let isStreaming = false;
-          try {
-            const state = asState(
-              await runtime.rpc.send({ type: "get_state" }, 2_000),
-            );
-            isStreaming = state.isStreaming;
-          } catch {
-            isStreaming = false;
-          }
-          runtime.running = isStreaming;
-          // Re-check accepted admissions after abort: a concurrent Steer may
-          // have been admitted while abort was in flight even if Pi never
-          // emitted the queue_update snapshot for an uncertain write.
-          if (this.hasNativeSteeringPending(sessionId, steeringGeneration)) {
-            await this.resetNativeSteering(
-              sessionId,
-              runtime,
-              "abort",
-            );
-            isStreaming = false;
-            runtime.running = false;
-          }
-          this.broadcastQueue(sessionId);
-          this.broadcastSessionActivity(sessionId);
-          return json(response, 200, {
-            ok: true,
-            isStreaming,
-            queuePaused: runtime.queuePaused,
-          });
-        } finally {
-          releaseRuntimeOperation();
-        }
+        await this.abortSecondaryRuntime(sessionId, runtime, (result) =>
+          json(response, 200, result),
+        );
+        return;
       }
       if (sessionId !== this.activeSessionId)
         return json(response, 409, { error: "该会话不是活动运行会话" });
-      // Abort invalidates an in-flight Primary preflight before acquiring the
-      // operation lease; the lease is a reclaim fence, not a cancellation queue.
-      this.scheduler.primaryAbortGeneration += 1;
-      const releasePrimaryOperation =
-        this.primaryOperationAdmission.acquire().release;
-      try {
-        if (this.promptQueue.length || this.dispatching)
-          this.queuePaused = true;
-        if (this.primaryFailed || this.options.rpc.isRunning?.() === false) {
-          this.broadcastQueue();
-          this.broadcastSessionActivity(sessionId);
-          return json(response, 200, {
-            ok: true,
-            isStreaming: false,
-            queuePaused: this.queuePaused,
-          });
-        }
-        const steeringGeneration = this.primaryRpcGeneration;
-        if (this.hasNativeSteeringPending(sessionId, steeringGeneration))
-          this.nativeSteeringResetAfterSettlement.set(
-            sessionId,
-            steeringGeneration,
-          );
-        try {
-          await this.options.rpc.send({ type: "abort" }, 5_000);
-        } catch (error) {
-          if (
-            !(error instanceof RpcRequestTimeoutError) ||
-            !error.outcomeUnknown ||
-            error.requestType !== "abort"
-          )
-            throw error;
-          // The command may still be executing inside Pi. Preserve event-owned
-          // running state because agent_settled can arrive just before timeout.
-          const abortPending = this.running;
-          this.broadcastQueue();
-          this.broadcastSessionActivity(sessionId);
-          return json(response, 200, {
-            ok: true,
-            abortPending,
-            isStreaming: abortPending,
-            queuePaused: this.queuePaused,
-          });
-        }
-        this.broadcastQueue();
-        let isStreaming = false;
-        try {
-          const state = asState(
-            await this.options.rpc.send({ type: "get_state" }, 2_000),
-          );
-          isStreaming = state.isStreaming;
-        } catch {
-          isStreaming = false;
-        }
-        this.running = isStreaming;
-        // Re-check accepted admissions after abort: a concurrent Steer may
-        // have been admitted while abort was in flight even if Pi never
-        // emitted the queue_update snapshot for an uncertain write.
-        if (this.hasNativeSteeringPending(sessionId, steeringGeneration)) {
-          await this.resetNativeSteering(sessionId, undefined, "abort");
-          isStreaming = false;
-          this.running = false;
-        }
-        this.broadcastSessionActivity(sessionId);
-        json(response, 200, {
-          ok: true,
-          isStreaming,
-          queuePaused: this.queuePaused,
-        });
-        return;
-      } finally {
-        releasePrimaryOperation();
-      }
-    }
-
-    const copySessionMatch = /^\/api\/sessions\/([a-f0-9]{20})\/(clone|fork)$/.exec(
-      url.pathname,
-    );
-    if (copySessionMatch) {
-      if (request.method !== "POST") return methodNotAllowed(response);
-      const body = preparedBody || (await bodyJson(request));
-      const persistedMessageId = typeof body.persistedMessageId === "string"
-        ? body.persistedMessageId
-        : undefined;
-      if (
-        copySessionMatch[2] === "fork" &&
-        (!persistedMessageId || persistedMessageId.length > 403)
-      )
-        return json(response, 400, { error: "分叉消息标识无效" });
-      json(
-        response,
-        200,
-        await this.copySession(
-          copySessionMatch[1],
-          copySessionMatch[2] as "clone" | "fork",
-          persistedMessageId,
-        ),
-      );
+      await this.abortPrimaryRuntime(sessionId, (result) => json(response, 200, result));
       return;
     }
 
-    const manageSessionMatch = /^\/api\/sessions\/([a-f0-9]{20})$/.exec(
-      url.pathname,
-    );
-    if (manageSessionMatch) {
-      if (request.method === "PATCH") {
-        this.requireSessionControl(manageSessionMatch[1], clientId);
-        const body = preparedBody || (await bodyJson(request));
-        const name = typeof body.name === "string" ? body.name.trim() : "";
-        if (!name || name.length > 120 || /[\u0000-\u001f\u007f]/.test(name))
-          return json(response, 400, {
-            error: "名称必须为 1 到 120 个有效字符",
-          });
-        const releaseSessionAdmission = await this.beginPromptAdmission(
-          manageSessionMatch[1],
-        );
-        try {
-          this.requireSessionControl(manageSessionMatch[1], clientId);
-          json(
-            response,
-            200,
-            await this.renameSession(manageSessionMatch[1], name),
-          );
-        } finally {
-          releaseSessionAdmission();
-        }
-        return;
-      }
-      if (request.method === "DELETE") {
-        this.requireSessionControl(manageSessionMatch[1], clientId);
-        const releaseSessionAdmission = await this.beginPromptAdmission(
-          manageSessionMatch[1],
-        );
-        try {
-          this.requireSessionControl(manageSessionMatch[1], clientId);
-          json(response, 200, await this.deleteSession(manageSessionMatch[1]));
-        } finally {
-          releaseSessionAdmission();
-        }
-        return;
-      }
-      return methodNotAllowed(response);
-    }
-
-    if (url.pathname === "/api/sessions/viewing/clear") {
-      if (request.method !== "POST") return methodNotAllowed(response);
-      if (!clientId)
-        return json(response, 400, { error: "浏览器窗口标识无效" });
-      const body = await bodyJson(request);
-      const expectedSessionId =
-        typeof body.sessionId === "string" ? body.sessionId : "";
-      if (!/^[a-f0-9]{20}$/.test(expectedSessionId))
-        return json(response, 400, { error: "待清除的会话标识无效" });
-      const viewing = this.sessionControl.clearViewed(
-        clientId,
-        expectedSessionId,
-      );
-      if (!viewing) {
-        const runtime = this.runtimePool.get(expectedSessionId);
-        if (runtime && this.runtimePool.canReclaim(runtime))
-          void this.runtimePool.sweep();
-      }
-      json(response, 200, { viewing });
-      return;
-    }
-
-    const viewingMatch = /^\/api\/sessions\/([a-f0-9]{20})\/viewing$/.exec(
-      url.pathname,
-    );
-    if (viewingMatch) {
-      if (request.method !== "POST") return methodNotAllowed(response);
-      if (!clientId)
-        return json(response, 400, { error: "浏览器窗口标识无效" });
-      const id = viewingMatch[1];
-      const runtime = this.runtimePool.get(id);
-      // A running Runtime is authoritative. Avoid a full SessionIndex scan after
-      // every hot navigation just to prove a worker we already own exists.
-      const indexed =
-        !runtime && id !== this.activeSessionId
-          ? (await (this.options.sessions as SessionIndex).cachedSummaryForId?.(id)) ||
-            this.options.sessions.summaryForId?.(id) ||
-            (await this.options.sessions.list(undefined, this.currentCwd)).find(
-              (session) => session.id === id,
-            )
-          : true;
-      if (!indexed && !runtime && id !== this.activeSessionId)
-        return json(response, 404, { error: "会话不存在" });
-      this.markSessionViewed(clientId, id);
-      if (runtime) this.runtimePool.touch(runtime);
-      json(response, 200, { viewing: id });
-      return;
-    }
-
-    const warmMatch = /^\/api\/sessions\/([a-f0-9]{20})\/warm$/.exec(
-      url.pathname,
-    );
-    if (warmMatch) {
-      if (request.method !== "POST") return methodNotAllowed(response);
-      const id = warmMatch[1];
-      const existing = this.runtimePool.get(id) || null;
-      // A Primary may still own this session after service startup. Bind that
-      // identity before allocating any cold Secondary so one JSONL never gains
-      // two live Pi writers.
-      if (!existing && !this.activeSessionId)
-        await this.ensurePrimaryIdentity();
-      // Warm is a Session-local capability upgrade. It deliberately performs
-      // no full sessionView probes; a cold JSONL pane remains immediately
-      // readable even if spawning fails or capacity is exhausted.
-      if (id === this.activeSessionId) {
-        try {
-          await this.ensurePrimaryRuntime();
-        } catch (error) {
-          this.rethrowResultPending(error, "准备会话运行时", false);
-        }
-        return json(response, 200, {
-          sessionId: id,
-          state: this.stateWithFastMode(id, {
-            ...this.lastPrimaryState,
-            isStreaming: this.primaryTurnActive(),
-          }),
-          gateMode: this.primaryGateMode,
-        } satisfies SessionRuntimeReadyData);
-      }
-      let runtime: SecondaryRuntime;
-      try {
-        runtime = existing || (await this.ensureRuntime(id));
-      } catch (error) {
-        this.rethrowResultPending(error, "准备会话运行时", false);
-      }
-      json(response, 200, this.runtimeReady(runtime));
-      return;
-    }
-
-    const activateMatch = /^\/api\/sessions\/([a-f0-9]{20})\/activate$/.exec(
-      url.pathname,
-    );
-    if (activateMatch) {
-      if (request.method !== "POST") return methodNotAllowed(response);
-      const id = activateMatch[1];
-      // An already-owned Secondary remains independently usable when Primary
-      // startup has failed. Only a new/unknown target must bind Primary first,
-      // preventing a cold Primary JSONL from being opened twice.
-      const existingSecondary = this.runtimePool.get(id) || null;
-      try {
-        if (!existingSecondary) await this.ensurePrimaryIdentity();
-        if (id === this.activeSessionId) await this.ensurePrimaryRuntime();
-        else if (!existingSecondary) await this.ensureRuntime(id);
-      } catch (error) {
-        this.rethrowResultPending(error, "激活会话", false);
-      }
-      const view = await this.sessionView(
-        id,
-        RECENT_TURN_WINDOW_SIZE,
-        clientId,
-      );
-      if (!view) return json(response, 404, { error: "会话不存在" });
-      json(response, 200, view);
-      return;
-    }
-
-    if (url.pathname === "/api/sessions/new") {
-      if (request.method !== "POST") return methodNotAllowed(response);
-      const body = preparedBody || (await bodyJson(request, PROMPT_BODY_LIMIT));
-      const requestedCwd =
-        typeof body.cwd === "string" && body.cwd.trim()
-          ? resolve(body.cwd)
-          : this.currentCwd;
-      if (!(await stat(requestedCwd)).isDirectory())
-        return json(response, 400, {
-          error: "新对话工作目录不存在或不是文件夹",
-        });
-      const initial =
-        body.initial &&
-        typeof body.initial === "object" &&
-        !Array.isArray(body.initial)
-          ? (body.initial as InitialPromptRequest)
-          : null;
-      const initialMessage =
-        typeof initial?.message === "string" ? initial.message.trim() : "";
-      const initialImages = initial ? promptImages(initial.images) : [];
-      const initialGateMode: GateMode | undefined =
-        initial?.gateMode === "strict" || initial?.gateMode === "open"
-          ? initial.gateMode
-          : undefined;
-      if (initial?.gateMode !== undefined && !initialGateMode)
-        return json(response, 400, { error: "无效的 Gate 模式" });
-      const initialClientPromptOperationId =
-        typeof initial?.clientPromptOperationId === "string"
-          ? initial.clientPromptOperationId
-          : "";
-      if (
-        initial?.clientPromptOperationId !== undefined &&
-        !CLIENT_PROMPT_OPERATION_ID_PATTERN.test(initialClientPromptOperationId)
-      )
-        return json(response, 400, { error: "Prompt 操作标识无效" });
-      if (
-        initial?.thinkingLevel !== undefined &&
-        !THINKING_LEVELS.includes(initial.thinkingLevel)
-      )
-        return json(response, 400, { error: "无效的 Thinking 强度" });
-      if (
-        initial?.model !== undefined &&
-        (!initial.model ||
-          typeof initial.model.provider !== "string" ||
-          !initial.model.provider ||
-          typeof initial.model.modelId !== "string" ||
-          !initial.model.modelId ||
-          (initial.model.api !== undefined &&
-            (typeof initial.model.api !== "string" || !initial.model.api)))
-      )
-        return json(response, 400, { error: "新对话模型配置无效" });
-      if (initial && !initialMessage && !initialImages.length)
-        return json(response, 400, { error: "消息或图片不能为空" });
-      // A failed initial Primary must be recovered before allocating a draft;
-      // otherwise a failed compatibility proof can leave an unnecessary
-      // Secondary worker behind. Healthy/starting Primary still overlaps its
-      // startup with draft creation as before.
-      const primaryWasFailed = this.primaryNeedsRecovery();
-      if (primaryWasFailed) {
-        try {
-          await this.waitForNewDraftPrimaryCompatibility();
-        } catch (error) {
-          this.rethrowResultPending(error, "准备新会话运行时", false);
-        }
-      }
-      let draftLease: import("./runtime-pool.js").DraftRuntimeLease;
-      try {
-        draftLease = await this.acquireDraftRuntime(clientId, requestedCwd);
-      } catch (error) {
-        this.rethrowResultPending(error, "新建会话", false);
-      }
-      try {
-        // Spawn and Primary compatibility are intentionally overlapped while
-        // Primary is starting. The draft remains unprompted until the common
-        // compatibility proof joins.
-        if (!primaryWasFailed) {
-          try {
-            await this.waitForNewDraftPrimaryCompatibility();
-          } catch (error) {
-            this.rethrowResultPending(error, "准备新会话运行时", false);
-          }
-        }
-        // The lease spans creation, preferences, Gate and prompt admission: an
-        // empty draft cannot be reclaimed between these parts of one first turn.
-        this.markSessionViewed(clientId, draftLease.runtime.id);
-        if (!initial) {
-          const view = await this.draftSessionView(
-            draftLease.runtime,
-            clientId,
-          );
-          json(response, 200, view);
-          return;
-        }
-        const runtime = draftLease.runtime;
-        // Capture abort intent before any asynchronous first-turn preparation;
-        // an abort that arrives during readiness/settings/Gate must invalidate
-        // this draft prompt rather than being absorbed by a newer generation.
-        const initialAbortGeneration = runtime.abortGeneration;
-        // Use the same per-Session prompt FIFO as ordinary /chat/prompt. The
-        // runtime lease protects reclamation; this admission prevents a caller
-        // that learns the newly allocated ID from interleaving another prompt
-        // between first-turn setup commands and the user instruction.
-        const releasePromptAdmission = await this.beginPromptAdmission(
-          runtime.id,
-        );
-        try {
-          this.requireSessionControl(runtime.id, clientId);
-          const promptAt = this.nextUserPromptAt();
-          const initialSettings: PendingTurnSettings = {
-            ...(initial.model
-              ? {
-                  model: {
-                    provider: initial.model.provider,
-                    modelId: initial.model.modelId,
-                    ...(initial.model.api ? { api: initial.model.api } : null),
-                  },
-                }
-              : null),
-            ...(initial.thinkingLevel
-              ? { thinkingLevel: initial.thinkingLevel }
-              : null),
-          };
-          if (initialSettings.model || initialSettings.thinkingLevel) {
-            try {
-              const appliedSettings = await this.applyTurnSettings(
-                runtime.rpc,
-                initialSettings,
-                runtime.id,
-              );
-              this.rememberRuntimeAppliedTurnSettings(runtime, appliedSettings);
-            } catch (error) {
-              if (error instanceof PartialTurnSettingsError)
-                this.rememberRuntimeAppliedTurnSettings(runtime, error.applied);
-              // The inner setting writes own the uncertainty marker; a
-              // read-only model catalogue failure must not fence this Session.
-              this.rethrowResultPending(error, "准备初始 Prompt 设置", false);
-            }
-          }
-          if (
-            initialAbortGeneration !== runtime.abortGeneration ||
-            this.applicationLifecycle !== "idle"
-          )
-            throw new Error("消息发送已取消");
-          const extensionCommand = initialMessage
-            ? await this.extensionCommand(initialMessage, runtime.rpc)
-            : null;
-          if (
-            initialAbortGeneration !== runtime.abortGeneration ||
-            this.applicationLifecycle !== "idle"
-          )
-            throw new Error("消息发送已取消");
-          if (extensionCommand && initialImages.length)
-            return json(response, 400, {
-              error: "Extension 指令不能同时附加图片",
-            });
-          await this.syncGateMode(runtime.rpc, runtime.id, initialGateMode);
-          if (
-            initialAbortGeneration !== runtime.abortGeneration ||
-            this.applicationLifecycle !== "idle"
-          )
-            throw new Error("消息发送已取消");
-          const promptId = extensionCommand ? "" : randomUUID();
-          runtime.running = true;
-          if (promptId) {
-            this.tracePrompt("admitted", runtime.id, promptId);
-          }
-          this.broadcastSessionActivity(runtime.id);
-          let deliveryUncertain = false;
-          try {
-            const command = {
-              type: "prompt",
-              message: initialMessage || "请查看这些图片。",
-              ...(initialImages.length ? { images: initialImages } : {}),
-            };
-            if (promptId)
-              await this.sendPromptRpc(runtime.rpc, runtime.id, promptId, command);
-            else await runtime.rpc.send(command, PROMPT_PREPARE_TIMEOUT_MS);
-            if (extensionCommand) {
-              // Extension commands can complete synchronously without an
-              // agent_start event. Refresh only their minimal state so the
-              // Runtime never remains falsely marked running, then commit the
-              // draft using the same semantics as ordinary extension commands.
-              const state = asState(
-                await runtime.rpc.send({ type: "get_state" }),
-              );
-              runtime.lastState = state;
-              runtime.running = state.isStreaming;
-              runtime.prompted = true;
-              this.noteUserPrompt(runtime.id, promptAt);
-              await this.finalizePersistedDraft(runtime);
-            } else {
-              this.scheduler.notifySecondaryPromptAccepted(
-                runtime,
-                promptAt,
-                initialMessage,
-                initialImages,
-                initialSettings,
-                promptId,
-                initialClientPromptOperationId || undefined,
-              );
-            }
-          } catch (error) {
-            if (error instanceof RpcRequestTimeoutError && error.outcomeUnknown) {
-              // The initial draft request is still a write to Pi stdin. Do not
-              // discard its newly-created Runtime or let a later prompt race a
-              // turn Pi may have accepted after the HTTP acknowledgement timer.
-              deliveryUncertain = true;
-              if (promptId)
-                this.tracePrompt("delivery-uncertain", runtime.id, promptId);
-              this.scheduler.notifySecondaryPromptAccepted(
-                runtime,
-                promptAt,
-                initialMessage,
-                initialImages,
-                initialSettings,
-                promptId,
-                initialClientPromptOperationId || undefined,
-              );
-            } else {
-              runtime.running = false;
-              this.broadcastSessionActivity(runtime.id);
-              throw error;
-            }
-          }
-          json(response, 202, {
-            ...this.runtimeReady(runtime),
-            session: {
-              ...(runtime.draftSession || {
-                id: runtime.id,
-                sessionId: runtime.lastState?.sessionId || runtime.id,
-                name: "新对话",
-                preview: "新对话",
-                cwd: runtime.cwd,
-                updatedAt: this.now(),
-                messageCount: 1,
-                active: true,
-              }),
-              active: true,
+    if (
+      await handleSessionMutationsRoute(
+        {
+          requireSessionControl: (sessionId, client) => this.requireSessionControl(sessionId, client),
+          beginPromptAdmission: (sessionId) => this.beginPromptAdmission(sessionId),
+          renameSession: (sessionId, name) => renameSession({
+            sessionMutationOutcomePending: (id) => this.sessionMutationOutcomePending(id),
+            activeSessionId: () => this.activeSessionId,
+            knownRuntime: (id) => this.runtimePool.get(id),
+            ensureRuntime: (id) => this.ensureRuntime(id),
+            primaryRpc: () => this.options.rpc,
+            acquireRuntimeOperation: (runtime) => this.runtimePool.acquireOperation(runtime),
+            acquirePrimaryOperation: () => this.primaryOperationAdmission.acquire().release,
+            lateRpcOutcomeHandler: (id, token) => this.lateRpcOutcomeHandler(id, token, "generic"),
+            markRpcOutcomePending: (id, error, token) => this.markRpcOutcomePending(id, error, token),
+            rethrowResultPending: (error, operation) => this.rethrowResultPending(error, operation),
+            clearNativeSteeringState: (id, reason) => this.clearNativeSteeringState(id, reason),
+            reclaimRuntime: (id) => this.runtimePool.reclaim(id, "idle").then(() => undefined),
+            persistForkNameOverride: async (id, name) => {
+              const applied = await this.sessionRelations.setNameOverride(id, name);
+              if (applied) this.options.sessions.applyForkNameOverride(id, name);
             },
-            accepted: true,
-            queued: false,
-            ...(promptId ? { promptId } : null),
-            ...(deliveryUncertain ? { deliveryUncertain: true } : null),
-            // A timed-out extension write has not been proven to execute; use
-            // the ordinary uncertain-prompt UX instead of claiming success.
-            ...(extensionCommand && !deliveryUncertain
-              ? {
-                  extension: true,
-                  command: extensionCommand.name,
-                  description: extensionCommand.description,
-                  isStreaming: this.runtimeTurnActive(runtime),
-                }
-              : null),
-          } satisfies InitialPromptData);
-        } finally {
-          releasePromptAdmission();
-        }
-      } catch (error) {
-        if (
-          draftLease.created &&
-          error instanceof PrimaryRuntimeUnavailableError
-        ) {
-          // releaseForDeletion drains Runtime admission; release this route's
-          // handoff lease first or cleanup would wait on itself indefinitely.
-          draftLease.release();
-          await this.runtimePool
-            .discardDraft(draftLease.runtime)
-            .catch(() => undefined);
-        }
-        throw error;
-      } finally {
-        draftLease.release();
-      }
-      return;
-    }
-
-    if (url.pathname === "/api/models/provider" && request.method === "POST") {
-      if (!this.options.modelManager) return json(response, 501, { error: "模型管理不可用" });
-      const result = await this.withLifecycle("models-refreshing", "添加 Provider", async () => {
-        const body = preparedBody || (await bodyJson(request));
-        await this.applyModelFileTransaction(() => this.options.modelManager!.addProvider(body));
-        return this.bootstrap();
-      });
-      json(response, 200, result);
-      return;
-    }
-    const customProviderMatch = /^\/api\/models\/provider\/([A-Za-z0-9._-]{1,80})$/.exec(url.pathname);
-    if (customProviderMatch) {
-      if (!this.options.modelManager) return json(response, 501, { error: "模型管理不可用" });
-      const provider = decodeURIComponent(customProviderMatch[1]);
-      if (request.method === "GET") {
-        json(response, 200, { provider: await this.options.modelManager.getCustomProvider(provider) });
-        return;
-      }
-      if (request.method === "DELETE") {
-        const state = asState(await this.options.rpc.send({ type: "get_state" }));
-        if (state.model?.provider === provider)
-          throw new Error("请先切换到其他模型，再删除当前 Provider");
-        const result = await this.withLifecycle("models-refreshing", "删除 Provider", async () => {
-          await this.applyModelFileTransaction(() => this.options.modelManager!.removeProvider(provider));
-          return this.bootstrap();
-        });
-        json(response, 200, result);
-        return;
-      }
-      if (request.method === "PUT") {
-        const result = await this.withLifecycle("models-refreshing", "更新 Provider 配置", async () => {
-          const body = preparedBody || (await bodyJson(request));
-          const primaryState = await this.options.rpc.send({ type: "get_state" });
-          const secondaryStates = await this.runtimePool.rpcStatesForQuiescence();
-          const proposedModels = body && typeof body === "object"
-            ? (body as Record<string, unknown>).models
-            : undefined;
-          const proposedIds = Array.isArray(proposedModels)
-            ? new Set(proposedModels.flatMap((model) => model && typeof model === "object" && typeof (model as Record<string, unknown>).id === "string" ? [(model as Record<string, unknown>).id as string] : []))
-            : null;
-          // The whole-Provider editor can rename/delete rows. Never leave any
-          // started Session pointing at a key that the same transaction removes;
-          // switching first gives Pi a durable model_change anchor.
-          const invalidatesActiveModel = proposedIds && [primaryState, ...secondaryStates].some((response) => {
-            if (!response) return false;
-            const model = asState(response).model;
-            return model?.provider === provider && !proposedIds.has(model.id);
-          });
-          if (invalidatesActiveModel)
-            throw new Error("请先在所有已启动对话中切换到其他模型，再重命名或删除当前模型");
-          await this.applyModelFileTransaction(() => this.options.modelManager!.updateProvider(provider, body));
-          return this.bootstrap();
-        });
-        json(response, 200, result);
-        return;
-      }
-      return methodNotAllowed(response);
-    }
-
-    const customModelMatch =
-      /^\/api\/models\/([A-Za-z0-9._-]{1,80})\/([^/]{1,200})$/.exec(
-        url.pathname,
-      );
-    if (customModelMatch) {
-      if (!this.options.modelManager)
-        return json(response, 501, { error: "模型管理不可用" });
-      const provider = decodeURIComponent(customModelMatch[1]);
-      const modelId = decodeURIComponent(customModelMatch[2]);
-      if (request.method === "GET") {
-        json(response, 200, {
-          model: await this.options.modelManager.getCustomConfig(
-            provider,
-            modelId,
-          ),
-        });
-        return;
-      }
-      if (request.method === "PUT") {
-        const result = await this.withLifecycle(
-          "models-refreshing",
-          "更新模型配置",
-          async () => {
-            const body = preparedBody || (await bodyJson(request));
-            const state = asState(
-              await this.options.rpc.send({ type: "get_state" }),
-            );
-            const wasActive =
-              state.model?.provider === provider && state.model?.id === modelId;
-            const updated = await this.applyModelFileTransaction(() =>
-              this.options.modelManager!.update(provider, modelId, body),
-            );
-            // A rename invalidates the session's model reference; reselect the new
-            // key so the UI never points at a model that no longer exists.
-            if (
-              wasActive &&
-              !this.primaryTurnActive() &&
-              (updated.provider !== provider || updated.id !== modelId)
-            ) {
-              const outcomeToken = randomUUID();
-              try {
-                await this.options.rpc.send(
-                  {
-                    type: "set_model",
-                    provider: updated.provider,
-                    modelId: updated.id,
-                  },
-                  undefined,
-                  {
-                    onLateResponse: this.lateRpcOutcomeHandler(
-                      this.activeSessionId,
-                      outcomeToken,
-                      "generic",
-                    ),
-                  },
-                );
-              } catch (error) {
-                if (this.rpcOutcomeUnknown(error)) {
-                  this.markRpcOutcomePending(
-                    this.activeSessionId,
-                    error,
-                    outcomeToken,
-                  );
-                  this.rethrowResultPending(error, "确认重命名模型");
-                }
-                // The renamed model may be unreachable (auth/network); the user can
-                // reselect it from the refreshed model list.
+            updateRuntimeName: (id, name) => {
+              if (id === this.activeSessionId && this.primarySummarySnapshot)
+                this.primarySummarySnapshot = { ...this.primarySummarySnapshot, name };
+              else {
+                const runtime = this.runtimePool.get(id);
+                if (runtime?.summarySnapshot)
+                  runtime.summarySnapshot = { ...runtime.summarySnapshot, name };
               }
-            }
-            // An in-flight prompt owns its captured Runtime route. Leave the
-            // old model selected until settlement; the next prompt admission
-            // will revalidate against the refreshed Host catalogue.
-            return this.bootstrap();
-          },
-        );
-        json(response, 200, result);
-        return;
-      }
-      return methodNotAllowed(response);
-    }
-
-    if (url.pathname === "/api/models") {
-      if (!this.options.modelManager)
-        return json(response, 501, { error: "模型管理不可用" });
-      if (request.method !== "POST" && request.method !== "DELETE")
-        return methodNotAllowed(response);
-      const result = await this.withLifecycle(
-        "models-refreshing",
-        "更新模型配置",
-        async () => {
-          const body = preparedBody || (await bodyJson(request));
-          await this.applyModelFileTransaction(async () => {
-            if (request.method === "POST") {
-              await this.options.modelManager!.add(body);
-              return;
-            }
-            const state = asState(
-              await this.options.rpc.send({ type: "get_state" }),
-            );
-            if (
-              state.model?.provider === body.provider &&
-              state.model?.id === body.modelId
-            )
-              throw new Error("请先切换到其他模型，再删除当前模型");
-            await this.options.modelManager!.remove(body.provider, body.modelId);
-          });
-          return this.bootstrap();
+            },
+            broadcastRenamed: (id) => this.broadcast({ type: "pi_chat_sessions_changed", action: "renamed", sessionId: id }),
+          }, sessionId, name),
+          deleteSession: (sessionId) => this.deleteSession(sessionId),
+          copySession: (sessionId, mode, persistedMessageId) =>
+            this.copySession(sessionId, mode, persistedMessageId),
         },
-      );
-      json(response, 200, result);
-      return;
-    }
-
-    if (url.pathname === "/api/models/set") {
-      if (request.method !== "POST") return methodNotAllowed(response);
-      const body = preparedBody || (await bodyJson(request));
-      const provider = typeof body.provider === "string" ? body.provider : "";
-      const modelId = typeof body.modelId === "string" ? body.modelId : "";
-      const sessionId = requiredSessionId(body);
-      const secondaryRuntime = this.runtimePool.get(sessionId) || null;
-      if (!provider || !modelId)
-        return json(response, 400, { error: "provider 和 modelId 必填" });
-      if (!secondaryRuntime && sessionId !== this.activeSessionId)
-        return json(response, 409, { error: "该会话尚未启用" });
-      // Legacy direct setting calls may come from an older window. Serialize
-      // them with prompt admission so they cannot interleave a newer prompt's
-      // captured set_model → set_thinking_level → prompt transaction.
-      const releaseSettingAdmission = await this.beginPromptAdmission(sessionId);
-      try {
-      if (secondaryRuntime) {
-        return this.runtimePool.withOperation(secondaryRuntime, async () => {
-          if (this.secondaryNeedsRecovery(secondaryRuntime))
-            await this.recoverRuntime(secondaryRuntime);
-          if (this.sessionMutationOutcomePending(sessionId))
-            return json(response, 409, {
-              error: "上一次操作结果尚未确认；请刷新页面核对，不要重复修改设置",
-              code: "RESULT_PENDING",
-              retryable: true,
-            });
-          const targetRpc = secondaryRuntime.rpc;
-          if (secondaryRuntime.running) {
-            const model = asModels(
-              await targetRpc.send({ type: "get_available_models" }),
-            ).find((item) => item.provider === provider && item.id === modelId);
-            if (!model)
-              return json(response, 404, {
-                error: `所选模型不可用：${provider}/${modelId} 不在该会话 Pi Runtime 的模型列表中。请改选该 Runtime 提供的模型；若你刚更新过模型配置，请重启该会话的 Pi Runtime 后重试。`,
-                code: "MODEL_UNAVAILABLE",
-              });
-            secondaryRuntime.pendingTurnSettings.model = { provider, modelId };
-            this.rememberRuntimeDisplaySettings(secondaryRuntime, { model });
-            return json(response, 200, { model, pending: true });
-          }
-          let modelResponse: Record<string, unknown>;
-          const outcomeToken = randomUUID();
-          try {
-            modelResponse = await targetRpc.send(
-              { type: "set_model", provider, modelId },
-              undefined,
-              {
-                onLateResponse: this.lateRpcOutcomeHandler(
-                  sessionId,
-                  outcomeToken,
-                  "generic",
-                ),
-              },
-            );
-          } catch (error) {
-            this.markRpcOutcomePending(sessionId, error, outcomeToken);
-            this.rethrowResultPending(error, "更新模型");
-          }
-          const model = rpcData<ModelInfo>(modelResponse);
-          this.rememberRuntimeDisplaySettings(secondaryRuntime, { model });
-          return json(response, 200, { model, pending: false });
-        });
-      }
-      const releasePrimaryOperation =
-        this.primaryOperationAdmission.acquire().release;
-      try {
-        try {
-          await this.ensurePrimaryRuntime();
-        } catch (error) {
-          this.rethrowResultPending(error, "准备模型运行时");
-        }
-        const targetRunning = this.running;
-        if (this.sessionMutationOutcomePending(sessionId))
-          return json(response, 409, {
-            error: "上一次操作结果尚未确认；请刷新页面核对，不要重复修改设置",
-            code: "RESULT_PENDING",
-            retryable: true,
-          });
-        if (targetRunning) {
-          const model = asModels(
-            await this.options.rpc.send({ type: "get_available_models" }),
-          ).find((item) => item.provider === provider && item.id === modelId);
-          if (!model)
-            return json(response, 404, {
-              error: `所选模型不可用：${provider}/${modelId} 不在当前 Pi Runtime 的模型列表中。请改选该 Runtime 提供的模型；若你刚更新过模型配置，请重启 Pi Runtime 后重试。`,
-              code: "MODEL_UNAVAILABLE",
-            });
-          this.pendingTurnSettings.model = { provider, modelId };
-          this.rememberPrimaryDisplaySettings({ model });
-          return json(response, 200, { model, pending: true });
-        }
-        let modelResponse: Record<string, unknown>;
-        const outcomeToken = randomUUID();
-        try {
-          modelResponse = await this.options.rpc.send(
-            { type: "set_model", provider, modelId },
-            undefined,
-            {
-              onLateResponse: this.lateRpcOutcomeHandler(
-                sessionId,
-                outcomeToken,
-                "generic",
-              ),
-            },
-          );
-        } catch (error) {
-          this.markRpcOutcomePending(sessionId, error, outcomeToken);
-          this.rethrowResultPending(error, "更新模型");
-        }
-        const model = rpcData<ModelInfo>(modelResponse);
-        this.rememberPrimaryDisplaySettings({ model });
-        return json(response, 200, { model, pending: false });
-      } finally {
-        releasePrimaryOperation();
-      }
-      } finally {
-        releaseSettingAdmission();
-      }
-      return;
-    }
-
-    if (url.pathname === "/api/thinking/set") {
-      if (request.method !== "POST") return methodNotAllowed(response);
-      const body = preparedBody || (await bodyJson(request));
-      const level =
-        typeof body.level === "string" &&
-        THINKING_LEVELS.includes(body.level as ThinkingLevel)
-          ? (body.level as ThinkingLevel)
-          : null;
-      const sessionId = requiredSessionId(body);
-      const secondaryRuntime = this.runtimePool.get(sessionId) || null;
-      if (!level) return json(response, 400, { error: "无效的 Thinking 强度" });
-      if (!secondaryRuntime && sessionId !== this.activeSessionId)
-        return json(response, 409, { error: "该会话尚未启用" });
-      // See /api/models/set: direct legacy mutations share the prompt FIFO.
-      const releaseSettingAdmission = await this.beginPromptAdmission(sessionId);
-      try {
-      if (secondaryRuntime) {
-        return this.runtimePool.withOperation(secondaryRuntime, async () => {
-          if (this.secondaryNeedsRecovery(secondaryRuntime))
-            await this.recoverRuntime(secondaryRuntime);
-          if (this.sessionMutationOutcomePending(sessionId))
-            return json(response, 409, {
-              error: "上一次操作结果尚未确认；请刷新页面核对，不要重复修改设置",
-              code: "RESULT_PENDING",
-              retryable: true,
-            });
-          if (secondaryRuntime.running) {
-            secondaryRuntime.pendingTurnSettings.thinkingLevel = level;
-            this.rememberRuntimeDisplaySettings(secondaryRuntime, {
-              thinkingLevel: level,
-            });
-            return json(response, 200, { level, pending: true });
-          }
-          const outcomeToken = randomUUID();
-          try {
-            await secondaryRuntime.rpc.send(
-              {
-                type: "set_thinking_level",
-                level,
-              },
-              undefined,
-              {
-                onLateResponse: this.lateRpcOutcomeHandler(
-                  sessionId,
-                  outcomeToken,
-                  "generic",
-                ),
-              },
-            );
-          } catch (error) {
-            this.markRpcOutcomePending(sessionId, error, outcomeToken);
-            this.rethrowResultPending(error, "更新 Thinking 强度");
-          }
-          let stateResponse: Record<string, unknown>;
-          try {
-            stateResponse = await secondaryRuntime.rpc.send({ type: "get_state" });
-          } catch (error) {
-            // set_thinking_level was already acknowledged; this follow-up read
-            // cannot prove a new mutation outcome and must not fence the Session.
-            if (this.rpcOutcomeUnknown(error))
-              this.rethrowResultPending(error, "确认 Thinking 强度", false);
-            throw error;
-          }
-          const state = asState(stateResponse);
-          secondaryRuntime.lastState = state;
-          secondaryRuntime.running = state.isStreaming;
-          return json(response, 200, {
-            level: state.thinkingLevel,
-            pending: false,
-          });
-        });
-      }
-      const releasePrimaryOperation =
-        this.primaryOperationAdmission.acquire().release;
-      try {
-        try {
-          await this.ensurePrimaryRuntime();
-        } catch (error) {
-          this.rethrowResultPending(error, "准备 Thinking 运行时");
-        }
-        if (this.sessionMutationOutcomePending(sessionId))
-          return json(response, 409, {
-            error: "上一次操作结果尚未确认；请刷新页面核对，不要重复修改设置",
-            code: "RESULT_PENDING",
-            retryable: true,
-          });
-        if (this.running) {
-          this.pendingTurnSettings.thinkingLevel = level;
-          this.rememberPrimaryDisplaySettings({ thinkingLevel: level });
-          return json(response, 200, { level, pending: true });
-        }
-        const outcomeToken = randomUUID();
-        try {
-          await this.options.rpc.send(
-            { type: "set_thinking_level", level },
-            undefined,
-            {
-              onLateResponse: this.lateRpcOutcomeHandler(
-                sessionId,
-                outcomeToken,
-                "generic",
-              ),
-            },
-          );
-        } catch (error) {
-          this.markRpcOutcomePending(sessionId, error, outcomeToken);
-          this.rethrowResultPending(error, "更新 Thinking 强度");
-        }
-        let stateResponse: Record<string, unknown>;
-        try {
-          stateResponse = await this.options.rpc.send({ type: "get_state" });
-        } catch (error) {
-          // set_thinking_level was already acknowledged; this follow-up read
-          // cannot prove a new mutation outcome and must not fence the Session.
-          if (this.rpcOutcomeUnknown(error))
-            this.rethrowResultPending(error, "确认 Thinking 强度", false);
-          throw error;
-        }
-        const state = asState(stateResponse);
-        this.lastPrimaryState = state;
-        this.running = state.isStreaming;
-        return json(response, 200, {
-          level: state.thinkingLevel,
-          pending: false,
-        });
-      } finally {
-        releasePrimaryOperation();
-      }
-      } finally {
-        releaseSettingAdmission();
-      }
-      return;
-    }
-
-    if (url.pathname === "/api/resources/browse") {
-      if (request.method !== "POST") return methodNotAllowed(response);
-      const body = await bodyJson(request);
-      const kind = typeof body.kind === "string" ? body.kind : "";
-      if (
-        ![
-          "skills-root",
-          "extensions-root",
-          "packages-root",
-          "models-root",
-        ].includes(kind)
-      ) {
-        return json(response, 400, { error: "kind 无效" });
-      }
-      const path = this.options.resources.resolveBrowsePath(
-        kind as
-          "skills-root" | "extensions-root" | "packages-root" | "models-root",
-      );
-      await revealInExplorer(path);
-      json(response, 200, { ok: true, path });
-      return;
-    }
-
-    if (url.pathname === "/api/resources/skills") {
-      if (request.method !== "GET") return methodNotAllowed(response);
-      const result = await this.options.resources.listSkills(
-        this.primaryRuntimeCwd,
-      );
-      return json(response, 200, {
-        ...result,
-        resources: result.resources.filter((item) => item.enabled),
-      });
-    }
-
-    if (url.pathname === "/api/resources/extensions") {
-      if (request.method !== "GET") return methodNotAllowed(response);
-      const result = await this.options.resources.listExtensions(
-        this.primaryRuntimeCwd,
-      );
-      return json(response, 200, {
-        ...result,
-        resources: result.resources.filter((item) => item.enabled),
-      });
-    }
-
-    if (url.pathname === "/api/resources/packages") {
-      if (request.method !== "GET") return methodNotAllowed(response);
-      const result = await this.options.resources.listPackages(
-        this.primaryRuntimeCwd,
-      );
-      return json(response, 200, {
-        ...result,
-        resources: result.resources.filter((item) => item.enabled),
-      });
-    }
-
-    if (url.pathname === "/api/extension-ui/respond") {
-      if (request.method !== "POST") return methodNotAllowed(response);
-      const body = preparedBody || (await bodyJson(request));
-      if (typeof body.id !== "string")
-        return json(response, 400, { error: "id 必填" });
-      const sessionId = requiredSessionId(body);
-      const runtime = this.runtimePool.get(sessionId);
-      const targetRpc =
-        runtime?.rpc ||
-        (sessionId === this.activeSessionId ? this.options.rpc : null);
-      if (!targetRpc)
-        return json(response, 409, { error: "Extension 对应的会话已经关闭" });
-      // Claim synchronously so two windows cannot answer the same request. Keep
-      // the authoritative pending state until sendRaw succeeds; a transport
-      // failure must leave the dialog retryable.
-      const claimKey = `${sessionId}\u0000${body.id}`;
-      if (this.uncertainExtensionResponseBySession.has(sessionId))
-        return json(response, 409, {
-          error: "上一次 Extension 回应结果尚未确认；请等待对话结束或刷新页面核对",
-          code: "RESULT_PENDING",
-          retryable: true,
-        });
-      const pending = this.pendingRequestForSession(sessionId);
-      if (
-        !pending ||
-        pending.id !== body.id ||
-        this.claimingExtensionRequests.has(claimKey)
+        request,
+        response,
+        url,
+        clientId,
+        preparedBody,
       )
-        return json(response, 409, {
-          error: "该确认已在另一窗口处理，或已失效",
-        });
-      this.claimingExtensionRequests.add(claimKey);
-      let releaseRuntimeOperation: (() => void) | null = null;
-      try {
-        releaseRuntimeOperation = runtime
-          ? this.runtimePool.acquireOperation(runtime)
-          : this.primaryOperationAdmission.acquire().release;
-        const command: Record<string, unknown> = {
-          type: "extension_ui_response",
-          id: body.id,
-        };
-        if (body.cancelled === true) command.cancelled = true;
-        else if (typeof body.confirmed === "boolean")
-          command.confirmed = body.confirmed;
-        else if (typeof body.value === "string") command.value = body.value;
-        else command.cancelled = true;
-        try {
-          await targetRpc.sendRaw(command);
-        } catch (error) {
-          if (this.rpcOutcomeUnknown(error)) {
-            // The frame may have reached Pi, but an unknown write is not proof
-            // that Pi consumed the answer. Keep the Extension request and its
-            // blocking state until an authoritative event settles it.
-            this.uncertainExtensionResponseBySession.add(sessionId);
-            this.markRpcOutcomePending(sessionId, error);
-            this.rethrowResultPending(error, "确认 Extension 回应");
-          }
-          throw error;
-        }
-        this.clearPendingRequest(sessionId, body.id);
-        json(response, 200, { ok: true });
-      } finally {
-        releaseRuntimeOperation?.();
-        this.claimingExtensionRequests.delete(claimKey);
-      }
+    )
       return;
-    }
+
+    if (
+      await handleSessionRuntimeControlRoute(
+        {
+          activeSessionId: () => this.activeSessionId,
+          runtimeExists: (sessionId) => this.runtimePool.has(sessionId),
+          runtimeCanReclaim: (sessionId) => {
+            const runtime = this.runtimePool.get(sessionId);
+            return Boolean(runtime && this.runtimePool.canReclaim(runtime));
+          },
+          sweepRuntimes: () => { void this.runtimePool.sweep(); },
+          clearViewed: (client, sessionId) => this.sessionControl.clearViewed(client, sessionId),
+          knownSession: async (sessionId) => Boolean(
+            (await (this.options.sessions as SessionIndex).cachedSummaryForId?.(sessionId))
+            || this.options.sessions.summaryForId?.(sessionId)
+            || (await this.options.sessions.list(undefined, this.currentCwd)).some((session) => session.id === sessionId),
+          ),
+          markViewed: (client, sessionId) => this.markSessionViewed(client, sessionId),
+          touchRuntime: (sessionId) => { const runtime = this.runtimePool.get(sessionId); if (runtime) this.runtimePool.touch(runtime); },
+          ensurePrimaryIdentity: () => this.ensurePrimaryIdentity(),
+          ensurePrimaryRuntime: () => this.ensurePrimaryRuntime(),
+          ensureSecondaryRuntime: async (sessionId) => { await this.ensureRuntime(sessionId); },
+          primaryReady: (sessionId) => ({
+            sessionId,
+            state: this.stateWithFastMode(sessionId, { ...this.lastPrimaryState, isStreaming: this.primaryTurnActive() }),
+            gateMode: this.primaryGateMode,
+          }),
+          secondaryReady: (sessionId) => this.runtimeReady(this.runtimePool.get(sessionId)!),
+          sessionView: (sessionId, browserId) => this.sessionView(sessionId, RECENT_TURN_WINDOW_SIZE, browserId),
+          rethrowResultPending: (error, operation, fence = true) => this.rethrowResultPending(error, operation, fence),
+        },
+        request,
+        response,
+        url,
+      )
+    ) return;
+
+    if (await handleNewSessionRoute({
+      currentCwd: () => this.currentCwd,
+      primaryNeedsRecovery: () => this.primaryNeedsRecovery(),
+      waitForPrimaryCompatibility: () => this.waitForNewDraftPrimaryCompatibility(),
+      acquireDraft: (owner, cwd) => this.acquireDraftRuntime(owner, cwd),
+      rethrowResultPending: (error, operation) => this.rethrowResultPending(error, operation, false),
+      markViewed: (owner, sessionId) => this.markSessionViewed(owner, sessionId),
+      draftView: (runtime, owner) => this.draftSessionView(runtime, owner),
+      beginPromptAdmission: (sessionId) => this.beginPromptAdmission(sessionId),
+      firstTurn: async (runtime, input) => {
+        const initialAbortGeneration = runtime.abortGeneration;
+        const promptAt = this.nextUserPromptAt();
+        const initialSettings: PromptSettingsSnapshot = input.settings || {};
+        const result = await dispatchNewDraftFirstTurn({
+          requireControl: () => this.requireSessionControl(runtime.id, clientId),
+          applySettings: () => this.applyTurnSettings(runtime.rpc, initialSettings, runtime.id),
+          isPartialSettingsError: (error): error is PartialTurnSettingsError => error instanceof PartialTurnSettingsError,
+          rememberPartialSettings: (applied) => this.rememberRuntimeAppliedTurnSettings(runtime, applied),
+          rememberSettings: (applied) => this.rememberRuntimeAppliedTurnSettings(runtime, applied),
+          assertCurrent: () => {
+            if (initialAbortGeneration !== runtime.abortGeneration || this.applicationLifecycle !== "idle")
+              throw new Error("消息发送已取消");
+          },
+          extensionCommand: (message) => this.extensionCommand(message, runtime.rpc),
+          syncGate: () => this.syncGateMode(runtime.rpc, runtime.id, input.gateMode),
+          setRunning: (running) => { runtime.running = running; },
+          traceAdmitted: (id) => this.tracePrompt("admitted", runtime.id, id),
+          broadcastActivity: () => this.broadcastSessionActivity(runtime.id),
+          sendPrompt: (message, images, promptId) => this.sendPromptRpc(runtime.rpc, runtime.id, promptId, {
+            type: "prompt", message, ...(images.length ? { images } : {}),
+          }).then(() => undefined),
+          sendExtensionPrompt: async (message) => { await runtime.rpc.send({ type: "prompt", message }, PROMPT_PREPARE_TIMEOUT_MS); },
+          readState: async () => asState(await runtime.rpc.send({ type: "get_state" })),
+          adoptExtensionState: async (state) => {
+            runtime.lastState = state;
+            runtime.running = state.isStreaming;
+            runtime.prompted = true;
+            this.noteUserPrompt(runtime.id, promptAt);
+            await this.finalizePersistedDraft(runtime);
+          },
+          noteUserPrompt: () => this.noteUserPrompt(runtime.id, promptAt),
+          notifyPromptAccepted: (id) => this.scheduler.notifySecondaryPromptAccepted(runtime, promptAt, input.message, input.images, initialSettings, id, input.clientPromptOperationId || undefined),
+          traceDeliveryUncertain: (id) => this.tracePrompt("delivery-uncertain", runtime.id, id),
+          readyData: () => this.runtimeReady(runtime),
+          sessionData: () => ({ ...(runtime.draftSession || { id: runtime.id, sessionId: runtime.lastState?.sessionId || runtime.id, name: "新对话", preview: "新对话", cwd: runtime.cwd, updatedAt: this.now(), messageCount: 1, active: true }), active: true }),
+          runtimeTurnActive: () => this.runtimeTurnActive(runtime),
+          onFailure: () => { runtime.running = false; this.broadcastSessionActivity(runtime.id); },
+        }, {
+          message: input.message,
+          images: input.images,
+          promptId: input.message ? randomUUID() : "",
+          settings: initialSettings,
+        });
+        return {
+          ...result.ready,
+          session: result.session,
+          accepted: true,
+          queued: false,
+          ...(result.promptId ? { promptId: result.promptId } : null),
+          ...(result.deliveryUncertain ? { deliveryUncertain: true } : null),
+          ...(result.extension && !result.deliveryUncertain ? { extension: true, command: result.extension.name, description: result.extension.description, isStreaming: result.extension.isStreaming } : null),
+        } satisfies InitialPromptData;
+      },
+      discardDraft: (runtime) => this.runtimePool.discardDraft(runtime).then(() => undefined),
+    }, request, response, url, clientId, preparedBody)) return;
+
+    if (
+      await handleModelManagementRoute({
+        available: () => Boolean(this.options.modelManager),
+        providerService: () => this.providerManagementService(),
+        customModelService: () => this.customModelManagementService(),
+        runtimeSettingsService: () => this.runtimeSettingsService(),
+        beginPromptAdmission: (sessionId) => this.beginPromptAdmission(sessionId),
+      }, request, response, url, preparedBody)
+    ) return;
+
+    if (
+      await handleExtensionResponseRoute({
+        respond: (input) => respondToExtension({
+          target: (sessionId) => {
+            const runtime = this.runtimePool.get(sessionId);
+            const rpc = runtime?.rpc || (sessionId === this.activeSessionId ? this.options.rpc : null);
+            if (!rpc) return null;
+            return {
+              rpc,
+              release: runtime
+                ? this.runtimePool.acquireOperation(runtime)
+                : this.primaryOperationAdmission.acquire().release,
+            };
+          },
+          hasUncertain: (sessionId) => this.uncertainExtensionResponseBySession.has(sessionId),
+          pendingRequest: (sessionId) => this.pendingRequestForSession(sessionId),
+          claim: (key) => {
+            if (this.claimingExtensionRequests.has(key)) return false;
+            this.claimingExtensionRequests.add(key);
+            return true;
+          },
+          releaseClaim: (key) => this.claimingExtensionRequests.delete(key),
+          rpcOutcomeUnknown: (error) => this.rpcOutcomeUnknown(error),
+          markOutcomePending: (sessionId, error) => this.markRpcOutcomePending(sessionId, error),
+          markUncertain: (sessionId) => this.uncertainExtensionResponseBySession.add(sessionId),
+          rethrowResultPending: (error, operation) => this.rethrowResultPending(error, operation),
+          clearPending: (sessionId, requestId) => this.clearPendingRequest(sessionId, requestId),
+        }, input),
+      }, request, response, url, preparedBody)
+    ) return;
 
     json(response, 404, { error: "API not found" });
   }

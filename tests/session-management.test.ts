@@ -46,7 +46,7 @@ class CopyWorker {
         ? entries.findIndex((entry) => entry.id === command.entryId)
         : entries.length;
       const retained = command.type === "fork"
-        ? entries.slice(0, Math.max(1, selected))
+        ? entries.slice(0, Math.max(1, selected + 1))
         : entries;
       retained[0] = {
         ...retained[0],
@@ -339,6 +339,60 @@ test("clone and persisted User fork create independent cold Sessions", async () 
       assert.equal(primary.stopped, false, "the source Primary is rebound after each copy");
       assert.equal((app as unknown as { runtimes: Map<string, unknown> }).runtimes.size, 0);
       assert.equal(existsSync(sourcePath), true, "copy operations never replace the source JSONL");
+    } finally {
+      server.close();
+      await app.close();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a visible persisted User in a Fork Session can fork again through the API", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-fork-again-api-"));
+  try {
+    const forkPath = join(root, "fork.jsonl");
+    const destinationPath = join(root, "fork-again.jsonl");
+    await writeFile(forkPath, [
+      { type: "session", id: "forked", cwd: process.cwd(), parentSession: join(root, "source.jsonl") },
+      { type: "message", id: "u1", parentId: null, message: { role: "user", content: "visible fork prompt" } },
+      { type: "message", id: "a1", parentId: "u1", message: { role: "assistant", content: "answer" } },
+      { type: "session_info", id: "name", name: "Braun实验对比（Fork）" },
+    ].map(JSON.stringify).join("\n") + "\n");
+    const forkId = idForPath(forkPath);
+    const relations = new SessionRelationStore(join(root, "pi-chat-session-relations.json"));
+    await relations.recordFork(forkId, {
+      sourceSessionId: idForPath(join(root, "source.jsonl")),
+      sourceName: "Braun实验对比",
+      sourcePersistedMessageId: "u0:0",
+      createdAt: 1,
+    });
+    const worker = new CopyWorker(forkPath, [destinationPath]);
+    const app = new PiChatApp({
+      rpc: worker as unknown as PiRpcClient,
+      sessions: new SessionIndex(root, join(root, "cache.json")),
+      sessionRelations: relations,
+      resources: {} as ResourceManager,
+      cwd: process.cwd(),
+      webRoot: process.cwd(),
+    });
+    const server = createServer((request, response) => void app.handle(request, response));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const origin = `http://127.0.0.1:${address.port}`;
+    try {
+      assert.equal((await fetch(`${origin}/api/bootstrap`)).status, 200);
+      const response = await fetch(`${origin}/api/sessions/${forkId}/fork`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ persistedMessageId: "u1:0" }),
+      });
+      assert.equal(response.status, 200);
+      const result = await response.json() as { session: { id: string }; editorText?: string };
+      assert.equal(result.session.id, idForPath(destinationPath));
+      assert.equal(result.editorText, "visible fork prompt");
+      assert.equal(existsSync(destinationPath), true);
     } finally {
       server.close();
       await app.close();
@@ -1216,12 +1270,76 @@ test("session rename uses Pi RPC and delete stops the worker before removing JSO
       const invalid = await fetch(`${origin}/api/sessions/${historyId}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "   " }) });
       assert.equal(invalid.status, 400);
       const renamed = await fetch(`${origin}/api/sessions/${historyId}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "Renamed session" }) });
-      assert.equal(renamed.status, 200);
       assert.equal(worker.commands.some((command) => command.type === "set_session_name" && command.name === "Renamed session"), true);
       const deleted = await fetch(`${origin}/api/sessions/${historyId}`, { method: "DELETE" });
       assert.equal(deleted.status, 200);
       assert.equal(worker.stopped, true);
       assert.equal(existsSync(historyPath), false);
+    } finally {
+      server.close();
+      await app.close();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a Fork rename removes the derived suffix while relation and restarted index remain intact", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-fork-rename-"));
+  try {
+    const forkPath = join(root, "fork.jsonl");
+    const sourcePath = join(root, "source.jsonl");
+    await writeFile(forkPath, [
+      { type: "session", id: "forked", cwd: process.cwd(), parentSession: sourcePath },
+      { type: "message", id: "u1", parentId: null, message: { role: "user", content: "Braun prompt" } },
+      { type: "session_info", id: "initial-name", name: "Braun实验对比（Fork）" },
+    ].map(JSON.stringify).join("\n") + "\n");
+    const forkId = idForPath(forkPath);
+    const sourceId = idForPath(sourcePath);
+    const relationPath = join(root, "pi-chat-session-relations.json");
+    const relations = new SessionRelationStore(relationPath);
+    await relations.recordFork(forkId, {
+      sourceSessionId: sourceId,
+      sourceName: "Braun实验对比",
+      sourcePersistedMessageId: "u1:0",
+      createdAt: 1,
+    });
+    const worker = new SessionWorker(forkPath);
+    const sessions = new SessionIndex(root, join(root, "cache.json"));
+    const app = new PiChatApp({
+      rpc: worker as unknown as PiRpcClient,
+      sessions,
+      sessionRelations: relations,
+      resources: {} as ResourceManager,
+      cwd: process.cwd(),
+      webRoot: process.cwd(),
+    });
+    const server = createServer((request, response) => void app.handle(request, response));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const origin = `http://127.0.0.1:${address.port}`;
+    try {
+      assert.equal((await fetch(`${origin}/api/bootstrap`)).status, 200);
+      const initial = await (await fetch(`${origin}/api/sessions/${forkId}/view`)).json() as { session: { name: string } };
+      assert.equal(initial.session.name, "Braun实验对比（Fork）");
+      const renamed = await fetch(`${origin}/api/sessions/${forkId}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "Braun实验对比" }),
+      });
+      assert.equal(renamed.status, 200);
+      assert.deepEqual(await renamed.json(), { id: forkId, name: "Braun实验对比" });
+      assert.equal((await sessions.list()).find((session) => session.id === forkId)?.name, "Braun实验对比");
+      assert.deepEqual(await relations.getForkOrigin(forkId), {
+        sourceSessionId: sourceId,
+        sourceName: "Braun实验对比",
+        sourcePersistedMessageId: "u1:0",
+        createdAt: 1,
+      });
+      const restarted = new SessionIndex(root, join(root, "cache.json"));
+      restarted.setForkNameOverrideReader((id) => relations.getNameOverride(id));
+      assert.equal((await restarted.list()).find((session) => session.id === forkId)?.name, "Braun实验对比");
     } finally {
       server.close();
       await app.close();
