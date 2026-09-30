@@ -1,4 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { dirname } from "node:path";
+import { existsSync } from "node:fs";
 import type { ResourceManager, ResourceBrowseKind } from "../resource-manager.js";
 import { bodyJson, json, methodNotAllowed } from "../http-transport.js";
 import { openWithDefaultApplication, revealInExplorer } from "../file-picker.js";
@@ -8,6 +10,8 @@ type ResourceHost = Pick<ResourceManager, "listSkills" | "listExtensions" | "lis
 export interface ResourcesReadRouteHost {
   resources: ResourceHost;
   primaryRuntimeCwd(): string;
+  openDefault?(path: string): Promise<void>;
+  reveal?(path: string): Promise<void>;
 }
 
 const BROWSE_KINDS = new Set<ResourceBrowseKind>([
@@ -37,9 +41,20 @@ export async function handleResourcesReadRoute(
     }
     const resourceKind = kind as ResourceBrowseKind;
     const path = host.resources.resolveBrowsePath(resourceKind);
-    if (resourceKind === "models-root") await openWithDefaultApplication(path);
-    else await revealInExplorer(path);
-    json(response, 200, { ok: true, path });
+    if (resourceKind === "models-root" && !existsSync(path)) {
+      const parentPath = dirname(path);
+      await (host.reveal || revealInExplorer)(parentPath);
+      json(response, 200, {
+        ok: true,
+        path,
+        openedPath: parentPath,
+        missing: true,
+      });
+      return true;
+    }
+    if (resourceKind === "models-root") await (host.openDefault || openWithDefaultApplication)(path);
+    else await (host.reveal || revealInExplorer)(path);
+    json(response, 200, { ok: true, path, openedPath: path, missing: false });
     return true;
   }
 

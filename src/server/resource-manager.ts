@@ -338,9 +338,9 @@ export class ResourceManager {
     return this.cached(`extensions\0${resolve(cwd)}`, () => this.loadExtensions(cwd));
   }
 
-  /** Managed local root folder used by the read-only resource inventory. */
+  /** Managed local resource target used by the read-only resource inventory. */
   resolveBrowsePath(kind: ResourceBrowseKind): string {
-    if (kind === "models-root") return this.agentDir;
+    if (kind === "models-root") return join(this.agentDir, "models.json");
     if (kind === "skills-root") return join(this.agentDir, "skills");
     if (kind === "extensions-root") return join(this.agentDir, "extensions");
     return join(this.agentDir, "npm", "node_modules");

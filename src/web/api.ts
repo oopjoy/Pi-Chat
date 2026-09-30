@@ -513,7 +513,7 @@ export const api = {
   extensions: () => request<ResourceResponse<ExtensionResource>>("/api/resources/extensions"),
   packages: () => request<ResourceResponse<PackageResource>>("/api/resources/packages"),
   browseResource: (kind: "skills-root" | "extensions-root" | "packages-root" | "models-root") =>
-    request<{ ok: true; path: string }>("/api/resources/browse", { method: "POST", body: JSON.stringify({ kind }) }),
+    request<{ ok: true; path: string; openedPath?: string; missing?: boolean }>("/api/resources/browse", { method: "POST", body: JSON.stringify({ kind }) }),
   respondToExtension: (body: ExtensionResponseInput) => request<{ ok: boolean }>("/api/extension-ui/respond", {
     method: "POST",
     body: JSON.stringify(body),

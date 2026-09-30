@@ -112,7 +112,13 @@ export function ManagementPanel({ section, appearance, workspaceCwd, workspacePi
     setResourceNotice("");
     try {
       const result = await api.browseResource(kind);
-      setResourceNotice(`已在资源管理器中打开：${result.path}`);
+      setResourceNotice(
+        result.missing && kind === "models-root"
+          ? `models.json 尚未创建，已打开所在目录：${result.openedPath || result.path}`
+          : kind === "models-root"
+            ? `已使用默认程序打开：${result.openedPath || result.path}`
+            : `已在资源管理器中打开：${result.openedPath || result.path}`,
+      );
     } catch (error) {
       setResourceError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -416,7 +422,7 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
     <button type="button" className="model-inline-add" disabled={busy || saving} onClick={addModelRow}>＋ 添加模型</button><div className="model-editor-footer"><span>保存不会修改当前正在执行的 Prompt。</span><button type="button" className="model-save-button" disabled={saving || busy} onClick={() => void saveProvider()}>{saving ? "保存中…" : "保存"}</button></div>
   </div> : null;
   return <div className="settings-resource-panel models-panel">
-    <div className="settings-resource-heading"><div className="settings-resource-title"><h3>模型<span className="count-badge">{models.length}</span></h3><p>按 Provider 管理自定义连接和模型目录。内置登录 Provider 由 Pi Runtime 管理。</p><span className={`model-runtime-status ${modelRuntimeSyncPending ? "is-pending" : "is-ready"}`}>{modelRuntimeSyncPending ? "Runtime 等待同步" : "Runtime 已同步"}</span></div><div className="models-panel-actions"><button type="button" className="model-add-button" disabled={busy || saving} onClick={beginAddProvider}>添加自定义提供方</button><button type="button" className="resource-browse-root" title="打开 models.json 所在目录" aria-label="打开 models.json 所在目录" disabled={browseBusy} onClick={onBrowseModels}><FolderIcon /></button></div></div>
+    <div className="settings-resource-heading"><div className="settings-resource-title"><h3>模型<span className="count-badge">{models.length}</span></h3><p>按 Provider 管理自定义连接和模型目录。内置登录 Provider 由 Pi Runtime 管理。</p><span className={`model-runtime-status ${modelRuntimeSyncPending ? "is-pending" : "is-ready"}`}>{modelRuntimeSyncPending ? "Runtime 等待同步" : "Runtime 已同步"}</span></div><div className="models-panel-actions"><button type="button" className="model-add-button" disabled={busy || saving} onClick={beginAddProvider}>添加自定义提供方</button><button type="button" className="resource-browse-root" title="打开 models.json" aria-label="打开 models.json" disabled={browseBusy} onClick={onBrowseModels}><FolderIcon /></button></div></div>
     {error && <div className="resource-error">{error}</div>}{notice && !error && <div className="resource-notice">{notice}</div>}
     {expandedProvider === "__new__" && providerEditor}
     <div className="model-provider-list">{modelGroups.map(([provider, providerModels], providerIndex) => {
