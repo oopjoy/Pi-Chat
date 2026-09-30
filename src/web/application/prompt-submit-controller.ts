@@ -73,6 +73,9 @@ export interface PromptSubmitController {
   delete(promptId: string): void;
   phaseForResult(result: PromptResultFacts): Extract<PromptOperationEvent, { type: "queue" | "run" | "uncertain" }>;
   phaseForError(input: PromptErrorPhaseInput): Extract<PromptOperationEvent, { type: "uncertain" | "fail" }>;
+  observeServerLifecycle(serverPromptId: string, eventType: "agent_start" | "agent_settled" | "pi_chat_process_error", runtimeGeneration?: number, sessionId?: string, runEpoch?: string): PromptOperation | undefined;
+  observeRetry(serverPromptId: string, phase: import("./prompt-operation").PromptRetryPhase, runtimeGeneration?: number, sessionId?: string, runEpoch?: string, attempt?: number, maxAttempts?: number, delayMs?: number): PromptOperation | undefined;
+  clearTerminal(): void;
 }
 
 export function createPromptSubmitController(
@@ -91,6 +94,9 @@ export function createPromptSubmitController(
     },
     phaseForResult: promptPhaseForResult,
     phaseForError: promptPhaseForError,
+    observeServerLifecycle: (...args) => promptCoordinator.observeServerLifecycle(...args),
+    observeRetry: (...args) => promptCoordinator.observeRetry(...args),
+    clearTerminal: () => promptCoordinator.clearTerminal(),
   };
 }
 
