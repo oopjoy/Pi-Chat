@@ -3673,19 +3673,6 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     viewOperationIsCurrent, viewOperationIsInCurrentRun,
   });
 
-  if (closeComplete) {
-    const applicationClosed = closeComplete === "application";
-    return (
-      <main className="shutdown-screen">
-        <span className="shutdown-mark"><PiMarkIcon /></span>
-        <h1>{applicationClosed ? "Pi Chat 已关闭" : "当前窗口已退出"}</h1>
-        <p>{applicationClosed
-          ? "本地服务和会话进程已经结束。现在可以关闭此窗口。"
-          : "其他 Pi Chat 窗口仍在运行。现在可以关闭此窗口。"}</p>
-        <button type="button" onClick={() => window.close()}>关闭窗口</button>
-      </main>
-    );
-  }
 
   const {
     diagnosticSidebarRows,
@@ -3762,6 +3749,21 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     finalizeDeletedSession: finalizeDeletedSessionAction,
     selectDeletionFallback: selectDeletionFallbackAction,
   };
+
+  if (closeComplete) {
+    const applicationClosed = closeComplete === "application";
+    return (
+      <main className="shutdown-screen">
+        <span className="shutdown-mark"><PiMarkIcon /></span>
+        <h1>{applicationClosed ? "Pi Chat 已关闭" : "当前窗口已退出"}</h1>
+        <p>{applicationClosed
+          ? "本地服务和会话进程已经结束。现在可以关闭此窗口。"
+          : "其他 Pi Chat 窗口仍在运行。现在可以关闭此窗口。"}</p>
+        <button type="button" onClick={() => window.close()}>关闭窗口</button>
+      </main>
+    );
+  }
+
 
   return <AppView {...{
     AppShell, AskQuestionnaireDialog, ChevronRightIcon, ConversationPane,
