@@ -46,8 +46,69 @@ function useRunDuration(
   };
 }
 
+type ToolEntry = Extract<ProcessEntry, { kind: "tool" }>;
+
+function parseToolArguments(argumentsText: string | undefined): Record<string, unknown> | null {
+  if (!argumentsText) return null;
+  try {
+    const parsed: unknown = JSON.parse(argumentsText);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function compactToolValue(value: unknown, limit = 72): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const compact = value.replace(/\\s+/g, " ").trim();
+  if (!compact) return undefined;
+  return compact.length > limit ? `${compact.slice(0, limit - 1)}…` : compact;
+}
+
+function compactToolPath(value: unknown, limit = 56): string | undefined {
+  const compact = compactToolValue(value, limit);
+  if (!compact) return undefined;
+  const normalized = compact.replaceAll("\\\\", "/");
+  if (normalized.length <= limit) return normalized;
+  const parts = normalized.split("/");
+  let result = parts.at(-1) || normalized;
+  for (let index = parts.length - 2; index >= 0 && result.length + parts[index]!.length + 4 <= limit; index -= 1)
+    result = `${parts[index]}/${result}`;
+  return result.length > limit ? `…${result.slice(-(limit - 1))}` : result;
+}
+
+/** One-line, source-oriented context for the collapsed process row. */
+export function toolSummary(entry: ToolEntry): string {
+  const args = parseToolArguments(entry.arguments);
+  const name = entry.name || "工具";
+  if (!args) return name;
+  if (name === "read" || name === "write" || name === "edit") {
+    const path = compactToolPath(args.path);
+    return path ? `${name} ${path}` : name;
+  }
+  if (name === "bash" || name === "powershell") {
+    const command = compactToolValue(args.command, 76);
+    return command ? `${name} ${command}` : name;
+  }
+  if (name === "grep" || name === "find") {
+    const pattern = compactToolValue(args.pattern ?? args.query, 42);
+    const path = compactToolPath(args.path ?? args.cwd, 34);
+    return pattern && path ? `${name} ${pattern} · ${path}` : pattern ? `${name} ${pattern}` : path ? `${name} ${path}` : name;
+  }
+  if (name === "intercom") {
+    const action = compactToolValue(args.action, 24);
+    const target = compactToolValue(args.to, 28);
+    return action && target ? `${name} ${action} → ${target}` : action ? `${name} ${action}` : name;
+  }
+  const firstValue = Object.values(args).find((value) => typeof value === "string");
+  const detail = compactToolValue(firstValue, 60);
+  return detail ? `${name} ${detail}` : name;
+}
+
 function summarize(entries: ProcessEntry[], streaming = false): string {
-  const tools = entries.filter((entry): entry is Extract<ProcessEntry, { kind: "tool" }> => entry.kind === "tool");
+  const tools = entries.filter((entry): entry is ToolEntry => entry.kind === "tool");
   const failed = tools.filter((entry) => entry.isError).length;
   const subagents = tools.filter((entry) => entry.name === "subagent").length;
   const labels: string[] = [];
@@ -55,6 +116,12 @@ function summarize(entries: ProcessEntry[], streaming = false): string {
   if (subagents) labels.push(`${subagents} 个子任务`);
   if (!labels.length) labels.push(streaming ? "进行中" : `${entries.length} 个步骤`);
   return `过程 · ${labels.join(" · ")}${failed ? ` · ${failed} 项失败` : ""}`;
+}
+
+function processToolDetails(entries: ProcessEntry[]): string[] {
+  return entries
+    .filter((entry): entry is ToolEntry => entry.kind === "tool")
+    .map(toolSummary);
 }
 
 export function toolLabel(entry: Extract<ProcessEntry, { kind: "tool" }>): string {
@@ -116,12 +183,14 @@ function ThinkingEntry({ text, disclosureKey }: { text: string; disclosureKey: s
 
 export const ConversationProcess = memo(function ConversationProcess({ entries, streaming = false, disclosureKey = "process", runStartedAt = null, runDurationMs = null }: { entries: ProcessEntry[]; streaming?: boolean; disclosureKey?: string; runStartedAt?: number | null; runDurationMs?: number | null }) {
   const summary = useMemo(() => summarize(entries, streaming), [entries, streaming]);
+  const toolDetails = useMemo(() => processToolDetails(entries), [entries]);
+  const toolDetailsLabel = toolDetails.join(" · ");
   const runDuration = useRunDuration(streaming, runStartedAt, runDurationMs);
   const hasFailures = entries.some((entry) => entry.kind === "tool" && entry.isError);
   const status = hasFailures ? <AlertIcon className="process-status-icon is-error" /> : streaming ? <span className="process-status-icon is-running" aria-hidden="true" /> : <CheckIcon className="process-status-icon" />;
 
   const body = <PersistentDetails className={`conversation-process${streaming ? " is-streaming" : ""}`} disclosureKey={disclosureKey} footerCollapse>
-    <summary><span className="conversation-process-summary process-summary-label">{status}{summary}</span>{runDuration && <time className="conversation-process-duration" {...(runDuration.dateTime ? { dateTime: runDuration.dateTime } : null)} title={runDuration.title}>{runDuration.label}</time>}<span className="conversation-process-chevron" aria-hidden="true"><svg className="chevron-collapsed" viewBox="0 0 16 16"><path d="M10 3.5 5.5 8 10 12.5" /></svg><svg className="chevron-expanded" viewBox="0 0 16 16"><path d="M3.5 6 8 10.5 12.5 6" /></svg></span></summary>
+    <summary><span className="conversation-process-summary process-summary-label">{status}<span className="process-summary-title">{summary}</span>{toolDetailsLabel && <span className="process-summary-detail" title={toolDetailsLabel}>{toolDetailsLabel}</span>}</span>{runDuration && <time className="conversation-process-duration" {...(runDuration.dateTime ? { dateTime: runDuration.dateTime } : null)} title={runDuration.title}>{runDuration.label}</time>}<span className="conversation-process-chevron" aria-hidden="true"><svg className="chevron-collapsed" viewBox="0 0 16 16"><path d="M10 3.5 5.5 8 10 12.5" /></svg><svg className="chevron-expanded" viewBox="0 0 16 16"><path d="M3.5 6 8 10.5 12.5 6" /></svg></span></summary>
     <div className="conversation-process-body">
       {entries.map((entry, index) => {
         if (entry.kind === "thinking") {

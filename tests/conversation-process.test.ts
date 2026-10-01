@@ -49,6 +49,19 @@ test("conversation item keys prefer projected message identities", () => {
   );
 });
 
+test("collapsed process summaries expose compact tool context without terminal completion metadata", () => {
+  const html = renderToStaticMarkup(createElement(ConversationProcess, {
+    entries: [
+      { kind: "tool", id: "read-1", name: "read", arguments: JSON.stringify({ path: "C:/work/src/server/session-index.ts" }), completed: true },
+      { kind: "tool", id: "bash-1", name: "bash", arguments: JSON.stringify({ command: "grep -n \\\"activeSessionBranch\\\" src/server/session-index.ts" }), completed: true },
+    ],
+  }));
+  assert.match(html, /process-summary-detail/);
+  assert.match(html, /read (?:C:\/work\/)?src\/server\/session-index\.ts/);
+  assert.match(html, /bash grep -n/);
+  assert.doesNotMatch(html, /Done|lines|行\)/);
+});
+
 test("thinking stays collapsed to a 思考 row while tool and edit entries keep their fold", () => {
   const html = renderToStaticMarkup(createElement(ConversationProcess, {
     entries: [
