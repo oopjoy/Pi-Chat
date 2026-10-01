@@ -175,6 +175,10 @@ test("provider exposes only a verified opaque child transcript address", async (
     const navigation = await provider.navigationTargetForParentSession(parent, idForPath(child));
     assert.equal(navigation?.path, process.platform === "win32" ? resolve(child).toLowerCase() : resolve(child));
     assert.equal(navigation?.label, "review child");
+    assert.equal(navigation?.status, "running");
+    assert.ok((navigation?.elapsedMs || 0) >= 900);
+    assert.equal(navigation?.activity, undefined);
+    assert.ok((navigation?.startedAt || 0) > 0);
     assert.match(navigation?.content || "", /inspect/);
     assert.equal(await provider.navigationTargetForParentSession(OTHER_PARENT, idForPath(child)), null);
   } finally {

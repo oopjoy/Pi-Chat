@@ -138,13 +138,34 @@ test("PiChatApp reads an addressed child JSONL without Runtime, control, or side
   (app as unknown as { subagentStatuses: {
     listForParentSession(path: string): Promise<BackgroundSubagentSnapshot>;
     knownChildSessionPath(id: string): string | null;
-    navigationTargetForParentSession(parent: string, child: string): Promise<{ path: string; label: string; modifiedAt: number; content: string } | null>;
+    navigationTargetForParentSession(parent: string, child: string): Promise<{
+      path: string;
+      label: string;
+      modifiedAt: number;
+      content: string;
+      status: "running" | "waiting" | "attention" | "complete" | "failed" | "cancelled";
+      elapsedMs: number;
+      updateAgeMs: number;
+      startedAt: number;
+      activity?: string;
+      endedAt?: number;
+    } | null>;
   } }).subagentStatuses = {
     listForParentSession: async () => SNAPSHOT,
     knownChildSessionPath: () => null,
     navigationTargetForParentSession: async (parent, child) =>
       parent === parentPath && child === childId
-        ? { path: childPath, label: "review child", modifiedAt: Date.now(), content: childContent }
+        ? {
+            path: childPath,
+            label: "review child",
+            modifiedAt: Date.now(),
+            content: childContent,
+            status: "running",
+            elapsedMs: 2_000,
+            updateAgeMs: 100,
+            startedAt: Date.now() - 2_000,
+            activity: "正在运行测试",
+          }
         : null,
   };
   const control = (app as unknown as { sessionControl: { connectedClients: Map<string, unknown>; viewedSessionsByClient: Map<string, unknown> } }).sessionControl;
@@ -156,14 +177,27 @@ test("PiChatApp reads an addressed child JSONL without Runtime, control, or side
     const response = await fetch(`http://127.0.0.1:${address.port}/api/sessions/${parentId}/background-subagents/${childId}/view`);
     assert.equal(response.status, 200);
     const view = await response.json() as {
-      session: { id: string; name: string; writable: boolean };
+      session: {
+        id: string;
+        name: string;
+        writable: boolean;
+        activity?: { execution: string; runStartedAt?: number };
+      };
       messages: Array<{ role: string; content: string }>;
       runtimeStatus: string;
+      isStreaming: boolean;
+      toolStatus?: string;
+      state: { isStreaming: boolean };
     };
     assert.equal(view.session.id, childId);
     assert.equal(view.session.name, "review child");
     assert.equal(view.session.writable, false);
     assert.equal(view.runtimeStatus, "view-only");
+    assert.equal(view.isStreaming, true);
+    assert.equal(view.state.isStreaming, true);
+    assert.equal(view.toolStatus, "正在运行测试");
+    assert.equal(view.session.activity?.execution, "running");
+    assert.ok((view.session.activity?.runStartedAt || 0) > 0);
     assert.equal(view.messages.at(-1)?.content, "child answer");
     assert.equal(creations, 0);
     assert.deepEqual(primary.commands, []);

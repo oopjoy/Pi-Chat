@@ -510,6 +510,8 @@ type Candidate = {
   elapsedMs: number;
   updateAgeMs: number;
   activity?: string;
+  startedAt: number;
+  endedAt?: number;
   childSessionId?: string;
   childSessionPath?: string;
 };
@@ -518,6 +520,12 @@ type NavigationTarget = {
   parentSessionPath: string;
   childSessionPath: string;
   label: string;
+  status: BackgroundSubagentStatus;
+  elapsedMs: number;
+  updateAgeMs: number;
+  activity?: string;
+  startedAt: number;
+  endedAt?: number;
   lastSeenAt: number;
 };
 
@@ -605,7 +613,18 @@ export class SubagentStatusProvider {
   async navigationTargetForParentSession(
     parentSessionPath: string,
     childSessionId: string,
-  ): Promise<{ path: string; label: string; modifiedAt: number; content: string } | null> {
+  ): Promise<{
+    path: string;
+    label: string;
+    modifiedAt: number;
+    content: string;
+    status: BackgroundSubagentStatus;
+    elapsedMs: number;
+    updateAgeMs: number;
+    activity?: string;
+    startedAt: number;
+    endedAt?: number;
+  } | null> {
     if (!/^[a-f0-9]{20}$/.test(childSessionId)) return null;
     await this.listForParentSession(parentSessionPath);
     const key = `${canonicalPath(parentSessionPath)}\0${childSessionId}`;
@@ -622,7 +641,16 @@ export class SubagentStatusProvider {
       this.navigationTargets.delete(key);
       return null;
     }
-    return { ...read, label: target.label };
+    return {
+      ...read,
+      label: target.label,
+      status: target.status,
+      elapsedMs: target.elapsedMs,
+      updateAgeMs: target.updateAgeMs,
+      ...(target.activity ? { activity: target.activity } : null),
+      startedAt: target.startedAt,
+      ...(target.endedAt !== undefined ? { endedAt: target.endedAt } : null),
+    };
   }
 
   async knownChildSessionPath(childSessionId: string): Promise<string | null> {
@@ -741,6 +769,8 @@ export class SubagentStatusProvider {
             activity: statusValue === "running" || statusValue === "attention"
               ? genericActivity(step.tool, step.toolArgs)
               : undefined,
+            startedAt: step.startedAt,
+            endedAt: step.endedAt ?? parsed.endedAt,
             childSessionPath: step.sessionFile,
           };
           best.push(candidate);
@@ -787,6 +817,12 @@ export class SubagentStatusProvider {
             parentSessionPath: expectedSessionPath,
             childSessionPath: candidate.childSessionPath,
             label,
+            status: candidate.status,
+            elapsedMs: candidate.elapsedMs,
+            updateAgeMs: candidate.updateAgeMs,
+            ...(candidate.activity ? { activity: candidate.activity } : null),
+            startedAt: candidate.startedAt,
+            ...(candidate.endedAt !== undefined ? { endedAt: candidate.endedAt } : null),
             lastSeenAt: now,
           });
         }
