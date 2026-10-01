@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 export const PI_CHAT_GATE_TARGET = "pi-chat-file-permission-gate.ts";
 export const PI_CHAT_GATE_MARKER = "Pi Chat system component: file-permission-gate; version: 1";
+const PI_CHAT_GATE_MARKER_PREFIX = "Pi Chat system component: file-permission-gate; version:";
 
 export type SystemGateInstallResult = "installed" | "verified" | "repaired" | "conflict" | "source-missing";
 
@@ -98,7 +99,7 @@ export async function ensurePiChatSystemGate({ agentDir, sourcePath }: SystemGat
     return { status: "verified", targetPath };
   }
   const targetContent = await readFile(targetPath, "utf8");
-  if (!targetContent.includes(PI_CHAT_GATE_MARKER)) {
+  if (!targetContent.includes(PI_CHAT_GATE_MARKER_PREFIX)) {
     return { status: "conflict", targetPath, diagnostic: "同名文件不是 Pi Chat 安全组件，已保留且未覆盖；请更名或移走后重新启动 Pi Chat。" };
   }
   await replaceAtomically(sourcePath, targetPath);

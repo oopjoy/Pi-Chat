@@ -33,6 +33,21 @@ test("Pi Chat system Gate installs, self-heals, and remains explicitly enabled",
   }
 });
 
+test("system Gate repairs an older Pi Chat-owned version in place", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-system-gate-version-"));
+  try {
+    const sourcePath = join(root, "gate.ts");
+    await writeFile(sourcePath, source("1"));
+    const agentDir = join(root, "agent");
+    await mkdir(join(agentDir, "extensions"), { recursive: true });
+    await writeFile(join(agentDir, "extensions", PI_CHAT_GATE_TARGET), source("2"));
+    assert.equal((await ensurePiChatSystemGate({ agentDir, sourcePath })).status, "repaired");
+    assert.equal(await readFile(join(agentDir, "extensions", PI_CHAT_GATE_TARGET), "utf8"), source("1"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("system Gate migrates its old equivalent adapter but preserves custom legacy Gates", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-system-gate-legacy-"));
   try {

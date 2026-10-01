@@ -28,14 +28,21 @@ const DEQUEUE_CASE = `            case "dequeue": {
 export function patchPiRpcModeSource(source) {
   if (source.includes('type: "pi_chat_queue_dequeued"')) return source;
   const matches = FOLLOW_UP_CASES.filter((candidate) => source.includes(candidate));
-  if (matches.length !== 1) {
-    throw new Error(
-      "当前 Pi RPC 实现与 Steer 撤回适配器不兼容；未修改全局 Pi，请更新 Pi Chat 适配器",
+  if (matches.length === 1)
+    return source.replace(
+      matches[0],
+      matches[0].replace('            case "abort": {', DEQUEUE_CASE),
     );
-  }
-  return source.replace(
-    matches[0],
-    matches[0].replace('            case "abort": {', DEQUEUE_CASE),
+
+  // Pi 0.85+ adds a disposition result to followUp(). Keep the adapter
+  // process-local while accepting that source evolution; do not patch or
+  // rewrite the globally installed Pi file.
+  const structural = /(^[ \t]*case "follow_up": \{[\s\S]*?)(^[ \t]*case "abort": \{)/m.exec(source);
+  if (structural)
+    return source.replace(structural[0], `${structural[1]}${DEQUEUE_CASE}`);
+
+  throw new Error(
+    "当前 Pi RPC 实现与 Steer 撤回适配器不兼容；未修改全局 Pi，请更新 Pi Chat 适配器",
   );
 }
 

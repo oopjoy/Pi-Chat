@@ -34,6 +34,7 @@ test("the dequeue overlay accepts Pi RPC follow-up signatures before and after s
   const signatures = [
     "                await session.followUp(command.message, command.images);",
     '                await session.followUp(command.message, command.images, { source: "rpc" });',
+    '                const disposition = await session.followUp(command.message, command.images, { source: "rpc" });\n                return success(id, "follow_up", { disposition });',
   ];
 
   for (const followUp of signatures) {

@@ -224,6 +224,10 @@ import { createSessionCopyDeleteActions } from "./services/session-copy-delete-a
 import { createSessionViewActions } from "./services/session-view-actions.js";
 import { createRuntimeFileActions } from "./services/runtime-file-actions.js";
 import { createSidebarProjectionActions } from "./services/sidebar-projection-actions.js";
+import { createSessionCopyOriginActions } from "./services/session-copy-origin-actions.js";
+import { createCompactAction } from "./services/compact-action.js";
+import { createTurnSettingsAction } from "./services/turn-settings-action.js";
+import { createPrimaryEnsureAction } from "./services/primary-ensure-action.js";
 import { handleNewSessionRoute } from "./routes/new-session.js";
 import { handleExtensionResponseRoute } from "./routes/extension-response.js";
 import {
@@ -241,7 +245,6 @@ import {
   recentModifiedWorkspaceFiles,
   workspaceFileTargetPath,
 } from "./workspace-files.js";
-
 export {
   messageWindow,
   promptImages,
@@ -306,7 +309,6 @@ const BUILTIN_COMMANDS: SlashCommand[] = [
   },
   { name: "abort", description: "停止当前生成", source: "builtin" },
 ];
-
 function gateModeFromCommand(message: string): GateMode | null {
   const command = /^\/gate\s+([^\s]+)\s*$/i
     .exec(message.trim())?.[1]
@@ -317,14 +319,12 @@ function gateModeFromCommand(message: string): GateMode | null {
     return "open";
   return null;
 }
-
 function gateModeFromNotice(message: unknown): GateMode | null {
   const value = typeof message === "string" ? message : "";
   const match = /^Gate mode:\s*(strict|open)\b/im.exec(value);
   if (match) return match[1] as GateMode;
   return null;
 }
-
 export interface PreparedApplicationRestart {
   /**
    * Optional in-process promote. Production defers the real dist swap to
@@ -335,9 +335,7 @@ export interface PreparedApplicationRestart {
   handoff(): void;
   discard(): Promise<void>;
 }
-
 export type ApplicationShutdownReason = "api-shutdown" | "last-window-close";
-
 export interface PiChatAppOptions {
   rpc: PiRpcClient;
   createRpc?: (cwd: string) => PiRpcClient;
@@ -398,7 +396,6 @@ export interface PiChatAppOptions {
   /** Test seam for the native directory picker; production uses pickWorkspaceFolder. */
   pickWorkspaceFolder?: (initialPath?: string) => Promise<string | null>;
 }
-
 /** Per-worker native steering snapshot with Pi's queue contents and verified dequeues. */
 interface NativeSteeringSnapshot {
   /** RPC worker generation this snapshot belongs to. */
@@ -412,7 +409,6 @@ interface NativeSteeringSnapshot {
    */
   dequeued: string[];
 }
-
 interface PendingConsumedSteer {
   id: string;
   payloadFingerprint: string;
@@ -421,12 +417,10 @@ interface PendingConsumedSteer {
   baselinePersistedUserIds: Set<string>;
   baselinePersistedTailId?: string;
 }
-
 interface PersistedSteerProjection {
   payloadFingerprint: string;
   timestamp?: number;
 }
-
 interface ActivePromptDiagnostic {
   promptId: string;
   rpcGeneration: number;
@@ -438,13 +432,11 @@ interface ActivePromptDiagnostic {
   retryExhaustedPublished?: boolean;
   terminalPublished?: boolean;
 }
-
 interface PersistedPromptIdentity {
   promptId: string;
   payloadFingerprint: string;
   timestamp?: number;
 }
-
 interface PendingAcceptedPrompt {
   id: string;
   promptId: string;
@@ -456,30 +448,24 @@ interface PendingAcceptedPrompt {
   baselinePersistedUserIds: ReadonlySet<string>;
   settings?: PromptSettingsSnapshot;
 }
-
 interface ActiveSessionRunTiming {
   generation: number;
   startedAt: number;
 }
-
 interface SettledSessionRunTiming {
   generation: number;
   startedAt: number;
   endedAt: number;
   durationMs: number;
 }
-
-
 class NativeSteeringResetError extends Error {
   readonly droppedCount: number;
-
   constructor(cause: unknown, droppedCount: number) {
     super(cause instanceof Error ? cause.message : String(cause));
     this.name = "NativeSteeringResetError";
     this.droppedCount = droppedCount;
   }
 }
-
 export class PiChatApp {
   private readonly sseHub: SseHub;
   private readonly promptEvidence: PromptEvidenceLedger;
@@ -659,7 +645,6 @@ export class PiChatApp {
   private readonly nativeSteeringResets = new Map<string, Promise<void>>();
   /** Queue authority captured by the Primary restart currently being adopted. */
   private primaryRecoveryFence?: { abortGeneration: number };
-
   // Primary queue/runtime flags live on PromptScheduler; aliases keep route handlers stable.
   private get promptQueue() {
     return this.scheduler.primaryQueue;
@@ -703,7 +688,6 @@ export class PiChatApp {
   private set pendingExtensionRequest(value: ExtensionUiRequest | undefined) {
     this.scheduler.primaryPendingExtensionRequest = value;
   }
-
   constructor(private readonly options: PiChatAppOptions) {
     this.runEpoch = options.runEpoch || randomBytes(16).toString("base64url");
     const sessionCachePath = typeof options.sessions.cachePath === "string"
@@ -1004,29 +988,24 @@ export class PiChatApp {
       this.handleRpcEvent(event, source),
     );
   }
-
   setAllowedHosts(allowedHosts: string[]): void {
     this.allowedHosts = [...allowedHosts];
   }
-
   private get applicationLifecycle(): ApplicationLifecycle {
     return this.lifecycleCoordinator.lifecycle;
   }
   private get activeMutationRequests(): number {
     return this.lifecycleCoordinator.activeMutations;
   }
-
   private lifecycleMessage(lifecycle = this.applicationLifecycle): string {
     return lifecycleMessage(lifecycle);
   }
-
   private broadcastLifecycle(): void {
     this.broadcast({
       type: "pi_chat_application_lifecycle",
       lifecycle: this.applicationLifecycle,
     });
   }
-
   private beginLifecycle(
     lifecycle: Exclude<ApplicationLifecycle, "idle">,
   ): void {
@@ -1040,7 +1019,6 @@ export class PiChatApp {
   private modelRouteKey(model: Pick<ModelInfo, "provider" | "id" | "api">): string {
     return [model.provider, model.id, model.api || ""].join(String.fromCharCode(0));
   }
-
   private mergeHostAndRuntimeModels(runtimeModels: ModelInfo[], hostModels: ModelInfo[]): ModelInfo[] {
     const result = new Map<string, ModelInfo>();
     for (const model of [...runtimeModels, ...hostModels]) {
@@ -1049,7 +1027,6 @@ export class PiChatApp {
     }
     return [...result.values()];
   }
-
   private readStartupModels(): ModelInfo[] {
     if (!this.options.modelManager) return [];
     try {
@@ -1101,7 +1078,6 @@ export class PiChatApp {
       return [];
     }
   }
-
   private startModelCatalogueWatcher(): void {
     const modelPath = this.options.modelManager?.path;
     if (!modelPath) return;
@@ -1138,7 +1114,6 @@ export class PiChatApp {
       // The API mutation path still refreshes synchronously when watching is unavailable.
     }
   }
-
   private refreshHostModelCatalogue(): ModelInfo[] {
     const previous = this.startupModels;
     const next = this.readStartupModels();
@@ -1158,7 +1133,6 @@ export class PiChatApp {
     }
     return next;
   }
-
   private scheduleModelRuntimeSync(delayMs = 100): void {
     if (!this.modelRuntimeSyncPending || this.closed || this.modelRuntimeSyncInFlight) return;
     if (this.modelRuntimeSyncTimer) clearTimeout(this.modelRuntimeSyncTimer);
@@ -1170,7 +1144,6 @@ export class PiChatApp {
       });
     }, delayMs);
   }
-
   private async syncModelRuntime(): Promise<void> {
     if (!this.modelRuntimeSyncPending || this.closed || this.modelRuntimeSyncInFlight) return;
     if (this.busyConversationCount() > 0) {
@@ -1197,11 +1170,9 @@ export class PiChatApp {
       this.modelRuntimeSyncInFlight = false;
     }
   }
-
   private beginMutation(): () => void {
     return this.lifecycleCoordinator.beginMutation();
   }
-
   private async beginPromptAdmission(sessionId: string): Promise<() => void> {
     const key = sessionId || "primary";
     const previous = this.promptAdmissionTails.get(key) || Promise.resolve();
@@ -1221,7 +1192,6 @@ export class PiChatApp {
         this.promptAdmissionTails.delete(key);
     };
   }
-
   private async withLifecycle<T>(
     lifecycle: Exclude<ApplicationLifecycle, "idle">,
     action: string,
@@ -1238,7 +1208,6 @@ export class PiChatApp {
       this.endLifecycle(lifecycle);
     }
   }
-
   private busyConversationCount(): number {
     const primaryBusy =
       this.primaryTurnActive() ||
@@ -1249,7 +1218,6 @@ export class PiChatApp {
       Boolean(this.primaryRecovery);
     return this.runtimePool.busyCount() + (primaryBusy ? 1 : 0);
   }
-
   private assertApplicationQuiescent(action: string): void {
     assertApplicationQuiescent({
       busyConversationCount: () => this.busyConversationCount(),
@@ -1260,7 +1228,6 @@ export class PiChatApp {
       secondaryStates: () => this.runtimePool.rpcStatesForQuiescence(),
     }, action);
   }
-
   private async verifyApplicationQuiescent(action: string): Promise<void> {
     await verifyApplicationQuiescent({
       busyConversationCount: () => this.busyConversationCount(),
@@ -1271,7 +1238,6 @@ export class PiChatApp {
       secondaryStates: () => this.runtimePool.rpcStatesForQuiescence(),
     }, action);
   }
-
   async close(): Promise<void> {
     this.closed = true;
     if (this.modelCatalogueRefreshTimer) clearTimeout(this.modelCatalogueRefreshTimer);
@@ -1333,7 +1299,6 @@ export class PiChatApp {
     this.streamDiagnostics.clear();
     if (runtimeStopFailure) throw runtimeStopFailure;
   }
-
   private diagnosticRuntimeProjection(
     sessionId: string,
   ): Record<string, unknown> {
@@ -1351,7 +1316,6 @@ export class PiChatApp {
       failed: primary ? this.primaryFailed : runtime?.failed === true,
     };
   }
-
   private traceState(
     category: string,
     name: string,
@@ -1384,7 +1348,6 @@ export class PiChatApp {
       // Optional observation must never perturb Runtime, HTTP, SSE, or queue work.
     }
   }
-
   private tracePromptDiagnosticOnly(
     name: string,
     sessionId: string,
@@ -1403,7 +1366,6 @@ export class PiChatApp {
       promptId,
     );
   }
-
   private tracePrompt(
     name: string,
     sessionId: string,
@@ -1434,7 +1396,6 @@ export class PiChatApp {
       // Prompt evidence remains observation-only and fail-open.
     }
   }
-
   private activePromptDiagnostic(
     sessionId: string,
     rpcGeneration: number,
@@ -1445,7 +1406,6 @@ export class PiChatApp {
       return undefined;
     return active;
   }
-
   private traceActivePrompt(
     name: string,
     sessionId: string,
@@ -1463,13 +1423,11 @@ export class PiChatApp {
     );
     return active.promptId;
   }
-
   private clearPromptDiagnostic(sessionId: string, promptId?: string): void {
     const active = this.activePromptDiagnostics.get(sessionId);
     if (!active || (promptId && active.promptId !== promptId)) return;
     this.activePromptDiagnostics.delete(sessionId);
   }
-
   /** Project Pi's native retry lifecycle without becoming a retry authority. */
   private broadcastPromptFailureLifecycle(
     sessionId: string,
@@ -1491,7 +1449,6 @@ export class PiChatApp {
       recordEvidence: (fact) => this.promptEvidence.record(fact),
     });
   }
-
   private observePromptRpc(
     sessionId: string,
     promptId: string,
@@ -1532,7 +1489,6 @@ export class PiChatApp {
       || observation.outcome === "not-written"
     ) this.clearPromptDiagnostic(sessionId, promptId);
   }
-
   private promptRpcObserver(
     rpc: PiRpcClient,
     sessionId: string,
@@ -1547,7 +1503,6 @@ export class PiChatApp {
     return (observation) =>
       this.observePromptRpc(sessionId, promptId, observation);
   }
-
   private async sendPromptRpc(
     rpc: PiRpcClient,
     sessionId: string,
@@ -1573,7 +1528,6 @@ export class PiChatApp {
       throw error;
     }
   }
-
   private traceViewProjection(
     name: string,
     sessionId: string,
@@ -1593,7 +1547,6 @@ export class PiChatApp {
       activityExecution: view?.session.activity?.execution || "none",
     });
   }
-
   private traceBootstrapProjection(data: BootstrapData): void {
     const sessionId = data.activeSessionId || "";
     const summary = data.sessions.find((session) => session.id === sessionId);
@@ -1608,7 +1561,6 @@ export class PiChatApp {
       primaryStatus: data.primaryRuntime.status,
     });
   }
-
   private browserEventAuthority(
     event: Record<string, unknown>,
   ): Record<string, unknown> {
@@ -1628,7 +1580,6 @@ export class PiChatApp {
       piChatRunGeneration: this.runGenerationsBySession.get(sessionId) || 0,
     };
   }
-
   private broadcast(event: Record<string, unknown>): void {
     const outboundEvent = this.browserEventAuthority(event);
     const sessionId =
@@ -1681,7 +1632,6 @@ export class PiChatApp {
       && runGeneration !== undefined
     ) this.streamDiagnostics.flush(sessionId, runGeneration);
   }
-
   private broadcastRpcEvent(
     event: Record<string, unknown>,
     sessionId: string,
@@ -1701,7 +1651,6 @@ export class PiChatApp {
       broadcast: (next) => this.broadcast(next),
     }, event, sessionId, runGeneration);
   }
-
   private broadcastControlState(sessionId: string): void {
     this.traceState("sse", "broadcast-control", sessionId, {
       eventType: "pi_chat_session_control_changed",
@@ -1714,11 +1663,9 @@ export class PiChatApp {
       ...this.sessionControl.controlState(sessionId, clientId),
     }));
   }
-
   private publicQueue(queue = this.promptQueue): QueuedPrompt[] {
     return this.scheduler.publicQueue(queue);
   }
-
   private incidentControlState(
     sessionId: string,
     clientId = "",
@@ -1731,7 +1678,6 @@ export class PiChatApp {
       ? "owned-by-other-present-window"
       : "owned-by-stale-window";
   }
-
   private reportIncident(
     error: unknown,
     input: Omit<IncidentFields, "lifecycle"> & {
@@ -1743,7 +1689,6 @@ export class PiChatApp {
       lifecycle: input.lifecycle || this.applicationLifecycle,
     });
   }
-
   private operationForRequest(request: IncomingMessage): IncidentOperation {
     const pathname = new URL(request.url || "/", "http://127.0.0.1").pathname;
     if (pathname.startsWith("/api/bootstrap")) return "navigation.bootstrap";
@@ -1755,7 +1700,6 @@ export class PiChatApp {
     if (pathname === "/api/chat/abort") return "prompt.abort";
     return "navigation.request";
   }
-
   private sessionIdForRequest(request: IncomingMessage): string {
     const admitted = (request as IncomingMessage & {
       piChatDiagnosticSessionId?: unknown;
@@ -1765,7 +1709,6 @@ export class PiChatApp {
     const match = pathname.match(/^\/api\/sessions\/([a-f0-9-]{16,64})(?:\/|$)/i);
     return match?.[1] || "";
   }
-
   /** Keep failed-runtime diagnostics useful in the sidebar without leaking an unbounded raw transport payload. */
   private recordRuntimeFailure(
     sessionId: string,
@@ -1787,14 +1730,12 @@ export class PiChatApp {
     const incidentId = incidentIdValue || incidentReference(error)?.incidentId;
     if (incidentId) this.runtimeIncidentIdsBySession.set(sessionId, incidentId);
   }
-
   private clearRuntimeFailure(sessionId: string): void {
     if (!sessionId) return;
     this.runtimeFailureReasonsBySession.delete(sessionId);
     this.runtimeIncidentIdsBySession.delete(sessionId);
     this.copyRecoveryPendingSessionIds.delete(sessionId);
   }
-
   private rpcOutcomeUnknown(error: unknown): boolean {
     if (error instanceof RpcProcessExitUnconfirmedError || isRpcOutcomeUnknown(error))
       return true;
@@ -1802,7 +1743,6 @@ export class PiChatApp {
       return this.rpcOutcomeUnknown(error.cause);
     return false;
   }
-
   private lateRpcOutcomeHandler(
     sessionId: string,
     token: string,
@@ -1837,7 +1777,6 @@ export class PiChatApp {
       this.broadcastSessionActivity(sessionId);
     };
   }
-
   private sessionMutationOutcomePending(sessionId: string): boolean {
     return Boolean(
       sessionId && (
@@ -1853,7 +1792,6 @@ export class PiChatApp {
       ),
     );
   }
-
   private installRpcOutcomeFence(sessionId: string, token?: string): void {
     if (!sessionId) return;
     this.rpcOutcomePendingBySession.add(sessionId);
@@ -1861,7 +1799,6 @@ export class PiChatApp {
       this.rpcOutcomeTokensBySession.set(sessionId, token || randomUUID());
     this.broadcastSessionActivity(sessionId);
   }
-
   private markRpcOutcomePending(
     sessionId: string,
     error: unknown,
@@ -1870,7 +1807,6 @@ export class PiChatApp {
     if (!sessionId || !this.rpcOutcomeUnknown(error)) return;
     this.installRpcOutcomeFence(sessionId, token);
   }
-
   /** Convert an acknowledged-but-unresolved RPC mutation into one retry-safe HTTP outcome. */
   private rethrowResultPending(
     error: unknown,
@@ -1887,7 +1823,6 @@ export class PiChatApp {
       );
     throw error;
   }
-
   /**
    * Clear process-owned state for one Session without touching its persisted
    * JSONL or its durable Gate preference. Resource reload/recovery uses this
@@ -1951,7 +1886,6 @@ export class PiChatApp {
       this.broadcastSessionActivity(sessionId);
     }
   }
-
   /** A copy operation has no second browser-dialog authority while the source RPC is rebound. */
   private cancelInteractiveCopyHook(
     sessionId: string,
@@ -1972,7 +1906,6 @@ export class PiChatApp {
       .catch(() => undefined);
     return true;
   }
-
   /** Events are authoritative over a hot-memory get_state snapshot that may lag compaction lifecycle frames. */
   private updateHotCompactionState(
     runtime: SecondaryRuntime | undefined,
@@ -1992,7 +1925,6 @@ export class PiChatApp {
     }
     this.lastPrimaryState = { ...this.lastPrimaryState, isCompacting };
   }
-
   /** A known active compaction is queueable; an unknown compact RPC outcome is not. */
   private compactionIsActive(sessionId: string): boolean {
     const runtime = this.runtimePool.get(sessionId);
@@ -2000,17 +1932,14 @@ export class PiChatApp {
       ? runtime.lastState?.isCompacting === true
       : sessionId === this.activeSessionId && this.lastPrimaryState.isCompacting === true;
   }
-
   /** Event-owned evidence that a Primary turn still has visible or tool work. */
   private primaryTurnActive(): boolean {
     return this.running || Boolean(this.liveMessage) || Boolean(this.toolStatus);
   }
-
   /** Event-owned evidence that a Secondary turn still has visible or tool work. */
   private runtimeTurnActive(runtime: SecondaryRuntime): boolean {
     return runtime.running || Boolean(runtime.liveMessage) || Boolean(runtime.toolStatus);
   }
-
   /** Begin timing only when Pi has produced authoritative execution evidence. */
   private beginSessionRunTiming(sessionId: string, generation: number): ActiveSessionRunTiming {
     const existing = this.activeRunTimingBySession.get(sessionId);
@@ -2019,7 +1948,6 @@ export class PiChatApp {
     this.activeRunTimingBySession.set(sessionId, timing);
     return timing;
   }
-
   /** Freeze the server-observed duration at a terminal lifecycle boundary. */
   private finishSessionRunTiming(sessionId: string, generation: number): SettledSessionRunTiming | undefined {
     const active = this.activeRunTimingBySession.get(sessionId);
@@ -2044,12 +1972,10 @@ export class PiChatApp {
     }
     return settled;
   }
-
   private clearSessionRunTiming(sessionId: string): void {
     this.activeRunTimingBySession.delete(sessionId);
     this.settledRunTimingBySession.delete(sessionId);
   }
-
   private sessionRunTiming(sessionId: string): { runStartedAt?: number; lastRunDurationMs?: number } {
     const active = this.activeRunTimingBySession.get(sessionId);
     const settled = this.settledRunTimingBySession.get(sessionId);
@@ -2058,7 +1984,6 @@ export class PiChatApp {
       ...(settled ? { lastRunDurationMs: settled.durationMs } : null),
     };
   }
-
   private eventRunTiming(
     sessionId: string,
     eventType: string,
@@ -2080,7 +2005,6 @@ export class PiChatApp {
       };
     return {};
   }
-
   private sessionActivity(sessionId: string): SessionActivityState {
     const runTiming = this.sessionRunTiming(sessionId);
     const runtime = this.runtimePool.get(sessionId);
@@ -2128,7 +2052,6 @@ export class PiChatApp {
       awaitingConfirmation: Boolean(this.pendingRequestForSession(sessionId)),
     };
   }
-
   /** One server-derived snapshot prevents Sidebar reconstruction from racing queue/RPC events. */
   /** A recovered worker is a fresh event source; fence off all old-child frames. */
   private advanceSessionRunGeneration(sessionId: string): number {
@@ -2136,7 +2059,6 @@ export class PiChatApp {
     this.runGenerationsBySession.set(sessionId, generation);
     return generation;
   }
-
   private broadcastSessionActivity(sessionId = this.activeSessionId): void {
     if (!sessionId) return;
     const activity = this.sessionActivity(sessionId);
@@ -2171,13 +2093,11 @@ export class PiChatApp {
         activity.execution === "dispatching",
     });
   }
-
   private broadcastQueue(sessionId = this.activeSessionId): void {
     const runtime = this.runtimePool.get(sessionId);
     if (runtime) this.scheduler.broadcastRuntimeQueue(runtime);
     else this.scheduler.broadcastPrimaryQueue();
   }
-
   private activeSessionIds(): string[] {
     const primaryActive = this.primaryReadReady();
     return [
@@ -2185,24 +2105,20 @@ export class PiChatApp {
       ...this.runtimePool.secondaryActiveIds(),
     ].filter((id): id is string => Boolean(id));
   }
-
   private controlState(
     sessionId: string,
     clientId = "",
   ): { controlOwner?: string; controlledByThisWindow?: boolean } {
     return this.sessionControl.controlState(sessionId, clientId);
   }
-
   private requireSessionControl(sessionId: string, clientId: string): void {
     this.sessionControl.requireControl(sessionId, clientId);
   }
-
   private clearPendingWindowPage(pageId: string): void {
     const timer = this.pendingWindowPageTimers.get(pageId);
     if (timer) clearTimeout(timer);
     this.pendingWindowPageTimers.delete(pageId);
   }
-
   /**
    * Register a browser page before SSE, without creating a transport lease.
    * The record is deliberately temporary: a crashed renderer has no unload
@@ -2235,7 +2151,6 @@ export class PiChatApp {
     this.pendingWindowPageTimers.set(pageId, timer);
     this.cancelLastWindowShutdown();
   }
-
   /** EventSource proves the page is alive; it replaces its temporary lease. */
   private clientConnected(clientId: string, pageId = ""): void {
     if (pageId) {
@@ -2245,18 +2160,15 @@ export class PiChatApp {
     this.cancelLastWindowShutdown();
     this.sessionControl.clientConnected(clientId);
   }
-
   private cancelLastWindowShutdown(): void {
     this.lastWindowIdleSince = null;
     if (this.lastWindowShutdownTimer)
       clearTimeout(this.lastWindowShutdownTimer);
     this.lastWindowShutdownTimer = null;
   }
-
   private openWindowCount(): number {
     return this.connectedPageClients.size;
   }
-
   /**
    * Lifecycle actions are destructive to every browser transport and Runtime.
    * A token-bearing handshake proves only that a local caller reached this
@@ -2275,7 +2187,6 @@ export class PiChatApp {
       ),
     );
   }
-
   private scheduleLastWindowShutdown(): void {
     if (
       !this.lastWindowAutoShutdownEnabled ||
@@ -2292,7 +2203,6 @@ export class PiChatApp {
     }, this.lastWindowShutdownPollMs);
     this.lastWindowShutdownTimer.unref();
   }
-
   private async pollLastWindowShutdown(): Promise<void> {
     if (
       !this.lastWindowAutoShutdownEnabled ||
@@ -2328,7 +2238,6 @@ export class PiChatApp {
       this.lastWindowShutdownTimer.unref();
       return;
     }
-
     this.autoShutdownRunning = true;
     let lifecycleStarted = false;
     try {
@@ -2357,7 +2266,6 @@ export class PiChatApp {
         this.scheduleLastWindowShutdown();
     }
   }
-
   private releaseClient(clientId: string): string {
     for (const [pageId, owner] of this.connectedPageClients) {
       if (owner !== clientId) continue;
@@ -2366,7 +2274,6 @@ export class PiChatApp {
     }
     return this.sessionControl.releaseClient(clientId);
   }
-
   private closeWindowClient(clientId: string, pageId: string): string {
     if (!pageId || this.connectedPageClients.get(pageId) !== clientId)
       return "";
@@ -2379,7 +2286,6 @@ export class PiChatApp {
     if (clientStillOpen) return "";
     return this.sessionControl.closeWindow(clientId);
   }
-
   private async restSessionAfterWindowClose(
     sessionId: string,
   ): Promise<boolean> {
@@ -2441,18 +2347,15 @@ export class PiChatApp {
       this.rethrowResultPending(error, "回收会话运行时");
     }
   }
-
   private clientDisconnected(clientId: string, pageId = ""): void {
     // An SSE connection is a re-connectable transport, not a service-lifetime
     // lease. Keep the page instance registered: only its matching pagehide
     // beacon may turn a network failure into an explicit close intent.
     this.sessionControl.clientDisconnected(clientId, pageId);
   }
-
   private markSessionViewed(clientId: string, sessionId: string): void {
     this.sessionControl.markViewed(clientId, sessionId);
   }
-
   private pendingRequestForSession(
     sessionId: string,
   ): ExtensionUiRequest | undefined {
@@ -2460,14 +2363,12 @@ export class PiChatApp {
       ? this.pendingExtensionRequest
       : this.runtimePool.get(sessionId)?.pendingExtensionRequest;
   }
-
   private stateWithFastMode(sessionId: string, state: PiState): PiState {
     return {
       ...state,
       fastModeActive: this.fastModeBySession.get(sessionId) === true,
     };
   }
-
   private setFastModeActive(sessionId: string, active: boolean): void {
     if (!sessionId) return;
     const previous = this.fastModeBySession.get(sessionId) === true;
@@ -2481,7 +2382,6 @@ export class PiChatApp {
       active,
     });
   }
-
   private adoptSecondaryFastMode(runtime: SecondaryRuntime): void {
     if (
       runtime.fastModeGeneration === runtime.rpcGeneration &&
@@ -2496,7 +2396,6 @@ export class PiChatApp {
       Boolean(pending && pending.rpcGeneration === runtime.rpcGeneration && pending.active),
     );
   }
-
   private trackPendingRequest(
     sessionId: string,
     request: ExtensionUiRequest,
@@ -2549,7 +2448,6 @@ export class PiChatApp {
     timer.unref();
     this.pendingExtensionTimers.set(sessionId, timer);
   }
-
   private clearPendingRequest(sessionId: string, requestId?: string): boolean {
     const current = this.pendingRequestForSession(sessionId);
     if (!current || (requestId && current.id !== requestId)) return false;
@@ -2574,7 +2472,6 @@ export class PiChatApp {
     this.broadcastSessionActivity(sessionId);
     return true;
   }
-
   private runtimeEventState(
     sessionId: string,
     runtime?: SecondaryRuntime,
@@ -2605,7 +2502,6 @@ export class PiChatApp {
           }),
     };
   }
-
   private applyRuntimeEventTransition(
     sessionId: string,
     runtime: SecondaryRuntime | undefined,
@@ -2673,7 +2569,6 @@ export class PiChatApp {
     }
     return transition;
   }
-
   /** Whether this generation still has an admitted or observed native Steer to settle. */
   private hasNativeSteeringPending(
     sessionId: string,
@@ -2690,7 +2585,6 @@ export class PiChatApp {
           admissions.items.length),
     );
   }
-
   /**
    * Drop every native-steering bookkeeping entry for a Session and notify the
    * UI with the reason and how many accepted steers could never execute. Called
@@ -2724,13 +2618,11 @@ export class PiChatApp {
       });
     return droppedCount;
   }
-
   private advanceNativeSteeringProjection(sessionId: string): number {
     const revision = (this.nativeSteeringProjectionRevisions.get(sessionId) || 0) + 1;
     this.nativeSteeringProjectionRevisions.set(sessionId, revision);
     return revision;
   }
-
   private pendingSteerProjection(sessionId: string): {
     items: PendingSteer[];
     revision: number;
@@ -2746,7 +2638,6 @@ export class PiChatApp {
       revision: this.nativeSteeringProjectionRevisions.get(sessionId) || 0,
     };
   }
-
   private nativeSteeringMessageText(event: Record<string, unknown>): string {
     const message =
       event.message && typeof event.message === "object"
@@ -2760,7 +2651,6 @@ export class PiChatApp {
       .map((block) => block.text || "")
       .join("\n");
   }
-
   /**
    * Pi's native Alt+Up action clears the whole remaining queue. The preceding
    * queue_update looks identical to consumption, so this correlated event
@@ -2826,7 +2716,6 @@ export class PiChatApp {
     }
     return items;
   }
-
   /** Retain only server-verified Steer provenance until JSONL exposes its User row. */
   private rememberConsumedNativeSteer(
     sessionId: string,
@@ -2864,7 +2753,6 @@ export class PiChatApp {
         this.pendingConsumedSteersBySession.keys().next().value!,
       );
   }
-
   /**
    * Returns true when this user message_start is a *verified* native steer
    * consumption: Pi dequeued the matching steering message (queue_update
@@ -2907,7 +2795,6 @@ export class PiChatApp {
     this.rememberConsumedNativeSteer(sessionId, event, consumed);
     return consumed.id;
   }
-
   private updateNativeSteeringSnapshot(
     sessionId: string,
     event: Record<string, unknown>,
@@ -2945,7 +2832,6 @@ export class PiChatApp {
       });
     else this.pendingNativeSteeringBySession.delete(sessionId);
   }
-
   private async resetNativeSteering(
     sessionId: string,
     runtime?: SecondaryRuntime,
@@ -3008,11 +2894,9 @@ export class PiChatApp {
         this.nativeSteeringResets.delete(sessionId);
     }
   }
-
   private handleSecondaryEvent(runtime: SecondaryRuntime, event: Record<string, unknown>, source?: RpcEventSource): void {
     handleSecondaryEventService(this, runtime, event, source);
   }
-
   /**
    * Pi documents stdout events as a JSONL stream and emits agent_settled only
    * after the session-level run is done. The RPC event payload nevertheless
@@ -3065,7 +2949,6 @@ export class PiChatApp {
       },
     }, runtime, sourceGeneration, promptId);
   }
-
   private async drainPrimaryAfterSettlement(
     sessionId: string,
     sourceGeneration = this.primaryRpcGeneration,
@@ -3134,7 +3017,6 @@ export class PiChatApp {
       },
     }, sessionId, sourceGeneration, promptId);
   }
-
   /** Abort one Secondary through the owner-held operation lease. */
   private async abortSecondaryRuntime(
     sessionId: string,
@@ -3189,7 +3071,6 @@ export class PiChatApp {
       release();
     }
   }
-
   /** Abort the Primary through its owner-held operation lease. */
   private async abortPrimaryRuntime(
     sessionId: string,
@@ -3238,91 +3119,24 @@ export class PiChatApp {
       release();
     }
   }
-
   /** Compact a Session behind its prompt/admission and Runtime ownership fences. */
+  private compactAction() {
+    return createCompactAction({
+      PROMPT_PREPARE_TIMEOUT_MS,
+      SessionNotFoundError,
+      compactRuntime,
+      randomUUID,
+      rpcData,
+      host: this,
+    } as any);
+  }
   private async compactSession(
     sessionId: string,
     customInstructions: string,
     present: (result: RuntimeCompactionResult) => void,
   ): Promise<void> {
-    const releasePromptAdmission = await this.beginPromptAdmission(sessionId);
-    let releaseRuntimeOperation: (() => void) | null = null;
-    try {
-      // A cold/reclaimed persisted Session is neither Primary nor an error.
-      // Bind Primary identity before allocating a Secondary so restoration,
-      // Gate, recovery, fast mode, and RuntimePool capacity stay App-owned.
-      let secondaryRuntime = this.runtimePool.get(sessionId) || null;
-      if (!secondaryRuntime && !this.activeSessionId) {
-        try {
-          await this.ensurePrimaryIdentity();
-        } catch (error) {
-          this.rethrowResultPending(error, "准备压缩运行时", false);
-        }
-      }
-      const requestedIsPrimary = sessionId === this.activeSessionId;
-      if (!requestedIsPrimary && !secondaryRuntime) {
-        try {
-          secondaryRuntime = await this.ensureRuntime(sessionId);
-        } catch (error) {
-          if (error instanceof SessionNotFoundError) {
-            present({ kind: "conflict", error: "该会话尚未启用" });
-            return;
-          }
-          throw error;
-        }
-      }
-      if (secondaryRuntime) {
-        releaseRuntimeOperation = this.runtimePool.acquireOperation(secondaryRuntime);
-        this.runtimePool.touch(secondaryRuntime);
-        if (this.secondaryNeedsRecovery(secondaryRuntime))
-          await this.recoverRuntime(secondaryRuntime);
-      } else {
-        releaseRuntimeOperation = this.primaryOperationAdmission.acquire().release;
-        try {
-          await this.ensurePrimaryRuntime();
-        } catch (error) {
-          this.rethrowResultPending(error, "准备压缩运行时", false);
-        }
-      }
-      const targetRpc = secondaryRuntime?.rpc || this.options.rpc;
-      const result = await compactRuntime({
-        outcomePending: () =>
-          this.compactionPendingBySession.has(sessionId) ||
-          this.sessionMutationOutcomePending(sessionId),
-        busy: () => secondaryRuntime
-          ? this.scheduler.runtimeBusyForQueue(secondaryRuntime)
-          : this.scheduler.primaryBusyForQueue(),
-        newOutcomeToken: () => randomUUID(),
-        sendCompact: async (command, outcomeToken) => rpcData<Record<string, unknown>>(
-          await targetRpc.send(
-            command,
-            PROMPT_PREPARE_TIMEOUT_MS,
-            {
-              onLateResponse: this.lateRpcOutcomeHandler(
-                sessionId,
-                outcomeToken,
-                "compact",
-              ),
-            },
-          ),
-        ),
-        outcomeUnknown: (error) => this.rpcOutcomeUnknown(error),
-        markOutcomePending: (error, token) =>
-          this.markRpcOutcomePending(sessionId, error, token),
-        markUncertainCompaction: () => this.uncertainCompactionBySession.add(sessionId),
-        broadcastActivity: () => this.broadcastSessionActivity(sessionId),
-        rethrowResultPending: (error) => this.rethrowResultPending(error, "上下文压缩"),
-      }, customInstructions);
-      // Preserve the response-write-before-admission-release boundary. A
-      // same-Session Prompt may not pass this compact transaction until its
-      // caller has received the compact outcome.
-      present(result);
-    } finally {
-      releaseRuntimeOperation?.();
-      releasePromptAdmission();
-    }
+    return this.compactAction()(sessionId, customInstructions, present);
   }
-
   private async ensureRuntime(id: string): Promise<SecondaryRuntime> {
     // Keep every failed-worker recovery in the App owner: it clears
     // generation-scoped Steer state and resumes already-admitted FIFO work.
@@ -3364,7 +3178,6 @@ export class PiChatApp {
     if (!runtime.messageSnapshot) this.warmRuntimeMessageSnapshot(runtime);
     return runtime;
   }
-
   private async recoverRuntime(runtime: SecondaryRuntime): Promise<void> {
     // A failed/replaced worker can never deliver steers queued in its old
     // process. Drop the stale bookkeeping so the recovered worker's settlement
@@ -3393,7 +3206,6 @@ export class PiChatApp {
     this.broadcastSessionActivity(runtime.id);
     this.resumeRecoveredRuntimeQueue(runtime);
   }
-
   private async acquireDraftRuntime(
     clientId = "",
     cwd = this.currentCwd,
@@ -3402,7 +3214,6 @@ export class PiChatApp {
     this.adoptSecondaryFastMode(lease.runtime);
     return lease;
   }
-
   /** A new draft may warm beside Primary startup, but no mutation is permitted
    * until the globally-owned compatibility probe succeeds. A failed Primary
    * must use the App-level recovery finalizer so its Session, state, Gate mode,
@@ -3423,7 +3234,6 @@ export class PiChatApp {
       await this.ensurePrimaryRuntime();
     }
   }
-
   private async finalizePersistedDraft(
     runtime: SecondaryRuntime,
   ): Promise<boolean> {
@@ -3440,7 +3250,6 @@ export class PiChatApp {
     });
     return true;
   }
-
   /**
    * `agent_settled` may arrive before the writer's just-created JSONL user row
    * is readable. A prompted draft otherwise retains its intentionally temporary
@@ -3471,7 +3280,6 @@ export class PiChatApp {
     timer.unref();
     this.draftPersistenceRetryTimers.set(runtime, timer);
   }
-
   /** A readiness-only capability projection: never wait for history, stats, or command discovery. */
   private runtimeReady(runtime: SecondaryRuntime): SessionRuntimeReadyData {
     return {
@@ -3483,7 +3291,6 @@ export class PiChatApp {
       gateMode: runtime.gateMode,
     };
   }
-
   /**
    * Empty New drafts have no messages and no real session stats. Avoid a full
    * sessionView round-trip (get_messages / stats / commands) on every New click.
@@ -3536,11 +3343,9 @@ export class PiChatApp {
       ...this.controlState(runtime.id, clientId),
     };
   }
-
   private handleRpcEvent(event: Record<string, unknown>, source?: RpcEventSource): void {
     handleRpcEventService(this, event, source);
   }
-
   private browserPrimaryReadiness(
     readiness = this.options.primaryRuntime?.snapshot() || {
       status: "ready" as const,
@@ -3555,11 +3360,9 @@ export class PiChatApp {
         : null),
     };
   }
-
   private primaryReadiness(): PrimaryRuntimeReadiness {
     return this.browserPrimaryReadiness();
   }
-
   /**
    * Atomically adopt the exact get_state response that certified this child.
    * The controller publishes ready only after this returns, so bootstrap/SSE,
@@ -3622,7 +3425,6 @@ export class PiChatApp {
       this.broadcastQueue();
     }
   }
-
   private primaryReadReady(): boolean {
     return (
       this.primaryReadiness().status === "ready" &&
@@ -3630,7 +3432,6 @@ export class PiChatApp {
       this.options.rpc.isRunning?.() !== false
     );
   }
-
   /** Mutation-time recovery policy; read-only paths keep primaryReadReady(). */
   private primaryNeedsRecovery(
     readiness = this.options.primaryRuntime?.snapshot(),
@@ -3641,12 +3442,10 @@ export class PiChatApp {
       this.options.rpc.isRunning?.() === false
     );
   }
-
   /** Secondary recovery is intentionally separate from abort's no-op policy. */
   private secondaryNeedsRecovery(runtime: SecondaryRuntime): boolean {
     return runtime.failed || runtime.rpc.isRunning?.() === false;
   }
-
   private async recoverPrimaryRuntimeWithQueueFence(
     primaryRuntime: PrimaryRuntimeReadinessBridge,
     sessionFile?: string,
@@ -3667,158 +3466,23 @@ export class PiChatApp {
         this.primaryRecoveryFence = undefined;
     }
   }
-
+  private ensurePrimaryAction() {
+    const host = {
+      OperationAdmissionClosedError,
+      PrimaryRuntimeReadinessController,
+      PrimaryRuntimeUnavailableError,
+      asState,
+      idForPath,
+      ...this,
+    };
+    return createPrimaryEnsureAction(host);
+  }
   private async ensurePrimaryRuntime(): Promise<void> {
-    if (this.closed) throw new Error("Pi Chat 已关闭");
-    if (this.primaryOperationAdmission.isClosed) {
-      if (!this.options.rpc.isExitConfirmed?.())
-        throw new OperationAdmissionClosedError("Primary Runtime 正在确认退出，请稍后重试");
-      this.primaryOperationAdmission.reopen(this.primaryOperationAdmission.generation);
-    }
-    const primaryRuntime = this.options.primaryRuntime;
-    let readiness = primaryRuntime?.snapshot();
-    // waitUntilReady() intentionally preserves a failed readiness snapshot for
-    // read-only callers. Mutating callers, however, are the recovery boundary:
-    // an initial spawn/probe failure must be allowed to retry without requiring
-    // a whole server restart.
-    if (primaryRuntime && readiness?.status !== "failed") {
-      try {
-        await primaryRuntime.waitUntilReady();
-      } catch (error) {
-        readiness = primaryRuntime.snapshot();
-        if (readiness.status !== "failed") throw error;
-      }
-    }
-    readiness = primaryRuntime?.snapshot();
-    // Reaching this point after waitUntilReady() means the normal startup path
-    // is ready. A failed snapshot deliberately skips that wait and falls into
-    // the single-flight recovery below.
-    if (!this.primaryNeedsRecovery(readiness)) return;
-    if (this.primaryRecovery) return this.primaryRecovery;
-    const recovery = (async () => {
-      try {
-        // A cold service may still be completing its initial asynchronous
-        // Primary spawn. If it won the race, consume that worker rather than
-        // stopping/restarting it a second time.
-        if (this.primaryNeedsRecovery(readiness)) {
-          this.clearNativeSteeringState(this.activeSessionId, "recovery");
-          this.clearPromptDiagnostic(this.activeSessionId);
-          // The controller's adopter completes App binding before recover()
-          // resolves. Never issue a second get_state here: that recreated the
-          // split authority where SSE said ready while App was still adopting.
-          if (primaryRuntime) {
-            this.options.rpc.setDiagnosticSessionId?.(this.activeSessionId);
-            await this.recoverPrimaryRuntimeWithQueueFence(
-              primaryRuntime,
-              this.activeSessionPath || undefined,
-              this.primaryRuntimeCwd,
-            );
-            if (this.closed) return;
-            if (!(primaryRuntime instanceof PrimaryRuntimeReadinessController)) {
-              const state = asState(
-                await this.options.rpc.send({ type: "get_state" }),
-              );
-              this.lastPrimaryState = state;
-              this.running = state.isStreaming;
-              this.primaryFailed = false;
-              this.toolStatus = "";
-              this.bindPrimaryIdentity(state);
-            }
-          } else {
-            // Legacy in-process embeddings do not have the controller/adopter
-            // contract. Preserve their explicit post-restart state bind; the
-            // production entrypoint always takes the controller branch above.
-            const response = await this.options.rpc.restart(
-              this.activeSessionPath || undefined,
-              this.primaryRuntimeCwd,
-            );
-            if (this.closed) return;
-            const state = asState(
-              response || (await this.options.rpc.send({ type: "get_state" })),
-            );
-            if (this.closed) return;
-            this.lastPrimaryState = state;
-            this.running = state.isStreaming;
-            this.primaryFailed = false;
-            this.toolStatus = "";
-            this.bindPrimaryIdentity(state);
-          }
-          if (this.closed) return;
-          this.clearRuntimeFailure(this.activeSessionId);
-          const runGeneration = this.advanceSessionRunGeneration(
-            this.activeSessionId,
-          );
-          this.broadcast({
-            type: "pi_chat_process_recovered",
-            piChatSessionId: this.activeSessionId,
-            piChatRunEpoch: this.runEpoch,
-            piChatRunGeneration: runGeneration,
-          });
-          this.broadcastSessionActivity(this.activeSessionId);
-          this.resumeRecoveredPrimaryQueue();
-        }
-      } catch (error) {
-        this.primaryFailed = true;
-        if (error instanceof PrimaryRuntimeUnavailableError) throw error;
-        if (this.rpcOutcomeUnknown(error)) {
-          // A failed Primary restart may still own its JSONL. Fence new
-          // operations until the RPC client proves that child ownership ended.
-          this.primaryOperationAdmission.fence();
-          throw error;
-        }
-        throw new Error(
-          `主 Pi RPC 恢复失败：${error instanceof Error ? error.message : String(error)}`,
-          { cause: error },
-        );
-      }
-    })();
-    this.primaryRecovery = recovery;
-    try {
-      await recovery;
-    } finally {
-      if (this.primaryRecovery === recovery) this.primaryRecovery = null;
-    }
+    return this.ensurePrimaryAction().ensurePrimaryRuntime();
   }
-
-  /** Bind event attribution only to the child generation that produced get_state. */
   private bindPrimaryIdentity(state: PiState): void {
-    const sessionId = state.sessionFile
-      ? idForPath(state.sessionFile)
-      : state.sessionId || "";
-    if (!sessionId) return;
-    const previousSessionId = this.primaryBoundSessionId;
-    const previousRpcGeneration = this.primaryRpcGeneration;
-    const sameRuntimeFastMode = Boolean(
-      previousSessionId &&
-      previousRpcGeneration &&
-      previousRpcGeneration ===
-        (this.options.rpc.currentGeneration?.() || 0) &&
-      this.fastModeBySession.get(previousSessionId) === true,
-    );
-    this.activeSessionId = sessionId;
-    this.activeSessionPath = state.sessionFile || this.activeSessionPath;
-    this.primaryBoundSessionId = sessionId;
-    this.options.rpc.setDiagnosticSessionId?.(sessionId);
-    this.primaryRpcGeneration = this.options.rpc.currentGeneration?.() || 0;
-    const pendingFastMode = this.pendingPrimaryFastMode;
-    this.pendingPrimaryFastMode = undefined;
-    if (previousSessionId && previousSessionId !== sessionId)
-      this.setFastModeActive(previousSessionId, false);
-    if (
-      pendingFastMode &&
-      pendingFastMode.rpcGeneration === this.primaryRpcGeneration
-    )
-      this.setFastModeActive(sessionId, pendingFastMode.active);
-    else if (previousSessionId !== sessionId)
-      this.setFastModeActive(sessionId, sameRuntimeFastMode);
-    else if (
-      previousRpcGeneration &&
-      previousRpcGeneration !== this.primaryRpcGeneration
-    )
-      this.setFastModeActive(sessionId, false);
+    this.ensurePrimaryAction().bindPrimaryIdentity(state);
   }
-
-  /** Bind Primary's Session only after the readiness gate passed. */
   private async ensurePrimaryIdentity(): Promise<void> {
     if (this.activeSessionId) return;
     await this.ensurePrimaryRuntime();
@@ -3830,7 +3494,6 @@ export class PiChatApp {
     this.running = state.isStreaming;
     this.bindPrimaryIdentity(state);
   }
-
   private async extensionCommand(
     message: string,
     rpc = this.options.rpc,
@@ -3841,140 +3504,26 @@ export class PiChatApp {
     const command = asCommands(response).find((item) => item.name === match[1]);
     return command?.source === "extension" ? command : null;
   }
-
   /**
    * Validate a captured Model against the exact Runtime that is about to run
    * it. Browser catalogues are advisory and may be stale; a valid-looking ID
    * must never bypass this target-Runtime check.
    */
-  private async applyTurnSettings(
-    rpc: PiRpcClient,
-    settings: PendingTurnSettings,
-    sessionId?: string,
-  ): Promise<AppliedTurnSettings> {
-    const applied: AppliedTurnSettings = {};
-    if (settings.model) {
-      const available = asModels(
-        await rpc.send({ type: "get_available_models" }),
-      );
-      const model = available.find(
-        (candidate) =>
-          candidate.provider === settings.model!.provider &&
-          candidate.id === settings.model!.modelId &&
-          // When the browser captured the Runtime API, require the same full
-          // route. Legacy inventories may omit api and remain pair-compatible.
-          (!settings.model!.api || candidate.api === settings.model!.api),
-      );
-      // Name the rejected pair and the catalogue it was checked against: a
-      // silent generic message left the user unable to tell which Runtime
-      // refused the selection or that the catalogue simply lacks that model.
-      if (!model)
-        throw new HttpRequestError(
-          400,
-          `所选模型不可用：${settings.model.provider}/${settings.model.modelId} 不在当前会话 Pi Runtime 的模型列表中（该 Runtime 提供 ${available.length} 个模型）。请在模型菜单中改选该 Runtime 提供的模型；若你刚更新过模型配置，请重启该会话的 Pi Runtime 后重试。`,
-          "MODEL_UNAVAILABLE",
-        );
-      // Pi RPC's documented set_model command accepts only provider/modelId.
-      // Two advertised API routes sharing that pair cannot be selected
-      // deterministically by this Runtime version, so reject the ambiguous
-      // route instead of acknowledging a choice Pi cannot faithfully execute.
-      if (
-        new Set(
-          available
-            .filter(
-              (candidate) =>
-                candidate.provider === settings.model!.provider &&
-                candidate.id === settings.model!.modelId,
-            )
-            .map((candidate) => candidate.api || ""),
-        ).size > 1
-      )
-        throw new HttpRequestError(
-          409,
-          `所选模型路由当前 Pi Runtime 无法区分：${settings.model.provider}/${settings.model.modelId}${settings.model.api ? `（${settings.model.api}）` : ""}。请在 Pi Runtime 支持 API 路由选择前改用唯一模型 ID。`,
-          "MODEL_ROUTE_AMBIGUOUS",
-        );
-      const outcomeToken = randomUUID();
-      try {
-        await rpc.send(
-          {
-            type: "set_model",
-            provider: model.provider,
-            modelId: model.id,
-          },
-          undefined,
-          {
-            onLateResponse: this.lateRpcOutcomeHandler(
-              sessionId || "",
-              outcomeToken,
-              "generic",
-            ),
-          },
-        );
-      } catch (error) {
-        this.markRpcOutcomePending(sessionId || "", error, outcomeToken);
-        throw error;
-      }
-      this.rememberModelContextWindows([model]);
-      applied.model = model;
-      // Pi clamps every non-reasoning model to off as part of set_model. Record
-      // that known side effect and do not issue an incompatible follow-up
-      // strength that would make the hot display diverge from Runtime state.
-      if (model.reasoning === false) applied.thinkingLevel = "off";
-    }
-    if (settings.thinkingLevel && applied.model?.reasoning !== false) {
-      const outcomeToken = randomUUID();
-      try {
-        await rpc.send(
-          {
-            type: "set_thinking_level",
-            level: settings.thinkingLevel,
-          },
-          undefined,
-          {
-            onLateResponse: this.lateRpcOutcomeHandler(
-              sessionId || "",
-              outcomeToken,
-              "generic",
-            ),
-          },
-        );
-      } catch (error) {
-        this.markRpcOutcomePending(sessionId || "", error, outcomeToken);
-        if (applied.model)
-          throw new PartialTurnSettingsError(applied, error);
-        throw error;
-      }
-      applied.thinkingLevel = settings.thinkingLevel;
-    }
-    const appliedModel = applied.model;
-    if (
-      settings.model &&
-      appliedModel &&
-      appliedModel.reasoning !== false
-    ) {
-      try {
-        const state = asState(await rpc.send({ type: "get_state" }));
-        const thinkingLevel = state.thinkingLevel as ThinkingLevel | undefined;
-        if (
-          state.model?.provider === appliedModel.provider &&
-          state.model.id === appliedModel.id &&
-          thinkingLevel &&
-          THINKING_LEVELS.includes(thinkingLevel)
-        )
-          applied.thinkingLevel = thinkingLevel;
-      } catch (error) {
-        // Model/Thinking writes were already acknowledged. A failed read must
-        // neither make the following Prompt ambiguous nor claim an unconfirmed
-        // clamped value; the next Runtime refresh can repair the projection.
-        console.warn(
-          `[Pi Chat] 切换模型后无法确认 Thinking 强度${sessionId ? `（Session ${sessionId}）` : ""}: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-    }
-    return applied;
+  private turnSettingsAction() {
+    const host = {
+      HttpRequestError,
+      PartialTurnSettingsError,
+      THINKING_LEVELS,
+      asModels,
+      asState,
+      randomUUID,
+      ...this,
+    };
+    return createTurnSettingsAction(host);
   }
-
+  private async applyTurnSettings(...args: any[]): Promise<AppliedTurnSettings> {
+    return (this.turnSettingsAction() as any)(...args);
+  }
   /** Apply and consume the legacy Runtime-wide next-turn setting holder. */
   private async applyPendingTurnSettings(
     rpc: PiRpcClient,
@@ -3984,7 +3533,6 @@ export class PiChatApp {
     delete pending.model;
     delete pending.thinkingLevel;
   }
-
   /**
    * A later prompt snapshot supersedes only legacy pending fields that existed
    * before this prompt's admission. Legacy mutations accepted after queueing
@@ -3997,7 +3545,6 @@ export class PiChatApp {
     if (snapshot?.model) delete pending.model;
     if (snapshot?.thinkingLevel) delete pending.thinkingLevel;
   }
-
   /**
    * A queued Composer submission owns settings captured at its own admission.
    * Its snapshot wins for this row, but must not consume a legacy setting that
@@ -4036,7 +3583,6 @@ export class PiChatApp {
       this.supersedePendingTurnSettings(pending, snapshot);
     return applied;
   }
-
   /**
    * Busy Pi workers deliberately skip get_state so navigation and reconnect do
    * not queue behind a long turn. Keep that display snapshot aligned with an
@@ -4052,7 +3598,6 @@ export class PiChatApp {
       isStreaming: this.primaryTurnActive() || this.lastPrimaryState.isStreaming,
     };
   }
-
   private rememberRuntimeDisplaySettings(
     runtime: SecondaryRuntime,
     patch: Partial<Pick<PiState, "model" | "thinkingLevel">>,
@@ -4067,7 +3612,6 @@ export class PiChatApp {
         false,
     };
   }
-
   /** Keep hot/busy reads truthful after a prompt snapshot changed settings. */
   private rememberPrimaryAppliedTurnSettings(
     settings: AppliedTurnSettings,
@@ -4079,7 +3623,6 @@ export class PiChatApp {
         : null),
     });
   }
-
   /** Keep a Secondary's hot-memory view aligned before its prompt starts. */
   private rememberRuntimeAppliedTurnSettings(
     runtime: SecondaryRuntime,
@@ -4092,7 +3635,6 @@ export class PiChatApp {
         : null),
     });
   }
-
   /** Read the already-known Runtime route without issuing a network/provider request. */
   private currentPromptSettings(sessionId: string): PromptSettingsSnapshot | undefined {
     const state = sessionId === this.activeSessionId
@@ -4109,7 +3651,6 @@ export class PiChatApp {
       ...(state?.thinkingLevel ? { thinkingLevel: state.thinkingLevel as ThinkingLevel } : null),
     };
   }
-
   private currentGateMode(sessionId: string): GateMode {
     if (!sessionId || sessionId === this.activeSessionId)
       return this.primaryGateMode;
@@ -4119,7 +3660,6 @@ export class PiChatApp {
       "strict"
     );
   }
-
   private async syncGateMode(
     rpc: PiRpcClient,
     sessionId: string,
@@ -4148,12 +3688,10 @@ export class PiChatApp {
     }
     this.setGateMode(sessionId, mode);
   }
-
   private nextUserPromptAt(): number {
     this.lastPromptOrderAt = Math.max(this.now(), this.lastPromptOrderAt + 1);
     return this.lastPromptOrderAt;
   }
-
   private setGateMode(sessionId: string, mode: GateMode): void {
     if (!sessionId) {
       this.primaryGateMode = mode;
@@ -4171,7 +3709,6 @@ export class PiChatApp {
       piChatSessionId: sessionId,
     });
   }
-
   private recordUserPrompt(sessionId: string, promptAt = this.now()): void {
     if (!sessionId) return;
     // A queued older prompt may dispatch after a newer one was already accepted.
@@ -4183,7 +3720,6 @@ export class PiChatApp {
     if (runtime)
       runtime.lastUserPromptAt = Math.max(runtime.lastUserPromptAt || 0, next);
   }
-
   private pendingPromptMessage(
     id: string,
     promptId: string,
@@ -4209,7 +3745,6 @@ export class PiChatApp {
       piChatPromptId: promptId,
     };
   }
-
   private promptPayloadKey(message: PiMessage): string {
     if (typeof message.content === "string") return JSON.stringify([["text", message.content]]);
     if (!Array.isArray(message.content)) return "[]";
@@ -4221,11 +3756,9 @@ export class PiChatApp {
           : [block.type, block.text || ""],
     ));
   }
-
   private promptPayloadFingerprint(message: PiMessage): string {
     return createHash("sha256").update(this.promptPayloadKey(message)).digest("hex");
   }
-
   private projectPersistedPromptIds(
     sessionId: string,
     messages: PiMessage[],
@@ -4256,7 +3789,6 @@ export class PiChatApp {
     }
     if (!identities.size) this.persistedPromptIdsBySession.delete(sessionId);
   }
-
   private rememberPersistedPromptId(
     sessionId: string,
     message: PiMessage,
@@ -4306,7 +3838,6 @@ export class PiChatApp {
       );
     message.piChatPromptId = promptId;
   }
-
   private projectPersistedSteerDeliveries(
     sessionId: string,
     messages: PiMessage[],
@@ -4339,7 +3870,6 @@ export class PiChatApp {
     if (!projections.size)
       this.persistedSteerProjectionsBySession.delete(sessionId);
   }
-
   private rememberPersistedSteerDelivery(
     sessionId: string,
     message: PiMessage,
@@ -4379,7 +3909,6 @@ export class PiChatApp {
       );
     message.piChatDelivery = "steer";
   }
-
   private reconcileConsumedSteerProjections(
     sessionId: string,
     messages: PiMessage[],
@@ -4431,7 +3960,6 @@ export class PiChatApp {
       this.pendingConsumedSteersBySession.set(sessionId, remaining);
     else this.pendingConsumedSteersBySession.delete(sessionId);
   }
-
   private pendingPromptPersisted(
     pending: PendingAcceptedPrompt,
     messages: PiMessage[],
@@ -4458,14 +3986,12 @@ export class PiChatApp {
     };
     const positional = users[pending.expectedTurnTotal - 1];
     if (positional && eligible(positional)) return positional;
-
     // Large/windowed or cold-start snapshots can carry a stale cumulative
     // ordinal even though the new JSONL row is already visible. Correlate the
     // ordered pending admission only to a post-admission row that was absent
     // at admission; claimed rows make repeated identical Prompts one-to-one.
     return users.find(eligible);
   }
-
   private reconcilePendingAcceptedPrompts(
     sessionId: string,
     messages: PiMessage[] | null | undefined,
@@ -4489,7 +4015,6 @@ export class PiChatApp {
     if (remaining.length) this.pendingAcceptedPromptsBySession.set(sessionId, remaining);
     else this.pendingAcceptedPromptsBySession.delete(sessionId);
   }
-
   private pendingPromptForSession(sessionId: string): PendingPromptProjection | undefined {
     const pending = this.pendingAcceptedPromptsBySession.get(sessionId)?.at(-1);
     if (!pending) return undefined;
@@ -4504,7 +4029,6 @@ export class PiChatApp {
       ...(pending.settings ? { settings: pending.settings } : null),
     };
   }
-
   private stateWithPendingPromptSettings(
     sessionId: string,
     state: PiState,
@@ -4527,7 +4051,6 @@ export class PiChatApp {
         : null),
     };
   }
-
   private recordAcceptedPrompt(
     sessionId: string,
     promptId: string,
@@ -4564,7 +4087,6 @@ export class PiChatApp {
     };
     this.pendingAcceptedPromptsBySession.set(sessionId, [...existing, pending]);
   }
-
   private noteUserPrompt(sessionId: string, promptAt = this.now()): void {
     this.recordUserPrompt(sessionId, promptAt);
     // The sidebar needs to move at admission/queue time, never when assistant
@@ -4575,7 +4097,6 @@ export class PiChatApp {
       sessionId,
     });
   }
-
   private async sendPrompt(
     message: string,
     images: PromptImage[],
@@ -4598,7 +4119,6 @@ export class PiChatApp {
       clientPromptOperationId,
     );
   }
-
   private warmRuntimeMessageSnapshot(runtime: SecondaryRuntime): void {
     if (typeof this.options.sessions.messagesForId !== "function") return;
     void this.options.sessions
@@ -4619,7 +4139,6 @@ export class PiChatApp {
       })
       .catch(() => undefined);
   }
-
   private warmPrimaryMessageSnapshot(): void {
     const path = this.activeSessionPath;
     const sessionId = this.activeSessionId;
@@ -4643,7 +4162,6 @@ export class PiChatApp {
       })
       .catch(() => undefined);
   }
-
   /** Recovery is demand-driven, but work already accepted before a crash must not strand. */
   private resumeRecoveredRuntimeQueue(runtime: SecondaryRuntime): void {
     if (
@@ -4657,7 +4175,6 @@ export class PiChatApp {
       return;
     void this.dispatchRuntimeNext(runtime);
   }
-
   private resumeRecoveredPrimaryQueue(): void {
     if (
       this.closed ||
@@ -4670,25 +4187,19 @@ export class PiChatApp {
       return;
     void this.dispatchNext();
   }
-
   private async dispatchRuntimeNext(runtime: SecondaryRuntime): Promise<void> {
     // Runtime recovery owns stale-lock cleanup. A concurrent Resume must not
     // create a new dispatch lock that the recovery completion could erase.
     if (runtime.recovery) return;
     await this.scheduler.dispatchRuntimeNext(runtime);
   }
-
   private async dispatchNext(): Promise<void> {
     if (this.primaryRecoveryFence) return;
     await this.scheduler.dispatchPrimaryNext();
   }
-
   private sidebarProjectionActions() {
     const routePorts = {
-      DEFAULT_DIRECTORY_SESSION_LIST_SIZE,
-      DEFAULT_SESSION_LIST_SIZE,
-      compareSessionsByLastUserPrompt,
-      resolve,
+      DEFAULT_DIRECTORY_SESSION_LIST_SIZE, DEFAULT_SESSION_LIST_SIZE, compareSessionsByLastUserPrompt, resolve,
     };
     const host = new Proxy(this as any, {
       get: (target, property) => Object.prototype.hasOwnProperty.call(routePorts, property)
@@ -4698,37 +4209,21 @@ export class PiChatApp {
     });
     return createSidebarProjectionActions(host);
   }
-
   private sessionSummaries(...args: any[]): SessionSummary[] {
     return (this.sidebarProjectionActions().sessionSummaries as any)(...args);
   }
-
   private sidebarSessions(...args: any[]): { sessions: SessionSummary[]; total: number; directories: SessionDirectorySummary[] } {
     return (this.sidebarProjectionActions().sidebarSessions as any)(...args);
   }
-
   private cachedSessionList(...args: any[]): Promise<SessionSummary[]> {
     return (this.sidebarProjectionActions().cachedSessionList as any)(...args);
   }
-
   private runtimeFileActions() {
     const routePorts = {
-      HttpRequestError,
-      PrimaryRuntimeReadinessController,
-      asModels,
-      asState,
-      basename,
-      createCustomModelManagement,
-      createProviderManagement,
-      createRuntimeSettingsService,
-      randomUUID,
-      reloadPrimaryResources,
-      resolve,
-      restartPrimaryRuntimeService,
-      restoreSnapshots,
-      saveWorkspace,
-      snapshotFile,
-      stat,
+      HttpRequestError, PrimaryRuntimeReadinessController, asModels, asState,
+      basename, createCustomModelManagement, createProviderManagement, createRuntimeSettingsService,
+      randomUUID, reloadPrimaryResources, resolve, restartPrimaryRuntimeService,
+      restoreSnapshots, saveWorkspace, snapshotFile, stat,
     };
     const host = new Proxy(this as any, {
       get: (target, property) => Object.prototype.hasOwnProperty.call(routePorts, property)
@@ -4738,140 +4233,56 @@ export class PiChatApp {
     });
     return createRuntimeFileActions(host);
   }
-
   private async restartPrimaryRuntime(...args: any[]): Promise<void> {
     return (this.runtimeFileActions().restartPrimaryRuntime as any)(...args);
   }
-
   private async reloadRpc(...args: any[]): Promise<void> {
     return (this.runtimeFileActions().reloadRpc as any)(...args);
   }
-
   private async applyResourceFileTransaction<T>(...args: any[]): Promise<T> {
     return (this.runtimeFileActions().applyResourceFileTransaction as any)(...args);
   }
-
   private async applyModelFileTransaction<T>(...args: any[]): Promise<T> {
     return (this.runtimeFileActions().applyModelFileTransaction as any)(...args);
   }
-
   private providerManagementService(): any {
     return this.runtimeFileActions().providerManagementService();
   }
-
   private runtimeSettingsService(): any {
     return this.runtimeFileActions().runtimeSettingsService();
   }
-
   private customModelManagementService(): any {
     return this.runtimeFileActions().customModelManagementService();
   }
-
   private async changeWorkspace(...args: any[]): Promise<any> {
     return (this.runtimeFileActions().changeWorkspace as any)(...args);
   }
-
-  private reportSessionRelationFailure(operation: string, error: unknown): void {
-    console.error(`[Pi Chat] Session relation ${operation} failed: ${error instanceof Error ? error.message : String(error)}`);
-  }
-
-  private async forkOriginForSession(destinationSessionId: string): Promise<SessionForkOrigin | undefined> {
-    let relation;
-    try { relation = await this.sessionRelations.getForkOrigin(destinationSessionId); }
-    catch (error) {
-      this.reportSessionRelationFailure("read", error);
-      return undefined;
-    }
-    if (!relation) return undefined;
-    const runtime = this.runtimePool.get(relation.sourceSessionId);
-    let source = runtime?.summarySnapshot
-      || (relation.sourceSessionId === this.activeSessionId ? this.primarySummarySnapshot : undefined)
-      || this.options.sessions.summaryForId(relation.sourceSessionId);
-    if (!source) {
-      try { source = await this.options.sessions.cachedSummaryForId(relation.sourceSessionId); }
-      catch { /* An unavailable source is still valid Fork provenance. */ }
-    }
-    return {
-      ...relation,
-      sourceName: source?.name || relation.sourceName,
-      sourceAvailable: Boolean(source),
+  private sessionCopyOriginActions() {
+    const routePorts = {
+      executeSessionCopyRpc, idForPath, validateCopiedSessionIdentity,
     };
+    const host = new Proxy(this as any, {
+      get: (target, property) => Object.prototype.hasOwnProperty.call(routePorts, property)
+        ? (routePorts as any)[property]
+        : Reflect.get(target, property, target),
+      set: (target, property, value) => Reflect.set(target, property, value, target),
+    });
+    return createSessionCopyOriginActions(host);
   }
-
-  private async runBoundSessionCopy(input: {
-    id: string;
-    sourcePath: string;
-    mode: "clone" | "fork";
-    entryId?: string;
-    runtime?: SecondaryRuntime;
-    knownSessionIds: ReadonlySet<string>;
-  }): Promise<{ sessionId: string; sessionPath: string; piSessionId: string; warning?: string }> {
-    const rpc = input.runtime?.rpc || this.options.rpc;
-    let committed: { sessionId: string; sessionPath: string; piSessionId: string; warning?: string } | null = null;
-    this.copyingSessionIds.add(input.id);
-    try {
-      const copyResult = await executeSessionCopyRpc({
-        host: {
-          lateRpcOutcomeHandler: (id, token) => this.lateRpcOutcomeHandler(id, token, "copy"),
-          markRpcOutcomePending: (id, error, token) => this.markRpcOutcomePending(id, error, token),
-          installOutcomeFence: (id, token) => this.installRpcOutcomeFence(id, token),
-          addCopyOutcomePending: (id) => this.copyOutcomePendingSessionIds.add(id),
-        },
-        rpc,
-        sourceSessionId: input.id,
-        mode: input.mode,
-        entryId: input.entryId,
-      });
-      committed = validateCopiedSessionIdentity({
-        sourcePath: input.sourcePath,
-        sourceSessionId: input.id,
-        sessionIdForPath: (path) => idForPath(path),
-        state: copyResult.state,
-        knownSessionIds: input.knownSessionIds,
-        liveRuntimeIds: new Set(this.runtimePool.runtimes.keys()),
-        activeSessionId: this.activeSessionId,
-        cancelled: copyResult.cancelled,
-        mutationOutcomeUnknown: copyResult.mutationOutcomeUnknown,
-        copyMayHaveCommitted: copyResult.copyMayHaveCommitted,
-        installOutcomeFence: () => this.installRpcOutcomeFence(input.id, copyResult.outcomeToken),
-        mode: input.mode,
-      });
-      return committed;
-    } finally {
-      this.copyingSessionIds.delete(input.id);
-      try {
-        if (input.runtime) {
-          input.runtime.failed = true;
-          // copySession closed this Runtime's admission for the duration of
-          // the attached-writer transaction; its owner may recover in place
-          // before the outer finally reopens that exact generation.
-          await this.runtimePool.recover(input.runtime, true);
-        } else {
-          await this.restartPrimaryRuntime(input.sourcePath);
-        }
-      } catch (error) {
-        if (!committed) throw error;
-        if (!input.runtime) this.primaryFailed = true;
-        this.copyRecoveryPendingSessionIds.add(input.id);
-        this.recordRuntimeFailure(input.id, error);
-        console.error(`[Pi Chat] Session copy source recovery failed: ${error instanceof Error ? error.message : String(error)}`);
-        committed.warning = "新对话已创建，但原对话恢复尚未确认；请勿重复操作";
-      }
-    }
+  private reportSessionRelationFailure(operation: string, error: unknown): void {
+    this.sessionCopyOriginActions().reportSessionRelationFailure(operation, error);
   }
-
+  private async forkOriginForSession(destinationSessionId: string): Promise<SessionForkOrigin | undefined> {
+    return this.sessionCopyOriginActions().forkOriginForSession(destinationSessionId);
+  }
+  private async runBoundSessionCopy(input: any): Promise<any> {
+    return this.sessionCopyOriginActions().runBoundSessionCopy(input);
+  }
   private sessionCopyDeleteActions() {
     const routePorts = {
-      HttpRequestError,
-      RpcProcessExitUnconfirmedError,
-      asState,
-      finalizeSessionCopy,
-      finalizeSessionDelete,
-      prepareSessionDeletionRuntime,
-      randomUUID,
-      rpcData,
-      validateSessionCopyPreparation,
-      validateSessionDeletePath,
+      HttpRequestError, RpcProcessExitUnconfirmedError, asState, finalizeSessionCopy,
+      finalizeSessionDelete, prepareSessionDeletionRuntime, randomUUID, rpcData,
+      validateSessionCopyPreparation, validateSessionDeletePath,
     };
     const host = new Proxy(this as any, {
       get: (target, property) => Object.prototype.hasOwnProperty.call(routePorts, property)
@@ -4881,7 +4292,6 @@ export class PiChatApp {
     });
     return createSessionCopyDeleteActions(host);
   }
-
   private async copySession(
     id: string,
     mode: "clone" | "fork",
@@ -4889,24 +4299,16 @@ export class PiChatApp {
   ): Promise<SessionCopyData> {
     return this.sessionCopyDeleteActions().copySession(id, mode, persistedMessageId);
   }
-
   private async validatedSessionDeletePath(path: string, sessionId: string): Promise<string> {
     return this.sessionCopyDeleteActions().validatedSessionDeletePath(path, sessionId);
   }
-
   private async deleteSession(id: string): Promise<BootstrapData> {
     return this.sessionCopyDeleteActions().deleteSession(id);
   }
-
   private sessionViewActions() {
     const routePorts = {
-      asSessionStats,
-      BUILTIN_COMMANDS,
-      projectColdSessionView,
-      projectHotMemoryView,
-      readColdSessionView,
-      readSessionView,
-      RECENT_TURN_WINDOW_SIZE,
+      asSessionStats, BUILTIN_COMMANDS, projectColdSessionView, projectHotMemoryView,
+      readColdSessionView, readSessionView, RECENT_TURN_WINDOW_SIZE,
     };
     const host = new Proxy(this as any, {
       get: (target, property) => Object.prototype.hasOwnProperty.call(routePorts, property)
@@ -4916,7 +4318,6 @@ export class PiChatApp {
     });
     return createSessionViewActions(host);
   }
-
   private async coldSessionView(
     id: string,
     session: SessionSummary,
@@ -4925,39 +4326,30 @@ export class PiChatApp {
   ): Promise<SessionViewData | null> {
     return this.sessionViewActions().coldSessionView(id, session, turnLimit, clientId);
   }
-
   private coldSessionViewFromSnapshot(...args: any[]): SessionViewData {
     return (this.sessionViewActions().coldSessionViewFromSnapshot as any)(...args);
   }
-
   private hotMemoryView(...args: any[]): SessionViewData | null {
     return (this.sessionViewActions().hotMemoryView as any)(...args);
   }
-
   private async coldSessionViewForId(...args: any[]): Promise<SessionViewData | null> {
     return (this.sessionViewActions().coldSessionViewForId as any)(...args);
   }
-
   private async sessionView(...args: any[]): Promise<SessionViewData | null> {
     return (this.sessionViewActions().sessionView as any)(...args);
   }
-
   private async sessionViewFromCurrentProjection(...args: any[]): Promise<SessionViewData | null> {
     return (this.sessionViewActions().sessionViewFromCurrentProjection as any)(...args);
   }
-
   private markContextUsagePendingRefresh(id: string): void {
     this.sessionViewActions().markContextUsagePendingRefresh(id);
   }
-
   private beginContextUsageRefreshTurn(id: string): void {
     this.sessionViewActions().beginContextUsageRefreshTurn(id);
   }
-
   private completeContextUsageRefreshTurn(id: string): void {
     this.sessionViewActions().completeContextUsageRefreshTurn(id);
   }
-
   private rememberModelContextWindows(models: ModelInfo[]): void {
     for (const model of models) {
       const key = `${model.provider}\u0000${model.id}`;
@@ -4966,23 +4358,18 @@ export class PiChatApp {
         this.modelContextWindows.set(key, model.contextWindow);
     }
   }
-
   private modelFromSessionSettings(settings: SessionSettingsSnapshot): ModelInfo | null {
     return this.sessionViewActions().modelFromSessionSettings(settings);
   }
-
   private offlineStatsFromUsage(id: string, usage: SessionUsageSnapshot): SessionStats | undefined {
     return this.sessionViewActions().offlineStatsFromUsage(id, usage);
   }
-
   private async offlineStatsForId(id: string, knownUsage?: SessionUsageSnapshot): Promise<SessionStats | undefined> {
     return this.sessionViewActions().offlineStatsForId(id, knownUsage);
   }
-
   private async statsForSession(id: string, response: Record<string, unknown>, knownUsage?: SessionUsageSnapshot): Promise<SessionStats | undefined> {
     return this.sessionViewActions().statsForSession(id, response, knownUsage);
   }
-
   private async bootstrap(clientId = "", coherenceRetry = 0): Promise<BootstrapData> {
     const owner = this;
     const bootstrapPorts: any = {
@@ -5051,7 +4438,6 @@ export class PiChatApp {
     };
     return bootstrapPrimary(bootstrapPorts, clientId, coherenceRetry);
   }
-
   async handle(
     request: IncomingMessage,
     response: ServerResponse,
@@ -5223,7 +4609,6 @@ export class PiChatApp {
       });
     }
   }
-
   private async handleApi(
     request: IncomingMessage,
     response: ServerResponse,
@@ -5293,8 +4678,6 @@ export class PiChatApp {
       throw error;
     }
   }
-
-
   private async listSessionsRoute(input: {
     clientId: string;
     all: boolean;
@@ -5356,7 +4739,6 @@ export class PiChatApp {
     );
     return { ...result, applicationLifecycle: this.applicationLifecycle };
   }
-
   private async workspaceCwdForSession(sessionId: string): Promise<string | null> {
     // Files is a cold persisted-Session surface. Runtime membership alone is
     // not persistence proof: an empty Primary or Secondary draft must remain
@@ -5365,14 +4747,12 @@ export class PiChatApp {
       || await this.options.sessions.cachedSummaryForId(sessionId);
     return summary?.cwd ? resolve(summary.cwd) : null;
   }
-
   private async workspaceRecentFilesRoute(input: { sessionId: string }): Promise<unknown | null> {
     const cwd = await this.workspaceCwdForSession(input.sessionId);
     if (!cwd) return null;
     const snapshot = await this.options.sessions.snapshotForId(input.sessionId);
     return snapshot ? recentModifiedWorkspaceFiles(snapshot.messages, cwd) : null;
   }
-
   private async workspaceRecentFileContext(
     input: { sessionId: string; path: string },
   ): Promise<{ cwd: string; path: string } | null> {
@@ -5385,7 +4765,6 @@ export class PiChatApp {
       throw new HttpRequestError(404, "文件不在当前对话的最近修改列表中");
     return { cwd, path };
   }
-
   private async workspaceLinkedFileContext(
     input: { sessionId: string; path: string },
   ): Promise<{ cwd: string; path: string } | null> {
@@ -5399,12 +4778,10 @@ export class PiChatApp {
       throw new HttpRequestError(404, "文件链接不在当前对话的已保存回复中");
     return { cwd, path };
   }
-
   private async workspaceFileRoute(input: { sessionId: string; path: string }): Promise<unknown | null> {
     const context = await this.workspaceRecentFileContext(input);
     return context ? readWorkspaceFile(context.cwd, context.path) : null;
   }
-
   private async openValidatedWorkspaceFile(context: { cwd: string; path: string }): Promise<{ ok: true; path: string }> {
     if (!isSafeDefaultApplicationFile(context.path))
       throw new HttpRequestError(409, "为安全起见，此文件类型不能直接打开");
@@ -5414,7 +4791,6 @@ export class PiChatApp {
     else await openWithDefaultApplication(target, verifyTarget);
     return { ok: true, path: context.path };
   }
-
   private async workspaceOpenFileRoute(input: { sessionId: string; path: string }): Promise<unknown | null> {
     const context = await this.workspaceRecentFileContext(input);
     if (!context) return null;
@@ -5423,12 +4799,10 @@ export class PiChatApp {
     await readWorkspaceFile(context.cwd, context.path);
     return this.openValidatedWorkspaceFile(context);
   }
-
   private async workspaceOpenLinkedFileRoute(input: { sessionId: string; path: string }): Promise<unknown | null> {
     const context = await this.workspaceLinkedFileContext(input);
     return context ? this.openValidatedWorkspaceFile(context) : null;
   }
-
   private async readOnlySessionPath(sessionId: string): Promise<string | null> {
     const runtime = this.runtimePool.get(sessionId);
     const regular = (sessionId === this.activeSessionId
@@ -5437,13 +4811,11 @@ export class PiChatApp {
       || this.options.sessions.pathForId(sessionId);
     return regular || await this.subagentStatuses.knownChildSessionPath(sessionId);
   }
-
   private async backgroundSubagentsRoute(sessionId: string): Promise<BackgroundSubagentSnapshot | null> {
     const path = await this.readOnlySessionPath(sessionId);
     if (!path) return null;
     return this.subagentStatuses.listForParentSession(path);
   }
-
   private async backgroundSubagentViewRoute(input: {
     parentSessionId: string;
     childSessionId: string;
@@ -5508,7 +4880,6 @@ export class PiChatApp {
     );
     return liveView;
   }
-
   private async sessionViewRoute(input: {
     sessionId: string;
     clientId: string;
@@ -5531,7 +4902,6 @@ export class PiChatApp {
     );
     return projected;
   }
-
   private async handleApiCore(
     request: IncomingMessage,
     response: ServerResponse,
@@ -5539,56 +4909,19 @@ export class PiChatApp {
     preparedBody?: Record<string, unknown>,
   ): Promise<void> {
     const routePorts = {
-      ApplicationLifecycleConflictError,
-      DEFAULT_DIRECTORY_SESSION_LIST_SIZE,
-      MAX_DIRECTORY_SESSION_LIST_SIZE,
-      MAX_NATIVE_STEERING,
-      MAX_NATIVE_STEERING_IMAGE_CHARS,
-      MAX_PENDING_PROMPT_BASELINE_IDS,
-      MAX_TURN_WINDOW_SIZE,
-      PROMPT_BODY_LIMIT,
-      PROMPT_PREPARE_TIMEOUT_MS,
-      PartialTurnSettingsError,
-      Proxy,
-      RECENT_TURN_WINDOW_SIZE,
-      Reflect,
-      TURN_WINDOW_INCREMENT,
-      asState,
-      bodyJson,
-      clearInterval,
-      dequeueNativeSteering,
-      dispatchNewDraftFirstTurn,
-      gateModeFromCommand,
-      handleBootstrapRoute,
-      handleDiagnosticsReadRoute,
-      handleExtensionResponseRoute,
-      handleLifecycleControlRoute,
-      handleLocalFilesWorkspaceRoute,
-      handleModelManagementRoute,
-      handleNewSessionRoute,
-      handlePromptRoute,
-      handleQueueControlRoute,
-      handleResourcesReadRoute,
-      handleSessionMutationsRoute,
-      handleSessionRuntimeControlRoute,
-      handleSessionsReadRoute,
-      handleSubagentsReadRoute,
-      handleWindowControlRoute,
-      handleWorkspaceControlRoute,
-      handleWorkspaceOpenRoute,
-      handleWorkspaceReadRoute,
-      json,
-      methodNotAllowed,
-      pickLocalFiles,
-      pickWorkspaceFolder,
-      randomUUID,
-      readClipboardFiles,
-      renameSession,
-      requestClientId,
-      requestPageId,
-      requiredSessionId,
-      respondToExtension,
-      setInterval,
+      ApplicationLifecycleConflictError, DEFAULT_DIRECTORY_SESSION_LIST_SIZE, MAX_DIRECTORY_SESSION_LIST_SIZE, MAX_NATIVE_STEERING,
+      MAX_NATIVE_STEERING_IMAGE_CHARS, MAX_PENDING_PROMPT_BASELINE_IDS, MAX_TURN_WINDOW_SIZE, PROMPT_BODY_LIMIT,
+      PROMPT_PREPARE_TIMEOUT_MS, PartialTurnSettingsError, Proxy, RECENT_TURN_WINDOW_SIZE,
+      Reflect, TURN_WINDOW_INCREMENT, asState, bodyJson,
+      clearInterval, dequeueNativeSteering, dispatchNewDraftFirstTurn, gateModeFromCommand,
+      handleBootstrapRoute, handleDiagnosticsReadRoute, handleExtensionResponseRoute, handleLifecycleControlRoute,
+      handleLocalFilesWorkspaceRoute, handleModelManagementRoute, handleNewSessionRoute, handlePromptRoute,
+      handleQueueControlRoute, handleResourcesReadRoute, handleSessionMutationsRoute, handleSessionRuntimeControlRoute,
+      handleSessionsReadRoute, handleSubagentsReadRoute, handleWindowControlRoute, handleWorkspaceControlRoute,
+      handleWorkspaceOpenRoute, handleWorkspaceReadRoute, json, methodNotAllowed,
+      pickLocalFiles, pickWorkspaceFolder, randomUUID, readClipboardFiles,
+      renameSession, requestClientId, requestPageId, requiredSessionId,
+      respondToExtension, setInterval,
     };
     const host = new Proxy(this as any, {
       get: (target, property) => Object.prototype.hasOwnProperty.call(routePorts, property)
@@ -5598,7 +4931,6 @@ export class PiChatApp {
     });
     await handleApiCoreRoute(host, request, response, url, preparedBody);
   }
-
   private async serveStatic(
     request: IncomingMessage,
     response: ServerResponse,
