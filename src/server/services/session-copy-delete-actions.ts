@@ -78,7 +78,8 @@ export function createSessionCopyDeleteActions(host: Record<string, any>) {
         operationAdmission.reopen(operationGeneration);
       }
 
-      return finalizeSessionCopy({        host: {
+      return finalizeSessionCopy({
+        host: {
           now: () => host.now(),
           recordFork: (destinationSessionId: any, origin: any) => host.sessionRelations.recordFork(destinationSessionId, origin),
           reportRelationFailure: (operation: any, error: any) => host.reportSessionRelationFailure(operation, error),
@@ -225,7 +226,6 @@ export function createSessionCopyDeleteActions(host: Record<string, any>) {
     }, id);
     return finalize(deletionRuntime.path);
   }
-
 
   return {
     copySession,

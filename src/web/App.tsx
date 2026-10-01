@@ -3673,7 +3673,6 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     viewOperationIsCurrent, viewOperationIsInCurrentRun,
   });
 
-
   const {
     diagnosticSidebarRows,
     diagnosticSidebarSignature,
@@ -3763,7 +3762,6 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
       </main>
     );
   }
-
 
   return <AppView {...{
     AppShell, AskQuestionnaireDialog, ChevronRightIcon, ConversationPane,
