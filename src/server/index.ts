@@ -46,9 +46,9 @@ function parseArgs(argv: string[]): CliOptions {
   const options: CliOptions = {
     host: process.env.PI_CHAT_HOST || "127.0.0.1",
     port: Number(process.env.PI_CHAT_PORT || 30170),
-    // A new installation should create conversations beside ordinary user files,
+    // A new installation should create conversations in the user's home,
     // not inside this app's own checkout. CLI/env and a saved user choice still win.
-    cwd: process.env.PI_CHAT_CWD || join(homedir(), "Desktop"),
+    cwd: process.env.PI_CHAT_CWD || homedir(),
     dev: false,
   };
   for (let index = 0; index < argv.length; index += 1) {

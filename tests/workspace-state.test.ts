@@ -7,17 +7,17 @@ import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { loadWorkspace, saveWorkspace } from "../src/server/workspace-state";
 
-test("a fresh portable workspace fallback is the user's Desktop", async () => {
+test("a fresh portable workspace fallback is the user's home", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-workspace-default-"));
-  const desktop = join(root, "Desktop");
+  const home = join(root, "user");
   const previous = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = join(root, "agent");
   try {
-    await mkdir(desktop);
-    assert.equal(await loadWorkspace(desktop), resolve(desktop));
+    await mkdir(home);
+    assert.equal(await loadWorkspace(home), resolve(home));
     await mkdir(join(root, "agent"), { recursive: true });
     await writeFile(join(root, "agent", "pi-chat-workspace.json"), JSON.stringify({ cwd: join(root, "missing") }), "utf8");
-    assert.equal(await loadWorkspace(desktop), resolve(desktop));
+    assert.equal(await loadWorkspace(home), resolve(home));
   } finally {
     if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previous;
