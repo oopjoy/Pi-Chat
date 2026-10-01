@@ -11,16 +11,21 @@ import * as path from "node:path";
 
 type GateMode = "strict" | "open";
 
+// Match command boundaries in both shell syntax and multiline scripts.
+const destructiveBashPatterns = [
+	/(?:^|[;&|\r\n]\s*)(?:sudo\s+)?rm(?:\s|$)/im,
+	/(?:^|[;&|\r\n]\s*)(?:sudo\s+)?(?:del|rmdir|shred|Remove-Item|ri|rd)(?:\s|$)/im,
+	/(?:^|[;&|\r\n]\s*)(?:sudo\s+)?mv\b[^;|\r\n]*\/dev\/null/i,
+	/(?:^|[;&|\r\n]\s*)git\s+clean\b[^;|\r\n]*\s-f[^;|\r\n]*d[^;|\r\n]*x(?:\s|$)/im,
+	/(?:^|[;&|\r\n]\s*)git\s+reset\s+--hard(?:\s|$)/im,
+];
+
+export function isDestructiveBashCommand(command: string): boolean {
+	return destructiveBashPatterns.some((pattern) => pattern.test(command));
+}
+
 export default function (pi: ExtensionAPI) {
 	let gateMode: GateMode = "strict";
-
-	const destructiveBashPatterns = [
-		// Keep detection intentionally simple. Match common delete commands at the
-		// beginning of a command or after a shell command boundary.
-		/(?:^|[;&|]\s*)(?:sudo\s+)?rm(?:\s|$)/i,
-		/(?:^|[;&|]\s*)(?:sudo\s+)?(?:del|rmdir|shred)(?:\s|$)/i,
-		/(?:^|[;&|]\s*)(?:sudo\s+)?mv\b[^;&|]*\/dev\/null/i,
-	];
 
 	pi.registerCommand("gate", {
 		description: "Toggle file permission gate: /gate [status|open|strict]",
@@ -92,7 +97,7 @@ export default function (pi: ExtensionAPI) {
 
 		if (tool === "bash") {
 			const command = ((event.input as any).command as string) || "";
-			const isDestructive = destructiveBashPatterns.some((pattern) => pattern.test(command));
+			const isDestructive = isDestructiveBashCommand(command);
 			if (!isDestructive || gateMode === "open") return undefined;
 
 			if (!ctx.hasUI) {

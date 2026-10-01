@@ -224,7 +224,7 @@ import { createSessionCopyDeleteActions } from "./services/session-copy-delete-a
 import { createSessionViewActions } from "./services/session-view-actions.js";
 import { createRuntimeFileActions } from "./services/runtime-file-actions.js";
 import { createSidebarProjectionActions } from "./services/sidebar-projection-actions.js";
-import { createSessionCopyOriginActions } from "./services/session-copy-origin-actions.js";
+import { createSessionCopyOriginActions, type SessionCopyOriginInput, type SessionCopyOriginResult } from "./services/session-copy-origin-actions.js";
 import { createCompactAction } from "./services/compact-action.js";
 import { createTurnSettingsAction } from "./services/turn-settings-action.js";
 import { createPrimaryEnsureAction } from "./services/primary-ensure-action.js";
@@ -4291,7 +4291,7 @@ export class PiChatApp {
   private async forkOriginForSession(destinationSessionId: string): Promise<SessionForkOrigin | undefined> {
     return this.sessionCopyOriginActions().forkOriginForSession(destinationSessionId);
   }
-  private async runBoundSessionCopy(input: any): Promise<any> {
+  private async runBoundSessionCopy(input: SessionCopyOriginInput): Promise<SessionCopyOriginResult | null> {
     return this.sessionCopyOriginActions().runBoundSessionCopy(input);
   }
   private sessionCopyDeleteActions() {

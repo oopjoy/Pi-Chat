@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { gateModeFromCommand, gateModeFromNotice } from "../src/web/lib/gate-mode";
+import { isDestructiveBashCommand } from "../resources/extensions/pi-chat-file-permission-gate";
+
+test("Gate detects destructive commands across multiline shell boundaries", () => {
+  assert.equal(isDestructiveBashCommand('echo start\nrm -rf dist'), true);
+  assert.equal(isDestructiveBashCommand('Write-Output ready\nRemove-Item -Recurse build'), true);
+  assert.equal(isDestructiveBashCommand('git clean -fdx'), true);
+  assert.equal(isDestructiveBashCommand('git reset --hard HEAD'), true);
+  assert.equal(isDestructiveBashCommand('echo safe\nprintf ready'), false);
+});
 
 test("gate mode parser recognizes aliases and runtime status notifications", () => {
   assert.equal(gateModeFromCommand("/gate strict"), "strict");

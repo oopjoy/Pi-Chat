@@ -106,6 +106,9 @@ test("file attachments stay drive-only while workspaces accept canonical WSL UNC
   assert.equal(isSafeDefaultApplicationFile("C:\\work\\notes.txt"), true);
   assert.equal(isSafeDefaultApplicationFile("C:\\work\\run.cmd"), false);
   assert.equal(isSafeDefaultApplicationFile("C:\\work\\script.js"), false);
+  for (const extension of [".chm", ".settingcontent-ms", ".website", ".internetshortcut", ".appx", ".msix", ".msixbundle", ".theme", ".themepack"]) {
+    assert.equal(isSafeDefaultApplicationFile(`C:\\work\\payload${extension}`), false, extension);
+  }
 
   let killed = 0;
   const hung = Object.assign(new EventEmitter(), {

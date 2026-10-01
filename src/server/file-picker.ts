@@ -237,7 +237,8 @@ const BLOCKED_DEFAULT_OPEN_EXTENSIONS = new Set([
   ".jse", ".lnk", ".msc", ".msi", ".msp", ".mst", ".pif", ".pl", ".ps1", ".ps1xml",
   ".ps2", ".ps2xml", ".psc1", ".psc2", ".psd1", ".psm1", ".py", ".pyw", ".rb", ".reg",
   ".scf", ".scr", ".sct", ".sh", ".shb", ".shs", ".url", ".vb", ".vbe", ".vbs", ".ws",
-  ".wsc", ".wsf", ".wsh", ".xll",
+  ".wsc", ".wsf", ".wsh", ".xll", ".chm", ".settingcontent-ms", ".website", ".internetshortcut",
+  ".appx", ".msix", ".msixbundle", ".theme", ".themepack",
 ]);
 const WINDOWS_SHELL_TIMEOUT_MS = 10_000;
 const MAX_WINDOWS_SHELL_STDERR_CHARS = 16 * 1024;

@@ -1,6 +1,11 @@
 import type { BootstrapData, SessionCopyData, SessionForkOrigin } from "../../shared/types.js";
+import type { SessionCopyOriginInput, SessionCopyOriginResult } from "./session-copy-origin-actions.js";
 
-export function createSessionCopyDeleteActions(host: Record<string, any>) {
+export interface SessionCopyDeleteHost extends Record<string, any> {
+  runBoundSessionCopy(input: SessionCopyOriginInput): Promise<SessionCopyOriginResult | null>;
+}
+
+export function createSessionCopyDeleteActions(host: SessionCopyDeleteHost) {
   const {
     HttpRequestError,
     RpcProcessExitUnconfirmedError,
@@ -26,8 +31,8 @@ export function createSessionCopyDeleteActions(host: Record<string, any>) {
       throw new HttpRequestError(409, "上次新对话已创建，但恢复或列表投影尚未确认；请勿重复操作");
     const releasePromptAdmission = await host.beginPromptAdmission(id);
     try {
-      const knownSessions = await host.options.sessions.list();
-      const knownSessionIds = new Set(knownSessions.map((session: any) => session.id));
+      const knownSessions = await host.options.sessions.list() as Array<{ id: string }>;
+      const knownSessionIds = new Set<string>(knownSessions.map((session) => session.id));
       let runtime = host.runtimePool.get(id);
       const primary = id === host.activeSessionId && !runtime;
       if (!primary && !runtime) runtime = await host.ensureRuntime(id);

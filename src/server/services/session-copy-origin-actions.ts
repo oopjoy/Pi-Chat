@@ -1,6 +1,22 @@
 import type { SessionForkOrigin } from "../../shared/types.js";
 import type { SecondaryRuntime } from "../runtime-pool.js";
 
+export interface SessionCopyOriginInput {
+  id: string;
+  sourcePath: string;
+  mode: "clone" | "fork";
+  entryId?: string;
+  runtime?: SecondaryRuntime;
+  knownSessionIds: ReadonlySet<string>;
+}
+
+export interface SessionCopyOriginResult {
+  sessionId: string;
+  sessionPath: string;
+  piSessionId: string;
+  warning?: string;
+}
+
 export function createSessionCopyOriginActions(host: Record<string, any>) {
   const {
     executeSessionCopyRpc,
@@ -34,14 +50,7 @@ export function createSessionCopyOriginActions(host: Record<string, any>) {
     };
   }
 
-  async function runBoundSessionCopy(input: {
-    id: string;
-    sourcePath: string;
-    mode: "clone" | "fork";
-    entryId?: string;
-    runtime?: SecondaryRuntime;
-    knownSessionIds: ReadonlySet<string>;
-  }): Promise<{ sessionId: string; sessionPath: string; piSessionId: string; warning?: string } | null> {
+  async function runBoundSessionCopy(input: SessionCopyOriginInput): Promise<SessionCopyOriginResult | null> {
     const rpc = input.runtime?.rpc || host.options.rpc;
     let committed: { sessionId: string; sessionPath: string; piSessionId: string; warning?: string } | null = null;
     host.copyingSessionIds.add(input.id);
