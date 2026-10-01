@@ -121,6 +121,14 @@ import { createHistoryPaginationFlow } from "./application/history-pagination-fl
 import { createStreamErrorHandler, createOversizedEventHandler } from "./application/stream-error-effects";
 import { createPiEventHandler } from "./application/pi-event-handler";
 import { createStopGeneration } from "./application/stop-generation-flow";
+import { createPromptSendFlow } from "./application/prompt-send-flow";
+import { createSessionManagementActions } from "./application/session-management-actions";
+import { createComposerSettingsActions } from "./application/composer-settings-actions";
+import { createQueueActions } from "./application/queue-actions";
+import { AppView } from "./application/app-view";
+import { createSessionProjectionFlows } from "./application/session-projection-flows";
+import { createAppPresentationState } from "./application/app-presentation-state";
+import { createSessionProjectionState } from "./application/session-projection-state";
 import { reconcileServerPendingPrompt as reconcileServerPendingPromptFlow, reconcileServerPendingSteers as reconcileServerPendingSteersFlow } from "./application/server-pending-projection";
 import { reconcileSessionInventory } from "./application/session-inventory-reconciliation";
 import {
@@ -797,198 +805,6 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   // Passive history browsing must stay fast without consuming a Pi Runtime.
   // Keep enough data-only panes to cover normal archive hopping; the server's
   // target snapshot cache has the same entry bound.
-  const viewCacheRef = useRef(new SessionViewCache(32));
-  /** A structural delete is terminal even if a response is lost in transit. */
-  const confirmedDeletedSessionIdsRef = useRef(new Set<string>());
-  const viewCacheWriterRef = useRef<SessionViewCacheWriter | null>(null);
-  if (!viewCacheWriterRef.current)
-    viewCacheWriterRef.current = new SessionViewCacheWriter(
-      viewCacheRef.current,
-      () => runEpochGenerationRef.current,
-      (sessionId) => confirmedDeletedSessionIdsRef.current.has(sessionId),
-    );
-  const viewCacheWriter = viewCacheWriterRef.current;
-  const activeSessionProjectionWriterRef =
-    useRef<ActiveSessionProjectionWriter | null>(null);
-  if (!activeSessionProjectionWriterRef.current)
-    activeSessionProjectionWriterRef.current =
-      new ActiveSessionProjectionWriter(
-        (ids) => {
-          setActiveSessionIds(ids);
-          viewCacheWriter.setPinnedCurrent(ids);
-          setSessions((current) => applyActiveSessionIds(current, ids));
-        },
-        () => runEpochGenerationRef.current,
-      );
-  const activeSessionProjectionWriter =
-    activeSessionProjectionWriterRef.current;
-  // Queue projections are event-owned and may be newer than an HTTP view. This
-  // preparation callback runs only after the writer accepts process/deletion
-  // authority, so a rejected async result cannot mutate queue projections.
-  const prepareSessionViewCacheWrite = (view: SessionViewData): SessionViewData => {
-    if (!Array.isArray(view.queue)) return view;
-    const sessionId = view.session.id;
-    const filteredQueue = filterCancelledQueue(sessionId, view.queue);
-    const latest = latestQueueProjectionRef.current.get(sessionId);
-    if (!latest) {
-      latestQueueProjectionRef.current.set(sessionId, {
-        queue: filteredQueue,
-        paused: view.queuePaused === true,
-      });
-      queueProjectionSourceRef.current.set(sessionId, "view");
-      advanceQueueProjectionRevision(sessionId);
-    }
-    const projection = latest || {
-      queue: filteredQueue,
-      paused: view.queuePaused === true,
-    };
-    return {
-      ...view,
-      queue: projection.queue,
-      queuePaused: projection.paused,
-    };
-  };
-  const commitSessionViewCache = (
-    view: SessionViewData,
-    authority: SessionViewCacheWriteAuthority,
-  ) => viewCacheWriter.remember(view, authority, prepareSessionViewCacheWrite);
-  const refreshSessionCache = (id: string, patch: Partial<SessionViewData>) =>
-    viewCacheWriter.refreshCurrent(id, patch);
-  const refreshSessionCacheForAuthority = (
-    id: string,
-    patch: Partial<SessionViewData>,
-    authority: SessionViewCacheWriteAuthority,
-  ) => viewCacheWriter.refresh(id, patch, authority);
-  /**
-   * Queue projections are event-owned and can be newer than a cached Session
-   * view. Never let a stale cached view resurrect an item already removed by a
-   * queue_update/dispatch event.
-   */
-  function withLatestQueueProjection(view: SessionViewSnapshot): SessionViewSnapshot;
-  function withLatestQueueProjection(view: undefined): undefined;
-  function withLatestQueueProjection(view: SessionViewSnapshot | undefined): SessionViewSnapshot | undefined;
-  function withLatestQueueProjection(view: SessionViewSnapshot | undefined): SessionViewSnapshot | undefined {
-    if (!view) return undefined;
-    const latest = latestQueueProjectionRef.current.get(view.session.id);
-    if (!latest) return view;
-    return {
-      ...view,
-      queue: latest.queue,
-      queuePaused: latest.paused,
-    };
-  };
-  const patchSessionCache = (
-    id: string,
-    patch: Parameters<SessionViewCacheWriter["patchCurrent"]>[1],
-  ) => viewCacheWriter.patchCurrent(id, patch);
-  const patchSessionCacheForAuthority = (
-    id: string,
-    patch: Parameters<SessionViewCacheWriter["patch"]>[1],
-    authority: SessionViewCacheWriteAuthority,
-  ) => viewCacheWriter.patch(id, patch, authority);
-  const updateLiveSessionCache = (id: string, message: PiMessage) =>
-    viewCacheWriter.updateLiveCurrent(id, message);
-  /**
-   * HTTP acknowledgements and SSE can both be lost during a reconnect. A later
-   * authoritative Session view still contains the scheduler's queue, so bind
-   * its stable queue IDs to matching local admissions before transcript
-   * protection decides whether those rows should remain hidden.
-   */
-  const reconcileQueuedAdmissions = (
-    sessionId: string,
-    queue: QueuedPrompt[] | undefined,
-  ) => {
-    if (!sessionId || !queue?.length) return;
-    const turns = localUserTurnsRef.current.get(sessionId);
-    if (!turns?.length) return;
-    for (const queued of queue)
-      bindQueuedAdmission(
-        turns,
-        queued.id,
-        queued.message,
-        queued.imageCount,
-      );
-  };
-  const appendTerminalSessionCache = (id: string, message: PiMessage) =>
-    viewCacheWriter.appendTerminalCurrent(id, message);
-  const [pendingSteersBySession, setPendingSteersBySession] = useState<
-    Record<string, PendingSteer[]>
-  >({});
-  const pendingSteersRef = useRef(new Map<string, PendingSteer[]>());
-  /** Latest server authority prevents an older refresh from reviving a consumed Steer. */
-  const pendingSteerProjectionRef = useRef(new Map<string, { revision: number; items: PendingSteer[] }>());
-  const syncPendingSteers = (sessionId: string, items: PendingSteer[]) => {
-    if (items.length) pendingSteersRef.current.set(sessionId, items);
-    else pendingSteersRef.current.delete(sessionId);
-    setPendingSteersBySession(Object.fromEntries(pendingSteersRef.current));
-  };
-  const [gateModes, setGateModes] = useState<Record<string, GateMode>>({});
-  const gateModesRef = useRef<Record<string, GateMode>>({});
-  const updateGateMode = useCallback(
-    (
-      sessionId: string,
-      mode: GateMode | undefined,
-      authority?: SessionViewCacheWriteAuthority,
-    ) => {
-      const next = { ...gateModesRef.current };
-      if (mode) next[sessionId] = mode;
-      else delete next[sessionId];
-      gateModesRef.current = next;
-      if (authority)
-        patchSessionCacheForAuthority(sessionId, { gateMode: mode }, authority);
-      else patchSessionCache(sessionId, { gateMode: mode });
-      setGateModes(next);
-    },
-    [],
-  );
-  const [failedSessionIds, setFailedSessionIds] = useState<string[]>([]);
-  /** Apply only server-authored Sidebar activity; cache overlay protects it from late HTTP views. */
-  const applySessionActivity = useCallback(
-    (sessionId: string, activity: SessionActivityState) => {
-      const terminalActivity =
-        activity.execution === "idle" ||
-        activity.execution === "queued" ||
-        activity.execution === "failed";
-      if (activity.execution === "running" || activity.execution === "dispatching")
-        sessionRunningOverridesRef.current.set(sessionId, true);
-      else if (terminalActivity)
-        sessionRunningOverridesRef.current.set(sessionId, false);
-      // `paused` belongs to the follow-up queue and may coexist with an active
-      // turn. Preserve the preceding running/terminal authority instead of
-      // manufacturing either conclusion from paused alone.
-      setFailedSessionIds((current) =>
-        activity.execution === "failed"
-          ? [...new Set([...current, sessionId])]
-          : current.filter((id) => id !== sessionId),
-      );
-      setSessions((current) =>
-        current.map((session) => {
-          if (session.id !== sessionId) return session;
-          const running =
-            activity.execution === "running" ||
-            activity.execution === "dispatching"
-              ? true
-              : terminalActivity
-                ? false
-                : session.running === true;
-          return {
-            ...session,
-            activity,
-            running,
-            queued:
-              activity.execution === "queued" ||
-              activity.execution === "paused",
-            pendingConfirmation: activity.awaitingConfirmation,
-          };
-        }),
-      );
-      patchSessionCache(sessionId, { sessionActivity: activity });
-    },
-    [],
-  );
-  useEffect(() => {
-    sessionsRef.current = sessions;
-  }, [sessions]);
   const diagnosticSidebarRowsRef = useRef(new Map<string, string>());
   const diagnosticUiSignatureRef = useRef("");
   const diagnosticSseRejectionAtRef = useRef(new Map<string, number>());
@@ -1053,6 +869,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     promptReconcileTimerRef.current = null;
   };
   const requestPromptReconcileRef = useRef<(sessionId: string) => void>(() => undefined);
+  const schedulePromptReconcileRef = useRef<(sessionId: string, eventVersion?: number, failedAttempts?: number) => void>(() => undefined);
   const sseReconnectTimerRef = useRef<number | null>(null);
   const sseFloodCountRef = useRef(0);
   const clearViewedPromiseRef = useRef<Promise<unknown> | null>(null);
@@ -1259,6 +1076,53 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     advanceQueueProjectionRevision(sessionId);
     return projection;
   };
+  const {
+    viewCacheRef,
+    confirmedDeletedSessionIdsRef,
+    viewCacheWriterRef,
+    viewCacheWriter,
+    activeSessionProjectionWriterRef,
+    activeSessionProjectionWriter,
+    prepareSessionViewCacheWrite,
+    commitSessionViewCache,
+    refreshSessionCache,
+    refreshSessionCacheForAuthority,
+    patchSessionCache,
+    patchSessionCacheForAuthority,
+    updateLiveSessionCache,
+    reconcileQueuedAdmissions,
+    appendTerminalSessionCache,
+    withLatestQueueProjection,
+    pendingSteersBySession,
+    setPendingSteersBySession,
+    pendingSteersRef,
+    pendingSteerProjectionRef,
+    syncPendingSteers,
+    gateModes,
+    setGateModes,
+    gateModesRef,
+    updateGateMode,
+    failedSessionIds,
+    setFailedSessionIds,
+    applySessionActivity,
+  } = createSessionProjectionState({
+    ActiveSessionProjectionWriter,
+    SessionViewCache,
+    SessionViewCacheWriter,
+    advanceQueueProjectionRevision,
+    applyActiveSessionIds,
+    bindQueuedAdmission,
+    filterCancelledQueue,
+    latestQueueProjectionRef,
+    localUserTurnsRef,
+    queueProjectionSourceRef,
+    runEpochGenerationRef,
+    sessionRunningOverridesRef,
+    sessions,
+    sessionsRef,
+    setActiveSessionIds,
+    setSessions,
+  });
   const rememberConfirmedQueueDispatchIds = (
     sessionId: string,
     before: LocalUserTurn[],
@@ -2486,520 +2350,147 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     [],
   );
 
-  const applySessionView = useCallback((
-    view: SessionViewData,
-    authority: SessionViewCommitAuthority | DraftSessionViewCommitAuthority,
-    queueRequestRevision?: number,
-  ) => createSessionViewApplicator({
-    recordBrowserStateDiagnostic,
-    confirmedDeleted: () => confirmedDeletedSessionIdsRef.current,
-    paneAuthorityCanCommit: (authority: any) => "sessionId" in authority ? paneAuthorityCanCommit(authority) : draftAuthorityCanCommit(authority),
-    projectActiveSession: (id: string) => activeSessionProjectionWriter.projectSessionView(id),
-    reconcileActiveSession: (id: string, active: boolean, authority: any) => activeSessionProjectionWriter.reconcileSessionView(id, active, authority),
-    completedCompaction: () => completedCompactionSessionIdsRef.current,
-    queueProjectionForView,
+  const loadingEarlierRequestsRef = useRef(
+    new Map<
+      string,
+      { token: symbol; navigationEpoch: number; controller: AbortController }
+    >(),
+  );
+
+  const {
+    applySessionView,
+    ensureHandshake,
+    loadBootstrap,
+    refresh,
+    startIdleRecovery,
+    refreshSidebarSessions,
+    loadAllSessions,
+    loadDirectorySessions,
+    scheduleSidebarRefresh
+  } = createSessionProjectionFlows({
+    EARLY_HISTORY_VIEW_DELAY_MS,
+    EARLY_SIDEBAR_INVENTORY_DELAY_MS,
+    MAX_DIRECTORY_PREFIX_SIZE,
+    acceptQueueProjectionIfCurrent,
+    activeSessionIds,
+    activeSessionProjectionWriter,
+    api,
+    appearance,
+    applyAppearance,
+    applyBootstrap,
+    applyBootstrapMetadata,
+    applySidebarInventory,
     applySidebarQueueProjection,
+    bootstrapCompletedRef,
+    bootstrapInFlightRef,
+    buildIdentityMatches,
+    cancelPendingNavigation,
+    cancellingQueueIdsRef,
+    capturePaneAuthority,
+    clearStoppingForSession,
+    commitPane,
     commitSessionViewCache,
-    recordRejectedView: (sessionId: string, reason: string, authority: any) => {
-      const decisionReason = reason === "session-deleted" ? reason : reason === "stale-authority"
-        ? authority && "sessionId" in authority ? "stale-pane-authority" : "stale-draft-authority" : reason;
-      recordBrowserStateDiagnostic("projection", "session-view-rejected", {
-        sessionId,
-        details: { authorityPresent: Boolean(authority), decisionReason },
-      });
-    },
-    recordAcceptedView: (sessionId: string, authority: any) => recordBrowserStateDiagnostic("projection", "session-view-accepted", {
-      sessionId,
-      details: { authorityPresent: Boolean(authority), decisionReason: "accepted" },
-    }),
+    commitSidebarSessions,
+    committedPaneCommandsRef,
+    committedPaneIdentityRef,
+    completedCompactionSessionIdsRef,
+    confirmPrimaryCapabilitySnapshot,
+    confirmedDeletedSessionIdsRef,
+    createSessionBootstrapFlow,
+    createSessionViewApplicator,
+    desiredSessionIdRef,
+    directoryLoadGenerationsRef,
+    directorySessionCoverageRef,
+    draftAuthorityCanCommit,
+    fetchSessionView,
+    handshakeInFlightRef,
+    initialHistoryRef,
+    initialReadyRecoveryRequestedRef,
+    loadAllSessionsGenerationRef,
+    loadingEarlierRequestsRef,
+    localDraftRef,
+    localTurnBelongsInTranscript,
+    localUserTurnsRef,
+    modelCatalogueRevisionGate,
+    navigationEpochRef,
+    optimisticSessionsTotal,
+    paneAuthorityCanCommit,
+    paneModelRef,
+    pinnedInventoryAttemptRef,
+    promoteTurnsAbsentFromQueue,
+    protectTranscriptWithLocalTurns,
+    queueProjectionForView,
+    queueProjectionRevisionRef,
+    reconcileQueuedAdmissions,
     reconcileServerPendingPrompt,
     reconcileServerPendingSteers,
-    clearStoppingForSession,
-    viewedSessionId: () => viewedSessionIdRef.current,
-    clearTerminalAssistantMarker: (id: string) => terminalAssistantSessionIdsRef.current.delete(id),
-    clearUnseenReply: (id: string) => setUnseenReplySessionIds((current) => current.filter((candidate) => candidate !== id)),
-    recordSourceTurnTotal,
-    reconcileQueuedAdmissions,
-    localTurns: (id: string) => localUserTurnsRef.current.get(id) || [],
-    promoteTurnsAbsentFromQueue,
-    cancellingQueueIds: (id: string) => cancellingQueueIdsRef.current.get(id),
-    protectTranscriptWithLocalTurns,
-    rememberConfirmedQueueDispatchIds,
-    localTurnBelongsInTranscript,
-    storeLocalTurns: (id: string, turns: any[]) => localUserTurnsRef.current.set(id, turns),
-    deleteLocalTurns: (id: string) => localUserTurnsRef.current.delete(id),
-    updateGateMode,
-    extensionAuthority: (id: string, authority: any) => authority && "sessionId" in authority ? authority : capturePaneAuthority(id),
-    tryAutoAllowGate,
-    commitPane,
-    committedPaneCommandsFor: (id: string) => committedPaneIdentityRef.current.kind === "session" && committedPaneIdentityRef.current.sessionId === id ? committedPaneCommandsRef.current : [],
-    setRuntimeWarming,
-    clearPaneLoading: (id: string) => setPaneLoading((current) => current?.sessionId === id ? null : current),
-    recordPaneCommit,
-    recordCommittedView: (resolvedView: SessionViewData, queuePaused: boolean) => recordBrowserStateDiagnostic("projection", "session-view-committed", {
-      sessionId: resolvedView.session.id,
-      details: {
-        decisionReason: "committed",
-        stateStreaming: resolvedView.state.isStreaming,
-        viewStreaming: resolvedView.isStreaming,
-        sessionRunning: resolvedView.session.running === true,
-        hasLive: Boolean(resolvedView.liveMessage),
-        toolActive: Boolean(resolvedView.toolStatus),
-        queuePaused,
-        queueLength: resolvedView.queue?.length || 0,
-        runtimeStatus: resolvedView.runtimeStatus || "view-only",
-      },
-    }),
-    isSubagentView: (id: string) => subagentAddressesRef.current.has(id),
     reconcileSessionInventoryCurrent,
-    updateSessionSummary: (summary: SessionSummary) => setSessions((current) => {
-      const known = current.some((session) => session.id === summary.id);
-      if (!known && !sidebarInventoryReadyRef.current) return current;
-      return uniqueSessionSummaries(known ? current.map((session) => session.id === summary.id ? { ...session, ...summary } : session) : [...current, summary]);
-    }),
-  })(view, authority, queueRequestRevision), [
-    capturePaneAuthority, commitPane, tryAutoAllowGate, draftAuthorityCanCommit,
-    paneAuthorityCanCommit, recordPaneCommit, reconcileServerPendingPrompt,
-    reconcileServerPendingSteers, setRuntimeWarming, updateGateMode,
-    clearStoppingForSession,
-  ]);
-
-  const ensureHandshake = useCallback(
-    (refreshEpoch: number, runEpochGeneration: number) => {
-      const current = handshakeInFlightRef.current;
-      if (
-        current &&
-        current.refreshEpoch === refreshEpoch &&
-        current.runEpochGeneration === runEpochGeneration
-      )
-        return current.request;
-      if (current) {
-        // Keep the same service token generation, but prevent this refresh from
-        // joining a promise whose authority closure belongs to an older refresh.
-        api.detachHandshake();
-        handshakeInFlightRef.current = null;
-      }
-      const request = api
-        .handshake()
-        .then((handshake) => {
-          if (
-            refreshEpochRef.current !== refreshEpoch ||
-            runEpochGenerationRef.current !== runEpochGeneration
-          )
-            return false;
-          api.acceptHandshake(handshake);
-          setServerBuildIdentity(handshake.buildIdentity);
-          setBuildIdentityMismatch(
-            !buildIdentityMatches(handshake.buildIdentity),
-          );
-          return true;
-        })
-        .finally(() => {
-          if (handshakeInFlightRef.current?.request === request)
-            handshakeInFlightRef.current = null;
-        });
-      handshakeInFlightRef.current = {
-        refreshEpoch,
-        runEpochGeneration,
-        request,
-      };
-      return request;
-    },
-    [],
-  );
-
-  const loadBootstrap = useCallback((authority: RefreshAuthority) => {
-    const current = bootstrapInFlightRef.current;
-    if (
-      current
-      && current.runEpochGeneration === authority.runEpochGeneration
-      && current.cacheGeneration === authority.cacheGeneration
-      && current.runtimeProjectionGeneration ===
-        authority.runtimeProjectionGeneration
-      && current.activeSessionProjectionGeneration ===
-        authority.activeSessionProjectionGeneration
-      && current.activeSessionFullRevision ===
-        authority.activeSessionFullRevision
-      && current.modelCatalogueGeneration ===
-        authority.modelCatalogueGeneration
-    ) return current.request;
-    // Never let a refresh authorized by a newer Runtime/cache observation join
-    // a request that began before that projection existed. The old request is
-    // uncancellable; identity-guarded cleanup prevents it detaching the new one.
-    if (current) bootstrapInFlightRef.current = null;
-    // api.bootstrap() performs the lightweight handshake only for the real
-    // transport. Keeping this seam direct preserves test/local adapters that
-    // supply a complete authenticated bootstrap projection themselves.
-    const request = api.bootstrap().finally(() => {
-      if (bootstrapInFlightRef.current?.request === request)
-        bootstrapInFlightRef.current = null;
-    });
-    bootstrapInFlightRef.current = {
-      request,
-      runEpochGeneration: authority.runEpochGeneration,
-      cacheGeneration: authority.cacheGeneration,
-      runtimeProjectionGeneration: authority.runtimeProjectionGeneration,
-      activeSessionProjectionGeneration:
-        authority.activeSessionProjectionGeneration,
-      activeSessionFullRevision: authority.activeSessionFullRevision,
-      modelCatalogueGeneration: authority.modelCatalogueGeneration,
-    };
-    return request;
-  }, []);
-
-  const refresh = useCallback(
-    () => createSessionBootstrapFlow({
-      captureRefreshAuthority: () => ({
-        refreshEpoch: ++refreshEpochRef.current,
-        ...viewCacheWriter.captureAuthority(runEpochGenerationRef.current),
-        ...runtimeProjectionWriter.captureAuthority(runEpochGenerationRef.current),
-        ...activeSessionProjectionWriter.captureAuthority(runEpochGenerationRef.current),
-        ...modelCatalogueRevisionGate.captureAuthority(),
-        navigationEpoch: navigationEpochRef.current,
-      }),
-      desiredSessionId: () => desiredSessionIdRef.current,
-      viewedSessionId: () => viewedSessionIdRef.current,
-      rememberedSessionId,
-      setDesiredSessionId: (id: string) => { desiredSessionIdRef.current = id; },
-      sessionEventVersion: (id: string) => sessionEventVersionRef.current.get(id) || 0,
-      queueProjectionRevision: (id: string) => queueProjectionRevisionRef.current.get(id) || 0,
-      queueRevisionSnapshot: () => new Map(queueProjectionRevisionRef.current),
-      capturePaneAuthority,
-      initialHistory: () => initialHistoryRef.current,
-      clearInitialHistory: () => { initialHistoryRef.current = null; },
-      refreshAuthorityIsCurrent,
-      confirmedDeleted: () => confirmedDeletedSessionIdsRef.current,
-      hasLocalDraft: () => Boolean(localDraftRef.current),
-      ensureHandshake,
-      fetchSessionView,
-      setInitialHistory: (value: any) => { initialHistoryRef.current = value; },
-      applySessionView,
-      earlyHistoryDelayMs: () => EARLY_HISTORY_VIEW_DELAY_MS,
-      earlySidebarDelayMs: () => EARLY_SIDEBAR_INVENTORY_DELAY_MS,
-      sidebarInventoryReady: () => sidebarInventoryReadyRef.current,
-      showAllSessions: () => showAllSessionsRef.current,
-      applySidebarInventory,
-      refreshEpoch: () => refreshEpochRef.current,
-      runEpochGeneration: () => runEpochGenerationRef.current,
-      recordBootstrapRejected: (reason: string) => recordBrowserStateDiagnostic("projection", "bootstrap-rejected", {
-        details: { authorityPresent: true, decisionReason: reason },
-      }),
-      markBootstrapCompleted: () => {
-        bootstrapCompletedRef.current = true;
-        if (typeof window !== "undefined") replacementBootstrapPendingRef.current = false;
-      },
-      applyBootstrapMetadata,
-      acceptQueueProjectionIfCurrent,
-      paneModel: () => paneModelRef.current,
-      confirmPrimaryCapabilitySnapshot,
-      clearRecoverableError: () => setError((current) => recoverableRefreshError(current) ? "" : current),
-      activeSessionIds: () => activeSessionIds,
-      applyBootstrap,
-      paneAuthorityCanCommit,
-      schedulePromptReconcile: (id: string, version?: number, failedAttempts?: number) =>
-        schedulePromptReconcile(id, version, failedAttempts),
-      requestPromptReconcile: (id: string) => requestPromptReconcileRef.current(id),
-      requestPromptReconcileRef,
-      loadBootstrap,
-    })(),
-    [
-      applyBootstrap,
-      applyBootstrapMetadata,
-      applySessionView,
-      applySidebarInventory,
-      confirmPrimaryCapabilitySnapshot,
-      capturePaneAuthority,
-      ensureHandshake,
-      fetchSessionView,
-      loadBootstrap,
-      paneAuthorityCanCommit,
-      refreshAuthorityIsCurrent,
-    ],
-  );
-
-  const startIdleRecovery = useCallback(
-    (serverEpochChanged = false, refreshOnOrdinaryIdle = false) => {
-      // Idle is authoritative lifecycle state even when the following bootstrap
-      // is slow or rejected. Do not leave navigation and mutations locked on
-      // stale maintenance state while JSONL fallback remains available.
-      runtimeProjectionWriter.observeLifecycle("idle");
-      setNotice("");
-      const replacementBootstrapPending =
-        replacementBootstrapPendingRef.current;
-      const retryFailedInitialBootstrap =
-        !bootstrapCompletedRef.current &&
-        !initialReadyRecoveryRequestedRef.current;
-      const needsRecovery =
-        serverEpochChanged ||
-        replacementBootstrapPending ||
-        retryFailedInitialBootstrap;
-      if (!needsRecovery && !refreshOnOrdinaryIdle) return;
-      // A same-epoch ready can arrive while B's first bootstrap is pending. It
-      // joins that request, so it must not consume the one retry reserved for a
-      // later failed attempt.
-      if (
-        retryFailedInitialBootstrap &&
-        !serverEpochChanged &&
-        !replacementBootstrapPending &&
-        bootstrapInFlightRef.current
-      )
-        return;
-      // A replacement may first announce maintenance, so its later first idle
-      // bootstrap remains distinct from this epoch's one failed-bootstrap retry.
-      replacementBootstrapPendingRef.current = false;
-      if (
-        retryFailedInitialBootstrap &&
-        !serverEpochChanged &&
-        !replacementBootstrapPending
-      )
-        initialReadyRecoveryRequestedRef.current = true;
-      void refresh()
-        .then(async () => {
-          const id = viewedSessionIdRef.current;
-          if (!id) return;
-          if (subagentAddressesRef.current.has(id)) {
-            await rehydrateSubagentAddressChain(id).catch(() => undefined);
-            return;
-          }
-          void api.markSessionViewed(id).catch(() => undefined);
-        })
-        .catch(reportBackgroundRefreshError);
-    },
-    [refresh, rehydrateSubagentAddressChain, reportBackgroundRefreshError],
-  );
-
-  const refreshSidebarSessions = useCallback(async (forceFull = false) => {
-    const runEpochGeneration = runEpochGenerationRef.current;
-    if (sessionRefreshInFlightRef.current) {
-      if (sessionRefreshGenerationRef.current === runEpochGeneration) {
-        sessionRefreshRequestedRef.current = true;
-        sessionRefreshRequestedFullRef.current ||= forceFull;
-        return;
-      }
-      // A replacement does not cancel browser requests. Detach A's coalescer so
-      // B can read its own Session Index immediately; A's finally is ownership-guarded.
-      sessionRefreshInFlightRef.current = false;
-      sessionRefreshGenerationRef.current = null;
-      sessionRefreshRequestedRef.current = false;
-      sessionRefreshRequestedFullRef.current = false;
-    }
-    sessionRefreshInFlightRef.current = true;
-    sessionRefreshGenerationRef.current = runEpochGeneration;
-    try {
-      const full = forceFull || showAllSessionsRef.current;
-      const fullBarrier = sidebarCommittedFullSequenceRef.current;
-      const fullRequestSequence = full
-        ? ++sidebarFullRequestSequenceRef.current
-        : 0;
-      const result = await api.sessions(
-        full,
-        full ? [] : sessionNavigationRef.current.pinnedSessionIds,
-        forceFull,
-      );
-      if (runEpochGenerationRef.current !== runEpochGeneration) return;
-      for (const session of result.sessions) {
-        if (
-          typeof session.turnCount === "number" &&
-          Number.isFinite(session.turnCount)
-        )
-          recordSourceTurnTotal(session.id, session.turnCount);
-      }
-      const committed = full
-        ? commitSidebarSessions(result.sessions, {
-            kind: "full",
-            requestSequence: fullRequestSequence,
-          })
-        : commitSidebarSessions(result.sessions, {
-            kind: "base",
-            fullBarrier,
-          });
-      if (!committed) return;
-      setSessionsTotal(
-        optimisticSessionsTotal(
-          result.sessions,
-          result.total ?? result.sessions.length,
-        ),
-      );
-      setSessionDirectories(result.directories || []);
-    } catch (cause) {
-      if (runEpochGenerationRef.current === runEpochGeneration) throw cause;
-    } finally {
-      if (sessionRefreshGenerationRef.current !== runEpochGeneration) return;
-      sessionRefreshInFlightRef.current = false;
-      sessionRefreshGenerationRef.current = null;
-      if (sessionRefreshRequestedRef.current) {
-        sessionRefreshRequestedRef.current = false;
-        const requestedFull = sessionRefreshRequestedFullRef.current;
-        sessionRefreshRequestedFullRef.current = false;
-        void refreshSidebarSessions(requestedFull).catch(reportBackgroundRefreshError);
-      }
-    }
-  }, [reportBackgroundRefreshError]);
-
-  const loadAllSessions = useCallback(async () => {
-    const runEpochGeneration = runEpochGenerationRef.current;
-    if (
-      showAllSessionsRef.current ||
-      loadAllSessionsGenerationRef.current === runEpochGeneration
-    )
-      return;
-    loadAllSessionsGenerationRef.current = runEpochGeneration;
-    const fullRequestSequence = ++sidebarFullRequestSequenceRef.current;
-    setLoadingAllSessions(true);
-    setError("");
-    try {
-      const result = await api.sessions(true);
-      if (runEpochGenerationRef.current !== runEpochGeneration) return;
-      for (const session of result.sessions) {
-        if (
-          typeof session.turnCount === "number" &&
-          Number.isFinite(session.turnCount)
-        )
-          recordSourceTurnTotal(session.id, session.turnCount);
-      }
-      if (
-        !commitSidebarSessions(result.sessions, {
-          kind: "full",
-          requestSequence: fullRequestSequence,
-        })
-      )
-        return;
-      setSessionsTotal(
-        optimisticSessionsTotal(
-          result.sessions,
-          result.total ?? result.sessions.length,
-        ),
-      );
-      setSessionDirectories(result.directories || []);
-    } catch (cause) {
-      if (runEpochGenerationRef.current === runEpochGeneration)
-        setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      if (loadAllSessionsGenerationRef.current !== runEpochGeneration) return;
-      loadAllSessionsGenerationRef.current = null;
-      setLoadingAllSessions(false);
-    }
-  }, []);
-
-  const loadDirectorySessions = useCallback(
-    async (cwd: string, renderedCount: number) => {
-      const runEpochGeneration = runEpochGenerationRef.current;
-      const fullBarrier = sidebarCommittedFullSequenceRef.current;
-      const key = sidebarDirectoryKey(cwd);
-      if (directoryLoadGenerationsRef.current.get(key) === runEpochGeneration)
-        return;
-      directoryLoadGenerationsRef.current.set(key, runEpochGeneration);
-      setLoadingDirectoryKeys((current) => [...new Set([...current, key])]);
-      try {
-        const covered =
-          directorySessionCoverageRef.current.get(key) ?? renderedCount;
-        if (covered >= MAX_DIRECTORY_PREFIX_SIZE) {
-          const fullRequestSequence = ++sidebarFullRequestSequenceRef.current;
-          const result = await api.sessions(true);
-          if (runEpochGenerationRef.current !== runEpochGeneration) return;
-          if (
-            !commitSidebarSessions(result.sessions, {
-              kind: "full",
-              requestSequence: fullRequestSequence,
-            })
-          )
-            return;
-          setSessionsTotal(
-            optimisticSessionsTotal(
-              result.sessions,
-              result.total ?? result.sessions.length,
-            ),
-          );
-          setSessionDirectories(result.directories || []);
-          return;
-        }
-        const result = await api.directorySessions(cwd, covered + 15);
-        if (runEpochGenerationRef.current !== runEpochGeneration) return;
-        if (
-          !commitSidebarSessions(result.sessions, {
-            kind: "directory",
-            cwd,
-            fullBarrier,
-          })
-        )
-          return;
-        setSessionDirectories(result.directories || []);
-      } catch (cause) {
-        if (runEpochGenerationRef.current === runEpochGeneration)
-          setError(cause instanceof Error ? cause.message : String(cause));
-      } finally {
-        if (directoryLoadGenerationsRef.current.get(key) !== runEpochGeneration)
-          return;
-        directoryLoadGenerationsRef.current.delete(key);
-        setLoadingDirectoryKeys((current) =>
-          current.filter((candidate) => candidate !== key),
-        );
-      }
-    },
-    [],
-  );
-
-  const scheduleSidebarRefresh = useCallback((forceFull = false) => {
-    const runEpochGeneration = runEpochGenerationRef.current;
-    if (forceFull) sessionRefreshRequestedFullRef.current = true;
-    if (sessionRefreshTimerRef.current !== null)
-      window.clearTimeout(sessionRefreshTimerRef.current);
-    sessionRefreshTimerRef.current = window.setTimeout(() => {
-      sessionRefreshTimerRef.current = null;
-      if (runEpochGenerationRef.current !== runEpochGeneration) return;
-      const requestedFull = sessionRefreshRequestedFullRef.current;
-      sessionRefreshRequestedFullRef.current = false;
-      void refreshSidebarSessions(requestedFull).catch(reportBackgroundRefreshError);
-    }, 180);
-  }, [refreshSidebarSessions, reportBackgroundRefreshError]);
-
-  useEffect(() => {
-    refresh()
-      .catch(reportBackgroundRefreshError)
-      .finally(() => setLoading(false));
-    return () => {
-      if (sessionRefreshTimerRef.current !== null)
-        window.clearTimeout(sessionRefreshTimerRef.current);
-      for (const request of loadingEarlierRequestsRef.current.values())
-        request.controller.abort();
-      cancelPendingNavigation();
-    };
-  }, [cancelPendingNavigation, refresh, reportBackgroundRefreshError]);
-
-  useEffect(() => {
-    applyAppearance(appearance);
-    saveAppearance(appearance);
-  }, [appearance]);
-
-  useEffect(() => saveSidebarOpen(sidebarOpen), [sidebarOpen]);
-  useEffect(() => saveSidebarWidth(sidebarWidth), [sidebarWidth]);
-  useEffect(
-    () => saveSessionNavigationPreferences(sessionNavigation),
-    [sessionNavigation],
-  );
-  useEffect(() => {
-    if (!sidebarInventoryReady || showAllSessionsRef.current) return;
-    const pinned = sessionNavigation.pinnedSessionIds.filter((id) =>
-      /^[a-f0-9]{20}$/i.test(id),
-    );
-    if (!pinned.length) return;
-    const loaded = new Set(sessions.map((session) => session.id));
-    if (pinned.every((id) => loaded.has(id))) return;
-    const attempt = `${runEpochGenerationRef.current}:${pinned.join(",")}`;
-    if (pinnedInventoryAttemptRef.current === attempt) return;
-    pinnedInventoryAttemptRef.current = attempt;
-    void refreshSidebarSessions().catch(reportBackgroundRefreshError);
-  }, [
-    refreshSidebarSessions,
+    recordBrowserStateDiagnostic,
+    recordPaneCommit,
+    recordSourceTurnTotal,
+    recoverableRefreshError,
+    refreshAuthorityIsCurrent,
+    refreshEpochRef,
+    rehydrateSubagentAddressChain,
+    rememberConfirmedQueueDispatchIds,
+    rememberedSessionId,
+    replacementBootstrapPendingRef,
     reportBackgroundRefreshError,
-    sessionNavigation.pinnedSessionIds,
+    requestPromptReconcileRef,
+    runEpochGenerationRef,
+    runtimeProjectionWriter,
+    saveAppearance,
+    saveSessionNavigationPreferences,
+    saveSidebarOpen,
+    saveSidebarWidth,
+    schedulePromptReconcileRef,
+    sessionEventVersionRef,
+    sessionNavigation,
+    sessionNavigationRef,
+    sessionRefreshGenerationRef,
+    sessionRefreshInFlightRef,
+    sessionRefreshRequestedFullRef,
+    sessionRefreshRequestedRef,
+    sessionRefreshTimerRef,
     sessions,
+    setBuildIdentityMismatch,
+    setError,
+    setLoading,
+    setLoadingAllSessions,
+    setLoadingDirectoryKeys,
+    setNotice,
+    setPaneLoading,
+    setRuntimeWarming,
+    setServerBuildIdentity,
+    setSessionDirectories,
+    setSessions,
+    setSessionsTotal,
+    setUnseenReplySessionIds,
+    showAllSessionsRef,
+    sidebarCommittedFullSequenceRef,
+    sidebarDirectoryKey,
+    sidebarFullRequestSequenceRef,
     sidebarInventoryReady,
-  ]);
+    sidebarInventoryReadyRef,
+    sidebarOpen,
+    sidebarWidth,
+    subagentAddressesRef,
+    terminalAssistantSessionIdsRef,
+    tryAutoAllowGate,
+    uniqueSessionSummaries,
+    updateGateMode,
+    useCallback,
+    useEffect,
+    viewCacheWriter,
+    viewedSessionIdRef,
+  });
 
-  // EventSource reconnects after a server restart, but it cannot replay events
-  // missed while disconnected. Keep transport ownership in usePiEventSource;
-  // this component remains responsible only for translating events into UI state.
+  const sessionManagementActionsRef = useRef<Pick<ReturnType<typeof createSessionManagementActions>, "finalizeDeletedSession" | "selectDeletionFallback"> | null>(null);
+  const finalizeDeletedSession = (...args: any[]) =>
+    (sessionManagementActionsRef.current?.finalizeDeletedSession as any)?.(...args);
+  const selectDeletionFallback = (...args: any[]) =>
+    (sessionManagementActionsRef.current?.selectDeletionFallback as any)?.(...args);
+
   const handleEventSourceReady = useCallback(createStreamReadyHandler({
     noteEventFrame: () => { lastEventFrameAtRef.current = Date.now(); },
     rejectSse: recordSseRejectionDiagnostic,
@@ -3538,12 +3029,6 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     return () => window.clearTimeout(timer);
   }, [error, notice]);
 
-  const loadingEarlierRequestsRef = useRef(
-    new Map<
-      string,
-      { token: symbol; navigationEpoch: number; controller: AbortController }
-    >(),
-  );
   const loadEarlierTurns = useCallback(createHistoryPaginationFlow({
     viewedSessionId: () => viewedSessionIdRef.current,
     navigationEpoch: () => navigationEpochRef.current,
@@ -3729,901 +3214,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   };
   requestPromptReconcileRef.current = (sessionId) =>
     schedulePromptReconcile(sessionId);
-
-  const send = async (
-    message: string,
-    images: PromptImage[],
-    delivery: PromptDelivery = "queue",
-    requestedTargetSessionId = "",
-  ) => {
-    if (buildIdentityMismatch) return;
-    const steering = delivery === "steer";
-    if (requestedTargetSessionId && steering)
-      throw new Error("子代理视图不能向父对话发送 Steer 消息");
-    if (steering && !state.isStreaming)
-      throw new Error("当前对话已不再运行，无法发送 Steer 消息");
-    setError("");
-    stickToBottomRef.current = true;
-    const initialSessionId =
-      requestedTargetSessionId ||
-      viewedSessionIdRef.current ||
-      (localDraftRef.current ? LOCAL_DRAFT_BUSY_ID : "");
-    let busySessionId = initialSessionId;
-    let finishSessionBusy = beginSessionBusy(busySessionId);
-    const moveSessionBusyTo = (sessionId: string) => {
-      if (!sessionId || sessionId === busySessionId) return;
-      finishSessionBusy();
-      busySessionId = sessionId;
-      finishSessionBusy = beginSessionBusy(busySessionId);
-    };
-    const alreadyStreaming = state.isStreaming;
-    const willQueueLocally =
-      !steering && (alreadyStreaming || queuePaused || displayedQueue.length > 0);
-    const previousToolStatus = toolStatus;
-    const optimisticMessage =
-      !steering &&
-      !message.startsWith("/") &&
-      (Boolean(state.isCompacting) || !willQueueLocally)
-        ? userMessage(message, images)
-        : null;
-    const localTurn = optimisticMessage || userMessage(message, images);
-    let targetSessionId = requestedTargetSessionId || viewedSessionIdRef.current;
-    let promptQueueProjectionRevision = targetSessionId
-      ? queueProjectionRevisionRef.current.get(targetSessionId) || 0
-      : 0;
-    const promptRunEpochGeneration = runEpochGenerationRef.current;
-    const promptOperationIsInCurrentRun = () =>
-      runEpochGenerationRef.current === promptRunEpochGeneration;
-    let promptAuthority: ReturnType<typeof capturePaneAuthority> | null =
-      targetSessionId && targetSessionId === viewedSessionIdRef.current
-        ? capturePaneAuthority(targetSessionId)
-        : null;
-    let promptDraftAuthority: DraftPaneAuthority | null = targetSessionId
-      ? null
-      : captureDraftPaneAuthority();
-    // Prompt acknowledgements and failures are both asynchronous pane facts.
-    // A matching Session ID is not enough after A → B → A. The first New
-    // submission begins in a draft, so it uses the matching draft token until
-    // its atomic Session commit creates a session authority.
-    const promptPaneIsCurrent = () =>
-      promptAuthority
-        ? paneAuthorityCanCommit(promptAuthority)
-        : Boolean(
-            promptDraftAuthority &&
-            draftAuthorityCanCommit(promptDraftAuthority),
-          );
-    let protectedLocalTurn: LocalUserTurn | null = null;
-    let promptBusyRelease: (() => void) | null = null;
-    let promptAcceptedByEvent = false;
-    let promptTerminalByEvent = false;
-    let promptSubmitted = false;
-    let promptOperationId = crypto.randomUUID();
-    let serverPromptId: string | null = null;
-    const protectLocalPrompt = (turn: PiMessage | null = localTurn) => {
-      // A child transcript never receives optimistic parent turns, queue rows,
-      // or Runtime projections. The server remains the sole parent authority
-      // until that parent is explicitly viewed.
-      const pending = localUserTurnsRef.current.get(targetSessionId) || [];
-      const nextLocalTurn = buildProtectedLocalTurn({
-        turn,
-        targetSessionId,
-        viewedSessionId: viewedSessionIdRef.current,
-        protectedLocalTurn,
-        pendingTurns: pending,
-        promptOperationId,
-        messages,
-        turnTotal,
-        willQueueLocally,
-        steering,
-        message,
-        images,
-        baselineTurnTotal: authoritativeTurnTotal(targetSessionId),
-      });
-      if (!nextLocalTurn) return protectedLocalTurn;
-      protectedLocalTurn = nextLocalTurn;
-      localUserTurnsRef.current.set(targetSessionId, [
-        ...pending,
-        nextLocalTurn,
-      ]);
-      recordUserTurnLifecycle("optimistic-created", targetSessionId, nextLocalTurn);
-      return nextLocalTurn;
-    };
-    const localTurnEntry = (): LocalUserTurn | undefined => {
-      if (!targetSessionId) return undefined;
-      const turns = localUserTurnsRef.current.get(targetSessionId) || [];
-      return turns.find(
-        (turn) =>
-          turn.promptOperationId === promptOperationId
-          || (serverPromptId && turn.serverPromptId === serverPromptId)
-          || turn.message === localTurn,
-      );
-    };
-    dispatchPane({
-      type: "PROMPT_STARTED",
-      target: targetSessionId
-        ? { kind: "session", sessionId: targetSessionId }
-        : { kind: "draft" },
-      pendingUserMessage: optimisticMessage,
-    });
-    try {
-      const command = /^\/(new|compact|abort)(?:\s+([\s\S]*))?$/.exec(message);
-      if (command?.[1] === "new") {
-        createSession();
-        return;
-      }
-      if (command?.[1] === "compact") {
-        if (localDraftRef.current)
-          throw new Error("新对话尚未发送消息，无需压缩上下文");
-        const authority = captureViewOperation();
-        if (runtimeStatus !== "active") {
-          dispatchPane({
-            type: "RUNTIME_STATUS_CHANGED",
-            sessionId: authority.sessionId,
-            status: "restoring",
-          });
-          const queueRequestRevision =
-            queueProjectionRevisionRef.current.get(authority.sessionId) || 0;
-          const view = await api.activateSession(viewedSessionId);
-          if (!viewOperationIsInCurrentRun(authority)) return;
-          viewCacheWriter.forget(view.session.id, authority);
-          if (viewOperationIsCurrent(authority))
-            applySessionView(view, authority, queueRequestRevision);
-          else {
-            const projection = queueProjectionForView(
-              view.session.id,
-              view.queue,
-              view.queuePaused === true,
-              queueRequestRevision,
-            );
-            commitSessionViewCache(
-              projection.known || projection.queue.length || projection.paused
-                ? {
-                    ...view,
-                    queue: projection.queue,
-                    queuePaused: projection.paused,
-                  }
-                : view,
-              authority,
-            );
-          }
-        }
-        await api.compact(command[2] || "", authority.sessionId);
-        if (!viewOperationIsInCurrentRun(authority)) return;
-        await refresh();
-        if (viewOperationIsCurrent(authority)) setNotice("上下文压缩完成");
-        return;
-      }
-      if (command?.[1] === "abort") {
-        await stopGeneration();
-        return;
-      }
-
-      // ModelInfo.input is advisory metadata only. Prompt delivery owns the
-      // transport boundary; upstream Pi/model handling decides whether the
-      // selected provider can interpret attached images.
-
-      // Capture one immutable selection with the send operation. The visible
-      // Composer may change while a cold Runtime warms, but that later choice
-      // belongs to a later prompt and must not rewrite this one.
-      const prefsKey = localDraftRef.current
-        ? DRAFT_PREFS_KEY
-        : targetSessionId;
-      const staged = pendingSessionPrefsRef.current.get(prefsKey);
-      // A draft has no Runtime-confirmed Gate state yet. Capture its explicit
-      // local intent with this first request without promoting it to authority.
-      const captured = capturePromptSelection({
-        stagedSelection: staged,
-        models,
-        isDraft: Boolean(localDraftRef.current),
-        draftGateMode: pendingGateModesRef.current.get(DRAFT_PREFS_KEY),
-      });
-      const capturedSelection = captured.selection;
-      const capturedPromptSettings = captured.promptSettings;
-      const capturedDraftGateMode = captured.draftGateMode;
-      if (capturedSelection?.model && modelInventoryConfirmed) {
-        const route = validateSelectedRoute(
-          models,
-          capturedSelection.model.provider,
-          capturedSelection.model.id,
-          capturedSelection.model.api,
-        );
-        if (!route.ok) {
-          setError(
-            `当前模型路由无效：${capturedSelection.model.provider}/${capturedSelection.model.id}`
-            + (capturedSelection.model.api ? `（${capturedSelection.model.api}）` : "")
-            + " 不在当前 Runtime 的模型目录中，请重新选择模型。",
-          );
-          return;
-        }
-      }
-      let initialPromptResult: Awaited<ReturnType<typeof api.prompt>> | null =
-        null;
-      const preparationRoute = promptPreparationRoute({
-        isDraft: Boolean(localDraftRef.current),
-        runtimeStatus,
-        alreadyStreaming,
-      });
-      if (preparationRoute === "draft") {
-        const draftAuthority = captureDraftPaneAuthority();
-        dispatchPane({
-          type: "PROMPT_PREPARING",
-          target: { kind: "draft" },
-          status: WAITING_FOR_PI_STATUS,
-        });
-        // Once the combined mutation is written its outcome may be unknown;
-        // retain the protected local bubble until SSE/JSONL proves otherwise.
-        promptSubmitted = true;
-        const clearViewedRequest = clearViewedPromiseRef.current;
-        await clearViewedRequest;
-        if (clearViewedPromiseRef.current === clearViewedRequest)
-          clearViewedPromiseRef.current = null;
-        if (!promptOperationIsInCurrentRun()) return;
-        // One host transaction owns the empty draft through model/thinking/Gate
-        // setup and prompt acceptance. Do not expose three extra browser round
-        // trips after the dedicated Runtime has just cold-started.
-        const initial = await submitNewDraftPrompt(
-          {
-            submitNewSession: api.submitNewSession,
-            newSession: api.newSession,
-            prompt: (promptMessage, promptImages, sessionId, gateMode, settings, clientPromptOperationId) =>
-              api.prompt(
-                promptMessage,
-                promptImages,
-                sessionId,
-                gateMode,
-                "queue",
-                settings,
-                undefined,
-                clientPromptOperationId,
-              ),
-            isCurrent: promptOperationIsInCurrentRun,
-          },
-          {
-            cwd: draftWorkspaceCwd || workspaceCwd,
-            message,
-            images,
-            // PiState supplies the displayed default only. Creating a new
-            // Runtime must mutate Model/Thinking solely for an explicit Composer
-            // selection captured with this first prompt.
-            model: capturedSelection?.model,
-            thinkingLevel: capturedPromptSettings?.thinkingLevel,
-            gateMode: capturedDraftGateMode,
-            clientPromptOperationId: promptOperationId,
-            promptSettings: capturedPromptSettings,
-          },
-        );
-        if (!promptOperationIsInCurrentRun()) return;
-        targetSessionId = initial.sessionId;
-        if (initial.promptId) {
-          promptSubmitControllerRef.current.adoptAccepted(
-            {
-              promptId: promptOperationId,
-              sessionId: targetSessionId,
-              navigationEpoch: navigationEpochRef.current,
-              runEpoch: runEpochRef.current,
-              runtimeGeneration: sessionRunGenerationsRef.current.get(targetSessionId),
-              delivery: steering ? "steer" : "queue",
-            },
-            initial.deliveryUncertain ? { type: "uncertain" } : { type: "run" },
-          );
-        }
-        // The draft's own failure reason is resolved once its first message is
-        // accepted; the Session that now exists keeps its own entries.
-        setLocalFailures((current) => forgetLocalFailuresForSession(current, DRAFT_FAILURE_SCOPE));
-        promptQueueProjectionRevision =
-          queueProjectionRevisionRef.current.get(targetSessionId) || 0;
-        moveSessionBusyTo(targetSessionId);
-        protectLocalPrompt();
-        const adoption = adoptDraftSessionView<SessionViewCommitAuthority>({
-          initial,
-          targetSessionId,
-          draftAuthority,
-          host: {
-            draftAuthorityCanCommit,
-            applySessionView,
-            capturePaneAuthority,
-            commitPane: commitPaneIfCurrent,
-            commitSessionViewCache,
-          },
-        });
-        const initialView = adoption.view;
-        if (adoption.paneAuthority) {
-          promptAuthority = adoption.paneAuthority;
-          promptDraftAuthority = null;
-        }
-        // A choice made after Send started remains the draft's newer revision;
-        // move it to the just-created ordinary target instead of dropping it.
-        // A replacement New owns a newer draft authority and must keep its own
-        // selection: an old async first-send completion may not touch it.
-        if (draftAuthorityCanCommit(draftAuthority)) {
-          const intent = draftIntentAfterSubmit({
-            capturedSelection,
-            newestDraftSelection: pendingSessionPrefsRef.current.get(DRAFT_PREFS_KEY),
-            capturedGateMode: capturedDraftGateMode,
-            newestDraftGateMode: pendingGateModesRef.current.get(DRAFT_PREFS_KEY),
-          });
-          if (intent.selectionForTarget) {
-            pendingSessionPrefsRef.current.set(targetSessionId, intent.selectionForTarget);
-            setComposerSelectionRevision((revision) => revision + 1);
-          }
-          if (intent.clearDraftSelection) {
-            pendingSessionPrefsRef.current.delete(DRAFT_PREFS_KEY);
-            saveSessionComposerSelections(pendingSessionPrefsRef.current);
-          }
-          // A distinct Gate intent belongs to the next turn; the captured
-          // value is already being confirmed by this atomic first request.
-          if (intent.gateModeForTarget)
-            pendingGateModesRef.current.set(targetSessionId, intent.gateModeForTarget);
-          if (intent.clearDraftGateMode) {
-            pendingGateModesRef.current.delete(DRAFT_PREFS_KEY);
-            setComposerSelectionRevision((revision) => revision + 1);
-            setPendingGateModes(Object.fromEntries(pendingGateModesRef.current));
-          }
-        }
-        // Preserve the ordinary acknowledgement/optimistic-turn path below;
-        // only the transport setup was collapsed into this first request.
-        initialPromptResult = initial;
-        promptQueueProjectionRevision =
-          queueProjectionRevisionRef.current.get(targetSessionId) || 0;
-      } else if (preparationRoute === "restore") {
-        const activationAuthority = capturePaneAuthority(targetSessionId);
-        promptAuthority = activationAuthority;
-        const restoring = await prepareRestoringPrompt({
-          sessionId: targetSessionId,
-          authority: activationAuthority,
-          dispatchPreparing: (authority, sessionId) => {
-            if (paneAuthorityCanCommit(authority))
-              dispatchPane({
-                type: "PROMPT_PREPARING",
-                target: { kind: "session", sessionId },
-                status: WAITING_FOR_PI_STATUS,
-                runtimeStatus: "restoring",
-              });
-          },
-          protectLocalTurn: () => { protectLocalPrompt(); },
-          warmRuntime: (sessionId: string): Promise<SessionRuntimeReadyData> => warmSessionRuntime(sessionId),
-          isCurrent: promptOperationIsInCurrentRun,
-          applyWarmReadiness: (sessionId, ready, authority) => applyWarmReadinessForPane(sessionId, ready, authority, true) as boolean,
-          commitPreparing: (authority, sessionId) => {
-            commitPaneIfCurrent(authority, {
-              type: "PROMPT_PREPARING",
-              target: { kind: "session", sessionId },
-              status: WAITING_FOR_PI_STATUS,
-              // Runtime readiness is not prompt acknowledgement. Keep the local
-              // user bubble visible until PROMPT_ACKNOWLEDGED moves it into messages.
-            });
-          },
-        });
-        if (restoring.cancelled) return;
-      } else if (!alreadyStreaming && promptAuthority) {
-        commitPaneIfCurrent(promptAuthority, {
-          type: "PROMPT_PREPARING",
-          target: { kind: "session", sessionId: targetSessionId },
-          status: WAITING_FOR_PI_STATUS,
-        });
-      }
-
-      promptBusyRelease = () => {
-        finishSessionBusy();
-      };
-      if (!alreadyStreaming)
-        promptBusyReleasesRef.current.set(targetSessionId, {
-          epoch: runEpochRef.current,
-          afterGeneration:
-            sessionRunGenerationsRef.current.get(targetSessionId) || 0,
-          release: promptBusyRelease,
-          markAccepted: () => {
-            promptAcceptedByEvent = true;
-          },
-          markTerminal: () => {
-            promptTerminalByEvent = true;
-          },
-        });
-      const eventVersionBeforePrompt =
-        sessionEventVersionRef.current.get(targetSessionId) || 0;
-      // Protect the prompt across every asynchronous refresh until a JSONL view
-      // confirms the additional user turn. This also covers active Sessions,
-      // which have no Runtime-start view to pass through above.
-      const admittedLocalTurn = protectLocalPrompt();
-      promptSubmitted = true;
-      const requestedGateMode =
-        pendingGateModesRef.current.get(targetSessionId) ??
-        gateModesRef.current[targetSessionId];
-      if (!promptOperationIsInCurrentRun()) return;
-      if (!initialPromptResult) promptOperationId = crypto.randomUUID();
-      if (admittedLocalTurn && promptOperationId)
-        admittedLocalTurn.promptOperationId = promptOperationId;
-      const result =
-        initialPromptResult ||
-        await promptSubmitFlowRef.current.admit({
-          admission: {
-            promptId: promptOperationId!,
-            sessionId: targetSessionId,
-            navigationEpoch: navigationEpochRef.current,
-            runEpoch: runEpochRef.current,
-            runtimeGeneration: sessionRunGenerationsRef.current.get(targetSessionId),
-            delivery: steering ? "steer" : "queue",
-          },
-          execute: () => (steering
-            ? api.prompt(
-                message,
-                images,
-                targetSessionId,
-                requestedGateMode,
-                "steer",
-                undefined,
-                admittedLocalTurn?.queueId,
-                promptOperationId,
-              )
-            : capturedPromptSettings
-              ? api.prompt(
-                  message,
-                  images,
-                  targetSessionId,
-                  requestedGateMode,
-                  "queue",
-                  capturedPromptSettings,
-                  undefined,
-                  promptOperationId,
-                )
-              : api.prompt(
-                  message,
-                  images,
-                  targetSessionId,
-                  requestedGateMode,
-                  "queue",
-                  undefined,
-                  undefined,
-                  promptOperationId,
-                )),
-          facts: {
-            promptSubmitted,
-            promptAcceptedByEvent,
-            promptTerminalByEvent,
-          },
-        });
-      if (promptOperationId && result.promptId) {
-        serverPromptId = result.promptId;
-        const boundOperation = promptSubmitControllerRef.current.bindServerPromptId(
-          promptOperationId,
-          result.promptId,
-        );
-        if (["settled", "failed", "aborted"].includes(boundOperation.phase))
-          promptSubmitControllerRef.current.clearTerminal();
-      }
-      if (
-        targetSessionId &&
-        !result.queued &&
-        !result.steered &&
-        capturedSelection &&
-        promptPaneIsCurrent()
-      ) {
-        const displaySettings = {
-          ...(capturedSelection.model ? { model: capturedSelection.model } : null),
-          ...(capturedSelection.thinkingLevel
-            ? { thinkingLevel: capturedSelection.thinkingLevel }
-            : null),
-        };
-        patchSessionCacheForAuthority(
-          targetSessionId,
-          { state: displaySettings },
-          promptAuthority!,
-        );
-        commitPaneIfCurrent(promptAuthority!, {
-          type: "RUNTIME_SETTINGS_ADOPTED",
-          target: { kind: "session", sessionId: targetSessionId },
-          state: displaySettings,
-        });
-      }
-      // This Session-scoped selection remains the Composer's next-normal-turn
-      // default after admission, matching a persistent Model chooser. The
-      // immutable captured object above still prevents a later click from
-      // rewriting this already-admitted prompt.
-      // HTTP acceptance can mean the prompt was queued, before Gate reaches its
-      // dispatch boundary. First reconcile its Session-local admission even if
-      // a refresh/navigation committed a newer pane while this response was in
-      // flight. In particular, losing the old pane authority must never drop a
-      // queue ID and strand a waiting local turn outside both Queue and history.
-      // Only the later DOM/notice writes are pane-authority guarded.
-      if (result.extension && protectedLocalTurn) {
-        const pending = localUserTurnsRef.current.get(targetSessionId) || [];
-        const remaining = removeLocalTurnAndRebase(pending, protectedLocalTurn);
-        if (remaining.length)
-          localUserTurnsRef.current.set(targetSessionId, remaining);
-        else localUserTurnsRef.current.delete(targetSessionId);
-        protectedLocalTurn = null;
-      }
-      const acceptedLocalTurn = localTurnEntry();
-      if (acceptedLocalTurn && !result.steered) {
-        const serverPromptId =
-          typeof result.promptId === "string"
-            ? result.promptId
-            : result.queued && typeof result.id === "string"
-              ? result.id
-              : undefined;
-        if (serverPromptId) {
-          bindLocalTurnPromptIdentity(acceptedLocalTurn, { serverPromptId });
-          recordUserTurnLifecycle("identity-bound", targetSessionId, acceptedLocalTurn, serverPromptId);
-        }
-      }
-      const promptNavigationIsCurrent = Boolean(
-        promptAuthority &&
-        promptAuthority.navigationEpoch === navigationEpochRef.current &&
-        viewedSessionIdRef.current === targetSessionId &&
-        desiredSessionIdRef.current === targetSessionId,
-      );
-      // Bind the server queue ID as Session-scoped bookkeeping even when the
-      // acknowledgement crossed navigation. Pane authority still fences the
-      // visible projection below, but dropping this binding would strand an
-      // accepted waiting turn without a recoverable queue identity.
-      if (
-        result.queued &&
-        acceptedLocalTurn &&
-        typeof result.id === "string"
-      )
-        markLocalTurnQueued(acceptedLocalTurn, result.id);
-      const currentQueueProjection = latestQueueProjectionRef.current.get(
-        targetSessionId,
-      ) || { queue: [], paused: queuePaused };
-      const acknowledgedTurn = localTurnEntry();
-      const queuePlan = promptNavigationIsCurrent
-        ? planAcknowledgedQueueProjection({
-            incoming: result.queue,
-            incomingPaused: queuePaused,
-            currentRevision: queueProjectionRevisionRef.current.get(targetSessionId) || 0,
-            requestRevision: promptQueueProjectionRevision,
-            current: currentQueueProjection,
-            source: queueProjectionSourceRef.current.get(targetSessionId),
-            resultQueued: result.queued,
-            resultId: typeof result.id === "string" ? result.id : undefined,
-            acknowledgedTurnQueueId: acknowledgedTurn?.queueId,
-            acknowledgedTurnQueueState: acknowledgedTurn?.queueState,
-          })
-        : undefined;
-      const acknowledgedProjection = queuePlan
-        ? queuePlan.accepted
-          ? {
-              ...acceptQueueProjection(
-                targetSessionId,
-                queuePlan.queue,
-                queuePlan.paused,
-                "ack",
-              ),
-              accepted: true,
-            }
-          : queuePlan
-        : undefined;
-      const acknowledgedQueue = acknowledgedProjection?.accepted
-        ? acknowledgedProjection.queue
-        : undefined;
-      let promotedAcknowledgedTurns: LocalUserTurn[] = [];
-      const acknowledgementKind = promptAcknowledgementKind(result);
-      const acknowledgementTurnPlan = planAcknowledgedTurn({
-        kind: acknowledgementKind,
-        acceptedTurnPresent: Boolean(acceptedLocalTurn),
-        resultId: typeof result.id === "string" ? result.id : undefined,
-        currentQueue: latestQueueProjectionRef.current.get(targetSessionId)?.queue,
-      });
-      const acknowledgedSteer = pendingSteerFromAcknowledgement({
-        steered: result.steered === true,
-        queueState: acceptedLocalTurn?.queueState,
-        queueId: acceptedLocalTurn?.queueId,
-        message,
-        imageCount: images.length,
-        createdAt: Date.now(),
-      });
-      if (acknowledgedSteer) {
-        syncPendingSteers(targetSessionId, [
-          ...(pendingSteersRef.current.get(targetSessionId) || []),
-          acknowledgedSteer,
-        ]);
-      } else if (acknowledgementTurnPlan.promoteFromQueue) {
-        // Dispatch SSE may beat this acknowledgement. Never demote a turn that
-        // the scheduler has already started into the waiting-only queue UI.
-        // A newer complete queue projection can prove that this acknowledged
-        // item has already left the FIFO even when queue_dispatch was lost.
-        const currentProjection = latestQueueProjectionRef.current.get(targetSessionId);
-        if (
-          currentProjection &&
-          !currentProjection.queue.some((item) => item.id === result.id)
-        )
-          promotedAcknowledgedTurns = promoteTurnsAbsentFromQueue(
-            localUserTurnsRef.current.get(targetSessionId) || [],
-            new Set(currentProjection.queue.map((item) => item.id)),
-            false,
-            true,
-            cancellingQueueIdsRef.current.get(targetSessionId),
-          );
-      } else if (acknowledgementTurnPlan.markDispatched && acceptedLocalTurn) {
-        acceptedLocalTurn.queueState = "dispatched";
-      }
-      if (acknowledgementKind !== "extension" && acknowledgementKind !== "steer" && acceptedLocalTurn) {
-        const acceptedTurnTotal = acceptedLocalTurn.expectedTurnTotal;
-        setSessions((current) =>
-          current.map((session) =>
-            session.id === targetSessionId &&
-            acceptedTurnTotal > (session.turnCount || 0)
-              ? { ...session, turnCount: acceptedTurnTotal }
-              : session,
-          ),
-        );
-      }
-      const promotedAcknowledgedForPane = promptPaneIsCurrent()
-        ? promotedAcknowledgedTurns.filter(
-            (candidate) => !candidate.renderedInTranscript,
-          )
-        : [];
-      for (const promoted of promotedAcknowledgedForPane)
-        promoted.renderedInTranscript = true;
-      // A prompt acknowledgement that crossed a real navigation boundary must
-      // not schedule a background reconcile against the later pane. The later
-      // A view owns its own authority and will reconcile the Session on entry;
-      // allowing the stale chain to schedule here can retain a deferred React
-      // update after unmount (and can repeatedly poll a stale test/consumer).
-      if (targetSessionId && promotedAcknowledgedTurns.length && promptNavigationIsCurrent)
-        requestPromptReconcileRef.current(targetSessionId);
-      // A late acknowledgement is useful for Session reconciliation, but it
-      // must not write into a later A pane after A → B → A. Queue state is
-      // Session-owned: after a same-Session view commit (e.g. an SSE-driven
-      // refresh snapshot taken before the acknowledgement) the ack is the only
-      // authority and must restore the queue. After a real navigation the
-      // newer view is authoritative, so the stale ack must stay inert.
-      if (!promptPaneIsCurrent()) {
-        reconcileStalePromptAcknowledgement({
-          sessionId: targetSessionId,
-          queued: result.queued === true,
-          queue: acknowledgedQueue,
-          queuePaused: acknowledgedProjection?.paused,
-          navigationEpochMatches: promptAuthority?.navigationEpoch === navigationEpochRef.current,
-          viewingSameSession: viewedSessionIdRef.current === targetSessionId,
-          desiredSameSession: desiredSessionIdRef.current === targetSessionId,
-          authority: promptAuthority,
-          previousToolStatus,
-        }, {
-          patchSessionCache: patchSessionCacheForAuthority,
-          capturePaneAuthority,
-          commitPane: commitPaneIfCurrent,
-          updateSidebarQueue: (sessionId, queue) => setSessions((current) => current.map((session) =>
-            session.id === sessionId ? applySidebarQueueProjection(session, queue) : session,
-          )),
-          scheduleSidebarRefresh,
-        });
-        return;
-      }
-      if (reconcileSpecialPromptAcknowledgement({
-        result,
-        message,
-        sessionId: targetSessionId,
-        authority: promptAuthority!,
-        gateModeFromCommand,
-      }, {
-        commitPane: commitPaneIfCurrent,
-        protectLocalTurn: () => { protectLocalPrompt(localTurn); },
-        updateGateMode,
-        showNotice: setNotice,
-        composerCommands,
-        previousToolStatus,
-        alreadyStreaming,
-      })) {
-        // Extension/Steer acknowledgement effects are host-driven; queue and
-        // ordinary Prompt paths continue below.
-      } else if (result.queued) {
-        const queuedTurn = localTurnEntry();
-        reconcileQueuedPromptAcknowledgement({
-          sessionId: targetSessionId,
-          authority: promptAuthority!,
-          queuedTurn,
-          acknowledgedQueue,
-          acknowledgedPaused: acknowledgedProjection?.paused,
-          promotedTurns: promotedAcknowledgedForPane,
-          alreadyStreaming,
-          previousToolStatus,
-        }, {
-          patchSessionCache: (sessionId, patch, authority) =>
-            patchSessionCacheForAuthority(sessionId, patch, authority),
-          commitPane: commitPaneIfCurrent,
-          updateSidebarQueue: (sessionId, queue, paused) => {
-            setSessions((current) => current.map((session) =>
-              session.id === sessionId
-                ? applySidebarQueueProjection(session, queue, paused)
-                : session,
-            ));
-          },
-          showNotice: setNotice,
-        });
-      } else {
-        await reconcileOrdinaryPromptAcknowledgement<SessionViewCommitAuthority>({
-          sessionId: targetSessionId,
-          authority: promptAuthority!,
-          eventVersionBefore: eventVersionBeforePrompt,
-          eventVersionAfter: sessionEventVersionRef.current.get(targetSessionId) || 0,
-          lastEventType: lastSessionEventTypeRef.current.get(targetSessionId),
-          promptTerminalByEvent,
-        }, {
-          protectLocalTurn: () => { protectLocalPrompt(localTurn); },
-          localTurnEntry,
-          commitPane: commitPaneIfCurrent,
-          fetchSessionView,
-          currentEventVersion: (sessionId) => sessionEventVersionRef.current.get(sessionId) || 0,
-          currentPaneAuthority: paneAuthorityCanCommit,
-          applySessionView,
-          queueRevision: (sessionId) => queueProjectionRevisionRef.current.get(sessionId) || 0,
-          schedulePromptReconcile: requestPromptReconcileRef.current,
-        });
-        if (result.deliveryUncertain)
-          setNotice("消息已交给 Pi，正在确认执行状态；请勿重复发送");
-      }
-    } catch (cause) {
-      // Transport failure recovery has two ownership layers: the local admission
-      // belongs to its Session even if a same-Session refresh committed a newer
-      // pane while the request was in flight; only rendering/error presentation
-      // belongs to a particular pane revision. Never strand a running-turn
-      // admission as hidden `waiting` merely because its old pane token expired.
-      const localEntry = localTurnEntry();
-      const resultPending = resultPendingError(cause);
-      // Whether this failure is definite is decided before anything is recorded:
-      // a request that may still be executing must not leave a permanent failure
-      // card under a running turn.
-      const explicitClientRejection =
-        cause instanceof ApiRequestError &&
-        cause.status >= 400 &&
-        cause.status < 500 &&
-        !resultPending;
-      const failureClassification = classifyPromptFailure({
-        resultPending,
-        promptSubmitted,
-        promptAcceptedByEvent,
-        promptTerminalByEvent,
-        explicitClientRejection,
-        upstreamOutcomeUnknown:
-          cause instanceof ApiRequestError && cause.outcomeUnknown,
-      });
-      const outcomeUnknown = failureClassification.outcomeUnknown;
-      {
-        // A failed upstream call never becomes an assistant message, so its reason
-        // is kept in the transcript instead of only in the five-second toast.
-        // Input validation stays a toast: the composer already explains it. A
-        // steer keeps the composer's own surface, and a failure whose outcome is
-        // unknown may still complete, so neither is recorded here.
-        const failureText = cause instanceof Error ? cause.message : String(cause);
-        const failureStatus = cause instanceof ApiRequestError ? cause.status : undefined;
-        const failureCode = cause instanceof ApiRequestError ? cause.code : undefined;
-        const scope = targetSessionId || (localDraftRef.current ? DRAFT_FAILURE_SCOPE : "");
-        reconcilePromptFailureRecord({
-          scope,
-          message: failureText,
-          status: failureStatus,
-          code: failureCode,
-          incidentId: cause instanceof ApiRequestError ? cause.incidentId : undefined,
-          failureIsDefinite: failureClassification.failureIsDefinite,
-          steering,
-        }, {
-          isTranscriptWorthyFailure,
-          recordLocalFailure: (failureScope, message, incidentId) =>
-            recordLocalFailure(failureScope, message, incidentId),
-        });
-      }
-      if (shouldClearModelSelectionOnFailure(cause, modelUnavailableError)) {
-        // The Runtime rejected this Model, so the staged selection can never be
-        // applied to this Session by retrying the same prompt. Dropping it makes
-        // the pane fall back to the Runtime-confirmed Model instead of failing
-        // every later prompt the same way.
-        pendingSessionPrefsRef.current.delete(targetSessionId || DRAFT_PREFS_KEY);
-        saveSessionComposerSelections(pendingSessionPrefsRef.current);
-        setComposerSelectionRevision((revision) => revision + 1);
-      }
-      const stoppedSteerRejection = authoritativeStoppedSteerRejection(
-        cause,
-        steering,
-      );
-      let rejectionMessages:
-        PiMessage[] | ((current: PiMessage[]) => PiMessage[]) | undefined;
-      const localTurnPlan = planPromptFailureLocalTurn({
-        localEntry,
-        pendingTurns: localUserTurnsRef.current.get(targetSessionId) || [],
-        outcomeUnknown,
-        steering,
-      });
-      if (localTurnPlan.retainAsDispatched && localEntry) {
-        localEntry.queueState = "dispatched";
-        rejectionMessages = (current) => appendLocalTurnOnce(current, localEntry);
-        schedulePromptReconcile(targetSessionId);
-      } else if (localTurnPlan.removeFromPending && localEntry) {
-        const pending = localUserTurnsRef.current.get(targetSessionId) || [];
-        const remaining = removeLocalTurnAndRebase(pending, localEntry);
-        if (remaining.length) localUserTurnsRef.current.set(targetSessionId, remaining);
-        else localUserTurnsRef.current.delete(targetSessionId);
-        viewCacheWriter.forget(targetSessionId, promptAuthority || promptDraftAuthority!);
-        if (localTurnPlan.renderedMessage)
-          rejectionMessages = (current) => current.filter((candidate) => candidate !== localTurnPlan.renderedMessage);
-      }
-      // A stale A failure must never surface after A → B → A. A same-session
-      // refresh is different: it only changes the pane revision, and must not
-      // strand this Session-owned admission offscreen while reconciliation is
-      // still pending.
-      const sameSessionRefreshAuthority =
-        promptAuthority &&
-        promptAuthority.navigationEpoch === navigationEpochRef.current &&
-        viewedSessionIdRef.current === targetSessionId &&
-        desiredSessionIdRef.current === targetSessionId
-          ? capturePaneAuthority(targetSessionId)
-          : null;
-      const failureAuthority =
-        promptAuthority && paneAuthorityCanCommit(promptAuthority)
-          ? promptAuthority
-          : sameSessionRefreshAuthority;
-      if (stoppedSteerRejection) {
-        reconcileStoppedSteerFailure({
-          sessionId: targetSessionId,
-          authority: promptAuthority!,
-        }, {
-          setRunningOverride: (sessionId, running) => sessionRunningOverridesRef.current.set(sessionId, running),
-          settleSidebar: (sessionId) => setSessions((current) => current.map((session) =>
-            session.id === sessionId ? settleSidebarActivity(session) : session,
-          )),
-          patchStoppedSession: (sessionId, authority) => patchSessionCacheForAuthority(
-            sessionId,
-            { isStreaming: false, liveMessage: undefined, toolStatus: "", state: { isStreaming: false, isCompacting: false } },
-            authority as SessionViewCommitAuthority,
-          ),
-          releasePromptBusy: (sessionId) => releasePromptBusy(sessionId, undefined, undefined, true),
-          clearStopping: (sessionId) => clearStoppingForSession(sessionId),
-        });
-      }
-      const visibleFailure = presentPromptFailure({
-        sessionId: targetSessionId,
-        paneAuthority: failureAuthority,
-        draftAuthority: promptDraftAuthority,
-        rejectionMessages,
-        stoppedSteerRejection,
-        stateStreaming: state.isStreaming,
-        promptAcceptedByEvent,
-        resultPending,
-        causeMessage: cause instanceof Error ? cause.message : String(cause),
-      }, {
-        commitPane: commitPaneIfCurrent,
-        commitDraft: commitDraftIfCurrent,
-        scheduleSidebarRefresh,
-        showNotice: setNotice,
-        showError: setError,
-      });
-      if (visibleFailure && stoppedSteerRejection) {
-        clearPendingLiveMessage();
-        const requestVersion =
-          sessionEventVersionRef.current.get(targetSessionId) || 0;
-        const queueRequestRevision =
-          queueProjectionRevisionRef.current.get(targetSessionId) || 0;
-        const authority = capturePaneAuthority(targetSessionId);
-        void fetchSessionView(targetSessionId)
-          .then((view) => {
-            if (
-              (sessionEventVersionRef.current.get(targetSessionId) || 0) !==
-              requestVersion
-            )
-              return;
-            if (paneAuthorityCanCommit(authority))
-              applySessionView(view, authority, queueRequestRevision);
-            else commitSessionViewCache(view, authority);
-          })
-          .catch(() => undefined);
-        scheduleSidebarRefresh();
-      }
-      // Rendering remains pane-authority guarded, but the editor-owned pump
-      // must learn every definite rejection so it can retain the originating
-      // scoped snapshot even when the user has navigated elsewhere.
-      if (!outcomeUnknown) throw cause;
-    } finally {
-      if (promptOperationId && !serverPromptId)
-        promptSubmitControllerRef.current.delete(promptOperationId);
-      if (
-        promptBusyRelease &&
-        promptBusyReleasesRef.current.get(targetSessionId)?.release ===
-          promptBusyRelease
-      )
-        promptBusyReleasesRef.current.delete(targetSessionId);
-      finishSessionBusy();
-    }
-  };
+  schedulePromptReconcileRef.current = schedulePromptReconcile;
 
   const stopGeneration = createStopGeneration({
     api,
@@ -4846,1004 +3437,6 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     [refreshSessionCacheForAuthority, setRuntimeWarming, updateGateMode],
   );
 
-  const composerTargetForViewedSession = () => {
-    // Background-child records are never normal Runtime targets. Follow only
-    // server-derived direct-parent edges until reaching the verified ordinary
-    // ancestor; malformed/cyclic retained addresses fail closed.
-    let target = viewedSessionIdRef.current;
-    const visited = new Set<string>();
-    while (target && subagentAddressesRef.current.has(target)) {
-      if (visited.has(target)) return "";
-      visited.add(target);
-      const parentSessionId = subagentAddressesRef.current.get(target)?.parentSessionId;
-      if (!parentSessionId || visited.has(parentSessionId)) return "";
-      target = parentSessionId;
-    }
-    return target;
-  };
-
-  const stageComposerSelection = (
-    key: string,
-    patch: Pick<SessionComposerSelection, "model" | "thinkingLevel">,
-  ) => {
-    if (!key) return undefined;
-    const next = stageSessionComposerSelection(
-      pendingSessionPrefsRef.current.get(key),
-      patch,
-    );
-    pendingSessionPrefsRef.current.set(key, next);
-    // Persist the click synchronously as browser-local intent so an immediate
-    // F5 cannot race React's post-commit storage effect.
-    saveSessionComposerSelections(pendingSessionPrefsRef.current);
-    // This value is only a render invalidator. The selection itself remains
-    // session-keyed in the ref so navigation never aliases one target's choice
-    // onto another target's Composer.
-    setComposerSelectionRevision((revision) => revision + 1);
-    return next;
-  };
-
-  const stageSessionPref = (patch: Pick<
-    SessionComposerSelection,
-    "model" | "thinkingLevel"
-  >) => {
-    const key = localDraftRef.current
-      ? DRAFT_PREFS_KEY
-      : composerTargetForViewedSession();
-    return stageComposerSelection(key, patch);
-  };
-
-  const changeModel = (provider: string, modelId: string, api?: string) => {
-    if (buildIdentityMismatch || !provider || !modelId) return;
-    const model = models.find(
-      (candidate) =>
-        candidate.provider === provider && candidate.id === modelId
-        && (api ? candidate.api === api : true),
-    );
-    const viewed = viewedSessionIdRef.current;
-    const targetSessionId = composerTargetForViewedSession();
-    const childOriginated = Boolean(
-      viewed && targetSessionId && viewed !== targetSessionId,
-    );
-    // A child transcript is read-only. Do not let its controls mutate the
-    // verified ordinary parent selection, even through a programmatic call.
-    if (childOriginated) {
-      setNotice("子代理对话为只读，不能修改模型设置");
-      return;
-    }
-    if (!model) return;
-    const selectionKey = localDraftRef.current
-      ? DRAFT_PREFS_KEY
-      : targetSessionId;
-    stageComposerSelection(
-      selectionKey,
-      modelSelectionPatch(
-        state,
-        pendingSessionPrefsRef.current.get(selectionKey),
-        model,
-        models,
-      ),
-    );
-    setError("");
-  };
-
-  const changeThinking = (level: ThinkingLevel) => {
-    if (buildIdentityMismatch) return;
-    const viewed = viewedSessionIdRef.current;
-    const targetSessionId = composerTargetForViewedSession();
-    const childOriginated = Boolean(
-      viewed && targetSessionId && viewed !== targetSessionId,
-    );
-    // A child transcript is read-only. Do not let its controls mutate the
-    // verified ordinary parent selection, even through a programmatic call.
-    if (childOriginated) {
-      setNotice("子代理对话为只读，不能修改思考强度");
-      return;
-    }
-    stageSessionPref({ thinkingLevel: level });
-    setError("");
-  };
-
-  const selectDraftWorkspace = (cwd: string) => {
-    const selected = cwd.trim();
-    if (workspacePicking || !localDraftRef.current || !selected) return;
-    const authority = captureDraftPaneAuthority();
-    setError("");
-    commitDraftIfCurrent(authority, {
-      type: "DRAFT_WORKSPACE_SELECTED",
-      cwd: selected,
-    });
-    setNotice(`新对话将使用工作目录：${selected}`);
-  };
-
-  const pickDraftWorkspace = async () => {
-    if (workspacePicking || !localDraftRef.current) return;
-    const authority = captureDraftPaneAuthority();
-    const token = Symbol("draft-workspace-picker");
-    draftWorkspacePickerTokenRef.current = token;
-    setWorkspacePicking(true);
-    setError("");
-    setNotice("请在弹出的 Windows 窗口中浏览并选择新对话工作目录");
-    try {
-      const result = await api.pickDraftWorkspace();
-      if (
-        draftWorkspacePickerTokenRef.current !== token ||
-        !draftAuthorityCanCommit(authority) ||
-        result.cancelled ||
-        !result.cwd
-      )
-        return;
-      commitDraftIfCurrent(authority, {
-        type: "DRAFT_WORKSPACE_SELECTED",
-        cwd: result.cwd,
-      });
-      setNotice(`新对话将使用工作目录：${result.cwd}`);
-    } catch (cause) {
-      if (
-        draftWorkspacePickerTokenRef.current === token &&
-        draftAuthorityCanCommit(authority)
-      )
-        setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      if (draftWorkspacePickerTokenRef.current === token) {
-        draftWorkspacePickerTokenRef.current = null;
-        setWorkspacePicking(false);
-      }
-    }
-  };
-
-  const pickDefaultWorkspace = async () => {
-    if (workspacePicking || mutationBlocked) return;
-    const runEpochGeneration = runEpochGenerationRef.current;
-    const token = Symbol("default-workspace-picker");
-    workspaceDefaultPickerTokenRef.current = token;
-    setWorkspacePicking(true);
-    setError("");
-    setNotice("请在弹出的 Windows 窗口中选择默认工作路径");
-    try {
-      const result = await api.pickWorkspace();
-      if (
-        workspaceDefaultPickerTokenRef.current !== token ||
-        runEpochGenerationRef.current !== runEpochGeneration ||
-        result.cancelled ||
-        !result.cwd
-      )
-        return;
-      // This is global metadata only. A pending draft can have its own selected
-      // cwd, and an existing Runtime always keeps its immutable Session cwd.
-      const workspaceEpoch =
-        typeof result.workspaceEpoch === "string"
-          ? result.workspaceEpoch
-          : runEpochRef.current;
-      const workspaceRevision =
-        typeof result.workspaceRevision === "number" &&
-        Number.isFinite(result.workspaceRevision)
-          ? result.workspaceRevision
-          : workspaceRevisionRef.current + 1;
-      if (
-        (!workspaceEpochRef.current ||
-          workspaceEpoch === workspaceEpochRef.current) &&
-        workspaceRevision >= workspaceRevisionRef.current
-      ) {
-        workspaceEpochRef.current = workspaceEpoch || workspaceEpochRef.current;
-        workspaceRevisionRef.current = workspaceRevision;
-        setWorkspaceCwd(result.cwd);
-      }
-      setNotice(`以后新建的对话将使用工作目录：${result.cwd}`);
-    } catch (cause) {
-      if (workspaceDefaultPickerTokenRef.current === token)
-        setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      if (workspaceDefaultPickerTokenRef.current === token) {
-        workspaceDefaultPickerTokenRef.current = null;
-        setWorkspacePicking(false);
-      }
-    }
-  };
-
-  const reconcileSessionMutation = async (
-    sessionId: string,
-    kind: "rename" | "delete",
-    expectedName?: string,
-  ) => {
-    const fullRequestSequence = ++sidebarFullRequestSequenceRef.current;
-    const result = await api.sessions(true, [], true);
-    const session = result.sessions.find((item) => item.id === sessionId);
-    const outcome =
-      kind === "rename"
-        ? session?.name === expectedName
-          ? "committed"
-          : session
-            ? "not-committed"
-            : "absent"
-        : session
-          ? "not-committed"
-          : "committed";
-    return { outcome, result, fullRequestSequence } as const;
-  };
-
-  const applySessionListSnapshot = (result: {
-    sessions: SessionSummary[];
-    total: number;
-    directories?: SessionDirectorySummary[];
-  }, fullRequestSequence: number) => {
-    if (
-      !commitSidebarSessions(result.sessions, {
-        kind: "full",
-        requestSequence: fullRequestSequence,
-      })
-    )
-      return false;
-    setSessionsTotal(optimisticSessionsTotal(result.sessions, result.total));
-    if (result.directories) setSessionDirectories(result.directories);
-    return true;
-  };
-
-  /**
-   * Delete terminal state is stronger than an ordinary list refresh: once an
-   * authoritative source says a Session is gone, no older request may restore
-   * its row or cached pane. Keep every Session-keyed projection cleanup here;
-   * otherwise a long-lived tab retains image payloads, promises, generations,
-   * and stale recovery markers forever after repeated deletes.
-   */
-  const clearDeletedSessionProjection = (sessionId: string): void => {
-    if (!sessionId) return;
-    const keyId = composerDraftKeyId({ kind: "session", sessionId });
-    localUserTurnsRef.current.delete(sessionId);
-    pendingSteersRef.current.delete(sessionId);
-    gateModesRef.current = Object.fromEntries(
-      Object.entries(gateModesRef.current).filter(([id]) => id !== sessionId),
-    );
-    pendingGateModesRef.current.delete(sessionId);
-    pendingSessionPrefsRef.current.delete(sessionId);
-    saveSessionComposerSelections(pendingSessionPrefsRef.current);
-    setComposerSelectionRevision((revision) => revision + 1);
-    composerDraftRevisionsRef.current.delete(keyId);
-    appliedDraftRestorationSequencesRef.current.delete(keyId);
-    steerDequeueExpectedDraftRevisionRef.current.delete(sessionId);
-    cancelledQueueIdsRef.current.delete(sessionId);
-    cancellingQueueIdsRef.current.delete(sessionId);
-    queueProjectionRevisionRef.current.delete(sessionId);
-    queueProjectionSourceRef.current.delete(sessionId);
-    confirmedQueueDispatchIdsRef.current.delete(sessionId);
-    latestQueueProjectionRef.current.delete(sessionId);
-    queueMutationSequenceRef.current.delete(sessionId);
-    appliedQueueMutationSequenceRef.current.delete(sessionId);
-    sessionEventVersionRef.current.delete(sessionId);
-    sessionRunGenerationsRef.current.delete(sessionId);
-    settledRunGenerationsRef.current.delete(sessionId);
-    lastSessionEventTypeRef.current.delete(sessionId);
-    sourceTurnTotalsRef.current.delete(sessionId);
-    sessionRunningOverridesRef.current.delete(sessionId);
-    terminalAssistantSessionIdsRef.current.delete(sessionId);
-    terminalAssistantStreamGenerationsRef.current.delete(sessionId);
-    streamingWireProjectionsRef.current.delete(sessionId);
-    streamGapRecoveriesRef.current.delete(sessionId);
-    unreadSteeringDropMessagesRef.current.delete(sessionId);
-    diagnosticSidebarRowsRef.current.delete(sessionId);
-    for (const key of diagnosticSseRejectionAtRef.current.keys())
-      if (key.startsWith(`${sessionId}:`)) diagnosticSseRejectionAtRef.current.delete(key);
-    warmingSessionIdsRef.current.delete(sessionId);
-    const promptBusyLease = promptBusyReleasesRef.current.get(sessionId);
-    if (promptBusyLease) {
-      promptBusyLease.markTerminal();
-      promptBusyLease.release();
-      promptBusyReleasesRef.current.delete(sessionId);
-    }
-    busySessionCountsRef.current.delete(sessionId);
-    stoppingOperationTokensRef.current.delete(sessionId);
-    for (const childId of [...subagentAddressesRef.current.keys()]) {
-      if (childId === sessionId || subagentAddressesRef.current.get(childId)?.parentSessionId === sessionId)
-        subagentAddressesRef.current.delete(childId);
-    }
-    viewCacheWriter.forgetCurrent(sessionId);
-    scrollMemoryRef.current.forget(sessionId);
-    streamDiagnosticsRef.current?.deleteSession(sessionId);
-    setPendingSteersBySession(Object.fromEntries(pendingSteersRef.current));
-    setGateModes({ ...gateModesRef.current });
-    setPendingGateModes(Object.fromEntries(pendingGateModesRef.current));
-    setSteerDequeueingBySession((current) => {
-      if (!current[sessionId]) return current;
-      const next = { ...current };
-      delete next[sessionId];
-      return next;
-    });
-    setComposerPendingByScope((current) => {
-      if (!(keyId in current)) return current;
-      const next = { ...current };
-      delete next[keyId];
-      return next;
-    });
-    setWarmingSessionIds([...warmingSessionIdsRef.current]);
-    setBusySessionIds([...busySessionCountsRef.current.keys()]);
-    setStoppingSessionIds((current) => current.filter((id) => id !== sessionId));
-    setFailedSessionIds((current) => current.filter((id) => id !== sessionId));
-    setUnseenReplySessionIds((current) => current.filter((id) => id !== sessionId));
-    activeSessionProjectionWriter.forgetCurrent(sessionId);
-    setCopyingSessionIds((current) => current.filter((id) => id !== sessionId));
-    setRestoredComposerDrafts((current) => {
-      if (!(keyId in current)) return current;
-      const next = { ...current };
-      delete next[keyId];
-      return next;
-    });
-  };
-
-  const finalizeDeletedSession = (sessionId: string) => {
-    const wasVisible = sessionId === viewedSessionIdRef.current;
-    const desiredSessionId = desiredSessionIdRef.current;
-    const wasViewed = wasVisible || sessionId === desiredSessionId;
-    // A delete may settle after the user has already selected a live replacement.
-    // Cancel only navigation to the deleted ID; preserve that newer destination.
-    if (sessionId === desiredSessionId) cancelPendingNavigation();
-    if (wasVisible) {
-      clearPendingLiveMessage();
-      pendingScrollRestoreRef.current = "";
-      viewedSessionIdRef.current = "";
-      if (desiredSessionIdRef.current === sessionId)
-        desiredSessionIdRef.current = "";
-      commitPane({ type: "CLEAR_PANE" });
-    }
-    optimisticRenamesRef.current.delete(sessionId);
-    optimisticDeletesRef.current.delete(sessionId);
-    confirmedDeletedSessionIdsRef.current.add(sessionId);
-    // Keep a bounded tombstone set for already-resolved late continuations;
-    // process-epoch invalidation remains the stronger long-term fence.
-    while (confirmedDeletedSessionIdsRef.current.size > 512) {
-      const oldest = confirmedDeletedSessionIdsRef.current.values().next().value;
-      if (typeof oldest !== "string") break;
-      confirmedDeletedSessionIdsRef.current.delete(oldest);
-    }
-    clearDeletedSessionProjection(sessionId);
-    forgetComposerKey(composerDraftKeyId({ kind: "session", sessionId }));
-    setSessionNavigation((current) => ({
-      ...current,
-      pinnedSessionIds: current.pinnedSessionIds.filter(
-        (id) => id !== sessionId,
-      ),
-    }));
-    setSessions((current) =>
-      current.filter((session) => session.id !== sessionId),
-    );
-    syncMutatingSessionIds();
-    return wasViewed;
-  };
-
-  const selectDeletionFallback = (
-    deletedId: string,
-    sessionsAfterDeletion: SessionSummary[],
-    wasViewed: boolean,
-  ) => {
-    // Only replace a pane that was still selected when terminal deletion was
-    // established; never override a newer user selection or local draft.
-    if (!wasViewed) return;
-    // A completed user navigation must win over deletion fallback. A deleted
-    // visible pane has already been cleared to empty refs by finalization.
-    if (
-      (viewedSessionIdRef.current &&
-        viewedSessionIdRef.current !== deletedId) ||
-      (desiredSessionIdRef.current && desiredSessionIdRef.current !== deletedId)
-    )
-      return;
-    const replacement = sessionsAfterDeletion.find(
-      (session) => session.id !== deletedId,
-    );
-    if (replacement) void viewSession(replacement.id);
-    else createSession();
-  };
-
-  /** Resolve only operations proven by a full authoritative Session inventory. */
-  const reconcilePendingSessionMutations = async () => {
-    const runEpochGeneration = runEpochGenerationRef.current;
-    const fullRequestSequence = ++sidebarFullRequestSequenceRef.current;
-    const result = await api.sessions(true, [], true);
-    if (
-      runEpochGenerationRef.current !== runEpochGeneration ||
-      fullRequestSequence < sidebarCommittedFullSequenceRef.current
-    )
-      return false;
-    let confirmed = false;
-    const absentRenames: Array<{ id: string; wasViewed: boolean }> = [];
-    for (const [id, pending] of optimisticRenamesRef.current) {
-      const session = result.sessions.find((item) => item.id === id);
-      if (session?.name === pending.name) {
-        optimisticRenamesRef.current.delete(id);
-        confirmed = true;
-      } else if (!session) {
-        absentRenames.push({ id, wasViewed: finalizeDeletedSession(id) });
-        confirmed = true;
-      }
-    }
-    for (const id of optimisticDeletesRef.current.keys()) {
-      if (!result.sessions.some((session) => session.id === id)) {
-        finalizeDeletedSession(id);
-        confirmed = true;
-      }
-    }
-    if (confirmed) syncMutatingSessionIds();
-    applySessionListSnapshot(result, fullRequestSequence);
-    for (const absent of absentRenames)
-      selectDeletionFallback(absent.id, result.sessions, absent.wasViewed);
-    return true;
-  };
-
-  const refreshManually = async () => {
-    const runEpochGeneration = runEpochGenerationRef.current;
-    const operationToken = Symbol("manual-refresh");
-    refreshOperationTokenRef.current = operationToken;
-    setRefreshing(true);
-    setError("");
-    try {
-      const [metadataResult, inventoryResult] = await Promise.allSettled([
-        refresh(),
-        reconcilePendingSessionMutations(),
-      ]);
-      if (runEpochGenerationRef.current !== runEpochGeneration) return;
-      if (inventoryResult.status === "rejected") throw inventoryResult.reason;
-      if (
-        inventoryResult.value &&
-        refreshOperationTokenRef.current === operationToken
-      )
-        setNotice("会话已刷新");
-      if (metadataResult.status === "rejected") {
-        const cause = metadataResult.reason;
-        setError(cause instanceof Error ? cause.message : String(cause));
-      }
-    } catch (cause) {
-      if (
-        refreshOperationTokenRef.current === operationToken &&
-        runEpochGenerationRef.current === runEpochGeneration
-      )
-        setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      if (refreshOperationTokenRef.current === operationToken) {
-        refreshOperationTokenRef.current = null;
-        setRefreshing(false);
-      }
-    }
-  };
-
-  const restartPi = async () => {
-    // A mismatched bundle has stale browser state by definition. Let the server
-    // make the final quiescence decision rather than trapping recovery behind a
-    // possibly stale sidebar activity projection.
-    if (
-      busy ||
-      lifecycleBlocked ||
-      (!buildIdentityMismatch &&
-        (anySessionRunning ||
-          anySessionQueued ||
-          anySessionPendingConfirmation))
-    )
-      return;
-    if (
-      !window.confirm(
-        "完整重启 Pi Chat 并应用本地更新？\n\n将结束 Pi Chat 服务及其所有 Pi RPC 会话进程，重新构建当前工作目录，然后启动全新的 Pi Chat。已保存的前端、服务端、内置组件与本地配置更新都会生效；聊天记录不会删除。\n\n会重新加载当前电脑上已经保存的 Pi Chat、扩展和配置改动。正在生成、排队或等待确认时无法执行。",
-      )
-    )
-      return;
-    cancelPendingNavigation();
-    setBusy(true);
-    setError("");
-    setNotice("正在结束 Pi Chat 进程、构建本地更新并启动全新服务…");
-    try {
-      await api.restart();
-      // Wait for a different startup token so this and every observing window
-      // reload only after the replacement listener is actually ready.
-      await api.waitForApplicationHandoff();
-      window.location.reload();
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const shutdownPiChat = async () => {
-    // See restartPi: only the server's live quiescence check is authoritative
-    // when this Web bundle no longer agrees with that server.
-    if (
-      busy ||
-      lifecycleBlocked ||
-      (!buildIdentityMismatch &&
-        (anySessionRunning ||
-          anySessionQueued ||
-          anySessionPendingConfirmation))
-    )
-      return;
-    if (
-      !window.confirm(
-        "关闭全部 Pi Chat？\n\n将先检查所有窗口中的对话。只要任一对话仍在执行、排队或等待确认，就不会关闭。\n\n确认空闲后，将关闭所有浏览器/PWA 窗口、本地服务和全部 Pi RPC。聊天记录和设置会保留。",
-      )
-    )
-      return;
-    setBusy(true);
-    setError("");
-    setNotice("正在检查全部对话并关闭 Pi Chat…");
-    try {
-      await api.shutdown();
-      setManagementSection(null);
-      setCloseComplete("application");
-      window.close();
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-      setBusy(false);
-    }
-  };
-
-  const exportStateDiagnostics = async () => {
-    if (diagnosticsBusy) return;
-    setDiagnosticsBusy(true);
-    setError("");
-    try {
-      recordBrowserStateDiagnostic("diagnostic", "export-requested", {
-        sessionId: viewedSessionIdRef.current,
-      });
-      streamDiagnosticsRef.current?.checkpoint();
-      diagnosticCheckpointRef.current();
-      const server = await api.stateDiagnosticSnapshot();
-      const bundle: StateDiagnosticExportBundle = {
-        schemaVersion: 4,
-        generatedAt: new Date().toISOString(),
-        warning:
-          "仅含最近五分钟的脱敏结构状态；服务端与当前浏览器页面各自保持本地顺序，时间戳不代表跨进程绝对顺序。",
-        server,
-        browser: browserStateDiagnosticSnapshot(),
-      };
-      const filename = downloadStateDiagnosticBundle(bundle);
-      setNotice(`诊断已导出：${filename}`);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setDiagnosticsBusy(false);
-    }
-  };
-
-  const copySessionToNew = (
-    source: SessionSummary,
-    persistedMessageId?: string,
-  ) => {
-    if (
-      buildIdentityMismatch ||
-      mutationBlocked ||
-      copyingSessionIds.includes(source.id) ||
-      optimisticRenamesRef.current.has(source.id) ||
-      optimisticDeletesRef.current.has(source.id)
-    )
-      return;
-    const runEpochGeneration = runEpochGenerationRef.current;
-    const navigationEpoch = navigationEpochRef.current;
-    const restorationSequence = persistedMessageId
-      ? ++draftRestorationIntentSequenceRef.current
-      : 0;
-    setCopyingSessionIds((current) => [...new Set([...current, source.id])]);
-    setError("");
-    setNotice(
-      persistedMessageId
-        ? "正在从该消息创建新对话…"
-        : "正在复制对话…",
-    );
-    const request = persistedMessageId
-      ? api.forkSession(source.id, persistedMessageId)
-      : api.cloneSession(source.id);
-    let retainCopyGuard = false;
-    void request
-      .then((result) => {
-        if (runEpochGenerationRef.current !== runEpochGeneration) return;
-        setSessions((current) => [
-          result.session,
-          ...current.filter((session) => session.id !== result.session.id),
-        ]);
-        setSessionsTotal((current) =>
-          sessionsRef.current.some((session) => session.id === result.session.id)
-            ? current
-            : current + 1,
-        );
-        if (result.editorText !== undefined || result.editorImages?.length) {
-          const key: ComposerDraftKey = {
-            kind: "session",
-            sessionId: result.session.id,
-          };
-          const keyId = composerDraftKeyId(key);
-          if (
-            restorationSequence >
-            (appliedDraftRestorationSequencesRef.current.get(keyId) || 0)
-          ) {
-            appliedDraftRestorationSequencesRef.current.set(
-              keyId,
-              restorationSequence,
-            );
-            setRestoredComposerDrafts((current) => ({
-              ...current,
-              [keyId]: {
-                key,
-                revision: restorationSequence,
-                expectedDraftRevision:
-                  composerDraftRevisionsRef.current.get(keyId) || 0,
-                message: result.editorText || "",
-                images: result.editorImages || [],
-              },
-            }));
-          }
-        }
-        setNotice(result.warning || (
-          persistedMessageId
-            ? "已在新对话中分叉，可修改原消息后发送"
-            : "已复制为新对话"
-        ));
-        void refreshSidebarSessions().catch(reportBackgroundRefreshError);
-        if (navigationEpochRef.current === navigationEpoch)
-          void viewSession(result.session.id, result.session.name);
-      })
-      .catch((cause) => {
-        if (runEpochGenerationRef.current !== runEpochGeneration) return;
-        const message = cause instanceof Error ? cause.message : String(cause);
-        const committedOrUncertain = /结果尚未确认|新对话已创建|请勿重复|不要重复/.test(message);
-        retainCopyGuard = committedOrUncertain;
-        setError(committedOrUncertain
-          ? message
-          : `${persistedMessageId ? "分叉" : "复制"}新对话失败：${message}`);
-        if (committedOrUncertain) void refreshSidebarSessions().catch(reportBackgroundRefreshError);
-      })
-      .finally(() => {
-        if (runEpochGenerationRef.current !== runEpochGeneration) return;
-        if (!retainCopyGuard) setCopyingSessionIds((current) =>
-          current.filter((sessionId) => sessionId !== source.id),
-        );
-      });
-  };
-
-  const confirmCloneSession = () => {
-    const dialog = sessionDialog;
-    if (!dialog || dialog.mode !== "clone") return;
-    setSessionDialog(null);
-    copySessionToNew(dialog.session);
-  };
-
-  const confirmForkSession = () => {
-    const dialog = sessionDialog;
-    if (!dialog || dialog.mode !== "fork") return;
-    setSessionDialog(null);
-    copySessionToNew(dialog.session, dialog.persistedMessageId);
-  };
-
-  const renameSession = (name: string) => {
-    if (buildIdentityMismatch) return;
-    const dialog = sessionDialog;
-    if (!dialog || dialog.mode !== "rename") return;
-    const sessionId = dialog.session.id;
-    if (
-      optimisticRenamesRef.current.has(sessionId) ||
-      optimisticDeletesRef.current.has(sessionId)
-    )
-      return;
-    const previousName = dialog.session.name;
-    const runEpochGeneration = runEpochGenerationRef.current;
-    const token = ++optimisticSessionMutationTokenRef.current;
-    optimisticRenamesRef.current.set(sessionId, { token, previousName, name });
-    syncMutatingSessionIds();
-    setSessionDialog(null);
-    setError("");
-    setSessions((current) =>
-      current.map((session) =>
-        session.id === sessionId ? { ...session, name } : session,
-      ),
-    );
-    refreshSessionCache(sessionId, {
-      session: { ...dialog.session, name },
-    });
-    void api
-      .renameSession(sessionId, name)
-      .then(() => {
-        if (optimisticRenamesRef.current.get(sessionId)?.token !== token)
-          return;
-        if (runEpochGenerationRef.current !== runEpochGeneration) {
-          void reconcilePendingSessionMutations().catch(() => undefined);
-          return;
-        }
-        optimisticRenamesRef.current.delete(sessionId);
-        syncMutatingSessionIds();
-        // `set_session_name` is the mutation authority. Sidebar/session views
-        // refresh asynchronously through the renamed SSE event, so never make
-        // a running rename wait for a full Bootstrap projection.
-        setNotice("对话已重命名");
-      })
-      .catch(async (cause) => {
-        const pending = optimisticRenamesRef.current.get(sessionId);
-        if (!pending || pending.token !== token) return;
-        if (runEpochGenerationRef.current !== runEpochGeneration) {
-          void reconcilePendingSessionMutations().catch(() => undefined);
-          return;
-        }
-        try {
-          const { outcome, result, fullRequestSequence } =
-            await reconcileSessionMutation(sessionId, "rename", name);
-          if (
-            optimisticRenamesRef.current.get(sessionId)?.token !== token ||
-            runEpochGenerationRef.current !== runEpochGeneration ||
-            fullRequestSequence < sidebarCommittedFullSequenceRef.current
-          ) {
-            if (runEpochGenerationRef.current !== runEpochGeneration)
-              void reconcilePendingSessionMutations().catch(() => undefined);
-            return;
-          }
-          if (outcome === "committed") {
-            optimisticRenamesRef.current.delete(sessionId);
-            syncMutatingSessionIds();
-            applySessionListSnapshot(result, fullRequestSequence);
-            setNotice("对话已重命名");
-            return;
-          }
-          if (outcome === "absent") {
-            const wasViewed = finalizeDeletedSession(sessionId);
-            applySessionListSnapshot(result, fullRequestSequence);
-            selectDeletionFallback(sessionId, result.sessions, wasViewed);
-            setError("重命名未完成：对话已不存在或已被删除");
-            return;
-          }
-          if (outcome === "not-committed") {
-            const definiteRejection =
-              cause instanceof ApiRequestError &&
-              cause.status >= 400 &&
-              cause.status < 500 &&
-              !resultPendingError(cause);
-            if (definiteRejection) {
-              optimisticRenamesRef.current.delete(sessionId);
-              syncMutatingSessionIds();
-              applySessionListSnapshot(result, fullRequestSequence);
-              setError(`重命名失败，已恢复原名称：${cause.message}`);
-              return;
-            }
-            // A fresh JSONL snapshot is not a completion barrier for the
-            // original request: the server may still be finishing its RPC and
-            // index refresh after the HTTP response was lost. Keep the local
-            // name and mutation guard until positive terminal evidence arrives.
-            applySessionListSnapshot(result, fullRequestSequence);
-          }
-        } catch {
-          // Transport is still indeterminate; retain the local intent and guard.
-        }
-        if (optimisticRenamesRef.current.get(sessionId)?.token !== token)
-          return;
-        if (runEpochGenerationRef.current !== runEpochGeneration) {
-          void reconcilePendingSessionMutations().catch(() => undefined);
-          return;
-        }
-        const message = cause instanceof Error ? cause.message : String(cause);
-        setError(`重命名结果尚未确认，请刷新页面后核对：${message}`);
-      });
-  };
-
-  const deleteSession = () => {
-    if (buildIdentityMismatch) return;
-    const dialog = sessionDialog;
-    if (!dialog || dialog.mode !== "delete") return;
-    const deleting = dialog.session;
-    const deletingId = deleting.id;
-    if (
-      optimisticRenamesRef.current.has(deletingId) ||
-      optimisticDeletesRef.current.has(deletingId)
-    )
-      return;
-    const index = sessions.findIndex((session) => session.id === deletingId);
-    const wasViewed =
-      deletingId === desiredSessionIdRef.current ||
-      deletingId === viewedSessionIdRef.current;
-    const replacement = wasViewed
-      ? sessions.find((session) => session.id !== deletingId)
-      : undefined;
-    const runEpochGeneration = runEpochGenerationRef.current;
-    const token = ++optimisticSessionMutationTokenRef.current;
-    optimisticDeletesRef.current.set(deletingId, {
-      token,
-      session: deleting,
-      index,
-      sessionsTotal,
-      wasViewed,
-    });
-    streamDiagnosticsRef.current?.deleteSession(deletingId);
-    // Session ids are path-derived, so a conversation created later can reuse the
-    // id of a deleted one; retained failure cards must not survive the delete.
-    setLocalFailures((current) => forgetLocalFailuresForSession(current, deletingId));
-    syncMutatingSessionIds();
-    if (wasViewed) cancelPendingNavigation();
-    setSessionDialog(null);
-    setError("");
-    setSessions((current) =>
-      current.filter((session) => session.id !== deletingId),
-    );
-    setSessionsTotal((current) => Math.max(0, current - 1));
-    if (wasViewed) {
-      if (replacement) void viewSession(replacement.id);
-      else createSession();
-    }
-    void api
-      .deleteSession(deletingId)
-      .then((data) => {
-        if (optimisticDeletesRef.current.get(deletingId)?.token !== token)
-          return;
-        if (runEpochGenerationRef.current !== runEpochGeneration) {
-          void reconcilePendingSessionMutations().catch(() => undefined);
-          return;
-        }
-        const finalizedViewed = finalizeDeletedSession(deletingId);
-        // Delete responses may reconcile ancillary inventory, but they never
-        // carry refresh-order authority for core Runtime projections.
-        applyBootstrapMetadata(data);
-        selectDeletionFallback(deletingId, data.sessions, finalizedViewed);
-        setNotice("对话已删除");
-      })
-      .catch(async (cause) => {
-        const pending = optimisticDeletesRef.current.get(deletingId);
-        if (!pending || pending.token !== token) return;
-        if (runEpochGenerationRef.current !== runEpochGeneration) {
-          void reconcilePendingSessionMutations().catch(() => undefined);
-          return;
-        }
-        try {
-          const { outcome, result, fullRequestSequence } =
-            await reconcileSessionMutation(deletingId, "delete");
-          if (
-            optimisticDeletesRef.current.get(deletingId)?.token !== token ||
-            runEpochGenerationRef.current !== runEpochGeneration ||
-            fullRequestSequence < sidebarCommittedFullSequenceRef.current
-          ) {
-            if (runEpochGenerationRef.current !== runEpochGeneration)
-              void reconcilePendingSessionMutations().catch(() => undefined);
-            return;
-          }
-          if (outcome === "committed") {
-            const finalizedViewed = finalizeDeletedSession(deletingId);
-            applySessionListSnapshot(result, fullRequestSequence);
-            selectDeletionFallback(
-              deletingId,
-              result.sessions,
-              finalizedViewed,
-            );
-            setNotice("对话已删除");
-            return;
-          }
-          if (outcome === "not-committed") {
-            const definiteRejection =
-              cause instanceof ApiRequestError &&
-              cause.status >= 400 &&
-              cause.status < 500 &&
-              !resultPendingError(cause);
-            if (definiteRejection) {
-              optimisticDeletesRef.current.delete(deletingId);
-              syncMutatingSessionIds();
-              applySessionListSnapshot(result, fullRequestSequence);
-              setError(`删除失败，已恢复对话显示：${cause.message}`);
-              return;
-            }
-            // Presence in a fresh inventory does not prove a timed-out delete
-            // failed; unlink/index refresh may still be in flight. Keep the row
-            // hidden and guarded until absence or a structural SSE proves the
-            // terminal outcome.
-            applySessionListSnapshot(result, fullRequestSequence);
-          }
-        } catch {
-          // Transport is still indeterminate; retain the local intent and guard.
-        }
-        if (optimisticDeletesRef.current.get(deletingId)?.token !== token)
-          return;
-        if (runEpochGenerationRef.current !== runEpochGeneration) {
-          void reconcilePendingSessionMutations().catch(() => undefined);
-          return;
-        }
-        const message = cause instanceof Error ? cause.message : String(cause);
-        setError(`删除结果尚未确认，请刷新页面后核对：${message}`);
-      });
-  };
-
-  const changeGate = async (mode: GateMode) => {
-    const viewed = viewedSessionIdRef.current;
-    const sessionId = composerTargetForViewedSession();
-    if (buildIdentityMismatch) return;
-    // A local New draft has no Runtime yet. Stage only its desired first-turn
-    // Gate value; the initial-submit FIFO applies it before the user prompt.
-    if (localDraftRef.current) {
-      stageGateMode(DRAFT_PREFS_KEY, mode);
-      setNotice(`已选择 ${mode === "open" ? "放行" : "严格"}，发送时生效`);
-      return;
-    }
-    if (!sessionId) return;
-    const childOriginated = Boolean(viewed && viewed !== sessionId);
-    // A child transcript is read-only. A child-originated Gate choice must
-    // never be staged as a parent preference; reject it explicitly instead.
-    if (childOriginated) {
-      setNotice("子代理对话为只读，不能修改文件权限模式");
-      return;
-    }
-    // A cold history pane and local preparation stage Gate for the target
-    // prompt instead of issuing an unauthorized command against a Runtime the
-    // pane does not own. Staging is local and never blocked by an in-flight
-    // settings request.
-    if (runtimeStatus !== "active" || state.isCompacting) {
-      stageGateMode(sessionId, mode);
-      setNotice(`已选择 ${mode === "open" ? "放行" : "严格"}，发送时生效`);
-      return;
-    }
-    // An explicit active-Runtime choice supersedes any cold staged intent. Do
-    // this before issuing /gate so an older staged value cannot later override
-    // a confirmed opposite command in UI, prompt payload, or auto-allow logic.
-    stageGateMode(sessionId, undefined);
-    // An active Runtime still requires its own confirmation before browser UI
-    // may change a security-sensitive Gate setting.
-    await send(`/gate ${mode}`, []);
-  };
-
-  const respondToExtension = async (body: {
-    id?: string;
-    cancelled?: boolean;
-    confirmed?: boolean;
-    value?: string;
-  }): Promise<boolean> => {
-    if (buildIdentityMismatch) return false;
-    const submittedRequest = extensionRequest;
-    if (!submittedRequest) return false;
-    const sessionId =
-      submittedRequest.piChatSessionId || viewedSessionIdRef.current;
-    if (!sessionId) {
-      setError("确认请求缺少会话标识，已拒绝发送");
-      return false;
-    }
-    if (subagentAddressesRef.current.has(sessionId)) {
-      setError("子代理对话为只读，不能提交扩展或问卷确认");
-      return false;
-    }
-    const retryRequest = (candidate: ExtensionUiRequest | null | undefined) => {
-      if (
-        candidate &&
-        (candidate.method === "input" || candidate.method === "editor") &&
-        typeof body.value === "string"
-      ) return { ...candidate, prefill: body.value };
-      return candidate || null;
-    };
-    // A response failure can arrive after A → B → A. Keep its recovery bound
-    // to the exact pane that submitted the confirmation, not just its ID.
-    const extensionAuthority = capturePaneAuthority(sessionId);
-    dispatchPane({
-      type: "EXTENSION_REQUEST_CHANGED",
-      sessionId,
-      request: null,
-    });
-    try {
-      await api.respondToExtension({
-        ...body,
-        id: submittedRequest.id,
-        sessionId,
-      });
-      return true;
-    } catch (cause) {
-      let acceptedDespiteFailure = false;
-      // Re-read the authoritative pending request. This distinguishes a real
-      // delivery failure from a lost HTTP response after Pi already accepted it.
-      try {
-        const view = await fetchSessionView(sessionId);
-        acceptedDespiteFailure =
-          !view.pendingExtensionRequest ||
-          view.pendingExtensionRequest.id !== submittedRequest.id;
-        commitPaneIfCurrent(extensionAuthority, {
-          type: "EXTENSION_REQUEST_CHANGED",
-          sessionId,
-          request: retryRequest(view.pendingExtensionRequest),
-        });
-      } catch {
-        commitPaneIfCurrent(extensionAuthority, {
-          type: "EXTENSION_REQUEST_CHANGED",
-          sessionId,
-          request: retryRequest(submittedRequest),
-        });
-      }
-      if (paneAuthorityCanCommit(extensionAuthority))
-        setError(cause instanceof Error ? cause.message : String(cause));
-      return acceptedDespiteFailure;
-    }
-  };
-
-  const loadingEarlier =
-    loadingEarlierRequestsRef.current.get(viewedSessionId)?.navigationEpoch ===
-    navigationEpochRef.current;
   const anySessionRunning = sessions.some((session) => session.running);
   const anySessionPendingConfirmation = sessions.some(
     (session) => session.pendingConfirmation,
@@ -5880,6 +3473,131 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   const displayedQueue = localQueueFallback.length
     ? [...queue, ...localQueueFallback]
     : queue;
+
+  const send = createPromptSendFlow({
+    ApiRequestError,
+    DRAFT_FAILURE_SCOPE,
+    DRAFT_PREFS_KEY,
+    LOCAL_DRAFT_BUSY_ID,
+    WAITING_FOR_PI_STATUS,
+    acceptQueueProjection,
+    adoptDraftSessionView,
+    api,
+    appendLocalTurnOnce,
+    applySessionView,
+    applySidebarQueueProjection,
+    applyWarmReadinessForPane,
+    authoritativeStoppedSteerRejection,
+    authoritativeTurnTotal,
+    beginSessionBusy,
+    bindLocalTurnPromptIdentity,
+    buildIdentityMismatch,
+    buildProtectedLocalTurn,
+    cancellingQueueIdsRef,
+    captureDraftPaneAuthority,
+    capturePaneAuthority,
+    capturePromptSelection,
+    captureViewOperation,
+    classifyPromptFailure,
+    clearPendingLiveMessage,
+    clearStoppingForSession,
+    clearViewedPromiseRef,
+    commitDraftIfCurrent,
+    commitPaneIfCurrent,
+    commitSessionViewCache,
+    composerCommands,
+    createSession,
+    desiredSessionIdRef,
+    dispatchPane,
+    displayedQueue,
+    draftAuthorityCanCommit,
+    draftIntentAfterSubmit,
+    draftWorkspaceCwd,
+    fetchSessionView,
+    forgetLocalFailuresForSession,
+    gateModeFromCommand,
+    gateModesRef,
+    isTranscriptWorthyFailure,
+    lastSessionEventTypeRef,
+    latestQueueProjectionRef,
+    localDraftRef,
+    localUserTurnsRef,
+    markLocalTurnQueued,
+    messages,
+    modelInventoryConfirmed,
+    modelUnavailableError,
+    models,
+    navigationEpochRef,
+    paneAuthorityCanCommit,
+    patchSessionCacheForAuthority,
+    pendingGateModesRef,
+    pendingSessionPrefsRef,
+    pendingSteerFromAcknowledgement,
+    pendingSteersRef,
+    planAcknowledgedQueueProjection,
+    planAcknowledgedTurn,
+    planPromptFailureLocalTurn,
+    prepareRestoringPrompt,
+    presentPromptFailure,
+    promoteTurnsAbsentFromQueue,
+    promptAcknowledgementKind,
+    promptBusyReleasesRef,
+    promptPreparationRoute,
+    promptSubmitControllerRef,
+    promptSubmitFlowRef,
+    queuePaused,
+    queueProjectionForView,
+    queueProjectionRevisionRef,
+    queueProjectionSourceRef,
+    reconcileOrdinaryPromptAcknowledgement,
+    reconcilePromptFailureRecord,
+    reconcileQueuedPromptAcknowledgement,
+    reconcileSpecialPromptAcknowledgement,
+    reconcileStalePromptAcknowledgement,
+    reconcileStoppedSteerFailure,
+    recordLocalFailure,
+    recordUserTurnLifecycle,
+    refresh,
+    releasePromptBusy,
+    removeLocalTurnAndRebase,
+    requestPromptReconcileRef,
+    resultPendingError,
+    runEpochGenerationRef,
+    runEpochRef,
+    runtimeStatus,
+    saveSessionComposerSelections,
+    schedulePromptReconcile,
+    scheduleSidebarRefresh,
+    sessionEventVersionRef,
+    sessionRunGenerationsRef,
+    sessionRunningOverridesRef,
+    setComposerSelectionRevision,
+    setError,
+    setLocalFailures,
+    setNotice,
+    setPendingGateModes,
+    setSessions,
+    settleSidebarActivity,
+    shouldClearModelSelectionOnFailure,
+    state,
+    stickToBottomRef,
+    stopGeneration,
+    submitNewDraftPrompt,
+    syncPendingSteers,
+    toolStatus,
+    turnTotal,
+    updateGateMode,
+    userMessage,
+    validateSelectedRoute,
+    viewCacheWriter,
+    viewOperationIsCurrent,
+    viewOperationIsInCurrentRun,
+    viewedSessionId,
+    viewedSessionIdRef,
+    warmSessionRuntime,
+    workspaceCwd,
+  });
+
   const composerQueueMode =
     state.isStreaming || queuePaused || displayedQueue.length > 0;
   // A stop request belongs to one Session. A stale/local abort intent must
@@ -5892,6 +3610,61 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   const subagentComposerAddress = subagentAddressesRef.current.get(viewedSessionId);
   const viewingSubagentSession = Boolean(subagentComposerAddress);
   /** A child transcript is read-only; normal messages use its verified ordinary ancestor. */
+  const {
+    composerTargetForViewedSession,
+    stageComposerSelection,
+    stageSessionPref,
+    changeModel,
+    changeThinking,
+    selectDraftWorkspace,
+    pickDraftWorkspace,
+    pickDefaultWorkspace,
+    changeGate,
+    respondToExtension,
+    loadingEarlier
+  } = createComposerSettingsActions({
+    DRAFT_PREFS_KEY,
+    api,
+    buildIdentityMismatch,
+    captureDraftPaneAuthority,
+    capturePaneAuthority,
+    commitDraftIfCurrent,
+    commitPaneIfCurrent,
+    dispatchPane,
+    draftAuthorityCanCommit,
+    draftWorkspacePickerTokenRef,
+    extensionRequest,
+    fetchSessionView,
+    loadingEarlierRequestsRef,
+    localDraftRef,
+    modelSelectionPatch,
+    models,
+    mutationBlocked,
+    navigationEpochRef,
+    paneAuthorityCanCommit,
+    pendingSessionPrefsRef,
+    runEpochGenerationRef,
+    runEpochRef,
+    runtimeStatus,
+    saveSessionComposerSelections,
+    send,
+    setComposerSelectionRevision,
+    setError,
+    setNotice,
+    setWorkspaceCwd,
+    setWorkspacePicking,
+    stageGateMode,
+    stageSessionComposerSelection,
+    state,
+    subagentAddressesRef,
+    viewedSessionId,
+    viewedSessionIdRef,
+    workspaceDefaultPickerTokenRef,
+    workspaceEpochRef,
+    workspacePicking,
+    workspaceRevisionRef,
+  });
+
   const composerTargetSessionId = composerTargetForViewedSession();
   // The bottom controls show the selection for the *next* ordinary prompt.
   // PiState remains a historical/Runtime projection for the transcript.
@@ -6090,925 +3863,419 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   const observing = Boolean(
     effectiveControl.controlOwner && !effectiveControl.controlledByThisWindow,
   );
-  const dequeuePendingSteers = () => {
-    const operation = captureViewOperation();
-    const draftKey: ComposerDraftKey = {
-      kind: "session",
-      sessionId: operation.sessionId,
-    };
-    steerDequeueExpectedDraftRevisionRef.current.set(
-      operation.sessionId,
-      composerDraftRevisionsRef.current.get(composerDraftKeyId(draftKey)) || 0,
-    );
-    setSteerDequeueingBySession((current) => ({
-      ...current,
-      [operation.sessionId]: true,
-    }));
-    void api.dequeueSteers(operation.sessionId).then((result) => {
-      if (!viewOperationIsInCurrentRun(operation)) return;
-      applyDequeuedSteers(
-        operation.sessionId,
-        result.items.map((item) => item.id),
-      );
-      if (
-        result.count === 0 &&
-        (pendingSteersRef.current.get(operation.sessionId)?.length || 0) > 0 &&
-        viewOperationIsCurrent(operation)
-      )
-        setError("这些 Steer 已不在 Pi 的原生等待队列中，未伪装为撤回成功");
-    }).catch((cause) => {
-      if (viewOperationIsCurrent(operation))
-        setError(cause instanceof Error ? cause.message : String(cause));
-    }).finally(() => {
-      setSteerDequeueingBySession((current) => {
-        if (!current[operation.sessionId]) return current;
-        const next = { ...current };
-        delete next[operation.sessionId];
-        return next;
-      });
-    });
-  };
-
-  const cancelQueuedPrompt = (item: QueuedPrompt) => {
-    const operation = captureViewOperation();
-    draftRestorationIntentSequenceRef.current += 1;
-    const cancellationSequence = draftRestorationIntentSequenceRef.current;
-    const cancellationDraftKey: ComposerDraftKey = {
-      kind: "session",
-      sessionId: operation.sessionId,
-    };
-    const expectedDraftRevision =
-      composerDraftRevisionsRef.current.get(composerDraftKeyId(cancellationDraftKey)) || 0;
-    const queueProjectionRevision =
-      queueProjectionRevisionRef.current.get(operation.sessionId) || 0;
-    const mutationSequence =
-      (queueMutationSequenceRef.current.get(operation.sessionId) || 0) + 1;
-    queueMutationSequenceRef.current.set(operation.sessionId, mutationSequence);
-    const pendingAtCancellation =
-      localUserTurnsRef.current.get(operation.sessionId) || [];
-    const localCancelledAtCancellation = pendingAtCancellation.find(
-      (turn) => turn.queueId === item.id,
-    );
-    const cancellingIds =
-      cancellingQueueIdsRef.current.get(operation.sessionId) || new Set<string>();
-    cancellingIds.add(item.id);
-    cancellingQueueIdsRef.current.set(operation.sessionId, cancellingIds);
-    void api
-      .cancelQueued(item.id, operation.sessionId)
-      .then((result) => {
-        if (!viewOperationIsInCurrentRun(operation)) return;
-        if (confirmedDeletedSessionIdsRef.current.has(operation.sessionId))
-          return;
-        const pending =
-          localUserTurnsRef.current.get(operation.sessionId) || [];
-        const cancelling = cancellingQueueIdsRef.current.get(operation.sessionId);
-        if (cancelling) {
-          cancelling.delete(item.id);
-          if (!cancelling.size)
-            cancellingQueueIdsRef.current.delete(operation.sessionId);
-        }
-        const cancelled =
-          pending.find((turn) => turn.queueId === item.id) ||
-          localCancelledAtCancellation;
-        const remaining = cancelled
-          ? removeLocalTurnAndRebase(pending, cancelled)
-          : pending;
-        if (remaining.length)
-          localUserTurnsRef.current.set(operation.sessionId, remaining);
-        else localUserTurnsRef.current.delete(operation.sessionId);
-        const cancelledIds =
-          cancelledQueueIdsRef.current.get(operation.sessionId) || new Set<string>();
-        cancelledIds.add(item.id);
-        cancelledQueueIdsRef.current.set(operation.sessionId, cancelledIds);
-        const queueProjectionChanged =
-          (queueProjectionRevisionRef.current.get(operation.sessionId) || 0) !==
-          queueProjectionRevision;
-        const appliedMutationSequence =
-          appliedQueueMutationSequenceRef.current.get(operation.sessionId) || 0;
-        const mutationIsNewestSuccess =
-          mutationSequence > appliedMutationSequence;
-        if (mutationIsNewestSuccess)
-          appliedQueueMutationSequenceRef.current.set(
-            operation.sessionId,
-            mutationSequence,
-          );
-        const currentProjection =
-          latestQueueProjectionRef.current.get(operation.sessionId) || {
-            queue: viewCacheRef.current.get(operation.sessionId)?.queue || [],
-            paused:
-              viewCacheRef.current.get(operation.sessionId)?.queuePaused === true,
-          };
-        const latestProjection =
-          queueProjectionChanged || !mutationIsNewestSuccess
-            ? currentProjection
-            : { queue: result.queue, paused: result.paused };
-        const authoritativeProjection = {
-          queue: filterCancelledQueue(
-            operation.sessionId,
-            latestProjection.queue,
-          ),
-          paused: latestProjection.paused,
-        };
-
-        latestQueueProjectionRef.current.set(
-          operation.sessionId,
-          authoritativeProjection,
-        );
-        queueProjectionSourceRef.current.set(operation.sessionId, "mutation");
-        if (!queueProjectionChanged)
-          advanceQueueProjectionRevision(operation.sessionId);
-        const authoritativeQueue = authoritativeProjection.queue;
-        setSessions((current) =>
-          current.map((session) =>
-            session.id === operation.sessionId
-              ? applySidebarQueueProjection(session, authoritativeQueue)
-              : session,
-          ),
-        );
-        if (cancelled) {
-          const restoredTurnTotal = Math.max(
-            sourceTurnTotalsRef.current.get(operation.sessionId) || 0,
-            cancelled.expectedTurnTotal - 1,
-            ...remaining.map((turn) => turn.expectedTurnTotal),
-          );
-          setSessions((current) =>
-            current.map((session) =>
-              session.id === operation.sessionId
-                ? { ...session, turnCount: restoredTurnTotal }
-                : session,
-            ),
-          );
-        }
-        patchSessionCacheForAuthority(
-          operation.sessionId,
-          {
-            queue: authoritativeQueue,
-            queuePaused: authoritativeProjection.paused,
-          },
-          operation,
-        );
-        const restored = cancelled
-          ? promptDraftFromMessage(cancelled.message, item.message)
-          : { message: item.message, images: [] };
-        commitPaneIfCurrent(operation, {
-          type: "QUEUE_UPDATED",
-          sessionId: operation.sessionId,
-          queue: authoritativeQueue,
-          paused: authoritativeProjection.paused,
-          messages: cancelled?.renderedInTranscript
-            ? (current) =>
-                current.filter((message) => message !== cancelled.message)
-            : undefined,
-        });
-        // Composer restoration is Session-keyed state. The server normally
-        // broadcasts the post-cancel queue before the DELETE response arrives,
-        // which advances the Pane revision and makes the click's old authority
-        // stale. Do not lose the user's message merely because that truthful
-        // queue frame won the race; a newer editor revision still wins in the
-        // Composer reducer below.
-        // HTTP completions may arrive out of click order. The latest successful
-        // cancellation wins the Composer, never whichever response finishes last.
-        const restorationKeyId = composerDraftKeyId(cancellationDraftKey);
-        if (
-          cancellationSequence >
-          (appliedDraftRestorationSequencesRef.current.get(restorationKeyId) || 0)
-        ) {
-          appliedDraftRestorationSequencesRef.current.set(
-            restorationKeyId,
-            cancellationSequence,
-          );
-          setRestoredComposerDrafts((current) => ({
-            ...current,
-            [restorationKeyId]: {
-              key: cancellationDraftKey,
-              revision: cancellationSequence,
-              expectedDraftRevision,
-              ...restored,
-            },
-          }));
-        }
-      })
-      .catch((cause) => {
-        if (viewOperationIsCurrent(operation))
-          setError(cause instanceof Error ? cause.message : String(cause));
-      });
-  };
-
-  const resumeQueuedPrompt = () => {
-    const operation = captureViewOperation();
-    const queueProjectionRevision =
-      queueProjectionRevisionRef.current.get(operation.sessionId) || 0;
-    const mutationSequence =
-      (queueMutationSequenceRef.current.get(operation.sessionId) || 0) + 1;
-    queueMutationSequenceRef.current.set(operation.sessionId, mutationSequence);
-    void api
-      .resumeQueue(operation.sessionId)
-      .then((result) => {
-        if (!viewOperationIsInCurrentRun(operation)) return;
-        const appliedMutationSequence =
-          appliedQueueMutationSequenceRef.current.get(operation.sessionId) || 0;
-        if (mutationSequence < appliedMutationSequence) return;
-        appliedQueueMutationSequenceRef.current.set(
-          operation.sessionId,
-          mutationSequence,
-        );
-        const currentProjection = latestQueueProjectionRef.current.get(
-          operation.sessionId,
-        );
-        const projectionChanged =
-          (queueProjectionRevisionRef.current.get(operation.sessionId) || 0) !==
-          queueProjectionRevision;
-        const resumedProjection = projectionChanged && currentProjection
-          ? acceptQueueProjection(
-              operation.sessionId,
-              currentProjection.queue,
-              result.paused,
-              "mutation",
-            )
-          : acceptQueueProjection(
-              operation.sessionId,
-              result.queue,
-              result.paused,
-              "mutation",
-            );
-        patchSessionCacheForAuthority(
-          operation.sessionId,
-          {
-            queue: resumedProjection.queue,
-            queuePaused: resumedProjection.paused,
-          },
-          operation,
-        );
-        setSessions((current) =>
-          current.map((session) =>
-            session.id === operation.sessionId
-              ? applySidebarQueueProjection(
-                  session,
-                  resumedProjection.queue,
-                  resumedProjection.paused,
-                )
-              : session,
-          ),
-        );
-        commitPaneIfCurrent(operation, {
-          type: "QUEUE_UPDATED",
-          sessionId: operation.sessionId,
-          queue: resumedProjection.queue,
-          paused: resumedProjection.paused,
-        });
-      })
-      .catch((cause) => {
-        if (viewOperationIsCurrent(operation))
-          setError(cause instanceof Error ? cause.message : String(cause));
-      });
-  };
-
-  const diagnosticSidebarRows = useMemo(
-    () => sessions.flatMap((session) => {
-      const execution = session.activity?.execution ||
-        (session.running ? "running" : session.queued ? "queued" : "idle");
-      const interesting =
-        session.id === viewedSessionId ||
-        execution !== "idle" ||
-        session.pendingConfirmation === true ||
-        Boolean(session.controlOwner);
-      if (!interesting) return [];
-      const controlledByThisWindow = session.controlledByThisWindow === true;
-      const foreignOwnerPresent = Boolean(
-        session.controlOwner && !controlledByThisWindow,
-      );
-      return [{
-        sessionId: session.id,
-        execution,
-        running: session.running === true,
-        queued: session.queued === true,
-        pendingConfirmation: session.pendingConfirmation === true,
-        controlledByThisWindow,
-        foreignOwnerPresent,
-        viewed: session.id === viewedSessionId,
-        signature: [
-          execution,
-          session.running === true,
-          session.queued === true,
-          session.pendingConfirmation === true,
-          controlledByThisWindow,
-          foreignOwnerPresent,
-          session.id === viewedSessionId,
-        ].join(":"),
-      }];
-    }),
-    [sessions, viewedSessionId],
-  );
-  const diagnosticSidebarSignature = diagnosticSidebarRows
-    .map((row) => `${row.sessionId}:${row.signature}`)
-    .join("|");
-  const diagnosticHasLive = Boolean(liveMessage);
-  const diagnosticControlledByThisWindow =
-    effectiveControl.controlledByThisWindow === true;
-  const diagnosticForeignOwnerPresent = Boolean(
-    effectiveControl.controlOwner && !diagnosticControlledByThisWindow,
-  );
-  const diagnosticUiDetails = {
-    paneKind: pane.identity.kind,
-    stateStreaming: state.isStreaming,
-    compacting: state.isCompacting === true,
-    hasLive: diagnosticHasLive,
-    toolActive: Boolean(toolStatus),
-    promptStarting,
-    runtimeStatus,
-    queuePaused,
-    queueLength: queue.length,
-    transcriptCount: messages.length,
-    sidebarRows: sessions.length,
-    sidebarRunning: viewedSession?.running === true,
-    sidebarQueued: viewedSession?.queued === true,
-    sidebarExecution: viewedSession?.activity?.execution || "none",
-    sidebarRunningCount: sessions.filter((session) => session.running).length,
-    sidebarQueuedCount: sessions.filter((session) => session.queued).length,
-    sidebarFailedCount: sessions.filter((session) => session.activity?.execution === "failed").length,
-    sidebarPausedCount: sessions.filter((session) => session.activity?.execution === "paused").length,
-    sidebarConfirmationCount: sessions.filter((session) => session.pendingConfirmation).length,
-    sidebarForeignOwnerCount: sessions.filter((session) =>
-      Boolean(session.controlOwner && session.controlledByThisWindow !== true),
-    ).length,
-    observing,
-    controlledByThisWindow: diagnosticControlledByThisWindow,
-    foreignOwnerPresent: diagnosticForeignOwnerPresent,
-    authorityPresent: Boolean(effectiveControl.controlOwner),
-    composerQueueVisible: composerQueueMode,
-    composerSteerEligible: state.isStreaming,
-    composerStopVisible: state.isStreaming,
-    composerSendVisible: !composerQueueMode,
-    composerDisabled: mutationBlocked,
-    stopping: stoppingCurrentSession,
-  };
-  const recordDiagnosticProjection = (force: boolean): void => {
-    const uiSignature = JSON.stringify([viewedSessionId, diagnosticUiDetails]);
-    if (force || diagnosticUiSignatureRef.current !== uiSignature) {
-      diagnosticUiSignatureRef.current = uiSignature;
-      recordBrowserStateDiagnostic("projection", "ui-state", {
-        sessionId: viewedSessionId,
-        details: diagnosticUiDetails,
-      });
-    }
-
-    const previousRows = diagnosticSidebarRowsRef.current;
-    const nextRows = new Map<string, string>();
-    const allSessionIds = new Set(sessions.map((session) => session.id));
-    for (const row of diagnosticSidebarRows) {
-      nextRows.set(row.sessionId, row.signature);
-      if (!force && previousRows.get(row.sessionId) === row.signature) continue;
-      recordBrowserStateDiagnostic("projection", "sidebar-session", {
-        sessionId: row.sessionId,
-        details: {
-          found: true,
-          sidebarExecution: row.execution,
-          sidebarRunning: row.running,
-          sidebarQueued: row.queued,
-          pendingConfirmation: row.pendingConfirmation,
-          controlledByThisWindow: row.controlledByThisWindow,
-          foreignOwnerPresent: row.foreignOwnerPresent,
-          viewed: row.viewed,
-        },
-      });
-    }
-    if (!force) {
-      for (const sessionId of previousRows.keys()) {
-        if (nextRows.has(sessionId)) continue;
-        recordBrowserStateDiagnostic("projection", "sidebar-session", {
-          sessionId,
-          details: {
-            found: allSessionIds.has(sessionId),
-            sidebarExecution: "idle",
-            sidebarRunning: false,
-            sidebarQueued: false,
-            pendingConfirmation: false,
-            controlledByThisWindow: false,
-            foreignOwnerPresent: false,
-            viewed: false,
-          },
-        });
-      }
-    }
-    diagnosticSidebarRowsRef.current = nextRows;
-  };
-  diagnosticCheckpointRef.current = () => recordDiagnosticProjection(true);
-
-  const diagnosedUserTurnProjectionRef = useRef("");
-  useEffect(() => {
-    const duplicates = diagnoseVisibleUserTurnDuplicates(
-      messages,
-      viewedSessionId ? (localUserTurnsRef.current.get(viewedSessionId) || []) : [],
-      turnTotal,
-    );
-    for (const duplicate of duplicates) {
-      const signature = [
-        viewedSessionId,
-        duplicate.kind,
-        duplicate.contentHash,
-        duplicate.pairCount,
-        pane.identity.sessionId,
-        paneCommitRevisionRef.current,
-      ].join(":");
-      if (diagnosedUserTurnProjectionRef.current === signature) continue;
-      diagnosedUserTurnProjectionRef.current = signature;
-      recordBrowserStateDiagnostic("projection", "user-turn-duplicate", {
-        sessionId: viewedSessionId,
-        details: {
-          duplicateKind: duplicate.kind,
-          duplicateCount: duplicate.messageCount,
-          duplicatePairCount: duplicate.pairCount,
-          localTurnCount: duplicate.localTurnCount,
-          localRowCount: duplicate.localRowCount,
-          persistedCount: duplicate.persistedCount,
-          identityCount: duplicate.identityCount,
-          persistedAfterBaselineCount: duplicate.persistedAfterBaselineCount,
-          adjacent: duplicate.adjacent,
-          sourceGeneration: paneCommitRevisionRef.current,
-          projectionSource: "pane-commit",
-        },
-      });
-    }
-  }, [messages, pane.identity.sessionId, viewedSessionId]);
-
-  useEffect(() => {
-    recordDiagnosticProjection(false);
-  }, [
-    composerQueueMode,
-    currentSessionBusyBeforeStreaming,
-    currentSessionRuntimePreparing,
-    diagnosticSidebarSignature,
-    effectiveControl.controlOwner,
-    effectiveControl.controlledByThisWindow,
-    diagnosticHasLive,
-    loading,
-    messages.length,
-    mutationBlocked,
-    observing,
-    viewingSubagentSession,
-    pane.identity.kind,
-    primaryRuntimeUnavailable,
-    promptStarting,
-    queue.length,
-    queuePaused,
-    runtimeStatus,
-    sessions.length,
-    state.isCompacting,
-    state.isStreaming,
-    stoppingCurrentSession,
-    toolStatus,
-    viewedSession?.activity?.execution,
-    viewedSession?.queued,
-    viewedSession?.running,
-    viewedSessionId,
-    viewSwitching,
-  ]);
-
-  const composerControls = (
-    <ComposerControls
-      state={composerState}
-      models={composerModels}
-      modelInventoryPending={!modelInventoryConfirmed}
-      stats={stats}
-      disabled={mutationBlocked || viewingSubagentSession}
-      gateAvailable={gateAvailable}
-      gateMode={gateMode}
-      primaryUnavailable={false}
-      onGate={(mode) => void changeGate(mode)}
-      onModel={(provider, id, api) => void changeModel(provider, id, api)}
-      onThinking={(level) => void changeThinking(level)}
-    />
-  );
-
-  const composerNotices = (
-    <>
-      {buildIdentityMismatch && (
-        <div className="primary-runtime-status is-failed" role="status">
-          网页与服务版本不一致，普通操作已暂停。请刷新页面；若仍存在，可在左侧使用“完整重启”，或在设置中关闭
-          Pi Chat 后重新打开。
-        </div>
-      )}
-      {primaryRuntimeMessage && (
-        <div
-          className={`primary-runtime-status is-${primaryRuntime.status}`}
-          role="status"
-        >
-          {primaryRuntimeMessage}
-        </div>
-      )}
-      {(error || notice) && (
-        <div className={`app-toast ${error ? "error" : ""}`} role="status">
-          {error || notice}
-        </div>
-      )}
-    </>
-  );
+  const {
+    dequeuePendingSteers,
+    cancelQueuedPrompt,
+    resumeQueuedPrompt
+  } = createQueueActions({
+    acceptQueueProjection,
+    advanceQueueProjectionRevision,
+    api,
+    appliedDraftRestorationSequencesRef,
+    appliedQueueMutationSequenceRef,
+    applyDequeuedSteers,
+    applySidebarQueueProjection,
+    cancelledQueueIdsRef,
+    cancellingQueueIdsRef,
+    captureViewOperation,
+    commitPaneIfCurrent,
+    composerDraftKeyId,
+    composerDraftRevisionsRef,
+    confirmedDeletedSessionIdsRef,
+    draftRestorationIntentSequenceRef,
+    filterCancelledQueue,
+    latestQueueProjectionRef,
+    localUserTurnsRef,
+    patchSessionCacheForAuthority,
+    pendingSteersRef,
+    promptDraftFromMessage,
+    queueMutationSequenceRef,
+    queueProjectionRevisionRef,
+    queueProjectionSourceRef,
+    removeLocalTurnAndRebase,
+    setError,
+    setRestoredComposerDrafts,
+    setSessions,
+    setSteerDequeueingBySession,
+    sourceTurnTotalsRef,
+    steerDequeueExpectedDraftRevisionRef,
+    viewCacheRef,
+    viewOperationIsCurrent,
+    viewOperationIsInCurrentRun,
+  });
 
   if (closeComplete) {
     const applicationClosed = closeComplete === "application";
     return (
       <main className="shutdown-screen">
-        <span className="shutdown-mark">
-          <PiMarkIcon />
-        </span>
+        <span className="shutdown-mark"><PiMarkIcon /></span>
         <h1>{applicationClosed ? "Pi Chat 已关闭" : "当前窗口已退出"}</h1>
-        <p>
-          {applicationClosed
-            ? "本地服务和会话进程已经结束。现在可以关闭此窗口。"
-            : "其他 Pi Chat 窗口仍在运行。现在可以关闭此窗口。"}
-        </p>
-        <button type="button" onClick={() => window.close()}>
-          关闭窗口
-        </button>
+        <p>{applicationClosed
+          ? "本地服务和会话进程已经结束。现在可以关闭此窗口。"
+          : "其他 Pi Chat 窗口仍在运行。现在可以关闭此窗口。"}</p>
+        <button type="button" onClick={() => window.close()}>关闭窗口</button>
       </main>
     );
   }
 
-  const sessionDialogSource = sessionDialog
-    ? sessions.find((session) => session.id === sessionDialog.session.id) || sessionDialog.session
-    : null;
-  const sessionDialogCopyBlocked = Boolean(
-    sessionDialog &&
-    (sessionDialog.mode === "clone" || sessionDialog.mode === "fork") &&
-    (mutationBlocked ||
-      copyingSessionIds.includes(sessionDialog.session.id) ||
-      sessionDialogSource?.running ||
-      sessionDialogSource?.queued ||
-      sessionDialogSource?.pendingConfirmation ||
-      sessionDialogSource?.messageCount === 0),
-  );
+  const {
+    diagnosticSidebarRows,
+    diagnosticSidebarSignature,
+    diagnosticHasLive,
+    diagnosticControlledByThisWindow,
+    diagnosticForeignOwnerPresent,
+    diagnosticUiDetails,
+    recordDiagnosticProjection,
+    diagnosedUserTurnProjectionRef,
+    composerControls,
+    composerNotices,
+    sessionDialogSource,
+    sessionDialogCopyBlocked,
+    reconcileSessionMutation,
+    applySessionListSnapshot,
+    clearDeletedSessionProjection,
+    finalizeDeletedSession: finalizeDeletedSessionAction,
+    selectDeletionFallback: selectDeletionFallbackAction,
+    reconcilePendingSessionMutations,
+    refreshManually,
+    restartPi,
+    shutdownPiChat,
+    exportStateDiagnostics,
+    copySessionToNew,
+    confirmCloneSession,
+    confirmForkSession,
+    renameSession,
+    deleteSession,
+  } = createAppPresentationState({
+    ApiRequestError,
+    api,
+    ComposerControls,
+    PiMarkIcon,
+    activeSessionProjectionWriter,
+    anySessionPendingConfirmation,
+    anySessionQueued,
+    anySessionRunning,
+    appliedDraftRestorationSequencesRef,
+    appliedQueueMutationSequenceRef,
+    applyBootstrapMetadata,
+    browserStateDiagnosticSnapshot,
+    buildIdentityMismatch,
+    busy,
+    busySessionCountsRef,
+    cancelPendingNavigation,
+    cancelledQueueIdsRef,
+    cancellingQueueIdsRef,
+    changeGate,
+    changeModel,
+    changeThinking,
+    clearPendingLiveMessage,
+    closeComplete,
+    commitPane,
+    commitSidebarSessions,
+    composerDraftKeyId,
+    composerDraftRevisionsRef,
+    composerModels,
+    composerQueueMode,
+    composerState,
+    confirmedDeletedSessionIdsRef,
+    confirmedQueueDispatchIdsRef,
+    copyingSessionIds,
+    createSession,
+    createSessionManagementActions,
+    currentSessionBusyBeforeStreaming,
+    currentSessionRuntimePreparing,
+    desiredSessionIdRef,
+    diagnoseVisibleUserTurnDuplicates,
+    diagnosticCheckpointRef,
+    diagnosticSidebarRowsRef,
+    diagnosticSseRejectionAtRef,
+    diagnosticUiSignatureRef,
+    diagnosticsBusy,
+    downloadStateDiagnosticBundle,
+    draftRestorationIntentSequenceRef,
+    effectiveControl,
+    error,
+    forgetComposerKey,
+    forgetLocalFailuresForSession,
+    gateAvailable,
+    gateMode,
+    gateModesRef,
+    lastSessionEventTypeRef,
+    latestQueueProjectionRef,
+    lifecycleBlocked,
+    liveMessage,
+    loading,
+    localUserTurnsRef,
+    messages,
+    modelInventoryConfirmed,
+    mutationBlocked,
+    navigationEpochRef,
+    notice,
+    observing,
+    optimisticDeletesRef,
+    optimisticRenamesRef,
+    optimisticSessionMutationTokenRef,
+    optimisticSessionsTotal,
+    pane,
+    paneCommitRevisionRef,
+    pendingGateModesRef,
+    pendingScrollRestoreRef,
+    pendingSessionPrefsRef,
+    pendingSteersRef,
+    primaryRuntime,
+    primaryRuntimeMessage,
+    primaryRuntimeUnavailable,
+    promptBusyReleasesRef,
+    promptStarting,
+    queue,
+    queueMutationSequenceRef,
+    queuePaused,
+    queueProjectionRevisionRef,
+    queueProjectionSourceRef,
+    recordBrowserStateDiagnostic,
+    refresh,
+    refreshOperationTokenRef,
+    refreshSessionCache,
+    refreshSidebarSessions,
+    reportBackgroundRefreshError,
+    resultPendingError,
+    runEpochGenerationRef,
+    runtimeStatus,
+    saveSessionComposerSelections,
+    scrollMemoryRef,
+    sessionDialog,
+    sessionEventVersionRef,
+    sessionRunGenerationsRef,
+    sessionRunningOverridesRef,
+    sessions,
+    sessionsRef,
+    sessionsTotal,
+    setBusy,
+    setBusySessionIds,
+    setCloseComplete,
+    setComposerPendingByScope,
+    setComposerSelectionRevision,
+    setCopyingSessionIds,
+    setDiagnosticsBusy,
+    setError,
+    setFailedSessionIds,
+    setGateModes,
+    setLocalFailures,
+    setManagementSection,
+    setNotice,
+    setPendingGateModes,
+    setPendingSteersBySession,
+    setRefreshing,
+    setRestoredComposerDrafts,
+    setSessionDialog,
+    setSessionDirectories,
+    setSessionNavigation,
+    setSessions,
+    setSessionsTotal,
+    setSteerDequeueingBySession,
+    setStoppingSessionIds,
+    setUnseenReplySessionIds,
+    setWarmingSessionIds,
+    settledRunGenerationsRef,
+    sidebarCommittedFullSequenceRef,
+    sidebarFullRequestSequenceRef,
+    sourceTurnTotalsRef,
+    state,
+    stats,
+    steerDequeueExpectedDraftRevisionRef,
+    stoppingCurrentSession,
+    stoppingOperationTokensRef,
+    streamDiagnosticsRef,
+    streamGapRecoveriesRef,
+    streamingWireProjectionsRef,
+    subagentAddressesRef,
+    syncMutatingSessionIds,
+    terminalAssistantSessionIdsRef,
+    terminalAssistantStreamGenerationsRef,
+    toolStatus,
+    turnTotal,
+    unreadSteeringDropMessagesRef,
+    useEffect,
+    useMemo,
+    useRef,
+    viewCacheWriter,
+    viewSession,
+    viewSwitching,
+    viewedSession,
+    viewedSessionId,
+    viewedSessionIdRef,
+    viewingSubagentSession,
+    warmingSessionIdsRef,
+  });
 
-  return (
-    <AppShell
-      diffSidebarOpen={diffSidebarOpen}
-      diffSidebarWidth={diffSidebarWidth}
-    >
-      <SessionInventory
-        sessions={sessions}
-        sessionsTotal={sessionsTotal}
-        sessionDirectories={sessionDirectories}
-        inventoryReady={sidebarInventoryReady}
-        loadingAllSessions={loadingAllSessions}
-        loadingDirectoryKeys={loadingDirectoryKeys}
-        viewedSessionId={viewedSessionId}
-        workspaceCwd={workspaceCwd}
-        workspaceEpoch={workspaceEpochRef.current}
-        workspaceRevision={workspaceRevisionRef.current}
-        open={sidebarOpen}
-        width={sidebarWidth}
-        onWidthChange={setSidebarWidth}
-        newDisabled={mutationBlocked}
-        refreshDisabled={loading || refreshing}
-        restartDisabled={
-          loading ||
-          busy ||
-          refreshing ||
-          (buildIdentityMismatch
-            ? recoveryActionBlocked
-            : globalMutationBlocked)
-        }
-        copyDisabled={mutationBlocked}
-        viewBusy={sidebarViewBlocked}
-        refreshing={refreshing}
-        pinnedSessionIds={sessionNavigation.pinnedSessionIds}
-        pinnedDirectoryKeys={sessionNavigation.pinnedDirectoryKeys}
-        collapsedDirectoryKeys={sessionNavigation.collapsedDirectoryKeys}
-        expandedDirectoryKeys={sessionNavigation.expandedDirectoryKeys}
-        failedSessionIds={failedSessionIds}
-        unseenReplySessionIds={unseenReplySessionIds}
-        mutatingSessionIds={[
-          ...new Set([...mutatingSessionIds, ...copyingSessionIds]),
-        ]}
-        onClose={() => setSidebarOpen(false)}
-        onCollapse={() => setSidebarOpen(false)}
-        onNew={() => void createSession()}
-        onRefresh={() => void refreshManually()}
-        onLoadAllSessions={() => void loadAllSessions()}
-        onLoadDirectory={(cwd, offset) =>
-          void loadDirectorySessions(cwd, offset)
-        }
-        onRestart={() => void restartPi()}
-        onView={(id) => {
-          if (window.matchMedia?.("(max-width: 760px)").matches)
-            setSidebarOpen(false);
-          void viewSession(id);
-        }}
-        onTogglePin={(sessionId) => {
-          pinnedInventoryAttemptRef.current = "";
-          setSessionNavigation((current) => ({
-            ...current,
-            pinnedSessionIds: togglePinnedSession(
-              current.pinnedSessionIds,
-              sessionId,
-            ),
-          }));
-        }}
-        onToggleDirectoryPin={(cwd) =>
-          setSessionNavigation((current) => ({
-            ...current,
-            pinnedDirectoryKeys: togglePinnedDirectory(
-              current.pinnedDirectoryKeys,
-              cwd,
-            ),
-          }))
-        }
-        onSetDirectoryCollapsed={(cwd, collapsed) =>
-          setSessionNavigation((current) => {
-            const key = normalizeCwdKey(cwd);
-            if (!key) return current;
-            return collapsed
-              ? {
-                  ...current,
-                  collapsedDirectoryKeys: [
-                    ...new Set([...current.collapsedDirectoryKeys, key]),
-                  ],
-                  expandedDirectoryKeys: current.expandedDirectoryKeys.filter(
-                    (value) => value !== key,
-                  ),
-                }
-              : {
-                  ...current,
-                  collapsedDirectoryKeys: current.collapsedDirectoryKeys.filter(
-                    (value) => value !== key,
-                  ),
-                  expandedDirectoryKeys: [
-                    ...new Set([...current.expandedDirectoryKeys, key]),
-                  ],
-                };
-          })
-        }
-        onClone={(session) => setSessionDialog({ mode: "clone", session })}
-        onRename={(session) => setSessionDialog({ mode: "rename", session })}
-        onDelete={(session) => setSessionDialog({ mode: "delete", session })}
-      />
-      {!sidebarOpen && (
-        <button
-          type="button"
-          className="sidebar-restore"
-          onClick={() => setSidebarOpen(true)}
-          title="展开会话栏"
-          aria-label="展开会话栏"
-        >
-          <ChevronRightIcon />
-        </button>
-      )}
-      <ConversationPane
-        topBar={{
-          sessionId: topBarSessionId,
-          conversationName: displayedConversationName,
-          workspacePath: conversationWorkspace,
-          buildIdentity: buildIdentityMismatch
-            ? `Web ${buildIdentityLabel(webBuildIdentity)}；服务 ${buildIdentityLabel(serverBuildIdentity)}`
-            : `构建 ${buildIdentityLabel(serverBuildIdentity)}`,
-          settingsOpen: managementSection !== null,
-          onOpenSettings: () =>
-            setManagementSection((current) => (current ? null : "settings")),
-          diffSidebarOpen,
-          onToggleDiffSidebar: () => setDiffSidebarOpen((open) => !open),
-          onOpenSubagentSession: openSubagentSession,
-          subagentBreadcrumb,
-          onNavigateSubagentAncestor: navigateSubagentAncestor,
-        }}
-        timelineRef={scrollRef}
-        onScroll={onScroll}
-        onClearNavigation={clearConversationNavigationTarget}
-        loading={loading}
-        viewedSessionId={viewedSessionId}
-        paneLoading={paneLoading}
-        messages={messages}
-        forkOrigin={pane.forkOrigin}
-        onOpenForkSource={() => {
-          const origin = pane.forkOrigin;
-          if (!origin?.sourceAvailable || viewSwitching) return;
-          void viewSession(origin.sourceSessionId, origin.sourceName);
-        }}
-        pendingUserMessage={pendingUserMessage}
-        localFailures={withoutPersistedFailure(
-          localFailures.filter((entry) =>
-            entry.sessionId === (localDraft ? DRAFT_FAILURE_SCOPE : viewedSessionId),
-          ),
-          messages,
-        )}
-        liveMessage={liveMessage}
-        localDraft={localDraft}
-        composerHasContent={composerHasContent}
-        suppressNewWelcome={lifecycleBlocked}
-        newConversationPresentation={newConversationPresentation}
-        firstRunGuide={newConversationPresentation && sessionsTotal === 0 ? {
-          runtimeStatus: primaryRuntime.status,
-          ...(piVersion ? { piVersion } : null),
-        } : undefined}
-        waitingForPiMessage={waitingForPiMessage}
-        draftWorkspaceCwd={draftWorkspaceCwd}
-        workspaceCwd={conversationWorkspace}
-        openLinkedWorkspaceFile={api.openLinkedWorkspaceFile}
-        workspacePicking={workspacePicking}
-        draftWorkspaceOptions={draftWorkspaceOptions}
-        onSelectDraftWorkspace={selectDraftWorkspace}
-        onPickDraftWorkspace={() => void pickDraftWorkspace()}
-        messagesTruncated={messagesTruncated}
-        visibleTurnCount={visibleTurnCount}
-        turnTotal={turnTotal}
-        messageTotal={messageTotal}
-        runStartedAt={runStartedAt}
-        lastRunDurationMs={lastRunDurationMs}
-        loadingEarlier={loadingEarlier}
-        onLoadEarlier={() => void loadEarlierTurns()}
-        state={state}
-        toolStatus={toolStatus}
-        onForkUserMessage={(message) => {
-          if (!viewedSession || !message.piChatPersistedMessageId) return;
-          const text = forkableUserMessageText(message);
-          const imageCount = Array.isArray(message.content)
-            ? message.content.filter((block) => block.type === "image").length
-            : 0;
-          if (!text && imageCount === 0) return;
-          setSessionDialog({
-            mode: "fork",
-            session: viewedSession,
-            persistedMessageId: message.piChatPersistedMessageId,
-            messagePreview: forkMessagePreview(text, imageCount),
-          });
-        }}
-        forkUserMessageDisabled={Boolean(
-          !viewedSession ||
-          localDraft ||
-          viewingSubagentSession ||
-          mutationBlocked ||
-          state.isStreaming ||
-          state.isCompacting ||
-          displayedQueue.length > 0 ||
-          queuePaused ||
-          extensionRequest ||
-          copyingSessionIds.includes(viewedSessionId),
-        )}
-        onNavigate={navigateConversation}
-        sessionControl={{
-          observing: viewingSubagentSession ? false : observing,
-        }}
-        promptQueue={{
-          queue: displayedQueue,
-          paused: queuePaused,
-          busy:
-            currentSessionBusyBeforeStreaming ||
-            viewSwitching ||
-            mutationBlocked ||
-            viewingSubagentSession,
-          onCancel: cancelQueuedPrompt,
-          onResume: resumeQueuedPrompt,
-        }}
-        pendingSteers={{
-          items: pendingSteersBySession[viewedSessionId] || [],
-          dequeueing: steerDequeueingBySession[viewedSessionId] === true,
-          onDequeue: dequeuePendingSteers,
-        }}
-        chatInput={{
-          streaming: viewingSubagentSession ? false : composerQueueMode,
-          activelyStreaming: viewingSubagentSession ? false : state.isStreaming,
-          stopping: viewingSubagentSession ? false : stoppingCurrentSession,
-          // Editing is independent from runtime preparation, compaction, and
-          // foreign control. Only the initial unaddressed pane is blocked so
-          // bootstrap cannot replace a provisional `session:none` draft.
-          disabled: mutationBlocked || initialPaneUnresolved,
-          disabledPlaceholder: buildIdentityMismatch
-            ? "网页与服务构建不一致；请刷新页面后再提交操作"
-            : lifecycleBlocked
-              ? "Pi Chat 正在执行全局维护，暂时不能提交新操作"
-              : initialPaneUnresolved
-                ? "正在恢复已保存的对话，请稍候…"
-                : undefined,
-          acceptsImages:
-            !viewingSubagentSession &&
-            composerState.model?.input?.includes("image") === true,
-          imageInputPending:
-            !viewingSubagentSession && primaryCapabilityPending,
-          restoredDraft: restoredComposerDrafts[composerDraftKeyId(composerDraftKey)] || null,
-          onDraftRevisionChange: (key, revision, hasContent) => {
-            const keyId = composerDraftKeyId(key);
-            composerDraftRevisionsRef.current.set(keyId, revision);
-            setComposerContentByScope((current) =>
-              current[keyId] === hasContent
-                ? current
-                : { ...current, [keyId]: hasContent },
-            );
-          },
-          draftKey: composerDraftKey,
-          forgottenComposerKeys,
-          submissionScope: composerSubmissionScope,
-          submissionTargetSessionId: composerTargetSessionId || undefined,
-          allowFollowupSubmissions: true,
-          submissionPaused: composerSubmissionPaused,
-          onSubmissionPendingChange: updateComposerPending,
-          commands: composerCommands,
-          controls: composerControls,
-          notices: composerNotices,
-          onSend: async (message, images, delivery, snapshotTargetSessionId) => {
-            const targetSessionId = snapshotTargetSessionId || "";
-            if (
-              viewingSubagentSession &&
-              (!targetSessionId ||
-                delivery !== "queue" ||
-                message.startsWith("/"))
-            )
-              throw new Error("子代理视图仅支持向已验证父对话发送普通消息");
-            return send(message, images, delivery, targetSessionId);
-          },
-          onPickLocalFiles: async () => (await api.pickLocalFiles()).paths,
-          onReadClipboardFiles: async (files) => (await api.clipboardLocalFiles(files)).paths,
-          onError: setError,
-          onAbort: stopGeneration,
-        }}
-      />
-      {managementSection && <Suspense fallback={null}>
-      <ManagementPanel
-        section={managementSection}
-        appearance={appearance}
-        workspaceCwd={workspaceCwd}
-        workspacePicking={workspacePicking}
-        workspaceDisabled={mutationBlocked}
-        models={models}
-        modelRuntimeSyncPending={modelRuntimeSyncPending}
-        state={state}
-        busy={busy || globalMutationBlocked}
-        shutdownBlocked={
-          busy ||
-          (buildIdentityMismatch
-            ? recoveryActionBlocked
-            : globalMutationBlocked)
-        }
-        diagnosticsBusy={diagnosticsBusy}
-        buildIdentity={serverBuildIdentity}
-        webBuildIdentity={webBuildIdentity}
-        piVersion={piVersion}
-        primaryRuntime={primaryRuntime}
-        onClose={() => setManagementSection(null)}
-        onAppearance={setAppearance}
-        onPickWorkspace={() => void pickDefaultWorkspace()}
-        onModel={(provider, id, api) => void changeModel(provider, id, api)}
-        onModelsChanged={(data) => {
-          if (
-            modelCatalogueRevisionGate.admitBootstrap(
-              data.modelCatalogueRevision,
-            )
-          ) {
-            setModels(data.models);
-            setModelRuntimeSyncPending(data.modelRuntimeSyncPending === true);
-            saveModelCatalog(data.models);
-          }
-          dispatchPane({ type: "RUNTIME_SETTINGS_ADOPTED", target: localDraftRef.current ? { kind: "draft" } : { kind: "session", sessionId: viewedSessionIdRef.current }, state: { model: data.state.model } });
-        }}
-        onExportDiagnostics={exportStateDiagnostics}
-        onShutdown={() => void shutdownPiChat()}
-      />
-      </Suspense>}
-      <SessionDialog
-        state={sessionDialog}
-        busy={sessionActionBusy}
-        disabled={buildIdentityMismatch || sessionDialogCopyBlocked}
-        onClose={() => setSessionDialog(null)}
-        onRename={(name) => void renameSession(name)}
-        onClone={() => confirmCloneSession()}
-        onFork={() => confirmForkSession()}
-        onDelete={() => void deleteSession()}
-      />
-      {!viewingSubagentSession && Object.entries(askQuestionnaires).map(([askSessionId, questionnaire]) => (
-        <AskQuestionnaireDialog
-          key={`${askSessionId}:${questionnaire.toolCallId}`}
-          plan={questionnaire}
-          request={askSessionId === viewedSessionId ? extensionRequest : null}
-          visible={askSessionId === viewedSessionId}
-          disabled={buildIdentityMismatch}
-          onRespond={respondToExtension}
-          onFallback={() => dispatchAskQuestionnaire({
-            type: "CLOSE_IF_MATCH",
-            sessionId: askSessionId,
-            toolCallId: questionnaire.toolCallId,
-          })}
-        />
-      ))}
-      {!viewingSubagentSession && !askQuestionnaires[viewedSessionId] && (
-        <ExtensionDialog
-          request={extensionRequest}
-          sessionId={viewedSessionId}
-          continuationPending={toolStatus === "正在运行工具：ask_user_question"}
-          disabled={buildIdentityMismatch}
-          onRespond={(body) => void respondToExtension(body)}
-        />
-      )}
-      <Suspense fallback={null}>
-      <EditDiffSidebar
-        open={diffSidebarOpen}
-        width={diffSidebarWidth}
-        sessionId={inspectorSessionId}
-        workspacePath={conversationWorkspace}
-        workspaceActivityRevision={workspaceActivityRevision}
-        listWorkspaceFiles={api.workspaceFiles}
-        readWorkspaceFile={api.workspaceFile}
-        openWorkspaceFile={api.openWorkspaceFile}
-        onOpenChange={setDiffSidebarOpen}
-        onWidthChange={setDiffSidebarWidth}
-      />
-      </Suspense>
-    </AppShell>
-  );
+  sessionManagementActionsRef.current = {
+    finalizeDeletedSession: finalizeDeletedSessionAction,
+    selectDeletionFallback: selectDeletionFallbackAction,
+  };
+
+  return <AppView {...{
+    AppShell,
+    AskQuestionnaireDialog,
+    ChevronRightIcon,
+    ConversationPane,
+    DRAFT_FAILURE_SCOPE,
+    api,
+    EditDiffSidebar,
+    ExtensionDialog,
+    ManagementPanel,
+    SessionDialog,
+    SessionInventory,
+    appearance,
+    askQuestionnaires,
+    buildIdentityLabel,
+    buildIdentityMismatch,
+    busy,
+    cancelQueuedPrompt,
+    changeModel,
+    clearConversationNavigationTarget,
+    composerCommands,
+    composerControls,
+    composerDraftKey,
+    composerDraftKeyId,
+    composerDraftRevisionsRef,
+    composerHasContent,
+    composerNotices,
+    composerQueueMode,
+    composerState,
+    composerSubmissionPaused,
+    composerSubmissionScope,
+    composerTargetSessionId,
+    confirmCloneSession,
+    confirmForkSession,
+    conversationWorkspace,
+    copyingSessionIds,
+    createSession,
+    currentSessionBusyBeforeStreaming,
+    deleteSession,
+    dequeuePendingSteers,
+    diagnosticsBusy,
+    diffSidebarOpen,
+    diffSidebarWidth,
+    dispatchAskQuestionnaire,
+    dispatchPane,
+    displayedConversationName,
+    displayedQueue,
+    draftWorkspaceCwd,
+    draftWorkspaceOptions,
+    exportStateDiagnostics,
+    extensionRequest,
+    failedSessionIds,
+    forgottenComposerKeys,
+    forkMessagePreview,
+    forkableUserMessageText,
+    globalMutationBlocked,
+    initialPaneUnresolved,
+    inspectorSessionId,
+    lastRunDurationMs,
+    lifecycleBlocked,
+    liveMessage,
+    loadAllSessions,
+    loadDirectorySessions,
+    loadEarlierTurns,
+    loading,
+    loadingAllSessions,
+    loadingDirectoryKeys,
+    loadingEarlier,
+    localDraft,
+    localDraftRef,
+    localFailures,
+    managementSection,
+    messageTotal,
+    messages,
+    messagesTruncated,
+    modelCatalogueRevisionGate,
+    modelRuntimeSyncPending,
+    models,
+    mutatingSessionIds,
+    mutationBlocked,
+    navigateConversation,
+    navigateSubagentAncestor,
+    newConversationPresentation,
+    normalizeCwdKey,
+    observing,
+    onScroll,
+    openSubagentSession,
+    pane,
+    paneLoading,
+    pendingSteersBySession,
+    pendingUserMessage,
+    piVersion,
+    pickDefaultWorkspace,
+    pickDraftWorkspace,
+    pinnedInventoryAttemptRef,
+    primaryCapabilityPending,
+    primaryRuntime,
+    queuePaused,
+    recoveryActionBlocked,
+    refreshManually,
+    refreshing,
+    renameSession,
+    respondToExtension,
+    restartPi,
+    restoredComposerDrafts,
+    resumeQueuedPrompt,
+    runStartedAt,
+    saveModelCatalog,
+    scrollRef,
+    selectDraftWorkspace,
+    send,
+    serverBuildIdentity,
+    sessionActionBusy,
+    sessionDialog,
+    sessionDialogCopyBlocked,
+    sessionDirectories,
+    sessionNavigation,
+    sessions,
+    sessionsTotal,
+    setAppearance,
+    setComposerContentByScope,
+    setDiffSidebarOpen,
+    setDiffSidebarWidth,
+    setError,
+    setManagementSection,
+    setModelRuntimeSyncPending,
+    setModels,
+    setSessionDialog,
+    setSessionNavigation,
+    setSidebarOpen,
+    setSidebarWidth,
+    shutdownPiChat,
+    sidebarInventoryReady,
+    sidebarOpen,
+    sidebarViewBlocked,
+    sidebarWidth,
+    state,
+    steerDequeueingBySession,
+    stopGeneration,
+    stoppingCurrentSession,
+    subagentBreadcrumb,
+    togglePinnedDirectory,
+    togglePinnedSession,
+    toolStatus,
+    topBarSessionId,
+    turnTotal,
+    unseenReplySessionIds,
+    updateComposerPending,
+    viewSession,
+    viewSwitching,
+    viewedSession,
+    viewedSessionId,
+    viewedSessionIdRef,
+    viewingSubagentSession,
+    visibleTurnCount,
+    waitingForPiMessage,
+    webBuildIdentity,
+    withoutPersistedFailure,
+    workspaceActivityRevision,
+    workspaceCwd,
+    workspaceEpochRef,
+    workspacePicking,
+    workspaceRevisionRef,
+  }} />;
+
 }

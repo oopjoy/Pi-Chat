@@ -219,6 +219,11 @@ import { dispatchNewDraftFirstTurn } from "./services/new-draft-first-turn.js";
 import { prepareNewDraftRuntime } from "./services/new-draft-preparation.js";
 import { handleModelManagementRoute } from "./routes/model-management.js";
 import { handlePromptRoute } from "./routes/prompt-route.js";
+import { handleApiCoreRoute } from "./routes/api-core-route.js";
+import { createSessionCopyDeleteActions } from "./services/session-copy-delete-actions.js";
+import { createSessionViewActions } from "./services/session-view-actions.js";
+import { createRuntimeFileActions } from "./services/runtime-file-actions.js";
+import { createSidebarProjectionActions } from "./services/sidebar-projection-actions.js";
 import { handleNewSessionRoute } from "./routes/new-session.js";
 import { handleExtensionResponseRoute } from "./routes/extension-response.js";
 import {
@@ -4678,384 +4683,92 @@ export class PiChatApp {
     await this.scheduler.dispatchPrimaryNext();
   }
 
-  private sessionSummaries(
-    sessions: BootstrapData["sessions"],
-    clientId = "",
-  ): BootstrapData["sessions"] {
-    // Empty drafts stay out of the sidebar. Prompted drafts that SessionIndex has
-    // not yet scanned must still appear as soon as the first send is accepted.
-    const listed = sessions.map((session) => {
-      const runtime = this.runtimePool.get(session.id);
-      const lastUserPromptAt =
-        this.lastUserPromptAtBySession.get(session.id) ??
-        runtime?.lastUserPromptAt ??
-        session.lastUserPromptAt;
-      return {
-        ...session,
-        ...(runtime?.cwd ? { cwd: runtime.cwd } : null),
-        ...(lastUserPromptAt !== undefined ? { lastUserPromptAt } : null),
-        writable: this.activeSessionIds().includes(session.id),
-        running:
-          (session.id === this.activeSessionId && this.primaryTurnActive()) ||
-          Boolean(runtime && this.runtimeTurnActive(runtime)),
-        queued:
-          session.id === this.activeSessionId
-            ? this.promptQueue.length > 0
-            : (runtime?.promptQueue.length || 0) > 0,
-        pendingConfirmation: Boolean(this.pendingRequestForSession(session.id)),
-        activity: this.sessionActivity(session.id),
-        ...this.controlState(session.id, clientId),
-      };
+  private sidebarProjectionActions() {
+    const routePorts = {
+      DEFAULT_DIRECTORY_SESSION_LIST_SIZE,
+      DEFAULT_SESSION_LIST_SIZE,
+      compareSessionsByLastUserPrompt,
+      resolve,
+    };
+    const host = new Proxy(this as any, {
+      get: (target, property) => Object.prototype.hasOwnProperty.call(routePorts, property)
+        ? (routePorts as any)[property]
+        : Reflect.get(target, property, target),
+      set: (target, property, value) => Reflect.set(target, property, value, target),
     });
-    const known = new Set(listed.map((session) => session.id));
-    for (const runtime of this.runtimePool.runtimes.values()) {
-      if (known.has(runtime.id)) continue;
-      if (
-        !runtime.prompted &&
-        !this.runtimeTurnActive(runtime) &&
-        !runtime.dispatching
-      )
-        continue;
-      // A persisted Session may be momentarily absent from a refresh while its
-      // JSONL is being written. Its Runtime captured the indexed summary at
-      // activation; use that before the one-message draft fallback so a real
-      // title/count cannot regress to "新会话" in the sidebar.
-      const base = runtime.summarySnapshot ||
-        runtime.draftSession || {
-          id: runtime.id,
-          sessionId: runtime.id,
-          name: "新会话",
-          preview: "新会话",
-          cwd: runtime.cwd,
-          updatedAt: runtime.lastUsedAt,
-          messageCount: 1,
-          active: true,
-        };
-      listed.push({
-        ...base,
-        messageCount: Math.max(base.messageCount || 0, 1),
-        updatedAt: Math.max(base.updatedAt || 0, runtime.lastUsedAt),
-        lastUserPromptAt:
-          this.lastUserPromptAtBySession.get(runtime.id) ??
-          runtime.lastUserPromptAt ??
-          base.lastUserPromptAt ??
-          base.updatedAt,
-        active: true,
-        writable: true,
-        running:
-          this.runtimeTurnActive(runtime) || runtime.dispatching,
-        queued: runtime.promptQueue.length > 0,
-        pendingConfirmation: Boolean(this.pendingRequestForSession(runtime.id)),
-        activity: this.sessionActivity(runtime.id),
-        ...this.controlState(runtime.id, clientId),
-      });
-      known.add(runtime.id);
-    }
-    return listed.sort(compareSessionsByLastUserPrompt);
+    return createSidebarProjectionActions(host);
   }
 
-  private sidebarSessions(
-    sessions: SessionSummary[],
-    clientId: string,
-    all = false,
-    includeIds: readonly string[] = [],
-  ): {
-    sessions: SessionSummary[];
-    total: number;
-    directories: SessionDirectorySummary[];
-  } {
-    const enriched = this.sessionSummaries(sessions, clientId);
-    const groups = new Map<string, SessionSummary[]>();
-    for (const session of enriched) {
-      const key = session.cwd || "";
-      const group = groups.get(key);
-      if (group) group.push(session);
-      else groups.set(key, [session]);
-    }
-    const directories = [...groups.entries()]
-      .map(([cwd, group]) => ({
-        cwd,
-        count: group.length,
-        lastUserPromptAt:
-          group[0]?.lastUserPromptAt ?? group[0]?.updatedAt ?? 0,
-      }))
-      .sort((left, right) => right.lastUserPromptAt - left.lastUserPromptAt);
-    if (all) return { sessions: enriched, total: enriched.length, directories };
-    const cwdKey = (cwd: string) =>
-      cwd ? resolve(cwd).toLowerCase() : "__unknown_cwd__";
-    const current =
-      [...groups.entries()].find(
-        ([cwd]) => cwdKey(cwd) === cwdKey(this.currentCwd),
-      )?.[1] || [];
-    const selected = current.slice(0, DEFAULT_DIRECTORY_SESSION_LIST_SIZE);
-    for (const directory of directories) {
-      if (selected.length >= DEFAULT_SESSION_LIST_SIZE) break;
-      if (cwdKey(directory.cwd) === cwdKey(this.currentCwd)) continue;
-      selected.push(
-        ...(groups.get(directory.cwd) || []).slice(
-          0,
-          Math.min(
-            DEFAULT_DIRECTORY_SESSION_LIST_SIZE,
-            DEFAULT_SESSION_LIST_SIZE - selected.length,
-          ),
-        ),
-      );
-    }
-    // Pins are browser-local presentation preferences. The read-only inventory
-    // endpoint may request their bounded stable IDs so an older pinned Session
-    // remains visible without forcing an unbounded all=1 scan into every page.
-    if (includeIds.length) {
-      const selectedIds = new Set(selected.map((session) => session.id));
-      const requested = new Set(includeIds);
-      for (const session of enriched) {
-        if (!requested.has(session.id) || selectedIds.has(session.id)) continue;
-        selected.push(session);
-        selectedIds.add(session.id);
-      }
-    }
-    return { sessions: selected, total: enriched.length, directories };
+  private sessionSummaries(...args: any[]): SessionSummary[] {
+    return (this.sidebarProjectionActions().sessionSummaries as any)(...args);
   }
 
-  private cachedSessionList(activePath?: string): Promise<SessionSummary[]> {
-    const cached = (
-      this.options.sessions as SessionIndex & {
-        listCached?: (
-          activePath?: string,
-          cwd?: string,
-        ) => Promise<SessionSummary[]>;
-      }
-    ).listCached;
-    return cached
-      ? cached.call(this.options.sessions, activePath)
-      : this.options.sessions.list(activePath);
+  private sidebarSessions(...args: any[]): { sessions: SessionSummary[]; total: number; directories: SessionDirectorySummary[] } {
+    return (this.sidebarProjectionActions().sidebarSessions as any)(...args);
   }
 
-  private async restartPrimaryRuntime(
-    sessionFile?: string,
-    cwd = this.primaryRuntimeCwd,
-  ): Promise<void> {
-    await restartPrimaryRuntimeService({
-      closed: () => this.closed,
-      primaryRuntime: this.options.primaryRuntime,
-      isConcreteReadinessController: () => this.options.primaryRuntime instanceof PrimaryRuntimeReadinessController,
-      rpc: this.options.rpc,
-      primaryRuntimeCwd: () => this.primaryRuntimeCwd,
-      activeSessionId: () => this.activeSessionId,
-      currentGateMode: () => this.gateModesBySession.get(this.activeSessionId) || this.primaryGateMode,
-      recoverPrimary: (runtime, file, runtimeCwd) => this.recoverPrimaryRuntimeWithQueueFence(runtime, file, runtimeCwd),
-      legacyRestart: async (file, runtimeCwd) => { await this.options.rpc.restart(file, runtimeCwd); },
-      lateRpcOutcomeHandler: (id, token) => this.lateRpcOutcomeHandler(id, token, "generic"),
-      markRpcOutcomePending: (id, error, token) => this.markRpcOutcomePending(id, error, token),
-      isOutcomeUnknown: (error) => this.rpcOutcomeUnknown(error),
-      fencePrimaryOperation: () => this.primaryOperationAdmission.fence(),
-      setPrimaryGateMode: (mode) => { this.primaryGateMode = mode; },
-    }, sessionFile, cwd);
+  private cachedSessionList(...args: any[]): Promise<SessionSummary[]> {
+    return (this.sidebarProjectionActions().cachedSessionList as any)(...args);
   }
 
-  private async reloadRpc(knownState?: PiState): Promise<void> {
-    this.assertApplicationQuiescent("修改资源配置");
-    const state = knownState || asState(await this.options.rpc.send({ type: "get_state" }));
-    const replacedSessionIds = new Set([
-      this.activeSessionId,
-      ...this.runtimePool.runtimes.keys(),
-    ]);
-    for (const sessionId of replacedSessionIds)
-      this.clearSessionRuntimeTransientState(sessionId, "resources-reloading", {
-        advanceGeneration: true,
-      });
-    await reloadPrimaryResources({
-      getPrimaryState: async () => state,
-      stopSecondaryRuntimes: () => this.runtimePool.stopAll({ terminal: false }),
-      restartPrimary: (sessionFile) => this.restartPrimaryRuntime(sessionFile),
-      rethrowResultPending: (error, operation) => this.rethrowResultPending(error, operation),
-      broadcastReloaded: () => this.broadcast({ type: "pi_chat_reloaded" }),
-    }, state);
-  }
-
-  private async applyResourceFileTransaction<T>(
-    snapshots: FileSnapshot[],
-    mutation: () => Promise<T>,
-  ): Promise<T> {
-    const state = asState(await this.options.rpc.send({ type: "get_state" }));
-    if (state.isStreaming)
-      throw new Error("请先停止所有并行生成，再修改资源配置");
-    let changed = false;
-    try {
-      const result = await mutation();
-      changed = true;
-      // ResourceManager inventories are read projections. Invalidate them only
-      // after the file transaction commits, before the replacement Runtime
-      // starts reading the new settings/resources.
-      this.options.resources.invalidate?.();
-      await this.reloadRpc(state);
-      return result;
-    } catch (error) {
-      // Once the resource file mutation has committed, an unknown reload RPC
-      // outcome must not trigger an immediate rollback/restart race. The
-      // caller receives one retry-safe result-pending response instead.
-      if (error instanceof HttpRequestError && error.code === "RESULT_PENDING")
-        throw error;
-      if (!changed) {
-        this.options.resources.invalidate?.();
-        // The file-manager write itself may have reached disk before its RPC
-        // acknowledgement timed out. Treat that outcome as uncertain too;
-        // retrying a POST/DELETE/PUT could duplicate the mutation.
-        this.rethrowResultPending(error, "更新资源配置");
-        throw error;
-      }
-      const original = error instanceof Error ? error.message : String(error);
-      try {
-        await restoreSnapshots(snapshots);
-        this.options.resources.invalidate?.();
-        await this.restartPrimaryRuntime(state.sessionFile);
-        this.broadcast({ type: "pi_chat_reloaded" });
-      } catch (rollbackError) {
-        throw new Error(
-          `资源修改失败，自动恢复也失败：${original}；恢复错误：${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
-        );
-      }
-      throw new Error(`资源修改失败，原配置已自动恢复：${original}`);
-    }
-  }
-
-  /** Compatibility wrapper; the transaction owner lives in the model service. */
-  private async applyModelFileTransaction<T>(mutation: () => Promise<T>): Promise<T> {
-    if (!this.options.modelManager) throw new Error("模型管理不可用");
-    return applyModelFileTransaction(
-      {
-        snapshot: () => snapshotFile(this.options.modelManager!.path),
-        restore: (snapshot) => restoreSnapshots([snapshot]),
-        invalidateCatalogue: () => this.refreshHostModelCatalogue(),
-        rethrowResultPending: (error, operation) => this.rethrowResultPending(error, operation, false),
-      },
-      "更新模型配置",
-      mutation,
-    );
-  }
-
-  private providerManagementService() {
-    if (!this.options.modelManager) throw new Error("模型管理不可用");
-    return createProviderManagement({
-      manager: this.options.modelManager,
-      withLifecycle: (description, mutation) =>
-        this.withLifecycle("models-refreshing", description, mutation),
-      withModelFileTransaction: (mutation) => this.applyModelFileTransaction(mutation),
-      primaryState: async () => this.options.rpc.send({ type: "get_state" }),
-      secondaryStates: () => this.runtimePool.rpcStatesForQuiescence(),
-      bootstrap: () => this.bootstrap(),
+  private runtimeFileActions() {
+    const routePorts = {
+      HttpRequestError,
+      PrimaryRuntimeReadinessController,
+      asModels,
+      asState,
+      basename,
+      createCustomModelManagement,
+      createProviderManagement,
+      createRuntimeSettingsService,
+      randomUUID,
+      reloadPrimaryResources,
+      resolve,
+      restartPrimaryRuntimeService,
+      restoreSnapshots,
+      saveWorkspace,
+      snapshotFile,
+      stat,
+    };
+    const host = new Proxy(this as any, {
+      get: (target, property) => Object.prototype.hasOwnProperty.call(routePorts, property)
+        ? (routePorts as any)[property]
+        : Reflect.get(target, property, target),
+      set: (target, property, value) => Reflect.set(target, property, value, target),
     });
+    return createRuntimeFileActions(host);
   }
 
-  private runtimeSettingsService() {
-    return createRuntimeSettingsService({
-      activeSessionId: () => this.activeSessionId,
-      primaryRpc: () => this.options.rpc,
-      primaryRunning: () => this.running,
-      secondaryRuntime: (sessionId) => this.runtimePool.get(sessionId) || null,
-      ensurePrimaryRuntime: () => this.ensurePrimaryRuntime(),
-      recoverSecondary: (runtime) => this.recoverRuntime(runtime),
-      withSecondaryOperation: (runtime, operation) => this.runtimePool.withOperation(runtime, operation),
-      acquirePrimaryOperation: () => this.primaryOperationAdmission.acquire().release,
-      mutationOutcomePending: (sessionId) => this.sessionMutationOutcomePending(sessionId),
-      availableModels: async (rpc) => asModels(await rpc.send({ type: "get_available_models" })),
-      lateRpcOutcomeHandler: (sessionId, token) => this.lateRpcOutcomeHandler(sessionId, token, "generic"),
-      markRpcOutcomePending: (sessionId, error, token) => this.markRpcOutcomePending(sessionId, error, token),
-      rethrowResultPending: (error, operation, fence = true) => this.rethrowResultPending(error, operation, fence),
-      rememberRuntimeModel: (runtime, model) => this.rememberRuntimeDisplaySettings(runtime, { model }),
-      rememberPrimaryModel: (model) => this.rememberPrimaryDisplaySettings({ model }),
-      stagePrimaryModel: (provider, modelId) => { this.pendingTurnSettings.model = { provider, modelId }; },
-      rememberRuntimeThinking: (runtime, level) => this.rememberRuntimeDisplaySettings(runtime, { thinkingLevel: level }),
-      rememberPrimaryThinking: (level) => this.rememberPrimaryDisplaySettings({ thinkingLevel: level }),
-      stagePrimaryThinking: (level) => { this.pendingTurnSettings.thinkingLevel = level; },
-      updateRuntimeState: (runtime, state) => {
-        runtime.lastState = state;
-        runtime.running = state.isStreaming;
-      },
-      updatePrimaryState: (state) => {
-        this.lastPrimaryState = state;
-        this.running = state.isStreaming;
-      },
-    });
+  private async restartPrimaryRuntime(...args: any[]): Promise<void> {
+    return (this.runtimeFileActions().restartPrimaryRuntime as any)(...args);
   }
 
-  private customModelManagementService() {
-    if (!this.options.modelManager) throw new Error("模型管理不可用");
-    return createCustomModelManagement({
-      manager: this.options.modelManager,
-      withLifecycle: (description, mutation) =>
-        this.withLifecycle("models-refreshing", description, mutation),
-      withModelFileTransaction: (mutation) => this.applyModelFileTransaction(mutation),
-      primaryState: async () => asState(await this.options.rpc.send({ type: "get_state" })),
-      primaryTurnActive: () => this.primaryTurnActive(),
-      setPrimaryModel: async (provider, modelId) => {
-        const outcomeToken = randomUUID();
-        try {
-          await this.options.rpc.send(
-            { type: "set_model", provider, modelId },
-            undefined,
-            { onLateResponse: this.lateRpcOutcomeHandler(this.activeSessionId, outcomeToken, "generic") },
-          );
-        } catch (error) {
-          if (this.rpcOutcomeUnknown(error)) {
-            this.markRpcOutcomePending(this.activeSessionId, error, outcomeToken);
-            this.rethrowResultPending(error, "确认重命名模型");
-          }
-        }
-      },
-      bootstrap: () => this.bootstrap(),
-    });
+  private async reloadRpc(...args: any[]): Promise<void> {
+    return (this.runtimeFileActions().reloadRpc as any)(...args);
   }
 
-  /** Changes only the persisted default/index context for future drafts. Existing
-   * Session paths and dedicated Runtime cwd values are immutable. Native folder
-   * pickers wait outside this queue; each returned selection gets a short,
-   * lifecycle-guarded commit in FIFO order. */
-  private async changeWorkspace(
-    selected: string,
-  ): Promise<{
-    workspaceName: string;
-    cwd: string;
-    workspaceEpoch: string;
-    workspaceRevision: number;
-  }> {
-    let releaseTurn!: () => void;
-    const previous = this.workspaceCommitTail;
-    const turn = new Promise<void>((resolveTurn) => {
-      releaseTurn = resolveTurn;
-    });
-    this.workspaceCommitTail = previous.catch(() => undefined).then(() => turn);
-    await previous.catch(() => undefined);
-    try {
-      const releaseMutation = this.beginMutation();
-      try {
-        // Normalize equivalent spellings while retaining canonical UNC/WSL
-        // workspace identity; Windows path.resolve() preserves UNC roots.
-        const selectedCwd = resolve(selected);
-        if (!(await stat(selectedCwd)).isDirectory())
-          throw new Error("所选工作目录不存在或不是文件夹");
-        await saveWorkspace(selectedCwd);
-        if (selectedCwd.toLowerCase() !== this.currentCwd.toLowerCase()) {
-          this.currentCwd = selectedCwd;
-          this.workspaceRevision += 1;
-          this.broadcast({
-            type: "pi_chat_workspace_changed",
-            cwd: selectedCwd,
-            workspaceEpoch: this.runEpoch,
-            workspaceRevision: this.workspaceRevision,
-          });
-        }
-        return {
-          workspaceName: basename(selectedCwd),
-          cwd: selectedCwd,
-          workspaceEpoch: this.runEpoch,
-          workspaceRevision: this.workspaceRevision,
-        };
-      } finally {
-        releaseMutation();
-      }
-    } finally {
-      releaseTurn();
-    }
+  private async applyResourceFileTransaction<T>(...args: any[]): Promise<T> {
+    return (this.runtimeFileActions().applyResourceFileTransaction as any)(...args);
+  }
+
+  private async applyModelFileTransaction<T>(...args: any[]): Promise<T> {
+    return (this.runtimeFileActions().applyModelFileTransaction as any)(...args);
+  }
+
+  private providerManagementService(): any {
+    return this.runtimeFileActions().providerManagementService();
+  }
+
+  private runtimeSettingsService(): any {
+    return this.runtimeFileActions().runtimeSettingsService();
+  }
+
+  private customModelManagementService(): any {
+    return this.runtimeFileActions().customModelManagementService();
+  }
+
+  private async changeWorkspace(...args: any[]): Promise<any> {
+    return (this.runtimeFileActions().changeWorkspace as any)(...args);
   }
 
   private reportSessionRelationFailure(operation: string, error: unknown): void {
@@ -5147,219 +4860,61 @@ export class PiChatApp {
     }
   }
 
+  private sessionCopyDeleteActions() {
+    const routePorts = {
+      HttpRequestError,
+      RpcProcessExitUnconfirmedError,
+      asState,
+      finalizeSessionCopy,
+      finalizeSessionDelete,
+      prepareSessionDeletionRuntime,
+      randomUUID,
+      rpcData,
+      validateSessionCopyPreparation,
+      validateSessionDeletePath,
+    };
+    const host = new Proxy(this as any, {
+      get: (target, property) => Object.prototype.hasOwnProperty.call(routePorts, property)
+        ? (routePorts as any)[property]
+        : Reflect.get(target, property, target),
+      set: (target, property, value) => Reflect.set(target, property, value, target),
+    });
+    return createSessionCopyDeleteActions(host);
+  }
+
   private async copySession(
     id: string,
     mode: "clone" | "fork",
     persistedMessageId?: string,
   ): Promise<SessionCopyData> {
-    if (
-      this.copyRecoveryPendingSessionIds.has(id) ||
-      this.copyProjectionPendingSessionIds.has(id) ||
-      this.sessionMutationOutcomePending(id)
-    )
-      throw new HttpRequestError(409, "上次新对话已创建，但恢复或列表投影尚未确认；请勿重复操作");
-    const releasePromptAdmission = await this.beginPromptAdmission(id);
-    try {
-      const knownSessions = await this.options.sessions.list();
-      const knownSessionIds = new Set(knownSessions.map((session) => session.id));
-      let runtime = this.runtimePool.get(id);
-      const primary = id === this.activeSessionId && !runtime;
-      if (!primary && !runtime) runtime = await this.ensureRuntime(id);
-      const candidateSourcePath = runtime?.sessionPath
-        || this.options.sessions.pathForId(id)
-        || (primary ? this.lastPrimaryState.sessionFile : undefined);
-      const candidateSummary = runtime?.summarySnapshot
-        || this.options.sessions.summaryForId(id)
-        || (primary ? this.primarySummarySnapshot || undefined : undefined);
-      const target = mode === "fork"
-        ? await this.options.sessions.forkTargetForId(id, persistedMessageId || "")
-        : null;
-      const copyPreparation = validateSessionCopyPreparation({
-        mode,
-        sourcePath: candidateSourcePath,
-        summary: candidateSummary,
-        draft: Boolean(runtime?.draftSession),
-        primary,
-        primaryBusy: this.primaryTurnActive()
-          || this.dispatching
-          || this.promptQueue.length > 0
-          || this.queuePaused
-          || Boolean(this.pendingExtensionRequest)
-          || this.lastPrimaryState.isCompacting === true,
-        secondaryBusy: Boolean(runtime && (!this.runtimePool.isIdle(runtime) || runtime.failed)),
-        forkTargetAvailable: Boolean(target),
-      });
-      const sourcePath = copyPreparation.sourcePath;
-      const summary = copyPreparation.summary;
-
-      const operationAdmission = runtime
-        ? runtime.operationAdmission
-        : this.primaryOperationAdmission;
-      const operationGeneration = await operationAdmission.closeAndDrain();
-      if (operationGeneration === null)
-        throw new HttpRequestError(409, "该会话正在休眠或切换，请刷新后重试");
-      let copied;
-      try {
-        copied = await this.runBoundSessionCopy({
-          id,
-          sourcePath,
-          mode,
-          runtime,
-          knownSessionIds,
-          ...(target ? { entryId: target.entryId } : null),
-        });
-      } finally {
-        operationAdmission.reopen(operationGeneration);
-      }
-
-      return finalizeSessionCopy({
-        host: {
-          now: () => this.now(),
-          recordFork: (destinationSessionId, origin) => this.sessionRelations.recordFork(destinationSessionId, origin),
-          reportRelationFailure: (operation, error) => this.reportSessionRelationFailure(operation, error),
-          listSessions: () => this.options.sessions.list(),
-          summaryForId: (sessionId) => this.options.sessions.summaryForId(sessionId),
-          pathForId: (sessionId) => this.options.sessions.pathForId(sessionId),
-          markProjectionPending: (sourceSessionId) => this.copyProjectionPendingSessionIds.add(sourceSessionId),
-          clearOutcome: (sourceSessionId) => {
-            this.copyOutcomePendingSessionIds.delete(sourceSessionId);
-            this.rpcOutcomePendingBySession.delete(sourceSessionId);
-            this.rpcOutcomeTokensBySession.delete(sourceSessionId);
-          },
-          broadcastCopied: ({ action, sessionId, sourceSessionId }) =>
-            this.broadcast({ type: "pi_chat_sessions_changed", action, sessionId, sourceSessionId }),
-        },
-        sourceSessionId: id,
-        sourceName: summary.name,
-        mode,
-        copied,
-        ...(target ? { forkTarget: target } : null),
-        ...(persistedMessageId ? { persistedMessageId } : null),
-      });
-    } finally {
-      releasePromptAdmission();
-    }
+    return this.sessionCopyDeleteActions().copySession(id, mode, persistedMessageId);
   }
 
-  /** Test/embedding compatibility wrapper around the destructive path guard. */
   private async validatedSessionDeletePath(path: string, sessionId: string): Promise<string> {
-    return validateSessionDeletePath({
-      sessionRoot: () => this.options.sessions.root,
-      indexedPath: (candidate) => this.options.sessions.pathForId(candidate),
-    }, path, sessionId);
+    return this.sessionCopyDeleteActions().validatedSessionDeletePath(path, sessionId);
   }
 
   private async deleteSession(id: string): Promise<BootstrapData> {
-    if (this.deletionOutcomePendingBySession.has(id)) {
-      const fencedRuntime = this.runtimePool.get(id);
-      // A prior deletion stop failed only because child exit was unconfirmed.
-      // Once the same Runtime proves its child is gone, the destructive delete
-      // itself has not yet run and may safely be retried.
-      if (
-        fencedRuntime?.admissionFenceReason === "deletion" &&
-        fencedRuntime.rpc.isExitConfirmed?.()
-      )
-        this.deletionOutcomePendingBySession.delete(id);
-      else
-        throw new HttpRequestError(
-          409,
-          "删除结果尚未确认；请刷新对话列表核对，不要重复操作",
-          "RESULT_PENDING",
-          true,
-        );
-    }
-    if (this.sessionMutationOutcomePending(id))
-      throw new HttpRequestError(
-        409,
-        "上一次操作结果尚未确认；请刷新页面核对，不要重复执行会话操作",
-        "RESULT_PENDING",
-        true,
-      );
-    const orphanedStart = this.runtimePool.orphanedStart(id);
-    if (orphanedStart) {
-      try {
-        await this.runtimePool.releaseOrphanedStart(id);
-      } catch (error) {
-        this.rethrowResultPending(error, "删除会话");
-      }
-    }
-    await this.options.sessions.list(undefined, this.currentCwd);
-    const runtime = this.runtimePool.get(id);
-    const indexedPath = runtime?.sessionPath || runtime?.draftSessionPath || this.options.sessions.pathForId(id);
-    const finalize = (path: string | undefined) => finalizeSessionDelete({
-      getForkOrigin: (sessionId) => this.sessionRelations.getForkOrigin(sessionId),
-      removeForkDestination: (sessionId) => this.sessionRelations.removeDestination(sessionId),
-      restoreForkOrigin: (sessionId, origin) => this.sessionRelations.recordFork(sessionId, origin as SessionForkOrigin),
-      reportRelationFailure: (operation, error) => this.reportSessionRelationFailure(operation, error),
-      validateDeletePath: (candidatePath, sessionId) => validateSessionDeletePath({
-        sessionRoot: () => this.options.sessions.root,
-        indexedPath: (candidate) => this.options.sessions.pathForId(candidate),
-      }, candidatePath, sessionId),
-      clearDeletedSessionState: (sessionId) => {
-        this.deletionOutcomePendingBySession.delete(sessionId);
-        this.clearSessionRuntimeTransientState(sessionId, "deleted", { removeGatePreference: true });
-        this.lastUserPromptAtBySession.delete(sessionId);
-        this.pendingAcceptedPromptsBySession.delete(sessionId);
-        this.persistedPromptIdsBySession.delete(sessionId);
-        this.pendingConsumedSteersBySession.delete(sessionId);
-        this.persistedSteerProjectionsBySession.delete(sessionId);
-        this.nativeSteeringProjectionRevisions.delete(sessionId);
-        this.runGenerationsBySession.delete(sessionId);
-        this.copyOutcomePendingSessionIds.delete(sessionId);
-        this.copyProjectionPendingSessionIds.delete(sessionId);
-        this.sessionControl.clearSession(sessionId);
-      },
-      refreshSessions: async () => { await this.options.sessions.list(this.activeSessionPath, this.currentCwd); },
-      broadcastDeleted: (sessionId) => this.broadcast({ type: "pi_chat_sessions_changed", action: "deleted", sessionId }),
-      bootstrap: () => this.bootstrap(),
-    }, id, path) as Promise<BootstrapData>;
-    if (id !== this.activeSessionId && !indexedPath && !runtime) {
-      // The fresh SessionIndex scan above proved that this is a stale sidebar
-      // row. Delete is idempotent: retire its projections rather than showing
-      // an error for a JSONL another process already removed.
-      return finalize(undefined);
-    }
-    const deletionRuntime = await prepareSessionDeletionRuntime({
-      activeSessionId: () => this.activeSessionId,
-      primaryState: async () => asState(await this.options.rpc.send({ type: "get_state" }, 12_000)),
-      primaryTurnActive: () => this.primaryTurnActive(),
-      primaryQueueLength: () => this.promptQueue.length,
-      primaryExtensionPending: () => Boolean(this.pendingExtensionRequest),
-      resetPrimarySession: async () => {
-        const outcomeToken = randomUUID();
-        try {
-          return rpcData<{ cancelled: boolean }>(
-            await this.options.rpc.send(
-              { type: "new_session" },
-              30_000,
-              { onLateResponse: this.lateRpcOutcomeHandler(id, outcomeToken, "delete") },
-            ),
-          );
-        } catch (error) {
-          if (this.rpcOutcomeUnknown(error)) {
-            this.deletionOutcomePendingBySession.add(id);
-            this.markRpcOutcomePending(id, error, outcomeToken);
-          }
-          this.rethrowResultPending(error, "删除会话");
-        }
-      },
-      runtime: () => runtime,
-      indexedSessionPath: (sessionId) => this.options.sessions.pathForId(sessionId),
-      runtimeSessionPath: (candidate) => candidate.sessionPath || candidate.draftSessionPath,
-      runtimeTurnActive: (candidate) => this.runtimeTurnActive(candidate),
-      runtimeQueueLength: (candidate) => candidate.promptQueue.length,
-      runtimeExtensionPending: (candidate) => candidate.extensionUiPending,
-      releaseRuntimeForDeletion: async (sessionId) => {
-        try {
-          return Boolean(await this.runtimePool.releaseForDeletion(sessionId));
-        } catch (error) {
-          if (error instanceof RpcProcessExitUnconfirmedError)
-            this.deletionOutcomePendingBySession.add(sessionId);
-          this.rethrowResultPending(error, "删除会话");
-        }
-      },
-    }, id);
-    return finalize(deletionRuntime.path);
+    return this.sessionCopyDeleteActions().deleteSession(id);
+  }
+
+  private sessionViewActions() {
+    const routePorts = {
+      asSessionStats,
+      BUILTIN_COMMANDS,
+      projectColdSessionView,
+      projectHotMemoryView,
+      readColdSessionView,
+      readSessionView,
+      RECENT_TURN_WINDOW_SIZE,
+    };
+    const host = new Proxy(this as any, {
+      get: (target, property) => Object.prototype.hasOwnProperty.call(routePorts, property)
+        ? (routePorts as any)[property]
+        : Reflect.get(target, property, target),
+      set: (target, property, value) => Reflect.set(target, property, value, target),
+    });
+    return createSessionViewActions(host);
   }
 
   private async coldSessionView(
@@ -5368,253 +4923,39 @@ export class PiChatApp {
     turnLimit: number,
     clientId: string,
   ): Promise<SessionViewData | null> {
-    const snapshot = await this.options.sessions.snapshotForId?.(id);
-    if (snapshot)
-      return this.coldSessionViewFromSnapshot(id, session, snapshot, turnLimit, clientId);
-    const messages = await this.options.sessions.messagesForId(id);
-    if (!messages) return null;
-    return this.coldSessionViewFromSnapshot(
-      id,
-      session,
-      { messages, settings: {} },
-      turnLimit,
-      clientId,
-    );
+    return this.sessionViewActions().coldSessionView(id, session, turnLimit, clientId);
   }
 
-  private coldSessionViewFromSnapshot(
-    id: string,
-    session: SessionSummary,
-    snapshot: Pick<SessionFileSnapshot, "messages" | "settings" | "sourceMessageTotal" | "sourceTurnTotal" | "sourceMessagesTruncated" | "usageComplete"> & { usage?: SessionUsageSnapshot },
-    turnLimit: number,
-    clientId: string,
-  ): SessionViewData {
-    this.reconcilePendingAcceptedPrompts(id, snapshot.messages);
-    return projectColdSessionView({
-      modelFromSettings: (settings) => this.modelFromSessionSettings(settings),
-      sessionActivity: (sessionId) => this.sessionActivity(sessionId),
-      offlineStats: (sessionId, usage) => this.offlineStatsFromUsage(sessionId, usage),
-      currentGateMode: (sessionId) => this.currentGateMode(sessionId),
-      pendingRequest: (sessionId) => this.pendingRequestForSession(sessionId),
-      controlState: (sessionId, browserId) => this.controlState(sessionId, browserId),
-    }, { id, session, snapshot, turnLimit, clientId });
+  private coldSessionViewFromSnapshot(...args: any[]): SessionViewData {
+    return (this.sessionViewActions().coldSessionViewFromSnapshot as any)(...args);
   }
 
-  private hotMemoryView(
-    id: string,
-    turnLimit: number,
-    clientId: string,
-  ): SessionViewData | null {
-    const runtime = id === this.activeSessionId ? null : this.runtimePool.get(id);
-    const primary = id === this.activeSessionId && this.primaryReadReady();
-    if (!runtime && !primary) return null;
-    const summary = primary
-      ? this.primarySummarySnapshot || {
-          id,
-          sessionId: this.lastPrimaryState.sessionId || id,
-          name: this.lastPrimaryState.sessionName || "当前对话",
-          preview: "",
-          cwd: this.currentCwd,
-          updatedAt: this.now(),
-          messageCount: this.lastPrimaryState.messageCount || 0,
-          active: true,
-        }
-      : runtime!.summarySnapshot || runtime!.draftSession;
-    if (!summary) return null;
-    const persisted = primary
-      ? this.lastPrimaryMessagesSessionId === id ? this.lastPrimaryMessages : undefined
-      : runtime!.messageSnapshot;
-    const tail = primary
-      ? this.primaryPendingTerminalSessionId === id ? this.primaryPendingTerminalMessages : []
-      : runtime!.pendingTerminalMessages;
-    const state = this.stateWithPendingPromptSettings(
-      id,
-      primary ? this.lastPrimaryState : runtime!.lastState || { model: null, isStreaming: runtime!.running },
-    );
-    const streaming = primary
-      ? this.primaryTurnActive()
-      : this.runtimeTurnActive(runtime!) || runtime!.dispatching;
-    return projectHotMemoryView({
-      modelFromSettings: (settings) => this.modelFromSessionSettings(settings),
-      sessionActivity: (sessionId) => this.sessionActivity(sessionId),
-      offlineStats: (sessionId, usage) => this.offlineStatsFromUsage(sessionId, usage),
-      currentGateMode: (sessionId) => this.currentGateMode(sessionId),
-      pendingRequest: (sessionId) => this.pendingRequestForSession(sessionId),
-      controlState: (sessionId, browserId) => this.controlState(sessionId, browserId),
-      touch: (sessionId) => { const target = this.runtimePool.get(sessionId); if (target) this.runtimePool.touch(target); },
-      reconcilePendingPrompts: (sessionId, messages) => this.reconcilePendingAcceptedPrompts(sessionId, messages),
-      pendingPrompt: (sessionId) => this.pendingPromptForSession(sessionId),
-      pendingSteers: (sessionId) => this.pendingSteerProjection(sessionId),
-      stateWithPendingPromptSettings: (sessionId, next) => this.stateWithPendingPromptSettings(sessionId, next),
-      stateWithFastMode: (sessionId, next) => this.stateWithFastMode(sessionId, next),
-    }, {
-      id,
-      turnLimit,
-      clientId,
-      primary,
-      source: {
-        summary,
-        persisted,
-        terminalTail: tail,
-        state,
-        streaming,
-        liveMessage: primary ? this.liveMessage : runtime!.liveMessage,
-        toolStatus: primary ? this.toolStatus : runtime!.toolStatus,
-        stats: primary
-          ? this.lastPrimaryStats?.sessionId === id ? this.lastPrimaryStats.value : undefined
-          : runtime!.lastStats,
-        queue: primary ? this.publicQueue() : this.publicQueue(runtime!.promptQueue),
-        queuePaused: primary ? this.queuePaused : runtime!.queuePaused,
-        commands: primary
-          ? this.lastPrimaryCommands.length ? [...BUILTIN_COMMANDS, ...this.lastPrimaryCommands] : undefined
-          : runtime!.commands?.length ? [...BUILTIN_COMMANDS, ...runtime!.commands] : undefined,
-        gateMode: primary ? this.primaryGateMode : runtime!.gateMode,
-        historyPending: !persisted,
-        reconcilePending: !persisted || tail.length > 0 || (primary
-          ? this.lastPrimaryStats?.sessionId !== id
-          : !runtime!.statsKnown || !runtime!.commandsKnown),
-      },
-    });
+  private hotMemoryView(...args: any[]): SessionViewData | null {
+    return (this.sessionViewActions().hotMemoryView as any)(...args);
   }
 
-  private async coldSessionViewForId(
-    id: string,
-    turnLimit: number,
-    clientId: string,
-    includeForkOrigin = false,
-  ): Promise<SessionViewData | null> {
-    return readColdSessionView({
-      index: this.options.sessions,
-      activeSessionPath: () => this.activeSessionPath,
-      currentCwd: () => this.currentCwd,
-      projectSnapshot: (sessionId, session, snapshot, limit, browserId) =>
-        this.coldSessionViewFromSnapshot(sessionId, session, snapshot, limit, browserId),
-      projectMessages: (sessionId, session, limit, browserId) =>
-        this.coldSessionView(sessionId, session, limit, browserId),
-      forkOrigin: (sessionId) => this.forkOriginForSession(sessionId),
-    }, id, turnLimit, clientId, includeForkOrigin);
+  private async coldSessionViewForId(...args: any[]): Promise<SessionViewData | null> {
+    return (this.sessionViewActions().coldSessionViewForId as any)(...args);
   }
 
-  private async sessionView(
-    id: string,
-    turnLimit = RECENT_TURN_WINDOW_SIZE,
-    clientId = "",
-    options: { fast?: boolean; includeForkOrigin?: boolean } = {},
-  ): Promise<SessionViewData | null> {
-    return readSessionView({
-      isPrimary: (sessionId) => sessionId === this.activeSessionId,
-      secondaryExists: (sessionId) => this.runtimePool.has(sessionId),
-      acquirePrimary: () => {
-        const lease = this.primaryOperationAdmission.acquire();
-        return { ...lease, rpcGeneration: this.options.rpc.currentGeneration?.() || 0 };
-      },
-      primaryCurrent: (sessionId, lease) =>
-        this.activeSessionId === sessionId
-        && this.primaryOperationAdmission.generation === lease.generation
-        && (this.options.rpc.currentGeneration?.() || 0) === lease.rpcGeneration
-        && this.options.rpc.isRunning?.() !== false,
-      acquireSecondary: (sessionId) => {
-        const runtime = this.runtimePool.get(sessionId)!;
-        const release = this.runtimePool.acquireOperation(runtime);
-        return {
-          generation: runtime.operationAdmission.generation,
-          rpcGeneration: runtime.rpc.currentGeneration?.() || 0,
-          release,
-        };
-      },
-      secondaryCurrent: (sessionId, lease) => {
-        const runtime = this.runtimePool.get(sessionId);
-        return Boolean(
-          runtime
-          && runtime.operationAdmission.generation === lease.generation
-          && (runtime.rpc.currentGeneration?.() || 0) === lease.rpcGeneration
-          && runtime.rpc.isRunning?.() !== false,
-        );
-      },
-      hotView: (sessionId, limit, browserId) => this.hotMemoryView(sessionId, limit, browserId),
-      currentProjection: (sessionId, limit, browserId, assertCurrent) =>
-        this.sessionViewFromCurrentProjection(sessionId, limit, browserId, assertCurrent),
-      coldView: (sessionId, limit, browserId, includeForkOrigin) =>
-        this.coldSessionViewForId(sessionId, limit, browserId, includeForkOrigin),
-      forkOrigin: (sessionId) => this.forkOriginForSession(sessionId),
-    }, id, turnLimit, clientId, options);
+  private async sessionView(...args: any[]): Promise<SessionViewData | null> {
+    return (this.sessionViewActions().sessionView as any)(...args);
   }
 
-  private async sessionViewFromCurrentProjection(
-    id: string,
-    turnLimit = RECENT_TURN_WINDOW_SIZE,
-    clientId = "",
-    assertCurrentHotRuntime?: () => void,
-  ): Promise<SessionViewData | null> {
-    const owner = this;
-    return sessionViewFromCurrentProjection({
-      index: this.options.sessions,
-      primaryRpc: this.options.rpc,
-      builtinCommands: BUILTIN_COMMANDS,
-      secondaryForId: (sessionId) => this.runtimePool.get(sessionId),
-      touchSecondary: (runtime) => this.runtimePool.touch(runtime),
-      get activeSessionId() { return owner.activeSessionId; },
-      get activeSessionPath() { return owner.activeSessionPath; },
-      get applicationLifecycle() { return owner.applicationLifecycle; },
-      get currentCwd() { return owner.currentCwd; },
-      get primaryRpcGeneration() { return owner.primaryRpcGeneration; },
-      get lastPrimaryState() { return owner.lastPrimaryState; },
-      set lastPrimaryState(state) { owner.lastPrimaryState = state; },
-      get running() { return owner.running; },
-      set running(running) { owner.running = running; },
-      get primarySummarySnapshot() { return owner.primarySummarySnapshot; },
-      set primarySummarySnapshot(summary) { owner.primarySummarySnapshot = summary; },
-      get liveMessage() { return owner.liveMessage; },
-      get toolStatus() { return owner.toolStatus; },
-      get lastPrimaryMessagesSessionId() { return owner.lastPrimaryMessagesSessionId; },
-      set lastPrimaryMessagesSessionId(id) { owner.lastPrimaryMessagesSessionId = id; },
-      get lastPrimaryMessages() { return owner.lastPrimaryMessages; },
-      set lastPrimaryMessages(messages) { owner.lastPrimaryMessages = messages; },
-      get primaryPendingTerminalSessionId() { return owner.primaryPendingTerminalSessionId; },
-      get primaryPendingTerminalMessages() { return owner.primaryPendingTerminalMessages; },
-      set primaryPendingTerminalMessages(messages) { owner.primaryPendingTerminalMessages = messages; },
-      get lastPrimaryCommands() { return owner.lastPrimaryCommands; },
-      get primaryGateMode() { return owner.primaryGateMode; },
-      get queuePaused() { return owner.queuePaused; },
-      now: () => this.now(),
-      primaryTurnActive: () => this.primaryTurnActive(),
-      runtimeTurnActive: (runtime) => this.runtimeTurnActive(runtime),
-      primaryReadReady: () => this.primaryReadReady(),
-      bindPrimaryIdentity: (state) => this.bindPrimaryIdentity(state),
-      coldSessionViewForId: (id, limit, client) => this.coldSessionViewForId(id, limit, client),
-      coldSessionView: (id, session, limit, client) => this.coldSessionView(id, session, limit, client),
-      sessionSummaries: (sessions, client) => this.sessionSummaries(sessions, client),
-      reconcilePendingAcceptedPrompts: (id, messages) => this.reconcilePendingAcceptedPrompts(id, messages),
-      pendingPromptForSession: (id) => this.pendingPromptForSession(id),
-      pendingSteerProjection: (id) => this.pendingSteerProjection(id),
-      statsForSession: (id, response) => this.statsForSession(id, response),
-      offlineStatsForId: (id, usage) => this.offlineStatsForId(id, usage),
-      stateWithFastMode: (id, state) => this.stateWithFastMode(id, state),
-      stateWithPendingPromptSettings: (id, state) => this.stateWithPendingPromptSettings(id, state),
-      sessionActivity: (id) => this.sessionActivity(id),
-      controlState: (id, client) => this.controlState(id, client),
-      publicQueue: (queue) => this.publicQueue(queue),
-      pendingRequestForSession: (id) => this.pendingRequestForSession(id),
-    }, id, turnLimit, clientId, assertCurrentHotRuntime);
+  private async sessionViewFromCurrentProjection(...args: any[]): Promise<SessionViewData | null> {
+    return (this.sessionViewActions().sessionViewFromCurrentProjection as any)(...args);
   }
 
-  /**
-   * Token stats for a cold session, derived from its JSONL instead of waking
-   * a Pi process. The context window comes from the model catalogue; when the
-   * model is unknown the percentage stays unavailable rather than guessed.
-   */
   private markContextUsagePendingRefresh(id: string): void {
-    if (id) this.contextUsagePendingRefresh.add(id);
+    this.sessionViewActions().markContextUsagePendingRefresh(id);
   }
 
   private beginContextUsageRefreshTurn(id: string): void {
-    if (this.contextUsagePendingRefresh.has(id))
-      this.contextUsageRefreshTurn.add(id);
+    this.sessionViewActions().beginContextUsageRefreshTurn(id);
   }
 
   private completeContextUsageRefreshTurn(id: string): void {
-    if (!this.contextUsageRefreshTurn.delete(id)) return;
-    this.contextUsagePendingRefresh.delete(id);
+    this.sessionViewActions().completeContextUsageRefreshTurn(id);
   }
 
   private rememberModelContextWindows(models: ModelInfo[]): void {
@@ -5626,83 +4967,20 @@ export class PiChatApp {
     }
   }
 
-  private modelFromSessionSettings(
-    settings: SessionSettingsSnapshot,
-  ): ModelInfo | null {
-    if (!settings.provider || !settings.modelId) return null;
-    return (
-      this.knownModels.get(`${settings.provider}\u0000${settings.modelId}`) ||
-        // Keep the actual persisted identifier visible if a model was later removed
-        // from the current catalogue; this is still more truthful than Primary's model.
-        {
-          provider: settings.provider,
-          id: settings.modelId,
-          name: settings.modelId,
-        }
-    );
+  private modelFromSessionSettings(settings: SessionSettingsSnapshot): ModelInfo | null {
+    return this.sessionViewActions().modelFromSessionSettings(settings);
   }
 
-  private offlineStatsFromUsage(
-    id: string,
-    usage: SessionUsageSnapshot,
-  ): SessionStats {
-    const stats: SessionStats = { tokens: usage.tokens };
-    if (usage.context) {
-      const contextWindow =
-        this.modelContextWindows.get(
-          `${usage.context.provider || ""}\u0000${usage.context.model || ""}`,
-        ) || 0;
-      if (!contextWindow)
-        console.warn(
-          `[Pi Chat] 冷会话上下文用量：未找到模型 ${usage.context.provider}/${usage.context.model} 的 contextWindow`,
-        );
-      if (contextWindow > 0) {
-        const pendingRefresh = this.contextUsagePendingRefresh.has(id);
-        stats.contextUsage = pendingRefresh
-          ? { tokens: null, contextWindow, percent: null }
-          : {
-              tokens: usage.context.tokens,
-              contextWindow,
-              percent: Math.min(
-                100,
-                (usage.context.tokens / contextWindow) * 100,
-              ),
-            };
-        if (pendingRefresh) stats.contextUsagePendingRefresh = true;
-      }
-    }
-    return stats;
+  private offlineStatsFromUsage(id: string, usage: SessionUsageSnapshot): SessionStats | undefined {
+    return this.sessionViewActions().offlineStatsFromUsage(id, usage);
   }
 
-  private async offlineStatsForId(
-    id: string,
-    knownUsage?: SessionUsageSnapshot,
-  ): Promise<SessionStats | undefined> {
-    // Optional-chained: test doubles and older indexes may not implement usageForId.
-    const usage =
-      knownUsage ??
-      (await Promise.resolve(this.options.sessions.usageForId?.(id)).catch(
-        () => null,
-      ));
-    return usage ? this.offlineStatsFromUsage(id, usage) : undefined;
+  private async offlineStatsForId(id: string, knownUsage?: SessionUsageSnapshot): Promise<SessionStats | undefined> {
+    return this.sessionViewActions().offlineStatsForId(id, knownUsage);
   }
 
-  /** Prefer Pi's live counters, but use persisted usage whenever it omits occupancy. */
-  private async statsForSession(
-    id: string,
-    response: Record<string, unknown>,
-    knownUsage?: SessionUsageSnapshot,
-  ): Promise<SessionStats> {
-    const live = asSessionStats(response);
-    const fallback = await this.offlineStatsForId(id, knownUsage);
-    const contextUsage = live.contextUsage || fallback?.contextUsage;
-    return {
-      ...live,
-      ...(contextUsage ? { contextUsage } : {}),
-      ...(fallback?.contextUsagePendingRefresh
-        ? { contextUsagePendingRefresh: true }
-        : {}),
-    };
+  private async statsForSession(id: string, response: Record<string, unknown>, knownUsage?: SessionUsageSnapshot): Promise<SessionStats | undefined> {
+    return this.sessionViewActions().statsForSession(id, response, knownUsage);
   }
 
   private async bootstrap(clientId = "", coherenceRetry = 0): Promise<BootstrapData> {
@@ -6260,567 +5538,65 @@ export class PiChatApp {
     url: URL,
     preparedBody?: Record<string, unknown>,
   ): Promise<void> {
-    const clientId = requestClientId(request);
-    if (
-      await handleDiagnosticsReadRoute(
-        {
-          isRegisteredWindowPage: (client, page) => this.connectedPageClients.get(page) === client,
-          checkpoint: () => this.streamDiagnostics.checkpoint(),
-          snapshot: () => this.stateDiagnostics.snapshot(),
-        },
-        request,
-        response,
-        url,
-      )
-    )
-      return;
-    if (
-      await handleBootstrapRoute(
-        {
-          lifecycle: () => this.applicationLifecycle,
-          assertBootstrapAllowed: () => {
-            if (this.applicationLifecycle !== "idle")
-              throw new ApplicationLifecycleConflictError(
-                this.applicationLifecycle,
-                this.lifecycleMessage(),
-              );
-          },
-          requestToken: () => this.requestToken,
-          buildIdentity: () => this.buildIdentity,
-          openWindowCount: () => this.openWindowCount(),
-          cancelLastWindowShutdown: () => this.cancelLastWindowShutdown(),
-          scheduleLastWindowShutdown: () => this.scheduleLastWindowShutdown(),
-          registerWindowPage: (id, pageId) =>
-            this.registerWindowPage(id, pageId),
-          bootstrap: async (id) => {
-            const data = await this.bootstrap(id);
-            this.traceBootstrapProjection(data);
-            return data;
-          },
-        },
-        request,
-        response,
-        url,
-        clientId,
-      )
-    )
-      return;
-    if (
-      await handleSubagentsReadRoute(
-        {
-          backgroundSubagents: (sessionId) => this.backgroundSubagentsRoute(sessionId),
-          backgroundSubagentView: (input) => this.backgroundSubagentViewRoute(input),
-        },
-        request,
-        response,
-        url,
-        clientId,
-        {
-          recentTurns: RECENT_TURN_WINDOW_SIZE,
-          maxTurns: MAX_TURN_WINDOW_SIZE,
-          turnIncrement: TURN_WINDOW_INCREMENT,
-        },
-      )
-    )
-      return;
-    if (
-      await handleWorkspaceOpenRoute(
-        {
-          openWorkspaceFile: (input) => this.workspaceOpenFileRoute(input),
-          openLinkedWorkspaceFile: (input) => this.workspaceOpenLinkedFileRoute(input),
-        },
-        request,
-        response,
-        url,
-        preparedBody,
-      )
-    )
-      return;
-    if (
-      await handleWorkspaceReadRoute(
-        {
-          workspaceRecentFiles: (input) => this.workspaceRecentFilesRoute(input),
-          workspaceFile: (input) => this.workspaceFileRoute(input),
-        },
-        request,
-        response,
-        url,
-      )
-    )
-      return;
-    if (
-      await handleResourcesReadRoute(
-        {
-          resources: this.options.resources,
-          primaryRuntimeCwd: () => this.primaryRuntimeCwd,
-        },
-        request,
-        response,
-        url,
-      )
-    )
-      return;
-    if (
-      await handleSessionsReadRoute(
-        {
-          listSessions: (input) => this.listSessionsRoute(input),
-          sessionView: (input) => this.sessionViewRoute(input),
-        },
-        request,
-        response,
-        url,
-        clientId,
-        {
-          recentTurns: RECENT_TURN_WINDOW_SIZE,
-          maxTurns: MAX_TURN_WINDOW_SIZE,
-          turnIncrement: TURN_WINDOW_INCREMENT,
-          directoryLimit: DEFAULT_DIRECTORY_SESSION_LIST_SIZE,
-          maxDirectoryLimit: MAX_DIRECTORY_SESSION_LIST_SIZE,
-        },
-      )
-    )
-      return;
-
-    if (
-      await handleWindowControlRoute(
-        {
-          assertIdle: () => {
-            if (this.applicationLifecycle !== "idle")
-              throw new ApplicationLifecycleConflictError(
-                this.applicationLifecycle,
-                this.lifecycleMessage(),
-              );
-          },
-          isConnectedWindowPage: (client, page) => this.isConnectedWindowPage(client, page),
-          noteClientPresence: (client, page, revision, foreground) =>
-            foreground
-              ? this.sessionControl.noteClientPresence(client, page, revision)
-              : this.sessionControl.noteClientBackground(client, page, revision),
-          isClientPresent: (client) => this.sessionControl.isClientPresent(client),
-          closeWindowClient: (client, page) => this.closeWindowClient(client, page),
-          openWindowCount: () => this.openWindowCount(),
-          activeMutationRequests: () => this.activeMutationRequests,
-          runtimeStartingCount: () => this.runtimePool.startingCount,
-          restSessionAfterWindowClose: (sessionId) => this.restSessionAfterWindowClose(sessionId),
-          scheduleLastWindowShutdown: () => this.scheduleLastWindowShutdown(),
-          lastWindowAutoShutdownEnabled: () => this.lastWindowAutoShutdownEnabled,
-          applicationShutdownAvailable: () => Boolean(this.options.applicationShutdown),
-        },
-        request,
-        response,
-        url,
-      )
-    )
-      return;
-
-    if (
-      await handleLifecycleControlRoute(
-        {
-          applicationShutdownAvailable: () => Boolean(this.options.applicationShutdown),
-          applicationRestartAvailable: () => Boolean(this.options.applicationRestart),
-          isConnectedWindowPage: (client, page) => this.isConnectedWindowPage(client, page),
-          beginLifecycle: (lifecycle) => this.beginLifecycle(lifecycle),
-          endLifecycle: (lifecycle) => this.endLifecycle(lifecycle),
-          verifyApplicationQuiescent: (reason) => this.verifyApplicationQuiescent(reason),
-          broadcast: (event) => this.broadcast(event),
-          shutdown: (reason) => this.options.applicationShutdown?.(reason as ApplicationShutdownReason),
-          restart: () => this.options.applicationRestart!(),
-          reportIncident: (error, input) => this.reportIncident(
-            error,
-            input as Parameters<PiChatApp["reportIncident"]>[1],
-          ),
-        },
-        request,
-        response,
-        url,
-      )
-    )
-      return;
-
-    if (
-      await handleLocalFilesWorkspaceRoute(
-        {
-          pickLocalFiles: () => pickLocalFiles(),
-          readClipboardFiles: (files) => readClipboardFiles(files),
-          pickWorkspaceFolder: (cwd) => (this.options.pickWorkspaceFolder || pickWorkspaceFolder)(cwd),
-          currentCwd: () => this.currentCwd,
-        },
-        request,
-        response,
-        url,
-      )
-    )
-      return;
-
-    if (url.pathname === "/api/events") {
-      if (request.method !== "GET") return methodNotAllowed(response);
-      response.writeHead(200, {
-        "content-type": "text/event-stream; charset=utf-8",
-        "cache-control": "no-cache, no-transform",
-        connection: "keep-alive",
-        "x-accel-buffering": "no",
-      });
-      // A browser commonly opens SSE only after its initial bootstrap. Include
-      // the current Primary capability snapshot here so a fast start that
-      // completes between those two connections cannot leave the client pinned
-      // forever to bootstrap's earlier `starting` state.
-      response.write(
-        `event: ready\ndata: ${JSON.stringify({ ok: true, lifecycle: this.applicationLifecycle, piChatRunEpoch: this.runEpoch, workspaceEpoch: this.runEpoch, primaryRuntime: this.primaryReadiness() })}\n\n`,
-      );
-      this.traceState("sse", "ready", this.activeSessionId, {
-        lifecycle: this.applicationLifecycle,
-        primaryStatus: this.primaryReadiness().status,
-      });
-      const pageId = requestPageId(request) || clientId;
-      this.sseHub.add(response, clientId, {
-        streamingDelta: url.searchParams.get("stream") === "delta-v1",
-      });
-      this.ssePageByResponse.set(response, pageId);
-      this.clientConnected(clientId, pageId);
-      this.traceState("sse", "connected", this.activeSessionId, {
-        openWindows: this.openWindowCount(),
-      });
-      const timer = setInterval(
-        () => this.sseHub.heartbeat(response),
-        this.sseHeartbeatMs,
-      );
-      request.once("close", () => {
-        clearInterval(timer);
-        // The hub emits exactly one disconnect notification. If a slow-client
-        // protection already removed this response, remove() is a harmless no-op.
-        this.sseHub.remove(response);
-      });
-      return;
-    }
-
-    if (url.pathname === "/api/chat/steers/dequeue") {
-      if (request.method !== "POST") return methodNotAllowed(response);
-      const body = preparedBody || (await bodyJson(request));
-      const requestedSessionId = requiredSessionId(body);
-      const result = await dequeueNativeSteering(
-        {
-          beginPromptAdmission: (sessionId) => this.beginPromptAdmission(sessionId),
-          resolveTarget: (sessionId) => {
-            const requestedIsPrimary = Boolean(this.activeSessionId) && sessionId === this.activeSessionId;
-            const runtime = requestedIsPrimary ? null : this.runtimePool.get(sessionId) || null;
-            if (!requestedIsPrimary && !runtime) return null;
-            return {
-              rpc: runtime?.rpc || this.options.rpc,
-              generation: requestedIsPrimary ? this.primaryRpcGeneration : (runtime?.rpcGeneration || 0),
-              releaseRuntimeAdmission: runtime
-                ? this.runtimePool.acquireOperation(runtime)
-                : this.primaryOperationAdmission.acquire().release,
-            };
-          },
-          completed: (dequeueId) => this.nativeSteeringDequeueResults.get(dequeueId),
-          settle: (sessionId, dequeueId, items, generation) => this.settleNativeSteeringDequeue(
-            sessionId,
-            { dequeueId, steering: items },
-            generation,
-          ),
-          forget: (dequeueId) => this.nativeSteeringDequeueResults.delete(dequeueId),
-        },
-        requestedSessionId,
-      );
-      return json(response, 200, result);
-    }
-
-    if (url.pathname === "/api/chat/prompt") {
-      const promptHost = new Proxy(this as any, {
-        get: (target, property) => Reflect.get(target, property, target),
-        set: (target, property, value) => Reflect.set(target, property, value, target),
-      });
-      Object.assign(promptHost, {
-        PROMPT_BODY_LIMIT,
-        PROMPT_PREPARE_TIMEOUT_MS,
-        MAX_NATIVE_STEERING,
-        MAX_NATIVE_STEERING_IMAGE_CHARS,
-        MAX_PENDING_PROMPT_BASELINE_IDS,
-        gateModeFromCommand,
-      });
-      await handlePromptRoute(promptHost, request, response, url, preparedBody);
-      return;
-    }
-
-    if (
-      await handleQueueControlRoute(
-        {
-          target: (sessionId) => {
-            const runtime = this.runtimePool.get(sessionId);
-            if (runtime)
-              return {
-                queue: runtime.promptQueue,
-                getPaused: () => runtime.queuePaused,
-                setPaused: (paused) => { runtime.queuePaused = paused; },
-                touch: () => this.runtimePool.touch(runtime),
-                recover: this.secondaryNeedsRecovery(runtime)
-                  ? () => this.recoverRuntime(runtime)
-                  : undefined,
-                dispatch: () => { void this.dispatchRuntimeNext(runtime); },
-              };
-            if (sessionId !== this.activeSessionId) return null;
-            return {
-              queue: this.promptQueue,
-              getPaused: () => this.queuePaused,
-              setPaused: (paused) => { this.queuePaused = paused; },
-              touch: () => {},
-              dispatch: () => { void this.dispatchNext(); },
-            };
-          },
-          publicQueue: (queue) => this.publicQueue(queue),
-          traceCancelled: (sessionId, queueId) =>
-            this.tracePrompt("cancelled", sessionId, queueId),
-          broadcastQueue: (sessionId) => this.broadcastQueue(sessionId),
-        },
-        request,
-        response,
-        url,
-        preparedBody,
-      )
-    ) return;
-
-    if (
-      await handleWorkspaceControlRoute(
-        {
-          currentCwd: () => this.currentCwd,
-          pickWorkspaceFolder: (cwd) =>
-            (this.options.pickWorkspaceFolder || pickWorkspaceFolder)(cwd),
-          changeWorkspace: (path) => this.changeWorkspace(path),
-          bootstrap: () => this.bootstrap(),
-        },
-        request,
-        response,
-        url,
-        preparedBody,
-      )
-    ) return;
-
-    if (url.pathname === "/api/chat/compact") {
-      if (request.method !== "POST") return methodNotAllowed(response);
-      const body = preparedBody || (await bodyJson(request));
-      const sessionId = requiredSessionId(body);
-      const customInstructions =
-        typeof body.customInstructions === "string"
-          ? body.customInstructions.trim()
-          : "";
-      await this.compactSession(sessionId, customInstructions, (result) => {
-        if (result.kind === "conflict")
-          json(response, 409, {
-            error: result.error,
-            ...(result.code ? { code: result.code } : null),
-          });
-        else json(response, 200, { result: result.result });
-      });
-      return;
-    }
-
-    if (url.pathname === "/api/chat/abort") {
-      if (request.method !== "POST") return methodNotAllowed(response);
-      const body = preparedBody || (await bodyJson(request));
-      const sessionId = requiredSessionId(body);
-      const runtime = this.runtimePool.get(sessionId);
-      if (runtime) {
-        await this.abortSecondaryRuntime(sessionId, runtime, (result) =>
-          json(response, 200, result),
-        );
-        return;
-      }
-      if (sessionId !== this.activeSessionId)
-        return json(response, 409, { error: "该会话不是活动运行会话" });
-      await this.abortPrimaryRuntime(sessionId, (result) => json(response, 200, result));
-      return;
-    }
-
-    if (
-      await handleSessionMutationsRoute(
-        {
-          requireSessionControl: (sessionId, client) => this.requireSessionControl(sessionId, client),
-          beginPromptAdmission: (sessionId) => this.beginPromptAdmission(sessionId),
-          renameSession: (sessionId, name) => renameSession({
-            sessionMutationOutcomePending: (id) => this.sessionMutationOutcomePending(id),
-            activeSessionId: () => this.activeSessionId,
-            knownRuntime: (id) => this.runtimePool.get(id),
-            ensureRuntime: (id) => this.ensureRuntime(id),
-            primaryRpc: () => this.options.rpc,
-            acquireRuntimeOperation: (runtime) => this.runtimePool.acquireOperation(runtime),
-            acquirePrimaryOperation: () => this.primaryOperationAdmission.acquire().release,
-            lateRpcOutcomeHandler: (id, token) => this.lateRpcOutcomeHandler(id, token, "generic"),
-            markRpcOutcomePending: (id, error, token) => this.markRpcOutcomePending(id, error, token),
-            rethrowResultPending: (error, operation) => this.rethrowResultPending(error, operation),
-            clearNativeSteeringState: (id, reason) => this.clearNativeSteeringState(id, reason),
-            reclaimRuntime: (id) => this.runtimePool.reclaim(id, "idle").then(() => undefined),
-            persistForkNameOverride: async (id, name) => {
-              const applied = await this.sessionRelations.setNameOverride(id, name);
-              if (applied) this.options.sessions.applyForkNameOverride(id, name);
-            },
-            updateRuntimeName: (id, name) => {
-              if (id === this.activeSessionId && this.primarySummarySnapshot)
-                this.primarySummarySnapshot = { ...this.primarySummarySnapshot, name };
-              else {
-                const runtime = this.runtimePool.get(id);
-                if (runtime?.summarySnapshot)
-                  runtime.summarySnapshot = { ...runtime.summarySnapshot, name };
-              }
-            },
-            broadcastRenamed: (id) => this.broadcast({ type: "pi_chat_sessions_changed", action: "renamed", sessionId: id }),
-          }, sessionId, name),
-          deleteSession: (sessionId) => this.deleteSession(sessionId),
-          copySession: (sessionId, mode, persistedMessageId) =>
-            this.copySession(sessionId, mode, persistedMessageId),
-        },
-        request,
-        response,
-        url,
-        clientId,
-        preparedBody,
-      )
-    )
-      return;
-
-    if (
-      await handleSessionRuntimeControlRoute(
-        {
-          activeSessionId: () => this.activeSessionId,
-          runtimeExists: (sessionId) => this.runtimePool.has(sessionId),
-          runtimeCanReclaim: (sessionId) => {
-            const runtime = this.runtimePool.get(sessionId);
-            return Boolean(runtime && this.runtimePool.canReclaim(runtime));
-          },
-          sweepRuntimes: () => { void this.runtimePool.sweep(); },
-          clearViewed: (client, sessionId) => this.sessionControl.clearViewed(client, sessionId),
-          knownSession: async (sessionId) => Boolean(
-            (await (this.options.sessions as SessionIndex).cachedSummaryForId?.(sessionId))
-            || this.options.sessions.summaryForId?.(sessionId)
-            || (await this.options.sessions.list(undefined, this.currentCwd)).some((session) => session.id === sessionId),
-          ),
-          markViewed: (client, sessionId) => this.markSessionViewed(client, sessionId),
-          touchRuntime: (sessionId) => { const runtime = this.runtimePool.get(sessionId); if (runtime) this.runtimePool.touch(runtime); },
-          ensurePrimaryIdentity: () => this.ensurePrimaryIdentity(),
-          ensurePrimaryRuntime: () => this.ensurePrimaryRuntime(),
-          ensureSecondaryRuntime: async (sessionId) => { await this.ensureRuntime(sessionId); },
-          primaryReady: (sessionId) => ({
-            sessionId,
-            state: this.stateWithFastMode(sessionId, { ...this.lastPrimaryState, isStreaming: this.primaryTurnActive() }),
-            gateMode: this.primaryGateMode,
-          }),
-          secondaryReady: (sessionId) => this.runtimeReady(this.runtimePool.get(sessionId)!),
-          sessionView: (sessionId, browserId) => this.sessionView(sessionId, RECENT_TURN_WINDOW_SIZE, browserId),
-          rethrowResultPending: (error, operation, fence = true) => this.rethrowResultPending(error, operation, fence),
-        },
-        request,
-        response,
-        url,
-      )
-    ) return;
-
-    if (await handleNewSessionRoute({
-      currentCwd: () => this.currentCwd,
-      primaryNeedsRecovery: () => this.primaryNeedsRecovery(),
-      waitForPrimaryCompatibility: () => this.waitForNewDraftPrimaryCompatibility(),
-      acquireDraft: (owner, cwd) => this.acquireDraftRuntime(owner, cwd),
-      rethrowResultPending: (error, operation) => this.rethrowResultPending(error, operation, false),
-      markViewed: (owner, sessionId) => this.markSessionViewed(owner, sessionId),
-      draftView: (runtime, owner) => this.draftSessionView(runtime, owner),
-      beginPromptAdmission: (sessionId) => this.beginPromptAdmission(sessionId),
-      firstTurn: async (runtime, input) => {
-        const initialAbortGeneration = runtime.abortGeneration;
-        const promptAt = this.nextUserPromptAt();
-        const initialSettings: PromptSettingsSnapshot = input.settings || {};
-        const result = await dispatchNewDraftFirstTurn({
-          requireControl: () => this.requireSessionControl(runtime.id, clientId),
-          applySettings: () => this.applyTurnSettings(runtime.rpc, initialSettings, runtime.id),
-          isPartialSettingsError: (error): error is PartialTurnSettingsError => error instanceof PartialTurnSettingsError,
-          rememberPartialSettings: (applied) => this.rememberRuntimeAppliedTurnSettings(runtime, applied),
-          rememberSettings: (applied) => this.rememberRuntimeAppliedTurnSettings(runtime, applied),
-          assertCurrent: () => {
-            if (initialAbortGeneration !== runtime.abortGeneration || this.applicationLifecycle !== "idle")
-              throw new Error("消息发送已取消");
-          },
-          extensionCommand: (message) => this.extensionCommand(message, runtime.rpc),
-          syncGate: () => this.syncGateMode(runtime.rpc, runtime.id, input.gateMode),
-          setRunning: (running) => { runtime.running = running; },
-          traceAdmitted: (id) => this.tracePrompt("admitted", runtime.id, id),
-          broadcastActivity: () => this.broadcastSessionActivity(runtime.id),
-          sendPrompt: (message, images, promptId) => this.sendPromptRpc(runtime.rpc, runtime.id, promptId, {
-            type: "prompt", message, ...(images.length ? { images } : {}),
-          }).then(() => undefined),
-          sendExtensionPrompt: async (message) => { await runtime.rpc.send({ type: "prompt", message }, PROMPT_PREPARE_TIMEOUT_MS); },
-          readState: async () => asState(await runtime.rpc.send({ type: "get_state" })),
-          adoptExtensionState: async (state) => {
-            runtime.lastState = state;
-            runtime.running = state.isStreaming;
-            runtime.prompted = true;
-            this.noteUserPrompt(runtime.id, promptAt);
-            await this.finalizePersistedDraft(runtime);
-          },
-          noteUserPrompt: () => this.noteUserPrompt(runtime.id, promptAt),
-          notifyPromptAccepted: (id) => this.scheduler.notifySecondaryPromptAccepted(runtime, promptAt, input.message, input.images, initialSettings, id, input.clientPromptOperationId || undefined),
-          traceDeliveryUncertain: (id) => this.tracePrompt("delivery-uncertain", runtime.id, id),
-          readyData: () => this.runtimeReady(runtime),
-          sessionData: () => ({ ...(runtime.draftSession || { id: runtime.id, sessionId: runtime.lastState?.sessionId || runtime.id, name: "新对话", preview: "新对话", cwd: runtime.cwd, updatedAt: this.now(), messageCount: 1, active: true }), active: true }),
-          runtimeTurnActive: () => this.runtimeTurnActive(runtime),
-          onFailure: () => { runtime.running = false; this.broadcastSessionActivity(runtime.id); },
-        }, {
-          message: input.message,
-          images: input.images,
-          promptId: input.message ? randomUUID() : "",
-          settings: initialSettings,
-        });
-        return {
-          ...result.ready,
-          session: result.session,
-          accepted: true,
-          queued: false,
-          ...(result.promptId ? { promptId: result.promptId } : null),
-          ...(result.deliveryUncertain ? { deliveryUncertain: true } : null),
-          ...(result.extension && !result.deliveryUncertain ? { extension: true, command: result.extension.name, description: result.extension.description, isStreaming: result.extension.isStreaming } : null),
-        } satisfies InitialPromptData;
-      },
-      discardDraft: (runtime) => this.runtimePool.discardDraft(runtime).then(() => undefined),
-    }, request, response, url, clientId, preparedBody)) return;
-
-    if (
-      await handleModelManagementRoute({
-        available: () => Boolean(this.options.modelManager),
-        providerService: () => this.providerManagementService(),
-        customModelService: () => this.customModelManagementService(),
-        runtimeSettingsService: () => this.runtimeSettingsService(),
-        beginPromptAdmission: (sessionId) => this.beginPromptAdmission(sessionId),
-      }, request, response, url, preparedBody)
-    ) return;
-
-    if (
-      await handleExtensionResponseRoute({
-        respond: (input) => respondToExtension({
-          target: (sessionId) => {
-            const runtime = this.runtimePool.get(sessionId);
-            const rpc = runtime?.rpc || (sessionId === this.activeSessionId ? this.options.rpc : null);
-            if (!rpc) return null;
-            return {
-              rpc,
-              release: runtime
-                ? this.runtimePool.acquireOperation(runtime)
-                : this.primaryOperationAdmission.acquire().release,
-            };
-          },
-          hasUncertain: (sessionId) => this.uncertainExtensionResponseBySession.has(sessionId),
-          pendingRequest: (sessionId) => this.pendingRequestForSession(sessionId),
-          claim: (key) => {
-            if (this.claimingExtensionRequests.has(key)) return false;
-            this.claimingExtensionRequests.add(key);
-            return true;
-          },
-          releaseClaim: (key) => this.claimingExtensionRequests.delete(key),
-          rpcOutcomeUnknown: (error) => this.rpcOutcomeUnknown(error),
-          markOutcomePending: (sessionId, error) => this.markRpcOutcomePending(sessionId, error),
-          markUncertain: (sessionId) => this.uncertainExtensionResponseBySession.add(sessionId),
-          rethrowResultPending: (error, operation) => this.rethrowResultPending(error, operation),
-          clearPending: (sessionId, requestId) => this.clearPendingRequest(sessionId, requestId),
-        }, input),
-      }, request, response, url, preparedBody)
-    ) return;
-
-    json(response, 404, { error: "API not found" });
+    const routePorts = {
+      ApplicationLifecycleConflictError,
+      DEFAULT_DIRECTORY_SESSION_LIST_SIZE,
+      MAX_DIRECTORY_SESSION_LIST_SIZE,
+      MAX_NATIVE_STEERING,
+      MAX_NATIVE_STEERING_IMAGE_CHARS,
+      MAX_PENDING_PROMPT_BASELINE_IDS,
+      MAX_TURN_WINDOW_SIZE,
+      PROMPT_BODY_LIMIT,
+      PROMPT_PREPARE_TIMEOUT_MS,
+      PartialTurnSettingsError,
+      Proxy,
+      RECENT_TURN_WINDOW_SIZE,
+      Reflect,
+      TURN_WINDOW_INCREMENT,
+      asState,
+      bodyJson,
+      clearInterval,
+      dequeueNativeSteering,
+      dispatchNewDraftFirstTurn,
+      gateModeFromCommand,
+      handleBootstrapRoute,
+      handleDiagnosticsReadRoute,
+      handleExtensionResponseRoute,
+      handleLifecycleControlRoute,
+      handleLocalFilesWorkspaceRoute,
+      handleModelManagementRoute,
+      handleNewSessionRoute,
+      handlePromptRoute,
+      handleQueueControlRoute,
+      handleResourcesReadRoute,
+      handleSessionMutationsRoute,
+      handleSessionRuntimeControlRoute,
+      handleSessionsReadRoute,
+      handleSubagentsReadRoute,
+      handleWindowControlRoute,
+      handleWorkspaceControlRoute,
+      handleWorkspaceOpenRoute,
+      handleWorkspaceReadRoute,
+      json,
+      methodNotAllowed,
+      pickLocalFiles,
+      pickWorkspaceFolder,
+      randomUUID,
+      readClipboardFiles,
+      renameSession,
+      requestClientId,
+      requestPageId,
+      requiredSessionId,
+      respondToExtension,
+      setInterval,
+    };
+    const host = new Proxy(this as any, {
+      get: (target, property) => Object.prototype.hasOwnProperty.call(routePorts, property)
+        ? (routePorts as any)[property]
+        : Reflect.get(target, property, target),
+      set: (target, property, value) => Reflect.set(target, property, value, target),
+    });
+    await handleApiCoreRoute(host, request, response, url, preparedBody);
   }
 
   private async serveStatic(

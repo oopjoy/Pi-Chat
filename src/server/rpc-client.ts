@@ -519,7 +519,14 @@ export class PiRpcClient {
     // reject every following attempt with "still processing". Use one request
     // for the whole startup budget instead; a late response is then the result
     // of this startup attempt rather than an orphan competing with a retry.
-    const startupTimeoutMs = 60_000;
+    // Loading a persisted JSONL Session can spend tens of seconds inside Pi
+    // before the first usable get_state response. A cold Session must not be
+    // retried at the ordinary Primary budget merely because its startup is
+    // slow: the retry would double the browser warm request and create the
+    // misleading "result pending" failure seen by Send.
+    const startupTimeoutMs = source?.startupMode === "persisted-session"
+      ? 120_000
+      : 60_000;
     if (!this.child || this.child.exitCode !== null) {
       throw new Error(`Pi RPC 在初始化期间退出。${this.stderrTail}`);
     }
