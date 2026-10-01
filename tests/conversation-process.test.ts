@@ -56,9 +56,10 @@ test("collapsed process summaries expose compact tool context without terminal c
       { kind: "tool", id: "bash-1", name: "bash", arguments: JSON.stringify({ command: "grep -n \\\"activeSessionBranch\\\" src/server/session-index.ts" }), completed: true },
     ],
   }));
-  assert.match(html, /process-summary-detail/);
+  assert.match(html, /process-tool-summary/);
   assert.match(html, /read (?:C:\/work\/)?src\/server\/session-index\.ts/);
   assert.match(html, /bash grep -n/);
+  assert.doesNotMatch(html, /process-summary-detail/);
   assert.doesNotMatch(html, /Done|lines|行\)/);
 });
 

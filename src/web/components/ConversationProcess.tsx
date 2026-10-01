@@ -79,31 +79,32 @@ function compactToolPath(value: unknown, limit = 56): string | undefined {
   return result.length > limit ? `…${result.slice(-(limit - 1))}` : result;
 }
 
-/** One-line, source-oriented context for the collapsed process row. */
-export function toolSummary(entry: ToolEntry): string {
+/** One-line, source-oriented context for an individual tool row. */
+export function toolSummaryDetail(entry: ToolEntry): string | undefined {
   const args = parseToolArguments(entry.arguments);
   const name = entry.name || "工具";
-  if (!args) return name;
-  if (name === "read" || name === "write" || name === "edit") {
-    const path = compactToolPath(args.path);
-    return path ? `${name} ${path}` : name;
-  }
-  if (name === "bash" || name === "powershell") {
-    const command = compactToolValue(args.command, 76);
-    return command ? `${name} ${command}` : name;
-  }
+  if (!args) return undefined;
+  if (name === "read" || name === "write" || name === "edit")
+    return compactToolPath(args.path);
+  if (name === "bash" || name === "powershell")
+    return compactToolValue(args.command, 76);
   if (name === "grep" || name === "find") {
     const pattern = compactToolValue(args.pattern ?? args.query, 42);
     const path = compactToolPath(args.path ?? args.cwd, 34);
-    return pattern && path ? `${name} ${pattern} · ${path}` : pattern ? `${name} ${pattern}` : path ? `${name} ${path}` : name;
+    return pattern && path ? `${pattern} · ${path}` : pattern || path;
   }
   if (name === "intercom") {
     const action = compactToolValue(args.action, 24);
     const target = compactToolValue(args.to, 28);
-    return action && target ? `${name} ${action} → ${target}` : action ? `${name} ${action}` : name;
+    return action && target ? `${action} → ${target}` : action || target;
   }
   const firstValue = Object.values(args).find((value) => typeof value === "string");
-  const detail = compactToolValue(firstValue, 60);
+  return compactToolValue(firstValue, 60);
+}
+
+export function toolSummary(entry: ToolEntry): string {
+  const name = entry.name || "工具";
+  const detail = toolSummaryDetail(entry);
   return detail ? `${name} ${detail}` : name;
 }
 
@@ -116,12 +117,6 @@ function summarize(entries: ProcessEntry[], streaming = false): string {
   if (subagents) labels.push(`${subagents} 个子任务`);
   if (!labels.length) labels.push(streaming ? "进行中" : `${entries.length} 个步骤`);
   return `过程 · ${labels.join(" · ")}${failed ? ` · ${failed} 项失败` : ""}`;
-}
-
-function processToolDetails(entries: ProcessEntry[]): string[] {
-  return entries
-    .filter((entry): entry is ToolEntry => entry.kind === "tool")
-    .map(toolSummary);
 }
 
 export function toolLabel(entry: Extract<ProcessEntry, { kind: "tool" }>): string {
@@ -183,14 +178,12 @@ function ThinkingEntry({ text, disclosureKey }: { text: string; disclosureKey: s
 
 export const ConversationProcess = memo(function ConversationProcess({ entries, streaming = false, disclosureKey = "process", runStartedAt = null, runDurationMs = null }: { entries: ProcessEntry[]; streaming?: boolean; disclosureKey?: string; runStartedAt?: number | null; runDurationMs?: number | null }) {
   const summary = useMemo(() => summarize(entries, streaming), [entries, streaming]);
-  const toolDetails = useMemo(() => processToolDetails(entries), [entries]);
-  const toolDetailsLabel = toolDetails.join(" · ");
   const runDuration = useRunDuration(streaming, runStartedAt, runDurationMs);
   const hasFailures = entries.some((entry) => entry.kind === "tool" && entry.isError);
   const status = hasFailures ? <AlertIcon className="process-status-icon is-error" /> : streaming ? <span className="process-status-icon is-running" aria-hidden="true" /> : <CheckIcon className="process-status-icon" />;
 
   const body = <PersistentDetails className={`conversation-process${streaming ? " is-streaming" : ""}`} disclosureKey={disclosureKey} footerCollapse>
-    <summary><span className="conversation-process-summary process-summary-label">{status}<span className="process-summary-title">{summary}</span>{toolDetailsLabel && <span className="process-summary-detail" title={toolDetailsLabel}>{toolDetailsLabel}</span>}</span>{runDuration && <time className="conversation-process-duration" {...(runDuration.dateTime ? { dateTime: runDuration.dateTime } : null)} title={runDuration.title}>{runDuration.label}</time>}<span className="conversation-process-chevron" aria-hidden="true"><svg className="chevron-collapsed" viewBox="0 0 16 16"><path d="M10 3.5 5.5 8 10 12.5" /></svg><svg className="chevron-expanded" viewBox="0 0 16 16"><path d="M3.5 6 8 10.5 12.5 6" /></svg></span></summary>
+    <summary><span className="conversation-process-summary process-summary-label">{status}<span className="process-summary-title">{summary}</span></span>{runDuration && <time className="conversation-process-duration" {...(runDuration.dateTime ? { dateTime: runDuration.dateTime } : null)} title={runDuration.title}>{runDuration.label}</time>}<span className="conversation-process-chevron" aria-hidden="true"><svg className="chevron-collapsed" viewBox="0 0 16 16"><path d="M10 3.5 5.5 8 10 12.5" /></svg><svg className="chevron-expanded" viewBox="0 0 16 16"><path d="M3.5 6 8 10.5 12.5 6" /></svg></span></summary>
     <div className="conversation-process-body">
       {entries.map((entry, index) => {
         if (entry.kind === "thinking") {
@@ -214,7 +207,7 @@ export const ConversationProcess = memo(function ConversationProcess({ entries, 
         }
         const toolKey = entry.id || `tool-${index}`;
         return <PersistentDetails className={`process-entry process-tool ${entry.isError ? "is-error" : ""}`} disclosureKey={`${disclosureKey}:${toolKey}`} key={toolKey}>
-          <summary><span className="process-summary-label">{entry.isError ? <AlertIcon className="process-status-icon is-error" /> : entry.completed ? <CheckIcon className="process-status-icon" /> : <span className="process-status-icon is-running" aria-hidden="true" />}{toolLabel(entry)}</span></summary>
+          <summary><span className="process-summary-label">{entry.isError ? <AlertIcon className="process-status-icon is-error" /> : entry.completed ? <CheckIcon className="process-status-icon" /> : <span className="process-status-icon is-running" aria-hidden="true" />}{toolLabel(entry)}{toolSummaryDetail(entry) && <span className="process-tool-summary" title={toolSummary(entry)}>{toolSummaryDetail(entry)}</span>}</span></summary>
           {(entry.arguments || entry.result) && <div className="process-tool-detail">
             {entry.arguments && <section><strong>调用参数</strong><pre>{entry.arguments}</pre></section>}
             {entry.result && <section><strong>{entry.isError ? "错误信息" : "结果"}</strong><pre>{entry.result}</pre></section>}

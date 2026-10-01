@@ -563,7 +563,7 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .conversation-process-summary { min-width: 0; }
 .process-summary-label { display: flex; min-width: 0; align-items: center; gap: 6px; overflow: hidden; }
 .process-summary-title { flex: 0 0 auto; }
-.process-summary-detail { min-width: 0; overflow: hidden; color: var(--muted); font-size: 11px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
+.process-tool-summary { min-width: 0; overflow: hidden; color: var(--muted); font-size: 11px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
 .process-status-icon { width: 15px; height: 15px; flex: 0 0 auto; color: var(--accent); }
 .process-status-icon.is-error { color: var(--danger); }
 .process-status-icon.is-running {
