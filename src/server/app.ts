@@ -3467,14 +3467,19 @@ export class PiChatApp {
     }
   }
   private ensurePrimaryAction() {
-    const host = {
+    const routePorts = {
       OperationAdmissionClosedError,
       PrimaryRuntimeReadinessController,
       PrimaryRuntimeUnavailableError,
       asState,
       idForPath,
-      ...this,
     };
+    const host = new Proxy(this as any, {
+      get: (target, property) => Object.prototype.hasOwnProperty.call(routePorts, property)
+        ? (routePorts as any)[property]
+        : Reflect.get(target, property, target),
+      set: (target, property, value) => Reflect.set(target, property, value, target),
+    });
     return createPrimaryEnsureAction(host);
   }
   private async ensurePrimaryRuntime(): Promise<void> {
