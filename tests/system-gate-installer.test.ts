@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { ensurePiChatSystemGate, PI_CHAT_GATE_MARKER, PI_CHAT_GATE_TARGET } from "../src/server/system-gate-installer";
 
-const source = (version = "1") => `/**\n * ${PI_CHAT_GATE_MARKER.replace("version: 1", `version: ${version}`)}\n */\n\nexport default function gate() {}\n`;
+const source = (version = "2") => `/**\n * ${PI_CHAT_GATE_MARKER.replace("version: 2", `version: ${version}`)}\n */\n\nexport default function gate() {}\n`;
 const legacy = () => `/** legacy banner */\n\nexport default function gate() {}\n`;
 
 test("Pi Chat system Gate installs, self-heals, and remains explicitly enabled", async () => {

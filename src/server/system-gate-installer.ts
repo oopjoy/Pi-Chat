@@ -4,7 +4,7 @@ import { copyFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 export const PI_CHAT_GATE_TARGET = "pi-chat-file-permission-gate.ts";
-export const PI_CHAT_GATE_MARKER = "Pi Chat system component: file-permission-gate; version: 1";
+export const PI_CHAT_GATE_MARKER = "Pi Chat system component: file-permission-gate; version: 2";
 const PI_CHAT_GATE_MARKER_PREFIX = "Pi Chat system component: file-permission-gate; version:";
 
 export type SystemGateInstallResult = "installed" | "verified" | "repaired" | "conflict" | "source-missing";
