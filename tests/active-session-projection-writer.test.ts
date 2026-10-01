@@ -161,17 +161,18 @@ test("deletion and process replacement retire earlier full and view authority", 
 });
 
 test("App routes active-set mutations through the projection writer", async () => {
-  const source = await readFile(
-    new URL("../src/web/App.tsx", import.meta.url),
-    "utf8",
-  );
+  const [appSource, projectionSource] = await Promise.all([
+    readFile(new URL("../src/web/App.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../src/web/application/session-projection-state.tsx", import.meta.url), "utf8"),
+  ]);
+  const source = `${appSource}\n${projectionSource}`;
   assert.equal(
     source.match(/setActiveSessionIds\(/g)?.length,
     1,
     "the React setter appears only in the writer sink wiring",
   );
   assert.match(
-    source,
+    projectionSource,
     /new ActiveSessionProjectionWriter\([\s\S]*?setActiveSessionIds\(ids\)/,
   );
 });

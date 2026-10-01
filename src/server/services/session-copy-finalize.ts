@@ -54,8 +54,21 @@ export async function finalizeSessionCopy(input: {
     host.markProjectionPending(sourceSessionId);
     throw new HttpRequestError(409, "新对话已创建，但列表索引尚未确认；请刷新页面核对，不要重复操作");
   }
-  const session = host.summaryForId(copied.sessionId);
-  const indexedPath = host.pathForId(copied.sessionId);
+  let session = host.summaryForId(copied.sessionId);
+  let indexedPath = host.pathForId(copied.sessionId);
+  if (
+    !session
+    || !indexedPath
+    || resolve(indexedPath).toLowerCase() !== resolve(copied.sessionPath).toLowerCase()
+    || session.sessionId !== copied.piSessionId
+  ) {
+    // A copy can complete while the preceding inventory refresh is still
+    // publishing its mapping. One bounded second read closes that race without
+    // weakening the identity/path verification or retry fence.
+    await host.listSessions();
+    session = host.summaryForId(copied.sessionId);
+    indexedPath = host.pathForId(copied.sessionId);
+  }
   if (
     !session
     || !indexedPath

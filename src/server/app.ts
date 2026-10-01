@@ -3121,14 +3121,20 @@ export class PiChatApp {
   }
   /** Compact a Session behind its prompt/admission and Runtime ownership fences. */
   private compactAction() {
-    return createCompactAction({
+    const routePorts = {
       PROMPT_PREPARE_TIMEOUT_MS,
       SessionNotFoundError,
       compactRuntime,
       randomUUID,
       rpcData,
-      host: this,
-    } as any);
+    };
+    const host = new Proxy(this as any, {
+      get: (target, property) => Object.prototype.hasOwnProperty.call(routePorts, property)
+        ? (routePorts as any)[property]
+        : Reflect.get(target, property, target),
+      set: (target, property, value) => Reflect.set(target, property, value, target),
+    });
+    return createCompactAction(host);
   }
   private async compactSession(
     sessionId: string,
@@ -3515,15 +3521,20 @@ export class PiChatApp {
    * must never bypass this target-Runtime check.
    */
   private turnSettingsAction() {
-    const host = {
+    const routePorts = {
       HttpRequestError,
       PartialTurnSettingsError,
       THINKING_LEVELS,
       asModels,
       asState,
       randomUUID,
-      ...this,
     };
+    const host = new Proxy(this as any, {
+      get: (target, property) => Object.prototype.hasOwnProperty.call(routePorts, property)
+        ? (routePorts as any)[property]
+        : Reflect.get(target, property, target),
+      set: (target, property, value) => Reflect.set(target, property, value, target),
+    });
     return createTurnSettingsAction(host);
   }
   private async applyTurnSettings(...args: any[]): Promise<AppliedTurnSettings> {

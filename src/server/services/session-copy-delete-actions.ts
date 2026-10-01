@@ -41,7 +41,8 @@ export function createSessionCopyDeleteActions(host: Record<string, any>) {
         ? await host.options.sessions.forkTargetForId(id, persistedMessageId || "")
         : null;
       const copyPreparation = validateSessionCopyPreparation({
-            sourcePath: candidateSourcePath,
+        mode,
+        sourcePath: candidateSourcePath,
         summary: candidateSummary,
         draft: Boolean(runtime?.draftSession),
         primary,
@@ -66,15 +67,18 @@ export function createSessionCopyDeleteActions(host: Record<string, any>) {
       let copied;
       try {
         copied = await host.runBoundSessionCopy({
-                            runtime,
-                ...(target ? { entryId: target.entryId } : null),
+          id,
+          sourcePath,
+          mode,
+          knownSessionIds,
+          runtime,
+          ...(target ? { entryId: target.entryId } : null),
         });
       } finally {
         operationAdmission.reopen(operationGeneration);
       }
 
-      return finalizeSessionCopy({
-        host: {
+      return finalizeSessionCopy({        host: {
           now: () => host.now(),
           recordFork: (destinationSessionId: any, origin: any) => host.sessionRelations.recordFork(destinationSessionId, origin),
           reportRelationFailure: (operation: any, error: any) => host.reportSessionRelationFailure(operation, error),
