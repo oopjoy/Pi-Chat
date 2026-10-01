@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { extensionExecutionNotice } from "../src/web/lib/extension-notice";
 
-const commands = [{ name: "gate", source: "extension" as const, description: "Control file permission gate: /gate status|open|strict" }];
+const commands = [{ name: "gate", source: "extension" as const, description: "Toggle file permission gate: /gate [status|open|strict]" }];
 
 test("gate extension notices describe the selected permission mode", () => {
   assert.match(extensionExecutionNotice("/gate open", "gate", commands), /已识别的高风险 Bash/);
   assert.match(extensionExecutionNotice("/gate strict", "gate", commands), /已识别高风险 Bash/);
-  assert.match(extensionExecutionNotice("/gate once", "gate", commands), /仅支持 strict、open 和 status/);
+  assert.match(extensionExecutionNotice("/gate", "gate", commands), /已切换文件权限模式/);
+  assert.match(extensionExecutionNotice("/gate once", "gate", commands), /已移除 once 模式/);
   assert.match(extensionExecutionNotice("/gate status", "gate", commands), /当前文件权限模式/);
 });
 

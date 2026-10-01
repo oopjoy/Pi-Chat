@@ -229,7 +229,7 @@ test("extension slash commands execute immediately and Gate mode survives browse
     onEvent: (listener: (event: Record<string, unknown>) => void) => { emit = listener; return () => {}; },
     send: async (command: Record<string, unknown>) => {
       commands.push(command);
-      if (command.type === "get_commands") return { type: "response", success: true, data: { commands: [{ name: "gate", source: "extension", description: "Control file permission gate: /gate status|open|strict" }] } };
+      if (command.type === "get_commands") return { type: "response", success: true, data: { commands: [{ name: "gate", source: "extension", description: "Toggle file permission gate: /gate [status|open|strict]" }] } };
       if (command.type === "get_state") return { type: "response", success: true, data: { model: null, sessionFile: path, sessionId: "gate", isStreaming: false } };
       if (command.type === "get_messages") return { type: "response", success: true, data: { messages: [] } };
       if (command.type === "get_available_models") return { type: "response", success: true, data: { models: [] } };
@@ -254,7 +254,7 @@ test("extension slash commands execute immediately and Gate mode survives browse
       body: JSON.stringify({ message: "/gate open", sessionId: id }),
     });
     assert.equal(response.status, 202);
-    assert.deepEqual(await response.json(), { accepted: true, queued: false, extension: true, command: "gate", description: "Control file permission gate: /gate status|open|strict", isStreaming: false });
+    assert.deepEqual(await response.json(), { accepted: true, queued: false, extension: true, command: "gate", description: "Toggle file permission gate: /gate [status|open|strict]", isStreaming: false });
     assert.deepEqual(commands.filter((command) => command.type === "prompt"), [{ type: "prompt", message: "/gate open" }]);
     assert.equal((app as unknown as {
       stateDiagnostics: { snapshot(): { promptEvidence: { records: unknown[] } } };
@@ -272,7 +272,7 @@ test("extension slash commands execute immediately and Gate mode survives browse
     const view = await (await fetch(`http://127.0.0.1:${address.port}/api/sessions/${id}/view`)).json() as { gateMode?: string };
     assert.equal(view.gateMode, "open", "an unsupported once command must not alter the authoritative mode");
     assert.equal(commands.filter((command) => command.type === "prompt").at(-1)?.message, "/gate once");
-    emit({ type: "extension_ui_request", method: "notify", message: "Usage: /gate status|open|strict" });
+    emit({ type: "extension_ui_request", method: "notify", message: "Usage: /gate [status|open|strict]" });
     assert.equal((await (await fetch(`http://127.0.0.1:${address.port}/api/sessions/${id}/view`)).json() as { gateMode?: string }).gateMode, "open");
   } finally {
     server.close();

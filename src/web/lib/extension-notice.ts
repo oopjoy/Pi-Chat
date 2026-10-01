@@ -11,7 +11,8 @@ export function extensionExecutionNotice(message: string, commandName: string, c
   if (commandName === "gate") {
     if (["open", "off", "allow", "disable"].includes(args)) return "已执行 /gate open · write/edit 和已识别的高风险 Bash 将不再要求确认";
     if (["strict", "on", "close", "closed", "enable"].includes(args)) return "已执行 /gate strict · 已恢复 write/edit 及已识别高风险 Bash 的确认提示";
-    if (["once", "next"].includes(args)) return "已执行 /gate once · Gate 仅支持 strict、open 和 status";
+    if (!args) return "已执行 /gate · 已切换文件权限模式";
+    if (["once", "next"].includes(args)) return "已执行 /gate once · 当前 Gate 已移除 once 模式，请使用 /gate、strict 或 open";
     return "已执行 /gate status · 已显示当前文件权限模式";
   }
   const description = commands.find((item) => item.name === commandName && item.source === "extension")?.description;
