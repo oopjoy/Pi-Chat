@@ -18,9 +18,7 @@ export async function handleApiCoreRoute(
     PROMPT_BODY_LIMIT,
     PROMPT_PREPARE_TIMEOUT_MS,
     PartialTurnSettingsError,
-    Proxy,
     RECENT_TURN_WINDOW_SIZE,
-    Reflect,
     TURN_WINDOW_INCREMENT,
     asState,
     bodyJson,
@@ -326,17 +324,22 @@ export async function handleApiCoreRoute(
     }
 
     if (url.pathname === "/api/chat/prompt") {
-      const promptHost = new Proxy(host as any, {
-        get: (target: any, property: any) => Reflect.get(target, property, target),
-        set: (target: any, property: any, value: any) => Reflect.set(target, property, value, target),
-      });
-      Object.assign(promptHost, {
+      const promptHost = Object.assign(Object.create(host), {
         PROMPT_BODY_LIMIT,
         PROMPT_PREPARE_TIMEOUT_MS,
         MAX_NATIVE_STEERING,
         MAX_NATIVE_STEERING_IMAGE_CHARS,
         MAX_PENDING_PROMPT_BASELINE_IDS,
         gateModeFromCommand,
+      });
+      // Prompt dispatch updates the active Primary's `running` flag. Preserve
+      // the original host write-through semantics without a second unrestricted
+      // Proxy around the route host.
+      Object.defineProperty(promptHost, "running", {
+        configurable: true,
+        enumerable: true,
+        get: () => host.running,
+        set: (value: unknown) => { host.running = value; },
       });
       await handlePromptRoute(promptHost, request, response, url, preparedBody);
       return;
