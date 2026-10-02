@@ -50,7 +50,6 @@ export interface PromptFailureStageHost {
   setError: Callback;
   setNotice: Callback;
   setSessions: Callback;
-  paneState: { isStreaming: boolean };
   viewCacheWriter: { forget: Callback };
   viewedSessionIdRef: Ref<any>;
 }
@@ -69,7 +68,7 @@ export interface PromptFailureStageState {
 
 /** Failure/uncertain-delivery stage for one browser Prompt transaction. */
 export function handlePromptSendFailure(
-  host: PromptFailureStageHost,
+  host: PromptFailureStageHost & { paneState: { isStreaming: boolean } },
   input: PromptFailureStageState,
 ): void {
   const {

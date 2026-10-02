@@ -6,7 +6,7 @@ on:
       - "v*"
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: windows-release-${{ github.ref }}
@@ -77,3 +77,25 @@ jobs:
           name: pi-chat-windows-${{ github.ref_name }}-verified
           path: ${{ runner.temp }}/pi-chat-release-output/*
           if-no-files-found: error
+      - name: Publish verified GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $output = Join-Path $env:RUNNER_TEMP "pi-chat-release-output"
+          $assets = Get-ChildItem -LiteralPath $output -File | ForEach-Object { $_.FullName }
+          if (-not $assets) { throw "No verified release assets were produced" }
+          $notes = Join-Path $env:GITHUB_WORKSPACE "release-notes-$tag.md"
+          if (Test-Path -LiteralPath $notes) {
+            $notesArgs = @('--notes-file', $notes)
+          } else {
+            $notesArgs = @('--generate-notes')
+          }
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag --repo $env:GITHUB_REPOSITORY --clobber @assets
+            gh release edit $tag --repo $env:GITHUB_REPOSITORY --title "Pi Chat $tag" --draft=false --prerelease=false @notesArgs
+          } else {
+            gh release create $tag --repo $env:GITHUB_REPOSITORY --verify-tag --title "Pi Chat $tag" --draft=false --prerelease=false @notesArgs @assets
+          }

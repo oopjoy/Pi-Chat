@@ -1,14 +1,57 @@
-import type { PromptDelivery, PromptImage, PiMessage } from "../../shared/types";
-import type { DraftPaneAuthority } from "../application/pane-authority";
+import type { GateMode } from "../lib/gate-mode";
+import type { PromptDelivery, PromptImage, PiMessage, PiState, QueuedPrompt, ModelInfo } from "../../shared/types";
+import type { DraftPaneAuthority, PaneAuthoritySnapshot } from "../application/pane-authority";
 import type { LocalUserTurn } from "../lib/local-user-turn";
+import type { RefObject } from "react";
+import type { ActiveSessionViewAuthority } from "./active-session-projection-writer";
 import { handlePromptSendFailure, type PromptFailureStageHost } from "./prompt-send-failure-stage";
 import { reconcilePromptAcknowledgement, type PromptAcknowledgementStageHost } from "./prompt-acknowledgement-stage";
 import { preparePromptRuntime, type PromptPreparationStageHost } from "./prompt-preparation-stage";
+
+type PromptViewAuthority = PaneAuthoritySnapshot & ActiveSessionViewAuthority;
+
+export type PromptSendFlowHost = PromptPreparationStageHost
+  & PromptAcknowledgementStageHost
+  & PromptFailureStageHost
+  & {
+    LOCAL_DRAFT_BUSY_ID: string;
+    authoritativeTurnTotal: (sessionId: string) => number | undefined;
+    beginSessionBusy: (sessionId: string) => () => void;
+    buildIdentityMismatch: boolean;
+    buildProtectedLocalTurn: typeof import("./prompt-submit-flow").buildProtectedLocalTurn;
+    captureViewOperation: () => PromptViewAuthority;
+    createSession: () => void;
+    displayedQueue: QueuedPrompt[];
+    gateModesRef: RefObject<Record<string, GateMode>>;
+    messages: PiMessage[];
+    modelInventoryConfirmed: boolean;
+    models: ModelInfo[];
+    pendingGateModesRef: RefObject<Map<string, GateMode>>;
+    promptPreparationRoute: typeof import("./prompt-submit-flow").promptPreparationRoute;
+    queuePaused: boolean;
+    promptBusyReleasesRef: RefObject<Map<string, { epoch: string; afterGeneration: number; release: () => void; markAccepted: () => void; markTerminal: () => void }>>;
+    promptSubmitFlowRef: RefObject<import("./prompt-submit-flow").PromptSubmitFlow>;
+    queueProjectionForView: (sessionId: string, incoming: QueuedPrompt[] | undefined, paused: boolean, requestRevision?: number) => { queue: QueuedPrompt[]; paused: boolean; known: boolean; accepted?: boolean };
+    refresh: () => Promise<void>;
+    runEpochGenerationRef: RefObject<number>;
+    runEpochRef: RefObject<string>;
+    runtimeStatus: string;
+    state: PiState;
+    stickToBottomRef: RefObject<boolean>;
+    stopGeneration: () => Promise<void>;
+    toolStatus: string;
+    turnTotal: number;
+    userMessage: typeof import("../lib/pi-events").userMessage;
+    viewOperationIsCurrent: (operation: PromptViewAuthority) => boolean;
+    viewOperationIsInCurrentRun: (operation: PromptViewAuthority) => boolean;
+    viewedSessionId: string;
+  };
+
 /**
  * Browser Prompt transaction adapter. App remains the authority owner; this
  * module receives a single explicit host boundary and does not retain state.
  */
-export function createPromptSendFlow(host: Record<string, any>) {
+export function createPromptSendFlow<THost extends PromptSendFlowHost>(host: THost) {
   const {
     ApiRequestError,
     DRAFT_FAILURE_SCOPE,
@@ -304,8 +347,8 @@ export function createPromptSendFlow(host: Record<string, any>) {
         return;
       }
 
-      const preparationHost = {
-        ...(host as PromptPreparationStageHost),
+      const preparationHost: PromptPreparationStageHost = {
+        ...host,
         moveSessionBusyTo,
       };
       const preparation = await preparePromptRuntime(
@@ -427,9 +470,7 @@ export function createPromptSendFlow(host: Record<string, any>) {
             promptTerminalByEvent,
           },
         });
-      const acknowledgementHost = {
-        ...(host as PromptAcknowledgementStageHost),
-      };
+      const acknowledgementHost: PromptAcknowledgementStageHost = host;
       const acknowledgement = await reconcilePromptAcknowledgement(
         acknowledgementHost,
         {
@@ -459,8 +500,8 @@ export function createPromptSendFlow(host: Record<string, any>) {
       serverPromptId = acknowledgement.serverPromptId;
     } catch (cause: any) {
       const localEntry = localTurnEntry();
-      const failureHost = {
-        ...(host as PromptFailureStageHost),
+      const failureHost: PromptFailureStageHost & { paneState: { isStreaming: boolean } } = {
+        ...host,
         paneState: state,
       };
       handlePromptSendFailure(

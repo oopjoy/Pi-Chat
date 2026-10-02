@@ -55,6 +55,7 @@
     "test:source": "node scripts/run-test-batches.mjs --suite=source",
     "test:source:single-process": "node scripts/run-tests.mjs --suite=source",
     "test:source:batched": "node scripts/run-test-batches.mjs --suite=source",
+    "test:inventory": "node scripts/test-inventory.mjs",
     "test:benchmark": "node scripts/run-test-batches.mjs --suite=benchmark",
     "test:source-and-benchmark": "npm run test:source && npm run test:benchmark",
     "test:artifact": "node scripts/run-tests.mjs --suite=artifact",

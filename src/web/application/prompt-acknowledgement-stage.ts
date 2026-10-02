@@ -1,4 +1,4 @@
-import type { PromptImage, PromptSettingsSnapshot, QueuedPrompt } from "../../shared/types";
+import type { PromptImage, PromptSettingsSnapshot, QueuedPrompt, SlashCommand } from "../../shared/types";
 import type { LocalUserTurn } from "../lib/local-user-turn";
 
 type Callback = (...args: any[]) => any;
@@ -12,7 +12,7 @@ export interface PromptAcknowledgementStageHost {
   cancellingQueueIdsRef: Ref<any>;
   capturePaneAuthority: Callback;
   commitPaneIfCurrent: Callback;
-  composerCommands: Callback;
+  composerCommands: SlashCommand[];
   desiredSessionIdRef: Ref<any>;
   fetchSessionView: Callback;
   gateModeFromCommand: Callback;

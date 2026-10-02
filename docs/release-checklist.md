@@ -31,5 +31,7 @@ Run every item from a clean, isolated staging directory. Do not replace the live
 ## Publish
 
 - [ ] Commit and tag point to the verified source revision.
+- [ ] Windows Release CI publishes the exact ZIP, checksum, and manifest produced by its verified staging job; do not manually bridge a separately built ZIP into the public Release.
+- [ ] The repository has a protected `refs/tags/v*` ruleset that rejects tag update/delete/force-move after publication.
 - [ ] Source archive is described as source-only; the Windows ZIP is identified as the runnable package.
 - [ ] Release notes include the ZIP checksum and known platform scope.

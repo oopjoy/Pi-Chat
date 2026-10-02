@@ -525,9 +525,11 @@ focused tests
 
 如果发现一个 coordinator 开始拥有另一个领域的事实，应停止并重新拆边界。
 
-## 五、当前实施状态（v0.4.8 维护基线）
+## 五、当前实施状态（v0.5.0 typed-seam 基线）
 
 当前 `main` 已完成并通过独立验证：
+
+v0.5.0 已完成两大中心文件的职责拆分。下一阶段不再以文件行数为目标，转向 typed seam convergence：收窄 application/service capability surface、删除 service-locator 式 `Record<string, any>`、补充 stage/port focused tests，并保持 Runtime、Session、JSONL authority 不变。
 
 ```text
 Application state contract
@@ -549,10 +551,11 @@ Browser duplicate Prompt / reload / reconnect smoke
 ```text
 v0.4.6   bdcf5d3；历史 GitHub Release 与 Windows ZIP，旧 tag 不移动
 v0.4.7   9665c7d；历史 stability preview，旧 tag 与资产不移动
-v0.4.8   当前正式维护发布候选，绑定独立 source revision 与 Windows artifact
+v0.4.8   历史正式维护发布，绑定独立 source revision 与 Windows artifact
+v0.5.0   当前正式发布，包含 Web/Server decomposition checkpoint 与 Windows artifact
 ```
 
-v0.4.8 只接受缺陷、发布、安全、平台兼容或测量驱动变更；不以文件大小或抽象数量为目标继续拆分 `App.tsx`。真实 Pi Runtime/provider failure field validation、Windows 工具链和发布卫生继续按维护需求推进。
+v0.5.x 只接受缺陷、类型安全、发布、安全、平台兼容或测量驱动变更；不以文件大小或抽象数量为目标继续拆分 `App.tsx` 或 `server/app.ts`。
 
 `e14ba25` 将以下逻辑从 `App.tsx` 提取为纯 admission boundary：
 

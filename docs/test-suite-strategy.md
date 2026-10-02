@@ -8,16 +8,22 @@
 
 ## 当前基线
 
-当前冻结候选基线：
+测试规模是生成数据，不在本文件中冻结具体数字。运行：
 
-- 177 个 `tests/**/*.test.ts` 文件；
-- 由测试名称解析器识别出 1,331 个静态展开测试；
-- 核心 source lane 162 个文件、1,256 个静态展开测试；完整执行为
-  1,264 个 Node tests（1,262 passed、2 个环境 skip）；
-- benchmark lane 6 个文件、33 个测试声明与执行；
-- artifact lane 9 个文件、42 个测试声明；隔离 Windows staging 执行为
-  41 passed、1 个环境 skip；
-- 核心 source lane 现在通过独立 Node batch 进程执行；
+```text
+npm run test:inventory
+npm run test:inventory -- --json
+```
+
+该命令从当前仓库发现的 `tests/**/*.test.ts` 和测试名称解析器生成：
+
+- repository test file 总数；
+- source、benchmark、artifact 三个 lane 的文件数和静态测试数；
+- process-isolated source 文件清单；
+- 三个 lane 是否恰好覆盖每个测试文件一次。
+
+Release gate 仍以实际执行结果为准，而不是文档中的历史数量。核心 source lane
+通过独立 Node batch 进程执行；benchmark 和 artifact lane 保持独立。
 - 测试 harness 固定 `--test-concurrency=1`、V8 old-space 2,048 MiB，Windows
   Job memory 3,072 MiB。
 

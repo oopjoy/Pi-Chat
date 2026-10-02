@@ -27,7 +27,7 @@ Three lifetimes must stay distinct:
 
 Closing a browser window is distinct from an SSE/EventSource drop. An SSE/EventSource drop is reconnectable transport state, not evidence that a window or service has closed: it only follows the delayed Session-control release path. Repeated handshakes from an already SSE-confirmed page retain that durable page lease and can never downgrade it to a temporary pre-SSE record. Foreground/background presence mutations carry a strictly increasing revision scoped to the exact SSE-backed page; stale or equal mutations are no-ops, and one page cannot clear a sibling page's newer foreground lease. Production keeps the service alive after the final window closes. Only the explicit legacy/test opt-in `lastWindowAutoShutdownEnabled: true` enables automatic shutdown: in that mode, Chromium/PWA lifecycle ambiguity means only an `unload` beacon carrying foreground close intent latched during `beforeunload`, while the server still holds a fresh foreground-presence lease, may remove the final page and start the shutdown check. The opt-in path then waits for all generation, queue, confirmation, recovery, Runtime transition, and mutation work to finish and requires a continuous $10$ second quiescent grace before stopping hosted RPC workers and the Node service. A replacement page cancels that grace; stale close beacons cannot remove a replacement page. Explicit close API, restart handoff, and process signals remain independent shutdown paths.
 
-## Hard product boundaries (0.4.x)
+## Hard product boundaries (0.5.x)
 
 The status of each current capability is tracked in [`feature-surface.md`](feature-surface.md). A capability marked removed there must not retain a hidden route, browser wrapper, shared type, or feature-specific regression test.
 
@@ -45,7 +45,7 @@ The status of each current capability is tracked in [`feature-surface.md`](featu
 
 ### Explicit non-goals / pseudo-requirements
 
-- **Remote access** — not a current product need. No half-open host escape hatch. Future remote would require a dedicated design (auth, HTTPS, audit), not `PI_CHAT_ALLOW_REMOTE` style switches.
+- **Remote access** — not a current product need. No half-open host escape hatch. Future remote would require a dedicated design (auth, HTTPS, audit), not `PI_CHAT_ALLOW_REMOTE` style switches. This remains a 0.5.x product boundary.
 - Electron shell
 - Rewriting agent orchestration inside Pi Chat
 - Public internet exposure
@@ -55,6 +55,26 @@ The status of each current capability is tracked in [`feature-surface.md`](featu
 The Settings panel exposes `POST /api/workspace/pick` as the sole browser control for choosing the persisted default cwd for future drafts. New-draft UI also exposes `POST /api/workspace/draft-pick` for one draft only. `POST /api/workspace/set` remains a **local automation** API for scripts or a future local CLI, with no browser wrapper. All global/default paths affect only future drafts and directory indexing; they never stop, restart, rebind, or change the cwd of a live Runtime. Do not document `workspace/set` as a remote client entry.
 
 The right-hand Files / Changes inspector has no filesystem write authority. Files projects up to fifty unique paths from the selected persisted Session's newest successful Edit/Write tool results; it never uses filesystem mtime or scans the Workspace as an explorer. A file preview is admitted only while that relative path remains in the Session-derived recent set, reads a bounded UTF-8 prefix without starting a Runtime, supports horizontal scrolling for long code lines, and shares a vertically resizable split with the recent-file list. After a preview succeeds, an explicit button may ask Windows to open that same file with its default application. The POST route parses before lifecycle admission, holds a bounded mutation lease, repeats the Session recent-set, text-preview, containment, file-type, and symlink validation at click time and immediately before the shell handoff, passes only the canonical server-derived path to a static shell command through an environment variable, and never starts a Runtime. The launcher has bounded stderr and a ten-second timeout. Known shell-active/executable extensions (for example `.cmd`, `.js`, `.vbs`, `.hta`, `.url`, and `.reg`) are never launched from this surface. Hidden, generated, dependency, credential-like, symlink, binary, unsafe-extension, and out-of-workspace paths fail closed. Changes retains the existing browser-derived Edit patch projection; it is not repository-wide Git status.
+
+## v0.5.0 decomposition checkpoint
+
+v0.5.0 is a physical decomposition checkpoint, not a license to keep splitting
+files mechanically. `App.tsx` and `server/app.ts` retain integration and owner
+wiring, while Runtime/Session/JSONL authority remains in the existing writers,
+RuntimePool, SessionControl, scheduler, and route/service owners.
+
+The next maintenance phase is **typed seam convergence**:
+
+- orchestration modules must expose narrow capability ports instead of
+  `Record<string, any>` host bags;
+- outer coordinators must not receive every internal ref owned by their stages;
+- route adapters parse and map HTTP while application services own Runtime,
+  Queue, Prompt, and Session mutation policy;
+- a seam change must remove an authority or prevent a reproduced bug, not only
+  relocate lines between files.
+
+Current source-shape measurements are generated by the test and release tools;
+architecture rules intentionally do not freeze file or test counts.
 
 ## Server module map
 
@@ -190,7 +210,7 @@ Prefer small hooks and pure libs over growing `App.tsx` further.
 
 Prefer **RPC capability probe** over a hard Pi version allowlist.
 
-| Field | Value (0.4.8) |
+| Field | Value (0.5.0) |
 |---|---|
 | Required capabilities | `get_state`, `get_messages`, `get_available_models`, `get_commands`, `get_session_stats` |
 | Last verified Pi | 0.85.1 |

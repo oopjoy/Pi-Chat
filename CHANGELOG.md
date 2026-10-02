@@ -17,6 +17,14 @@
 - `pi-chat-windows-0.5.0.zip` is the runnable Windows package. GitHub-generated source archives remain source-only development inputs.
 - Pi Chat remains loopback-only, local-first, and Windows-first.
 
+## 0.4.8
+
+See [`release-notes-v0.4.8.md`](release-notes-v0.4.8.md) for the Windows-first maintenance release notes.
+
+## 0.4.7
+
+See [`release-notes-v0.4.7.md`](release-notes-v0.4.7.md) for the stability-preview release notes.
+
 ## 0.4.6
 
 ### Conversation continuity and presentation
