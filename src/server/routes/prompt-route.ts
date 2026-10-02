@@ -1,5 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import type { ApplicationLifecycle, GateMode, PiMessage, PromptImage, PromptSettingsSnapshot, QueuedPrompt } from "../../shared/types.js";
+import type { PiChatAppOptions } from "../app.js";
+import type { OperationAdmission } from "../operation-admission.js";
+import type { PendingTurnSettings, RuntimePool } from "../runtime-pool.js";
+import type { NativeSteeringAdmissions } from "../services/native-steering-admission.js";
 import { bodyJson, json, methodNotAllowed } from "../http-transport.js";
 import { RpcRequestTimeoutError } from "../rpc-client.js";
 import { asState } from "../pi-data.js";
@@ -12,7 +17,81 @@ import { admitPromptToQueue } from "../services/prompt-queue-admission.js";
 import { dispatchPrimaryPrompt } from "../services/prompt-primary-dispatch.js";
 import { dispatchSecondaryPrompt } from "../services/prompt-secondary-dispatch.js";
 
-export async function handlePromptRoute(host: any, request: IncomingMessage, response: ServerResponse, url: URL, preparedBody?: Record<string, unknown>): Promise<void> {
+type PromptRouteCallback = (...args: any[]) => any;
+type PromptRouteSchedulerPort = {
+  primaryAbortGeneration: number;
+  runtimeBusyForQueue: PromptRouteCallback;
+  primaryBusyForQueue: PromptRouteCallback;
+  assertCanEnqueue: PromptRouteCallback;
+  enqueueRuntime: PromptRouteCallback;
+  enqueuePrimary: PromptRouteCallback;
+  notifySecondaryPromptAccepted: PromptRouteCallback;
+};
+
+export interface PromptRouteHost {
+  PROMPT_BODY_LIMIT: number;
+  PROMPT_PREPARE_TIMEOUT_MS: number;
+  MAX_NATIVE_STEERING: number;
+  MAX_NATIVE_STEERING_IMAGE_CHARS: number;
+  MAX_PENDING_PROMPT_BASELINE_IDS: number;
+  activeSessionId: string;
+  activeSessionIds: () => string[];
+  applicationLifecycle: ApplicationLifecycle;
+  applyPromptSettings: PromptRouteCallback;
+  advanceNativeSteeringProjection: (sessionId: string) => void;
+  beginPromptAdmission: (sessionId: string) => Promise<() => void>;
+  broadcast: PromptRouteCallback;
+  broadcastQueue: (sessionId: string) => void;
+  broadcastSessionActivity: (sessionId: string) => void;
+  clearNativeSteeringState: (sessionId: string, reason: string) => void;
+  clearPromptDiagnostic: (sessionId: string) => void;
+  dispatchNext: () => void;
+  dispatchRuntimeNext: (runtime: unknown) => void;
+  dispatching: boolean;
+  ensurePrimaryIdentity: () => Promise<void>;
+  ensurePrimaryRuntime: () => Promise<void>;
+  ensureRuntime: (sessionId: string) => Promise<unknown>;
+  extensionCommand: PromptRouteCallback;
+  finalizePersistedDraft: (runtime: unknown) => Promise<void>;
+  gateModeFromCommand: (message: string) => GateMode | null;
+  hasNativeSteeringPending: (sessionId: string, generation: number) => boolean;
+  lastPrimaryMessages: PiMessage[];
+  lastPrimaryMessagesSessionId: string;
+  lateRpcOutcomeHandler: PromptRouteCallback;
+  liveMessage: PiMessage | undefined;
+  markRpcOutcomePending: PromptRouteCallback;
+  nativeSteeringAdmissionsBySession: Map<string, NativeSteeringAdmissions>;
+  nextUserPromptAt: () => number;
+  noteUserPrompt: (sessionId: string, promptAt: number) => void;
+  options: PiChatAppOptions;
+  pendingTurnSettings: PendingTurnSettings | undefined;
+  primaryOperationAdmission: OperationAdmission;
+  primaryRpcGeneration: number;
+  primaryTurnActive: () => boolean;
+  promptQueue: QueuedPrompt[];
+  publicQueue: PromptRouteCallback;
+  queuePaused: boolean;
+  recoverRuntime: (runtime: unknown) => Promise<void>;
+  rememberRuntimeAppliedTurnSettings: (runtime: unknown, applied: unknown) => void;
+  resetNativeSteering: (sessionId: string, runtime: unknown, reason: string) => Promise<void>;
+  rethrowResultPending: PromptRouteCallback;
+  rpcOutcomeUnknown: (error: unknown) => boolean;
+  runtimePool: RuntimePool;
+  runtimeTurnActive: (runtime: unknown) => boolean;
+  running: boolean;
+  scheduler: PromptRouteSchedulerPort;
+  secondaryNeedsRecovery: (runtime: unknown) => boolean;
+  sendPrompt: PromptRouteCallback;
+  sendPromptRpc: PromptRouteCallback;
+  sessionMutationOutcomePending: (sessionId: string) => boolean;
+  setGateMode: (sessionId: string, mode: GateMode | undefined) => void;
+  supersedePendingTurnSettings: (pending: PendingTurnSettings | undefined, settings: PromptSettingsSnapshot | undefined) => void;
+  syncGateMode: PromptRouteCallback;
+  toolStatus: string;
+  tracePrompt: PromptRouteCallback;
+}
+
+export async function handlePromptRoute(host: PromptRouteHost, request: IncomingMessage, response: ServerResponse, url: URL, preparedBody?: Record<string, unknown>): Promise<void> {
   if (url.pathname !== "/api/chat/prompt") return;
   if (request.method !== "POST") return methodNotAllowed(response);
   const body = preparedBody || (await bodyJson(request, host.PROMPT_BODY_LIMIT));
