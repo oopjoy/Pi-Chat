@@ -1,6 +1,34 @@
 import type { RuntimeCompactionResult } from "./runtime-compaction.js";
 
-export function createCompactAction(host: Record<string, any>) {
+type CompactCallback = (...args: any[]) => any;
+export interface CompactActionHost {
+  PROMPT_PREPARE_TIMEOUT_MS: number;
+  SessionNotFoundError: typeof import("../runtime-pool.js").SessionNotFoundError;
+  compactRuntime: typeof import("./runtime-compaction.js").compactRuntime;
+  randomUUID: typeof import("node:crypto").randomUUID;
+  rpcData: typeof import("../rpc-client.js").rpcData;
+  beginPromptAdmission: (sessionId: string) => Promise<() => void>;
+  runtimePool: { get: (sessionId: string) => any; acquireOperation: CompactCallback; touch: CompactCallback };
+  activeSessionId: string;
+  ensurePrimaryIdentity: CompactCallback;
+  ensureRuntime: (sessionId: string) => Promise<any>;
+  rethrowResultPending: (error: unknown, operation: string, fence?: boolean) => never;
+  secondaryNeedsRecovery: CompactCallback;
+  recoverRuntime: CompactCallback;
+  primaryOperationAdmission: { acquire: CompactCallback };
+  ensurePrimaryRuntime: CompactCallback;
+  options: { rpc: any };
+  compactionPendingBySession: Set<string>;
+  sessionMutationOutcomePending: (sessionId: string) => boolean;
+  scheduler: { runtimeBusyForQueue: CompactCallback; primaryBusyForQueue: CompactCallback };
+  lateRpcOutcomeHandler: CompactCallback;
+  rpcOutcomeUnknown: (error: unknown) => boolean;
+  markRpcOutcomePending: CompactCallback;
+  uncertainCompactionBySession: Set<string>;
+  broadcastSessionActivity: (sessionId: string) => void;
+}
+
+export function createCompactAction(host: CompactActionHost) {
   const {
     PROMPT_PREPARE_TIMEOUT_MS,
     SessionNotFoundError,

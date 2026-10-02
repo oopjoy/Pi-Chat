@@ -4,11 +4,11 @@ import type { SecondaryRuntime, RuntimePool } from "../runtime-pool.js";
 import { fastModeStatusFromExtensionEvent } from "../runtime-event-transition.js";
 import { finalizeAcceptedRuntimeEvent } from "./runtime-event-lifecycle.js";
 
-type RuntimeEventCallback = (...args: any[]) => any;
+type RuntimeEventCallback = (...args: unknown[]) => unknown;
 
 export interface RuntimeEventHost {
-  activePromptDiagnostic: RuntimeEventCallback;
-  applyRuntimeEventTransition: RuntimeEventCallback;
+  activePromptDiagnostic: (...args: unknown[]) => { promptId?: string } | undefined;
+  applyRuntimeEventTransition: (...args: unknown[]) => import("../runtime-event-transition.js").RuntimeEventTransition;
   beginSessionRunTiming: RuntimeEventCallback;
   broadcast: RuntimeEventCallback;
   broadcastPromptFailureLifecycle: RuntimeEventCallback;
@@ -16,11 +16,11 @@ export interface RuntimeEventHost {
   broadcastRpcEvent: RuntimeEventCallback;
   broadcastSessionActivity: RuntimeEventCallback;
   cancelInteractiveCopyHook: RuntimeEventCallback;
-  clearNativeSteeringState: RuntimeEventCallback;
+  clearNativeSteeringState: (...args: unknown[]) => number;
   clearPendingRequest: RuntimeEventCallback;
   clearPromptDiagnostic: RuntimeEventCallback;
   closed: boolean;
-  consumeNativeSteeringAdmission: RuntimeEventCallback;
+  consumeNativeSteeringAdmission: (...args: unknown[]) => string | undefined;
   dispatching: boolean;
   queuePaused: boolean;
   dispatchRuntimeNext: RuntimeEventCallback;
@@ -28,10 +28,10 @@ export interface RuntimeEventHost {
   drainSecondaryAfterSettlement: RuntimeEventCallback;
   finalizePersistedDraftWhenVisible: RuntimeEventCallback;
   finishSessionRunTiming: RuntimeEventCallback;
-  hasNativeSteeringPending: RuntimeEventCallback;
+  hasNativeSteeringPending: (...args: unknown[]) => boolean;
   nativeSteeringResetAfterSettlement: Map<string, number>;
   pendingPrimaryFastMode: { rpcGeneration: number; active: boolean } | undefined;
-  pendingRequestForSession: RuntimeEventCallback;
+  pendingRequestForSession: (...args: unknown[]) => { id: string } | undefined;
   primaryBoundSessionId: string;
   primaryRpcGeneration: number;
   recordRuntimeFailure: RuntimeEventCallback;
@@ -41,7 +41,7 @@ export interface RuntimeEventHost {
   scheduleModelRuntimeSync: RuntimeEventCallback;
   settleNativeSteeringDequeue: RuntimeEventCallback;
   setFastModeActive: RuntimeEventCallback;
-  traceActivePrompt: RuntimeEventCallback;
+  traceActivePrompt: (...args: unknown[]) => string | undefined;
   traceState: RuntimeEventCallback;
   uncertainCompactionBySession: Set<string>;
   uncertainExtensionResponseBySession: Set<string>;
