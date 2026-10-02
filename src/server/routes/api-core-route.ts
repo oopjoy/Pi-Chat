@@ -1,9 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
-type ApplicationShutdownReason = any;
-type PiChatApp = any;
-type SessionIndex = any;
-
 export async function handleApiCoreRoute(
   host: Record<string, any>,
   request: IncomingMessage,

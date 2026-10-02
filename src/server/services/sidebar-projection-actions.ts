@@ -1,5 +1,5 @@
 import type { BootstrapData, SessionDirectorySummary, SessionSummary } from "../../shared/types.js";
-type SessionIndex = any;
+import type { SessionIndex } from "../session-index.js";
 
 export function createSidebarProjectionActions(host: Record<string, any>) {
   const {
