@@ -1,6 +1,6 @@
 # Pi Chat Feature Surface
 
-This inventory is the scope authority for the current 0.4.x convergence work. Every capability must have exactly one status:
+This inventory is the scope authority for the current 0.5.x maintenance work. Every capability must have exactly one status:
 
 - **Product entry**: visible or directly invoked by the browser/PWA product.
 - **Retained local API**: intentionally available only on the loopback service for launchers, local automation, lifecycle handoff, or a future local CLI. It is not a hidden browser feature.

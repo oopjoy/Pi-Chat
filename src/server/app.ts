@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createReadStream, existsSync, readFileSync, watch, type FSWatcher } from "node:fs";
 import { stat } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { basename, dirname, extname, join, normalize, resolve } from "node:path";
+import { basename, dirname, extname, join, normalize, relative, resolve } from "node:path";
 import {
   appendTerminalMessage,
   assistantMessageRequestsTool,
@@ -4761,7 +4761,23 @@ export class PiChatApp {
     // unavailable until SessionIndex observes its first durable turn.
     const summary = this.options.sessions.summaryForId?.(sessionId)
       || await this.options.sessions.cachedSummaryForId(sessionId);
-    return summary?.cwd ? resolve(summary.cwd) : null;
+    if (!summary?.cwd) return null;
+    const candidate = resolve(summary.cwd);
+    const runtime = this.runtimePool.get(sessionId);
+    const trustedRoots = [
+      this.currentCwd,
+      this.primaryRuntimeCwd,
+      ...(runtime?.cwd ? [runtime.cwd] : []),
+    ].map((root) => resolve(root));
+    const belongsToTrustedRoot = trustedRoots.some((root) => {
+      const remainder = relative(root, candidate);
+      return remainder === ""
+        || (!remainder.startsWith("..\\") && !remainder.startsWith("../") && !/^[A-Za-z]:[\\/]/.test(remainder));
+    });
+    // Session JSONL cwd is useful metadata, but it is not by itself a server
+    // workspace authority. Cold Files previews stay inside a server-known root;
+    // a hot Runtime may additionally vouch for its own immutable cwd above.
+    return belongsToTrustedRoot ? candidate : null;
   }
   private async workspaceRecentFilesRoute(input: { sessionId: string }): Promise<unknown | null> {
     const cwd = await this.workspaceCwdForSession(input.sessionId);

@@ -59,9 +59,11 @@ test("cold persisted Workspace reads and explicit opens never start or query a R
     const activePath = join(sessionsRoot, "active.jsonl");
     const coldPath = join(sessionsRoot, "cold.jsonl");
     const unsafePath = join(sessionsRoot, "unsafe.jsonl");
+    const untrustedPath = join(sessionsRoot, "untrusted.jsonl");
     await writeFile(activePath, sessionContent("active", workspace, true));
     await writeFile(coldPath, sessionContent("cold", workspace, true, ["README.md"], ["notes.txt"]));
     await writeFile(unsafePath, sessionContent("unsafe", workspace, true, [...unsafeFiles, "hold.txt", "swap/file.txt"], unsafeFiles));
+    await writeFile(untrustedPath, sessionContent("untrusted", join(root, "outside"), true, ["file.txt"]));
     const rpc = new FakeRpc(activePath, "active");
     const opened: string[] = [];
     let replaceBeforeFinalVerification = false;
@@ -96,6 +98,8 @@ test("cold persisted Workspace reads and explicit opens never start or query a R
       await fetch(`${base}/api/bootstrap`);
       const before = rpc.commands.length;
       const coldId = idForPath(coldPath);
+      const untrustedId = idForPath(untrustedPath);
+      assert.equal((await fetch(`${base}/api/sessions/${untrustedId}/workspace/files?dir=`)).status, 404, "JSONL cwd alone cannot authorize a Workspace root");
       const listing = await fetch(`${base}/api/sessions/${coldId}/workspace/files?dir=`);
       assert.equal(listing.status, 200);
       assert.deepEqual((await listing.json() as { files: unknown[] }).files, [{ path: "README.md", name: "README.md", operation: "edit" }]);

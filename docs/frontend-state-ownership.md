@@ -1,6 +1,6 @@
 # Frontend State Ownership Plan
 
-This document is the design gate for step 3 of the 0.4.x convergence work. It defines state ownership and migration boundaries before any `App.tsx` code is moved.
+This document is the design gate for step 3 of the 0.5.x maintenance architecture. It defines state ownership and migration boundaries before any `App.tsx` code is moved.
 
 ## Objective
 
