@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.5.0
+
+### Reliability and maintainability
+
+- Split browser Pi event handling into message/streaming, Runtime lifecycle, workspace/session, queue/extension, and failure/control domains without changing SSE admission, generation fencing, or terminal ordering.
+- Split Prompt sending into preparation, Runtime/Draft warm-up, acknowledgement reconciliation, and failure/uncertain-delivery stages.
+- Bound New first-send Server Prompt identity before retry lifecycle frames can race the browser acknowledgement.
+- Removed the nested Prompt-route Proxy while preserving active Primary `running` write-through semantics.
+- Replaced residual server/browser `any` authority aliases with explicit projection and Runtime types.
+- Preserved the App/server decomposition targets and the full authority-first behavior contract.
+
+### Verification and package scope
+
+- `npm run typecheck`, `npm run test:preflight`, the complete source suite, committed-text checks, and diff checks pass.
+- `pi-chat-windows-0.5.0.zip` is the runnable Windows package. GitHub-generated source archives remain source-only development inputs.
+- Pi Chat remains loopback-only, local-first, and Windows-first.
+
 ## 0.4.6
 
 ### Conversation continuity and presentation

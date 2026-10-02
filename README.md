@@ -16,7 +16,7 @@ Pi Chat 连接本机 Pi RPC，负责聊天展示、Session 浏览、流式输出
    npm install -g @earendil-works/pi-coding-agent
    pi --version
    ```
-3. 从 [v0.4.8 Release](https://github.com/oopjoy/Pi-Chat/releases/tag/v0.4.8) 下载 `pi-chat-windows-0.4.8.zip`，解压后运行 `start-pi-chat.cmd`。
+3. 从 [v0.5.0 Release](https://github.com/oopjoy/Pi-Chat/releases/tag/v0.5.0) 下载 `pi-chat-windows-0.5.0.zip`，解压后运行 `start-pi-chat.cmd`。
 4. 浏览器打开 `http://127.0.0.1:30170`，或运行 `start-pi-chat-ui.ps1` 使用独立窗口体验。
 
 Release ZIP 是 Windows-first 的可运行包；源码开发和从 checkout 运行仍需要 Node.js。Pi Chat 默认只监听本机回环地址，关闭浏览器窗口不会停止本地服务。
@@ -75,7 +75,7 @@ Release ZIP 是 Windows-first 的可运行包；源码开发和从 checkout 运�
 
 ## 版本与路线
 
-当前发布版本为 **0.4.8**，定位为 Windows-first 正式维护版本，但仍不应被理解为功能和平台边界已经最终定型的 1.0 或 adoption release。Runtime、Active Session、hot-read 与 model catalogue authority 收敛已经完成，主动架构演进现已冻结；后续工作转入缺陷、发布、安全和测量驱动维护。真实 Pi Runtime/provider failure field validation 仍是明确边界。完整限制见 [`release-notes-v0.4.8.md`](release-notes-v0.4.8.md)。
+当前发布版本为 **0.5.0**，定位为 Windows-first、local-first 的可靠性与可维护性版本，仍不应被理解为功能和平台边界已经最终定型的 1.0 或 adoption release。Runtime、Active Session、hot-read、model catalogue authority、Prompt reconciliation 与 SSE 生命周期收敛已经完成；后续工作以缺陷、类型安全、发布、安全和测量驱动维护为主。完整限制见 [`release-notes-v0.5.0.md`](release-notes-v0.5.0.md)。
 
 路线与 authority 说明见 [`docs/architecture.md`](docs/architecture.md)、[`docs/web-architecture-roadmap.md`](docs/web-architecture-roadmap.md) 和 [`v0.4.7 authority 收敛稳定性矩阵`](docs/v0.4.7-stability-matrix.md)。
 

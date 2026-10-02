@@ -1,7 +1,16 @@
 import type { SessionDirectorySummary, SessionSummary, SessionViewData } from "../../shared/types";
-type SessionViewCommitAuthority = any;
-type DraftSessionViewCommitAuthority = any;
-type RefreshAuthority = any;
+import type { PaneAuthority, PaneAuthoritySnapshot, DraftPaneAuthority } from "./pane-authority";
+import type { RuntimeProjectionWriteAuthority } from "./runtime-projection-writer";
+import type { ActiveSessionProjectionAuthority, ActiveSessionViewAuthority, ActiveSessionDraftAuthority } from "./active-session-projection-writer";
+import type { ModelCatalogueAuthority } from "./model-catalogue-revision-gate";
+
+type SessionViewCommitAuthority = PaneAuthoritySnapshot & ActiveSessionViewAuthority;
+type DraftSessionViewCommitAuthority = DraftPaneAuthority & ActiveSessionDraftAuthority;
+type RefreshAuthority = Pick<PaneAuthority, "runEpochGeneration" | "cacheGeneration" | "navigationEpoch">
+  & Pick<RuntimeProjectionWriteAuthority, "runtimeProjectionGeneration">
+  & Pick<ActiveSessionProjectionAuthority, "activeSessionProjectionGeneration" | "activeSessionFullRevision">
+  & ModelCatalogueAuthority
+  & { refreshEpoch: number };
 
 export function createSessionProjectionFlows(host: Record<string, any>) {
   const {

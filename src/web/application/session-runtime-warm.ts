@@ -1,12 +1,14 @@
-export function applyWarmReadiness(host: Record<string, any>, sessionId: string, ready: any, authority: any, capabilityOnly = false): unknown {
+import type { SessionRuntimeReadyData } from "../../shared/types";
+import type { PaneAuthoritySnapshot } from "./pane-authority";
+export function applyWarmReadiness(host: Record<string, any>, sessionId: string, ready: SessionRuntimeReadyData, authority: PaneAuthoritySnapshot, capabilityOnly = false): unknown {
   const state = capabilityOnly ? { isStreaming: ready.state.isStreaming } : ready.state;
   return host.commitPaneIfCurrent(authority, { type: "RUNTIME_READY", sessionId, state });
 }
 
-export function joinWarmPane(host: Record<string, any>, sessionId: string, authority: any): void {
+export function joinWarmPane(host: Record<string, any>, sessionId: string, authority: PaneAuthoritySnapshot): void {
   const warm = host.warmingRuntime(sessionId);
   if (!warm) return;
-  void warm.then((ready: any) => {
+  void warm.then((ready: SessionRuntimeReadyData) => {
     applyWarmReadiness(host, sessionId, ready, authority, true);
   }).catch((cause: unknown) => {
     if (!host.commitPaneIfCurrent(authority, { type: "RUNTIME_FAILED", sessionId })) return;
@@ -14,7 +16,7 @@ export function joinWarmPane(host: Record<string, any>, sessionId: string, autho
   });
 }
 
-export function warmSessionRuntime(host: Record<string, any>, sessionId: string): Promise<any> {
+export function warmSessionRuntime(host: Record<string, any>, sessionId: string): Promise<SessionRuntimeReadyData> {
   if (!sessionId) return Promise.reject(new Error("会话标识无效"));
   const existing = host.warmingRuntime(sessionId);
   if (existing) return existing;

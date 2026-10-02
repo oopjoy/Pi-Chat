@@ -1,10 +1,10 @@
 import type { PiState } from "../../shared/types.js";
+import { HttpRequestError } from "../http-transport.js";
 import { applyModelFileTransaction as applyModelFileTransactionService } from "./model-file-transaction.js";
 import type { FileSnapshot } from "../file-transaction.js";
 
 export function createRuntimeFileActions(host: Record<string, any>) {
   const {
-    HttpRequestError,
     PrimaryRuntimeReadinessController,
     asModels,
     asState,
@@ -84,7 +84,7 @@ export function createRuntimeFileActions(host: Record<string, any>) {
       // Once the resource file mutation has committed, an unknown reload RPC
       // outcome must not trigger an immediate rollback/restart race. The
       // caller receives one retry-safe result-pending response instead.
-      if (error instanceof (HttpRequestError as any) && (error as any).code === "RESULT_PENDING")
+      if (error instanceof HttpRequestError && error.code === "RESULT_PENDING")
         throw error;
       if (!changed) {
         host.options.resources.invalidate?.();
