@@ -193,7 +193,7 @@ import { abortRuntime } from "./services/runtime-abort.js";
 import { admitPromptExtension } from "./services/prompt-extension-admission.js";
 import { admitPromptToQueue } from "./services/prompt-queue-admission.js";
 import { sessionViewFromCurrentProjection } from "./services/session-hot-view.js";
-import { handleSecondaryEvent as handleSecondaryEventService, handleRpcEvent as handleRpcEventService } from "./services/runtime-event-handlers.js";
+import { handleSecondaryEvent as handleSecondaryEventService, handleRpcEvent as handleRpcEventService, type RuntimeEventHost } from "./services/runtime-event-handlers.js";
 import { bootstrap as bootstrapPrimary } from "./services/primary-bootstrap.js";
 import { dispatchSecondaryPrompt } from "./services/prompt-secondary-dispatch.js";
 import { dispatchPrimaryPrompt } from "./services/prompt-primary-dispatch.js";
@@ -2895,7 +2895,7 @@ export class PiChatApp {
     }
   }
   private handleSecondaryEvent(runtime: SecondaryRuntime, event: Record<string, unknown>, source?: RpcEventSource): void {
-    handleSecondaryEventService(this, runtime, event, source);
+    handleSecondaryEventService(this as unknown as RuntimeEventHost, runtime, event, source);
   }
   /**
    * Pi documents stdout events as a JSONL stream and emits agent_settled only
@@ -3350,7 +3350,7 @@ export class PiChatApp {
     };
   }
   private handleRpcEvent(event: Record<string, unknown>, source?: RpcEventSource): void {
-    handleRpcEventService(this, event, source);
+    handleRpcEventService(this as unknown as RuntimeEventHost, event, source);
   }
   private browserPrimaryReadiness(
     readiness = this.options.primaryRuntime?.snapshot() || {

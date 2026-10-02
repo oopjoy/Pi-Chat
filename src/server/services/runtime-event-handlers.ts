@@ -1,9 +1,58 @@
 import type { RpcEventSource } from "../rpc-client.js";
-import type { SecondaryRuntime } from "../runtime-pool.js";
+import type { PiChatAppOptions } from "../app.js";
+import type { SecondaryRuntime, RuntimePool } from "../runtime-pool.js";
 import { fastModeStatusFromExtensionEvent } from "../runtime-event-transition.js";
 import { finalizeAcceptedRuntimeEvent } from "./runtime-event-lifecycle.js";
 
-export function handleSecondaryEvent(host: any, runtime: SecondaryRuntime, event: Record<string, unknown>, source?: RpcEventSource): void {
+type RuntimeEventCallback = (...args: any[]) => any;
+
+export interface RuntimeEventHost {
+  activePromptDiagnostic: RuntimeEventCallback;
+  applyRuntimeEventTransition: RuntimeEventCallback;
+  beginSessionRunTiming: RuntimeEventCallback;
+  broadcast: RuntimeEventCallback;
+  broadcastPromptFailureLifecycle: RuntimeEventCallback;
+  broadcastQueue: RuntimeEventCallback;
+  broadcastRpcEvent: RuntimeEventCallback;
+  broadcastSessionActivity: RuntimeEventCallback;
+  cancelInteractiveCopyHook: RuntimeEventCallback;
+  clearNativeSteeringState: RuntimeEventCallback;
+  clearPendingRequest: RuntimeEventCallback;
+  clearPromptDiagnostic: RuntimeEventCallback;
+  closed: boolean;
+  consumeNativeSteeringAdmission: RuntimeEventCallback;
+  dispatching: boolean;
+  queuePaused: boolean;
+  dispatchRuntimeNext: RuntimeEventCallback;
+  drainPrimaryAfterSettlement: RuntimeEventCallback;
+  drainSecondaryAfterSettlement: RuntimeEventCallback;
+  finalizePersistedDraftWhenVisible: RuntimeEventCallback;
+  finishSessionRunTiming: RuntimeEventCallback;
+  hasNativeSteeringPending: RuntimeEventCallback;
+  nativeSteeringResetAfterSettlement: Map<string, number>;
+  pendingPrimaryFastMode: { rpcGeneration: number; active: boolean } | undefined;
+  pendingRequestForSession: RuntimeEventCallback;
+  primaryBoundSessionId: string;
+  primaryRpcGeneration: number;
+  recordRuntimeFailure: RuntimeEventCallback;
+  rpcOutcomePendingBySession: Set<string>;
+  rpcOutcomeTokensBySession: Map<string, string>;
+  runtimePool: Pick<RuntimePool, "get" | "touch">;
+  scheduleModelRuntimeSync: RuntimeEventCallback;
+  settleNativeSteeringDequeue: RuntimeEventCallback;
+  setFastModeActive: RuntimeEventCallback;
+  traceActivePrompt: RuntimeEventCallback;
+  traceState: RuntimeEventCallback;
+  uncertainCompactionBySession: Set<string>;
+  uncertainExtensionResponseBySession: Set<string>;
+  updateHotCompactionState: RuntimeEventCallback;
+  updateNativeSteeringSnapshot: RuntimeEventCallback;
+  warmPrimaryMessageSnapshot: RuntimeEventCallback;
+  warmRuntimeMessageSnapshot: RuntimeEventCallback;
+  options: Pick<PiChatAppOptions, "rpc" | "primaryRuntime">;
+}
+
+export function handleSecondaryEvent(host: RuntimeEventHost, runtime: SecondaryRuntime, event: Record<string, unknown>, source?: RpcEventSource): void {
 
     if (host.closed) return;
     const currentGeneration = runtime.rpc.currentGeneration?.() || 0;
@@ -147,7 +196,7 @@ export function handleSecondaryEvent(host: any, runtime: SecondaryRuntime, event
 
 }
 
-export function handleRpcEvent(host: any, event: Record<string, unknown>, source?: RpcEventSource): void {
+export function handleRpcEvent(host: RuntimeEventHost, event: Record<string, unknown>, source?: RpcEventSource): void {
 
     if (host.closed) return;
     const currentGeneration = host.options.rpc.currentGeneration?.() || 0;
