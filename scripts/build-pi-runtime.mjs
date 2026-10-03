@@ -7,7 +7,7 @@ import { build, version as esbuildVersion } from "esbuild";
 const PI_PACKAGE_NAME = "@earendil-works/pi-coding-agent";
 const BUNDLE_SCHEMA_VERSION = 2;
 const BUNDLE_LAYOUT_VERSION = 1;
-const BUNDLE_RECIPE_VERSION = 4;
+const BUNDLE_RECIPE_VERSION = 5;
 const MAX_BUNDLE_SOURCE_INPUTS = 4_096;
 
 function sha256(content) {
@@ -78,8 +78,12 @@ await mkdir(packageDist, { recursive: true });
 
 try {
 const { patchPiRpcModeSource } = await import(pathToFileURL(resolve("resources", "runtime", "pi-chat-rpc-loader.mjs")).href);
-const loaderMarker = `...(isBunBinary || isNodeSeaBinary || isBundledNode\n            ? { virtualModules: VIRTUAL_MODULES, tryNative: false }\n            : isTypeScriptSourceRuntime`;
-const bundledLoaderMarker = `...(isBunBinary || isNodeSeaBinary || isBundledNode || process.env.PI_CHAT_BUNDLED_RUNTIME === "1"\n            ? { virtualModules: VIRTUAL_MODULES, tryNative: false }\n            : isTypeScriptSourceRuntime`;
+const legacyLoaderMarker = `...(isBunBinary || isNodeSeaBinary || isBundledNode\n            ? { virtualModules: VIRTUAL_MODULES, tryNative: false }\n            : isTypeScriptSourceRuntime`;
+const legacyBundledLoaderMarker = `...(isBunBinary || isNodeSeaBinary || isBundledNode || process.env.PI_CHAT_BUNDLED_RUNTIME === "1"\n            ? { virtualModules: VIRTUAL_MODULES, tryNative: false }\n            : isTypeScriptSourceRuntime`;
+const modernLoaderMarker = `const resolutionOptions = usesEmbeddedModules\n        ? { virtualModules: await getVirtualModules(), tryNative: false }`;
+const modernBundledLoaderMarker = `const resolutionOptions = (usesEmbeddedModules || process.env.PI_CHAT_BUNDLED_RUNTIME === "1")\n        ? { virtualModules: await getVirtualModules(), tryNative: false }`;
+const modernJitiMarker = `createJitiPromise ??= (usesEmbeddedModules ? import("./jiti-static-loader.js") : import("./jiti-loader.js"))`;
+const modernBundledJitiMarker = `createJitiPromise ??= ((usesEmbeddedModules || process.env.PI_CHAT_BUNDLED_RUNTIME === "1") ? import("./jiti-static-loader.js") : import("./jiti-loader.js"))`;
 let transformedLoader = false;
 let transformedExtensionImport = false;
 let transformedExtensionFactory = false;
@@ -96,10 +100,22 @@ const extensionLoaderPlugin = {
       }
       if (resolve(args.path) !== extensionLoader) return undefined;
       const source = await readFile(args.path, "utf8");
-      if (!source.includes(loaderMarker)) {
+      const loaderMarker = source.includes(legacyLoaderMarker)
+        ? legacyLoaderMarker
+        : source.includes(modernLoaderMarker)
+          ? modernLoaderMarker
+          : null;
+      const bundledLoaderMarker = loaderMarker === legacyLoaderMarker
+        ? legacyBundledLoaderMarker
+        : modernBundledLoaderMarker;
+      if (!loaderMarker) {
         throw new Error("Installed Pi extension loader is incompatible with the bundled-runtime transform");
       }
-      transformedLoader = true;
+      const hasModernJitiMarker = source.includes(modernJitiMarker);
+      if (hasModernJitiMarker) transformedLoader = true;
+      else if (!source.includes("getCreateJiti"))
+        throw new Error("Installed Pi extension loader has no supported Jiti lifecycle marker");
+      else transformedLoader = true;
       const importMarker = "const module = await jiti.import(extensionPath, { default: true });";
       const factoryMarker = "await factory(load.api);";
       if (!source.includes(importMarker) || !source.includes(factoryMarker)) {
@@ -109,6 +125,7 @@ const extensionLoaderPlugin = {
       transformedExtensionFactory = true;
       const tracedSource = source
         .replace(loaderMarker, bundledLoaderMarker)
+        .replace(modernJitiMarker, modernBundledJitiMarker)
         .replace(
           importMarker,
           "const extensionOrdinal = (globalThis.__piChatStartupExtensionOrdinal = (globalThis.__piChatStartupExtensionOrdinal || 0) + 1);\n    globalThis.__piChatStartupMark?.(\"X\", extensionOrdinal);\n    const module = await jiti.import(extensionPath, { default: true });\n    globalThis.__piChatStartupMark?.(\"Y\", extensionOrdinal);",
