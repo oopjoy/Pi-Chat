@@ -5,6 +5,7 @@ Run every item from a clean, isolated staging directory. Do not replace the live
 ## Build And Tests
 
 - [ ] `npm run typecheck` passes.
+- [ ] `npm run lint` completes; the initial rollout may report warnings while the existing debt is reduced.
 - [ ] `npm run check:type-debt` passes without exceeding the committed baseline.
 - [ ] Full unit validation passes with a unique absolute `PI_CHAT_DIST_DIR` under the OS temp directory.
 - [ ] Complete Playwright passes with a different unique absolute `PI_CHAT_DIST_DIR` under the OS temp directory.

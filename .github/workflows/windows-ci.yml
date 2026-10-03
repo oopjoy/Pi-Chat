@@ -29,6 +29,7 @@ jobs:
       - run: npm ci
       - run: npx playwright install chromium
       - run: npm run typecheck
+      - run: npm run lint
       - run: npm run check:type-debt
       - run: npm run verify:unit
         env:

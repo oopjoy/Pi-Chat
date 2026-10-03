@@ -31,6 +31,7 @@ jobs:
       - run: npm ci
       - run: npx playwright install chromium
       - run: npm run typecheck
+      - run: npm run lint
       - run: npm run check:type-debt
       - run: npm run verify:unit
       - run: npm run verify:e2e
