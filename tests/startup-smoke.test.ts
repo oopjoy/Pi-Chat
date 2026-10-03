@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { once } from "node:events";
 import { createServer } from "node:net";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -85,13 +86,17 @@ function parseSsePayloads(buffer: string): Record<string, unknown>[] {
 }
 
 const fakeRpcEntry = String.raw`
-import { appendFileSync } from "node:fs";
+import { appendFileSync, existsSync } from "node:fs";
 import { createInterface } from "node:readline";
 const log = process.env.PI_CHAT_SMOKE_LOG;
 const reply = (id, data) => process.stdout.write(JSON.stringify({ type: "response", id, success: true, data }) + "\n");
 const emit = (event) => process.stdout.write(JSON.stringify(event) + "\n");
 const handlers = {
-  get_state: () => ({ model: null, isStreaming: false, sessionId: "fake", sessionFile: process.env.PI_CHAT_SMOKE_SESSION_FILE }),
+  get_state: async () => {
+    const holdFile = process.env.PI_CHAT_SMOKE_HOLD_READY_FILE;
+    while (holdFile && existsSync(holdFile)) await new Promise((resolve) => setTimeout(resolve, 10));
+    return { model: null, isStreaming: false, sessionId: "fake", sessionFile: process.env.PI_CHAT_SMOKE_SESSION_FILE };
+  },
   get_messages: () => ({ messages: [] }),
   get_available_models: () => ({ models: [] }),
   get_commands: () => ({ commands: [] }),
@@ -106,10 +111,12 @@ const handlers = {
     return {};
   },
 };
-createInterface({ input: process.stdin }).on("line", (line) => {
-  const command = JSON.parse(line);
+const dispatch = async (command) => {
   appendFileSync(log, String(command.type) + "\n");
-  reply(command.id, handlers[command.type]?.() || {});
+  reply(command.id, await handlers[command.type]?.() || {});
+};
+createInterface({ input: process.stdin }).on("line", (line) => {
+  void dispatch(JSON.parse(line));
 });
 `;
 
@@ -245,6 +252,48 @@ test("compiled server starts against fake RPC, probes capabilities, serves guard
     if (child.exitCode === null) child.kill("SIGTERM");
     await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 5_000))]);
     assert.ok(child.exitCode !== null || child.signalCode !== null, "SIGTERM should terminate the compiled Pi Chat server");
+    await removeWithWindowsRetry(root);
+  }
+});
+
+test("HTTP handshake is available while Primary capability probing is still blocked", { timeout: 45_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-startup-ready-"));
+  const rpcEntry = join(root, "fake-rpc.mjs");
+  const rpcLog = join(root, "rpc.log");
+  const holdReadyFile = join(root, "hold-primary-ready");
+  const agentDir = join(root, "agent");
+  const sessionFile = join(agentDir, "session.jsonl");
+  const port = await freePort();
+  await mkdir(agentDir, { recursive: true });
+  await writeFile(sessionFile, `${JSON.stringify({ type: "session", id: "fake", cwd: root })}\n`, "utf8");
+  await writeFile(rpcEntry, fakeRpcEntry, "utf8");
+  await writeFile(holdReadyFile, "hold", "utf8");
+  const child = spawn(process.execPath, [join(compiledDist, "server", "server", "index.js"), "--host", "127.0.0.1", "--port", String(port), "--cwd", root], {
+    cwd: projectRoot,
+    env: {
+      ...process.env,
+      PI_CHAT_PI_ENTRY: rpcEntry,
+      PI_CODING_AGENT_DIR: agentDir,
+      PI_CHAT_SMOKE_LOG: rpcLog,
+      PI_CHAT_SMOKE_SESSION_FILE: sessionFile,
+      PI_CHAT_SMOKE_HOLD_READY_FILE: holdReadyFile,
+    },
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  try {
+    const origin = `http://127.0.0.1:${port}`;
+    const handshake = await waitFor(`${origin}/api/bootstrap/handshake`, child);
+    assert.equal(handshake.status, 200);
+    assert.ok((await handshake.json() as { requestToken?: string }).requestToken);
+    assert.equal(existsSync(holdReadyFile), true, "the capability probe must still be blocked when HTTP becomes reachable");
+    await rm(holdReadyFile, { force: true });
+    await waitForCapabilityProbe(rpcLog, child);
+  } finally {
+    const exited = child.exitCode === null ? once(child, "exit") : Promise.resolve();
+    if (child.exitCode === null) child.kill("SIGTERM");
+    await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 5_000))]);
+    assert.ok(child.exitCode !== null || child.signalCode !== null, "SIGTERM should terminate the delayed startup fixture");
     await removeWithWindowsRetry(root);
   }
 });
