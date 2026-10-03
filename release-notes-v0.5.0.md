@@ -46,7 +46,7 @@ The release package is source-authority aligned with the tagged revision and inc
 ## Installation
 
 1. Install Node.js 22.19 or newer.
-2. Install and authenticate Pi 1.0.0 or a compatible Pi with the required RPC surface.
+2. Install and authenticate Pi 1.0.1 or a compatible Pi with the required RPC surface.
 3. Download `pi-chat-windows-0.5.0.zip` and its `.sha256` sidecar.
 4. Verify the checksum, extract the ZIP, and run `start-pi-chat.cmd` or `start-pi-chat-ui.ps1`.
 5. Open the loopback listener shown by the launcher, normally `http://127.0.0.1:30170`.

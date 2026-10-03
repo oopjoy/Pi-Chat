@@ -7,7 +7,7 @@ import { build, version as esbuildVersion } from "esbuild";
 const PI_PACKAGE_NAME = "@earendil-works/pi-coding-agent";
 const BUNDLE_SCHEMA_VERSION = 2;
 const BUNDLE_LAYOUT_VERSION = 1;
-const BUNDLE_RECIPE_VERSION = 5;
+const BUNDLE_RECIPE_VERSION = 6;
 const MAX_BUNDLE_SOURCE_INPUTS = 4_096;
 
 function sha256(content) {
@@ -32,6 +32,20 @@ async function regularFiles(directory) {
 function isInside(path, parent) {
   const offset = relative(parent, path);
   return offset === "" || (!offset.startsWith("..") && !isAbsolute(offset));
+}
+
+function packagePathUnder(root, packageName) {
+  return resolve(root, "node_modules", ...packageName.split("/"));
+}
+
+function packageLocatorForRuntime(ownerRoot, ownerName, sourceRoot) {
+  const localLocator = relative(sourceRoot, ownerRoot).split(/[/\\\\]/).join("/");
+  if (isInside(ownerRoot, sourceRoot)) return localLocator || ".";
+  // npm may hoist Pi's transitive dependencies into the application root while
+  // the installed/global Pi package keeps the same package at its own nested
+  // node_modules path. Record the runtime-relative locator, not the build-only
+  // hoisted path, so the manifest remains portable and fail-closed at launch.
+  return relative(sourceRoot, packagePathUnder(sourceRoot, ownerName)).split(/[/\\\\]/).join("/");
 }
 
 async function findPackageRoot(entryPath, expectedName) {
@@ -67,6 +81,8 @@ const piVersion = sourcePackage.manifest.version;
 if (typeof piVersion !== "string" || !piVersion) throw new Error("Bundled Pi package has no version");
 
 const rpcEntry = resolve(sourcePackage.root, "dist", "rpc-entry.js");
+const piAiEntry = fileURLToPath(import.meta.resolve("@earendil-works/pi-ai/compat", pathToFileURL(rpcEntry).href));
+const piAiPackage = await findPackageRoot(piAiEntry, "@earendil-works/pi-ai");
 const extensionLoader = resolve(sourcePackage.root, "dist", "core", "extensions", "loader.js");
 const rpcMode = resolve(sourcePackage.root, "dist", "modes", "rpc", "rpc-mode.js");
 if (!isInside(rpcEntry, sourcePackage.root) || !isInside(extensionLoader, sourcePackage.root) || !isInside(rpcMode, sourcePackage.root)) {
@@ -187,7 +203,7 @@ await cp(
 // Pi AI keeps OAuth flows behind runtime dynamic imports. In the bundled
 // runtime those imports resolve relative to package/dist, so copy the OAuth
 // modules and their relative Pi AI dependencies into the staged package.
-const piAiDist = resolve(sourcePackage.root, "node_modules", "@earendil-works", "pi-ai", "dist");
+const piAiDist = resolve(piAiPackage.root, "dist");
 await cp(resolve(piAiDist, "auth", "oauth"), resolve(packageDist, "auth", "oauth"), { recursive: true });
 await cp(resolve(piAiDist, "utils"), resolve(packageDist, "utils"), { recursive: true });
 await cp(resolve(piAiDist, "providers"), resolve(packageDist, "providers"), { recursive: true });
@@ -221,7 +237,7 @@ const bundledInputs = [...new Set([
 const sourceInputs = [];
 for (const inputPath of bundledInputs) {
   const owner = await findPackageRoot(inputPath);
-  const packageLocator = relative(sourcePackage.root, owner.root).split(/[/\\\\]/).join("/") || ".";
+  const packageLocator = packageLocatorForRuntime(owner.root, owner.manifest.name, sourcePackage.root);
   const relativePath = relative(owner.root, inputPath).split(/[/\\\\]/).join("/");
   if (
     packageLocator.startsWith("../")

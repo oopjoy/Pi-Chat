@@ -79,7 +79,7 @@
     "install:shortcuts": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-shortcuts.ps1"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "1.0.0",
+    "@earendil-works/pi-coding-agent": "1.0.1",
     "@eslint/js": "^10.0.1",
     "@playwright/test": "^1.62.0",
     "@types/node": "^24.10.0",
