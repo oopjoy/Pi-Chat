@@ -303,11 +303,12 @@ export function createSessionManagementActions(host: Record<string, any>) {
       (desiredSessionIdRef.current && desiredSessionIdRef.current !== deletedId)
     )
       return;
-    const replacement = sessionsAfterDeletion.find(
-      (session: any) => session.id !== deletedId,
-    );
-    if (replacement) void viewSession(replacement.id);
-    else createSession();
+    // Deleting the conversation currently being read is an explicit end of
+    // that reading context. Do not silently move the user into another recent
+    // Session; create the New presentation instead. Other Sessions remain in
+    // the sidebar and can be selected explicitly.
+    void sessionsAfterDeletion;
+    createSession();
   };
 
   /** Resolve only operations proven by a full authoritative Session inventory. */
@@ -707,9 +708,6 @@ export function createSessionManagementActions(host: Record<string, any>) {
     const wasViewed =
       deletingId === desiredSessionIdRef.current ||
       deletingId === viewedSessionIdRef.current;
-    const replacement = wasViewed
-      ? sessions.find((session: any) => session.id !== deletingId)
-      : undefined;
     const runEpochGeneration = runEpochGenerationRef.current;
     const token = ++optimisticSessionMutationTokenRef.current;
     optimisticDeletesRef.current.set(deletingId, {
@@ -731,10 +729,7 @@ export function createSessionManagementActions(host: Record<string, any>) {
       current.filter((session: any) => session.id !== deletingId),
     );
     setSessionsTotal((current: any) => Math.max(0, current - 1));
-    if (wasViewed) {
-      if (replacement) void viewSession(replacement.id);
-      else createSession();
-    }
+    if (wasViewed) createSession();
     void api
       .deleteSession(deletingId)
       .then((data: any) => {

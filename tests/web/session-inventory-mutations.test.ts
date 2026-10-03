@@ -902,7 +902,7 @@ test("rename and delete keep their immediate changes when the backend confirms",
   }
 });
 
-test("viewed delete immediately selects an existing replacement and success keeps it selected", async () => {
+test("viewed delete opens a New conversation instead of selecting a recent replacement", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../../src/web/api");
@@ -968,14 +968,7 @@ test("viewed delete immediately selects an existing replacement and success keep
         .click(),
     );
     await act(async () => Promise.resolve());
-    assert.equal(
-      dom.window.document.querySelector(".topbar-title")?.textContent,
-      "Replacement",
-    );
-    assert.equal(
-      dom.window.document.querySelector(".session-name")?.textContent,
-      "Replacement",
-    );
+    assert.match(dom.window.document.querySelector(".topbar-title")?.textContent || "", /新对话/);
     await act(async () =>
       resolveDelete({
         ...bootstrap,
@@ -984,10 +977,7 @@ test("viewed delete immediately selects an existing replacement and success keep
         activeSessionId: replacement.id,
       }),
     );
-    assert.equal(
-      dom.window.document.querySelector(".topbar-title")?.textContent,
-      "Replacement",
-    );
+    assert.ok(dom.window.document.querySelector(".draft-workspace"));
     assert.match(
       dom.window.document.querySelector(".app-toast")?.textContent || "",
       /对话已删除/,
@@ -998,7 +988,7 @@ test("viewed delete immediately selects an existing replacement and success keep
   }
 });
 
-test("local delete keeps its deferred replacement navigation after success settles", async () => {
+test("local delete keeps the New presentation after success settles", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../../src/web/api");
@@ -1061,10 +1051,7 @@ test("local delete keeps its deferred replacement navigation after success settl
         .click(),
     );
     await act(async () => Promise.resolve());
-    assert.match(
-      dom.window.document.querySelector(".pane-loading")?.textContent || "",
-      /Deferred replacement/,
-    );
+    assert.match(dom.window.document.querySelector(".topbar-title")?.textContent || "", /新对话/);
 
     await act(async () =>
       resolveDelete({
@@ -1074,10 +1061,7 @@ test("local delete keeps its deferred replacement navigation after success settl
         activeSessionId: replacement.id,
       }),
     );
-    assert.match(
-      dom.window.document.querySelector(".pane-loading")?.textContent || "",
-      /Deferred replacement/,
-    );
+    assert.match(dom.window.document.querySelector(".topbar-title")?.textContent || "", /新对话/);
 
     await act(async () =>
       resolveReplacement({
@@ -1087,14 +1071,7 @@ test("local delete keeps its deferred replacement navigation after success settl
         runtimeStatus: "view-only",
       }),
     );
-    assert.equal(
-      dom.window.document.querySelector(".topbar-title")?.textContent,
-      "Deferred replacement",
-    );
-    assert.equal(
-      dom.window.document.querySelector(".session-name")?.textContent,
-      "Deferred replacement",
-    );
+    assert.ok(dom.window.document.querySelector(".draft-workspace"));
   } finally {
     await act(async () => root.unmount());
     restoreApi();
@@ -1194,10 +1171,7 @@ test("a deleted session cannot return from a deferred activation response", asyn
       dom.window.document.querySelectorAll(".session-row").length,
       1,
     );
-    assert.match(
-      dom.window.document.querySelector(".topbar-title")?.textContent || "",
-      /Active/,
-    );
+    assert.match(dom.window.document.body.textContent || "", /新对话/);
     assert.doesNotMatch(
       dom.window.document.body.textContent || "",
       /Activation target|deleted activation transcript/,
