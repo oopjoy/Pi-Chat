@@ -45,6 +45,7 @@ function sample(cell: ReturnType<typeof streamingCadenceMatrix>[number]): Stream
     },
     browser: {
       firstVisibleDomObservationMs: 10,
+      firstVisibleWireToPaintOpportunityMs: 8,
       firstVisibleDomObservationPaintOpportunityMs: 20,
       messageEndPaintOpportunityMs: 300,
       visibleDomObservationCount: 6,
@@ -124,6 +125,7 @@ function validResult() {
     },
     metrics: {
       firstVisibleDomObservationMs: "safe metric",
+      firstVisibleWireToPaintOpportunityMs: "safe metric",
       firstVisibleDomObservationPaintOpportunityMs: "safe metric",
       messageEndPaintOpportunityMs: "safe metric",
       browserStartSkewMs: "safe metric",

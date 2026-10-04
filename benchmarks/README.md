@@ -99,7 +99,7 @@ The browser lane measures:
 - `hot-switch`: return to the same natural recent pane through `browser-cache` in one browser context;
 - `load-earlier`: expand that same generated 1000-turn Session and compare the viewport position of the same pre-existing user-message anchor.
 
-It records action-to-settled-frame time, existing Pi Chat pane-commit time, DOM node count, renderer Long Tasks overlapping the action window, Chromium renderer JS heap, load-earlier anchor error, and optional maintenance-build React render evidence. React evidence is marked unsupported for ordinary production builds. A missing completion signal is an operational failure, not a performance sample.
+It records action-to-settled-frame time, existing Pi Chat pane-commit time, DOM node count, renderer Long Tasks overlapping the action window, Chromium renderer JS heap, load-earlier anchor error, and optional maintenance-build React render evidence. The streaming cadence lane also records the first visible wire frame to guarded paint opportunity, separating transport-to-paint from the broader agent-start-to-paint interval. React evidence is marked unsupported for ordinary production builds. A missing completion signal is an operational failure, not a performance sample.
 
 Server-only fixtures cover artificially padded 10 MiB and 50 MiB size targets, a natural 1000-user-turn Session, a tool/process-heavy turn, Markdown/KaTeX-heavy content, image metadata, and encoded image content. The browser lane deliberately uses only the natural 1000-turn fixture: size-padding fixtures append artificial assistant payloads after the final user turn and would conflate JSONL size with giant visible-tail rendering.
 

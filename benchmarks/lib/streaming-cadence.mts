@@ -46,6 +46,7 @@ export interface StreamingCadenceSample {
   };
   browser: {
     firstVisibleDomObservationMs: number;
+    firstVisibleWireToPaintOpportunityMs: number;
     firstVisibleDomObservationPaintOpportunityMs: number;
     messageEndPaintOpportunityMs: number;
     visibleDomObservationCount: number;
@@ -148,6 +149,7 @@ export function aggregateStreamingCadence(samples: StreamingCadenceSample[]) {
       cell,
       iterations: selected.length,
       firstVisibleDomObservationMs: summary((sample) => sample.browser.firstVisibleDomObservationMs),
+      firstVisibleWireToPaintOpportunityMs: summary((sample) => sample.browser.firstVisibleWireToPaintOpportunityMs),
       firstVisibleDomObservationPaintOpportunityMs: summary((sample) => sample.browser.firstVisibleDomObservationPaintOpportunityMs),
       messageEndPaintOpportunityMs: summary((sample) => sample.browser.messageEndPaintOpportunityMs),
       visibleDomObservationCount: summary((sample) => sample.browser.visibleDomObservationCount),
@@ -258,7 +260,7 @@ const SOURCE_KEYS = [
 ] as const;
 
 const BROWSER_KEYS = [
-  "firstVisibleDomObservationMs", "firstVisibleDomObservationPaintOpportunityMs",
+  "firstVisibleDomObservationMs", "firstVisibleWireToPaintOpportunityMs", "firstVisibleDomObservationPaintOpportunityMs",
   "messageEndPaintOpportunityMs", "visibleDomObservationCount", "receivedUpdateFrames",
   "receivedUpdateBytes", "visibleReceivedUpdateFrames", "allExpectedSessionsSettled",
   "settledSessions", "startSkewMs", "finalMarkerVisible", "allSessionsReceivedUpdates",
@@ -296,7 +298,7 @@ function assertSample(value: unknown, label: string): void {
 
   const browser = asRecord(record.browser, BROWSER_KEYS, `${label}.browser`);
   for (const key of [
-    "firstVisibleDomObservationMs", "firstVisibleDomObservationPaintOpportunityMs",
+    "firstVisibleDomObservationMs", "firstVisibleWireToPaintOpportunityMs", "firstVisibleDomObservationPaintOpportunityMs",
     "messageEndPaintOpportunityMs", "visibleDomObservationCount", "receivedUpdateFrames",
     "receivedUpdateBytes", "visibleReceivedUpdateFrames", "settledSessions", "startSkewMs",
     "parseErrors", "offscreenTerminalCachesVerified",
@@ -325,7 +327,7 @@ function assertSample(value: unknown, label: string): void {
 }
 
 const AGGREGATE_KEYS = [
-  "firstVisibleDomObservationMs", "firstVisibleDomObservationPaintOpportunityMs",
+  "firstVisibleDomObservationMs", "firstVisibleWireToPaintOpportunityMs", "firstVisibleDomObservationPaintOpportunityMs",
   "messageEndPaintOpportunityMs", "visibleDomObservationCount", "receivedUpdateFrames",
   "receivedUpdateBytes", "browserStartSkewMs", "sourceStartSkewMs",
   "actualSourceDurationMs", "maxFrameGapMs", "serverSnapshotsWritten",
@@ -383,7 +385,7 @@ export function assertStreamingCadenceResultPrivacy(value: unknown): void {
   }
 
   const metrics = asRecord(result.metrics, [
-    "firstVisibleDomObservationMs", "firstVisibleDomObservationPaintOpportunityMs",
+    "firstVisibleDomObservationMs", "firstVisibleWireToPaintOpportunityMs", "firstVisibleDomObservationPaintOpportunityMs",
     "messageEndPaintOpportunityMs", "browserStartSkewMs", "sourceTiming", "frameGaps",
     "longTasks",
   ], "metrics");

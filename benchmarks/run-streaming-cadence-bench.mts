@@ -380,6 +380,7 @@ async function installBrowserProbe(context: BrowserContext): Promise<void> {
       visibleReceivedUpdateFrames: number;
       visibleCommitCount: number;
       firstVisibleCommitAt: number | null;
+      firstVisibleWireAt: number | null;
       firstPaintOpportunityAt: number | null;
       terminalPaintOpportunityAt: number | null;
       finalMarkerVisible: boolean;
@@ -412,6 +413,7 @@ async function installBrowserProbe(context: BrowserContext): Promise<void> {
       visibleReceivedUpdateFrames: 0,
       visibleCommitCount: 0,
       firstVisibleCommitAt: null,
+      firstVisibleWireAt: null,
       firstPaintOpportunityAt: null,
       terminalPaintOpportunityAt: null,
       finalMarkerVisible: false,
@@ -488,6 +490,7 @@ async function installBrowserProbe(context: BrowserContext): Promise<void> {
         const output = {
           eventSourceUrl: this.eventSourceUrl,
           firstVisibleDomObservationMs: this.firstVisibleCommitAt === null ? -1 : this.firstVisibleCommitAt - visibleStartedAt,
+          firstVisibleWireToPaintOpportunityMs: this.firstVisibleWireAt === null || this.firstPaintOpportunityAt === null ? -1 : this.firstPaintOpportunityAt - this.firstVisibleWireAt,
           firstVisibleDomObservationPaintOpportunityMs: this.firstPaintOpportunityAt === null ? -1 : this.firstPaintOpportunityAt - visibleStartedAt,
           messageEndPaintOpportunityMs: this.terminalPaintOpportunityAt === null ? -1 : this.terminalPaintOpportunityAt - visibleStartedAt,
           visibleDomObservationCount: this.visibleCommitCount,
@@ -569,7 +572,10 @@ async function installBrowserProbe(context: BrowserContext): Promise<void> {
               if (evidence) evidence.updates += 1;
               state.receivedUpdateFrames += 1;
               state.receivedUpdateBytes += new TextEncoder().encode(messageEvent.data).byteLength;
-              if (sessionId === state.visibleSessionId) state.visibleReceivedUpdateFrames += 1;
+              if (sessionId === state.visibleSessionId) {
+                if (state.firstVisibleWireAt === null) state.firstVisibleWireAt = now;
+                state.visibleReceivedUpdateFrames += 1;
+              }
             }
             if (eventType === "message_end") {
               if (evidence) {
@@ -920,10 +926,12 @@ async function measureSample(options: {
       || measuredSource.actualMaxLatenessMs > MAX_SOURCE_LATENESS_MS
     ) throw new Error("Streaming benchmark source scheduling exceeded operational tolerance");
     const firstVisibleDomObservationMs = Number(browserRaw.firstVisibleDomObservationMs);
+    const firstVisibleWireToPaintOpportunityMs = Number(browserRaw.firstVisibleWireToPaintOpportunityMs);
     const firstVisibleDomObservationPaintOpportunityMs = Number(browserRaw.firstVisibleDomObservationPaintOpportunityMs);
     const messageEndPaintOpportunityMs = Number(browserRaw.messageEndPaintOpportunityMs);
     if (
       firstVisibleDomObservationMs < 0
+      || firstVisibleWireToPaintOpportunityMs < 0
       || firstVisibleDomObservationPaintOpportunityMs < 0
       || messageEndPaintOpportunityMs < 0
       || browserRaw.finalMarkerVisible !== true
@@ -950,6 +958,7 @@ async function measureSample(options: {
       source: { ...metadata, ...measuredSource },
       browser: {
         firstVisibleDomObservationMs: round(firstVisibleDomObservationMs),
+        firstVisibleWireToPaintOpportunityMs: round(firstVisibleWireToPaintOpportunityMs),
         firstVisibleDomObservationPaintOpportunityMs: round(firstVisibleDomObservationPaintOpportunityMs),
         messageEndPaintOpportunityMs: round(messageEndPaintOpportunityMs),
         visibleDomObservationCount: Number(browserRaw.visibleDomObservationCount),
@@ -1289,6 +1298,7 @@ export async function runStreamingCadenceBenchmark(options: {
       },
       metrics: {
         firstVisibleDomObservationMs: "Browser time from the visible Session agent_start frame to the first frame-coalesced DOM text observation of changed assistant output.",
+        firstVisibleWireToPaintOpportunityMs: "Browser time from the first visible assistant update frame to the guarded double-requestAnimationFrame opportunity after the first DOM observation.",
         firstVisibleDomObservationPaintOpportunityMs: "Browser time from visible agent_start to the guarded double-requestAnimationFrame opportunity after that DOM observation.",
         messageEndPaintOpportunityMs: "Browser time from visible agent_start to the double-requestAnimationFrame opportunity after the visible message_end transport frame.",
         browserStartSkewMs: "Difference between earliest and latest expected agent_start receive times in the browser.",
@@ -1370,7 +1380,7 @@ function printSummary(result: StreamingCadenceResult): void {
     const cell = summary.cell;
     console.log(
       `${cell.key}/${cell.concurrency}/${cell.contentKind}: first DOM observation p50 ${summary.firstVisibleDomObservationMs.median.toFixed(2)} ms; `
-      + `observation paint opportunity p50 ${summary.firstVisibleDomObservationPaintOpportunityMs.median.toFixed(2)} ms; message_end paint opportunity p50 ${summary.messageEndPaintOpportunityMs.median.toFixed(2)} ms; `
+      + `first-wire→paint p50 ${summary.firstVisibleWireToPaintOpportunityMs.median.toFixed(2)} ms; observation paint opportunity p50 ${summary.firstVisibleDomObservationPaintOpportunityMs.median.toFixed(2)} ms; message_end paint opportunity p50 ${summary.messageEndPaintOpportunityMs.median.toFixed(2)} ms; `
       + `max frame gap p50 ${summary.maxFrameGapMs.median.toFixed(2)} ms`,
     );
   }
