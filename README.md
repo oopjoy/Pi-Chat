@@ -63,7 +63,7 @@ Release ZIP 是 Windows-first 的可运行包；源码开发和从 checkout 运�
 - 文件权限 Gate：作为 Pi Chat 内置辅助确认层呈现；顶栏可切换“严格 / 放行”。严格模式始终确认 `write` / `edit`，并只对可识别的高风险 Bash 做辅助确认；它不是完整 sandbox，不覆盖任意脚本副作用、网络命令、包安装或注册表/启动项修改。随应用自动安装、校验和修复的极小 Pi 工具执行适配器仍在真实工具执行前运行
 - 侧栏提供独立刷新和“完整重启 Pi Chat 并应用更新”：应用级 Lifecycle Barrier 会在构建前同步阻止所有新写操作；新版本先在独立 staging 目录完成并验证，构建失败不会修改当前 `dist`，二次核验全部 Runtime、队列和确认状态通过后才提升产物并执行服务切换。维护期间历史、健康检查和只读 API 保持可用。网页与服务的 build identity 不一致时，普通修改会暂停，但“完整重启”与设置中的“关闭 Pi Chat”仍可请求服务端执行其最终 Busy 检查，避免客户端恢复路径被旧页面状态锁死。SSE/EventSource 是可重连传输，断开不会自动关闭 Pi Chat 服务或托管 RPC；关闭全部浏览器/PWA 页面也只释放窗口、Presence、Session 控制与可回收 Runtime，不再自动停止本地服务。需要停止服务时，使用设置中的“关闭 Pi Chat”显式请求，并由服务端执行全局 Busy 检查
 - 外观设置：主题、字体、字号、行距和对话宽度
-- 设置中的“关于”显示 Pi Chat/Pi Runtime 版本、Build Revision/Fingerprint、Web/服务构建一致性、Primary Runtime 和生命周期，并提供显式 GitHub Release 检查；检查更新只读取最新 Release，不自动下载、安装、重启或部署。诊断还会记录独立 RPC 的 Bundle/direct backend、child entry evaluation、Bundle entry 以及 Extension import/factory 的脱敏阶段时间；设置中的“诊断”可一键导出最近五分钟的服务端/当前浏览器页面结构状态时间线，用于复现 Runtime、SSE 实际投递、Sidebar、Composer、多窗口控制与队列投影不一致；两条时间线始终在内存中有界保留，不需要预先开始录制，也不拥有窗口或 Session 控制权。普通累计流式更新不会逐帧入库，而只在有界计数器中汇总 SSE 调度、背压、无客户端、超限替代、写错误与浏览器调度结果；可见当前 Pane 的首个 Assistant 提交仅通过双 `requestAnimationFrame` 记录一次绘制机会（不代表物理显示或首 token）。排队 Prompt 只复用既有公开 Queue ID，立即发送 Prompt 的诊断 UUID 仅存在于服务内存，最终文件对 Session 与全部 Prompt 关联统一使用一次性别名，且不包含请求 token、聊天/草稿正文、图片、文件路径、密钥或原始错误堆栈
+- 设置中的“关于”显示 Pi Chat/Pi Runtime 版本、Build Revision/Fingerprint、Web/服务构建一致性、Primary Runtime 和生命周期，并提供显式 GitHub Release 检查；检查更新只读取最新 Release，不自动下载、安装、重启或部署。诊断还会记录独立 Direct RPC 的 child entry evaluation、stdout、transport readiness 以及可用的 Extension import/factory 脱敏阶段时间；设置中的“诊断”可一键导出最近五分钟的服务端/当前浏览器页面结构状态时间线，用于复现 Runtime、SSE 实际投递、Sidebar、Composer、多窗口控制与队列投影不一致；两条时间线始终在内存中有界保留，不需要预先开始录制，也不拥有窗口或 Session 控制权。普通累计流式更新不会逐帧入库，而只在有界计数器中汇总 SSE 调度、背压、无客户端、超限替代、写错误与浏览器调度结果；可见当前 Pane 的首个 Assistant 提交仅通过双 `requestAnimationFrame` 记录一次绘制机会（不代表物理显示或首 token）。排队 Prompt 只复用既有公开 Queue ID，立即发送 Prompt 的诊断 UUID 仅存在于服务内存，最终文件对 Session 与全部 Prompt 关联统一使用一次性别名，且不包含请求 token、聊天/草稿正文、图片、文件路径、密钥或原始错误堆栈
 - 可用模型列表、Models 面板与模型切换；支持基于 `~/.pi/agent/models.json` 的自定义模型 Add/Remove
 - 顶栏 Thinking 强度切换
 - 固定左右布局的设置窗口：左侧依次为外观、Models、Skills、Extensions、Packages、诊断；顶栏模型切换与侧栏 Models 快捷入口仍保留
@@ -83,7 +83,7 @@ Release ZIP 是 Windows-first 的可运行包；源码开发和从 checkout 运�
 
 - **Node.js** 22.19 或更高版本（用来运行 Pi Chat 本地服务）
 - **已全局安装并完成模型认证的 Pi**：`pi --version`  
-  Pi Chat **不会**用进程内共享 Pi 内核托管多个 Session；服务仍会为每个执行对话拉起独立 Pi RPC。已验证构建可选择 fingerprint-gated 启动 Bundle 来减少 Node/Defender 冷模块加载，但仍要求本机安装匹配的全局 Pi，并继续从该安装读取配置、Extension、Package、CLI 与 package-relative 资源。Pi 尚未就绪时，已保存的 Session JSONL 仍可浏览；发送或其他需要 Pi 的操作会提示 Runtime 不可用。
+  Pi Chat **不会**用进程内共享 Pi 内核托管多个 Session；服务仍会为每个执行对话拉起独立 Pi RPC。Runtime 直接使用本机安装的全局 Pi，并继续从该安装读取配置、Extension、Package、CLI 与 package-relative 资源。Pi 尚未就绪时，已保存的 Session JSONL 仍可浏览；发送或其他需要 Pi 的操作会提示 Runtime 不可用。
 - Windows 桌面快捷方式可选；Edge PWA 仅影响独立窗口体验，不是硬性依赖
 
 ### 没有安装 Pi 时会发生什么？
@@ -91,7 +91,7 @@ Release ZIP 是 Windows-first 的可运行包；源码开发和从 checkout 运�
 双击或运行 `start-pi-chat.cmd`、`pi-chat-launch.cmd`、桌面 **Pi Chat / Pi Chat Web** 时：
 
 1. 启动器先尝试用 **Node** 启动本机 `http://127.0.0.1:30170` 服务；
-2. 服务先开放 Session JSONL 浏览，再在启动时一次性解析并冻结全局 Pi identity；若内置 RPC Bundle 的 Pi 版本、构建配方、全部 Bundle 输入和全部输出 hash 精确匹配，则 Primary 与所有 Secondary 共用该 immutable 启动计划，否则统一使用全局 `rpc-entry.js`；随后启动独立 RPC 并验证协议能力；
+2. 服务先开放 Session JSONL 浏览，再在启动时一次性解析并冻结全局 Pi identity，随后使用该安装的 `rpc-entry.js` 启动独立 RPC 并验证协议能力；
 3. **找不到 Pi 或兼容性验证失败**时，已保存的历史仍可查看，但发送、运行指令和其他 Runtime 操作会稳定返回“Pi Runtime 不可用”，不会通过隐式重启绕过兼容性验证。找不到 Pi 时会显示：
    `找不到全局 Pi。请先安装 Pi，或设置 PI_CHAT_PI_ENTRY 指向 dist/rpc-entry.js。`
 4. 表现：
@@ -163,7 +163,7 @@ npm run verify
 冷 Runtime 基准使用显式离线 Session 副本，不会向源 JSONL 写入 Prompt：
 
 ```bash
-npm run benchmark:pi-runtime-startup -- --session <offline-session.jsonl> --iterations 5 --backend both --profile core --runtime-dist <staged-dist>
+npm run benchmark:pi-runtime-startup -- --session <offline-session.jsonl> --iterations 5 --profile core
 ```
 
 `core` 隔离 Pi/Session 核心启动；`installed-profile` 显式加载当前安装的 Extension/Profile。该基准保证 fresh process，但不会声称已经清空 Windows 文件缓存或 Defender 缓存。
@@ -249,7 +249,7 @@ Skills 可以向模型注入指令，Plugins/Packages 可以用当前用户的�
 ## 兼容的 Pi 版本
 
 - **已验证：** Pi `1.0.1`（全局 `@earendil-works/pi-coding-agent`；包含 `ask_user_question` RPC dialog fallback 冒烟验证）
-- **探测方式：** 服务启动时冻结一个 Primary/Secondary 共用的 Pi launch plan。Bundle 选择先验证 Pi `1.0.1`、固定 esbuild/配方、全部 Bundle 输入 hash、全部 Runtime 输出 hash 和 Node/平台要求；显式 `PI_CHAT_PI_ENTRY` 保持 direct-only authority，`PI_CHAT_DISABLE_BUNDLED_PI_RUNTIME=1` 可强制使用原始入口。Primary 随后执行 RPC 能力探测（`get_state` / `get_messages` / `get_available_models` / `get_commands` / `get_session_stats`）。不兼容时 Session 浏览继续可用，而新的或需要恢复的 Runtime 写操作返回明确的不可用状态；已经健康的 Secondary 保持可用。任何 Primary 恢复都会重新探测
+- **探测方式：** 服务启动时冻结一个 Primary/Secondary 共用的 Direct Pi launch plan，解析并记录全局 Pi 版本与入口；显式 `PI_CHAT_PI_ENTRY` 保持 direct-only authority。Primary 随后执行 RPC 能力探测（`get_state` / `get_messages` / `get_available_models` / `get_commands` / `get_session_stats`）。不兼容时 Session 浏览继续可用，而新的或需要恢复的 Runtime 写操作返回明确的不可用状态；已经健康的 Secondary 保持可用。任何 Primary 恢复都会重新探测
 - 升级 Pi 后若启动失败，请先 `pi --version`，再确认 Pi Chat 是否为最新 0.5.x
 
 更完整的模块边界与拆分优先级见 `docs/architecture.md`；日常维护入口见 [`docs/change-map.md`](docs/change-map.md)。

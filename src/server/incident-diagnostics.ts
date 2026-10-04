@@ -6,14 +6,13 @@ import type { ApplicationLifecycle } from "../shared/types.js";
 
 export type IncidentRuntimeKind = "host" | "primary" | "secondary";
 export type IncidentStartupMode = "primary" | "persisted-session" | "new-draft" | "recovery";
-export type IncidentStartupBackend = "bundle" | "direct" | "unknown";
+export type IncidentStartupBackend = "direct" | "unknown";
 export type IncidentStartupPhase =
   | "spawn-invoked"
   | "spawn-returned"
   | "child-spawn-event"
   | "child-pre-entry"
   | "child-entry-evaluated"
-  | "bundle-entry"
   | "extension-import-start"
   | "extension-import-end"
   | "extension-factory-start"

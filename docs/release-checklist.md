@@ -23,8 +23,8 @@ Run every item from a clean, isolated staging directory. Do not replace the live
 - [ ] Inspect the ZIP's `dist/build-identity.json`; revision and fingerprint match the release commit and staged build.
 - [ ] Inspect the generated `.manifest.json`; package version, tag, full revision, fingerprint, ZIP name, size, and SHA-256 must match the ZIP and embedded identity.
 - [ ] If packaging fails, confirm stale ZIP, checksum, and manifest sidecars were removed; do not publish a previous sidecar as current evidence.
-- [ ] Verify `dist/resources/pi-runtime/manifest.json`, the RPC Bundle, image worker, CLI wrapper, minimal package identity, and Photon JS/WASM exist; the manifest must pin the recipe/esbuild version, enumerate every bundled source input, and hash every regular Runtime artifact.
-- [ ] On the verified Pi version, confirm startup logs select the fingerprint-matched Bundle; corrupt/mismatch one staged hash and confirm startup falls back to the frozen direct entry before spawning a child.
+- [ ] Verify the staged server, Web assets, direct Pi RPC adapter, startup probe, minimal package identity, and all Windows launcher dependencies exist.
+- [ ] On the verified Pi version, confirm startup logs resolve the expected direct entry and that a child starts only through the local RPC adapter; missing or incompatible Pi must fail closed while JSONL browsing remains available.
 - [ ] Confirm Primary and at least two Secondary Sessions have distinct child PIDs while sharing the same frozen launch plan; no shared SDK host, broker, or process rebinding is introduced.
 - [ ] In a clean directory, launch the ZIP and verify its startup handshake identity matches the embedded Web bundle identity.
 - [ ] Verify the listener on the selected port reports the expected build identity.

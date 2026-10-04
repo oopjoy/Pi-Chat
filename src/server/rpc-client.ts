@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import { delimiter, dirname, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
@@ -225,6 +225,29 @@ export function resolvePiEntry(env: NodeJS.ProcessEnv = process.env): string | n
   return null;
 }
 
+/** Resolve the installed Pi package version without importing its SDK. */
+export function resolvePiVersion(entryPath: string | null): string | undefined {
+  if (!entryPath) return undefined;
+  let directory: string;
+  try { directory = dirname(realpathSync(entryPath)); }
+  catch { return undefined; }
+  while (true) {
+    try {
+      const manifest = JSON.parse(readFileSync(join(directory, "package.json"), "utf8")) as {
+        name?: unknown;
+        version?: unknown;
+      };
+      if (manifest.name === "@earendil-works/pi-coding-agent")
+        return typeof manifest.version === "string" && manifest.version ? manifest.version : undefined;
+    } catch {
+      return undefined;
+    }
+    const parent = dirname(directory);
+    if (parent === directory) return undefined;
+    directory = parent;
+  }
+}
+
 export class PiRpcClient {
   private child: ChildProcessWithoutNullStreams | null = null;
   private source: RpcChildSource | null = null;
@@ -442,8 +465,6 @@ export class PiRpcClient {
         } else if (marker === "I" && !source.entryEvaluatedObserved) {
           source.entryEvaluatedObserved = true;
           this.recordStartupPhase(source, "child-entry-evaluated");
-        } else if (marker === "B") {
-          this.recordStartupPhase(source, "bundle-entry");
         } else {
           const extensionMarker = marker.match(/^([XYFG])(?::([0-9]+))?$/);
           const extensionPhase = extensionMarker?.[1];

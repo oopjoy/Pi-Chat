@@ -103,7 +103,7 @@ const handlers = {
   get_session_stats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }),
   prompt: () => {
     setTimeout(() => {
-      emit({ type: "auto_retry_start", attempt: 1, maxAttempts: 2, delayMs: 1, errorMessage: "provider secret sk-bundled-fixture" });
+      emit({ type: "auto_retry_start", attempt: 1, maxAttempts: 2, delayMs: 1, errorMessage: "provider secret sk-retry-fixture" });
       emit({ type: "agent_start" });
       emit({ type: "auto_retry_end", success: false, attempt: 1, finalError: "final provider failure" });
       emit({ type: "agent_settled" });
@@ -206,7 +206,7 @@ test("compiled server starts against fake RPC, probes capabilities, serves guard
     const prompt = await fetch(`${origin}/api/chat/prompt`, {
       method: "POST",
       headers: { ...guardedHeaders, "content-type": "application/json" },
-      body: JSON.stringify({ sessionId: data.activeSessionId, message: "bundled retry fixture" }),
+      body: JSON.stringify({ sessionId: data.activeSessionId, message: "retry fixture" }),
     });
     assert.equal(prompt.status, 202);
     const promptBody = await prompt.json() as { promptId?: string };

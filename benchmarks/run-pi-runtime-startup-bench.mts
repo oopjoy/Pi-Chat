@@ -2,37 +2,30 @@ import { lstat, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { IncidentDiagnostics, IncidentFields } from "../src/server/incident-diagnostics";
-import { resolvePiRuntimeLaunch } from "../src/server/pi-runtime-bundle";
 import { PiRpcClient, resolvePiEntry } from "../src/server/rpc-client";
 
 interface Options {
   session: string;
   iterations: number;
-  backend: "direct" | "bundle" | "both";
   profile: "core" | "installed-profile";
-  runtimeDist: string;
 }
 
 function parseArgs(argv: string[]): Options {
   let session = "";
   let iterations = 5;
-  let backend: Options["backend"] = "both";
   let profile: Options["profile"] = "core";
-  let runtimeDist = resolve("dist");
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     const value = argv[index + 1];
     if (argument === "--session" && value) { session = resolve(value); index += 1; }
     else if (argument === "--iterations" && value) { iterations = Number(value); index += 1; }
-    else if (argument === "--backend" && (value === "direct" || value === "bundle" || value === "both")) { backend = value; index += 1; }
     else if (argument === "--profile" && (value === "core" || value === "installed-profile")) { profile = value; index += 1; }
-    else if (argument === "--runtime-dist" && value) { runtimeDist = resolve(value); index += 1; }
     else throw new Error(`Unknown or incomplete argument: ${argument}`);
   }
   if (!session) throw new Error("--session requires an offline Session JSONL snapshot");
   if (!Number.isInteger(iterations) || iterations < 1 || iterations > 30)
     throw new Error("--iterations must be an integer from 1 to 30");
-  return { session, iterations, backend, profile, runtimeDist };
+  return { session, iterations, profile };
 }
 
 function collector() {
@@ -70,24 +63,17 @@ if (!sourceStat.isFile()) throw new Error("Session snapshot is not a regular fil
 const sessionBytes = await readFile(canonicalSource);
 const directEntry = resolvePiEntry();
 if (!directEntry) throw new Error("Global Pi RPC entry is unavailable");
-const bundledPlan = await resolvePiRuntimeLaunch({ runtimeDist: options.runtimeDist });
-const backends = options.backend === "both" ? ["direct", "bundle"] as const : [options.backend] as const;
 const startupProbe = resolve("resources", "runtime", "pi-chat-startup-probe.mjs");
-const results: Record<string, unknown> = {};
-
-for (const backend of backends) {
-  if (backend === "bundle" && (!bundledPlan.bundled || !bundledPlan.piEntry))
-    throw new Error(`Bundled Runtime is unavailable: ${bundledPlan.diagnostic}`);
-  const samples: Array<{ totalMs: number; phases: Record<string, number> }> = [];
+const samples: Array<{ totalMs: number; phases: Record<string, number> }> = [];
   for (let iteration = 0; iteration < options.iterations; iteration += 1) {
-    const root = await mkdtemp(join(tmpdir(), `pi-chat-startup-${backend}-`));
+    const root = await mkdtemp(join(tmpdir(), "pi-chat-startup-direct-"));
     const sessionCopy = join(root, "session.jsonl");
     await writeFile(sessionCopy, sessionBytes, { flag: "wx" });
     const observed = collector();
     const client = new PiRpcClient({
       cwd: root,
-      piEntry: backend === "bundle" ? bundledPlan.piEntry! : directEntry,
-      childEnvironment: backend === "bundle" ? bundledPlan.childEnvironment : {},
+      piEntry: directEntry,
+      childEnvironment: {},
       startupProbe,
       diagnostics: observed.diagnostics,
       runtimeKind: "secondary",
@@ -113,11 +99,12 @@ for (const backend of backends) {
       await rm(root, { recursive: true, force: true });
     }
   }
-  results[backend] = {
+const results = {
+  direct: {
     summary: summary(samples.map((sample) => sample.totalMs)),
     samples,
-  };
-}
+  },
+};
 
 console.log(JSON.stringify({
   schemaVersion: 1,

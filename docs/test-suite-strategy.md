@@ -175,7 +175,7 @@ Queue 第四批拆分后的职责边界：
 - 完整 benchmark lane（通过 `test:source-and-benchmark`）；
 - 9 个 artifact test files；
 - Playwright 三个项目及其 tag 覆盖；
-- build identity、Windows launcher、startup、runtime bundle、live-dist guard；
+- build identity、Windows launcher、startup、direct Runtime、live-dist guard；
 - Gate/readiness/admission/recovery、Queue/Prompt/Steer/SSE authority 测试；
 - Release packaging、checksum、manifest 和 committed-text 检查。
 

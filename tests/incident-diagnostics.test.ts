@@ -56,7 +56,7 @@ test("incident diagnostics writes fixed metadata-only JSONL", async () => {
       startupSpanId: "PS-START001",
       startupAttempt: 2,
       startupMode: "recovery",
-      startupBackend: "bundle",
+      startupBackend: "direct",
       startupPhase: "transport-ready",
       extensionOrdinal: 7,
       extensionImportDurationMs: 1234,
@@ -86,7 +86,7 @@ test("incident diagnostics writes fixed metadata-only JSONL", async () => {
     assert.equal(records[0].startupSpanId, "PS-START001");
     assert.equal(records[0].startupAttempt, 2);
     assert.equal(records[0].startupMode, "recovery");
-    assert.equal(records[0].startupBackend, "bundle");
+    assert.equal(records[0].startupBackend, "direct");
     assert.equal(records[0].startupPhase, "transport-ready");
     assert.equal(records[0].extensionOrdinal, 7);
     assert.equal(records[0].extensionImportDurationMs, 1234);

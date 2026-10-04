@@ -9,6 +9,7 @@
 - Replaced the remaining generic callback/host bags in Compact, Runtime Event, and Prompt Route orchestration seams with explicit capability contracts.
 - Added descriptive streaming metrics for first visible wire frame to guarded paint opportunity and optional React render profiling; production cadence remains unchanged.
 - Added diagnostic Markdown-only and KaTeX-only streaming fixtures to separate parser/layout costs before any Progressive RichText experiment.
+- Removed the experimental Pi Runtime Bundle path; Pi Chat now uses the installed Pi Direct RPC entry and keeps startup diagnostics focused on initialization.
 
 ## 0.5.0
 

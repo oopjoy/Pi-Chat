@@ -13,8 +13,6 @@ export const ARTIFACT_TEST_PATHS = new Set([
   "tests/build-guard.test.ts",
   "tests/e2e-fixtures.test.ts",
   "tests/e2e-runtime-dist.test.ts",
-  "tests/pi-runtime-build.test.ts",
-  "tests/pi-runtime-bundle.test.ts",
   "tests/startup-smoke.test.ts",
   "tests/web-build-artifacts.test.ts",
   "tests/windows-launcher.test.ts",

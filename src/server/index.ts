@@ -9,8 +9,7 @@ import { PiChatApp } from "./app.js";
 import { PrimaryRuntimeReadinessController } from "./primary-runtime-readiness.js";
 import { ModelManager } from "./model-manager.js";
 import { ResourceManager } from "./resource-manager.js";
-import { PiRpcClient } from "./rpc-client.js";
-import { resolvePiRuntimeLaunch } from "./pi-runtime-bundle.js";
+import { PiRpcClient, resolvePiEntry, resolvePiVersion } from "./rpc-client.js";
 import {
   DEFAULT_MAX_IDLE_SECONDARY_RUNTIMES,
   DEFAULT_MAX_SECONDARY_RUNTIMES,
@@ -138,10 +137,23 @@ if (gateComponent.status === "conflict" || gateComponent.status === "source-miss
   throw new Error(`[Pi Chat] ${gateComponent.diagnostic || "内置文件权限安全执行组件不可用。"}`);
 }
 let lifecycleForDiagnostics: import("../shared/types.js").ApplicationLifecycle = "idle";
-const resolvedPiRuntimeLaunch = await resolvePiRuntimeLaunch({ runtimeDist });
+let directPiEntry: string | null = null;
+let piVersion: string | undefined;
+let piDiagnostic: string;
+try {
+  directPiEntry = resolvePiEntry();
+  piVersion = resolvePiVersion(directPiEntry);
+  piDiagnostic = directPiEntry
+    ? `已选择全局 Pi ${piVersion || "unknown"} Direct RPC`
+    : "找不到全局 Pi；历史 JSONL 保持可浏览，Runtime 写操作将不可用";
+} catch (error) {
+  piDiagnostic = error instanceof Error ? error.message : String(error);
+}
 const piRuntimeLaunch = Object.freeze({
-  ...resolvedPiRuntimeLaunch,
-  childEnvironment: Object.freeze({ ...resolvedPiRuntimeLaunch.childEnvironment }),
+  piEntry: directPiEntry,
+  piVersion,
+  childEnvironment: Object.freeze({}),
+  diagnostic: piDiagnostic,
 });
 console.log(`[Pi Chat] Pi Runtime：${piRuntimeLaunch.diagnostic}`);
 const builtStartupProbe = resolve(runtimeDist, "resources", "runtime", "pi-chat-startup-probe.mjs");
@@ -155,8 +167,8 @@ const rpc = new PiRpcClient({
   cwd: options.cwd,
   piEntry: piRuntimeLaunch.piEntry,
   startupProbe,
-  startupBackend: piRuntimeLaunch.bundled ? "bundle" : "direct",
-  rpcRegister: piRuntimeLaunch.bundled ? undefined : piRpcRegister,
+  startupBackend: "direct",
+  rpcRegister: piRpcRegister,
   childEnvironment: piRuntimeLaunch.childEnvironment,
   diagnostics,
   runtimeKind: "primary",
@@ -237,8 +249,8 @@ const app = new PiChatApp({
     cwd,
     piEntry: piRuntimeLaunch.piEntry,
     startupProbe,
-    startupBackend: piRuntimeLaunch.bundled ? "bundle" : "direct",
-    rpcRegister: piRuntimeLaunch.bundled ? undefined : piRpcRegister,
+    startupBackend: "direct",
+    rpcRegister: piRpcRegister,
     childEnvironment: piRuntimeLaunch.childEnvironment,
     diagnostics,
     runtimeKind: "secondary",
