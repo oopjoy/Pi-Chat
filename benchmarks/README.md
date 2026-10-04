@@ -87,6 +87,14 @@ Run the isolated streaming-cadence matrix. This command builds two private varia
 npm run benchmark:streaming-cadence -- --iterations 3 --output ./tmp/streaming-cadence.json
 ```
 
+For the diagnostic rendering split, run only the Markdown and KaTeX families:
+
+```sh
+PI_CHAT_BENCHMARK_REACT_PROFILER=1 npm run benchmark:streaming-cadence -- --content-kinds markdown-only,katex-only --iterations 3 --output ./tmp/streaming-render-isolation.json
+```
+
+`markdown-only` keeps headings, lists, tables, and fenced code without math. `katex-only` keeps inline/display math without tables or code. This lane is diagnostic evidence only and does not alter the production content renderer.
+
 The streaming lane compares exactly three package policies: server `50 ms` plus browser timeout `50 ms`, server `33 ms` plus frame-aligned latest-snapshot commits, and server `25 ms` plus frame-aligned latest-snapshot commits. Each policy runs with one or four concurrent Sessions and plain or Markdown/KaTeX-heavy cumulative content. The four-Session case has one visible pane plus three offscreen cache streams; it is not four simultaneously painted panes. A deterministic `20 ms` fake-RPC source emits 60 cumulative snapshots from a shared future barrier. The runner records and gates actual source duration, interval distribution, lateness, and cross-process start skew rather than treating the requested source interval as observed truth.
 
 Each sample attests the staged browser policy and entry-asset SHA-256, the effective server interval, exact per-Session source completion, worst-case timing/lateness across the selected sources, terminal browser receipt, offscreen-cache terminal availability, and healthy transport outcomes. The result also hashes the benchmark runner and matrix library so a retained artifact identifies the measurement harness that produced it. Markdown/KaTeX samples wait for fonts and require headings, tables, fenced code, KaTeX nodes, and no KaTeX errors. Browser metrics are explicitly frame-coalesced DOM observations and double-`requestAnimationFrame` opportunities; they are not physical-display telemetry or exact React commit timestamps. Frame gaps and Long Tasks begin at the visible `agent_start` window. Three default iterations rotate policy order with a deterministic Latin-square strategy. Comparison readiness requires at least one complete three-iteration cycle; one, four, or five iterations remain non-comparison-ready.

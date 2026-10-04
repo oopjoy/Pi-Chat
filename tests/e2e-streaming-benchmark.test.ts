@@ -36,6 +36,17 @@ test("stream benchmark builds monotonic cumulative snapshots with one final mark
   assert.match(metadata.finalMarkerSha256, /^[a-f0-9]{64}$/);
 });
 
+test("diagnostic Markdown-only and KaTeX-only snapshots isolate their syntax families", () => {
+  const markdown = streamingBenchmarkSnapshots({ ...base, contentKind: "markdown-only", updateCount: 6 });
+  const katex = streamingBenchmarkSnapshots({ ...base, contentKind: "katex-only", updateCount: 6 });
+  assert.match(markdown.at(-1) || "", /## Deterministic section 6/);
+  assert.match(markdown.at(-1) || "", /```ts/);
+  assert.equal((markdown.at(-1) || "").includes("$") , false);
+  assert.match(katex.at(-1) || "", /\\sum_\{k=1\}\^\{6\}/);
+  assert.match(katex.at(-1) || "", /\$a_6 = 6\^2 \+ 1\$/);
+  assert.equal((katex.at(-1) || "").includes("| term |"), false);
+});
+
 test("Markdown and KaTeX stream snapshots retain complete deterministic syntax", () => {
   const snapshots = streamingBenchmarkSnapshots({
     ...base,

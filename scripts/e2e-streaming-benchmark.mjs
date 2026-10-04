@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
-export const STREAM_BENCHMARK_CONTENT_KINDS = ["plain", "markdown-katex"];
+export const STREAM_BENCHMARK_CONTENT_KINDS = ["plain", "markdown-katex", "markdown-only", "katex-only"];
 
 export function parseStreamingBenchmarkConfig(value) {
   if (!value || typeof value !== "object" || Array.isArray(value))
@@ -35,6 +35,34 @@ export async function readStreamingBenchmarkConfig(path) {
 
 function plainChunk(index) {
   return `Snapshot ${String(index + 1).padStart(3, "0")}: deterministic alpha beta gamma delta epsilon. `;
+}
+
+function markdownOnlyChunk(index) {
+  const n = index + 1;
+  return [
+    `\n\n## Deterministic section ${n}`,
+    "",
+    `- item **${n}** with _streaming_ Markdown`,
+    "",
+    "| term | value |",
+    "| --- | ---: |",
+    `| term-${n} | ${n} |`,
+    "",
+    "```ts",
+    `const value${n} = ${n} * (${n} + 1) / 2;`,
+    "```",
+  ].join("\n");
+}
+
+function katexOnlyChunk(index) {
+  const n = index + 1;
+  return [
+    `\n\nMath snapshot ${n}: inline $a_${n} = ${n}^2 + 1$`,
+    "",
+    "$$",
+    `\\sum_{k=1}^{${n}} k = \\frac{${n}(${n}+1)}{2}`,
+    "$$",
+  ].join("\n");
 }
 
 function markdownKatexChunk(index) {
@@ -81,12 +109,16 @@ export function streamingBenchmarkSnapshots(input) {
     }
     cumulative += config.contentKind === "plain"
       ? plainChunk(index)
-      : markdownKatexChunk(index);
-    if (config.contentKind === "markdown-katex" && index < config.updateCount - 1) {
-      if (index % 10 === 4) {
+      : config.contentKind === "markdown-only"
+        ? markdownOnlyChunk(index)
+        : config.contentKind === "katex-only"
+          ? katexOnlyChunk(index)
+          : markdownKatexChunk(index);
+    if ((config.contentKind === "markdown-katex" || config.contentKind === "markdown-only" || config.contentKind === "katex-only") && index < config.updateCount - 1) {
+      if (config.contentKind !== "katex-only" && index % 10 === 4) {
         cumulative += `\n\n\`\`\`ts\nconst unfinished${index + 1} = `;
         pendingTailClose = "\n```";
-      } else if (index % 10 === 8) {
+      } else if (config.contentKind !== "markdown-only" && index % 10 === 8) {
         cumulative += `\n\n$$\n\\sum_{k=1}^{${index + 1}} k`;
         pendingTailClose = "\n$$";
       }

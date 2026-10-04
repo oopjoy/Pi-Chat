@@ -8,10 +8,11 @@ export const STREAMING_CADENCE_POLICIES = [
 
 export const STREAMING_CADENCE_CONCURRENCIES = [1, 4] as const;
 export const STREAMING_CADENCE_CONTENT_KINDS = ["plain", "markdown-katex"] as const;
+export const STREAMING_CADENCE_DIAGNOSTIC_CONTENT_KINDS = ["markdown-only", "katex-only"] as const;
 
 export type StreamingCadencePolicy = typeof STREAMING_CADENCE_POLICIES[number];
 export type StreamingCadenceConcurrency = typeof STREAMING_CADENCE_CONCURRENCIES[number];
-export type StreamingCadenceContentKind = typeof STREAMING_CADENCE_CONTENT_KINDS[number];
+export type StreamingCadenceContentKind = typeof STREAMING_CADENCE_CONTENT_KINDS[number] | typeof STREAMING_CADENCE_DIAGNOSTIC_CONTENT_KINDS[number];
 
 export interface StreamingCadenceCell extends StreamingCadencePolicy {
   concurrency: StreamingCadenceConcurrency;
@@ -29,7 +30,7 @@ export interface StreamingCadenceSample {
     serverIntervalMs: number;
   };
   source: {
-    contentKind: "plain" | "markdown-katex";
+    contentKind: StreamingCadenceContentKind;
     updateCount: number;
     sourceIntervalMs: number;
     finalBytes: number;
@@ -101,10 +102,10 @@ export interface StreamingCadenceSample {
   };
 }
 
-export function streamingCadenceMatrix(): StreamingCadenceCell[] {
+export function streamingCadenceMatrix(contentKinds: readonly StreamingCadenceContentKind[] = STREAMING_CADENCE_CONTENT_KINDS): StreamingCadenceCell[] {
   return STREAMING_CADENCE_POLICIES.flatMap((policy) =>
     STREAMING_CADENCE_CONCURRENCIES.flatMap((concurrency) =>
-      STREAMING_CADENCE_CONTENT_KINDS.map((contentKind) => ({
+      contentKinds.map((contentKind) => ({
         ...policy,
         concurrency,
         contentKind,
@@ -135,8 +136,11 @@ export function summarizeFrameGaps(values: number[]) {
   };
 }
 
-export function aggregateStreamingCadence(samples: StreamingCadenceSample[]) {
-  return streamingCadenceMatrix().map((cell) => {
+export function aggregateStreamingCadence(
+  samples: StreamingCadenceSample[],
+  contentKinds: readonly StreamingCadenceContentKind[] = STREAMING_CADENCE_CONTENT_KINDS,
+) {
+  return streamingCadenceMatrix(contentKinds).map((cell) => {
     const selected = samples.filter((sample) =>
       sample.cell.key === cell.key
       && sample.cell.concurrency === cell.concurrency
@@ -237,7 +241,7 @@ function assertCell(value: unknown, label: string): Record<string, unknown> {
     ["one-visible-pane", "one-visible-pane-plus-three-offscreen-cache-streams"],
     `${label}.concurrencyShape`,
   );
-  exactString(record.contentKind, ["plain", "markdown-katex"], `${label}.contentKind`);
+  exactString(record.contentKind, ["plain", "markdown-katex", "markdown-only", "katex-only"], `${label}.contentKind`);
   return record;
 }
 
@@ -285,7 +289,7 @@ function assertSample(value: unknown, label: string): void {
     throw new Error(`Streaming cadence ${label} server attestation mismatch`);
 
   const source = asRecord(record.source, SOURCE_KEYS, `${label}.source`);
-  exactString(source.contentKind, ["plain", "markdown-katex"], `${label}.source.contentKind`);
+  exactString(source.contentKind, ["plain", "markdown-katex", "markdown-only", "katex-only"], `${label}.source.contentKind`);
   if (source.contentKind !== cell.contentKind)
     throw new Error(`Streaming cadence ${label} source content kind mismatch`);
   for (const key of SOURCE_KEYS) {

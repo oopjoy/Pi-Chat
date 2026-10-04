@@ -26,8 +26,11 @@ import {
   aggregateStreamingCadence,
   assertStreamingCadenceResultPrivacy,
   streamingCadenceMatrix,
+  STREAMING_CADENCE_CONTENT_KINDS,
+  STREAMING_CADENCE_DIAGNOSTIC_CONTENT_KINDS,
   summarizeFrameGaps,
   type StreamingCadenceCell,
+  type StreamingCadenceContentKind,
   type StreamingCadenceSample,
 } from "./lib/streaming-cadence.mjs";
 
@@ -945,16 +948,17 @@ async function measureSample(options: {
         katexErrors: message?.querySelectorAll(".katex-error").length || 0,
       };
     });
+    const requiresMarkdownStructure = options.cell.contentKind === "markdown-katex" || options.cell.contentKind === "markdown-only";
+    const requiresKatexStructure = options.cell.contentKind === "markdown-katex" || options.cell.contentKind === "katex-only";
     if (
-      options.cell.contentKind === "markdown-katex"
-      && (
+      (requiresMarkdownStructure && (
         renderedStructure.headings < 1
         || renderedStructure.tables < 1
         || renderedStructure.codeBlocks < 1
-        || renderedStructure.katexNodes < 2
-        || renderedStructure.katexErrors !== 0
-      )
-    ) throw new Error("Markdown/KaTeX structural rendering proof is incomplete");
+      ))
+      || (requiresKatexStructure && renderedStructure.katexNodes < 2)
+      || renderedStructure.katexErrors !== 0
+    ) throw new Error("Streaming Markdown/KaTeX structural rendering proof is incomplete");
 
     const browserRaw = await page.evaluate(() => {
       const state = (window as Window & { __piStreamingCadenceBench?: { snapshot(): Record<string, unknown> } }).__piStreamingCadenceBench;
@@ -1031,7 +1035,7 @@ async function measureSample(options: {
         parseErrors: 0,
         offscreenTerminalCachesVerified,
         fontsReady,
-        renderedStructure: options.cell.contentKind === "markdown-katex" ? renderedStructure : null,
+        renderedStructure: options.cell.contentKind === "plain" ? null : renderedStructure,
         frameGaps: summarizeFrameGaps(frameGaps),
         longTasks: {
           supported: longTasks?.supported === true,
@@ -1266,8 +1270,11 @@ export async function benchmarkHarnessSha256(): Promise<string> {
   return hash.digest("hex");
 }
 
-export function streamingCadenceOrder(iteration: number): StreamingCadenceCell[] {
-  const matrix = streamingCadenceMatrix();
+export function streamingCadenceOrder(
+  iteration: number,
+  contentKinds: readonly StreamingCadenceContentKind[] = STREAMING_CADENCE_CONTENT_KINDS,
+): StreamingCadenceCell[] {
+  const matrix = streamingCadenceMatrix(contentKinds);
   const groups = (["A", "B", "C"] as const).map((key) =>
     matrix.filter((cell) => cell.key === key)
   );
@@ -1282,8 +1289,10 @@ export function streamingCadenceOrder(iteration: number): StreamingCadenceCell[]
 export async function runStreamingCadenceBenchmark(options: {
   iterations?: number;
   outputPath?: string;
+  contentKinds?: readonly StreamingCadenceContentKind[];
 }): Promise<StreamingCadenceResult> {
   const iterations = Math.max(1, Math.floor(options.iterations ?? 3));
+  const contentKinds = options.contentKinds?.length ? options.contentKinds : STREAMING_CADENCE_CONTENT_KINDS;
   const outputPath = options.outputPath
     ? await validateStreamingCadenceOutputPath(options.outputPath)
     : undefined;
@@ -1300,7 +1309,7 @@ export async function runStreamingCadenceBenchmark(options: {
     activeBenchmarkBrowser = browser;
     const samples: StreamingCadenceSample[] = [];
     for (let iteration = 1; iteration <= iterations; iteration += 1) {
-      for (const cell of streamingCadenceOrder(iteration)) {
+      for (const cell of streamingCadenceOrder(iteration, contentKinds)) {
         const stage = cell.stage === "baseline" ? variants.baseline.root : variants.frame.root;
         const variant = cell.stage === "baseline" ? variants.baseline : variants.frame;
         samples.push(await measureSample({
@@ -1366,7 +1375,7 @@ export async function runStreamingCadenceBenchmark(options: {
       },
       iterations,
       samples,
-      summaries: aggregateStreamingCadence(samples),
+      summaries: aggregateStreamingCadence(samples, contentKinds),
     };
     assertStreamingCadenceResultPrivacy(result);
     completed = true;
@@ -1415,14 +1424,23 @@ export async function runStreamingCadenceBenchmark(options: {
   return result;
 }
 
-function parseArgs(argv: string[]): { iterations?: number; outputPath?: string } {
-  const result: { iterations?: number; outputPath?: string } = {};
+function parseArgs(argv: string[]): { iterations?: number; outputPath?: string; contentKinds?: StreamingCadenceContentKind[] } {
+  const result: { iterations?: number; outputPath?: string; contentKinds?: StreamingCadenceContentKind[] } = {};
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--iterations") result.iterations = Number(argv[++index]);
     else if (argument === "--output") result.outputPath = argv[++index] || "";
-    else if (argument === "--help") {
-      console.log("Usage: node --import tsx benchmarks/run-streaming-cadence-bench.mts [--iterations N] [--output result.json]");
+    else if (argument === "--content-kinds") {
+      const values = (argv[++index] || "").split(",").filter(Boolean);
+      const allowed = new Set<StreamingCadenceContentKind>([
+        ...STREAMING_CADENCE_CONTENT_KINDS,
+        ...STREAMING_CADENCE_DIAGNOSTIC_CONTENT_KINDS,
+      ]);
+      if (!values.length || values.some((value) => !allowed.has(value as StreamingCadenceContentKind)))
+        throw new Error(`--content-kinds must contain only: ${[...allowed].join(",")}`);
+      result.contentKinds = [...new Set(values as StreamingCadenceContentKind[])];
+    } else if (argument === "--help") {
+      console.log("Usage: node --import tsx benchmarks/run-streaming-cadence-bench.mts [--iterations N] [--content-kinds kind,...] [--output result.json]");
       process.exit(0);
     } else throw new Error(`Unknown argument: ${argument}`);
   }
@@ -1433,7 +1451,7 @@ function parseArgs(argv: string[]): { iterations?: number; outputPath?: string }
 
 function printSummary(result: StreamingCadenceResult): void {
   console.log("Pi Chat streaming cadence benchmark (descriptive only; no thresholds)");
-  console.log(`Chromium ${result.environment.chromiumVersion}; ${result.iterations} iteration(s); 12 cells`);
+  console.log(`Chromium ${result.environment.chromiumVersion}; ${result.iterations} iteration(s); ${result.summaries.length} cells`);
   for (const summary of result.summaries) {
     const cell = summary.cell;
     console.log(

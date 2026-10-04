@@ -8,6 +8,7 @@
 - Ratcheted the type-debt guard to the current verified floor: `732 / 32 / 37 / 8` for explicit `any`, `Record<string, any>`, `as any`, and `new Proxy`.
 - Replaced the remaining generic callback/host bags in Compact, Runtime Event, and Prompt Route orchestration seams with explicit capability contracts.
 - Added descriptive streaming metrics for first visible wire frame to guarded paint opportunity and optional React render profiling; production cadence remains unchanged.
+- Added diagnostic Markdown-only and KaTeX-only streaming fixtures to separate parser/layout costs before any Progressive RichText experiment.
 
 ## 0.5.0
 
