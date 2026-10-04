@@ -10,6 +10,7 @@
 - Added descriptive streaming metrics for first visible wire frame to guarded paint opportunity and optional React render profiling; production cadence remains unchanged.
 - Added diagnostic Markdown-only and KaTeX-only streaming fixtures to separate parser/layout costs before any Progressive RichText experiment.
 - Removed the experimental Pi Runtime Bundle path; Pi Chat now uses the installed Pi Direct RPC entry and keeps startup diagnostics focused on initialization.
+- Workspace Files now revalidates transcript-derived paths against the current Session Workspace before displaying them, hiding stale paths left by moved or deleted checkouts.
 - Direct startup benchmarking now separates transport-ready from capability-ready and records metadata-only Extension import/factory timing when the direct loader exposes those boundaries.
 
 ## 0.5.0

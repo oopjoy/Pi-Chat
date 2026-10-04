@@ -216,6 +216,7 @@ function WorkspaceFiles({ sessionId, workspacePath, visible, activityRevision, l
         <em>{file.operation === "edit" ? "Edit" : "Write"}</em>
       </button>)}
       {recent?.truncated && <p className="workspace-files-note">仅显示最近修改的 50 个文件。</p>}
+      {recent?.staleCount && <p className="workspace-files-note">已隐藏 {recent.staleCount} 个已不在当前 Workspace 中的历史路径。</p>}
     </div>
     <div ref={splitterRef} className="workspace-files-splitter" role="separator" aria-label="调整文件列表与预览高度" aria-orientation="horizontal" tabIndex={0}
       onPointerDown={startSplitResize}

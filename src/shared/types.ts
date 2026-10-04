@@ -58,6 +58,8 @@ export interface WorkspaceRecentFile {
 export interface WorkspaceRecentFilesData {
   files: WorkspaceRecentFile[];
   truncated: boolean;
+  /** Historical transcript paths that no longer resolve inside this Workspace. */
+  staleCount?: number;
 }
 
 export interface WorkspaceFileData {

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { PiMessage } from "../src/shared/types";
-import { assistantLinkedWorkspaceFiles, readWorkspaceFile, recentModifiedWorkspaceFiles, workspaceFileTargetPath } from "../src/server/workspace-files";
+import { assistantLinkedWorkspaceFiles, readWorkspaceFile, recentModifiedWorkspaceFiles, revalidateRecentWorkspaceFiles, workspaceFileTargetPath } from "../src/server/workspace-files";
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-workspace-files-"));
@@ -53,6 +53,23 @@ test("recent files project only successful Edit and Write results, newest first 
       ],
       truncated: false,
     });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("recent file revalidation hides transcript paths that no longer exist in the Workspace", async () => {
+  const root = await fixture();
+  try {
+    const recent = await revalidateRecentWorkspaceFiles(root, {
+      files: [
+        { path: "src/app.ts", name: "app.ts", operation: "edit" },
+        { path: "Desktop/pi-chat/tests/old.ts", name: "old.ts", operation: "edit" },
+      ],
+      truncated: false,
+    });
+    assert.deepEqual(recent.files.map((file) => file.path), ["src/app.ts"]);
+    assert.equal(recent.staleCount, 1);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

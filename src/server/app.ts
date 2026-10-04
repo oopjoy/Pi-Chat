@@ -243,6 +243,7 @@ import {
   normalizeWorkspaceRelativePath,
   readWorkspaceFile,
   recentModifiedWorkspaceFiles,
+  revalidateRecentWorkspaceFiles,
   workspaceFileTargetPath,
 } from "./workspace-files.js";
 export {
@@ -4800,7 +4801,9 @@ export class PiChatApp {
     const cwd = await this.workspaceCwdForSession(input.sessionId);
     if (!cwd) return null;
     const snapshot = await this.options.sessions.snapshotForId(input.sessionId);
-    return snapshot ? recentModifiedWorkspaceFiles(snapshot.messages, cwd) : null;
+    return snapshot
+      ? revalidateRecentWorkspaceFiles(cwd, recentModifiedWorkspaceFiles(snapshot.messages, cwd))
+      : null;
   }
   private async workspaceRecentFileContext(
     input: { sessionId: string; path: string },

@@ -189,6 +189,26 @@ export function recentModifiedWorkspaceFiles(messages: PiMessage[], cwd: string)
   return { files, truncated };
 }
 
+export async function revalidateRecentWorkspaceFiles(
+  cwd: string,
+  recent: WorkspaceRecentFilesData,
+): Promise<WorkspaceRecentFilesData> {
+  const checks = await Promise.all(recent.files.map(async (file) => {
+    try {
+      await workspaceFileTargetPath(cwd, file.path);
+      return true;
+    } catch {
+      return false;
+    }
+  }));
+  const files = recent.files.filter((_file, index) => checks[index]);
+  return {
+    ...recent,
+    files,
+    ...(files.length !== recent.files.length ? { staleCount: recent.files.length - files.length } : {}),
+  };
+}
+
 export async function workspaceFileTargetPath(cwd: string, rawPath: string): Promise<string> {
   const path = normalizeWorkspaceRelativePath(rawPath);
   const { target, targetStat } = await workspaceTarget(cwd, path);
