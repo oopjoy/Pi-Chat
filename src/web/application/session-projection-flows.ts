@@ -12,7 +12,7 @@ type RefreshAuthority = Pick<PaneAuthority, "runEpochGeneration" | "cacheGenerat
   & ModelCatalogueAuthority
   & { refreshEpoch: number };
 
-export function createSessionProjectionFlows(host: Record<string, any>) {
+export function useSessionProjectionFlows(host: Record<string, any>) {
   const {
     EARLY_HISTORY_VIEW_DELAY_MS,
     EARLY_SIDEBAR_INVENTORY_DELAY_MS,

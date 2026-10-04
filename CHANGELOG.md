@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Maintainability
+
+- Enabled React Hooks ordering checks as an ESLint error and dependency checks as warnings.
+- Ratcheted the type-debt guard to the current verified floor: `732 / 32 / 37 / 8` for explicit `any`, `Record<string, any>`, `as any`, and `new Proxy`.
+- Replaced the remaining generic callback/host bags in Compact, Runtime Event, and Prompt Route orchestration seams with explicit capability contracts.
+
 ## 0.5.0
 
 ### Reliability and maintainability

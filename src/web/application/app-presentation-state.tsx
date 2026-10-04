@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { createSessionManagementActions } from "./session-management-actions";
 
-export function createAppPresentationState(host: Record<string, any>) {
+export function useAppPresentationState(host: Record<string, any>) {
   const {
     ApiRequestError,
     api,

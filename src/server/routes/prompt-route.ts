@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { ApplicationLifecycle, GateMode, PiMessage, PromptImage, PromptSettingsSnapshot, QueuedPrompt } from "../../shared/types.js";
+import type { ApplicationLifecycle, GateMode, PiMessage, PromptImage, PromptSettingsSnapshot, QueuedPrompt, SlashCommand } from "../../shared/types.js";
 import type { PiChatAppOptions } from "../app.js";
+import type { RpcLateResponseHandler, PiRpcClient } from "../rpc-client.js";
 import type { OperationAdmission } from "../operation-admission.js";
-import type { PendingTurnSettings, RuntimePool } from "../runtime-pool.js";
+import type { InternalQueuedPrompt, PromptAcceptance, PromptScheduler } from "../prompt-scheduler.js";
+import type { AppliedTurnSettings, PendingTurnSettings, RuntimePool, RuntimeQueuedPrompt, SecondaryRuntime } from "../runtime-pool.js";
 import type { NativeSteeringAdmissions } from "../services/native-steering-admission.js";
 import { bodyJson, json, methodNotAllowed } from "../http-transport.js";
 import { RpcRequestTimeoutError } from "../rpc-client.js";
@@ -17,16 +19,24 @@ import { admitPromptToQueue } from "../services/prompt-queue-admission.js";
 import { dispatchPrimaryPrompt } from "../services/prompt-primary-dispatch.js";
 import { dispatchSecondaryPrompt } from "../services/prompt-secondary-dispatch.js";
 
-type PromptRouteCallback = (...args: any[]) => any;
-type PromptRouteSchedulerPort = {
+type PromptRouteSchedulerPort = Pick<PromptScheduler, "assertCanEnqueue" | "enqueueRuntime" | "enqueuePrimary" | "notifySecondaryPromptAccepted" | "runtimeBusyForQueue" | "primaryBusyForQueue"> & {
   primaryAbortGeneration: number;
-  runtimeBusyForQueue: PromptRouteCallback;
-  primaryBusyForQueue: PromptRouteCallback;
-  assertCanEnqueue: PromptRouteCallback;
-  enqueueRuntime: PromptRouteCallback;
-  enqueuePrimary: PromptRouteCallback;
-  notifySecondaryPromptAccepted: PromptRouteCallback;
 };
+type PromptRouteTrace = (
+  name: string,
+  sessionId: string,
+  promptId: string,
+  rpcGeneration?: number,
+  runGeneration?: number,
+  details?: Record<string, unknown>,
+) => void;
+
+type PromptRouteLateOutcomeHandler = (
+  sessionId: string,
+  token: string,
+  kind: "generic" | "compact" | "extension" | "delete" | "copy",
+  requestId?: string,
+) => RpcLateResponseHandler;
 
 export interface PromptRouteHost {
   PROMPT_BODY_LIMIT: number;
@@ -37,58 +47,78 @@ export interface PromptRouteHost {
   activeSessionId: string;
   activeSessionIds: () => string[];
   applicationLifecycle: ApplicationLifecycle;
-  applyPromptSettings: PromptRouteCallback;
+  applyPromptSettings: (
+    rpc: PiRpcClient,
+    pending: PendingTurnSettings,
+    snapshot?: PromptSettingsSnapshot,
+    consumeSupersededLegacy?: boolean,
+    sessionId?: string,
+  ) => Promise<AppliedTurnSettings>;
   advanceNativeSteeringProjection: (sessionId: string) => void;
   beginPromptAdmission: (sessionId: string) => Promise<() => void>;
-  broadcast: PromptRouteCallback;
+  broadcast: (event: Record<string, unknown>) => void;
   broadcastQueue: (sessionId: string) => void;
   broadcastSessionActivity: (sessionId: string) => void;
   clearNativeSteeringState: (sessionId: string, reason: string) => void;
-  clearPromptDiagnostic: (sessionId: string) => void;
-  dispatchNext: () => void;
-  dispatchRuntimeNext: (runtime: unknown) => void;
+  clearPromptDiagnostic: (sessionId: string, promptId?: string) => void;
+  dispatchNext: () => Promise<void>;
+  dispatchRuntimeNext: (runtime: SecondaryRuntime) => Promise<void>;
   dispatching: boolean;
   ensurePrimaryIdentity: () => Promise<void>;
   ensurePrimaryRuntime: () => Promise<void>;
-  ensureRuntime: (sessionId: string) => Promise<unknown>;
-  extensionCommand: PromptRouteCallback;
-  finalizePersistedDraft: (runtime: unknown) => Promise<void>;
+  ensureRuntime: (sessionId: string) => Promise<SecondaryRuntime>;
+  extensionCommand: (message: string, rpc?: PiRpcClient) => Promise<SlashCommand | null>;
+  finalizePersistedDraft: (runtime: SecondaryRuntime) => Promise<void>;
   gateModeFromCommand: (message: string) => GateMode | null;
   hasNativeSteeringPending: (sessionId: string, generation: number) => boolean;
   lastPrimaryMessages: PiMessage[];
   lastPrimaryMessagesSessionId: string;
-  lateRpcOutcomeHandler: PromptRouteCallback;
+  lateRpcOutcomeHandler: PromptRouteLateOutcomeHandler;
   liveMessage: PiMessage | undefined;
-  markRpcOutcomePending: PromptRouteCallback;
+  markRpcOutcomePending: (sessionId: string, error: unknown, token?: string) => void;
   nativeSteeringAdmissionsBySession: Map<string, NativeSteeringAdmissions>;
   nextUserPromptAt: () => number;
   noteUserPrompt: (sessionId: string, promptAt: number) => void;
   options: PiChatAppOptions;
-  pendingTurnSettings: PendingTurnSettings | undefined;
+  pendingTurnSettings: PendingTurnSettings;
   primaryOperationAdmission: OperationAdmission;
   primaryRpcGeneration: number;
   primaryTurnActive: () => boolean;
-  promptQueue: QueuedPrompt[];
-  publicQueue: PromptRouteCallback;
+  promptQueue: InternalQueuedPrompt[];
+  publicQueue: (queue?: Array<InternalQueuedPrompt | RuntimeQueuedPrompt>) => QueuedPrompt[];
   queuePaused: boolean;
-  recoverRuntime: (runtime: unknown) => Promise<void>;
-  rememberRuntimeAppliedTurnSettings: (runtime: unknown, applied: unknown) => void;
-  resetNativeSteering: (sessionId: string, runtime: unknown, reason: string) => Promise<void>;
-  rethrowResultPending: PromptRouteCallback;
+  recoverRuntime: (runtime: SecondaryRuntime) => Promise<void>;
+  rememberRuntimeAppliedTurnSettings: (runtime: SecondaryRuntime, applied: AppliedTurnSettings) => void;
+  resetNativeSteering: (sessionId: string, runtime: SecondaryRuntime | undefined, reason: string) => Promise<void>;
+  rethrowResultPending: (error: unknown, operation: string, fence?: boolean) => never;
   rpcOutcomeUnknown: (error: unknown) => boolean;
   runtimePool: RuntimePool;
-  runtimeTurnActive: (runtime: unknown) => boolean;
+  runtimeTurnActive: (runtime: SecondaryRuntime) => boolean;
   running: boolean;
   scheduler: PromptRouteSchedulerPort;
-  secondaryNeedsRecovery: (runtime: unknown) => boolean;
-  sendPrompt: PromptRouteCallback;
-  sendPromptRpc: PromptRouteCallback;
+  secondaryNeedsRecovery: (runtime: SecondaryRuntime) => boolean;
+  sendPrompt: (
+    message: string,
+    images: PromptImage[],
+    promptAt?: number,
+    gateMode?: GateMode,
+    promptId?: string,
+    settings?: PromptSettingsSnapshot,
+    expectedAbortGeneration?: number,
+    clientPromptOperationId?: string,
+  ) => Promise<PromptAcceptance>;
+  sendPromptRpc: (
+    rpc: PiRpcClient,
+    sessionId: string,
+    promptId: string,
+    command: Record<string, unknown>,
+  ) => Promise<Record<string, unknown>>;
   sessionMutationOutcomePending: (sessionId: string) => boolean;
-  setGateMode: (sessionId: string, mode: GateMode | undefined) => void;
-  supersedePendingTurnSettings: (pending: PendingTurnSettings | undefined, settings: PromptSettingsSnapshot | undefined) => void;
-  syncGateMode: PromptRouteCallback;
+  setGateMode: (sessionId: string, mode: GateMode) => void;
+  supersedePendingTurnSettings: (pending: PendingTurnSettings, snapshot?: PromptSettingsSnapshot) => void;
+  syncGateMode: (rpc: PiRpcClient, sessionId: string, mode?: GateMode) => Promise<void>;
   toolStatus: string;
-  tracePrompt: PromptRouteCallback;
+  tracePrompt: PromptRouteTrace;
 }
 
 export async function handlePromptRoute(host: PromptRouteHost, request: IncomingMessage, response: ServerResponse, url: URL, preparedBody?: Record<string, unknown>): Promise<void> {

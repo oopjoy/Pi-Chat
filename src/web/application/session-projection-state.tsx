@@ -4,7 +4,7 @@ import { SessionViewCacheWriter, type SessionViewCacheWriteAuthority } from "./s
 import { ActiveSessionProjectionWriter } from "./active-session-projection-writer";
 import { SessionViewCache, type SessionViewSnapshot } from "../lib/session-view-cache";
 
-export function createSessionProjectionState(host: Record<string, any>) {
+export function useSessionProjectionState(host: Record<string, any>) {
   const {
     advanceQueueProjectionRevision,
     applyActiveSessionIds,

@@ -126,9 +126,9 @@ import { createSessionManagementActions } from "./application/session-management
 import { createComposerSettingsActions } from "./application/composer-settings-actions";
 import { createQueueActions } from "./application/queue-actions";
 import { AppView } from "./application/app-view";
-import { createSessionProjectionFlows } from "./application/session-projection-flows";
-import { createAppPresentationState } from "./application/app-presentation-state";
-import { createSessionProjectionState } from "./application/session-projection-state";
+import { useSessionProjectionFlows } from "./application/session-projection-flows";
+import { useAppPresentationState } from "./application/app-presentation-state";
+import { useSessionProjectionState } from "./application/session-projection-state";
 import { reconcileServerPendingPrompt as reconcileServerPendingPromptFlow, reconcileServerPendingSteers as reconcileServerPendingSteersFlow } from "./application/server-pending-projection";
 import { reconcileSessionInventory } from "./application/session-inventory-reconciliation";
 import {
@@ -1105,7 +1105,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     failedSessionIds,
     setFailedSessionIds,
     applySessionActivity,
-  } = createSessionProjectionState({
+  } = useSessionProjectionState({
     ActiveSessionProjectionWriter,
     SessionViewCache,
     SessionViewCacheWriter,
@@ -2367,7 +2367,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     loadAllSessions,
     loadDirectorySessions,
     scheduleSidebarRefresh
-  } = createSessionProjectionFlows({
+  } = useSessionProjectionFlows({
     EARLY_HISTORY_VIEW_DELAY_MS, EARLY_SIDEBAR_INVENTORY_DELAY_MS, MAX_DIRECTORY_PREFIX_SIZE, acceptQueueProjectionIfCurrent,
     activeSessionIds, activeSessionProjectionWriter, api, appearance,
     applyAppearance, applyBootstrap, applyBootstrapMetadata, applySidebarInventory,
@@ -3701,7 +3701,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     confirmForkSession,
     renameSession,
     deleteSession,
-  } = createAppPresentationState({
+  } = useAppPresentationState({
     ApiRequestError, api, ComposerControls, PiMarkIcon,
     activeSessionProjectionWriter, anySessionPendingConfirmation, anySessionQueued, anySessionRunning,
     appliedDraftRestorationSequencesRef, appliedQueueMutationSequenceRef, applyBootstrapMetadata, browserStateDiagnosticSnapshot,

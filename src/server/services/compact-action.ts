@@ -1,29 +1,37 @@
+import type { PiChatAppOptions } from "../app.js";
+import type { OperationAdmission } from "../operation-admission.js";
+import type { RpcLateResponseHandler } from "../rpc-client.js";
+import type { PromptScheduler } from "../prompt-scheduler.js";
 import type { RuntimeCompactionResult } from "./runtime-compaction.js";
+import { compactRuntime } from "./runtime-compaction.js";
+import { SessionNotFoundError, type SecondaryRuntime, type RuntimePool } from "../runtime-pool.js";
 
-type CompactCallback = (...args: any[]) => any;
+type CompactRuntimePoolPort = Pick<RuntimePool, "get" | "acquireOperation" | "touch">;
+type CompactSchedulerPort = Pick<PromptScheduler, "runtimeBusyForQueue" | "primaryBusyForQueue">;
+
 export interface CompactActionHost {
   PROMPT_PREPARE_TIMEOUT_MS: number;
-  SessionNotFoundError: typeof import("../runtime-pool.js").SessionNotFoundError;
-  compactRuntime: typeof import("./runtime-compaction.js").compactRuntime;
+  SessionNotFoundError: typeof SessionNotFoundError;
+  compactRuntime: typeof compactRuntime;
   randomUUID: typeof import("node:crypto").randomUUID;
   rpcData: typeof import("../rpc-client.js").rpcData;
   beginPromptAdmission: (sessionId: string) => Promise<() => void>;
-  runtimePool: { get: (sessionId: string) => any; acquireOperation: CompactCallback; touch: CompactCallback };
+  runtimePool: CompactRuntimePoolPort;
   activeSessionId: string;
-  ensurePrimaryIdentity: CompactCallback;
-  ensureRuntime: (sessionId: string) => Promise<any>;
+  ensurePrimaryIdentity: () => Promise<void>;
+  ensureRuntime: (sessionId: string) => Promise<SecondaryRuntime>;
   rethrowResultPending: (error: unknown, operation: string, fence?: boolean) => never;
-  secondaryNeedsRecovery: CompactCallback;
-  recoverRuntime: CompactCallback;
-  primaryOperationAdmission: { acquire: CompactCallback };
-  ensurePrimaryRuntime: CompactCallback;
-  options: { rpc: any };
+  secondaryNeedsRecovery: (runtime: SecondaryRuntime) => boolean;
+  recoverRuntime: (runtime: SecondaryRuntime) => Promise<void>;
+  primaryOperationAdmission: Pick<OperationAdmission, "acquire">;
+  ensurePrimaryRuntime: () => Promise<void>;
+  options: Pick<PiChatAppOptions, "rpc">;
   compactionPendingBySession: Set<string>;
   sessionMutationOutcomePending: (sessionId: string) => boolean;
-  scheduler: { runtimeBusyForQueue: CompactCallback; primaryBusyForQueue: CompactCallback };
-  lateRpcOutcomeHandler: CompactCallback;
+  scheduler: CompactSchedulerPort;
+  lateRpcOutcomeHandler: (sessionId: string, token: string, kind: "generic" | "compact" | "extension" | "delete" | "copy", requestId?: string) => RpcLateResponseHandler;
   rpcOutcomeUnknown: (error: unknown) => boolean;
-  markRpcOutcomePending: CompactCallback;
+  markRpcOutcomePending: (sessionId: string, error: unknown, token?: string) => void;
   uncertainCompactionBySession: Set<string>;
   broadcastSessionActivity: (sessionId: string) => void;
 }

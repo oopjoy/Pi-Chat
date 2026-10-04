@@ -225,7 +225,7 @@ import { createSessionViewActions } from "./services/session-view-actions.js";
 import { createRuntimeFileActions } from "./services/runtime-file-actions.js";
 import { createSidebarProjectionActions } from "./services/sidebar-projection-actions.js";
 import { createSessionCopyOriginActions, type SessionCopyOriginInput, type SessionCopyOriginResult } from "./services/session-copy-origin-actions.js";
-import { createCompactAction } from "./services/compact-action.js";
+import { createCompactAction, type CompactActionHost } from "./services/compact-action.js";
 import { createTurnSettingsAction } from "./services/turn-settings-action.js";
 import { createPrimaryEnsureAction } from "./services/primary-ensure-action.js";
 import { handleNewSessionRoute } from "./routes/new-session.js";
@@ -3121,19 +3121,36 @@ export class PiChatApp {
   }
   /** Compact a Session behind its prompt/admission and Runtime ownership fences. */
   private compactAction() {
-    const routePorts = {
+    const app = this;
+    const host: CompactActionHost = {
       PROMPT_PREPARE_TIMEOUT_MS,
       SessionNotFoundError,
       compactRuntime,
       randomUUID,
       rpcData,
+      beginPromptAdmission: this.beginPromptAdmission.bind(this),
+      runtimePool: this.runtimePool,
+      get activeSessionId() { return app.activeSessionId; },
+      ensurePrimaryIdentity: this.ensurePrimaryIdentity.bind(this),
+      ensureRuntime: this.ensureRuntime.bind(this),
+      rethrowResultPending: this.rethrowResultPending.bind(this),
+      secondaryNeedsRecovery: this.secondaryNeedsRecovery.bind(this),
+      recoverRuntime: this.recoverRuntime.bind(this),
+      primaryOperationAdmission: this.primaryOperationAdmission,
+      ensurePrimaryRuntime: this.ensurePrimaryRuntime.bind(this),
+      options: { rpc: this.options.rpc },
+      compactionPendingBySession: this.compactionPendingBySession,
+      sessionMutationOutcomePending: this.sessionMutationOutcomePending.bind(this),
+      scheduler: {
+        runtimeBusyForQueue: this.scheduler.runtimeBusyForQueue.bind(this.scheduler),
+        primaryBusyForQueue: this.scheduler.primaryBusyForQueue.bind(this.scheduler),
+      },
+      lateRpcOutcomeHandler: this.lateRpcOutcomeHandler.bind(this),
+      rpcOutcomeUnknown: this.rpcOutcomeUnknown.bind(this),
+      markRpcOutcomePending: this.markRpcOutcomePending.bind(this),
+      uncertainCompactionBySession: this.uncertainCompactionBySession,
+      broadcastSessionActivity: this.broadcastSessionActivity.bind(this),
     };
-    const host = new Proxy(this as any, {
-      get: (target, property) => Object.prototype.hasOwnProperty.call(routePorts, property)
-        ? (routePorts as any)[property]
-        : Reflect.get(target, property, target),
-      set: (target, property, value) => Reflect.set(target, property, value, target),
-    });
     return createCompactAction(host);
   }
   private async compactSession(
