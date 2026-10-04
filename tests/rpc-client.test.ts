@@ -786,3 +786,31 @@ test("global Pi RPC starts and answers state requests",  { skip: !piEntry, timeo
     await client.stop();
   }
 });
+
+test("direct RPC startup traces process-local Extension import and factory phases", { skip: !piEntry, timeout: 75_000 }, async () => {
+  assert.ok(piEntry);
+  const incidents = incidentCollector();
+  const client = new PiRpcClient({
+    cwd: process.cwd(),
+    piEntry,
+    startupProbe: fileURLToPath(new URL("../resources/runtime/pi-chat-startup-probe.mjs", import.meta.url)),
+    rpcRegister: fileURLToPath(new URL("../resources/runtime/pi-chat-rpc-register.mjs", import.meta.url)),
+    diagnostics: incidents.diagnostics,
+    args: [
+      "--no-session",
+      "--no-skills",
+      "--no-prompt-templates",
+      "--no-themes",
+      "--no-context-files",
+      "--extension",
+      fileURLToPath(new URL("../resources/extensions/pi-chat-file-permission-gate.ts", import.meta.url)),
+    ],
+  });
+  try {
+    await client.start();
+    assert.ok(incidents.records.some((record) => record.startupPhase === "extension-import-end"));
+    assert.ok(incidents.records.some((record) => record.startupPhase === "extension-factory-end"));
+  } finally {
+    await client.stop();
+  }
+});

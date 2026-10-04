@@ -1,4 +1,5 @@
-const RPC_MODE_SUFFIX = "/@earendil-works/pi-coding-agent/dist/modes/rpc/rpc-mode.js";
+const RPC_MODE_SUFFIX = "/dist/modes/rpc/rpc-mode.js";
+const EXTENSION_LOADER_SUFFIX = "/dist/core/extensions/loader.js";
 
 const FOLLOW_UP_CASES = [
   `            case "follow_up": {
@@ -46,12 +47,33 @@ export function patchPiRpcModeSource(source) {
   );
 }
 
+export function patchPiExtensionLoaderSource(source) {
+  if (source.includes("__piChatStartupExtensionOrdinal")) return source;
+  const importMarker = "const module = await jiti.import(extensionPath, { default: true });";
+  const factoryMarker = "await factory(load.api);";
+  if (!source.includes(importMarker) || !source.includes(factoryMarker)) return source;
+  return source
+    .replace(
+      importMarker,
+      "const extensionOrdinal = (globalThis.__piChatStartupExtensionOrdinal = (globalThis.__piChatStartupExtensionOrdinal || 0) + 1);\n    globalThis.__piChatStartupMark?.(\"X\", extensionOrdinal);\n    const module = await jiti.import(extensionPath, { default: true });\n    globalThis.__piChatStartupMark?.(\"Y\", extensionOrdinal);",
+    )
+    .replace(
+      factoryMarker,
+      "globalThis.__piChatStartupMark?.(\"F\", globalThis.__piChatStartupExtensionOrdinal);\n        await factory(load.api);\n        globalThis.__piChatStartupMark?.(\"G\", globalThis.__piChatStartupExtensionOrdinal);",
+    );
+}
+
 export async function load(url, context, nextLoad) {
   const loaded = await nextLoad(url, context);
   const pathname = new URL(url).pathname.replace(/\\/g, "/");
-  if (!pathname.endsWith(RPC_MODE_SUFFIX)) return loaded;
+  const shouldPatchRpc = pathname.endsWith(RPC_MODE_SUFFIX);
+  const shouldPatchExtensions = pathname.endsWith(EXTENSION_LOADER_SUFFIX);
+  if (!shouldPatchRpc && !shouldPatchExtensions) return loaded;
+  if (loaded.source === null || loaded.source === undefined) return loaded;
   const source = typeof loaded.source === "string"
     ? loaded.source
     : Buffer.from(loaded.source).toString("utf8");
-  return { ...loaded, source: patchPiRpcModeSource(source) };
+  if (shouldPatchRpc)
+    return { ...loaded, source: patchPiRpcModeSource(source) };
+  return { ...loaded, source: patchPiExtensionLoaderSource(source) };
 }

@@ -54,6 +54,10 @@ function summary(values: number[]) {
   };
 }
 
+function optionalSummary(values: number[]) {
+  return values.length ? summary(values) : null;
+}
+
 const options = parseArgs(process.argv.slice(2));
 const sourceLink = await lstat(options.session);
 if (!sourceLink.isFile() || sourceLink.isSymbolicLink()) throw new Error("Session snapshot must be a regular non-symlink file");
@@ -64,7 +68,14 @@ const sessionBytes = await readFile(canonicalSource);
 const directEntry = resolvePiEntry();
 if (!directEntry) throw new Error("Global Pi RPC entry is unavailable");
 const startupProbe = resolve("resources", "runtime", "pi-chat-startup-probe.mjs");
-const samples: Array<{ totalMs: number; phases: Record<string, number> }> = [];
+const samples: Array<{
+  transportReadyMs: number;
+  capabilityReadyMs: number;
+  totalMs: number;
+  phases: Record<string, number>;
+  extensionImportMs: number[];
+  extensionFactoryMs: number[];
+}> = [];
   for (let iteration = 0; iteration < options.iterations; iteration += 1) {
     const root = await mkdtemp(join(tmpdir(), "pi-chat-startup-direct-"));
     const sessionCopy = join(root, "session.jsonl");
@@ -85,15 +96,38 @@ const samples: Array<{ totalMs: number; phases: Record<string, number> }> = [];
     let stopped = false;
     try {
       await client.start(["--session", sessionCopy]);
-      const totalMs = performance.now() - startedAt;
+      const transportReadyMs = performance.now() - startedAt;
+      const compatibility = await client.probeCompatibility();
+      if (!compatibility.compatible) throw new Error(`Pi RPC capability probe failed: ${compatibility.diagnostics.join("; ")}`);
+      const capabilityReadyMs = performance.now() - startedAt;
+      const startupRecords = observed.records.filter((record) => record.startupPhase);
       const phases = Object.fromEntries(
-        observed.records
-          .filter((record) => record.startupPhase && typeof record.durationMs === "number")
+        startupRecords
+          .filter((record) =>
+            record.startupPhase !== "extension-import-end"
+            && record.startupPhase !== "extension-factory-end"
+            && typeof record.durationMs === "number",
+          )
           .map((record) => [record.startupPhase as string, Math.round(record.durationMs as number)]),
       );
+      const extensionImportMs = startupRecords
+        .map((record) => record.extensionImportDurationMs)
+        .filter((value): value is number => typeof value === "number" && Number.isFinite(value))
+        .map((value) => Math.round(value));
+      const extensionFactoryMs = startupRecords
+        .map((record) => record.extensionFactoryDurationMs)
+        .filter((value): value is number => typeof value === "number" && Number.isFinite(value))
+        .map((value) => Math.round(value));
       await client.stop();
       stopped = true;
-      samples.push({ totalMs: Math.round(totalMs), phases });
+      samples.push({
+        transportReadyMs: Math.round(transportReadyMs),
+        capabilityReadyMs: Math.round(capabilityReadyMs),
+        totalMs: Math.round(capabilityReadyMs),
+        phases,
+        extensionImportMs,
+        extensionFactoryMs,
+      });
     } finally {
       if (!stopped) await client.stop().catch(() => undefined);
       await rm(root, { recursive: true, force: true });
@@ -102,6 +136,10 @@ const samples: Array<{ totalMs: number; phases: Record<string, number> }> = [];
 const results = {
   direct: {
     summary: summary(samples.map((sample) => sample.totalMs)),
+    transportReadySummary: summary(samples.map((sample) => sample.transportReadyMs)),
+    capabilityReadySummary: summary(samples.map((sample) => sample.capabilityReadyMs)),
+    extensionImportSummary: optionalSummary(samples.flatMap((sample) => sample.extensionImportMs)),
+    extensionFactorySummary: optionalSummary(samples.flatMap((sample) => sample.extensionFactoryMs)),
     samples,
   },
 };
