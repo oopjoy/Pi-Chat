@@ -1,4 +1,4 @@
-import { summarizeValues, type DescriptiveSummary } from "./browser-fluency.mjs";
+import { summarizeValues, type DescriptiveSummary, type ReactRenderBenchmarkSample } from "./browser-fluency.mjs";
 
 export const STREAMING_CADENCE_POLICIES = [
   { key: "A", serverIntervalMs: 50, browserPolicy: "timeout-50", stage: "baseline" },
@@ -85,6 +85,7 @@ export interface StreamingCadenceSample {
       totalDurationMs: number | null;
       maxDurationMs: number | null;
     };
+    reactRender: ReactRenderBenchmarkSample;
   };
   server: {
     summaryCount: number;
@@ -266,7 +267,7 @@ const BROWSER_KEYS = [
   "settledSessions", "startSkewMs", "finalMarkerVisible", "allSessionsReceivedUpdates",
   "allSessionsReceivedMessageEnd", "allSessionsReceivedFinalMarker", "parseErrors",
   "offscreenTerminalCachesVerified", "fontsReady", "renderedStructure", "frameGaps",
-  "longTasks",
+  "longTasks", "reactRender",
 ] as const;
 
 function assertSample(value: unknown, label: string): void {
@@ -321,6 +322,13 @@ function assertSample(value: unknown, label: string): void {
   for (const key of ["count", "totalDurationMs", "maxDurationMs"] as const) {
     if (tasks[key] !== null) finiteNumber(tasks[key], `${label}.browser.longTasks.${key}`);
   }
+  const reactRender = asRecord(browser.reactRender, ["supported", "commitCount", "actualDurationMs", "baseDurationMs", "byPhase", "bySurface"], `${label}.browser.reactRender`);
+  if (typeof reactRender.supported !== "boolean") throw new Error(`Streaming cadence ${label}.browser.reactRender.supported must be boolean`);
+  for (const key of ["commitCount", "actualDurationMs", "baseDurationMs"] as const)
+    finiteNumber(reactRender[key], `${label}.browser.reactRender.${key}`);
+  asRecord(reactRender.byPhase, ["mount", "update", "nested-update"], `${label}.browser.reactRender.byPhase`);
+  if (!reactRender.bySurface || typeof reactRender.bySurface !== "object" || Array.isArray(reactRender.bySurface))
+    throw new Error(`Streaming cadence ${label}.browser.reactRender.bySurface must be an object`);
 
   const server = asRecord(record.server, SERVER_KEYS, `${label}.server`);
   for (const key of SERVER_KEYS) finiteNumber(server[key], `${label}.server.${key}`);
@@ -387,7 +395,7 @@ export function assertStreamingCadenceResultPrivacy(value: unknown): void {
   const metrics = asRecord(result.metrics, [
     "firstVisibleDomObservationMs", "firstVisibleWireToPaintOpportunityMs", "firstVisibleDomObservationPaintOpportunityMs",
     "messageEndPaintOpportunityMs", "browserStartSkewMs", "sourceTiming", "frameGaps",
-    "longTasks",
+    "longTasks", "reactRender",
   ], "metrics");
   for (const [key, description] of Object.entries(metrics)) safeString(description, `metrics.${key}`);
 

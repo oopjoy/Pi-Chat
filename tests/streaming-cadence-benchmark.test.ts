@@ -67,6 +67,14 @@ function sample(cell: ReturnType<typeof streamingCadenceMatrix>[number]): Stream
         : null,
       frameGaps: summarizeFrameGaps([16, 17, 40]),
       longTasks: { supported: true, count: 1, totalDurationMs: 55, maxDurationMs: 55 },
+      reactRender: {
+        supported: false,
+        commitCount: 0,
+        actualDurationMs: 0,
+        baseDurationMs: 0,
+        byPhase: { mount: 0, update: 0, "nested-update": 0 },
+        bySurface: {},
+      },
     },
     server: {
       summaryCount: cell.concurrency,
@@ -132,6 +140,7 @@ function validResult() {
       sourceTiming: "safe metric",
       frameGaps: "safe metric",
       longTasks: "safe metric",
+      reactRender: "safe metric",
     },
     iterations: 1,
     samples,

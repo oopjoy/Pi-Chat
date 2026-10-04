@@ -95,6 +95,8 @@ Results remain descriptive only with no thresholds. Successful JSON is emitted o
 
 The browser lane measures:
 
+- `first wire → paint`: the first visible assistant update frame to the guarded double-rAF opportunity after the first DOM observation;
+- optional maintenance-build React Profiler totals and surface breakdown during the visible streaming window;
 - `cold-first-pane`: generated natural 1000-turn JSONL to matching `cold-jsonl` pane commit plus two animation frames;
 - `hot-switch`: return to the same natural recent pane through `browser-cache` in one browser context;
 - `load-earlier`: expand that same generated 1000-turn Session and compare the viewport position of the same pre-existing user-message anchor.

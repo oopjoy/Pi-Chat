@@ -21,6 +21,7 @@ import {
   type parseStreamingBenchmarkConfig,
 } from "../scripts/e2e-streaming-benchmark.mjs";
 import { validateStagingDist } from "./run-browser-fluency-bench.mjs";
+import type { ReactRenderBenchmarkSample } from "./lib/browser-fluency.mjs";
 import {
   aggregateStreamingCadence,
   assertStreamingCadenceResultPrivacy,
@@ -383,6 +384,7 @@ async function installBrowserProbe(context: BrowserContext): Promise<void> {
       firstVisibleWireAt: number | null;
       firstPaintOpportunityAt: number | null;
       terminalPaintOpportunityAt: number | null;
+      visibleSettledAt: number | null;
       finalMarkerVisible: boolean;
       lastVisibleText: string;
       frameGaps: number[];
@@ -416,6 +418,7 @@ async function installBrowserProbe(context: BrowserContext): Promise<void> {
       firstVisibleWireAt: null,
       firstPaintOpportunityAt: null,
       terminalPaintOpportunityAt: null,
+      visibleSettledAt: null,
       finalMarkerVisible: false,
       lastVisibleText: "",
       frameGaps: [],
@@ -487,6 +490,55 @@ async function installBrowserProbe(context: BrowserContext): Promise<void> {
         );
         const starts = [...this.agentStartTimes.values()];
         const visibleStartedAt = this.agentStartTimes.get(this.visibleSessionId) ?? this.startedAt;
+        const commits = (benchWindow as Window & {
+          __piChatReactRenderBenchmark?: { commits?: Array<{
+            id?: unknown;
+            phase?: unknown;
+            actualDuration?: unknown;
+            baseDuration?: unknown;
+            commitTime?: unknown;
+          }> };
+        }).__piChatReactRenderBenchmark?.commits;
+        const emptyReactRender: ReactRenderBenchmarkSample = {
+          supported: false,
+          commitCount: 0,
+          actualDurationMs: 0,
+          baseDurationMs: 0,
+          byPhase: { mount: 0, update: 0, "nested-update": 0 },
+          bySurface: {},
+        };
+        const selectedCommits = Array.isArray(commits)
+          ? commits.filter((commit) =>
+            typeof commit.commitTime === "number"
+            && Number.isFinite(commit.commitTime)
+            && commit.commitTime >= visibleStartedAt
+            && (this.visibleSettledAt === null || commit.commitTime <= this.visibleSettledAt)
+            && typeof commit.id === "string"
+            && (commit.phase === "mount" || commit.phase === "update" || commit.phase === "nested-update")
+            && typeof commit.actualDuration === "number"
+            && Number.isFinite(commit.actualDuration)
+            && typeof commit.baseDuration === "number"
+            && Number.isFinite(commit.baseDuration),
+          ) as Array<{ id: string; phase: "mount" | "update" | "nested-update"; actualDuration: number; baseDuration: number }>
+          : [];
+        const reactRender: ReactRenderBenchmarkSample = Array.isArray(commits)
+          ? (() => {
+            const byPhase = { mount: 0, update: 0, "nested-update": 0 };
+            const bySurface: ReactRenderBenchmarkSample["bySurface"] = {};
+            let actualDurationMs = 0;
+            let baseDurationMs = 0;
+            for (const commit of selectedCommits) {
+              byPhase[commit.phase] += 1;
+              actualDurationMs += commit.actualDuration;
+              baseDurationMs += commit.baseDuration;
+              const surface = bySurface[commit.id] ??= { commits: 0, actualDurationMs: 0, baseDurationMs: 0 };
+              surface.commits += 1;
+              surface.actualDurationMs += commit.actualDuration;
+              surface.baseDurationMs += commit.baseDuration;
+            }
+            return { supported: true, commitCount: selectedCommits.length, actualDurationMs, baseDurationMs, byPhase, bySurface };
+          })()
+          : emptyReactRender;
         const output = {
           eventSourceUrl: this.eventSourceUrl,
           firstVisibleDomObservationMs: this.firstVisibleCommitAt === null ? -1 : this.firstVisibleCommitAt - visibleStartedAt,
@@ -512,6 +564,7 @@ async function installBrowserProbe(context: BrowserContext): Promise<void> {
             totalDurationMs: this.longTasksSupported ? selected.reduce((total, entry) => total + entry.duration, 0) : null,
             maxDurationMs: this.longTasksSupported ? Math.max(0, ...selected.map((entry) => entry.duration)) : null,
           },
+          reactRender,
         };
         this.active = false;
         if (this.frameHandle) cancelAnimationFrame(this.frameHandle);
@@ -589,7 +642,10 @@ async function installBrowserProbe(context: BrowserContext): Promise<void> {
                 }));
               }
             }
-            if (eventType === "agent_settled") state.settled.add(sessionId);
+            if (eventType === "agent_settled") {
+              state.settled.add(sessionId);
+              if (sessionId === state.visibleSessionId) state.visibleSettledAt = now;
+            }
           } catch {
             state.parseErrors += 1;
           }
@@ -983,6 +1039,7 @@ async function measureSample(options: {
           totalDurationMs: typeof longTasks?.totalDurationMs === "number" ? round(longTasks.totalDurationMs) : null,
           maxDurationMs: typeof longTasks?.maxDurationMs === "number" ? round(longTasks.maxDurationMs) : null,
         },
+        reactRender: browserRaw.reactRender as ReactRenderBenchmarkSample,
       },
       server: aggregateServerSummaries(
         diagnosticSnapshot,
@@ -1305,6 +1362,7 @@ export async function runStreamingCadenceBenchmark(options: {
         sourceTiming: "Source-process first/last emission duration, interval distribution, deadline lateness, and cross-process start skew.",
         frameGaps: "requestAnimationFrame callback gaps while the sample is active; this is renderer scheduling evidence, not physical-display telemetry.",
         longTasks: "Renderer Long Task entries overlapping the sample window; unsupported values remain null.",
+        reactRender: "Optional maintenance-only React Profiler commits overlapping the visible streaming window; unsupported in ordinary production builds.",
       },
       iterations,
       samples,

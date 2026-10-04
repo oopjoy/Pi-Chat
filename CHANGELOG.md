@@ -7,7 +7,7 @@
 - Enabled React Hooks ordering checks as an ESLint error and dependency checks as warnings.
 - Ratcheted the type-debt guard to the current verified floor: `732 / 32 / 37 / 8` for explicit `any`, `Record<string, any>`, `as any`, and `new Proxy`.
 - Replaced the remaining generic callback/host bags in Compact, Runtime Event, and Prompt Route orchestration seams with explicit capability contracts.
-- Added a descriptive streaming metric for first visible wire frame to guarded paint opportunity; production cadence remains unchanged.
+- Added descriptive streaming metrics for first visible wire frame to guarded paint opportunity and optional React render profiling; production cadence remains unchanged.
 
 ## 0.5.0
 
