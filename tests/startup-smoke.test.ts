@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { once } from "node:events";
 import { createServer } from "node:net";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -252,6 +252,58 @@ test("compiled server starts against fake RPC, probes capabilities, serves guard
     if (child.exitCode === null) child.kill("SIGTERM");
     await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 5_000))]);
     assert.ok(child.exitCode !== null || child.signalCode !== null, "SIGTERM should terminate the compiled Pi Chat server");
+    await removeWithWindowsRetry(root);
+  }
+});
+
+test("portable compiled server discovers managed Pi without npm, source, or node_modules", { timeout: 45_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-portable-managed-"));
+  const portable = join(root, "Pi Chat's & (portable)");
+  const home = join(root, "user-home");
+  const agentDir = join(home, ".pi", "agent");
+  const install = join(agentDir, "install");
+  const piPackage = join(install, "releases", "1.1.0", "node_modules", "@earendil-works", "pi-coding-agent");
+  const rpcLog = join(root, "rpc.log");
+  const sessionFile = join(agentDir, "session.jsonl");
+  let child: ReturnType<typeof spawn> | undefined;
+  try {
+    await mkdir(join(piPackage, "dist"), { recursive: true });
+    await writeFile(join(install, "current-version"), "1.1.0\n");
+    await writeFile(join(piPackage, "package.json"), JSON.stringify({ type: "module", name: "@earendil-works/pi-coding-agent", version: "1.1.0" }));
+    await writeFile(join(piPackage, "dist/rpc-entry.js"), fakeRpcEntry);
+    await writeFile(sessionFile, `${JSON.stringify({ type: "session", id: "fake", cwd: root })}\n`);
+    await mkdir(portable);
+    await cp(compiledDist, join(portable, "dist"), { recursive: true });
+    await cp(join(projectRoot, "resources"), join(portable, "resources"), { recursive: true });
+    await cp(join(projectRoot, "package.json"), join(portable, "package.json"));
+    const port = await freePort();
+    const env = { ...process.env, HOME: home, USERPROFILE: home, PI_CODING_AGENT_DIR: agentDir, PI_CHAT_SMOKE_LOG: rpcLog, PI_CHAT_SMOKE_SESSION_FILE: sessionFile };
+    for (const key of ["PI_CHAT_PI_ENTRY", "PI_MANAGED_INSTALL_ROOT", "PI_CHAT_RUNTIME_DIST"])
+      delete (env as NodeJS.ProcessEnv)[key];
+    child = spawn(process.execPath, [join(portable, "dist/server/server/index.js"), "--port", String(port), "--cwd", root], {
+      cwd: portable, env, stdio: "ignore", windowsHide: true,
+    });
+    const origin = `http://127.0.0.1:${port}`;
+    const handshake = await (await waitFor(`${origin}/api/bootstrap/handshake`, child)).json() as { requestToken: string };
+    assert.equal((await fetch(origin)).status, 200);
+    await waitForCapabilityProbe(rpcLog, child);
+    let status: string | undefined;
+    for (let attempt = 0; attempt < 50; attempt++) {
+      const response = await fetch(`${origin}/api/bootstrap`, { headers: { origin, "x-pi-chat-token": handshake.requestToken } });
+      const data = await response.json() as { primaryRuntime?: { status: string } };
+      status = data.primaryRuntime?.status;
+      if (status === "ready") break;
+      await new Promise(resolve => setTimeout(resolve, 80));
+    }
+    assert.equal(status, "ready");
+    assert.equal(existsSync(join(portable, "node_modules")), false);
+    assert.equal(existsSync(join(portable, "src")), false);
+  } finally {
+    if (child && child.exitCode === null) {
+      const exited = once(child, "exit");
+      child.kill("SIGTERM");
+      await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 5000))]);
+    }
     await removeWithWindowsRetry(root);
   }
 });

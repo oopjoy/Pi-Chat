@@ -17,7 +17,7 @@ test("Windows launcher assets are packaged and project shortcuts are ignored", a
   ]);
   const pkg = JSON.parse(packageJson) as { files: string[]; scripts: Record<string, string> };
   assert.match(gitignore, /^\*\.lnk$/m);
-  for (const file of ["CONTRIBUTING.md", "docs", "start-pi-chat.cmd", "start-pi-chat-ui.ps1", "scripts/install-shortcuts.ps1", "scripts/pi-chat-launch-process.ps1", "scripts/assert-safe-live-dist.mjs", "scripts/dist-paths.mjs", "scripts/workspace-artifacts.mjs", "scripts/run-staged-verification.mjs", "resources"]) {
+  for (const file of ["CONTRIBUTING.md", "docs", "start-pi-chat.cmd", "start-pi-chat-ui.ps1", "scripts/install-shortcuts.ps1", "scripts/pi-chat-launch-process.ps1", "scripts/pi-chat-preflight.ps1", "scripts/pi-chat-start-server.ps1", "scripts/check-runtime-files.mjs", "scripts/runtime-required-files.json", "scripts/assert-safe-live-dist.mjs", "scripts/dist-paths.mjs", "scripts/workspace-artifacts.mjs", "scripts/run-staged-verification.mjs", "resources"]) {
     assert.ok(pkg.files.includes(file), `${file} must be included in the package`);
   }
   assert.equal(pkg.scripts["install:shortcuts"], "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-shortcuts.ps1");
@@ -42,6 +42,9 @@ test("launcher keeps portable path resolution and refuses to take over another b
     assert.doesNotMatch(source, /C:\\Users\\/i);
 
   assert.match(cmd, /%~dp0/);
+  assert.match(cmd, /pi-chat-preflight\.ps1/i);
+  assert.match(cmd, /pi-chat-start-server\.ps1/i);
+  assert.doesNotMatch(cmd, /call npm|npm run build|npm install|current-version/i);
   assert.match(cmd, /pi-chat-port-ready\.ps1/i);
   assert.match(readiness, /\/api\/bootstrap\/handshake/);
   assert.match(readiness, /exit 2/);
@@ -51,6 +54,25 @@ test("launcher keeps portable path resolution and refuses to take over another b
   assert.doesNotMatch(cmd, /\/api\/shutdown/);
   assert.doesNotMatch(cmd, /X-Pi-Chat-Token/);
   assert.doesNotMatch(readiness, /X-Pi-Chat-Token/);
+});
+
+test("double-click wrapper preserves errors and offers an explicit noninteractive escape", { skip: process.platform !== "win32" }, async () => {
+  const sandbox = await mkdtemp(join(tmpdir(), "pi-chat-wrapper-"));
+  try {
+    await cp(join(root, "start-pi-chat.cmd"), join(sandbox, "start-pi-chat.cmd"));
+    await writeFile(join(sandbox, "pi-chat-launch.cmd"), "@echo off\r\necho fixture-launch-failure\r\nexit /b 7\r\n");
+    assert.throws(() => execFileSync("cmd.exe", ["/d", "/c", join(sandbox, "start-pi-chat.cmd")], {
+      env: { ...process.env, PI_CHAT_NONINTERACTIVE: "1" }, encoding: "utf8", timeout: 5000,
+    }), (error: unknown) => {
+      const result = error as { status: number; stdout: string };
+      assert.equal(result.status, 7);
+      assert.match(result.stdout, /fixture-launch-failure/);
+      assert.match(result.stdout, /recovery steps above/);
+      return true;
+    });
+    const wrapper = await readProjectFile("start-pi-chat.cmd");
+    assert.match(wrapper, /PI_CHAT_NONINTERACTIVE.*pause/);
+  } finally { await rm(sandbox, { recursive: true, force: true }); }
 });
 
 test("PowerShell readiness distinguishes the expected build from a verified stale listener", { skip: process.platform !== "win32" }, async () => {
