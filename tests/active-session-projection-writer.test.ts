@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { collectWriterBoundarySources, writerBoundaryViolations } from "../scripts/check-writer-boundaries.mjs";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { ActiveSessionProjectionWriter } from "../src/web/application/active-session-projection-writer";
@@ -160,7 +161,9 @@ test("deletion and process replacement retire earlier full and view authority", 
   assert.equal(writer.commitBootstrap(["primary"], processAuthority), false);
 });
 
-test("App routes active-set mutations through the projection writer", async () => {
+test("all Web modules route active-set mutations through the projection writer", async () => {
+  const violations = writerBoundaryViolations(await collectWriterBoundarySources());
+  assert.deepEqual(violations.filter(item => item.kind === "active-setter"), []);
   const [appSource, projectionSource] = await Promise.all([
     readFile(new URL("../src/web/App.tsx", import.meta.url), "utf8"),
     readFile(new URL("../src/web/application/session-projection-state.tsx", import.meta.url), "utf8"),
