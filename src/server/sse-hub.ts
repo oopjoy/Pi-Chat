@@ -143,7 +143,7 @@ export class SseHub {
   private readonly scheduledSnapshots = new Map<ServerResponse, Map<string, ScheduledSnapshot>>();
   private readonly lastSnapshotWrites = new Map<ServerResponse, Map<string, number>>();
   /** Async ServerResponse errors must be consumed before Node treats them as uncaught. */
-  private readonly responseErrorHandlers = new Map<ServerResponse, () => void>();
+  private readonly responseErrorHandlers = new WeakMap<ServerResponse, () => void>();
   private readonly lastResponseMetadata = new Map<ServerResponse, FrameMetadata>();
   private readonly disconnectListeners = new Set<(response: ServerResponse, clientId: string, info: SseDisconnectInfo) => void>();
   private diagnosticObserver?: (event: SseTransportDiagnostic) => void;
@@ -175,7 +175,7 @@ export class SseHub {
       if (!this.clients.has(response)) return;
       const metadata = this.lastResponseMetadata.get(response) || { eventType: "unknown" };
       this.observe("write-error", metadata);
-      this.disconnect(response, { reason: "write-error" });
+      this.endClient(response, { reason: "write-error" });
     };
     this.clients.set(response, clientId);
     this.responseErrorHandlers.set(response, onError);
@@ -290,34 +290,32 @@ export class SseHub {
     }
   }
 
-  closeAll(): void {
-    for (const client of [...this.clients.keys()]) {
-      // `end()` may emit an asynchronous error after the client leaves the
-      // hub. Keep the per-response error listener alive until the stream emits
-      // close/finish so shutdown cannot reintroduce an uncaught EventEmitter
-      // error. The listener is a no-op once `clients` no longer contains it.
-      const errorHandler = this.responseErrorHandlers.get(client);
-      this.disconnect(
-        client,
-        { reason: "shutdown" },
-        { retainResponseErrorHandler: Boolean(errorHandler) },
-      );
-      const cleanup = () => {
-        if (errorHandler) client.removeListener("error", errorHandler);
-        if (this.responseErrorHandlers.get(client) === errorHandler)
-          this.responseErrorHandlers.delete(client);
-        client.removeListener("close", cleanup);
-        client.removeListener("finish", cleanup);
-      };
-      client.once("close", cleanup);
-      client.once("finish", cleanup);
-      try {
-        client.end();
-      } catch {
-        cleanup();
-        // Shutdown path must not throw.
-      }
+  /** All server-initiated closes keep error ownership until response close. */
+  private endClient(client: ServerResponse, info: SseDisconnectInfo): void {
+    if (!this.clients.has(client)) return;
+    const errorHandler = this.responseErrorHandlers.get(client);
+    this.disconnect(client, info, { retainResponseErrorHandler: Boolean(errorHandler) });
+    const cleanup = () => {
+      if (errorHandler) client.removeListener("error", errorHandler);
+      if (this.responseErrorHandlers.get(client) === errorHandler)
+        this.responseErrorHandlers.delete(client);
+      client.removeListener("close", cleanup);
+    };
+    // `finish` is not socket closure: a queued end/write may still fail later.
+    // The weak registry does not retain a disconnected response that never
+    // emits close; the response itself owns these final no-op error listeners.
+    client.once("close", cleanup);
+    try { client.end(); }
+    catch {
+      // Even a synchronous end failure can be followed by an asynchronous error.
+      // Keep the listener until close rather than abandoning it in this catch.
+      try { client.destroy?.(); } catch { /* already unusable */ }
     }
+  }
+
+  closeAll(): void {
+    for (const client of [...this.clients.keys()])
+      this.endClient(client, { reason: "shutdown" });
     this.streamingDeltaClients.clear();
     this.streamProjections.clear();
     this.backpressured.clear();
@@ -429,7 +427,7 @@ export class SseHub {
       this.waitForDrain(client);
     } catch {
       this.observe("write-error", framed.metadata);
-      this.disconnect(client, { reason: "write-error" });
+      this.endClient(client, { reason: "write-error" });
     }
   }
 
@@ -450,8 +448,7 @@ export class SseHub {
     if (pending.bytes > MAX_PENDING_SSE_BYTES) {
       // A reconnect makes the browser fetch an authoritative view. Disconnecting
       // is safer than silently dropping ordered lifecycle/tool terminal events.
-      this.disconnect(client, { reason: "pending-buffer-limit", pendingBytes: pending.bytes });
-      try { client.end(); } catch { /* socket is already unusable */ }
+      this.endClient(client, { reason: "pending-buffer-limit", pendingBytes: pending.bytes });
       return;
     }
     this.pendingFrames.set(client, pending);

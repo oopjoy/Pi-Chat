@@ -37,6 +37,55 @@ test("closeAll absorbs an asynchronous end error after disconnecting", async () 
   assert.equal(client.listenerCount("error"), 0);
 });
 
+test("buffer-limit close absorbs late end errors through finish and releases listeners on close", async () => {
+  const hub = new SseHub(0);
+  const congested = stubClient(false);
+  const healthy = stubClient();
+  let ends = 0;
+  let escaped: unknown;
+  let disconnects = 0;
+  congested.end = () => {
+    ends++;
+    queueMicrotask(() => {
+      congested.emit("finish");
+      try { congested.emit("error", new Error("late end failure")); }
+      catch (error) { escaped = error; }
+    });
+  };
+  hub.onDisconnect((_client, id) => { if (id === "slow") disconnects++; });
+  hub.add(congested as never, "slow");
+  hub.add(healthy as never, "healthy");
+  for (let i = 0; i < 7; i++) hub.broadcast({ type: "message_end", n: i, payload: "x".repeat(450000) });
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(escaped, undefined);
+  assert.equal(ends, 1);
+  assert.equal(disconnects, 1);
+  assert.equal(hub.size, 1);
+  const written = congested.frames.length;
+  congested.emit("drain");
+  assert.equal(congested.frames.length, written);
+  congested.emit("close");
+  assert.equal(congested.listenerCount("error"), 0);
+  assert.equal(congested.listenerCount("close"), 0);
+  hub.closeAll();
+  assert.equal(ends, 1);
+});
+
+test("write-error closes its response with the same late-error protection", async () => {
+  const hub = new SseHub(0);
+  const client = stubClient();
+  client.write = () => { throw new Error("write failed"); };
+  let ends = 0;
+  client.end = () => { ends++; queueMicrotask(() => client.emit("error", new Error("end failed"))); };
+  hub.add(client as never, "broken");
+  hub.broadcast({ type: "agent_start" });
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(ends, 1);
+  assert.equal(hub.size, 0);
+  client.emit("close");
+  assert.equal(client.listenerCount("error"), 0);
+});
+
 test("diagnostic observer failures never perturb SSE delivery", () => {
   const hub = new SseHub(0, () => { throw new Error("diagnostic failure"); });
   const client = stubClient();
