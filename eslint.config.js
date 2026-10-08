@@ -25,4 +25,23 @@ export default [
       "@typescript-eslint/no-explicit-any": "warn",
     },
   },
+  {
+    // Converged ownership modules get real type-aware Promise checks first;
+    // legacy orchestration remains visible debt, not a blanket rule disable.
+    files: [
+      "src/server/runtime-pool.ts", "src/server/session-projection.ts", "src/server/sse-hub.ts",
+      "src/web/application/session-view-cache-writer.ts",
+      "src/web/application/runtime-projection-writer.ts",
+      "src/web/application/active-session-projection-writer.ts",
+    ],
+    languageOptions: {
+      parserOptions: { project: ["./tsconfig.json", "./tsconfig.server.json"], tsconfigRootDir: import.meta.dirname },
+    },
+    rules: {
+      "@typescript-eslint/no-floating-promises": ["error", { ignoreVoid: false }],
+      "@typescript-eslint/no-misused-promises": "error",
+      "@typescript-eslint/no-explicit-any": "error",
+      "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_", varsIgnorePattern: "^_" }],
+    },
+  },
 ];
