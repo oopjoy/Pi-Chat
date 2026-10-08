@@ -1,4 +1,5 @@
 import { expect, test } from "./fixtures";
+import type { BootstrapData, PiMessage, SessionViewData } from "../src/shared/types";
 
 async function openInitialSession(page: import("@playwright/test").Page) {
   await page.goto("/");
@@ -34,6 +35,61 @@ async function openSecondSession(page: import("@playwright/test").Page) {
   await page.locator(".session-item", { hasText: "Second session" }).click();
   await expect(page.getByText("Final answer with")).toBeVisible();
 }
+
+test("queued turn process ownership survives a busy refresh and a reload", { tag: "@desktop-only" }, async ({ page }) => {
+  const now = Date.now();
+  const queuedId = "00000000-0000-4000-8000-000000000201";
+  const old: PiMessage[] = [
+    { role: "user", content: "OLD_REQUEST", timestamp: now - 10000, piChatPersistedMessageId: "old-user:0" },
+    { role: "assistant", timestamp: now - 9000, piChatPersistedMessageId: "old-early:0", content: [{ type: "thinking", thinking: "OLD_EARLY_WORK" }, { type: "toolCall", name: "read", id: "old-read", arguments: {} }] },
+    { role: "toolResult", timestamp: now - 8000, piChatPersistedMessageId: "old-result:0", toolCallId: "old-read", toolName: "read", content: "ok" },
+    { role: "assistant", timestamp: now + 60000, piChatPersistedMessageId: "old-late:0", content: [{ type: "thinking", thinking: "OLD_LATE_WORK" }, { type: "toolCall", name: "bash", id: "old-test", arguments: {} }] },
+    { role: "toolResult", timestamp: now + 70000, piChatPersistedMessageId: "old-test-result:0", toolCallId: "old-test", toolName: "bash", content: "ok" },
+    { role: "assistant", timestamp: now + 90000, piChatPersistedMessageId: "old-final:0", content: "OLD_FINAL_ANSWER" },
+  ];
+  const next: PiMessage = { role: "assistant", timestamp: now + 110000, piChatLiveMessageId: "next-live", content: [{ type: "thinking", thinking: "NEW_REQUEST_WORK" }, { type: "toolCall", name: "read", id: "new-read", arguments: {} }] };
+  let phase = 0;
+  let queued = false;
+  await page.route(/\/api\/(?:bootstrap(?:\?|$)|sessions\/[^/]+\/view(?:\?|$))/, async route => {
+    const response = await route.fetch({ headers: { ...route.request().headers(), origin: new URL(route.request().url()).origin } });
+    expect(response.status()).toBe(200);
+    const data = await response.json() as BootstrapData | SessionViewData;
+    data.messages = phase === 0 ? old.slice(0, 3) : phase === 1 ? [...old, next] : [...old, { role: "user", content: "NEW_REQUEST", timestamp: now + 100000, piChatPersistedMessageId: "next-user:0" }, next];
+    data.messageTotal = data.messages.length;
+    data.turnTotal = phase === 2 ? 2 : 1;
+    data.state.isStreaming = true;
+    if ("isStreaming" in data) data.isStreaming = true;
+    data.queue = phase === 0 && queued ? [{ id: queuedId, message: "NEW_REQUEST", createdAt: now, imageCount: 0 }] : [];
+    data.queuePaused = false;
+    await route.fulfill({ response, json: data });
+  });
+  await page.route("**/api/chat/prompt", async route => {
+    queued = true;
+    await route.fulfill({ json: { accepted: true, queued: true, id: queuedId, queue: [{ id: queuedId, message: "NEW_REQUEST", createdAt: now, imageCount: 0 }] } });
+  });
+  await page.goto("/");
+  await expect(page.locator(".message-user")).toContainText("OLD_REQUEST");
+  await page.getByRole("textbox", { name: "消息输入" }).fill("NEW_REQUEST");
+  await page.locator(".queue-submit-button").click();
+  await expect(page.locator(".prompt-queue article")).toHaveCount(1);
+  await expect(page.locator(".message-user")).toHaveCount(1);
+  phase = 1; // Complete queue snapshot proves dispatch; JSONL User echo is still missing.
+  await page.getByRole("button", { name: "刷新会话列表", exact: true }).click();
+  const processes = page.locator(".conversation-process");
+  await expect(processes).toHaveCount(2);
+  await expect(processes.nth(0)).toContainText("OLD_EARLY_WORK");
+  await expect(processes.nth(0)).toContainText("OLD_LATE_WORK");
+  await expect(processes.nth(0)).not.toHaveClass(/is-streaming/);
+  await expect(processes.nth(1)).toContainText("NEW_REQUEST_WORK");
+  await expect(processes.nth(1)).toHaveClass(/is-streaming/);
+  const order = () => page.locator(".timeline-inner").evaluate(root => [...root.querySelectorAll(".message, .conversation-process")].map(node => node.classList.contains("conversation-process") ? (node.textContent?.includes("NEW_REQUEST_WORK") ? "new-process" : "old-process") : node.classList.contains("message-user") ? (node.textContent?.includes("NEW_REQUEST") ? "new-user" : "old-user") : "old-final"));
+  const expected = ["old-user", "old-process", "old-final", "new-user", "new-process"];
+  await expect.poll(order).toEqual(expected);
+  phase = 2;
+  await page.reload();
+  await expect.poll(order).toEqual(expected);
+  await expect(page.locator(".message-user")).toHaveCount(2);
+});
 
 test("accepted duplicate Prompts remain one row per Prompt across reload", { tag: "@desktop-only" }, async ({ page }) => {
   const { input, send } = await openInitialSession(page);
