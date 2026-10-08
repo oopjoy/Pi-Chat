@@ -361,6 +361,31 @@ test("a mismatched Web artifact blocks mutations but keeps guarded recovery acti
   await expect(page.getByRole("button", { name: "关闭 Pi Chat" })).toBeEnabled();
 });
 
+test("Pi connection settings detects without restarting and keeps the unsent draft", { tag: "@desktop-mobile" }, async ({ page }) => {
+  const { input } = await openInitialSession(page);
+  await input.fill("keep my unsent draft");
+  if (await page.locator(".sidebar-scrim").isVisible())
+    await page.getByRole("button", { name: "收起侧栏", exact: true }).click();
+  let restarts = 0;
+  page.on("request", request => { if (request.url().endsWith("/api/runtime/restart")) restarts++; });
+  await page.getByRole("button", { name: "打开设置", exact: true }).click();
+  await page.getByRole("button", { name: "关于", exact: true }).click();
+  await page.getByRole("button", { name: "Pi 连接设置 / 重试", exact: true }).click();
+  const setup = page.getByRole("dialog", { name: "连接本机 Pi" });
+  await expect(setup).toBeVisible();
+  await expect(setup).toContainText("环境变量 PI_CHAT_PI_ENTRY");
+  await expect(setup.getByRole("button", { name: "选择 rpc-entry.js", exact: true })).toBeDisabled();
+  await setup.getByRole("button", { name: "重新检测", exact: true }).click();
+  const retry = setup.getByRole("button", { name: "重试连接（重启服务）", exact: true });
+  await expect(retry).toBeEnabled();
+  page.once("dialog", dialog => dialog.dismiss());
+  await retry.click();
+  expect(restarts).toBe(0);
+  await setup.getByRole("button", { name: "关闭 Pi 连接设置", exact: true }).click();
+  await expect(setup).not.toBeVisible();
+  await expect(input).toHaveValue("keep my unsent draft");
+});
+
 test("Provider disclosure exposes native desktop keyboard semantics", { tag: "@desktop-only" }, async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "设置" }).click();

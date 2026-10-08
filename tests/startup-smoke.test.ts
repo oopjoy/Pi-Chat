@@ -308,6 +308,75 @@ test("portable compiled server discovers managed Pi without npm, source, or node
   }
 });
 
+test("portable missing-Pi recovery saves an entry and hands off this build without npm or source", { timeout: 45_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-setup-restart-"));
+  const portable = join(root, "portable");
+  const home = join(root, "home");
+  const agentDir = join(home, ".pi", "agent");
+  const piPackage = join(root, "selected-pi");
+  const entry = join(piPackage, "dist/rpc-entry.js");
+  const handoffFile = join(root, "handoff.json");
+  const rpcLog = join(root, "rpc.log");
+  const sessionFile = join(agentDir, "session.jsonl");
+  const port = await freePort();
+  const origin = `http://127.0.0.1:${port}`;
+  let child: ReturnType<typeof spawn> | undefined;
+  let events: AbortController | undefined;
+  try {
+    await mkdir(portable);
+    await cp(compiledDist, join(portable, "dist"), { recursive: true });
+    await cp(join(projectRoot, "resources"), join(portable, "resources"), { recursive: true });
+    await cp(join(projectRoot, "package.json"), join(portable, "package.json"));
+    await mkdir(agentDir, { recursive: true });
+    await mkdir(join(piPackage, "dist"), { recursive: true });
+    await writeFile(join(piPackage, "package.json"), JSON.stringify({ type: "module", name: "@earendil-works/pi-coding-agent", version: "1.1.0" }));
+    await writeFile(entry, fakeRpcEntry);
+    await writeFile(sessionFile, `${JSON.stringify({ type: "session", id: "fake", cwd: root })}\n`);
+    // Capture the detached handoff instead of letting a replacement outlive the test.
+    // The second child below executes its exact command/args under test ownership.
+    await writeFile(join(portable, "dist/server/server/restart-handoff.js"), "import { writeFileSync } from 'node:fs'; writeFileSync(process.env.PI_CHAT_SETUP_HANDOFF, process.argv[2]);\n");
+    const env: NodeJS.ProcessEnv = {
+      ...process.env, HOME: home, USERPROFILE: home, APPDATA: home, PATH: "", Path: "", npm_config_prefix: "", NPM_CONFIG_PREFIX: "",
+      PI_CODING_AGENT_DIR: agentDir, PI_CHAT_SMOKE_LOG: rpcLog, PI_CHAT_SMOKE_SESSION_FILE: sessionFile, PI_CHAT_SETUP_HANDOFF: handoffFile,
+    };
+    for (const key of ["PI_CHAT_PI_ENTRY", "PI_MANAGED_INSTALL_ROOT", "PI_CHAT_RUNTIME_DIST"]) delete env[key];
+    child = spawn(process.execPath, [join(portable, "dist/server/server/index.js"), "--port", String(port), "--cwd", root], { cwd: portable, env, stdio: "ignore", windowsHide: true });
+    const handshake = await (await waitFor(`${origin}/api/bootstrap/handshake`, child)).json() as { requestToken: string };
+    const headers = { origin, "x-pi-chat-token": handshake.requestToken, "x-pi-chat-client": "cccccccc-cccc-4ccc-8ccc-cccccccccccc", "x-pi-chat-page": "dddddddd-dddd-4ddd-8ddd-dddddddddddd", "content-type": "application/json" };
+    const setup = await (await fetch(`${origin}/api/runtime/setup`, { headers })).json() as { configured: unknown; configurationRevision: string };
+    assert.equal(setup.configured, null);
+    events = new AbortController();
+    const eventStream = await fetch(`${origin}/api/events`, { headers, signal: events.signal });
+    const reader = eventStream.body!.getReader();
+    await reader.read();
+    const restart = await fetch(`${origin}/api/runtime/restart`, { method: "POST", headers, body: JSON.stringify({ mode: "select", entry, configurationRevision: setup.configurationRevision }) });
+    assert.equal(restart.status, 202, await restart.text());
+    events.abort();
+    await reader.cancel().catch(() => undefined);
+    if (child.exitCode === null) await Promise.race([once(child, "exit"), new Promise(resolve => setTimeout(resolve, 5000))]);
+    assert.equal(child.exitCode, 0, "old service must shut down before handing off");
+    for (let i = 0; i < 100 && !existsSync(handoffFile); i++) await new Promise(resolve => setTimeout(resolve, 30));
+    const payload = JSON.parse(await readFile(handoffFile, "utf8")) as { command: string; args: string[]; runtimeDist: string; promoteAfterExit?: unknown };
+    assert.equal(payload.promoteAfterExit, undefined);
+    assert.equal(payload.command, process.execPath);
+    assert.equal(payload.args[0], join(portable, "dist/server/server/index.js"));
+    assert.equal(existsSync(rpcLog), false, "selection must not spawn Pi in the old process");
+    child = spawn(payload.command, payload.args, { cwd: portable, env: { ...env, PI_CHAT_RUNTIME_DIST: payload.runtimeDist }, stdio: "ignore", windowsHide: true });
+    const replacement = await (await waitFor(`${origin}/api/bootstrap/handshake`, child)).json() as { requestToken: string };
+    assert.notEqual(replacement.requestToken, handshake.requestToken);
+    await waitForCapabilityProbe(rpcLog, child);
+    const next = await (await fetch(`${origin}/api/runtime/setup`, { headers: { ...headers, "x-pi-chat-token": replacement.requestToken } })).json() as { source: string; current: { entry: string; version: string } };
+    assert.equal(next.source, "saved");
+    assert.equal(next.current.version, "1.1.0");
+    assert.equal(next.current.entry, entry);
+    assert.equal(existsSync(join(portable, "node_modules")), false);
+  } finally {
+    events?.abort();
+    if (child && child.exitCode === null) { const exited = once(child, "exit"); child.kill("SIGTERM"); await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 5000))]); }
+    await removeWithWindowsRetry(root);
+  }
+});
+
 test("HTTP handshake is available while Primary capability probing is still blocked", { timeout: 45_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-startup-ready-"));
   const rpcEntry = join(root, "fake-rpc.mjs");

@@ -1,5 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { json, methodNotAllowed, requestClientId, requestPageId } from "../http-transport.js";
+import { bodyJson, json, methodNotAllowed, requestClientId, requestPageId } from "../http-transport.js";
+import type { RuntimeSetupChange } from "../../shared/runtime-setup.js";
+import { parseRuntimeSetupChange } from "../runtime-setup.js";
 
 export interface LifecycleControlRouteHost {
   applicationShutdownAvailable(): boolean;
@@ -15,6 +17,7 @@ export interface LifecycleControlRouteHost {
     discard(): Promise<void>;
     handoff(): void;
   }>;
+  runtimeRestart?(change: RuntimeSetupChange): ReturnType<LifecycleControlRouteHost["restart"]>;
   reportIncident(error: unknown, input: unknown): { incidentId: string };
 }
 
@@ -24,7 +27,8 @@ export async function handleLifecycleControlRoute(
   response: ServerResponse,
   url: URL,
 ): Promise<boolean> {
-  if (url.pathname !== "/api/restart" && url.pathname !== "/api/shutdown") return false;
+  const runtimeRestart = url.pathname === "/api/runtime/restart";
+  if (!runtimeRestart && url.pathname !== "/api/restart" && url.pathname !== "/api/shutdown") return false;
   if (request.method !== "POST") {
     methodNotAllowed(response);
     return true;
@@ -34,7 +38,11 @@ export async function handleLifecycleControlRoute(
     json(response, 501, { error: "当前启动方式不支持从网页关闭 Pi Chat；请关闭服务进程。" });
     return true;
   }
-  if (!shuttingDown && !host.applicationRestartAvailable()) {
+  if (runtimeRestart && !host.runtimeRestart) {
+    json(response, 501, { error: "当前启动方式不支持免构建重启，请关闭 Pi Chat 后重新启动。" });
+    return true;
+  }
+  if (!shuttingDown && !runtimeRestart && !host.applicationRestartAvailable()) {
     json(response, 501, { error: "当前启动方式不支持应用更新并重启；请在 Pi Chat 项目目录运行 npm run build 后重启服务。" });
     return true;
   }
@@ -63,17 +71,23 @@ export async function handleLifecycleControlRoute(
     });
     return true;
   }
+  // A slow or malformed body cannot hold the exclusive lifecycle barrier.
+  const runtimeChange = runtimeRestart ? parseRuntimeSetupChange(await bodyJson(request, 8192)) : null;
+  if (runtimeChange && !host.isConnectedWindowPage(clientId, pageId)) {
+    json(response, 409, { error: "当前页面已断开，请重新连接后再应用 Pi 入口。", code: "LIFECYCLE_PAGE_NOT_CONNECTED" });
+    return true;
+  }
   const lifecycle = shuttingDown ? "shutting-down" : "restarting";
   host.beginLifecycle(lifecycle);
   try {
-    await host.verifyApplicationQuiescent(shuttingDown ? "关闭 Pi Chat" : "应用更新并重启");
+    await host.verifyApplicationQuiescent(shuttingDown ? "关闭 Pi Chat" : runtimeRestart ? "应用 Pi 入口并重启服务" : "应用更新并重启");
     if (shuttingDown) {
       host.broadcast({ type: "pi_chat_application_closing" });
       json(response, 202, { shuttingDown: true });
       host.shutdown?.("api-shutdown");
       return true;
     }
-    const prepared = await host.restart();
+    const prepared = runtimeChange ? await host.runtimeRestart!(runtimeChange) : await host.restart();
     try {
       await host.verifyApplicationQuiescent("完成重启");
       await prepared.promote();

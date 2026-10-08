@@ -164,6 +164,8 @@ import { handleWorkspaceReadRoute } from "./routes/workspace-read.js";
 import { handleResourcesReadRoute } from "./routes/resources-read.js";
 import { handleDiagnosticsReadRoute } from "./routes/diagnostics-read.js";
 import { handleLifecycleControlRoute } from "./routes/lifecycle-control.js";
+import { handleRuntimeSetupRoute } from "./routes/runtime-setup.js";
+import type { RuntimeEntryInfo, RuntimeSetupChange, RuntimeSetupStatus } from "../shared/runtime-setup.js";
 import { handleLocalFilesWorkspaceRoute } from "./routes/local-files-and-workspace.js";
 import { dequeueNativeSteering } from "./services/native-steering-dequeue.js";
 import {
@@ -390,6 +392,10 @@ export interface PiChatAppOptions {
   diagnostics?: IncidentDiagnostics;
   /** Build a staged replacement; PiChatApp promotes it only after its second quiescence check. */
   applicationRestart?: () => Promise<PreparedApplicationRestart>;
+  /** Installation metadata and explicit service-only restart; never mutate a live launch plan. */
+  runtimeSetupStatus?: () => RuntimeSetupStatus;
+  pickRuntimeEntry?: () => Promise<RuntimeEntryInfo | null>;
+  runtimeRestart?: (change: RuntimeSetupChange) => Promise<PreparedApplicationRestart>;
   /** Gracefully terminate the entire Pi Chat service process after explicit user intent. */
   applicationShutdown?: (reason: ApplicationShutdownReason) => void;
   /** Index owns spawn/probe/retry; App only projects and gates capability use. */
@@ -1694,7 +1700,7 @@ export class PiChatApp {
     const pathname = new URL(request.url || "/", "http://127.0.0.1").pathname;
     if (pathname.startsWith("/api/bootstrap")) return "navigation.bootstrap";
     if (/^\/api\/sessions\/[^/]+$/.test(pathname)) return "navigation.session-view";
-    if (pathname === "/api/restart") return "lifecycle.restart";
+    if (pathname === "/api/restart" || pathname === "/api/runtime/restart") return "lifecycle.restart";
     if (pathname === "/api/shutdown") return "lifecycle.shutdown";
     if (pathname === "/api/chat/prompt") return "prompt.send";
     if (pathname === "/api/chat/steers/dequeue") return "prompt.abort";
@@ -4966,7 +4972,7 @@ export class PiChatApp {
       PROMPT_PREPARE_TIMEOUT_MS, PartialTurnSettingsError, Proxy, RECENT_TURN_WINDOW_SIZE,
       Reflect, TURN_WINDOW_INCREMENT, asState, bodyJson,
       clearInterval, dequeueNativeSteering, dispatchNewDraftFirstTurn, gateModeFromCommand,
-      handleBootstrapRoute, handleDiagnosticsReadRoute, handleExtensionResponseRoute, handleLifecycleControlRoute,
+      handleBootstrapRoute, handleDiagnosticsReadRoute, handleExtensionResponseRoute, handleLifecycleControlRoute, handleRuntimeSetupRoute,
       handleLocalFilesWorkspaceRoute, handleModelManagementRoute, handleNewSessionRoute, handlePromptRoute,
       handleQueueControlRoute, handleResourcesReadRoute, handleSessionMutationsRoute, handleSessionRuntimeControlRoute,
       handleSessionsReadRoute, handleSubagentsReadRoute, handleWindowControlRoute, handleWorkspaceControlRoute,

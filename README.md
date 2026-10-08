@@ -110,12 +110,28 @@ Pi Chat 默认只监听本机回环地址，关闭浏览器窗口不会停止本
 CMD、PowerShell 和直接运行 Node 服务使用同一套服务端发现逻辑，不需要逐个修改启动脚本：
 
 1. 显式 `PI_CHAT_PI_ENTRY` 优先，指向 Pi 的 `dist/rpc-entry.js`；路径无效时不会偷偷回退到另一套 Pi。
-2. 检查 `PI_MANAGED_INSTALL_ROOT`（若设置），再检查用户主目录下 `.pi/agent/install/current-version` 所选择的官方 managed install。
-3. 检查 npm prefix、系统全局目录、Windows `%APPDATA%/npm` 和 PATH 附近的 npm 安装。
+2. 使用在“Pi 连接设置”中明确保存的入口（按 Pi Chat 安装目录隔离）。保存的路径无效时不会静默改用其他 Pi。
+3. 未保存入口或选择自动发现时：先检查 `PI_MANAGED_INSTALL_ROOT`（若设置），再检查用户主目录下 `.pi/agent/install/current-version` 所选择的官方 managed install。
+4. 继续检查 npm prefix、系统全局目录、Windows `%APPDATA%/npm` 和 PATH 附近的 npm 安装。
 
 安装发现只读文件，不执行 `pi`、`npm` 或网络下载，也不会把 Pi Chat 开发依赖中的 Pi 当作用户安装。版本从所选 Pi 包的 `package.json` 读取，协议兼容性仍由 RPC capability probe 判定。
 
 更新 Pi、修改入口路径或修复安装后，使用网页的关闭功能安全退出 Pi Chat，再重新启动即可，**通常不需要重启电脑**。如果服务仍显示不可用，请检查 server 日志：安装发现、协议兼容性、模型认证和网络连接是不同问题。
+
+### 在网页中修复 Pi 连接
+
+不可用提示旁的 **“连接设置 / 重试”**，以及 **设置 → 关于 → Pi 连接设置 / 重试**，进入同一个连接设置窗口：
+
+- **重新检测**：只读取安装元数据，不启动 Pi、不修改配置。
+- **选择 rpc-entry.js**：在 Windows 本机文件窗口中选择可信 Pi 安装的 `dist/rpc-entry.js`。选择只是预览；取消不会保存任何设置。
+- **使用自动发现**：预览自动发现的候选入口；确认应用后清除固定入口偏好。
+- **重试连接 / 保存入口并重启服务**：明确确认后，检查所有对话空闲并安全重启 Pi Chat；不执行 npm、不构建、不下载，也不删除聊天记录。请先保存未发送内容，无需重启电脑。
+
+入口偏好保存在 Pi agent 目录（默认 `~/.pi/agent`）下的 `pi-chat/runtime/<安装目录哈希>.json`，只包含入口路径，不存储模型密钥，不影响其他 Pi Chat 安装目录。`PI_CHAT_PI_ENTRY` 仍拥有最高优先级；存在该环境变量时，网页不会覆盖它。
+
+所选文件只会做路径和 Pi 包元数据检查，**不是代码安全认证**；应用后会以当前用户权限运行该 Pi 安装及其扩展。真正的协议兼容性仍要由重启后的 Runtime 检查。模型认证或 API 网络故障不会因为重新选择入口而自动解决。
+
+若保存成功但服务重启失败，入口偏好保留供下次手动启动；若旧 Pi 进程退出无法确认，不会启动第二个 writer。源代码 watch/dev 模式不支持此免构建重启，请手动重启开发服务。
 
 ### 可选：让模型在歧义处暂停提问
 

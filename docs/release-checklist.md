@@ -28,6 +28,7 @@ Run every item from a clean, isolated staging directory. Do not replace the live
 - [ ] Verify missing/old Node and an unbuilt source checkout show actionable errors without downloading dependencies. Double-click CMD failures stay visible; automated callers use `PI_CHAT_NONINTERACTIVE=1`.
 - [ ] Verify both npm and official managed Pi installs resolve through the server, and an invalid explicit `PI_CHAT_PI_ENTRY` never falls back to another install. A portable, source-free isolated startup fixture covers managed discovery with fake RPC.
 - [ ] On the verified Pi version, confirm startup logs resolve the expected direct entry and that a child starts only through the local RPC adapter; missing or incompatible Pi must fail closed while JSONL browsing remains available.
+- [ ] Verify the connection-settings dialog detects without starting Pi, refuses to replace an explicit environment entry, and applies a selected trusted entry only after confirmation and idle checks. Service-only retry must work without npm/source and must not modify live dist; record any native picker/manual checks not performed.
 - [ ] Confirm Primary and at least two Secondary Sessions have distinct child PIDs while sharing the same frozen launch plan; no shared SDK host, broker, or process rebinding is introduced.
 - [ ] In a clean directory, launch the ZIP and verify its startup handshake identity matches the embedded Web bundle identity.
 - [ ] Verify the listener on the selected port reports the expected build identity.

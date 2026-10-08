@@ -1,3 +1,4 @@
+import type { RuntimeEntryInfo, RuntimeSetupChange, RuntimeSetupStatus } from "../shared/runtime-setup";
 import type { ServerStateDiagnosticSnapshot } from "../shared/state-diagnostics";
 import type { BackgroundSubagentSnapshot, BootstrapData, BootstrapHandshakeData, CustomModelInput, CustomProviderInput, ExtensionResource, GateMode, InitialPromptData, ModelInfo, PackageResource, PromptDelivery, PromptImage, PromptSettingsSnapshot, QueuedPrompt, ResourceResponse, SessionCopyData, SessionDirectorySummary, SessionRuntimeReadyData, SessionSummary, SessionViewData, SkillResource, ThinkingLevel, WorkspaceFileData, WorkspaceRecentFilesData } from "../shared/types";
 import { recordBrowserStateDiagnostic } from "./lib/state-diagnostics";
@@ -338,6 +339,14 @@ export const api = {
     method: "POST",
     body: JSON.stringify({ foreground: false, revision: nextPresenceRevision() }),
   }, 10_000),
+  runtimeSetup: () => request<RuntimeSetupStatus>("/api/runtime/setup"),
+  pickRuntimeEntry: () => request<{ candidate: RuntimeEntryInfo | null }>("/api/runtime/pick", { method: "POST" }, 10 * 60_000),
+  restartRuntime: async (change: RuntimeSetupChange): Promise<void> => {
+    // Capture before POST: SSE may observe the replacement before its response resolves.
+    const previousToken = requestToken;
+    await request<{ restarting: true }>("/api/runtime/restart", { method: "POST", body: JSON.stringify(change) });
+    await waitForApplicationHandoff(previousToken);
+  },
   restart: () => request<{ restarting: true }>("/api/restart", { method: "POST" }, APPLICATION_RESTART_TIMEOUT_MS),
   checkForUpdates,
   waitForApplicationHandoff,

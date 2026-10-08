@@ -30,6 +30,7 @@ export async function handleApiCoreRoute(
     handleDiagnosticsReadRoute,
     handleExtensionResponseRoute,
     handleLifecycleControlRoute,
+    handleRuntimeSetupRoute,
     handleLocalFilesWorkspaceRoute,
     handleModelManagementRoute,
     handleNewSessionRoute,
@@ -211,6 +212,12 @@ export async function handleApiCoreRoute(
     )
       return;
 
+    if (await handleRuntimeSetupRoute({
+      status: host.options.runtimeSetupStatus,
+      pick: host.options.pickRuntimeEntry,
+      isConnectedWindowPage: (client: string, page: string) => host.isConnectedWindowPage(client, page),
+    }, request, response, url)) return;
+
     if (
       await handleLifecycleControlRoute(
         {
@@ -223,6 +230,7 @@ export async function handleApiCoreRoute(
           broadcast: (event: any) => host.broadcast(event),
           shutdown: (reason: any) => host.options.applicationShutdown?.(reason as any),
           restart: () => host.options.applicationRestart!(),
+          runtimeRestart: host.options.runtimeRestart,
           reportIncident: (error: any, input: any) => host.reportIncident(
             error,
             input as any,

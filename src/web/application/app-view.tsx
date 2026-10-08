@@ -98,6 +98,8 @@ export function AppView(host: Record<string, any>) {
     pinnedInventoryAttemptRef,
     primaryCapabilityPending,
     primaryRuntime,
+    runtimeSetupDialog,
+    openRuntimeSetup,
     queuePaused,
     recoveryActionBlocked,
     refreshManually,
@@ -484,10 +486,12 @@ export function AppView(host: Record<string, any>) {
           }
           dispatchPane({ type: "RUNTIME_SETTINGS_ADOPTED", target: localDraftRef.current ? { kind: "draft" } : { kind: "session", sessionId: viewedSessionIdRef.current }, state: { model: data.state.model } });
         }}
+        onRuntimeSetup={openRuntimeSetup}
         onExportDiagnostics={exportStateDiagnostics}
         onShutdown={() => void shutdownPiChat()}
       />
       </Suspense>}
+      {runtimeSetupDialog}
       <SessionDialog
         state={sessionDialog}
         busy={sessionActionBusy}

@@ -17,6 +17,8 @@
   "dist/build-identity.json",
   "dist/server/server/index.js",
   "dist/server/server/rpc-client.js",
+  "dist/server/server/runtime-setup.js",
+  "dist/server/server/routes/runtime-setup.js",
   "dist/server/server/markdown-links.js",
   "dist/server/server/restart-handoff.js",
   "dist/web/index.html",
