@@ -151,6 +151,18 @@ test("caller-owned E2E roots are retained until process-tree exit is confirmed",
   assert.equal(removed, true);
 });
 
+test("confirmed E2E cleanup requests bounded filesystem retries and propagates permanent failure", async () => {
+  let calls = 0;
+  const locked = Object.assign(new Error("still locked"), { code: "EBUSY" });
+  await assert.rejects(removeE2eRootAfterConfirmedTree("C:/Temp/owned-root", true, async (path, options) => {
+    calls++;
+    assert.equal(path, "C:/Temp/owned-root");
+    assert.deepEqual(options, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 });
+    throw locked;
+  }), error => error === locked);
+  assert.equal(calls, 1, "the filesystem implementation owns the bounded retries, not an unbounded outer loop");
+});
+
 test("Windows cleanup refuses roots after the wrapper already exited", { skip: process.platform !== "win32" }, async () => {
   const observed = {
     child: { pid: 12345 },

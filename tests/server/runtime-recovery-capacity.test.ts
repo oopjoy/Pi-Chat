@@ -574,6 +574,16 @@ test("four viewed idle Sessions still obey a configured cap of three idle Second
   const primary = new FakeRpc(paths[0], "primary");
   const workers = paths.slice(1).map((path, index) => new FakeRpc(path, `secondary-${index}`));
   const pendingWorkers = [...workers];
+  // Concurrent HTTP activation does not promise that worker creation follows
+  // the caller's array order. Bind each worker to the actual launch request.
+  const workerSessions = new Map<FakeRpc, string>();
+  for (const worker of workers) {
+    worker.start = async (args: string[] = []) => {
+      const path = args[args.indexOf("--session") + 1];
+      assert.ok(paths.includes(path));
+      workerSessions.set(worker, idForPath(path));
+    };
+  }
   const summaries = paths.map((path, index) => ({ id: ids[index], sessionId: `s${index}`, name: `S${index}`, preview: "", cwd: process.cwd(), updatedAt: 10 - index, messageCount: 1, active: index === 0 }));
   const sessions = {
     list: async () => summaries,
@@ -609,7 +619,9 @@ test("four viewed idle Sessions still obey a configured cap of three idle Second
     assert.equal(workers.reduce((count, worker) => count + worker.stopCount, 0), 1);
     const reclaimedIndex = workers.findIndex((worker) => worker.stopCount === 1);
     assert.ok(reclaimedIndex >= 0);
-    const reclaimedId = ids[reclaimedIndex + 1];
+    assert.equal(workerSessions.size, 4);
+    assert.equal(new Set(workerSessions.values()).size, 4);
+    const reclaimedId = workerSessions.get(workers[reclaimedIndex])!;
     assert.equal(internals.runtimes.has(reclaimedId), false);
     const oldHistory = await fetch(`${origin}/api/sessions/${reclaimedId}/view`);
     assert.equal(oldHistory.status, 200);
