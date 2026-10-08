@@ -15,6 +15,7 @@ test("writer guard scans the actual Web tree including extracted application mod
 test("writer guard detects direct, computed, assigned and destructured cache bypasses", () => {
   for (const source of [
     "viewCacheRef.current.patch('id', {});",
+    "(viewCacheRef.current as unknown as Unsafe).patch('id', {});",
     "host.viewCacheRef.current['clear']();",
     "const method = 'patch'; viewCacheRef.current[method]('id', {});",
     "const c = host.viewCacheRef.current; c.appendTerminal('id', {});",

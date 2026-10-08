@@ -66,6 +66,14 @@ Use `dist-local/` only for intentionally retained local release artifacts. It is
 - Prompt and follow-up ordering stays in `PromptScheduler`; Runtime capacity stays in `RuntimePool`; presence/control stays in `SessionControl`; transport buffering stays in `SseHub`.
 - Do not split `App.tsx` or `server/app.ts` merely to reduce line count. A coordination extraction must remove an existing writable authority or duplicate policy and must have a concrete regression.
 
+## Writer and Promise boundary checks
+
+`npm run check:writer-boundaries` scans the complete `src/web` tree, not only `App.tsx`, for known direct/aliased cache and projection-setter bypasses. It is an AST/symbol guard, not a complete inter-module data-flow proof; keep the writer behavior tests and narrow capability interfaces. Do not broaden its sink allowlist to silence a failing check.
+
+`npm run typecheck` also compiles `tests/types/**/*.contract.ts` through `tsconfig.contracts.json`. Compile-only negative cases use `@ts-expect-error` so a newly accepted invalid call fails tsc; executing them via tsx would not check their types. Runtime freshness still belongs to the corresponding writer.
+
+The RuntimePool, SessionProjection, SseHub and three projection/cache writer modules additionally use type-aware Promise linting. Explicit `void` alone does not discharge a Promise: await it, return it to an owner, or install a rejection handler. Extend this strict-module set as other boundaries converge instead of disabling rules globally.
+
 ## Before committing
 
 Run the focused regression first, then the gate appropriate to the change class in [`docs/change-map.md`](docs/change-map.md). At minimum:

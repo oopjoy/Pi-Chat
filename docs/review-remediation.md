@@ -35,15 +35,49 @@
 
 main 上原有两个未提交的本机启动修复已备份为 `main-local-20261008-190427.patch`（SHA-256 `672f26e657aeb297103b831b2aaa597005ee0af185715cd52c2af3e04913585c`），并原样保留；第一批不修改这两个文件。不自动推送、构建 live dist 或重启服务。
 
+## 第二批：渲染隔离与边界验证
+
+分支 `fix/review-render-boundaries`，基于已合并的第一批 `47d7811`。
+
+- `5113958`：稳定 Fork 回调，保留对当前 Session 的正确闭包依赖；六次诊断 filter 改为一次统计，并按 sessions 引用缓存。React Hooks 和固定工厂不再由 App 注入展示 hook。
+- `5ed435d`：writer 检查扩大到全部 137 个 Web 源文件，使用 AST/符号识别已知直接调用、计算属性、赋值/解构/bind 别名绕写；保留三个 writer 的行为测试。增加真正纳入 tsc 的 compile-only authority 负例，并接入 preflight/CI。
+- `7ff6dec`：六个已收敛模块启用类型感知的 no-floating-promises / no-misused-promises，以及 any/unused 错误规则。规则实际查出 Runtime draft probe 的 detached finally 链，改成两分支观察收尾，保留原 Promise 向调用者传播错误。
+
+### 可重复的渲染证据
+
+同一个 JSDOM 流式场景，40 条历史消息、8 次更新：
+
+| 指标 | 原前端实现 | 修复后 |
+|---|---:|---:|
+| 历史 ChatMessage 函数额外执行次数 | 320 | 0 |
+| 既有 React Profiler 边界回调数 | 320 | 320 |
+| 该次历史子树 actualDuration 合计 | 约 126.95 ms | 约 1.01 ms |
+
+这是受控 JSDOM/React 诊断样本，不是浏览器 FPS 或所有设备性能保证；未改 MarkdownBody 缓存。日志为 `render-before.log`、`render-after.log`。Fork 行为回归仍通过。
+
+第二批完整 `npm run verify` 退出码 **0**：Source 1475 通过 / 2 跳过，Benchmark 34 通过，Playwright 28 通过，Artifact 39 通过 / 1 跳过，零失败。最终日志为 `render-boundary-final-verify.log`（加入规模测量合同后的完整重跑）。Lint 从 1328 降为 1318 warnings，0 errors；显式 `: any` 从 732 降为 724，并下调其总量上限。
+
+结构守卫不是完整的跨模块数据流证明，也不是安全沙箱；宽泛 host/Proxy 仍需继续收紧。类型负例防止 authority 种类混用，同类 token 是否过期仍由 writer 的运行时校验负责。六个严格模块不等于全仓库已启用严格 Promise 检查。
+
+### outline 缓存规模测量（`5796597`）
+
+新增 `npm run benchmark:index-scale -- <sessions> <toolPairs>`，在私有临时目录生成数据，显式 GC、校验索引结果、记录源码哈希，不读取用户会话、不启动服务。每组独立 Node 进程；结果仅用于诊断。
+
+| 会话数 × 每会话工具对 | 总记录数 | 源文件总量 | 首次列表 | 三次未变化刷新 | 保留堆增量 |
+|---|---:|---:|---:|---|---:|
+| 200 × 50 | 20,400 | 4.45 MiB | 107.8 ms | 33.2 / 31.8 / 31.6 ms | 3.38 MiB |
+| 1000 × 50 | 102,000 | 22.25 MiB | 427.5 ms | 148.8 / 140.4 / 135.9 ms | 15.78 MiB |
+| 200 × 500 | 200,400 | 44.65 MiB | 578.2 ms | 136.3 / 128.9 / 128.6 ms | 25.24 MiB |
+
+数据位于整改 artifacts 目录 `index-scale-*.json`。这量化了“全部历史规模会增加成本”，不是内存泄漏证据；包含 outline 与 summary 缓存，不是进程总内存。仍需大文本/图片和长期增长样本，不能直接据此选一个 LRU 阈值：盲目逐出 outline 可能把下次列表刷新变成重复全读。本批只测量，不改变预算策略。
+
 ## 后续批次（不能标为已完成）
 
 | 审核项 | 下一步与验收 |
 |---|---|
-| 不稳定 Fork 回调、重复诊断统计 | 保持闭包语义，稳定 callback、缓存统计；补渲染次数/Profiler 对照，而非只改 memo 声明 |
-| outlineProjections 缓存预算 | 使用大量会话和工具密集 JSONL 测量内存/刷新开销；先留可重复数据，再决定容量政策 |
+| outlineProjections 缓存预算 | 已完成三组多会话/工具密集测量；后续补大文本/图片与长期增长样本，再单独设计容量政策 |
 | 万能 host、整对象 Proxy | 一次选择一个真实事务边界，连同调用点改为编译器可检查的具体 ports，真正减少访问权限，不加新的代理层 |
 | Callback / Ref<any> 空契约 | 参数、返回值、authority 类型与 ref 内容均收紧；禁止调用方用强制转换掩盖接线错误 |
-| writer 边界测试范围 | 覆盖实际 application 目录，加入违规负例；类型负例必须纳入 tsc，行为测试保持过期结果拒绝等原有保障 |
-| lint / 类型债增量门禁 | 新增或整理模块先严格；新增警告不可被旧警告减少抵消；Promise 处理与模块级预算逐步收紧，不做全库格式化 |
+| lint / 类型债增量门禁的剩余部分 | 六个模块已严格；仍需覆盖其他模块、建立更细的新增警告/模块预算，防止跨位置的计数抵消，不做全库格式化 |
 
 此前部署、LaTeX、轮次投影分支仍需基于恢复的门禁分别验收后再合并，不夹带到第一批稳定性提交。
