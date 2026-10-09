@@ -1,3 +1,4 @@
+import { normalizeLatexDelimiters } from "./markdown-latex-delimiters";
 import {
   prepareMarkdownMathPipes,
   type PreparedMarkdownMathPipes,
@@ -151,15 +152,19 @@ function normalizeDisplayMath(source: string, trackOffsets: boolean): SourceMapp
 
 export function normalizeDisplayMathWithSourceMap(source: string): SourceMappedMarkdown {
   const normalized = normalizeDisplayMath(source, true);
-  // Pipe protection is one UTF-16 code unit for one UTF-16 code unit, so the
-  // display-normalization boundary map remains exact.
-  const protectedMarkdown = prepareMarkdownMathPipes(normalized.markdown);
-  return { ...normalized, ...protectedMarkdown };
+  const latex = normalizeLatexDelimiters(normalized.markdown, true);
+  // Compose both rendering-only boundary maps. Pipe protection is equal-width.
+  return {
+    source,
+    ...prepareMarkdownMathPipes(latex.markdown),
+    mapOffset: (offset: number) => normalized.mapOffset(latex.mapOffset(offset)),
+  };
 }
 
 /** Keep malformed display-math boundaries local in streaming Markdown too. */
 export function normalizeDisplayMathForRendering(source: string): PreparedMarkdownMathPipes {
-  return prepareMarkdownMathPipes(normalizeDisplayMath(source, false).markdown);
+  const normalized = normalizeDisplayMath(source, false);
+  return prepareMarkdownMathPipes(normalizeLatexDelimiters(normalized.markdown, false).markdown);
 }
 
 const atomicTags = new Set([

@@ -35,6 +35,51 @@ async function openSecondSession(page: import("@playwright/test").Page) {
   await expect(page.getByText("Final answer with")).toBeVisible();
 }
 
+test("backslash LaTeX renders and copies original delimiters without corrupting Markdown", { tag: "@desktop-mobile" }, async ({ page, isMobile }) => {
+  const text = String.raw`行内 \(\psi\)。
+
+\[
+E(\psi)
+=
+\frac{1}{2}\int |\psi|^2\,dx
+\]
+
+## 后续正文
+
+| formula | note |
+|---|---|
+| \(\min|\psi|\) | keep |
+
+` + "```tex\n\\[x\\]\n```";
+  await page.route(/\/api\/(?:bootstrap(?:\?|$)|sessions\/[^/]+\/view(?:\?|$))/, async route => {
+    const response = await route.fetch({ headers: { ...route.request().headers(), origin: new URL(route.request().url()).origin } });
+    expect(response.status()).toBe(200);
+    const data = await response.json() as { messages?: Array<{ role: string; content: unknown }> };
+    for (const message of data.messages || [])
+      if (message.role === "assistant") message.content = [{ type: "text", text }];
+    await route.fulfill({ response, json: data });
+  });
+  await page.goto("/");
+  if (isMobile) await page.getByRole("button", { name: "收起侧栏", exact: true }).click();
+  const body = page.locator(".message-assistant .markdown-source-copy").first();
+  await expect(body.locator(".katex")).toHaveCount(3);
+  await expect(body.locator(".katex-display")).toHaveCount(1);
+  await expect(body.locator(".katex-display")).toBeVisible();
+  await expect(body.locator(".katex-error")).toHaveCount(0);
+  await expect(body.locator("h1")).toHaveCount(0);
+  await expect(body.locator("h2")).toHaveText("后续正文");
+  await expect(body.locator("table th")).toHaveCount(2);
+  await expect(body.locator(".code-block")).toContainText(String.raw`\[x\]`);
+  if (!isMobile) {
+    await body.locator(".katex").first().evaluate(element => {
+      const range = document.createRange(); range.selectNodeContents(element);
+      const selection = window.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+    });
+    await page.keyboard.press("Control+c");
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(String.raw`\(\psi\)`);
+  }
+});
+
 test("accepted duplicate Prompts remain one row per Prompt across reload", { tag: "@desktop-only" }, async ({ page }) => {
   const { input, send } = await openInitialSession(page);
   const promptText = "browser identity smoke";
