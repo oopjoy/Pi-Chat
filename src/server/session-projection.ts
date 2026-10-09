@@ -241,6 +241,8 @@ export class SessionProjection<Entry> {
   private identity = "";
   private version: Stats | null = null;
   private prefixFingerprint = "";
+  /** All callers, including list/body reads, serialize through this owner. */
+  private reconciliationTail: Promise<void> = Promise.resolve();
 
   constructor(path: string, private readonly options: SessionProjectionOptions<Entry>) {
     this.path = resolve(path);
@@ -256,7 +258,15 @@ export class SessionProjection<Entry> {
     return this.observedBytes;
   }
 
-  async reconcile(_expected?: Stats): Promise<SessionProjectionResult<Entry>> {
+  reconcile(_expected?: Stats): Promise<SessionProjectionResult<Entry>> {
+    // Do not return the same in-flight snapshot to a later reader: an append
+    // may have arrived while it waited. Open/stat afresh when its turn begins.
+    const operation = this.reconciliationTail.then(() => this.reconcileCurrent());
+    this.reconciliationTail = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
+  private async reconcileCurrent(): Promise<SessionProjectionResult<Entry>> {
     const handle = await open(this.path, "r");
     try {
       const current = await handle.stat();
@@ -289,49 +299,28 @@ export class SessionProjection<Entry> {
         if (verified.value === this.prefixFingerprint) kind = "append";
       }
 
-      if (kind === "append") {
-        const decoded = await decodeRange(
-          handle,
-          this.committedBytes,
-          targetBytes,
-          "append",
-          this.options,
-        );
-        this.committedEntries.push(...decoded.committedEntries);
-        this.provisionalEntry = decoded.provisionalEntry;
-        this.committedBytes = decoded.committedBytes;
-        const fingerprint = await committedFingerprint(handle, this.committedBytes);
-        verificationBytes += fingerprint.bytesRead;
-        this.prefixFingerprint = fingerprint.value;
-        let observedFingerprint = fingerprint.value;
-        if (this.committedBytes !== targetBytes) {
-          const observed = await committedFingerprint(handle, targetBytes);
-          verificationBytes += observed.bytesRead;
-          observedFingerprint = observed.value;
-        }
-        this.observedBytes = targetBytes;
-        this.identity = sourceIdentity(current);
-        this.version = current;
-        return this.result("append", decoded.bytesRead + verificationBytes, current, observedFingerprint);
-      }
-
-      const decoded = await decodeRange(handle, 0, targetBytes, "rewrite", this.options);
-      this.committedEntries = decoded.committedEntries;
-      this.provisionalEntry = decoded.provisionalEntry;
-      this.committedBytes = decoded.committedBytes;
-      const fingerprint = await committedFingerprint(handle, this.committedBytes);
+      const decoded = await decodeRange(handle, kind === "append" ? this.committedBytes : 0, targetBytes, kind, this.options);
+      const fingerprint = await committedFingerprint(handle, decoded.committedBytes);
       verificationBytes += fingerprint.bytesRead;
-      this.prefixFingerprint = fingerprint.value;
       let observedFingerprint = fingerprint.value;
-      if (this.committedBytes !== targetBytes) {
+      if (decoded.committedBytes !== targetBytes) {
         const observed = await committedFingerprint(handle, targetBytes);
         verificationBytes += observed.bytesRead;
         observedFingerprint = observed.value;
       }
+      // Publish the entire verified state together. Failed I/O cannot leave new
+      // entries/offsets paired with the old version. Copy-on-append also keeps
+      // previously returned result arrays stable (no deep copy of message data).
+      this.committedEntries = kind === "append"
+        ? this.committedEntries.concat(decoded.committedEntries)
+        : decoded.committedEntries;
+      this.provisionalEntry = decoded.provisionalEntry;
+      this.committedBytes = decoded.committedBytes;
+      this.prefixFingerprint = fingerprint.value;
       this.observedBytes = targetBytes;
       this.identity = sourceIdentity(current);
       this.version = current;
-      return this.result("rewrite", decoded.bytesRead + verificationBytes, current, observedFingerprint);
+      return this.result(kind, decoded.bytesRead + verificationBytes, current, observedFingerprint);
     } finally {
       await handle.close();
     }
