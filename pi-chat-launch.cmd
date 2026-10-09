@@ -22,21 +22,14 @@ powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0sc
 if not errorlevel 1 goto :open
 if errorlevel 2 goto :stale
 
-rem Normal startup must use the existing production build. Rebuilding on every
-rem PWA launch turns a 5–10 second cold start into a 30+ second one and briefly
-rem removes dist while a previous browser tab may still request assets. Developers
-rem explicitly run npm run build after source changes; a missing dist is the sole
-rem recovery case here.
-if not exist "%~dp0dist\server\server\index.js" (
-  if exist "%~dp0src\server\index.ts" (
-    echo Pi Chat build is missing; building current source...
-    call npm run build
-    if errorlevel 1 exit /b 1
-  ) else (
-    echo Pi Chat distribution is incomplete: dist\server\server\index.js was not found.
-    exit /b 1
-  )
+rem Startup is offline and read-only until the service is launched. A checkout
+rem must be prepared explicitly; a release must already contain its whole build.
+if not exist "%~dp0scripts\pi-chat-preflight.ps1" (
+  echo Pi Chat launcher files are missing. Fully extract the Windows release ZIP again.
+  exit /b 1
 )
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0scripts\pi-chat-preflight.ps1" -ProjectDirectory "%PI_CHAT_PROJECT_DIRECTORY%"
+if errorlevel 1 exit /b 1
 
 echo Starting Pi Chat service...
 rem Pass the working directory through the environment. Embedding %%~dp0 in
@@ -44,24 +37,9 @@ rem PowerShell source breaks when the checkout path contains an apostrophe.
 set "PI_CHAT_PROJECT_DIR=%~dp0"
 if not defined PI_CHAT_SERVER_OUT set "PI_CHAT_SERVER_OUT=%TEMP%\pi-chat-server.stdout.log"
 if not defined PI_CHAT_SERVER_ERR set "PI_CHAT_SERVER_ERR=%TEMP%\pi-chat-server.stderr.log"
-powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; Start-Process -FilePath 'node.exe' -ArgumentList @('dist\server\server\index.js','--port','30170') -WorkingDirectory $env:PI_CHAT_PROJECT_DIR -WindowStyle Hidden -RedirectStandardOutput $env:PI_CHAT_SERVER_OUT -RedirectStandardError $env:PI_CHAT_SERVER_ERR | Out-Null"
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0scripts\pi-chat-start-server.ps1" -ProjectDirectory "%PI_CHAT_PROJECT_DIRECTORY%"
 if errorlevel 1 exit /b 1
-
-set /a ATTEMPTS=0
-:wait
-powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0scripts\pi-chat-port-ready.ps1" -ProjectDirectory "%PI_CHAT_PROJECT_DIRECTORY%"
-if not errorlevel 1 goto :open
-if errorlevel 2 (
-  echo A different Pi Chat build is listening on port 30170.
-  exit /b 1
-)
-set /a ATTEMPTS+=1
-if %ATTEMPTS% GEQ 60 (
-  echo Pi Chat did not start within 30 seconds.
-  exit /b 1
-)
-powershell.exe -NoProfile -NonInteractive -Command "Start-Sleep -Seconds 1"
-goto :wait
+goto :open
 
 :stale
 rem A verified Pi Chat is listening on this port, but its build identity does

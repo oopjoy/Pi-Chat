@@ -207,7 +207,7 @@ test("release packaging creates a ZIP, portable checksum and identity manifest",
       await copy(join(repositoryRoot, file), join(fixtureRepo, file));
     }
     await mkdir(join(fixtureRepo, "scripts"), { recursive: true });
-    for (const file of ["install-shortcuts.ps1", "pi-chat-launch-process.ps1", "pi-chat-port-ready.ps1"]) {
+    for (const file of ["install-shortcuts.ps1", "pi-chat-launch-process.ps1", "pi-chat-port-ready.ps1", "pi-chat-preflight.ps1", "pi-chat-start-server.ps1", "check-runtime-files.mjs", "runtime-required-files.json"]) {
       await copy(join(repositoryRoot, "scripts", file), join(fixtureRepo, "scripts", file));
     }
     assert.equal(git(["init", "--quiet"], fixtureRepo).status, 0);
@@ -223,7 +223,15 @@ test("release packaging creates a ZIP, portable checksum and identity manifest",
       revision: revisionOutput.trim(),
       fingerprint: "f".repeat(64),
     }), "utf8");
-    await writeFile(join(staging, "marker.txt"), "staged\n", "utf8");
+    const required = JSON.parse(await readFile(join(repositoryRoot, "scripts/runtime-required-files.json"), "utf8")) as string[];
+    for (const file of required.filter(file => file.startsWith("dist/") && file !== "dist/build-identity.json")) {
+      const path = join(staging, file.slice(5));
+      await mkdir(resolve(path, ".."), { recursive: true });
+      await writeFile(path, "fixture\n");
+    }
+    await mkdir(join(staging, "web/assets"), { recursive: true });
+    await writeFile(join(staging, "web/assets/index.js"), "// fixture\n");
+    await writeFile(join(staging, "web/index.html"), '<script type="module" src="/assets/index.js"></script>');
     const result = await packageRelease({
       repoRoot: fixtureRepo,
       stagingDir: staging,
@@ -255,9 +263,20 @@ test("release packaging creates a ZIP, portable checksum and identity manifest",
       `pi-chat-windows-${packageVersion}/start-pi-chat-ui.ps1`,
       `pi-chat-windows-${packageVersion}/scripts/pi-chat-launch-process.ps1`,
       `pi-chat-windows-${packageVersion}/scripts/pi-chat-port-ready.ps1`,
+      `pi-chat-windows-${packageVersion}/scripts/pi-chat-preflight.ps1`,
+      `pi-chat-windows-${packageVersion}/scripts/pi-chat-start-server.ps1`,
+      `pi-chat-windows-${packageVersion}/scripts/check-runtime-files.mjs`,
+      `pi-chat-windows-${packageVersion}/scripts/runtime-required-files.json`,
       `pi-chat-windows-${packageVersion}/resources/icons/pi-chat.ico`,
       `pi-chat-windows-${packageVersion}/dist/build-identity.json`,
     ]) assert.ok(entries.includes(entry), `missing ZIP entry: ${entry}`);
+    // Incomplete runtime output must never leave a previously successful ZIP behind.
+    await rm(join(staging, "server/server/index.js"));
+    await assert.rejects(packageRelease({
+      repoRoot: fixtureRepo, stagingDir: staging, outputDir: output, tag: "HEAD", zipName: "pi-chat-windows-test.zip",
+    }), /runtime files are missing/);
+    for (const path of [result.outputPath, result.checksumPath, result.manifestPath])
+      await assert.rejects(stat(path), /ENOENT/);
     await writeFile(join(output, "pi-chat-windows-dirty.zip.sha256"), "stale\n", "utf8");
     await writeFile(join(output, "pi-chat-windows-dirty.zip.manifest.json"), "stale\n", "utf8");
     await writeFile(join(fixtureRepo, "README.md"), "dirty release source\n", "utf8");

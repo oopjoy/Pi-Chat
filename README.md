@@ -8,18 +8,23 @@
 
 Pi Chat 连接本机 Pi RPC，负责聊天展示、Session 浏览、流式输出和本地窗口协调；Pi 仍然是 agent、模型、工具、Skills 和 Extensions 的唯一执行 authority。每个执行对话仍由独立 Node/Pi RPC 进程拥有，浏览器只通过 loopback HTTP API 与 SSE 接收事实投影。
 
-## 30 秒开始（Windows）
+## Windows 安装（推荐使用发布包）
 
 1. 安装 Node.js 22.19+。
-2. 安装并完成认证的 Pi：
+2. 安装并完成模型认证的 Pi。可以使用 [Pi 官方安装器](https://pi.dev)，也可以使用 npm：
    ```powershell
-   npm install -g @earendil-works/pi-coding-agent
+   npm install -g --ignore-scripts @earendil-works/pi-coding-agent
    pi --version
    ```
+   运行 `pi`，通过 `/login` 配置模型服务。已有 Pi 安装和模型配置无需重复安装。
 3. 从 [v0.5.0 Release](https://github.com/oopjoy/Pi-Chat/releases/tag/v0.5.0) 下载 `pi-chat-windows-0.5.0.zip`，解压后运行 `start-pi-chat.cmd`。
 4. 浏览器打开 `http://127.0.0.1:30170`，或运行 `start-pi-chat-ui.ps1` 使用独立窗口体验。
 
-Release ZIP 是 Windows-first 的可运行包；源码开发和从 checkout 运行仍需要 Node.js。Pi Chat 默认只监听本机回环地址，关闭浏览器窗口不会停止本地服务。
+**请选择 `pi-chat-windows-*.zip`，不是 GitHub 自动生成的 `Source code.zip`。** 完整解压后再启动，不要直接在压缩包内运行。发布包包含编译好的服务和网页，仍需要 Node.js，但不需要 Git、npm 依赖安装或本地构建；它不会自动下载或安装软件。
+
+源码 checkout 的首次准备方法见下文「开发」。启动器会检查 Node 版本和关键运行文件；源码未构建时给出准备命令，发布包不完整时提示重新下载。双击 CMD 启动失败会保留窗口；自动化可设置 `PI_CHAT_NONINTERACTIVE=1` 禁止暂停。图形启动器另提供日志和重试按钮。
+
+Pi Chat 默认只监听本机回环地址，关闭浏览器窗口不会停止本地服务。
 
 ## 为什么不是另一个 Pi Web UI？
 
@@ -98,7 +103,35 @@ Release ZIP 是 Windows-first 的可运行包；源码开发和从 checkout 运�
    - **带启动浮窗**（桌面快捷方式 / `start-pi-chat-ui.ps1`）：浮窗在服务可浏览时关闭；Pi Runtime 的后续失败记录在 server 日志；
    - **直接跑 cmd**：浏览器仍可打开本地历史；详细 Runtime 错误在 server 的 stderr 日志。
 
-若要聊天或运行工具，请安装并配置好 Pi。可选环境变量：`PI_CHAT_PI_ENTRY` 指向 Pi 的 `dist/rpc-entry.js`。
+若要聊天或运行工具，请安装并配置好 Pi。
+
+### Pi 已安装，却提示不可用？
+
+CMD、PowerShell 和直接运行 Node 服务使用同一套服务端发现逻辑，不需要逐个修改启动脚本：
+
+1. 显式 `PI_CHAT_PI_ENTRY` 优先，指向 Pi 的 `dist/rpc-entry.js`；路径无效时不会偷偷回退到另一套 Pi。
+2. 使用在“Pi 连接设置”中明确保存的入口（按 Pi Chat 安装目录隔离）。保存的路径无效时不会静默改用其他 Pi。
+3. 未保存入口或选择自动发现时：先检查 `PI_MANAGED_INSTALL_ROOT`（若设置），再检查用户主目录下 `.pi/agent/install/current-version` 所选择的官方 managed install。
+4. 继续检查 npm prefix、系统全局目录、Windows `%APPDATA%/npm` 和 PATH 附近的 npm 安装。
+
+安装发现只读文件，不执行 `pi`、`npm` 或网络下载，也不会把 Pi Chat 开发依赖中的 Pi 当作用户安装。版本从所选 Pi 包的 `package.json` 读取，协议兼容性仍由 RPC capability probe 判定。
+
+更新 Pi、修改入口路径或修复安装后，使用网页的关闭功能安全退出 Pi Chat，再重新启动即可，**通常不需要重启电脑**。如果服务仍显示不可用，请检查 server 日志：安装发现、协议兼容性、模型认证和网络连接是不同问题。
+
+### 在网页中修复 Pi 连接
+
+不可用提示旁的 **“连接设置 / 重试”**，以及 **设置 → 关于 → Pi 连接设置 / 重试**，进入同一个连接设置窗口：
+
+- **重新检测**：只读取安装元数据，不启动 Pi、不修改配置。
+- **选择 rpc-entry.js**：在 Windows 本机文件窗口中选择可信 Pi 安装的 `dist/rpc-entry.js`。选择只是预览；取消不会保存任何设置。
+- **使用自动发现**：预览自动发现的候选入口；确认应用后清除固定入口偏好。
+- **重试连接 / 保存入口并重启服务**：明确确认后，检查所有对话空闲并安全重启 Pi Chat；不执行 npm、不构建、不下载，也不删除聊天记录。请先保存未发送内容，无需重启电脑。
+
+入口偏好保存在 Pi agent 目录（默认 `~/.pi/agent`）下的 `pi-chat/runtime/<安装目录哈希>.json`，只包含入口路径，不存储模型密钥，不影响其他 Pi Chat 安装目录。`PI_CHAT_PI_ENTRY` 仍拥有最高优先级；存在该环境变量时，网页不会覆盖它。
+
+所选文件只会做路径和 Pi 包元数据检查，**不是代码安全认证**；应用后会以当前用户权限运行该 Pi 安装及其扩展。真正的协议兼容性仍要由重启后的 Runtime 检查。模型认证或 API 网络故障不会因为重新选择入口而自动解决。
+
+若保存成功但服务重启失败，入口偏好保留供下次手动启动；若旧 Pi 进程退出无法确认，不会启动第二个 writer。源代码 watch/dev 模式不支持此免构建重启，请手动重启开发服务。
 
 ### 可选：让模型在歧义处暂停提问
 
@@ -114,12 +147,14 @@ pi install npm:@juicesharp/rpiv-ask-user-question
 
 首次参与请先阅读 [`CONTRIBUTING.md`](CONTRIBUTING.md)，其中给出了 live `dist` 安全边界、focused/full 验证入口和单 writer 工作方式。
 
-如果环境设置了 `NODE_ENV=production`，安装时需要显式包含开发依赖：
+`git clone` 或 `Source code.zip` 仅包含源码，不是可直接双击运行的发布包。首次在项目目录准备依赖并构建：
 
 ```bash
-npm install --include=dev
-npm run dev
+npm ci --include=dev
+npm run build
 ```
+
+完成后再运行 `start-pi-chat.cmd`。开发热更新可用 `npm run dev`。`--include=dev` 确保即使设置了 `NODE_ENV=production`，构建工具也会安装；启动器本身不会代替你执行安装或构建。网络需要代理时，请单独配置 Git/npm 代理，不要把模型密钥放进代理地址或提交到仓库。
 
 默认地址：`http://127.0.0.1:30170`。没有已保存工作目录选择的新安装，New 草稿默认使用当前用户主目录（Windows 下如 `C:\\Users\\<用户名>`）；`PI_CHAT_CWD` 或 `--cwd` 可提供启动回退目录，但已有的用户保存选择不会被自动覆盖。每个尚未提交的 New 草稿可单独修改其工作路径。
 
@@ -209,7 +244,7 @@ Pi Chat 不提供 Todo 功能，也不会安装或管理 Todo Extension。历史
 
 Pi Chat 保留普通浏览器访问，同时提供适合 Edge / Chrome 的独立窗口安装配置。启动服务后，用 Edge 或 Chrome 打开 `http://127.0.0.1:30170`，在浏览器菜单中选择“应用 / Apps → 将此站点安装为应用（Install this site as an app）”。
 
-安装后会以独立 Pi Chat 窗口启动，不显示地址栏、标签页、书签栏或浏览器导航；普通浏览器访问仍然可用。该模式不使用 Service Worker，避免本地更新后被旧前端缓存遮挡。关闭最后一个浏览器/PWA 窗口不会停止本地服务；刷新、BFCache、网络/SSE 断线以及测试或临时浏览器退出都不会让 Pi Chat 离线。需要停止服务时，请使用设置中的“关闭 Pi Chat”显式关闭；可通过桌面的 **Pi Chat** / **Pi Chat Web** 再次打开窗口。源码工作目录的启动器会先构建本地改动；Windows Release ZIP 已内置干净的编译产物，不需要 npm、源码或构建工具即可启动。
+安装后会以独立 Pi Chat 窗口启动，不显示地址栏、标签页、书签栏或浏览器导航；普通浏览器访问仍然可用。该模式不使用 Service Worker，避免本地更新后被旧前端缓存遮挡。关闭最后一个浏览器/PWA 窗口不会停止本地服务；刷新、BFCache、网络/SSE 断线以及测试或临时浏览器退出都不会让 Pi Chat 离线。需要停止服务时，请使用设置中的“关闭 Pi Chat”显式关闭；可通过桌面的 **Pi Chat** / **Pi Chat Web** 再次打开窗口。源码工作目录需在停服后显式执行 `npm run build` 才会应用本地改动，启动器不自动构建；Windows Release ZIP 已内置编译产物，不需要 npm、源码或构建工具即可启动。
 
 ## 构建与运行
 

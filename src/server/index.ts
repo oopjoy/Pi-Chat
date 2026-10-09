@@ -9,7 +9,11 @@ import { PiChatApp } from "./app.js";
 import { PrimaryRuntimeReadinessController } from "./primary-runtime-readiness.js";
 import { ModelManager } from "./model-manager.js";
 import { ResourceManager } from "./resource-manager.js";
-import { PiRpcClient, resolvePiEntry, resolvePiVersion } from "./rpc-client.js";
+import { PiRpcClient } from "./rpc-client.js";
+import { RuntimeSetupStore, validateRuntimeEntry } from "./runtime-setup.js";
+import { pickPiRuntimeEntry } from "./file-picker.js";
+import { HttpRequestError } from "./http-transport.js";
+import type { RuntimeSetupChange } from "../shared/runtime-setup.js";
 import {
   DEFAULT_MAX_IDLE_SECONDARY_RUNTIMES,
   DEFAULT_MAX_SECONDARY_RUNTIMES,
@@ -22,6 +26,7 @@ import {
   cleanupStaleDistArtifacts,
   handOffAfterConfirmedShutdown,
   handOffApplicationRestart,
+  type ApplicationRestartOptions,
 } from "./application-restart.js";
 import { loadBuildIdentity } from "./build-identity.js";
 import {
@@ -137,12 +142,14 @@ if (gateComponent.status === "conflict" || gateComponent.status === "source-miss
   throw new Error(`[Pi Chat] ${gateComponent.diagnostic || "内置文件权限安全执行组件不可用。"}`);
 }
 let lifecycleForDiagnostics: import("../shared/types.js").ApplicationLifecycle = "idle";
+const runtimeSetup = new RuntimeSetupStore(projectRoot, agentDir);
 let directPiEntry: string | null = null;
 let piVersion: string | undefined;
 let piDiagnostic: string;
 try {
-  directPiEntry = resolvePiEntry();
-  piVersion = resolvePiVersion(directPiEntry);
+  const { candidate } = runtimeSetup.resolveLaunch();
+  directPiEntry = candidate?.entry || null;
+  piVersion = candidate?.version;
   piDiagnostic = directPiEntry
     ? `已选择全局 Pi ${piVersion || "unknown"} Direct RPC`
     : "找不到全局 Pi；历史 JSONL 保持可浏览，Runtime 写操作将不可用";
@@ -201,40 +208,55 @@ async function prepareApplicationRestart() {
     // Promotion runs in restart-handoff after the parent PID exits (Windows EPERM fix).
     promote: async () => {},
     discard: () => build.discard(),
-    handoff: () => {
-      // Yield one event-loop turn so the browser receives the 202 response before
-      // the listener and its SSE streams close.
-      setTimeout(() => {
-        void handOffAfterConfirmedShutdown(
-          () => shutdown("restart-handoff"),
-          () => {
-            // Start the detached promoter only after every Session writer has a
-            // confirmed exit. Otherwise an orphaned old Pi process could overlap
-            // the replacement server and mutate the same JSONL.
-            handOffApplicationRestart({
-              projectRoot,
-              // Always hand off to the compiled entry under live dist. After promote,
-              // that tree contains the freshly built server; during promote-after-exit
-              // the helper swaps dist before spawning this path.
-              serverEntry: resolve(projectRoot, "dist", "server", "server", "index.js"),
-              host: options.host,
-              port: options.port,
-              cwd: options.cwd,
-              dev: options.dev,
-              expectedBuildFingerprint: build.buildFingerprint,
-              promoteAfterExit: {
-                liveDist: build.liveDist,
-                stagedDist: build.distPath,
-                previousDist: build.previousDist,
-              },
-            });
-          },
-        ).then(() => process.exit(0)).catch((error) => {
-          console.error(`[Pi Chat] 重启关闭失败，已取消替代进程：${errorDetail(error)}`);
-          process.exitCode = 1;
-        });
-      }, 0);
-    },
+    handoff: () => scheduleServiceRestart({
+      projectRoot,
+      serverEntry: resolve(projectRoot, "dist", "server", "server", "index.js"),
+      host: options.host,
+      port,
+      cwd: options.cwd,
+      dev: options.dev,
+      expectedBuildFingerprint: build.buildFingerprint,
+      promoteAfterExit: {
+        liveDist: build.liveDist,
+        stagedDist: build.distPath,
+        previousDist: build.previousDist,
+      },
+    }),
+  };
+}
+
+// Both restart paths use the existing confirmed-writer-exit barrier. Only the
+// update path above builds/promotes dist; installation recovery reuses this build.
+function scheduleServiceRestart(restart: ApplicationRestartOptions): void {
+  setTimeout(() => {
+    void handOffAfterConfirmedShutdown(
+      () => shutdown("restart-handoff"),
+      () => handOffApplicationRestart(restart),
+    ).then(() => process.exit(0)).catch((error) => {
+      console.error(`[Pi Chat] 重启关闭失败，已取消替代进程：${errorDetail(error)}`);
+      process.exitCode = 1;
+    });
+  }, 0);
+}
+
+const runtimeRestartAvailable = !options.dev && fileURLToPath(import.meta.url).endsWith(".js");
+async function prepareRuntimeRestart(change: RuntimeSetupChange) {
+  if (!existsSync(resolve(runtimeDist, "server", "server", "index.js")))
+    throw new HttpRequestError(409, "当前构建入口不存在，请重新安装完整 Pi Chat 发布包。", "RUNTIME_RESTART_UNAVAILABLE");
+  const prepared = runtimeSetup.prepare(change);
+  return {
+    promote: () => prepared.commit(),
+    discard: async () => {}, // Preparation is read-only; a failed atomic save keeps the previous setting.
+    handoff: () => scheduleServiceRestart({
+      projectRoot,
+      serverEntry: fileURLToPath(import.meta.url),
+      runtimeDist,
+      host: options.host,
+      port,
+      cwd: options.cwd,
+      dev: false,
+      expectedBuildFingerprint: buildIdentity.fingerprint,
+    }),
   };
 }
 
@@ -264,6 +286,12 @@ const app = new PiChatApp({
   devMiddleware: vite ? (request, response, next) => vite.middlewares(request, response, next) : undefined,
   allowedHosts: [],
   applicationRestart: prepareApplicationRestart,
+  runtimeSetupStatus: () => ({ ...runtimeSetup.status(directPiEntry ? { entry: directPiEntry, version: piVersion } : null), restartAvailable: runtimeRestartAvailable }),
+  pickRuntimeEntry: async () => {
+    const entry = await pickPiRuntimeEntry();
+    return entry ? validateRuntimeEntry(entry) : null;
+  },
+  runtimeRestart: runtimeRestartAvailable ? prepareRuntimeRestart : undefined,
   applicationShutdown: (reason) => setTimeout(() => void shutdown(reason).then(
     () => {
       if (!fatalShutdownRequested) process.exit(0);
