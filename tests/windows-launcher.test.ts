@@ -53,6 +53,39 @@ test("launcher keeps portable path resolution and refuses to take over another b
   assert.doesNotMatch(readiness, /X-Pi-Chat-Token/);
 });
 
+test("Windows launcher discovers managed Pi, respects explicit entries, and tolerates missing installs", { skip: process.platform !== "win32" }, async () => {
+  const sandbox = await mkdtemp(join(tmpdir(), "pi-chat-managed-pi-"));
+  try {
+    const cmd = await readProjectFile("pi-chat-launch.cmd");
+    const discovery = cmd.slice(
+      cmd.indexOf("rem Discover the managed Pi install"),
+      cmd.indexOf("powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File"),
+    );
+    assert.ok(discovery.includes("current-version"));
+    const fixture = join(sandbox, "discover.cmd");
+    await writeFile(fixture, ("@echo off\n" + discovery + "echo entry=\"%PI_CHAT_PI_ENTRY%\"\n").replace(/\r?\n/g, "\r\n"));
+    const profile = join(sandbox, "User's & (profile)");
+    const install = join(profile, ".pi", "agent", "install");
+    const entry = join(install, "releases", "1.1.0", "node_modules", "@earendil-works", "pi-coding-agent", "dist", "rpc-entry.js");
+    await mkdir(resolve(entry, ".."), { recursive: true });
+    await writeFile(join(install, "current-version"), "1.1.0\n");
+    await writeFile(entry, "// fixture\n");
+    const run = (userProfile: string, explicit?: string) => {
+      const env: NodeJS.ProcessEnv = { ...process.env, USERPROFILE: userProfile };
+      delete env.PI_CHAT_PI_ENTRY;
+      if (explicit) env.PI_CHAT_PI_ENTRY = explicit;
+      return execFileSync("cmd.exe", ["/d", "/c", fixture], { env, encoding: "utf8" }).trim();
+    };
+    assert.equal(run(profile), `entry="${entry}"`);
+    assert.equal(run(profile, "explicit-rpc-entry.js"), 'entry="explicit-rpc-entry.js"');
+    assert.equal(run(join(sandbox, "missing-profile")), 'entry=""');
+    await rm(entry);
+    assert.equal(run(profile), 'entry=""');
+  } finally {
+    await rm(sandbox, { recursive: true, force: true });
+  }
+});
+
 test("PowerShell readiness distinguishes the expected build from a verified stale listener", { skip: process.platform !== "win32" }, async () => {
   const sandbox = await mkdtemp(join(tmpdir(), "pi-chat-readiness-"));
   const readyScript = join(root, "scripts", "pi-chat-port-ready.ps1");
