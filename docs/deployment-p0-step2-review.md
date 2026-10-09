@@ -91,3 +91,11 @@ npm run verify:artifact
 ```
 
 本批补齐 P0 的连接修复界面，不包含 P1 首次运行向导、doctor、代理自动识别或 P2 安装器。建议开始下一阶段前先单独处理全量验证阻塞，避免每批功能都依赖受干扰的浏览器证据。
+
+## PR 发布时的 Windows CI 路径复核
+
+PR #14 的首轮 CI 在 `runtime-setup.test.ts` 的 automatic detection 用例失败：Windows runner 的 TEMP 使用 `RUNNER~1` 短路径，fixture 的异步 realpath 得到长路径。二者指向同一个文件，测试却比较了路径拼写。这是本批测试可移植性问题，不归入旧基线失败。
+
+在本机创建具有 8.3 别名的私有临时目录，仅为官方 harness 的子进程设置 TEMP/TMP，已稳定复现同一断言失败；没有改变文件系统或系统级设置。修正为先断言自动检测结果存在，再以 realpath 核对目标文件；保留配置 revision、安装变更必须拒绝以及失败不得覆盖旧配置的断言，生产代码未修改。
+
+短路径 TEMP 下完整 Store 测试与正常路径下 52 项部署专项复核通过，typecheck 通过。此补充不表示新的完整 Source/E2E/Artifact 已全绿；更新后的 GitHub CI 结果以 PR 检查为准。

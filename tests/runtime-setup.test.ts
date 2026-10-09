@@ -97,7 +97,9 @@ test("automatic detection can explicitly repair malformed saved configuration bu
     await writeFile(f.store.path, "malformed");
     const before = f.store.status(null);
     assert.match(before.error || "", /已保存/);
-    assert.equal(before.automatic?.entry, entry);
+    assert.ok(before.automatic);
+    // Windows TEMP can use an 8.3 alias; verify the detected file, not its spelling.
+    assert.equal(await realpath(before.automatic.entry), entry);
     const prepare = f.store.prepare({ mode: "automatic", configurationRevision: before.configurationRevision });
     await f.makeEntry(join(managed, "releases", "1.2.0"), "1.2.0");
     await writeFile(join(managed, "current-version"), "1.2.0\n");
