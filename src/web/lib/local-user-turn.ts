@@ -793,9 +793,23 @@ export function protectTranscriptWithLocalTurns(
     const localTimestamp = typeof turn.message.timestamp === "number" && Number.isFinite(turn.message.timestamp)
       ? turn.message.timestamp
       : undefined;
+    // An unconfirmed admission is newer than the authoritative JSONL prefix.
+    // A queued prompt keeps its original submit timestamp, which can predate
+    // minutes of the previous turn's tools/final answer. That clock must never
+    // splice a User into the middle of already-persisted history and split its
+    // process group. Retain the legacy timestamp fallback only in the remaining
+    // non-persisted tail (e.g. this prompt's assistant terminal won the view race).
+    let persistedBoundary = 0;
+    for (let index = protectedMessages.length - 1; index >= 0; index -= 1) {
+      if (protectedMessages[index].piChatPersistedMessageId) {
+        persistedBoundary = index + 1;
+        break;
+      }
+    }
     const insertAt = localTimestamp === undefined
       ? -1
-      : protectedMessages.findIndex((message) => typeof message.timestamp === "number" && Number.isFinite(message.timestamp) && message.timestamp > localTimestamp);
+      : protectedMessages.findIndex((message, index) => index >= persistedBoundary
+        && typeof message.timestamp === "number" && Number.isFinite(message.timestamp) && message.timestamp > localTimestamp);
     if (insertAt < 0) protectedMessages.push(turn.message);
     else protectedMessages.splice(insertAt, 0, turn.message);
   }
