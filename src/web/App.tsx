@@ -122,7 +122,7 @@ import { createStreamErrorHandler, createOversizedEventHandler } from "./applica
 import { createPiEventHandler } from "./application/pi-event-handler";
 import { createStopGeneration } from "./application/stop-generation-flow";
 import { createPromptSendFlow } from "./application/prompt-send-flow";
-import { createSessionManagementActions } from "./application/session-management-actions";
+import type { createSessionManagementActions } from "./application/session-management-actions";
 import { createComposerSettingsActions } from "./application/composer-settings-actions";
 import { createQueueActions } from "./application/queue-actions";
 import { AppView } from "./application/app-view";
@@ -3710,7 +3710,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     changeThinking, clearPendingLiveMessage, closeComplete, commitPane,
     commitSidebarSessions, composerDraftKeyId, composerDraftRevisionsRef, composerModels,
     composerQueueMode, composerState, confirmedDeletedSessionIdsRef, confirmedQueueDispatchIdsRef,
-    copyingSessionIds, createSession, createSessionManagementActions, currentSessionBusyBeforeStreaming,
+    copyingSessionIds, createSession, currentSessionBusyBeforeStreaming,
     currentSessionRuntimePreparing, desiredSessionIdRef, diagnoseVisibleUserTurnDuplicates, diagnosticCheckpointRef,
     diagnosticSidebarRowsRef, diagnosticSseRejectionAtRef, diagnosticUiSignatureRef, diagnosticsBusy,
     downloadStateDiagnosticBundle, draftRestorationIntentSequenceRef, effectiveControl, error,
@@ -3739,7 +3739,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     stoppingCurrentSession, stoppingOperationTokensRef, streamDiagnosticsRef, streamGapRecoveriesRef,
     streamingWireProjectionsRef, subagentAddressesRef, syncMutatingSessionIds, terminalAssistantSessionIdsRef,
     terminalAssistantStreamGenerationsRef, toolStatus, turnTotal, unreadSteeringDropMessagesRef,
-    useEffect, useMemo, useRef, viewCacheWriter,
+    viewCacheWriter,
     viewSession, viewSwitching, viewedSession, viewedSessionId,
     viewedSessionIdRef, viewingSubagentSession, warmingSessionIdsRef,
   });

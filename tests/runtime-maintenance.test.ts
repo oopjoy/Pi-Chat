@@ -108,6 +108,24 @@ test("a failed sweep releases its single-flight slot for the next maintenance ti
   await targetPool.sweep();
 });
 
+test("a rejected draft probe clears its cache without a detached rejecting finally chain", async t => {
+  const targetPool = pool();
+  const internals = targetPool as unknown as {
+    draftHasMessages(runtime: SecondaryRuntime): Promise<boolean | null>;
+    probeDraftHasMessages(runtime: SecondaryRuntime): Promise<boolean | null>;
+  };
+  let calls = 0;
+  t.mock.method(internals, "draftHasMessages", async () => {
+    if (++calls === 1) throw new Error("probe fixture failure");
+    return false;
+  });
+  const target = runtime("probe");
+  await assert.rejects(internals.probeDraftHasMessages(target), /probe fixture failure/);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(target.draftProbe, undefined);
+  assert.equal(await internals.probeDraftHasMessages(target), false);
+});
+
 test("the background maintenance timer contains rejected sweeps and continues ticking", async t => {
   let warnings = 0;
   let complete!: () => void;

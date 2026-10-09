@@ -1,5 +1,19 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
+import type { SessionSummary } from "../../shared/types";
 import { createSessionManagementActions } from "./session-management-actions";
+
+export function summarizeDiagnosticSessions(sessions: readonly SessionSummary[]) {
+  const counts = { sidebarRunningCount: 0, sidebarQueuedCount: 0, sidebarFailedCount: 0, sidebarPausedCount: 0, sidebarConfirmationCount: 0, sidebarForeignOwnerCount: 0 };
+  for (const session of sessions) {
+    if (session.running) counts.sidebarRunningCount++;
+    if (session.queued) counts.sidebarQueuedCount++;
+    if (session.activity?.execution === "failed") counts.sidebarFailedCount++;
+    if (session.activity?.execution === "paused") counts.sidebarPausedCount++;
+    if (session.pendingConfirmation) counts.sidebarConfirmationCount++;
+    if (session.controlOwner && session.controlledByThisWindow !== true) counts.sidebarForeignOwnerCount++;
+  }
+  return counts;
+}
 
 export function useAppPresentationState(host: Record<string, any>) {
   const {
@@ -37,7 +51,6 @@ export function useAppPresentationState(host: Record<string, any>) {
     confirmedQueueDispatchIdsRef,
     copyingSessionIds,
     createSession,
-    createSessionManagementActions,
     currentSessionBusyBeforeStreaming,
     currentSessionRuntimePreparing,
     desiredSessionIdRef,
@@ -151,9 +164,6 @@ export function useAppPresentationState(host: Record<string, any>) {
     toolStatus,
     turnTotal,
     unreadSteeringDropMessagesRef,
-    useEffect,
-    useMemo,
-    useRef,
     viewCacheWriter,
     viewSession,
     viewSwitching,
@@ -163,6 +173,7 @@ export function useAppPresentationState(host: Record<string, any>) {
     viewingSubagentSession,
     warmingSessionIdsRef,
   } = host;
+  const diagnosticSidebarCounts = useMemo(() => summarizeDiagnosticSessions(sessions), [sessions]);
   const diagnosticSidebarRows = useMemo(
     () => sessions.flatMap((session: any) => {
       const execution = session.activity?.execution ||
@@ -223,14 +234,7 @@ export function useAppPresentationState(host: Record<string, any>) {
     sidebarRunning: viewedSession?.running === true,
     sidebarQueued: viewedSession?.queued === true,
     sidebarExecution: viewedSession?.activity?.execution || "none",
-    sidebarRunningCount: sessions.filter((session: any) => session.running).length,
-    sidebarQueuedCount: sessions.filter((session: any) => session.queued).length,
-    sidebarFailedCount: sessions.filter((session: any) => session.activity?.execution === "failed").length,
-    sidebarPausedCount: sessions.filter((session: any) => session.activity?.execution === "paused").length,
-    sidebarConfirmationCount: sessions.filter((session: any) => session.pendingConfirmation).length,
-    sidebarForeignOwnerCount: sessions.filter((session: any) =>
-      Boolean(session.controlOwner && session.controlledByThisWindow !== true),
-    ).length,
+    ...diagnosticSidebarCounts,
     observing,
     controlledByThisWindow: diagnosticControlledByThisWindow,
     foreignOwnerPresent: diagnosticForeignOwnerPresent,

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { collectWriterBoundarySources, writerBoundaryViolations } from "../scripts/check-writer-boundaries.mjs";
 import test from "node:test";
 import type {
   ApplicationLifecycle,
@@ -38,19 +39,13 @@ function fixture() {
   };
 }
 
-test("App routes core Runtime lifecycle writes through the projection writer", async () => {
+test("all Web modules route core Runtime lifecycle writes through the projection writer", async () => {
+  const violations = writerBoundaryViolations(await collectWriterBoundarySources());
+  assert.deepEqual(violations.filter(item => item.kind === "runtime-setter"), []);
   const source = await readFile(
     new URL("../src/web/App.tsx", import.meta.url),
     "utf8",
   );
-  for (const directWrite of [
-    "setPrimaryRuntime(",
-    "setPrimaryCapabilitySnapshot(",
-    "setApplicationLifecycle(",
-    "publishPrimaryReadiness(",
-    "publishPrimaryCapabilitySnapshot(",
-    "publishApplicationLifecycle(",
-  ]) assert.equal(source.includes(directWrite), false, directWrite);
   assert.match(
     source,
     /data\.applicationLifecycle === undefined\s*\? "idle"\s*:\s*data\.applicationLifecycle/,

@@ -26,6 +26,10 @@ The same variables can be exported in a POSIX shell. Build the staging Web artif
 - Every browser iteration uses a disposable fake-RPC server on a loopback ephemeral port and a fresh Chromium context. Teardown confirms the server process tree exited.
 - Results are descriptive baselines. There are deliberately no pass/fail thresholds.
 
+## Many-session outline inventory
+
+`npm run benchmark:index-scale -- 200 50` generates 200 private temporary Sessions with 50 tool call/result pairs each, checks summary correctness, measures one initial inventory and three unchanged refreshes, and reports GC-retained heap plus source hashes as JSON on stdout. Use separate processes for comparisons, for example `1000 50` and `200 500`. It never reads user Sessions, opens a listener, or writes dist; fixture roots are removed before success is reported. Session count and per-Session tool-pair count are bounded at 2000. Results include both outline and summary cache cost, not proof of a leak, total service memory, or a release threshold. Large assistant-text/image workloads require separate measurements before selecting an eviction policy.
+
 ## Commands
 
 Generate one deterministic fixture (optionally pass `--minimum-bytes N`; generated content may intrinsically be larger):
