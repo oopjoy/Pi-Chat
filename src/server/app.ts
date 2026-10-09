@@ -176,10 +176,7 @@ import { prepareSessionDeletionRuntime } from "./services/session-delete-runtime
 import { finalizeSessionDelete } from "./services/session-delete-finalize.js";
 import { finalizeSessionCopy } from "./services/session-copy-finalize.js";
 import { validateSessionCopyPreparation } from "./services/session-copy-preparation.js";
-import {
-  executeSessionCopyRpc,
-  validateCopiedSessionIdentity,
-} from "./services/session-copy-transaction.js";
+import { executeSessionCopyRpc } from "./services/session-copy-transaction.js";
 import { applyModelFileTransaction } from "./services/model-file-transaction.js";
 import { projectColdSessionView, projectHotMemoryView } from "./services/session-view-projection.js";
 import { readColdSessionView } from "./services/cold-session-view.js";
@@ -4271,8 +4268,8 @@ export class PiChatApp {
     });
     return createRuntimeFileActions(host);
   }
-  private async restartPrimaryRuntime(...args: any[]): Promise<void> {
-    return (this.runtimeFileActions().restartPrimaryRuntime as any)(...args);
+  private async restartPrimaryRuntime(sessionFile?: string, cwd?: string): Promise<void> {
+    return this.runtimeFileActions().restartPrimaryRuntime(sessionFile, cwd);
   }
   private async reloadRpc(...args: any[]): Promise<void> {
     return (this.runtimeFileActions().reloadRpc as any)(...args);
@@ -4296,16 +4293,58 @@ export class PiChatApp {
     return (this.runtimeFileActions().changeWorkspace as any)(...args);
   }
   private sessionCopyOriginActions() {
-    const routePorts = {
-      executeSessionCopyRpc, idForPath, validateCopiedSessionIdentity,
+    const boundRuntime = (input: SessionCopyOriginInput): SecondaryRuntime | undefined => {
+      if (!input.runtime) return undefined;
+      const runtime = this.runtimePool.get(input.id);
+      if (!runtime || runtime !== input.runtime)
+        throw new OperationAdmissionClosedError("复制源 Runtime 已被替换，拒绝操作过期 writer");
+      return runtime;
     };
-    const host = new Proxy(this as any, {
-      get: (target, property) => Object.prototype.hasOwnProperty.call(routePorts, property)
-        ? (routePorts as any)[property]
-        : Reflect.get(target, property, target),
-      set: (target, property, value) => Reflect.set(target, property, value, target),
+    return createSessionCopyOriginActions({
+      readOrigin: (id) => this.sessionRelations.getForkOrigin(id),
+      sourceSummary: (id) => {
+        const summary = this.runtimePool.get(id)?.summarySnapshot
+          || (id === this.activeSessionId ? this.primarySummarySnapshot : undefined)
+          || this.options.sessions.summaryForId(id);
+        return summary ? { name: summary.name } : undefined;
+      },
+      cachedSourceSummary: async (id) => {
+        const summary = await this.options.sessions.cachedSummaryForId(id);
+        return summary ? { name: summary.name } : undefined;
+      },
+      executeCopy: (input) => executeSessionCopyRpc({
+        host: {
+          lateRpcOutcomeHandler: (id, token) => this.lateRpcOutcomeHandler(id, token, "copy"),
+          markRpcOutcomePending: (id, error, token) => this.markRpcOutcomePending(id, error, token),
+          installOutcomeFence: (id, token) => this.installRpcOutcomeFence(id, token),
+          addCopyOutcomePending: (id) => { this.copyOutcomePendingSessionIds.add(id); },
+        },
+        rpc: boundRuntime(input)?.rpc || this.options.rpc,
+        sourceSessionId: input.id,
+        mode: input.mode,
+        entryId: input.entryId,
+      }),
+      activeSessionId: () => this.activeSessionId,
+      liveRuntimeIds: () => new Set(this.runtimePool.runtimes.keys()),
+      setCopying: (id, copying) => {
+        if (copying) this.copyingSessionIds.add(id);
+        else this.copyingSessionIds.delete(id);
+      },
+      recoverSource: async (input) => {
+        const runtime = boundRuntime(input);
+        if (runtime) {
+          runtime.failed = true;
+          // The outer copy transaction owns this closed admission generation.
+          await this.runtimePool.recover(runtime, true);
+        } else await this.restartPrimaryRuntime(input.sourcePath);
+      },
+      recordCommittedRecoveryFailure: (input, error) => {
+        if (!input.runtime) this.primaryFailed = true;
+        this.copyRecoveryPendingSessionIds.add(input.id);
+        this.recordRuntimeFailure(input.id, error);
+      },
+      installOutcomeFence: (id, token) => { this.installRpcOutcomeFence(id, token); },
     });
-    return createSessionCopyOriginActions(host);
   }
   private reportSessionRelationFailure(operation: string, error: unknown): void {
     this.sessionCopyOriginActions().reportSessionRelationFailure(operation, error);

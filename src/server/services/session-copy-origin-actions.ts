@@ -1,13 +1,17 @@
 import type { SessionForkOrigin } from "../../shared/types.js";
+import type { StoredSessionForkOrigin } from "../session-relations.js";
 import type { SecondaryRuntime } from "../runtime-pool.js";
+import { idForPath } from "../session-index.js";
+import { validateCopiedSessionIdentity, type executeSessionCopyRpc } from "./session-copy-transaction.js";
 
 export interface SessionCopyOriginInput {
-  id: string;
-  sourcePath: string;
-  mode: "clone" | "fork";
-  entryId?: string;
-  runtime?: SecondaryRuntime;
-  knownSessionIds: ReadonlySet<string>;
+  readonly id: string;
+  readonly sourcePath: string;
+  readonly mode: "clone" | "fork";
+  readonly entryId?: string;
+  /** Identity-only handle; the App revalidates ownership before using its RPC. */
+  readonly runtime?: Readonly<Pick<SecondaryRuntime, "id">>;
+  readonly knownSessionIds: ReadonlySet<string>;
 }
 
 export interface SessionCopyOriginResult {
@@ -17,30 +21,39 @@ export interface SessionCopyOriginResult {
   warning?: string;
 }
 
-export function createSessionCopyOriginActions(host: Record<string, any>) {
-  const {
-    executeSessionCopyRpc,
-    idForPath,
-    validateCopiedSessionIdentity,
-  } = host;
+type SourceSummary = Readonly<{ name: string }>;
+
+/** Copy/provenance orchestration only; no App object, raw Maps, setters or RPC ownership. */
+export interface SessionCopyOriginPorts {
+  readOrigin(destinationSessionId: string): Promise<Readonly<StoredSessionForkOrigin> | null>;
+  sourceSummary(sourceSessionId: string): SourceSummary | undefined;
+  cachedSourceSummary(sourceSessionId: string): Promise<SourceSummary | undefined>;
+  executeCopy(input: SessionCopyOriginInput): ReturnType<typeof executeSessionCopyRpc>;
+  activeSessionId(): string;
+  liveRuntimeIds(): ReadonlySet<string>;
+  /** Synchronous state effects must not accidentally accept async callbacks. */
+  setCopying(sessionId: string, copying: boolean): undefined;
+  recoverSource(input: SessionCopyOriginInput): Promise<void>;
+  recordCommittedRecoveryFailure(input: SessionCopyOriginInput, error: unknown): undefined;
+  installOutcomeFence(sessionId: string, token: string): undefined;
+}
+
+export function createSessionCopyOriginActions(ports: SessionCopyOriginPorts) {
   function reportSessionRelationFailure(operation: string, error: unknown): void {
     console.error(`[Pi Chat] Session relation ${operation} failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 
   async function forkOriginForSession(destinationSessionId: string): Promise<SessionForkOrigin | undefined> {
-    let relation;
-    try { relation = await host.sessionRelations.getForkOrigin(destinationSessionId); }
+    let relation: Readonly<StoredSessionForkOrigin> | null;
+    try { relation = await ports.readOrigin(destinationSessionId); }
     catch (error) {
-      host.reportSessionRelationFailure("read", error);
+      reportSessionRelationFailure("read", error);
       return undefined;
     }
     if (!relation) return undefined;
-    const runtime = host.runtimePool.get(relation.sourceSessionId);
-    let source = runtime?.summarySnapshot
-      || (relation.sourceSessionId === host.activeSessionId ? host.primarySummarySnapshot : undefined)
-      || host.options.sessions.summaryForId(relation.sourceSessionId);
+    let source = ports.sourceSummary(relation.sourceSessionId);
     if (!source) {
-      try { source = await host.options.sessions.cachedSummaryForId(relation.sourceSessionId); }
+      try { source = await ports.cachedSourceSummary(relation.sourceSessionId); }
       catch { /* An unavailable source is still valid Fork provenance. */ }
     }
     return {
@@ -51,64 +64,38 @@ export function createSessionCopyOriginActions(host: Record<string, any>) {
   }
 
   async function runBoundSessionCopy(input: SessionCopyOriginInput): Promise<SessionCopyOriginResult | null> {
-    const rpc = input.runtime?.rpc || host.options.rpc;
-    let committed: { sessionId: string; sessionPath: string; piSessionId: string; warning?: string } | null = null;
-    host.copyingSessionIds.add(input.id);
+    let committed: SessionCopyOriginResult | null = null;
+    ports.setCopying(input.id, true);
     try {
-      const copyResult = await executeSessionCopyRpc({
-        host: {
-          lateRpcOutcomeHandler: (id: any, token: any) => host.lateRpcOutcomeHandler(id, token, "copy"),
-          markRpcOutcomePending: (id: any, error: any, token: any) => host.markRpcOutcomePending(id, error, token),
-          installOutcomeFence: (id: any, token: any) => host.installRpcOutcomeFence(id, token),
-          addCopyOutcomePending: (id: any) => host.copyOutcomePendingSessionIds.add(id),
-        },
-        rpc,
-        sourceSessionId: input.id,
-        mode: input.mode,
-        entryId: input.entryId,
-      });
+      const copyResult = await ports.executeCopy(input);
       committed = validateCopiedSessionIdentity({
         sourcePath: input.sourcePath,
         sourceSessionId: input.id,
-        sessionIdForPath: (path: any) => idForPath(path),
+        sessionIdForPath: idForPath,
         state: copyResult.state,
         knownSessionIds: input.knownSessionIds,
-        liveRuntimeIds: new Set(host.runtimePool.runtimes.keys()),
-        activeSessionId: host.activeSessionId,
+        liveRuntimeIds: ports.liveRuntimeIds(),
+        activeSessionId: ports.activeSessionId(),
         cancelled: copyResult.cancelled,
         mutationOutcomeUnknown: copyResult.mutationOutcomeUnknown,
         copyMayHaveCommitted: copyResult.copyMayHaveCommitted,
-        installOutcomeFence: () => host.installRpcOutcomeFence(input.id, copyResult.outcomeToken),
+        installOutcomeFence: () => ports.installOutcomeFence(input.id, copyResult.outcomeToken),
         mode: input.mode,
       });
       return committed;
     } finally {
-      host.copyingSessionIds.delete(input.id);
+      ports.setCopying(input.id, false);
       try {
-        if (input.runtime) {
-          input.runtime.failed = true;
-          // copySession closed this Runtime's admission for the duration of
-          // the attached-writer transaction; its owner may recover in place
-          // before the outer finally reopens that exact generation.
-          await host.runtimePool.recover(input.runtime, true);
-        } else {
-          await host.restartPrimaryRuntime(input.sourcePath);
-        }
+        // Restoring the original writer stays with its existing Runtime owner.
+        await ports.recoverSource(input);
       } catch (error) {
         if (!committed) throw error;
-        if (!input.runtime) host.primaryFailed = true;
-        host.copyRecoveryPendingSessionIds.add(input.id);
-        host.recordRuntimeFailure(input.id, error);
+        ports.recordCommittedRecoveryFailure(input, error);
         console.error(`[Pi Chat] Session copy source recovery failed: ${error instanceof Error ? error.message : String(error)}`);
         committed.warning = "新对话已创建，但原对话恢复尚未确认；请勿重复操作";
       }
     }
   }
 
-
-  return {
-    reportSessionRelationFailure,
-    forkOriginForSession,
-    runBoundSessionCopy,
-  };
+  return { reportSessionRelationFailure, forkOriginForSession, runBoundSessionCopy };
 }

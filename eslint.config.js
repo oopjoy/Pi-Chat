@@ -30,6 +30,7 @@ export default [
     // legacy orchestration remains visible debt, not a blanket rule disable.
     files: [
       "src/server/runtime-pool.ts", "src/server/session-projection.ts", "src/server/sse-hub.ts",
+      "src/server/services/session-copy-origin-actions.ts",
       "src/web/application/session-view-cache-writer.ts",
       "src/web/application/runtime-projection-writer.ts",
       "src/web/application/active-session-projection-writer.ts",
@@ -42,6 +43,17 @@ export default [
       "@typescript-eslint/no-misused-promises": "error",
       "@typescript-eslint/no-explicit-any": "error",
       "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_", varsIgnorePattern: "^_" }],
+    },
+  },
+  {
+    files: ["src/server/services/session-copy-origin-actions.ts"],
+    rules: {
+      "@typescript-eslint/no-unsafe-assignment": "error",
+      "@typescript-eslint/no-unsafe-call": "error",
+      "@typescript-eslint/no-unsafe-member-access": "error",
+      "@typescript-eslint/no-unsafe-return": "error",
+      "@typescript-eslint/no-unsafe-argument": "error",
+      "@typescript-eslint/no-unsafe-type-assertion": "error",
     },
   },
 ];
