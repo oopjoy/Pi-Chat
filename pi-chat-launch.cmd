@@ -18,6 +18,13 @@ set "PI_CHAT_PROJECT_DIRECTORY=%~dp0."
 set "PWA_APP_ID=geogmfmioogonffbmpjonolpkgepgafd"
 set "EDGE_PWA=%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge_proxy.exe"
 
+rem Discover the managed Pi install without overriding an explicit RPC entry.
+if not defined PI_CHAT_PI_ENTRY if exist "%USERPROFILE%\.pi\agent\install\current-version" (
+  for /f "usebackq delims=" %%V in ("%USERPROFILE%\.pi\agent\install\current-version") do (
+    if exist "%USERPROFILE%\.pi\agent\install\releases\%%V\node_modules\@earendil-works\pi-coding-agent\dist\rpc-entry.js" set "PI_CHAT_PI_ENTRY=%USERPROFILE%\.pi\agent\install\releases\%%V\node_modules\@earendil-works\pi-coding-agent\dist\rpc-entry.js"
+  )
+)
+
 powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0scripts\pi-chat-port-ready.ps1" -ProjectDirectory "%PI_CHAT_PROJECT_DIRECTORY%"
 if not errorlevel 1 goto :open
 if errorlevel 2 goto :stale
