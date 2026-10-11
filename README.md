@@ -50,7 +50,7 @@ Release ZIP 是 Windows-first 的可运行包；源码开发和从 checkout 运�
 - 普通文件通过 Windows 原生选择器或资源管理器复制粘贴获取绝对路径，只引用路径并由 Pi 工具按需读取
 - Pi 扩展命令、Prompt Templates、Skills 与常用内置命令的 `/` 指令联想
 - Extension 状态命令立即执行并仅显示通知，不写入对话或 Follow-up 队列
-- Markdown、GFM 与 KaTeX
+- Markdown、GFM 与 KaTeX；正文支持 `$...$` / `$$...$$` 和 `\(...\)` / `\[...\]` 四种数学分隔符。仅转换渲染副本，代码、链接和 HTML 标签不按公式改写，复制仍返回原始 Markdown / LaTeX
 - 选中渲染内容时复制原始 Markdown / LaTeX
 - Pi-web 风格的可收起会话侧栏、New 和刷新
 - 当前 Session 若有 `pi-subagents` 后台步骤，顶栏会快速显示紧凑的“N 个子代理”入口：使用安全任务标签、活动与耗时投影，点击已验证条目可在现有聊天区打开对应子代理 JSONL（严格只读）；子 Session 不加入左侧会话，也不能启动、Steer、恢复、中断、停止或取得 SessionControl

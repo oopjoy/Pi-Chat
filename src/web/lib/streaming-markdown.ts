@@ -1,3 +1,5 @@
+import { latexMathRanges } from "./markdown-latex-delimiters";
+
 export interface StreamingMarkdownSegments {
   /** Completed Markdown regions whose source no longer changes during append-only streaming. */
   stable: string[];
@@ -59,11 +61,16 @@ export function streamingMarkdownSegments(source: string): StreamingMarkdownSegm
   let lineStart = 0;
   let fence: string | null = null;
   let displayMath = false;
+  const latex = latexMathRanges(normalized, true);
+  let latexIndex = 0;
 
   for (let cursor = 0; cursor <= normalized.length; cursor += 1) {
+    while (latexIndex < latex.length && latex[latexIndex].end <= cursor) latexIndex++;
+    const insideLatex = latexIndex < latex.length && latex[latexIndex].start <= cursor;
     if (cursor < normalized.length && normalized[cursor] !== "\n") {
       const safeInlineBoundary = !fence
         && !displayMath
+        && !insideLatex
         && cursor - segmentStart >= MAX_STREAMING_TAIL_CHARS
         && /\s/.test(normalized[cursor]);
       if (safeInlineBoundary) {
@@ -73,12 +80,12 @@ export function streamingMarkdownSegments(source: string): StreamingMarkdownSegm
       continue;
     }
     const line = normalized.slice(lineStart, cursor);
-    const marker = fenceMarker(line);
+    const marker = insideLatex ? null : fenceMarker(line);
     if (fence) {
       if (closesFence(line, fence)) fence = null;
     } else if (marker) {
       fence = marker;
-    } else if (displayMathBoundary(line)) {
+    } else if (!insideLatex && displayMathBoundary(line)) {
       displayMath = !displayMath;
     }
 
@@ -86,11 +93,13 @@ export function streamingMarkdownSegments(source: string): StreamingMarkdownSegm
     const nextLineStart = hasLineBreak ? cursor + 1 : cursor;
     const previousLineBreak = lineStart > 0 && normalized[lineStart - 1] === "\n";
     const blankBoundary = hasLineBreak
+      && !insideLatex
       && !fence
       && !displayMath
       && !line.trim()
       && previousLineBreak;
     const oversizedTail = hasLineBreak
+      && !insideLatex
       && !fence
       && !displayMath
       && nextLineStart - segmentStart >= MAX_STREAMING_TAIL_CHARS;
