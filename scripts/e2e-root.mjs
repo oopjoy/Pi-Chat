@@ -71,10 +71,13 @@ export function combinedE2eError(primaryError, secondaryErrors, message) {
 export async function removeE2eRootAfterConfirmedTree(
   root,
   treeExitConfirmed,
-  remove = (path) => rm(path, { recursive: true, force: true }),
+  remove = rm,
 ) {
   if (!treeExitConfirmed) {
     throw new Error(`E2E process tree exit is unconfirmed; retained root: ${root}`);
   }
-  await remove(root);
+  // Confirmed process exit can precede Windows releasing the cwd handle.
+  // Node retries only its documented transient filesystem errors, with a
+  // finite linear backoff; persistent locks still fail and retain evidence.
+  await remove(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 });
 }

@@ -981,7 +981,11 @@ export class PiChatApp {
       options.secondaryRuntimeSweepMs ?? DEFAULT_SECONDARY_RUNTIME_SWEEP_MS,
     );
     this.secondaryRuntimeSweepTimer = setInterval(
-      () => void this.runtimePool.sweep(),
+      () => void this.runtimePool.sweep().catch((error: unknown) => {
+        // Detached maintenance must not reach index.ts's process-fatal rejection
+        // handler. Runtime stop/exit barriers remain fail-closed in the pool.
+        console.warn("[Pi Chat] 后台 Runtime 维护失败，将在后续周期重试：", error);
+      }),
       sweepMs,
     );
     this.secondaryRuntimeSweepTimer.unref();

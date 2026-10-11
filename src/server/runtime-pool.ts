@@ -150,6 +150,8 @@ export interface RuntimePoolOptions {
   maxIdleSecondaryRuntimes?: number;
   secondaryRuntimeIdleMs?: number;
   createRpc?: (cwd: string) => PiRpcClient;
+  /** Narrow filesystem seam; empty-draft deletion policy remains owned here. */
+  unlinkDraftFile?: (path: string) => Promise<void>;
   cwd: () => string;
   /** Secondary workers share the verified Primary Pi implementation. This is a
    * global compatibility capability, not a per-session probe: start/recovery
@@ -189,6 +191,7 @@ export class RuntimePool {
   /** Once shutdown begins, no pending start may publish a new Runtime. */
   private lifecycleClosing = false;
   private runtimeCapacityTail: Promise<void> = Promise.resolve();
+  private sweepOperation: Promise<void> | null = null;
   /** Starts reserve capacity before spawning outside the short capacity lock. */
   private reservedStarts = 0;
   private readonly maxSecondaryRuntimes: number;
@@ -359,9 +362,15 @@ export class RuntimePool {
       return;
     }
     if (messages.some((message) => message.role === "user")) return;
-    await unlink(runtime.draftSessionPath).catch((error: NodeJS.ErrnoException) => {
-      if (error.code !== "ENOENT") throw error;
-    });
+    try {
+      await (this.options.unlinkDraftFile || unlink)(runtime.draftSessionPath);
+    } catch (error) {
+      // File hygiene is not proof of process ownership. Once exit is confirmed,
+      // a locked draft must not prevent detach notifications or stop unrelated
+      // maintenance; retain it rather than escalating into service shutdown.
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+        console.warn(`[Pi Chat] 无法删除空草稿，保留文件：${runtime.draftSessionPath}`, error);
+    }
   }
 
   private async detachConfirmedRuntime(
@@ -494,7 +503,16 @@ export class RuntimePool {
     }
   }
 
-  async sweep(): Promise<void> {
+  sweep(): Promise<void> {
+    if (this.sweepOperation) return this.sweepOperation;
+    const operation = this.sweepOnce();
+    this.sweepOperation = operation;
+    const release = () => { if (this.sweepOperation === operation) this.sweepOperation = null; };
+    void operation.then(release, release);
+    return operation;
+  }
+
+  private async sweepOnce(): Promise<void> {
     if (this.options.isClosed() || !this.options.canSweep()) return;
     for (const orphan of [...this.orphanedStarts]) {
       if (!orphan.rpc.isExitConfirmed?.()) continue;
