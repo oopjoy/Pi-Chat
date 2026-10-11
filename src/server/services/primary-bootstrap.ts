@@ -1,8 +1,10 @@
 import { reconcilePersistedHistory } from "../../shared/streaming-assistant.js";
+import { stat as statPath } from "node:fs/promises";
 import type { BootstrapData, ModelInfo, PiMessage, PiState, SessionStats, SessionSummary, SlashCommand } from "../../shared/types.js";
 import { ApplicationLifecycleConflictError } from "../application-lifecycle.js";
 import { asCommands, asMessages, asModels, asSessionStats, asState, messageWindow, RECENT_TURN_WINDOW_SIZE } from "../pi-data.js";
-import { readSessionSnapshot, SessionIndex } from "../session-index.js";
+import { OVERSIZED_SESSION_RECENT_TURN_LIMIT, readSessionSnapshot, readSessionTailSnapshot } from "../session-index.js";
+import { MAX_SESSION_SNAPSHOT_BYTES } from "../session-projection.js";
 import { StaleSessionViewRuntimeError } from "./session-view-service.js";
 
 export async function bootstrap(ports: any, clientId = "", coherenceRetry = 0): Promise<BootstrapData> {
@@ -72,10 +74,31 @@ export async function bootstrap(ports: any, clientId = "", coherenceRetry = 0): 
     // carries the same verified JSONL path; use it to avoid returning an empty
     // transcript for an already-existing Session.
     const activeSessionPath = ports.activeSessionPath || state.sessionFile;
-    const diskSnapshot = activeSessionPath
+    let diskSnapshot = activeSessionPath
       ? await readSessionSnapshot(activeSessionPath).catch(() => null)
       : null;
+    let activeSessionIsOversized = false;
+    if (activeSessionPath) {
+      try {
+        activeSessionIsOversized = (await statPath(activeSessionPath)).size > MAX_SESSION_SNAPSHOT_BYTES;
+      } catch {
+        // The full read above remains authoritative for missing/temporary files.
+      }
+    }
+    // A large active Session must still produce a usable bootstrap. Full
+    // snapshot parsing is intentionally capped at 128 MiB; fall back to the
+    // newest bounded tail before considering an RPC get_messages request,
+    // whose single-line limit is smaller and would fail again. Read by the
+    // authoritative active path here instead of relying on SessionIndex's
+    // inventory mapping, which may not have completed during cold startup.
+    if (!diskSnapshot && activeSessionIsOversized && activeSessionPath) {
+      diskSnapshot = await readSessionTailSnapshot(
+        activeSessionPath,
+        OVERSIZED_SESSION_RECENT_TURN_LIMIT,
+      ).catch(() => null);
+    }
     const diskMessages = diskSnapshot?.messages ?? null;
+    const diskReadFailedWithBoundedFallback = activeSessionIsOversized && !diskSnapshot;
     let messages: PiMessage[] | null = null;
     const primaryTerminalTail =
       ports.primaryPendingTerminalSessionId === ports.activeSessionId
@@ -99,7 +122,7 @@ export async function bootstrap(ports: any, clientId = "", coherenceRetry = 0): 
     // JSONL is authoritative enough for an immediately readable bootstrap.
     // An empty brand-new busy Session can render its live/optimistic message;
     // never hold the whole shell open waiting for get_messages.
-    if (primaryAvailable && !messages && !busy) {
+    if (primaryAvailable && !messages && !busy && !diskReadFailedWithBoundedFallback) {
       const rpcMessages = asMessages(
         await ports.options.rpc.send({ type: "get_messages" }, 12_000),
       );

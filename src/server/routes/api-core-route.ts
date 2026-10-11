@@ -214,6 +214,7 @@ export async function handleApiCoreRoute(
 
     if (await handleRuntimeSetupRoute({
       status: host.options.runtimeSetupStatus,
+      piRuntimeUpdateCheck: host.options.piRuntimeUpdateCheck,
       pick: host.options.pickRuntimeEntry,
       isConnectedWindowPage: (client: string, page: string) => host.isConnectedWindowPage(client, page),
     }, request, response, url)) return;

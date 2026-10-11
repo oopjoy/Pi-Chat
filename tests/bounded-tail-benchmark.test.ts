@@ -69,7 +69,9 @@ test("tail runner exercises production oversized reads and concurrent access wit
     assert.equal(result.baselinePolicy, "descriptive-only");
     assert.ok(result.fixture.bytes > MAX_SESSION_SNAPSHOT_BYTES);
     assert.ok(result.environment.runnerPeakRssBytes > 0);
-    assert.equal(result.measurements.recent10.returnedTurns, 10);
+    // Oversized Session reads intentionally retain at least 50 turns even
+    // when the caller asks for the normal ten-turn cold window.
+    assert.equal(result.measurements.recent10.returnedTurns, 50);
     assert.equal(result.measurements.recent50.returnedTurns, 50);
     assert.equal(result.measurements.concurrentRecent10.readsPerBatch.length, 4);
     for (const evidence of [result.measurements.recent10, result.measurements.recent50, ...result.measurements.concurrentRecent10.readsPerBatch]) {

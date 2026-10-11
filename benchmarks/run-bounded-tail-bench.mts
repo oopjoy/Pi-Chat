@@ -53,19 +53,20 @@ export function tailBenchmarkParameters(options: TailBenchmarkOptions): { minimu
 }
 
 /** Validate semantic evidence, not performance thresholds. Extra read counters come from the production tail reader. */
-export function tailReadEvidence(snapshot: SessionFileSnapshot | null, turns: number, fixture: TailFixtureManifest): TailReadEvidence {
+export function tailReadEvidence(snapshot: SessionFileSnapshot | null, turns: number, fixture: TailFixtureManifest, enforceOversizedMinimum = false): TailReadEvidence {
   if (!snapshot) throw new Error("Tail snapshot is missing");
   const counters = snapshot as SessionFileSnapshot & { sourceBytes?: number; bytesRead?: number };
+  const expectedTurns = enforceOversizedMinimum ? Math.max(50, turns) : turns;
   const returnedTurns = snapshot.messages.filter((message) => message.role === "user").length;
   const identitiesMatch = snapshot.messages.every((message, position) => {
-    const turn = fixture.userTurns - turns + Math.floor(position / 2);
+    const turn = fixture.userTurns - expectedTurns + Math.floor(position / 2);
     const role = position % 2 === 0 ? "user" : "assistant";
     return message.role === role && message.piChatPersistedMessageId === `${role}-${turn}:0`;
   });
   if (!identitiesMatch || snapshot.sourceMessagesTruncated !== true || snapshot.usageComplete !== false ||
       counters.sourceBytes !== fixture.bytes || !Number.isSafeInteger(counters.bytesRead) ||
       counters.bytesRead! <= 0 || counters.bytesRead! > fixture.bytes ||
-      returnedTurns !== turns || snapshot.messages.length !== turns * 2 ||
+      returnedTurns !== expectedTurns || snapshot.messages.length !== expectedTurns * 2 ||
       snapshot.sourceMessageTotal !== fixture.messages || snapshot.sourceTurnTotal !== fixture.userTurns) {
     throw new Error("Tail snapshot does not match the fixture or bounded-tail production contract");
   }
@@ -96,7 +97,7 @@ export async function runBoundedTailBenchmark(options: TailBenchmarkOptions = {}
     if (first.value.length !== 1) throw new Error("Expected one synthetic Session");
     const id = first.value[0].id;
     const repeat = await measure(iterations, () => index.list());
-    const read = async (turns: number) => tailReadEvidence(await index.recentSnapshotForId(id, turns), turns, fixture);
+    const read = async (turns: number) => tailReadEvidence(await index.recentSnapshotForId(id, turns), turns, fixture, true);
     const recent10 = await measure(iterations, () => read(10));
     const recent50 = await measure(iterations, () => read(50));
     const concurrent = await measure(iterations, () => Promise.all(Array.from({ length: 4 }, () => read(10))));

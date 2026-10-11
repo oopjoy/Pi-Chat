@@ -80,6 +80,17 @@ test("Pi discovery rejects malformed managed pointers and falls back to npm with
   } finally { await f.cleanup(); }
 });
 
+test("PiChat-managed install roots take precedence without changing the user's global Pi", async () => {
+  const f = await fixture();
+  try {
+    const managedRoot = join(f.home, "PiChat managed");
+    const managedEntry = await f.setManaged(managedRoot, "2.0.0");
+    const globalPrefix = join(f.home, "global-prefix");
+    await f.makePackage(globalPrefix, "1.0.0");
+    await assertResolvedEntry(resolvePiEntry({ ...f.env, PI_CHAT_MANAGED_INSTALL_ROOT: managedRoot, npm_config_prefix: globalPrefix }), managedEntry);
+  } finally { await f.cleanup(); }
+});
+
 test("Pi discovery preserves AppData npm and Unix npm-prefix layouts", async () => {
   const f = await fixture();
   try {

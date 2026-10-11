@@ -11,6 +11,7 @@ import { ModelManager } from "./model-manager.js";
 import { ResourceManager } from "./resource-manager.js";
 import { PiRpcClient } from "./rpc-client.js";
 import { RuntimeSetupStore, validateRuntimeEntry } from "./runtime-setup.js";
+import { checkPiRuntimeUpdate } from "./pi-runtime-update.js";
 import { pickPiRuntimeEntry } from "./file-picker.js";
 import { HttpRequestError } from "./http-transport.js";
 import type { RuntimeSetupChange } from "../shared/runtime-setup.js";
@@ -287,6 +288,7 @@ const app = new PiChatApp({
   allowedHosts: [],
   applicationRestart: prepareApplicationRestart,
   runtimeSetupStatus: () => ({ ...runtimeSetup.status(directPiEntry ? { entry: directPiEntry, version: piVersion } : null), restartAvailable: runtimeRestartAvailable }),
+  piRuntimeUpdateCheck: () => checkPiRuntimeUpdate(piVersion),
   pickRuntimeEntry: async () => {
     const entry = await pickPiRuntimeEntry();
     return entry ? validateRuntimeEntry(entry) : null;

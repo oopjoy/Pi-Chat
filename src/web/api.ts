@@ -1,3 +1,4 @@
+import type { PiRuntimeUpdateCheck } from "../shared/pi-runtime-update";
 import type { RuntimeEntryInfo, RuntimeSetupChange, RuntimeSetupStatus } from "../shared/runtime-setup";
 import type { ServerStateDiagnosticSnapshot } from "../shared/state-diagnostics";
 import type { BackgroundSubagentSnapshot, BootstrapData, BootstrapHandshakeData, CustomModelInput, CustomProviderInput, ExtensionResource, GateMode, InitialPromptData, ModelInfo, PackageResource, PromptDelivery, PromptImage, PromptSettingsSnapshot, QueuedPrompt, ResourceResponse, SessionCopyData, SessionDirectorySummary, SessionRuntimeReadyData, SessionSummary, SessionViewData, SkillResource, ThinkingLevel, WorkspaceFileData, WorkspaceRecentFilesData } from "../shared/types";
@@ -340,6 +341,7 @@ export const api = {
     body: JSON.stringify({ foreground: false, revision: nextPresenceRevision() }),
   }, 10_000),
   runtimeSetup: () => request<RuntimeSetupStatus>("/api/runtime/setup"),
+  checkPiRuntimeUpdate: () => request<PiRuntimeUpdateCheck>("/api/runtime/update-check"),
   pickRuntimeEntry: () => request<{ candidate: RuntimeEntryInfo | null }>("/api/runtime/pick", { method: "POST" }, 10 * 60_000),
   restartRuntime: async (change: RuntimeSetupChange): Promise<void> => {
     // Capture before POST: SSE may observe the replacement before its response resolves.

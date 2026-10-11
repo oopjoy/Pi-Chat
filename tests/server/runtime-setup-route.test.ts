@@ -52,6 +52,27 @@ async function fixture(options: Partial<PiChatAppOptions> = {}) {
 
 const retry = JSON.stringify({ mode: "retry", configurationRevision: revision });
 
+test("Pi Runtime update check is read-only and guarded by the local API authority", async () => {
+  const f = await fixture({
+    piRuntimeUpdateCheck: async () => ({
+      packageName: "@earendil-works/pi-coding-agent",
+      currentVersion: "1.0.1",
+      latestVersion: "1.1.0",
+      registryUrl: "https://registry.npmjs.org/%40earendil-works%2Fpi-coding-agent",
+      checkedAt: "2026-10-11T00:00:00.000Z",
+      updateAvailable: true,
+    }),
+  });
+  try {
+    assert.equal((await fetch(`${f.origin}/api/runtime/update-check`)).status, 403);
+    const response = await fetch(`${f.origin}/api/runtime/update-check`, { headers: f.headers });
+    assert.equal(response.status, 200);
+    assert.equal((await response.json() as { latestVersion: string }).latestVersion, "1.1.0");
+    assert.equal(f.rpc.commands.length, 0);
+    assert.deepEqual(f.calls, []);
+  } finally { await f.close(); }
+});
+
 test("runtime setup metadata is guarded and detection never touches RPC or native picker", async () => {
   const f = await fixture();
   try {

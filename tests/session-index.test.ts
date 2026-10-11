@@ -98,6 +98,63 @@ test("large cold Sessions read only a bounded recent tail", async () => {
   }
 });
 
+test("oversized cold Sessions retain a bounded recent window even when the view asks for fewer turns", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-session-tail-window-"));
+  try {
+    const path = join(root, "large-window.jsonl");
+    await writeFile(path, `${JSON.stringify({ type: "session", id: "large-window", cwd: root })}\n`);
+    await truncate(path, MAX_SESSION_SNAPSHOT_BYTES + 1);
+    const records: Array<Record<string, unknown>> = [];
+    let parentId: string | undefined;
+    for (let index = 0; index < 60; index += 1) {
+      const userId = `u${index}`;
+      const assistantId = `a${index}`;
+      records.push({
+        type: "message",
+        id: userId,
+        ...(parentId ? { parentId } : null),
+        message: { role: "user", content: `recent-${index}` },
+      });
+      records.push({
+        type: "message",
+        id: assistantId,
+        parentId: userId,
+        message: { role: "assistant", content: `answer-${index}` },
+      });
+      parentId = assistantId;
+    }
+    await appendFile(path, `${records.map(JSON.stringify).join("\n")}\n`);
+    const id = idForPath(path);
+    const summary = {
+      id,
+      sessionId: "large-window",
+      name: "Large window",
+      preview: "older",
+      cwd: root,
+      updatedAt: 1,
+      messageCount: 120,
+      turnCount: 60,
+      active: false,
+    };
+    const index = new SessionIndex(root, join(root, "index.json"));
+    const internals = index as unknown as {
+      pathsById: Map<string, string>;
+      cache: Map<string, { summary: typeof summary }>;
+    };
+    internals.pathsById.set(id, path);
+    internals.cache = new Map([[path, { summary }]]);
+
+    const snapshot = await index.recentSnapshotForId(id, 2);
+    assert.equal(snapshot?.sourceMessagesTruncated, true);
+    assert.equal(snapshot?.sourceTurnTotal, 60);
+    assert.equal(snapshot?.messages.length, 100);
+    assert.equal(snapshot?.messages[0]?.content, "recent-10");
+    assert.equal(snapshot?.messages.at(-1)?.content, "answer-59");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("large cold Sessions stop at the tail line budget instead of scanning an unbounded EOF line", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-session-tail-budget-"));
   try {

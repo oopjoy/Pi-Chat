@@ -110,6 +110,7 @@ import {
 } from "./pi-data.js";
 import {
   idForPath,
+  OVERSIZED_SESSION_RECENT_TURN_LIMIT,
   parseSessionContent,
   readSessionMessages,
   readSessionSnapshot,
@@ -388,6 +389,7 @@ export interface PiChatAppOptions {
   applicationRestart?: () => Promise<PreparedApplicationRestart>;
   /** Installation metadata and explicit service-only restart; never mutate a live launch plan. */
   runtimeSetupStatus?: () => RuntimeSetupStatus;
+  piRuntimeUpdateCheck?: () => Promise<import("../shared/pi-runtime-update.js").PiRuntimeUpdateCheck>;
   pickRuntimeEntry?: () => Promise<RuntimeEntryInfo | null>;
   runtimeRestart?: (change: RuntimeSetupChange) => Promise<PreparedApplicationRestart>;
   /** Gracefully terminate the entire Pi Chat service process after explicit user intent. */
@@ -4839,7 +4841,10 @@ export class PiChatApp {
   private async workspaceRecentFilesRoute(input: { sessionId: string }): Promise<unknown | null> {
     const cwd = await this.workspaceCwdForSession(input.sessionId);
     if (!cwd) return null;
-    const snapshot = await this.options.sessions.snapshotForId(input.sessionId);
+    const snapshot = await this.options.sessions.recentSnapshotForId(
+      input.sessionId,
+      OVERSIZED_SESSION_RECENT_TURN_LIMIT,
+    );
     return snapshot
       ? revalidateRecentWorkspaceFiles(cwd, recentModifiedWorkspaceFiles(snapshot.messages, cwd))
       : null;
@@ -4849,7 +4854,10 @@ export class PiChatApp {
   ): Promise<{ cwd: string; path: string } | null> {
     const cwd = await this.workspaceCwdForSession(input.sessionId);
     if (!cwd) return null;
-    const snapshot = await this.options.sessions.snapshotForId(input.sessionId);
+    const snapshot = await this.options.sessions.recentSnapshotForId(
+      input.sessionId,
+      OVERSIZED_SESSION_RECENT_TURN_LIMIT,
+    );
     if (!snapshot) return null;
     const path = normalizeWorkspaceRelativePath(input.path);
     if (!recentModifiedWorkspaceFiles(snapshot.messages, cwd).files.some((file) => file.path === path))
@@ -4861,7 +4869,10 @@ export class PiChatApp {
   ): Promise<{ cwd: string; path: string } | null> {
     const cwd = await this.workspaceCwdForSession(input.sessionId);
     if (!cwd) return null;
-    const snapshot = await this.options.sessions.snapshotForId(input.sessionId);
+    const snapshot = await this.options.sessions.recentSnapshotForId(
+      input.sessionId,
+      OVERSIZED_SESSION_RECENT_TURN_LIMIT,
+    );
     if (!snapshot) return null;
     const path = normalizeWorkspaceRelativePath(input.path);
     const key = process.platform === "win32" ? path.toLowerCase() : path;

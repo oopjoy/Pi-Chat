@@ -23,10 +23,19 @@ export async function readColdSessionView(
     snapshotAndSummaryForId?: (sessionId: string) => Promise<{ snapshot: SessionFileSnapshot; summary: SessionSummary } | null>;
     recentSnapshotAndSummaryForId?: (sessionId: string, turnLimit: number) => Promise<{ snapshot: SessionFileSnapshot; summary: SessionSummary } | null>;
   };
-  const recentTarget = index.recentSnapshotAndSummaryForId
-    ? await index.recentSnapshotAndSummaryForId(id, turnLimit)
-    : null;
-  const target = recentTarget || await index.snapshotAndSummaryForId?.(id);
+  let recentTarget: { snapshot: SessionFileSnapshot; summary: SessionSummary } | null = null;
+  if (index.recentSnapshotAndSummaryForId) {
+    try { recentTarget = await index.recentSnapshotAndSummaryForId(id, turnLimit); }
+    catch { recentTarget = null; }
+  }
+  let target = recentTarget;
+  if (!target && index.snapshotAndSummaryForId) {
+    // The full path is a compatibility fallback for older embedding hosts.
+    // A current oversized JSONL may intentionally have no materializable full
+    // snapshot, so never let that fallback re-surface the 128 MiB error.
+    try { target = await index.snapshotAndSummaryForId(id); }
+    catch { target = null; }
+  }
   let view = target
     ? ports.projectSnapshot(id, target.summary, target.snapshot, turnLimit, clientId)
     : null;

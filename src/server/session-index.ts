@@ -220,6 +220,8 @@ async function readSessionEntries(path: string): Promise<SessionEntry[]> {
 }
 
 export const SESSION_TAIL_READ_CHUNK_BYTES = 256 * 1024;
+/** Oversized JSONL files are readable through a bounded recent-turn projection. */
+export const OVERSIZED_SESSION_RECENT_TURN_LIMIT = 50;
 /** Never scan an unbounded prefix while constructing a cold recent view. */
 export const SESSION_TAIL_MAX_SCAN_BYTES = MAX_SESSION_SNAPSHOT_BYTES;
 /** Keep the materialized recent branch well below the full snapshot budget. */
@@ -359,7 +361,7 @@ async function readSessionTailEntries(
   }
 }
 
-async function readSessionTailSnapshot(
+export async function readSessionTailSnapshot(
   path: string,
   turnLimit: number,
 ): Promise<SessionFileSnapshot & { sourceBytes: number; bytesRead: number }> {
@@ -1124,6 +1126,15 @@ export class SessionIndex {
     }
     if (fileStat.size <= MAX_SESSION_SNAPSHOT_BYTES) return this.snapshotForId(id);
 
+    // Oversized JSONL is intentionally projected from a larger bounded recent
+    // window than the browser's ordinary display window. The final view may
+    // still render fewer turns, but loading 50 turns here keeps recovery,
+    // refresh, and navigation useful instead of failing at the 128 MiB gate.
+    const effectiveTurnLimit = Math.max(
+      OVERSIZED_SESSION_RECENT_TURN_LIMIT,
+      Math.floor(Number.isFinite(turnLimit) ? turnLimit : OVERSIZED_SESSION_RECENT_TURN_LIMIT),
+    );
+
     // The summary/cache and the bounded tail are separate reads for oversized
     // Sessions. Revalidate the file after the tail read so an append or atomic
     // rewrite cannot combine totals from version A with messages from version B.
@@ -1134,7 +1145,7 @@ export class SessionIndex {
       const summary = this.summaryForId(id) || await this.cachedSummaryForId(id);
       if (!summary) return null;
       const cachedVersion = this.cache?.get(resolve(path));
-      const tail = await readSessionTailSnapshot(path, turnLimit);
+      const tail = await readSessionTailSnapshot(path, effectiveTurnLimit);
       latestTail = tail;
       let currentStat: Stats;
       try { currentStat = await this.statFile(path); }

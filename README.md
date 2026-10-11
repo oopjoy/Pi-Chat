@@ -8,7 +8,20 @@
 
 Pi Chat 连接本机 Pi RPC，负责聊天展示、Session 浏览、流式输出和本地窗口协调；Pi 仍然是 agent、模型、工具、Skills 和 Extensions 的唯一执行 authority。每个执行对话仍由独立 Node/Pi RPC 进程拥有，浏览器只通过 loopback HTTP API 与 SSE 接收事实投影。
 
-## Windows 安装（推荐使用发布包）
+## Windows 安装（推荐使用一键 Setup）
+
+### 一键 Setup
+
+从 GitHub Release 下载并完整解压 `pi-chat-windows-*.zip`，再运行其中的 `pi-chat-setup.cmd`。Setup 会在当前用户目录安装 Pi Chat 自带的 Node.js Runtime，检测本机已有的 Pi，并在安装前询问是否复用它：
+
+- 已有可兼容 Pi：默认使用本机 Pi，不修改或升级它；
+- 没有 Pi，或明确选择不复用：安装隔离的 PiChat managed Runtime；
+- 不需要 Git、npm 或管理员权限；
+- 安装完成后自动启动本地服务并打开浏览器。
+
+Setup 不会复制或上传模型密钥。首次使用模型时，仍可能需要在 Pi 中完成登录或 Provider 配置。以后可在「设置 → 关于 → Pi 连接设置」中重新检测、选择入口或切换 Runtime。
+
+### 手动安装
 
 1. 安装 Node.js 22.19+。
 2. 安装并完成模型认证的 Pi。可以使用 [Pi 官方安装器](https://pi.dev)，也可以使用 npm：

@@ -1,7 +1,7 @@
 import { assistantMessageRequestsTool, reconcilePersistedHistory } from "../../shared/streaming-assistant.js";
 import type { ApplicationLifecycle, ExtensionUiRequest, GateMode, PendingPromptProjection, PendingSteer, PiMessage, PiState, QueuedPrompt, SessionActivityState, SessionStats, SessionViewData, SessionSummary, SlashCommand } from "../../shared/types.js";
 import { asCommands, asMessages, asState, messageWindow, RECENT_TURN_WINDOW_SIZE } from "../pi-data.js";
-import { readSessionMessages, type SessionIndex, type SessionFileSnapshot, type SessionUsageSnapshot } from "../session-index.js";
+import { OVERSIZED_SESSION_RECENT_TURN_LIMIT, readSessionMessages, type SessionIndex, type SessionFileSnapshot, type SessionUsageSnapshot } from "../session-index.js";
 import type { SecondaryRuntime, RuntimeQueuedPrompt } from "../runtime-pool.js";
 import type { PiRpcClient } from "../rpc-client.js";
 import { StaleSessionViewRuntimeError } from "./session-view-service.js";
@@ -253,7 +253,15 @@ export async function sessionViewFromCurrentProjection(
           (runtime as SecondaryRuntime).draftSessionPath;
         if (path) {
           try {
-            persistedMessages = await readSessionMessages(path);
+            // A known Runtime can still reach this repair path after its
+            // in-memory snapshot is unavailable. Prefer the SessionIndex's
+            // bounded recent projection so an oversized JSONL remains
+            // readable instead of falling through to the 128 MiB rejection.
+            const recentSnapshot = await ports.index.recentSnapshotForId?.(
+              id,
+              Math.max(OVERSIZED_SESSION_RECENT_TURN_LIMIT, turnLimit),
+            );
+            persistedMessages = recentSnapshot?.messages ?? await readSessionMessages(path);
             assertCurrentHotRuntime?.();
             messages = reconcilePersistedHistory(
               persistedMessages,

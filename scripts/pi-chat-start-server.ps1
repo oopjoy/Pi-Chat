@@ -4,7 +4,18 @@ param(
 
 $ErrorActionPreference = 'Stop'
 try {
-  $node = (Get-Command node.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+  $runtimeRoot = Join-Path $ProjectDirectory 'runtime'
+  if (-not (Test-Path -LiteralPath $runtimeRoot)) { $runtimeRoot = Join-Path (Split-Path -Parent $ProjectDirectory) 'runtime' }
+  $configRoot = Join-Path $ProjectDirectory 'config'
+  if (-not (Test-Path -LiteralPath $configRoot)) { $configRoot = Join-Path (Split-Path -Parent $ProjectDirectory) 'config' }
+  $runtimeEnv = Join-Path $configRoot 'runtime.env'
+  if (Test-Path -LiteralPath $runtimeEnv) {
+    Get-Content -LiteralPath $runtimeEnv | ForEach-Object {
+      if ($_ -match '^([A-Z][A-Z0-9_]*)=(.*)$') { Set-Item -Path ("Env:" + $matches[1]) -Value $matches[2] }
+    }
+  }
+  $bundledNode = Join-Path $runtimeRoot 'node\node.exe'
+  $node = if (Test-Path -LiteralPath $bundledNode) { $bundledNode } else { (Get-Command node.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source }
   $process = Start-Process -FilePath $node -ArgumentList @('dist\server\server\index.js', '--port', '30170') -WorkingDirectory $ProjectDirectory -WindowStyle Hidden -RedirectStandardOutput $env:PI_CHAT_SERVER_OUT -RedirectStandardError $env:PI_CHAT_SERVER_ERR -PassThru
   # Retain the process handle so Windows PowerShell can read a fast child's exit code.
   $null = $process.Handle

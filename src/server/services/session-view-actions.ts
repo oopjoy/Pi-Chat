@@ -1,6 +1,6 @@
 import type { ModelInfo, SessionStats, SessionSummary, SessionViewData } from "../../shared/types.js";
 import { sessionViewFromCurrentProjection as sessionViewFromCurrentProjectionService } from "./session-hot-view.js";
-import type { SessionFileSnapshot, SessionSettingsSnapshot, SessionUsageSnapshot } from "../session-index.js";
+import { OVERSIZED_SESSION_RECENT_TURN_LIMIT, type SessionFileSnapshot, type SessionSettingsSnapshot, type SessionUsageSnapshot } from "../session-index.js";
 
 export function createSessionViewActions(host: Record<string, any>) {
   const {
@@ -34,10 +34,27 @@ export function createSessionViewActions(host: Record<string, any>) {
     turnLimit: number,
     clientId: string,
   ): Promise<SessionViewData | null> {
-    const snapshot = await host.options.sessions.snapshotForId?.(id);
+    // Use the bounded recent projection for every cold view. Small Sessions
+    // still take the normal full-snapshot path; oversized JSONL falls back to
+    // the newest 50 turns instead of surfacing the 128 MiB read failure.
+    let snapshot: SessionFileSnapshot | null = null;
+    try {
+      snapshot = host.options.sessions.recentSnapshotForId
+        ? await host.options.sessions.recentSnapshotForId(
+          id,
+          Math.max(OVERSIZED_SESSION_RECENT_TURN_LIMIT, turnLimit),
+        )
+        : await host.options.sessions.snapshotForId?.(id) || null;
+    } catch {
+      // A full snapshot may be unavailable for an oversized or concurrently
+      // replaced JSONL. The bounded messages fallback below remains guarded.
+      snapshot = null;
+    }
     if (snapshot)
       return host.coldSessionViewFromSnapshot(id, session, snapshot, turnLimit, clientId);
-    const messages = await host.options.sessions.messagesForId(id);
+    let messages: SessionFileSnapshot["messages"] | null = null;
+    try { messages = await host.options.sessions.messagesForId(id); }
+    catch { return null; }
     if (!messages) return null;
     return host.coldSessionViewFromSnapshot(
       id,

@@ -203,11 +203,11 @@ test("release packaging creates a ZIP, portable checksum and identity manifest",
     await copy(join(repositoryRoot, "SECURITY.md"), join(fixtureRepo, "SECURITY.md"));
     await copy(join(repositoryRoot, ".gitattributes"), join(fixtureRepo, ".gitattributes"));
     await copy(join(repositoryRoot, "resources"), join(fixtureRepo, "resources"), { recursive: true });
-    for (const file of ["pi-chat-launch.cmd", "start-pi-chat.cmd", "start-pi-chat-ui.ps1"]) {
+    for (const file of ["pi-chat-launch.cmd", "start-pi-chat.cmd", "start-pi-chat-ui.ps1", "pi-chat-setup.cmd"]) {
       await copy(join(repositoryRoot, file), join(fixtureRepo, file));
     }
     await mkdir(join(fixtureRepo, "scripts"), { recursive: true });
-    for (const file of ["install-shortcuts.ps1", "pi-chat-launch-process.ps1", "pi-chat-port-ready.ps1", "pi-chat-preflight.ps1", "pi-chat-start-server.ps1", "check-runtime-files.mjs", "runtime-required-files.json"]) {
+    for (const file of ["install-shortcuts.ps1", "pi-chat-launch-process.ps1", "pi-chat-port-ready.ps1", "pi-chat-preflight.ps1", "pi-chat-start-server.ps1", "pi-chat-setup.ps1", "detect-pi-entry.mjs", "check-runtime-files.mjs", "runtime-required-files.json"]) {
       await copy(join(repositoryRoot, "scripts", file), join(fixtureRepo, "scripts", file));
     }
     assert.equal(git(["init", "--quiet"], fixtureRepo).status, 0);
@@ -261,10 +261,13 @@ test("release packaging creates a ZIP, portable checksum and identity manifest",
       `pi-chat-windows-${packageVersion}/pi-chat-launch.cmd`,
       `pi-chat-windows-${packageVersion}/SECURITY.md`,
       `pi-chat-windows-${packageVersion}/start-pi-chat-ui.ps1`,
+      `pi-chat-windows-${packageVersion}/pi-chat-setup.cmd`,
       `pi-chat-windows-${packageVersion}/scripts/pi-chat-launch-process.ps1`,
       `pi-chat-windows-${packageVersion}/scripts/pi-chat-port-ready.ps1`,
       `pi-chat-windows-${packageVersion}/scripts/pi-chat-preflight.ps1`,
       `pi-chat-windows-${packageVersion}/scripts/pi-chat-start-server.ps1`,
+      `pi-chat-windows-${packageVersion}/scripts/pi-chat-setup.ps1`,
+      `pi-chat-windows-${packageVersion}/scripts/detect-pi-entry.mjs`,
       `pi-chat-windows-${packageVersion}/scripts/check-runtime-files.mjs`,
       `pi-chat-windows-${packageVersion}/scripts/runtime-required-files.json`,
       `pi-chat-windows-${packageVersion}/resources/icons/pi-chat.ico`,

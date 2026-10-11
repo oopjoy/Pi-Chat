@@ -201,6 +201,10 @@ export function resolvePiEntry(env: NodeJS.ProcessEnv = process.env): string | n
   const packageEntry = (...root: string[]) => join(...root, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "rpc-entry.js");
   const home = (process.platform === "win32" ? env.USERPROFILE : env.HOME) || homedir();
   const managedRoots = [
+    // PiChat Setup keeps its fallback Runtime isolated from the user's global
+    // npm/Pi installation. The launcher supplies this path only when the user
+    // explicitly chose the managed Runtime during setup.
+    env.PI_CHAT_MANAGED_INSTALL_ROOT?.trim(),
     env.PI_MANAGED_INSTALL_ROOT?.trim(),
     join(home, ".pi", "agent", "install"),
   ];
