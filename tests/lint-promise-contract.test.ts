@@ -8,9 +8,15 @@ const root = resolve(import.meta.dirname, "..");
 test("converged modules reject floating and misused Promises even with explicit void", async () => {
   const eslint = new ESLint({ cwd: root });
   const [floating] = await eslint.lintText("async function work() { throw new Error('fixture'); }\nvoid work();\n", { filePath: "src/server/session-projection.ts" });
-  assert.ok(floating.messages.some(message => message.ruleId === "@typescript-eslint/no-floating-promises" && message.severity === 2));
+  assert.ok(
+    floating.messages.some(message => message.ruleId === "@typescript-eslint/no-floating-promises" && message.severity === 2),
+    JSON.stringify(floating.messages),
+  );
   const [misused] = await eslint.lintText("declare function schedule(task: () => void): void;\nschedule(async () => { await Promise.resolve(); });\n", { filePath: "src/server/session-projection.ts" });
-  assert.ok(misused.messages.some(message => message.ruleId === "@typescript-eslint/no-misused-promises" && message.severity === 2));
+  assert.ok(
+    misused.messages.some(message => message.ruleId === "@typescript-eslint/no-misused-promises" && message.severity === 2),
+    JSON.stringify(misused.messages),
+  );
 });
 
 test("converged modules accept handled detached work without requiring legacy modules to be clean", async () => {
