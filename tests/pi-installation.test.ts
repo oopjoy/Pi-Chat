@@ -25,14 +25,21 @@ async function fixture() {
   return { home, env, managed, makePackage, setManaged, cleanup: () => rm(home, { recursive: true, force: true }) };
 }
 
+async function assertResolvedEntry(actual: string | null, expected: string): Promise<void> {
+  assert.ok(actual);
+  // Windows may spell the same TEMP path with an 8.3 alias. Compare the
+  // resolved target rather than platform-dependent path spelling.
+  assert.equal(await realpath(actual), await realpath(expected));
+}
+
 test("Pi discovery finds managed installations and follows the current version on the next resolution", async () => {
   const f = await fixture();
   try {
     const first = await f.setManaged();
-    assert.equal(resolvePiEntry(f.env), first);
+    await assertResolvedEntry(resolvePiEntry(f.env), first);
     assert.equal(resolvePiVersion(first), "1.1.0");
     const second = await f.setManaged(f.managed, "1.2.0-beta.1");
-    assert.equal(resolvePiEntry(f.env), second);
+    await assertResolvedEntry(resolvePiEntry(f.env), second);
     assert.equal(resolvePiVersion(second), "1.2.0-beta.1");
   } finally { await f.cleanup(); }
 });
@@ -42,7 +49,7 @@ test("Pi discovery honors explicit entries and never falls back from an invalid 
   try {
     await f.setManaged();
     const explicit = await f.makePackage(join(f.home, "explicit install"));
-    assert.equal(resolvePiEntry({ ...f.env, PI_CHAT_PI_ENTRY: explicit }), explicit);
+    await assertResolvedEntry(resolvePiEntry({ ...f.env, PI_CHAT_PI_ENTRY: explicit }), explicit);
     assert.throws(() => resolvePiEntry({ ...f.env, PI_CHAT_PI_ENTRY: join(f.home, "missing.js") }), /PI_CHAT_PI_ENTRY/);
     assert.throws(() => resolvePiEntry({ ...f.env, PI_CHAT_PI_ENTRY: f.home }), /PI_CHAT_PI_ENTRY/);
   } finally { await f.cleanup(); }
@@ -54,7 +61,7 @@ test("Pi discovery supports a custom managed root with spaces and shell metachar
     const root = join(f.home, "Pi's & (managed) 中文");
     const entry = await f.setManaged(root);
     await f.setManaged();
-    assert.equal(resolvePiEntry({ ...f.env, PI_MANAGED_INSTALL_ROOT: root }), entry);
+    await assertResolvedEntry(resolvePiEntry({ ...f.env, PI_MANAGED_INSTALL_ROOT: root }), entry);
   } finally { await f.cleanup(); }
 });
 
@@ -66,10 +73,10 @@ test("Pi discovery rejects malformed managed pointers and falls back to npm with
     const entry = await f.makePackage(prefix);
     for (const pointer of ["", ".", "..", "../escape", "..\\escape", "x & echo bad", "x\ny", "a".repeat(257), "missing-release"]) {
       await writeFile(join(f.managed, "current-version"), pointer);
-      assert.equal(resolvePiEntry({ ...f.env, npm_config_prefix: prefix }), entry, pointer);
+      await assertResolvedEntry(resolvePiEntry({ ...f.env, npm_config_prefix: prefix }), entry);
     }
-    assert.equal(resolvePiEntry({ ...f.env, APPDATA: f.home, PATH: `"${prefix}"` }), entry);
-    if (process.platform === "win32") assert.equal(resolvePiEntry({ ...f.env, PATH: undefined, Path: prefix }), entry);
+    await assertResolvedEntry(resolvePiEntry({ ...f.env, APPDATA: f.home, PATH: `"${prefix}"` }), entry);
+    if (process.platform === "win32") await assertResolvedEntry(resolvePiEntry({ ...f.env, PATH: undefined, Path: prefix }), entry);
   } finally { await f.cleanup(); }
 });
 
@@ -77,10 +84,10 @@ test("Pi discovery preserves AppData npm and Unix npm-prefix layouts", async () 
   const f = await fixture();
   try {
     const appdataEntry = await f.makePackage(join(f.home, "npm"));
-    assert.equal(resolvePiEntry({ ...f.env, APPDATA: f.home }), appdataEntry);
+    await assertResolvedEntry(resolvePiEntry({ ...f.env, APPDATA: f.home }), appdataEntry);
     const prefix = join(f.home, "unix-prefix");
     const libEntry = await f.makePackage(join(prefix, "lib"));
-    assert.equal(resolvePiEntry({ ...f.env, NPM_CONFIG_PREFIX: prefix }), libEntry);
+    await assertResolvedEntry(resolvePiEntry({ ...f.env, NPM_CONFIG_PREFIX: prefix }), libEntry);
   } finally { await f.cleanup(); }
 });
 
