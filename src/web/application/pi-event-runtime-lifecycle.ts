@@ -36,6 +36,7 @@ export function handlePiRuntimeLifecycleEvents(scope: Record<string, any>): bool
     recordBrowserStateDiagnostic,
     refresh,
     releasePromptBusy,
+    requestPromptReconcileRef,
     rememberObservedModel,
     reportBackgroundRefreshError,
     runtimeProjectionWriter,
@@ -320,6 +321,14 @@ export function handlePiRuntimeLifecycleEvents(scope: Record<string, any>): bool
                   applySessionView(view, authority, queueRequestRevision);
               })
               .catch(() => undefined);
+            // JSONL persistence can lag the terminal Runtime event. One
+            // immediate view may therefore still expose pendingPrompt and keep
+            // the optimistic User bubble alive. Schedule the existing bounded
+            // reconciliation loop so the bubble is removed as soon as the
+            // authoritative persisted echo becomes visible; uncertain delivery
+            // remains visible if no echo ever arrives.
+            if ((localUserTurnsRef.current.get(eventSessionId) || []).some((turn: any) => !turn.revealOnMessageStart))
+              requestPromptReconcileRef.current(eventSessionId);
           }
           scheduleSidebarRefresh();
 
