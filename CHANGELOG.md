@@ -11,6 +11,7 @@
 - Preserved pending local turns after confirmed transcript history so queued work cannot split an earlier tool process or final answer.
 - Replaced whole-App recovery/settings proxies with explicit capability ports and compile-time boundary contracts.
 - Added guarded Pi package discovery, runtime-entry validation, connection setup, and lifecycle-safe service-only restart; no automatic installation, download, or credential storage is introduced.
+- Stabilized the last-window auto-shutdown test boundary so Windows scheduler jitter cannot turn a passing idle-phase check into a release-gate failure.
 
 ### Maintainability
 

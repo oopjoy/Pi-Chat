@@ -85,7 +85,9 @@ test("a final window close never shuts down an actively streaming Pi worker", as
     cwd: process.cwd(),
     webRoot: process.cwd(),
     lastWindowAutoShutdownEnabled: true,
-    lastWindowShutdownGraceMs: 25,
+    // Keep the idle grace comfortably above the scheduler jitter so this test
+    // proves the phase boundary instead of racing a 25 ms wall-clock window.
+    lastWindowShutdownGraceMs: 100,
     lastWindowShutdownPollMs: 5,
     applicationShutdown: (reason) => { shutdownReasons.push(reason); },
   });
@@ -123,7 +125,7 @@ test("a final window close never shuts down an actively streaming Pi worker", as
     internals.running = false;
     await new Promise((resolve) => setTimeout(resolve, 15));
     assert.deepEqual(shutdownReasons, [], "a full grace begins only after the worker becomes idle");
-    await new Promise((resolve) => setTimeout(resolve, 70));
+    await new Promise((resolve) => setTimeout(resolve, 130));
     assert.deepEqual(shutdownReasons, ["last-window-close"]);
   } finally {
     server.close();

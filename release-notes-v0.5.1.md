@@ -30,7 +30,7 @@ The integrated source was checked in an isolated worktree with:
 
 ```text
 preflight: passed
-source and benchmark unit verification: passed after a focused rerun of one timing-sensitive shutdown test
+source and benchmark unit verification: passed; the timing-sensitive shutdown boundary was also repeated in ten focused runs
 Playwright: 33 passed
 artifact lane: 42 passed, 1 environment skip
 ```
