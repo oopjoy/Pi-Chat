@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.5.1
+
+### Reliability and maintainability
+
+- Integrated the audited Runtime maintenance, serialized SessionProjection, and safe SSE lifecycle fixes from the review chain.
+- Added exact LaTeX backslash-delimiter rendering and source-copy coverage without changing Session JSONL or provider payloads.
+- Preserved pending local turns after confirmed transcript history so queued work cannot split an earlier tool process or final answer.
+- Replaced whole-App recovery/settings proxies with explicit capability ports and compile-time boundary contracts.
+- Added guarded Pi package discovery, runtime-entry validation, connection setup, and lifecycle-safe service-only restart; no automatic installation, download, or credential storage is introduced.
+
 ### Maintainability
 
 - Enabled React Hooks ordering checks as an ESLint error and dependency checks as warnings.

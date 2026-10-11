@@ -17,7 +17,7 @@ Pi Chat 连接本机 Pi RPC，负责聊天展示、Session 浏览、流式输出
    pi --version
    ```
    运行 `pi`，通过 `/login` 配置模型服务。已有 Pi 安装和模型配置无需重复安装。
-3. 从 [v0.5.0 Release](https://github.com/oopjoy/Pi-Chat/releases/tag/v0.5.0) 下载 `pi-chat-windows-0.5.0.zip`，解压后运行 `start-pi-chat.cmd`。
+3. 从 [v0.5.1 Release](https://github.com/oopjoy/Pi-Chat/releases/tag/v0.5.1) 下载 `pi-chat-windows-0.5.1.zip`，解压后运行 `start-pi-chat.cmd`。
 4. 浏览器打开 `http://127.0.0.1:30170`，或运行 `start-pi-chat-ui.ps1` 使用独立窗口体验。
 
 **请选择 `pi-chat-windows-*.zip`，不是 GitHub 自动生成的 `Source code.zip`。** 完整解压后再启动，不要直接在压缩包内运行。发布包包含编译好的服务和网页，仍需要 Node.js，但不需要 Git、npm 依赖安装或本地构建；它不会自动下载或安装软件。
@@ -80,7 +80,7 @@ Pi Chat 默认只监听本机回环地址，关闭浏览器窗口不会停止本
 
 ## 版本与路线
 
-当前发布版本为 **0.5.0**，定位为 Windows-first、local-first 的可靠性与可维护性版本，仍不应被理解为功能和平台边界已经最终定型的 1.0 或 adoption release。Runtime、Active Session、hot-read、model catalogue authority、Prompt reconciliation 与 SSE 生命周期收敛已经完成；后续工作以缺陷、类型安全、发布、安全和测量驱动维护为主。完整限制见 [`release-notes-v0.5.0.md`](release-notes-v0.5.0.md)。
+当前发布版本为 **0.5.1**，定位为 Windows-first、local-first 的可靠性与可维护性版本，仍不应被理解为功能和平台边界已经最终定型的 1.0 或 adoption release。Runtime、Active Session、hot-read、model catalogue authority、Prompt reconciliation、SSE 生命周期、LaTeX 渲染边界和 Runtime 连接设置收敛已经完成；后续工作以缺陷、类型安全、发布、安全和测量驱动维护为主。完整限制见 [`release-notes-v0.5.1.md`](release-notes-v0.5.1.md)。
 
 路线与 authority 说明见 [`docs/architecture.md`](docs/architecture.md)、[`docs/web-architecture-roadmap.md`](docs/web-architecture-roadmap.md) 和 [`v0.4.7 authority 收敛稳定性矩阵`](docs/v0.4.7-stability-matrix.md)。
 
