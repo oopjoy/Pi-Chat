@@ -2,11 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { ESLint } from "eslint";
 import { resolve } from "node:path";
+import projectConfig from "../eslint.config.js";
 
 const root = resolve(import.meta.dirname, "..");
 
+function createProjectLinter(): ESLint {
+  // Pass the repository's flat config directly so lintText cannot lose its
+  // config match when the whole Node test batch is running on Windows.
+  return new ESLint({ cwd: root, overrideConfigFile: null, ignore: false, overrideConfig: projectConfig });
+}
+
 test("converged modules reject floating and misused Promises even with explicit void", async () => {
-  const eslint = new ESLint({ cwd: root });
+  const eslint = createProjectLinter();
   const [floating] = await eslint.lintText("async function work() { throw new Error('fixture'); }\nvoid work();\n", { filePath: "src/server/session-projection.ts" });
   assert.ok(
     floating.messages.some(message => message.ruleId === "@typescript-eslint/no-floating-promises" && message.severity === 2),
@@ -20,7 +27,7 @@ test("converged modules reject floating and misused Promises even with explicit 
 });
 
 test("converged modules accept handled detached work without requiring legacy modules to be clean", async () => {
-  const eslint = new ESLint({ cwd: root });
+  const eslint = createProjectLinter();
   const code = "async function work() { throw new Error('fixture'); }\nvoid work().catch(() => {});\n";
   const [handled] = await eslint.lintText(code, { filePath: "src/server/session-projection.ts" });
   assert.equal(handled.errorCount, 0);
