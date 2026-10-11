@@ -799,9 +799,12 @@ export class RuntimePool {
     if (runtime.draftProbe) return runtime.draftProbe;
     const probe = this.draftHasMessages(runtime);
     runtime.draftProbe = probe;
-    void probe.finally(() => {
+    const release = () => {
       if (runtime.draftProbe === probe) runtime.draftProbe = undefined;
-    });
+    };
+    // Observe both outcomes without creating an unhandled rejecting finally
+    // chain; callers still receive the original probe and its original error.
+    void probe.then(release, release);
     return probe;
   }
 

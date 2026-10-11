@@ -1,14 +1,9 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { collectWriterBoundarySources, writerBoundaryViolations } from "../scripts/check-writer-boundaries.mjs";
 import test from "node:test";
 import { SessionViewCacheWriter } from "../src/web/application/session-view-cache-writer";
 import { SessionViewCache } from "../src/web/lib/session-view-cache";
 import { createSessionViewFixture } from "./fixtures/app-bootstrap";
-
-const appSource = readFileSync(
-  new URL("../src/web/App.tsx", import.meta.url),
-  "utf8",
-);
 
 function writerFixture() {
   const cache = new SessionViewCache(6, () => 100);
@@ -28,10 +23,9 @@ function writerFixture() {
   };
 }
 
-test("App routes every SessionView cache mutation through its writer", () => {
-  const directMutation = /viewCacheRef\.current\.(?:remember|mergeNavigation|refresh|patch|updateLive|appendTerminal|forget|clear|setPinned)\s*\(/g;
-  assert.deepEqual(appSource.match(directMutation), null);
-  assert.equal(appSource.includes("rememberSessionView("), false);
+test("all Web modules route SessionView cache mutation through its writer", async () => {
+  const violations = writerBoundaryViolations(await collectWriterBoundarySources());
+  assert.deepEqual(violations.filter(item => item.kind === "cache-write" || item.kind === "legacy-cache-write"), []);
 });
 
 test("SessionView cache writer accepts same-process authoritative views", () => {

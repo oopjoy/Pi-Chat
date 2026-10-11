@@ -33,6 +33,7 @@ jobs:
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run check:type-debt
+      - run: npm run check:writer-boundaries
       - run: npm run verify:unit
       - run: npm run verify:e2e
       - name: Verify release artifact

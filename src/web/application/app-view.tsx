@@ -1,4 +1,5 @@
-import { Suspense } from "react";
+import { Suspense, useCallback } from "react";
+import type { PiMessage } from "../../shared/types";
 
 export function AppView(host: Record<string, any>) {
   const {
@@ -165,6 +166,20 @@ export function AppView(host: Record<string, any>) {
     workspacePicking,
     workspaceRevisionRef,
   } = host;
+  const onForkUserMessage = useCallback((message: PiMessage) => {
+    if (!viewedSession || !message.piChatPersistedMessageId) return;
+    const text = forkableUserMessageText(message);
+    const imageCount = Array.isArray(message.content)
+      ? message.content.filter(block => block.type === "image").length
+      : 0;
+    if (!text && imageCount === 0) return;
+    setSessionDialog({
+      mode: "fork",
+      session: viewedSession,
+      persistedMessageId: message.piChatPersistedMessageId,
+      messagePreview: forkMessagePreview(text, imageCount),
+    });
+  }, [viewedSession, setSessionDialog, forkableUserMessageText, forkMessagePreview]);
   return (
     <AppShell
       diffSidebarOpen={diffSidebarOpen}
@@ -343,20 +358,7 @@ export function AppView(host: Record<string, any>) {
         onLoadEarlier={() => void loadEarlierTurns()}
         state={state}
         toolStatus={toolStatus}
-        onForkUserMessage={(message: any) => {
-          if (!viewedSession || !message.piChatPersistedMessageId) return;
-          const text = forkableUserMessageText(message);
-          const imageCount = Array.isArray(message.content)
-            ? message.content.filter((block: any) => block.type === "image").length
-            : 0;
-          if (!text && imageCount === 0) return;
-          setSessionDialog({
-            mode: "fork",
-            session: viewedSession,
-            persistedMessageId: message.piChatPersistedMessageId,
-            messagePreview: forkMessagePreview(text, imageCount),
-          });
-        }}
+        onForkUserMessage={onForkUserMessage}
         forkUserMessageDisabled={Boolean(
           !viewedSession ||
           localDraft ||

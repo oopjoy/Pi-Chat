@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "../src");
 const limits = {
-  explicitAny: 732,
+  explicitAny: 724,
   recordAny: 32,
   castAny: 37,
   proxy: 8,
