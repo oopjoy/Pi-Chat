@@ -983,7 +983,9 @@ test("a conflicting persisted Prompt identity cannot settle another identical lo
     1,
   );
   assert.deepEqual(afterFirst.pendingTurns, [second]);
-  assert.deepEqual(afterFirst.messages, [second.message, firstPersisted]);
+  // The second submit clock predates the first Runtime receipt, but it is
+  // still the second Prompt. Never place it before the confirmed first row.
+  assert.deepEqual(afterFirst.messages, [firstPersisted, second.message]);
 
   const secondPersisted = {
     role: "user" as const,

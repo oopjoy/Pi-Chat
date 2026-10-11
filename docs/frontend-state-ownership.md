@@ -119,6 +119,10 @@ measure is fewer writable pane authorities and fewer async pane-write paths.
 8. Reducer tests assert state transitions and invariants. They must not read implementation source or lock JSX/CSS shape.
 9. Background Subagent status is an independent TopBar catalog owned by `use-background-subagents.ts` and `SubagentStatusControl.tsx`. It is keyed by the committed parent Session ID, aborts on navigation/unmount, and may hand App one verified `{parentSessionId, childSessionId}` read address. App reuses the Conversation pane for that JSONL transcript but keeps it strictly read-only; the child never enters Session inventory, Runtime readiness, Queue, Steer, Gate, presence, or control-owner authorities.
 
+### Pending User placement
+
+`local-user-turn.ts` keeps unconfirmed local admissions visible, but they cannot acquire authority over persisted history order. In a Session view missing the pending User's JSONL echo, the last row carrying `piChatPersistedMessageId` sets the insertion lower bound. The local submit timestamp is only a legacy placement hint within the remaining non-persisted tail; a queued message can have been submitted long before the previous turn finished. It must not split that previous turn's tools/final answer merely because their timestamps are later. Existing queue visibility and one-to-one persisted confirmation rules remain unchanged. Process grouping consumes this correctly ordered projection; it does not repair or reorder source messages itself.
+
 ## Target Domains
 
 ### AppShell
