@@ -1,15 +1,32 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { after, before, test } from "node:test";
 import { ESLint } from "eslint";
 import { resolve } from "node:path";
-import projectConfig from "../eslint.config.js";
 
 const root = resolve(import.meta.dirname, "..");
+const originalCI = process.env.CI;
+
+// Exercise the CI environment even when this regression runs locally.
+before(() => { process.env.CI = "true"; });
+after(() => {
+  if (originalCI === undefined) delete process.env.CI;
+  else process.env.CI = originalCI;
+});
 
 function createProjectLinter(): ESLint {
-  // Pass the repository's flat config directly so the contract does not
-  // depend on ESLint discovering a config during a Windows test batch.
-  return new ESLint({ cwd: root, overrideConfigFile: null, ignore: false, overrideConfig: projectConfig });
+  return new ESLint({
+    cwd: root,
+    overrideConfig: {
+      languageOptions: {
+        parserOptions: {
+          // lintText supplies multiple in-memory versions of existing files.
+          // CI single-run inference instead reuses a disk-backed Program on
+          // the first parse, so the fixture is not actually checked.
+          disallowAutomaticSingleRunInference: true,
+        },
+      },
+    },
+  });
 }
 
 const serverFixturePath = resolve(root, "src/server/session-projection.ts");
@@ -36,7 +53,7 @@ test("converged modules reject floating and misused Promises even with explicit 
 test("converged modules accept handled detached work without requiring legacy modules to be clean", async () => {
   const eslint = createProjectLinter();
   const handled = await lintText(eslint, "async function work() { throw new Error('fixture'); }\nvoid work().catch(() => {});\n", serverFixturePath);
-  assert.equal(handled.errorCount, 0);
+  assert.deepEqual(handled.messages, []);
   const legacy = await lintText(eslint, "async function work() {}\nvoid work();\n", legacyFixturePath);
   assert.equal(legacy.messages.some(message => message.ruleId === "@typescript-eslint/no-floating-promises"), false);
 });
