@@ -3,10 +3,10 @@ import { join, resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "../src");
 const limits = {
-  explicitAny: 714,
-  recordAny: 31,
-  castAny: 34,
-  proxy: 7,
+  explicitAny: 710,
+  recordAny: 30,
+  castAny: 31,
+  proxy: 6,
 };
 
 async function filesUnder(directory) {

@@ -30,7 +30,7 @@ export default [
     // legacy orchestration remains visible debt, not a blanket rule disable.
     files: [
       "src/server/runtime-pool.ts", "src/server/session-projection.ts", "src/server/sse-hub.ts",
-      "src/server/services/session-copy-origin-actions.ts",
+      "src/server/services/session-copy-origin-actions.ts", "src/server/services/turn-settings-action.ts",
       "src/web/application/session-view-cache-writer.ts",
       "src/web/application/runtime-projection-writer.ts",
       "src/web/application/active-session-projection-writer.ts",
@@ -46,7 +46,7 @@ export default [
     },
   },
   {
-    files: ["src/server/services/session-copy-origin-actions.ts"],
+    files: ["src/server/services/session-copy-origin-actions.ts", "src/server/services/turn-settings-action.ts"],
     rules: {
       "@typescript-eslint/no-unsafe-assignment": "error",
       "@typescript-eslint/no-unsafe-call": "error",

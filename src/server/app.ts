@@ -223,14 +223,11 @@ import { createRuntimeFileActions } from "./services/runtime-file-actions.js";
 import { createSidebarProjectionActions } from "./services/sidebar-projection-actions.js";
 import { createSessionCopyOriginActions, type SessionCopyOriginInput, type SessionCopyOriginResult } from "./services/session-copy-origin-actions.js";
 import { createCompactAction, type CompactActionHost } from "./services/compact-action.js";
-import { createTurnSettingsAction } from "./services/turn-settings-action.js";
+import { createTurnSettingsAction, type TurnSettingsRpc, type TurnSettingsSnapshot } from "./services/turn-settings-action.js";
 import { createPrimaryEnsureAction } from "./services/primary-ensure-action.js";
 import { handleNewSessionRoute } from "./routes/new-session.js";
 import { handleExtensionResponseRoute } from "./routes/extension-response.js";
-import {
-  THINKING_LEVELS,
-  requiredSessionId,
-} from "./routes/request-validation.js";
+import { requiredSessionId } from "./routes/request-validation.js";
 import { parsePromptRouteInput } from "./routes/prompt-input.js";
 import { handleWindowControlRoute } from "./routes/window-control.js";
 import { SubagentStatusProvider } from "./subagent-status-provider.js";
@@ -3540,24 +3537,17 @@ export class PiChatApp {
    * must never bypass this target-Runtime check.
    */
   private turnSettingsAction() {
-    const routePorts = {
-      HttpRequestError,
-      PartialTurnSettingsError,
-      THINKING_LEVELS,
-      asModels,
-      asState,
-      randomUUID,
-    };
-    const host = new Proxy(this as any, {
-      get: (target, property) => Object.prototype.hasOwnProperty.call(routePorts, property)
-        ? (routePorts as any)[property]
-        : Reflect.get(target, property, target),
-      set: (target, property, value) => Reflect.set(target, property, value, target),
+    return createTurnSettingsAction({
+      lateRpcOutcomeHandler: (sessionId, token) => this.lateRpcOutcomeHandler(sessionId, token, "generic"),
+      markRpcOutcomePending: (sessionId, error, token) => { this.markRpcOutcomePending(sessionId, error, token); },
+      rememberModelContextWindows: (models) => { this.rememberModelContextWindows(models); },
     });
-    return createTurnSettingsAction(host);
   }
-  private async applyTurnSettings(...args: any[]): Promise<AppliedTurnSettings> {
-    return (this.turnSettingsAction() as any)(...args);
+  private async applyTurnSettings(rpc: TurnSettingsRpc, settings: TurnSettingsSnapshot, sessionId?: string): Promise<AppliedTurnSettings> {
+    const transport: TurnSettingsRpc = {
+      send: (command, timeoutMs, options) => rpc.send(command, timeoutMs, options),
+    };
+    return this.turnSettingsAction()(transport, settings, sessionId);
   }
   /** Apply and consume the legacy Runtime-wide next-turn setting holder. */
   private async applyPendingTurnSettings(
@@ -4427,7 +4417,7 @@ export class PiChatApp {
   private completeContextUsageRefreshTurn(id: string): void {
     this.sessionViewActions().completeContextUsageRefreshTurn(id);
   }
-  private rememberModelContextWindows(models: ModelInfo[]): void {
+  private rememberModelContextWindows(models: readonly ModelInfo[]): void {
     for (const model of models) {
       const key = `${model.provider}\u0000${model.id}`;
       this.knownModels.set(key, model);
