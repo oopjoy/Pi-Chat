@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { performance } from "node:perf_hooks";
 import { delimiter, dirname, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
@@ -194,15 +195,44 @@ export function resolvePiEntry(env: NodeJS.ProcessEnv = process.env): string | n
     }
   }
 
-  const candidates: string[] = [
+  // Discover installation metadata only: never execute pi/npm or import Pi here.
+  // All launchers use this server-side resolver; the host freezes its result once.
+  const candidates: string[] = [];
+  const packageEntry = (...root: string[]) => join(...root, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "rpc-entry.js");
+  const home = (process.platform === "win32" ? env.USERPROFILE : env.HOME) || homedir();
+  const managedRoots = [
+    env.PI_MANAGED_INSTALL_ROOT?.trim(),
+    join(home, ".pi", "agent", "install"),
+  ];
+  for (const root of managedRoots) {
+    if (!root) continue;
+    try {
+      const pointer = join(root, "current-version");
+      if (!statSync(pointer).isFile() || statSync(pointer).size > 256) continue;
+      const version = readFileSync(pointer, "utf8").trim();
+      // Match Pi's managed launcher contract; never interpret a path or shell code.
+      if (!version || version === "." || version === ".." || !/^[0-9A-Za-z._+-]+$/.test(version)) continue;
+      candidates.push(packageEntry(root, "releases", version));
+    } catch {
+      // A missing/broken managed install does not hide a usable npm installation.
+    }
+  }
+  const npmPrefix = env.npm_config_prefix || env.NPM_CONFIG_PREFIX;
+  if (npmPrefix) {
+    candidates.push(packageEntry(npmPrefix), packageEntry(npmPrefix, "lib"));
+  }
+  candidates.push(
     "/usr/local/lib/node_modules/@earendil-works/pi-coding-agent/dist/rpc-entry.js",
     "/usr/lib/node_modules/@earendil-works/pi-coding-agent/dist/rpc-entry.js",
-  ];
+  );
   const appData = env.APPDATA;
   if (appData) {
     candidates.push(join(appData, "npm", "node_modules", "@earendil-works", "pi-coding-agent", "dist", "rpc-entry.js"));
   }
-  for (const pathEntry of (env.PATH || "").split(delimiter)) {
+  // Windows environment keys are case-insensitive, including plain object snapshots.
+  const searchPath = env.PATH || (process.platform === "win32" ? env.Path : "") || "";
+  for (const rawEntry of searchPath.split(delimiter)) {
+    const pathEntry = rawEntry.replace(/^"(.*)"$/, "$1");
     if (!pathEntry) continue;
     candidates.push(join(pathEntry, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "rpc-entry.js"));
     candidates.push(join(dirname(pathEntry), "node_modules", "@earendil-works", "pi-coding-agent", "dist", "rpc-entry.js"));
@@ -239,8 +269,9 @@ export function resolvePiVersion(entryPath: string | null): string | undefined {
       };
       if (manifest.name === "@earendil-works/pi-coding-agent")
         return typeof manifest.version === "string" && manifest.version ? manifest.version : undefined;
-    } catch {
-      return undefined;
+    } catch (error) {
+      // rpc-entry.js lives in dist/, while package.json is normally one level up.
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return undefined;
     }
     const parent = dirname(directory);
     if (parent === directory) return undefined;

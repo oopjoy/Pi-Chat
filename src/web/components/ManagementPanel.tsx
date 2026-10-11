@@ -30,7 +30,7 @@ const FONT_OPTIONS: Array<CompactSelectOption<FontPreference>> = [
   { value: "mono", label: "等宽字体" },
 ];
 
-export function ManagementPanel({ section, appearance, workspaceCwd, workspacePicking, workspaceDisabled, models, modelRuntimeSyncPending, state, busy, shutdownBlocked, diagnosticsBusy, buildIdentity, webBuildIdentity, piVersion, primaryRuntime, onClose, onAppearance, onPickWorkspace, onModel, onModelsChanged, onExportDiagnostics, onShutdown }: {
+export function ManagementPanel({ section, appearance, workspaceCwd, workspacePicking, workspaceDisabled, models, modelRuntimeSyncPending, state, busy, shutdownBlocked, diagnosticsBusy, buildIdentity, webBuildIdentity, piVersion, primaryRuntime, onClose, onAppearance, onPickWorkspace, onModel, onModelsChanged, onExportDiagnostics, onRuntimeSetup, onShutdown }: {
   section: ManagementSection | null;
   appearance: AppearancePreferences;
   /** Persisted default for future drafts; existing Session cwd values stay immutable. */
@@ -57,6 +57,7 @@ export function ManagementPanel({ section, appearance, workspaceCwd, workspacePi
     "models" | "state" | "modelRuntimeSyncPending" | "modelCatalogueRevision"
   >) => void;
   onExportDiagnostics: () => Promise<void>;
+  onRuntimeSetup?: () => void;
   onShutdown: () => void;
 }) {
   const [settingsTab, setSettingsTab] = useState<SettingsTab>(() =>
@@ -163,6 +164,7 @@ export function ManagementPanel({ section, appearance, workspaceCwd, workspacePi
                 primaryRuntime={primaryRuntime}
                 diagnosticsBusy={diagnosticsBusy}
                 onExportDiagnostics={onExportDiagnostics}
+                onRuntimeSetup={onRuntimeSetup}
               />}
               {settingsTab === "appearance" && <AppearancePanel value={appearance} workspaceCwd={workspaceCwd} workspacePicking={workspacePicking} workspaceDisabled={workspaceDisabled} onChange={onAppearance} onPickWorkspace={onPickWorkspace} />}
               {settingsTab === "models" && <ModelsPanel models={models} modelRuntimeSyncPending={modelRuntimeSyncPending} state={state} busy={busy} browseBusy={resourceBusy} onModel={onModel} onBrowseModels={() => void browseResource("models-root")} onModelsChanged={onModelsChanged} />}
@@ -211,11 +213,12 @@ export function ManagementPanel({ section, appearance, workspaceCwd, workspacePi
   );
 }
 
-function AboutPanel({ buildIdentity, webBuildIdentity, piVersion, primaryRuntime, diagnosticsBusy, onExportDiagnostics }: {
+function AboutPanel({ buildIdentity, webBuildIdentity, piVersion, primaryRuntime, diagnosticsBusy, onExportDiagnostics, onRuntimeSetup }: {
   buildIdentity: BuildIdentity;
   webBuildIdentity: BuildIdentity;
   piVersion?: string;
   primaryRuntime: PrimaryRuntimeReadiness;
+  onRuntimeSetup?: () => void;
   diagnosticsBusy: boolean;
   onExportDiagnostics: () => Promise<void>;
 }) {
@@ -261,6 +264,7 @@ function AboutPanel({ buildIdentity, webBuildIdentity, piVersion, primaryRuntime
       <AboutValue label="Web / 服务一致性" value={identityMismatch ? "不一致：请完整重启" : "一致"} tone={identityMismatch ? "warning" : "ok"} />
     </div>
     {primaryRuntime.status === "failed" && <div className="about-notice is-warning">Primary Runtime 暂不可用，但历史 Session 与 JSONL 浏览仍可继续。{primaryRuntime.error ? ` ${primaryRuntime.error}` : ""}</div>}
+    {onRuntimeSetup && <button type="button" className="about-link-button" onClick={onRuntimeSetup}>Pi 连接设置 / 重试</button>}
     {error && <div className="resource-error">{error}</div>}
     {update && <div className={`about-update ${update.updateAvailable ? "is-update" : "is-current"}`}>
       <strong>{update.updateAvailable ? `发现新版本 v${update.latestVersion}` : update.updateAvailable === false ? "当前已是最新版本" : `已找到最新版本 v${update.latestVersion}`}</strong>

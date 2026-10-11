@@ -5,6 +5,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { promisify } from "node:util";
 import { assertCommittedLf } from "./check-committed-text.mjs";
 import { validateDistTarget } from "./dist-paths.mjs";
+import { assertRuntimeFiles } from "./check-runtime-files.mjs";
 
 const execFile = promisify(execFileCallback);
 const projectRoot = resolve(import.meta.dirname, "..");
@@ -19,6 +20,10 @@ const packageFiles = [
   "scripts/install-shortcuts.ps1",
   "scripts/pi-chat-launch-process.ps1",
   "scripts/pi-chat-port-ready.ps1",
+  "scripts/pi-chat-preflight.ps1",
+  "scripts/pi-chat-start-server.ps1",
+  "scripts/check-runtime-files.mjs",
+  "scripts/runtime-required-files.json",
 ];
 
 export function assertPortableArtifactName(name) {
@@ -203,6 +208,8 @@ export async function packageRelease({
     await mkdir(packageRoot, { recursive: true });
     for (const file of packageFiles) await cp(join(root, file), join(packageRoot, file), { recursive: true });
     await cp(stage, join(packageRoot, "dist"), { recursive: true });
+    // Validate the actual packaged tree, not just the identity file in staging.
+    await assertRuntimeFiles(packageRoot);
     await createArchive({ packageRootName, outputPath, packageStage });
     const { checksum } = await writePortableChecksum({
       zipPath: outputPath,

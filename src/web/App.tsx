@@ -41,6 +41,7 @@ import type {
 } from "../shared/types";
 import { ApiRequestError, api } from "./api";
 import { AppShell } from "./components/AppShell";
+import { RuntimeSetupDialog, type RuntimeSetupDialogProps } from "./components/RuntimeSetupDialog";
 import { AskQuestionnaireDialog } from "./components/AskQuestionnaireDialog";
 import { ConversationPane } from "./components/ConversationPane";
 import { composerDraftKeyId, type ComposerDraftKey } from "./state/composer";
@@ -768,6 +769,17 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   const runEpochRef = useRef("");
   /** Increments only on a real replacement, invalidating old async projections. */
   const runEpochGenerationRef = useRef(0);
+  const [runtimeSetupView, setRuntimeSetupView] = useState<Pick<RuntimeSetupDialogProps, "status" | "candidate" | "mode" | "loading" | "applying" | "error"> | null>(null);
+  const runtimeSetupRequestRef = useRef(0);
+  const runtimeSetupOperationRef = useRef<"read" | "pick" | "apply" | null>(null);
+  const runtimeSetupEpoch = runEpochGenerationRef.current;
+  useEffect(() => {
+    if (runtimeSetupOperationRef.current === "apply") return;
+    runtimeSetupRequestRef.current += 1;
+    runtimeSetupOperationRef.current = null;
+    setRuntimeSetupView(null);
+  }, [runtimeSetupEpoch]);
+  useEffect(() => () => { runtimeSetupRequestRef.current += 1; }, []);
   /** A stale Web bundle may read, but must not mutate a different Server build. */
   const [buildIdentityMismatch, setBuildIdentityMismatch] = useState(false);
   const [serverBuildIdentity, setServerBuildIdentity] =
@@ -3657,6 +3669,85 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
   const observing = Boolean(
     effectiveControl.controlOwner && !effectiveControl.controlledByThisWindow,
   );
+  const runtimeSetupBlocked = busy || lifecycleBlocked || buildIdentityMismatch || anySessionRunning || anySessionQueued || anySessionPendingConfirmation;
+  const closeRuntimeSetup = () => {
+    if (runtimeSetupOperationRef.current === "apply") return;
+    runtimeSetupRequestRef.current += 1;
+    runtimeSetupOperationRef.current = null;
+    setRuntimeSetupView(null);
+  };
+  const detectRuntimeSetup = async () => {
+    if (runtimeSetupOperationRef.current) return;
+    const request = ++runtimeSetupRequestRef.current;
+    const epoch = runEpochGenerationRef.current;
+    runtimeSetupOperationRef.current = "read";
+    setManagementSection(null);
+    setRuntimeSetupView({ status: null, candidate: null, mode: "retry", loading: true, applying: false, error: "" });
+    const current = () => request === runtimeSetupRequestRef.current && epoch === runEpochGenerationRef.current;
+    try {
+      const status = await api.runtimeSetup();
+      if (current()) setRuntimeSetupView({ status, candidate: status.configured, mode: "retry", loading: false, applying: false, error: "" });
+    } catch (cause) {
+      if (current()) setRuntimeSetupView(value => value && { ...value, loading: false, error: cause instanceof Error ? cause.message : String(cause) });
+    } finally {
+      if (current()) runtimeSetupOperationRef.current = null;
+    }
+  };
+  const pickRuntimeSetup = async () => {
+    if (runtimeSetupOperationRef.current || runtimeSetupBlocked || !runtimeSetupView?.status || runtimeSetupView.status.environmentOverride) return;
+    const request = ++runtimeSetupRequestRef.current;
+    const epoch = runEpochGenerationRef.current;
+    const current = () => request === runtimeSetupRequestRef.current && epoch === runEpochGenerationRef.current;
+    runtimeSetupOperationRef.current = "pick";
+    setRuntimeSetupView(value => value && { ...value, loading: true, error: "" });
+    try {
+      const { candidate } = await api.pickRuntimeEntry();
+      if (current() && candidate) setRuntimeSetupView(value => value && { ...value, candidate, mode: "select" });
+    } catch (cause) {
+      if (current()) setRuntimeSetupView(value => value && { ...value, error: cause instanceof Error ? cause.message : String(cause) });
+    } finally {
+      if (current()) {
+        runtimeSetupOperationRef.current = null;
+        setRuntimeSetupView(value => value && { ...value, loading: false });
+      }
+    }
+  };
+  const applyRuntimeSetup = async () => {
+    if (runtimeSetupOperationRef.current || runtimeSetupBlocked || !runtimeSetupView?.status || !runtimeSetupView.candidate) return;
+    if (!window.confirm("应用 Pi 入口并重启 Pi Chat 服务？\n\n只运行你信任的 Pi 安装。将检查所有会话空闲、停止旧 Pi 进程，再启动新服务；不构建或下载软件，不删除聊天记录。请先保存未发送内容。无需重启电脑。")) return;
+    const request = ++runtimeSetupRequestRef.current;
+    const epoch = runEpochGenerationRef.current;
+    runtimeSetupOperationRef.current = "apply";
+    setRuntimeSetupView(value => value && { ...value, applying: true, error: "" });
+    cancelPendingNavigation();
+    setBusy(true);
+    try {
+      await api.restartRuntime({
+        mode: runtimeSetupView.mode,
+        configurationRevision: runtimeSetupView.status.configurationRevision,
+        ...(runtimeSetupView.mode === "select" ? { entry: runtimeSetupView.candidate.entry } : {}),
+      });
+      if (request === runtimeSetupRequestRef.current) window.location.reload();
+    } catch (cause) {
+      if (request === runtimeSetupRequestRef.current && epoch === runEpochGenerationRef.current)
+        setRuntimeSetupView(value => value && { ...value, error: cause instanceof Error ? cause.message : String(cause) });
+    } finally {
+      if (request === runtimeSetupRequestRef.current) {
+        runtimeSetupOperationRef.current = null;
+        setBusy(false);
+        setRuntimeSetupView(value => epoch === runEpochGenerationRef.current && value ? { ...value, applying: false } : null);
+      }
+    }
+  };
+  const runtimeSetupDialog = runtimeSetupView ? <RuntimeSetupDialog {...runtimeSetupView}
+    blocked={runtimeSetupBlocked && !runtimeSetupView.applying}
+    onClose={closeRuntimeSetup}
+    onDetect={() => void detectRuntimeSetup()}
+    onPick={() => void pickRuntimeSetup()}
+    onAutomatic={() => setRuntimeSetupView(value => value && !value.status?.environmentOverride ? { ...value, candidate: value.status?.automatic || null, mode: "automatic", error: value.status?.automaticError || "" } : value)}
+    onApply={() => void applyRuntimeSetup()}
+  /> : null;
+
   const {
     dequeuePendingSteers,
     cancelQueuedPrompt,
@@ -3702,7 +3793,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     renameSession,
     deleteSession,
   } = useAppPresentationState({
-    ApiRequestError, api, ComposerControls, PiMarkIcon,
+    ApiRequestError, api, ComposerControls, PiMarkIcon, openRuntimeSetup: () => void detectRuntimeSetup(),
     activeSessionProjectionWriter, anySessionPendingConfirmation, anySessionQueued, anySessionRunning,
     appliedDraftRestorationSequencesRef, appliedQueueMutationSequenceRef, applyBootstrapMetadata, browserStateDiagnosticSnapshot,
     buildIdentityMismatch, busy, busySessionCountsRef, cancelPendingNavigation,
@@ -3767,6 +3858,7 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     AppShell, AskQuestionnaireDialog, ChevronRightIcon, ConversationPane,
     DRAFT_FAILURE_SCOPE, api, EditDiffSidebar, ExtensionDialog,
     ManagementPanel, SessionDialog, SessionInventory, appearance,
+    runtimeSetupDialog, openRuntimeSetup: () => void detectRuntimeSetup(),
     askQuestionnaires, buildIdentityLabel, buildIdentityMismatch, busy,
     cancelQueuedPrompt, changeModel, clearConversationNavigationTarget, composerCommands,
     composerControls, composerDraftKey, composerDraftKeyId, composerDraftRevisionsRef,

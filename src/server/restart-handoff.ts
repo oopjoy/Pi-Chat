@@ -12,6 +12,7 @@ type RestartPayload = {
   cwd: string;
   healthUrl: string;
   expectedBuildFingerprint?: string;
+  runtimeDist?: string;
   logPath: string;
   promoteAfterExit?: DistPromotionPaths;
 };
@@ -55,7 +56,7 @@ function spawnServer(protectRollbackBackup: boolean, runtimeDist?: string): Chil
       env: {
         ...process.env,
         ...(protectRollbackBackup ? { PI_CHAT_SKIP_STALE_DIST_CLEANUP: "1" } : {}),
-        ...(runtimeDist ? { PI_CHAT_RUNTIME_DIST: runtimeDist } : {}),
+        ...((runtimeDist || payload.runtimeDist) ? { PI_CHAT_RUNTIME_DIST: runtimeDist || payload.runtimeDist } : {}),
       },
     });
   } finally {

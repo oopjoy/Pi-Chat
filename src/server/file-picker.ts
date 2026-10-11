@@ -218,6 +218,15 @@ export async function pickLocalFiles(): Promise<string[]> {
   }
 }
 
+export async function pickPiRuntimeEntry(): Promise<string | null> {
+  const script = PICKER_SCRIPT
+    .replace("$dialog.Multiselect = $true", "$dialog.Multiselect = $false")
+    .replace("Pi Chat - Local file picker", "Pi Chat - Select trusted Pi dist/rpc-entry.js")
+    .replace("所有文件 (*.*)|*.*", "Pi RPC entry (rpc-entry.js)|rpc-entry.js");
+  const paths = parsePickerOutput(await runPicker(script, "Pi 入口选择窗口等待超时"));
+  return paths.length === 1 ? paths[0] : null;
+}
+
 export async function pickWorkspaceFolder(initialPath?: string): Promise<string | null> {
   try {
     const output = (await runPicker(FOLDER_PICKER_SCRIPT, "文件夹选择窗口等待超时", initialPath ? { PI_CHAT_PICKER_INITIAL: initialPath } : {})).trim();

@@ -10,6 +10,8 @@ export interface ApplicationRestartOptions {
   /** Expected staged artifact fingerprint; handoff rejects a stale candidate. */
   expectedBuildFingerprint?: string;
   serverEntry: string;
+  /** Service-only restart preserves an explicitly staged runtime without promoting it. */
+  runtimeDist?: string;
   host: string;
   port: number;
   cwd: string;
@@ -306,6 +308,7 @@ export function handOffApplicationRestart(options: ApplicationRestartOptions): v
     cwd: options.projectRoot,
     healthUrl: `http://${authority}/api/health`,
     ...(options.expectedBuildFingerprint ? { expectedBuildFingerprint: options.expectedBuildFingerprint } : {}),
+    ...(options.runtimeDist ? { runtimeDist: options.runtimeDist } : {}),
     logPath: join(tmpdir(), "pi-chat-restart-handoff.log"),
     ...(options.promoteAfterExit ? { promoteAfterExit: options.promoteAfterExit } : {}),
   });

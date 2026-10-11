@@ -93,6 +93,7 @@ export function useAppPresentationState(host: Record<string, any>) {
     pendingSteersRef,
     primaryRuntime,
     primaryRuntimeMessage,
+    openRuntimeSetup,
     primaryRuntimeUnavailable,
     promptBusyReleasesRef,
     promptStarting,
@@ -398,6 +399,7 @@ export function useAppPresentationState(host: Record<string, any>) {
           role="status"
         >
           {primaryRuntimeMessage}
+          {primaryRuntime.status === "failed" && <button type="button" className="runtime-setup-link" onClick={openRuntimeSetup}>连接设置 / 重试</button>}
         </div>
       )}
       {(error || notice) && (

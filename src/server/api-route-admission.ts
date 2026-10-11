@@ -69,7 +69,7 @@ export function apiRouteAdmission(request: IncomingMessage, url: URL): ApiRouteA
   if (request.method === "GET" || request.method === "HEAD")
     return { bodyBeforeMutationLease: false, validateSessionId: false, ordinaryMutation: false };
   const excluded = [
-    "/api/restart", "/api/shutdown", "/api/window/close", "/api/presence",
+    "/api/restart", "/api/runtime/restart", "/api/shutdown", "/api/window/close", "/api/presence",
     "/api/workspace/pick", "/api/workspace/set", "/api/workspace/draft-pick",
     "/api/local-files/pick", "/api/sessions/viewing/clear",
   ].includes(url.pathname)
