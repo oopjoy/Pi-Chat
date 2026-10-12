@@ -58,8 +58,12 @@ pi-chat-setup.ps1=
   # Verify the embedded files, not an old executable left at Output.
   $unpacked = Join-Path $stage 'unpacked'
   New-Item -ItemType Directory -Path $unpacked | Out-Null
-  $extractor = Start-Process -FilePath $target -ArgumentList @('/Q', '/C', ('/T:"' + $unpacked + '"')) -PassThru
-  if (-not $extractor.WaitForExit(60000) -or $extractor.ExitCode -ne 0) { throw 'Setup extraction verification failed.' }
+  # Extract-only verification. Never combine /Q here: /Q means "quiet
+  # INSTALL" and on Windows Server 2022 IExpress it overrides /C, actually
+  # executing the embedded setup instead of extracting it.
+  $extractor = Start-Process -FilePath $target -ArgumentList @('/C', ('/T:"' + $unpacked + '"')) -PassThru
+  if (-not $extractor.WaitForExit(120000)) { throw 'Setup extraction verification timed out.' }
+  if ($extractor.ExitCode -ne 0) { throw "Setup extraction verification failed (exit code $($extractor.ExitCode))." }
   foreach ($file in (Get-ChildItem -LiteralPath $source -File)) {
     $actual = Join-Path $unpacked $file.Name
     if (-not (Test-Path -LiteralPath $actual) -or (Get-FileHash -LiteralPath $actual).Hash -ne (Get-FileHash -LiteralPath $file.FullName).Hash) {
