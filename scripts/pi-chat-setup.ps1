@@ -96,6 +96,29 @@ function InstallShortcuts {
   if ($LASTEXITCODE -ne 0) { throw "Pi Chat 快捷方式创建失败。" }
 }
 
+function RegisterUninstall([string]$tag) {
+  $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Pi Chat'
+  [void](New-Item -Path $key -Force)
+  $displayVersion = ([string]$tag).TrimStart('v')
+  if ($displayVersion -notmatch '^\d+\.\d+') { $displayVersion = "0.0.0" }
+  $uninstallScript = Join-Path $appRoot "scripts\pi-chat-uninstall.ps1"
+  $properties = @{
+    DisplayName = 'Pi Chat'
+    DisplayVersion = $displayVersion
+    Publisher = 'oopjoy'
+    InstallLocation = $InstallRoot
+    UninstallString = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $uninstallScript + '"'
+    QuietUninstallString = 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $uninstallScript + '" -NonInteractive'
+    DisplayIcon = (Join-Path $appRoot "resources\icons\pi-chat.ico")
+    NoModify = 1
+    NoRepair = 1
+  }
+  foreach ($name in $properties.Keys) {
+    New-ItemProperty -Path $key -Name $name -Value $properties[$name] -Force | Out-Null
+  }
+  Log "已注册卸载程序（设置 → 应用 → 安装的应用 → Pi Chat → 卸载）"
+}
+
 function Get-ReleaseAsset {
   $uri = if ($ReleaseTag -eq "latest") {
     "https://api.github.com/repos/$repo/releases/latest"
@@ -264,6 +287,7 @@ try {
   $launcher = Join-Path $appRoot "pi-chat-launch.cmd"
   if (-not (Test-Path $launcher)) { throw "安装后的 Pi Chat 启动器缺失。" }
   InstallShortcuts
+  RegisterUninstall ([string]$asset.Tag)
   Log ("安装完成：" + $asset.Tag)
   Log "首次启动将打开浏览器，并继续使用本机 Pi 或 PiChat 管理的 Pi Runtime。"
   if (-not $SkipLaunch) { Start-Process -FilePath $launcher -WorkingDirectory $appRoot }

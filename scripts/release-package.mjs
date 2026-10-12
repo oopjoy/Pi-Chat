@@ -24,6 +24,7 @@ const packageFiles = [
   "scripts/pi-chat-preflight.ps1",
   "scripts/pi-chat-start-server.ps1",
   "scripts/pi-chat-setup.ps1",
+  "scripts/pi-chat-uninstall.ps1",
   "scripts/detect-pi-entry.mjs",
   "scripts/check-runtime-files.mjs",
   "scripts/runtime-required-files.json",

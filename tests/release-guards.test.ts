@@ -207,7 +207,7 @@ test("release packaging creates a ZIP, portable checksum and identity manifest",
       await copy(join(repositoryRoot, file), join(fixtureRepo, file));
     }
     await mkdir(join(fixtureRepo, "scripts"), { recursive: true });
-    for (const file of ["install-shortcuts.ps1", "pi-chat-launch-process.ps1", "pi-chat-port-ready.ps1", "pi-chat-preflight.ps1", "pi-chat-start-server.ps1", "pi-chat-setup.ps1", "detect-pi-entry.mjs", "check-runtime-files.mjs", "runtime-required-files.json"]) {
+    for (const file of ["install-shortcuts.ps1", "pi-chat-launch-process.ps1", "pi-chat-port-ready.ps1", "pi-chat-preflight.ps1", "pi-chat-start-server.ps1", "pi-chat-setup.ps1", "pi-chat-uninstall.ps1", "detect-pi-entry.mjs", "check-runtime-files.mjs", "runtime-required-files.json"]) {
       await copy(join(repositoryRoot, "scripts", file), join(fixtureRepo, "scripts", file));
     }
     assert.equal(git(["init", "--quiet"], fixtureRepo).status, 0);
@@ -267,6 +267,7 @@ test("release packaging creates a ZIP, portable checksum and identity manifest",
       `pi-chat-windows-${packageVersion}/scripts/pi-chat-preflight.ps1`,
       `pi-chat-windows-${packageVersion}/scripts/pi-chat-start-server.ps1`,
       `pi-chat-windows-${packageVersion}/scripts/pi-chat-setup.ps1`,
+      `pi-chat-windows-${packageVersion}/scripts/pi-chat-uninstall.ps1`,
       `pi-chat-windows-${packageVersion}/scripts/detect-pi-entry.mjs`,
       `pi-chat-windows-${packageVersion}/scripts/check-runtime-files.mjs`,
       `pi-chat-windows-${packageVersion}/scripts/runtime-required-files.json`,
