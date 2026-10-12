@@ -320,7 +320,12 @@ const app = new PiChatApp({
   allowedHosts: [],
   applicationRestart: prepareApplicationRestart,
   runtimeSetupStatus: () => ({ ...runtimeSetup.status(directPiEntry ? { entry: directPiEntry, version: piVersion } : null), restartAvailable: runtimeRestartAvailable }),
-  piRuntimeUpdateCheck: () => checkPiRuntimeUpdate(piVersion),
+  piRuntimeUpdateCheck: async () => {
+    const check = await checkPiRuntimeUpdate(piVersion);
+    // The UI must know before offering a button: only a PiChat-managed install
+    // root (or the shared ~/.pi/agent/install layout) may be upgraded in place.
+    return { ...check, inPlaceUpdateAvailable: resolveManagedPiInstall(directPiEntry, process.env, projectRoot) !== null };
+  },
   pickRuntimeEntry: async () => {
     const entry = await pickPiRuntimeEntry();
     return entry ? validateRuntimeEntry(entry) : null;

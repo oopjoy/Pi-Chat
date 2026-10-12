@@ -300,10 +300,13 @@ function AboutPanel({ buildIdentity, webBuildIdentity, piVersion, primaryRuntime
     {piUpdate && <div className={`about-update ${piUpdate.updateAvailable ? "is-update" : "is-current"}`}>
       <strong>{piUpdate.updateAvailable ? `发现 Pi 内核更新 v${piUpdate.latestVersion}` : piUpdate.updateAvailable === false ? "当前 Pi 内核已是最新版本" : `已找到 Pi 内核 v${piUpdate.latestVersion}`}</strong>
       <span>{piUpdate.currentVersion ? `当前 v${piUpdate.currentVersion} · ` : "当前未检测到可用版本 · "}{new Date(piUpdate.checkedAt).toLocaleString()}</span>
-      {piUpdate.updateAvailable && !piUpdateConfirming && (
+      {piUpdate.updateAvailable && piUpdate.inPlaceUpdateAvailable && !piUpdateConfirming && (
         <button type="button" className="about-link-button" disabled={piUpdating} onClick={() => setPiUpdateConfirming(true)}>
           更新到 v{piUpdate.latestVersion}
         </button>
+      )}
+      {piUpdate.updateAvailable && !piUpdate.inPlaceUpdateAvailable && (
+        <span>当前 Pi 不是 PiChat 管理的安装，不能直接更新；请通过 Pi 自带方式升级（例如 npm 全局更新）。</span>
       )}
       {piUpdateConfirming && (
         <div className="about-update-confirm">

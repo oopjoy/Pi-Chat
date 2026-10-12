@@ -52,6 +52,7 @@ export async function checkPiRuntimeUpdate(
     registryUrl: PI_RUNTIME_REGISTRY_URL,
     checkedAt: new Date().toISOString(),
     updateAvailable: comparison === null ? null : comparison < 0,
+    inPlaceUpdateAvailable: false,
   };
 }
 

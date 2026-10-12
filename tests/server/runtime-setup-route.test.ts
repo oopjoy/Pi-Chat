@@ -61,6 +61,7 @@ test("Pi Runtime update check is read-only and guarded by the local API authorit
       registryUrl: "https://registry.npmjs.org/%40earendil-works%2Fpi-coding-agent",
       checkedAt: "2026-10-11T00:00:00.000Z",
       updateAvailable: true,
+      inPlaceUpdateAvailable: false,
     }),
   });
   try {

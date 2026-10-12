@@ -110,6 +110,7 @@ test("Pi Runtime update offers in-place update with an explicit confirmation", a
       registryUrl: "https://registry.npmjs.org/%40earendil-works%2Fpi-coding-agent",
       checkedAt: "2026-10-12T00:00:00.000Z",
       updateAvailable: true,
+      inPlaceUpdateAvailable: true,
     }),
     updatePiRuntime: async (version: string) => { updateRequested = version; },
   });
@@ -135,6 +136,47 @@ test("Pi Runtime update offers in-place update with an explicit confirmation", a
       .find((button) => button.textContent === "确认更新")!;
     await act(async () => { confirm.click(); await Promise.resolve(); });
     assert.equal(updateRequested, "1.1.0");
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
+test("Pi Runtime update button is hidden for a user-owned Pi install", async () => {
+  const { dom } = installAppDom();
+  const { api } = await import("../../src/web/api");
+  const restoreApi = captureApiSnapshot(api);
+  const { createRoot } = await import("react-dom/client");
+  const { ManagementPanel } = await import("../../src/web/components/ManagementPanel");
+  Object.assign(api, {
+    checkPiRuntimeUpdate: async () => ({
+      packageName: "@earendil-works/pi-coding-agent",
+      currentVersion: "1.0.1",
+      latestVersion: "1.1.0",
+      registryUrl: "https://registry.npmjs.org/x",
+      checkedAt: "2026-10-12T00:00:00.000Z",
+      updateAvailable: true,
+      inPlaceUpdateAvailable: false,
+    }),
+    updatePiRuntime: async () => { throw new Error("must not be called"); },
+  });
+  const root = createRoot(dom.window.document.getElementById("root")!);
+  try {
+    await act(async () => root.render(createElement(ManagementPanel, {
+      ...panelProps([]),
+      section: "settings" as never,
+    })));
+    const aboutTab = [...dom.window.document.querySelectorAll<HTMLButtonElement>(".settings-nav-tabs button")]
+      .find((button) => button.textContent === "关于")!;
+    await act(async () => aboutTab.click());
+    await act(async () => {
+      dom.window.document.querySelector<HTMLButtonElement>(".about-actions .about-link-button")!.click();
+      await Promise.resolve();
+    });
+    assert.equal([...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
+      .some((button) => button.textContent === "更新到 v1.1.0"), false,
+      "a user-owned Pi install must not be offered an in-place update button");
+    assert.ok(dom.window.document.body.textContent?.includes("当前 Pi 不是 PiChat 管理的安装"));
   } finally {
     await act(async () => root.unmount());
     restoreApi();
