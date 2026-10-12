@@ -4,6 +4,12 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+# A parent pwsh process can leak its PS7 module paths into PSModulePath, which
+# makes Windows PowerShell 5.1 load PowerShell 7's incompatible Utility module
+# (Get-FileHash and friends disappear). Restore the 5.1 default explicitly.
+if ($env:PSModulePath -and $env:PSModulePath -imatch 'PowerShell\\7\\') {
+  $env:PSModulePath = "$env:SystemRoot\system32\WindowsPowerShell\v1.0\Modules;$env:ProgramFiles\WindowsPowerShell\Modules"
+}
 $projectRoot = Split-Path -Parent $PSScriptRoot
 if (-not $Output) { $Output = Join-Path $projectRoot "dist-local\pi-chat-setup.exe" }
 $iexpress = Join-Path $env:SystemRoot "System32\iexpress.exe"
@@ -52,29 +58,40 @@ pi-chat-setup.ps1=
 "@
   [IO.File]::WriteAllText($sed, $sedContent.TrimStart(), [Text.UTF8Encoding]::new($false))
   & $iexpress /N /Q $sed
+  # IExpress can leave a child writing $target after the maker process exits,
+  # so wait for the file to exist AND stop growing before reading it.
   $deadline = [DateTime]::UtcNow.AddSeconds(60)
-  while (-not (Test-Path -LiteralPath $target) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 250 }
-  if (-not (Test-Path -LiteralPath $target)) { throw "IExpress failed to create $target." }
+  $stableBytes = -1
+  while ([DateTime]::UtcNow -lt $deadline) {
+    if (Test-Path -LiteralPath $target) {
+      $size = (Get-Item -LiteralPath $target).Length
+      if ($size -gt 0 -and $size -eq $stableBytes) { break }
+      $stableBytes = $size
+    }
+    Start-Sleep -Milliseconds 250
+  }
+  if (-not (Test-Path -LiteralPath $target) -or $stableBytes -le 0) { throw "IExpress failed to create $target." }
   # Verify the embedded files, not an old executable left at Output.
-  # IExpress appends a CAB (MSCF) payload after the PE stub; executing the EXE
-  # to extract is non-deterministic across Windows builds (UI prompts, quiet
-  # mode runs the installer instead), so slice the embedded CAB out and expand
-  # it with the built-in expand.exe. The same path runs locally and on CI.
+  # Executing the EXE is non-deterministic across Windows builds (UI prompts;
+  # quiet mode runs the installer). Instead locate the embedded Microsoft CAB
+  # directly: scan for MSCF anywhere (new wextract stores it as an RCDATA
+  # resource, old builds append it after the PE), validate the header, slice it
+  # out, and expand it with the built-in expand.exe. Same path locally and on CI.
   $unpacked = Join-Path $stage 'unpacked'
   New-Item -ItemType Directory -Path $unpacked | Out-Null
   $bytes = [IO.File]::ReadAllBytes($target)
-  $cabOffset = -1
-  for ($i = $bytes.Length - 4; $i -ge 4; $i--) {
-    if ($bytes[$i] -eq 0x4D -and $bytes[$i + 1] -eq 0x53 -and $bytes[$i + 2] -eq 0x43 -and $bytes[$i + 3] -eq 0x46) {
-      # CABFOLDER/CAB header check: reserved1 immediately after MSCF is zeroed.
-      if ($bytes[$i + 4] -eq 0 -and $bytes[$i + 5] -eq 0 -and $bytes[$i + 6] -eq 0 -and $bytes[$i + 7] -eq 0) { $cabOffset = $i; break }
-    }
+  $innerCab = $null
+  for ($i = 0; $i -le $bytes.Length - 12; $i++) {
+    if ($bytes[$i] -ne 0x4D -or $bytes[$i + 1] -ne 0x53 -or $bytes[$i + 2] -ne 0x43 -or $bytes[$i + 3] -ne 0x46) { continue }
+    $cbFile = [int]$bytes[$i + 8] -bor ([int]$bytes[$i + 9] -shl 8) -bor ([int]$bytes[$i + 10] -shl 16) -bor ([int]$bytes[$i + 11] -shl 24)
+    if ($cbFile -le 44 -or ($i + $cbFile) -gt $bytes.Length) { continue }
+    $innerCab = Join-Path $stage 'inner.cab'
+    $cab = New-Object byte[] $cbFile
+    [Array]::Copy($bytes, $i, $cab, 0, $cbFile)
+    [IO.File]::WriteAllBytes($innerCab, $cab)
+    break
   }
-  if ($cabOffset -lt 0) { throw 'Setup executable does not contain an embedded CAB payload.' }
-  $innerCab = Join-Path $stage 'inner.cab'
-  $cab = New-Object byte[] ($bytes.Length - $cabOffset)
-  [Array]::Copy($bytes, $cabOffset, $cab, 0, $cab.Length)
-  [IO.File]::WriteAllBytes($innerCab, $cab)
+  if (-not $innerCab) { throw 'Setup executable does not contain a verifiable embedded CAB payload.' }
   & "$env:SystemRoot\System32\expand.exe" -F:* $innerCab $unpacked | Out-Null
   if ($LASTEXITCODE -ne 0) { throw "Setup CAB extraction failed (exit code $($LASTEXITCODE))." }
   $extracted = @(Get-ChildItem -LiteralPath $unpacked -Recurse -File)
