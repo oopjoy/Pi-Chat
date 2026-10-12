@@ -47,6 +47,17 @@ function Download([string]$Url, [string]$Path) {
   Invoke-WebRequest -Uri $Url -OutFile $Path -UseBasicParsing
 }
 
+# Primary hosts can be unreachable from some networks (e.g. nodejs.org 403);
+# mirror fallbacks keep first-run installs working without user intervention.
+function DownloadWithFallback([string[]]$Urls, [string]$Path) {
+  $lastError = $null
+  foreach ($url in $Urls) {
+    try { Download $url $Path; return }
+    catch { $lastError = $_; Log ("下载失败，尝试镜像：" + $_.Exception.Message) }
+  }
+  throw $lastError
+}
+
 function EnsureDirectory([string]$Path) {
   New-Item -ItemType Directory -Force -Path $Path | Out-Null
 }
@@ -112,8 +123,14 @@ function InstallNode {
   $archiveName = "node-v$nodeVersion-win-x64.zip"
   $archive = Join-Path $temporary $archiveName
   $checksums = Join-Path $temporary "SHASUMS256.txt"
-  Download "https://nodejs.org/dist/v$nodeVersion/$archiveName" $archive
-  Download "https://nodejs.org/dist/v$nodeVersion/SHASUMS256.txt" $checksums
+  DownloadWithFallback @(
+    "https://nodejs.org/dist/v$nodeVersion/$archiveName",
+    "https://registry.npmmirror.com/-/binary/node/v$nodeVersion/$archiveName"
+  ) $archive
+  DownloadWithFallback @(
+    "https://nodejs.org/dist/v$nodeVersion/SHASUMS256.txt",
+    "https://registry.npmmirror.com/-/binary/node/v$nodeVersion/SHASUMS256.txt"
+  ) $checksums
   $archivePattern = '\s' + [regex]::Escape($archiveName) + '$'
   $record = Get-Content -LiteralPath $checksums | Where-Object { $_ -match $archivePattern } | Select-Object -First 1
   if (-not $record) { throw "无法取得 Node.js $nodeVersion 的校验值。" }
@@ -204,6 +221,10 @@ function InstallManagedPi {
   if (-not (Test-Path $npm)) { throw "随 Node.js 提供的 npm 不完整，无法安装 Pi Runtime。" }
   Log ("安装 Pi Runtime " + $version + " 到 " + $releaseRoot)
   & $node $npm install --prefix $releaseRoot "$piPackage@$version" --ignore-scripts --no-audit --no-fund | Out-Host
+  if ($LASTEXITCODE -ne 0 -and -not $env:PI_CHAT_NPM_REGISTRY) {
+    Log "npm 官方源安装失败，尝试 npmmirror 镜像源"
+    & $node $npm install --prefix $releaseRoot "$piPackage@$version" --ignore-scripts --no-audit --no-fund --registry https://registry.npmmirror.com | Out-Host
+  }
   if ($LASTEXITCODE -ne 0) { throw "Pi Runtime 安装失败。" }
   Set-Content -LiteralPath (Join-Path $managedRoot "current-version") -Value $version -NoNewline -Encoding ascii
   return $managedRoot
