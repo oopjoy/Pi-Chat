@@ -392,6 +392,8 @@ export interface PiChatAppOptions {
   piRuntimeUpdateCheck?: () => Promise<import("../shared/pi-runtime-update.js").PiRuntimeUpdateCheck>;
   pickRuntimeEntry?: () => Promise<RuntimeEntryInfo | null>;
   runtimeRestart?: (change: RuntimeSetupChange) => Promise<PreparedApplicationRestart>;
+  /** Pinned managed-Pi upgrade; install + pointer switch + service-only restart. */
+  piRuntimeUpdate?: (version: string) => Promise<PreparedApplicationRestart>;
   /** Gracefully terminate the entire Pi Chat service process after explicit user intent. */
   applicationShutdown?: (reason: ApplicationShutdownReason) => void;
   /** Index owns spawn/probe/retry; App only projects and gates capability use. */
@@ -1700,7 +1702,7 @@ export class PiChatApp {
     const pathname = new URL(request.url || "/", "http://127.0.0.1").pathname;
     if (pathname.startsWith("/api/bootstrap")) return "navigation.bootstrap";
     if (/^\/api\/sessions\/[^/]+$/.test(pathname)) return "navigation.session-view";
-    if (pathname === "/api/restart" || pathname === "/api/runtime/restart") return "lifecycle.restart";
+    if (pathname === "/api/restart" || pathname === "/api/runtime/restart" || pathname === "/api/runtime/update") return "lifecycle.restart";
     if (pathname === "/api/shutdown") return "lifecycle.shutdown";
     if (pathname === "/api/chat/prompt") return "prompt.send";
     if (pathname === "/api/chat/steers/dequeue") return "prompt.abort";

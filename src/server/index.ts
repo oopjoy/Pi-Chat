@@ -11,7 +11,12 @@ import { ModelManager } from "./model-manager.js";
 import { ResourceManager } from "./resource-manager.js";
 import { PiRpcClient } from "./rpc-client.js";
 import { RuntimeSetupStore, validateRuntimeEntry } from "./runtime-setup.js";
-import { checkPiRuntimeUpdate } from "./pi-runtime-update.js";
+import {
+  checkPiRuntimeUpdate,
+  installManagedPiVersion,
+  resolveManagedPiInstall,
+  switchManagedPiVersion,
+} from "./pi-runtime-update.js";
 import { pickPiRuntimeEntry } from "./file-picker.js";
 import { HttpRequestError } from "./http-transport.js";
 import type { RuntimeSetupChange } from "../shared/runtime-setup.js";
@@ -241,6 +246,33 @@ function scheduleServiceRestart(restart: ApplicationRestartOptions): void {
 }
 
 const runtimeRestartAvailable = !options.dev && fileURLToPath(import.meta.url).endsWith(".js");
+async function preparePiRuntimeUpdate(version: string) {
+  const managed = resolveManagedPiInstall(directPiEntry, process.env, projectRoot);
+  if (!managed) {
+    throw new HttpRequestError(409, "当前 Pi 不是 PiChat 管理的安装，不能直接更新；请通过安装目录的 Setup 或 Pi 自带方式升级。", "PI_RUNTIME_NOT_MANAGED");
+  }
+  if (!managed.npmCliPath) {
+    throw new HttpRequestError(409, "当前安装缺少可用于更新的 npm，请通过 Setup 更新 Pi Runtime。", "PI_RUNTIME_UPDATE_UNAVAILABLE");
+  }
+  // Download/install outside the barrier is unsafe (the version may vanish),
+  // but installing a new release directory is additive: the live pointer only
+  // moves inside `promote()` after the second quiescence check.
+  await installManagedPiVersion(managed.root, version, managed.npmCliPath);
+  return {
+    promote: async () => { await switchManagedPiVersion(managed.root, version); },
+    discard: async () => {},
+    handoff: () => scheduleServiceRestart({
+      projectRoot,
+      serverEntry: fileURLToPath(import.meta.url),
+      runtimeDist,
+      host: options.host,
+      port,
+      cwd: options.cwd,
+      dev: false,
+      expectedBuildFingerprint: buildIdentity.fingerprint,
+    }),
+  };
+}
 async function prepareRuntimeRestart(change: RuntimeSetupChange) {
   if (!existsSync(resolve(runtimeDist, "server", "server", "index.js")))
     throw new HttpRequestError(409, "当前构建入口不存在，请重新安装完整 Pi Chat 发布包。", "RUNTIME_RESTART_UNAVAILABLE");
@@ -294,6 +326,7 @@ const app = new PiChatApp({
     return entry ? validateRuntimeEntry(entry) : null;
   },
   runtimeRestart: runtimeRestartAvailable ? prepareRuntimeRestart : undefined,
+  piRuntimeUpdate: runtimeRestartAvailable ? preparePiRuntimeUpdate : undefined,
   applicationShutdown: (reason) => setTimeout(() => void shutdown(reason).then(
     () => {
       if (!fatalShutdownRequested) process.exit(0);

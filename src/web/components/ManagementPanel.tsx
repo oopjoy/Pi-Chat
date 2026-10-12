@@ -227,6 +227,8 @@ function AboutPanel({ buildIdentity, webBuildIdentity, piVersion, primaryRuntime
   const [update, setUpdate] = useState<UpdateCheckResult | null>(null);
   const [piUpdate, setPiUpdate] = useState<PiRuntimeUpdateCheck | null>(null);
   const [piUpdateChecking, setPiUpdateChecking] = useState(false);
+  const [piUpdateConfirming, setPiUpdateConfirming] = useState(false);
+  const [piUpdating, setPiUpdating] = useState(false);
   const [error, setError] = useState("");
   const [piUpdateError, setPiUpdateError] = useState("");
   const check = async () => {
@@ -251,6 +253,19 @@ function AboutPanel({ buildIdentity, webBuildIdentity, piVersion, primaryRuntime
       setPiUpdateError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setPiUpdateChecking(false);
+    }
+  };
+  const runPiUpdate = async (version: string) => {
+    setPiUpdating(true);
+    setPiUpdateError("");
+    try {
+      await api.updatePiRuntime(version);
+      setPiUpdate(null);
+    } catch (cause) {
+      setPiUpdateError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setPiUpdating(false);
+      setPiUpdateConfirming(false);
     }
   };
   const version = buildIdentity.packageVersion || "unknown";
@@ -285,7 +300,20 @@ function AboutPanel({ buildIdentity, webBuildIdentity, piVersion, primaryRuntime
     {piUpdate && <div className={`about-update ${piUpdate.updateAvailable ? "is-update" : "is-current"}`}>
       <strong>{piUpdate.updateAvailable ? `发现 Pi 内核更新 v${piUpdate.latestVersion}` : piUpdate.updateAvailable === false ? "当前 Pi 内核已是最新版本" : `已找到 Pi 内核 v${piUpdate.latestVersion}`}</strong>
       <span>{piUpdate.currentVersion ? `当前 v${piUpdate.currentVersion} · ` : "当前未检测到可用版本 · "}{new Date(piUpdate.checkedAt).toLocaleString()}</span>
-      <a href={piUpdate.registryUrl} target="_blank" rel="noreferrer">查看 npm 包</a>
+      {piUpdate.updateAvailable && !piUpdateConfirming && (
+        <button type="button" className="about-link-button" disabled={piUpdating} onClick={() => setPiUpdateConfirming(true)}>
+          更新到 v{piUpdate.latestVersion}
+        </button>
+      )}
+      {piUpdateConfirming && (
+        <div className="about-update-confirm">
+          <span>确认更新到 Pi Runtime v{piUpdate.latestVersion}？Pi Chat 会在所有对话空闲后安全重启服务。</span>
+          <button type="button" className="about-primary-action" disabled={piUpdating} onClick={() => void runPiUpdate(piUpdate.latestVersion)}>
+            {piUpdating ? "正在更新…" : "确认更新"}
+          </button>
+          <button type="button" className="about-link-button" disabled={piUpdating} onClick={() => setPiUpdateConfirming(false)}>取消</button>
+        </div>
+      )}
     </div>}
     {error && <div className="resource-error">{error}</div>}
     {update && <div className={`about-update ${update.updateAvailable ? "is-update" : "is-current"}`}>
@@ -295,10 +323,10 @@ function AboutPanel({ buildIdentity, webBuildIdentity, piVersion, primaryRuntime
     </div>}
     <div className="about-actions">
       <button type="button" className="about-primary-action" disabled={checking} onClick={() => void check()}>{checking ? "正在检查…" : "检查更新"}</button>
-      <button type="button" className="about-link-button" disabled={Boolean(piUpdateChecking)} onClick={() => void checkPiRuntime()}>{piUpdateChecking ? "正在检查 Pi 内核…" : "检查 Pi 内核更新"}</button>
+      <button type="button" className="about-link-button" disabled={Boolean(piUpdateChecking) || piUpdating} onClick={() => { setPiUpdateConfirming(false); void checkPiRuntime(); }}>{piUpdateChecking ? "正在检查 Pi 内核…" : "检查 Pi 内核更新"}</button>
       <a className="about-link-button" href={PI_CHAT_RELEASES_URL} target="_blank" rel="noreferrer">打开 GitHub Releases</a>
     </div>
-    <p className="about-footnote">检查只在你主动点击后访问 GitHub Release API 或 npm Registry；不会自动安装、替换 Pi、重启或部署。</p>
+    <p className="about-footnote">检查只在你主动点击后访问 npm Registry；直接更新仅适用于 PiChat 管理的 Pi 安装，更新前会确认所有对话空闲并安全重启本地服务，不会修改你自行安装的 Pi。</p>
     <div className="about-diagnostics-section">
       <DiagnosticsPanel busy={diagnosticsBusy} onExport={onExportDiagnostics} />
     </div>

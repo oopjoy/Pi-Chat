@@ -95,6 +95,52 @@ test("Settings navigation and Provider disclosure use native non-nested controls
   }
 });
 
+test("Pi Runtime update offers in-place update with an explicit confirmation", async () => {
+  const { dom } = installAppDom();
+  const { api } = await import("../../src/web/api");
+  const restoreApi = captureApiSnapshot(api);
+  const { createRoot } = await import("react-dom/client");
+  const { ManagementPanel } = await import("../../src/web/components/ManagementPanel");
+  let updateRequested = "";
+  Object.assign(api, {
+    checkPiRuntimeUpdate: async () => ({
+      packageName: "@earendil-works/pi-coding-agent",
+      currentVersion: "1.0.1",
+      latestVersion: "1.1.0",
+      registryUrl: "https://registry.npmjs.org/%40earendil-works%2Fpi-coding-agent",
+      checkedAt: "2026-10-12T00:00:00.000Z",
+      updateAvailable: true,
+    }),
+    updatePiRuntime: async (version: string) => { updateRequested = version; },
+  });
+  const root = createRoot(dom.window.document.getElementById("root")!);
+  try {
+    await act(async () => root.render(createElement(ManagementPanel, {
+      ...panelProps([]),
+      section: "settings" as never,
+    })));
+    const aboutTab = [...dom.window.document.querySelectorAll<HTMLButtonElement>(".settings-nav-tabs button")]
+      .find((button) => button.textContent === "关于")!;
+    await act(async () => aboutTab.click());
+    await act(async () => {
+      dom.window.document.querySelector<HTMLButtonElement>(".about-actions .about-link-button")!.click();
+      await Promise.resolve();
+    });
+    const updateButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "更新到 v1.1.0")!;
+    assert.ok(updateButton);
+    assert.equal(dom.window.document.querySelector(".about-update a"), null, "update flow must not jump to an external page");
+    await act(async () => updateButton.click());
+    const confirm = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "确认更新")!;
+    await act(async () => { confirm.click(); await Promise.resolve(); });
+    assert.equal(updateRequested, "1.1.0");
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("Provider editor preserves the stable source key when saving an edited model", async () => {
   const { dom } = installAppDom();
   const { api } = await import("../../src/web/api");

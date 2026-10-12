@@ -349,6 +349,11 @@ export const api = {
     await request<{ restarting: true }>("/api/runtime/restart", { method: "POST", body: JSON.stringify(change) });
     await waitForApplicationHandoff(previousToken);
   },
+  updatePiRuntime: async (version: string): Promise<void> => {
+    const previousToken = requestToken;
+    await request<{ restarting: true }>("/api/runtime/update", { method: "POST", body: JSON.stringify({ version }) }, APPLICATION_RESTART_TIMEOUT_MS);
+    await waitForApplicationHandoff(previousToken);
+  },
   restart: () => request<{ restarting: true }>("/api/restart", { method: "POST" }, APPLICATION_RESTART_TIMEOUT_MS),
   checkForUpdates,
   waitForApplicationHandoff,

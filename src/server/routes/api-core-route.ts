@@ -232,6 +232,7 @@ export async function handleApiCoreRoute(
           shutdown: (reason: any) => host.options.applicationShutdown?.(reason as any),
           restart: () => host.options.applicationRestart!(),
           runtimeRestart: host.options.runtimeRestart,
+          piRuntimeUpdate: host.options.piRuntimeUpdate,
           reportIncident: (error: any, input: any) => host.reportIncident(
             error,
             input as any,

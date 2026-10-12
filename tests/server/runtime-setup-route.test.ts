@@ -73,6 +73,29 @@ test("Pi Runtime update check is read-only and guarded by the local API authorit
   } finally { await f.close(); }
 });
 
+test("Pi Runtime direct update requires quiescence and hands off a service restart", async () => {
+  const calls: string[] = [];
+  const f = await fixture({
+    piRuntimeUpdate: async (version: string) => {
+      calls.push("prepare:" + version);
+      return {
+        promote: async () => { calls.push("commit"); },
+        discard: async () => { calls.push("discard"); },
+        handoff: () => { calls.push("handoff"); },
+      };
+    },
+  });
+  try {
+    await f.connect();
+    const response = await fetch(`${f.origin}/api/runtime/update`, { method: "POST", headers: f.headers, body: JSON.stringify({ version: "1.1.0" }) });
+    assert.equal(response.status, 202, JSON.stringify(await response.json()));
+    assert.deepEqual(calls, ["prepare:1.1.0", "commit", "handoff"]);
+    assert.equal(f.rpc.commands.filter(c => c.type === "get_state").length, 2);
+    const malformed = await fetch(`${f.origin}/api/runtime/update`, { method: "POST", headers: f.headers, body: JSON.stringify({ version: "../escape" }) });
+    assert.equal(malformed.status, 400);
+  } finally { await f.close(); }
+});
+
 test("runtime setup metadata is guarded and detection never touches RPC or native picker", async () => {
   const f = await fixture();
   try {
