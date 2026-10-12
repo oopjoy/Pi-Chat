@@ -56,43 +56,42 @@ pi-chat-setup.ps1=
   while (-not (Test-Path -LiteralPath $target) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 250 }
   if (-not (Test-Path -LiteralPath $target)) { throw "IExpress failed to create $target." }
   # Verify the embedded files, not an old executable left at Output.
-  # A freshly built self-extractor can be briefly locked by antivirus scans,
-  # so a failed verification retries once with a clean directory before failing.
+  # IExpress appends a CAB (MSCF) payload after the PE stub; executing the EXE
+  # to extract is non-deterministic across Windows builds (UI prompts, quiet
+  # mode runs the installer instead), so slice the embedded CAB out and expand
+  # it with the built-in expand.exe. The same path runs locally and on CI.
   $unpacked = Join-Path $stage 'unpacked'
-  $sevenZip = Join-Path $env:ProgramFiles '7-Zip\7z.exe'
-  if (-not (Test-Path -LiteralPath $sevenZip)) { $sevenZip = (Get-Command 7z.exe -ErrorAction SilentlyContinue).Source }
-  $verified = $false
-  $lastFailure = ''
-  for ($attempt = 1; $attempt -le 2 -and -not $verified; $attempt++) {
-    if (Test-Path -LiteralPath $unpacked) { Remove-Item -LiteralPath $unpacked -Recurse -Force }
-    New-Item -ItemType Directory -Path $unpacked | Out-Null
-    try {
-      if ($sevenZip) {
-        # Deterministic, UI-free extraction (IExpress packages are CAB SFX).
-        # CI runners ship 7-Zip; executing the EXE there blocks on IExpress UI.
-        & $sevenZip x -y ('-o' + $unpacked) $target | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "Setup archive extraction failed (exit code $($LASTEXITCODE))." }
-      } else {
-        # Extract-only fallback. IExpress shows a confirmation dialog in /C mode on
-        # some builds, so this path is only used where it is known to behave.
-        $extractor = Start-Process -FilePath $target -ArgumentList @('/C', ('/T:"' + $unpacked + '"')) -PassThru
-        if (-not $extractor.WaitForExit(120000)) { throw 'Setup extraction verification timed out.' }
-        if ($extractor.ExitCode -ne 0) { throw "Setup extraction verification failed (exit code $($extractor.ExitCode))." }
-      }
-      foreach ($file in (Get-ChildItem -LiteralPath $source -File)) {
-        $actual = Join-Path $unpacked $file.Name
-        if (-not (Test-Path -LiteralPath $actual) -or (Get-FileHash -LiteralPath $actual).Hash -ne (Get-FileHash -LiteralPath $file.FullName).Hash) {
-          throw "Setup embedded file mismatch: $($file.Name)"
-        }
-      }
-      $verified = $true
-    } catch {
-      $lastFailure = $_.Exception.Message
-      $listing = (Get-ChildItem -LiteralPath $unpacked -File -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }) -join ', '
-      Write-Warning ("Setup verification attempt $attempt failed: $lastFailure (unpacked: [$listing])")
+  New-Item -ItemType Directory -Path $unpacked | Out-Null
+  $bytes = [IO.File]::ReadAllBytes($target)
+  $cabOffset = -1
+  for ($i = $bytes.Length - 4; $i -ge 4; $i--) {
+    if ($bytes[$i] -eq 0x4D -and $bytes[$i + 1] -eq 0x53 -and $bytes[$i + 2] -eq 0x43 -and $bytes[$i + 3] -eq 0x46) {
+      # CABFOLDER/CAB header check: reserved1 immediately after MSCF is zeroed.
+      if ($bytes[$i + 4] -eq 0 -and $bytes[$i + 5] -eq 0 -and $bytes[$i + 6] -eq 0 -and $bytes[$i + 7] -eq 0) { $cabOffset = $i; break }
     }
   }
-  if (-not $verified) { throw "Setup verification failed after retries: $lastFailure" }
+  if ($cabOffset -lt 0) { throw 'Setup executable does not contain an embedded CAB payload.' }
+  $innerCab = Join-Path $stage 'inner.cab'
+  $cab = New-Object byte[] ($bytes.Length - $cabOffset)
+  [Array]::Copy($bytes, $cabOffset, $cab, 0, $cab.Length)
+  [IO.File]::WriteAllBytes($innerCab, $cab)
+  & "$env:SystemRoot\System32\expand.exe" -F:* $innerCab $unpacked | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "Setup CAB extraction failed (exit code $($LASTEXITCODE))." }
+  $extracted = @(Get-ChildItem -LiteralPath $unpacked -Recurse -File)
+  foreach ($file in (Get-ChildItem -LiteralPath $source -File)) {
+    $actual = $extracted | Where-Object { $_.Name -ieq $file.Name } | Select-Object -First 1
+    if (-not $actual -or (Get-FileHash -LiteralPath $actual.FullName).Hash -ne (Get-FileHash -LiteralPath $file.FullName).Hash) {
+      $listing = ($extracted | ForEach-Object { $_.FullName.Substring($unpacked.Length + 1) }) -join ', '
+      $detail = if ($actual) {
+        $a = [IO.File]::ReadAllBytes($actual.FullName)
+        $b = [IO.File]::ReadAllBytes($file.FullName)
+        $hexA = (($a | Select-Object -First 64 | ForEach-Object { $_.ToString('X2') }) -join ' ')
+        $hexB = (($b | Select-Object -First 64 | ForEach-Object { $_.ToString('X2') }) -join ' ')
+        "extracted $($a.Length)B sha256=$((Get-FileHash -LiteralPath $actual.FullName).Hash) head=[$hexA]; expected $($b.Length)B sha256=$((Get-FileHash -LiteralPath $file.FullName).Hash) head=[$hexB]"
+      } else { 'extracted file missing' }
+      throw "Setup embedded file mismatch: $($file.Name). $detail. Extracted: [$listing]"
+    }
+  }
   Copy-Item -LiteralPath $target -Destination $Output -Force
   $hash = (Get-FileHash -LiteralPath $Output -Algorithm SHA256).Hash.ToLowerInvariant()
   [IO.File]::WriteAllText(($Output + '.sha256'), ($hash + ' *' + [IO.Path]::GetFileName($Output) + "`n"), [Text.UTF8Encoding]::new($false))
