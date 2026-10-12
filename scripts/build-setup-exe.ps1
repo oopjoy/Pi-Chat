@@ -56,20 +56,43 @@ pi-chat-setup.ps1=
   while (-not (Test-Path -LiteralPath $target) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 250 }
   if (-not (Test-Path -LiteralPath $target)) { throw "IExpress failed to create $target." }
   # Verify the embedded files, not an old executable left at Output.
+  # A freshly built self-extractor can be briefly locked by antivirus scans,
+  # so a failed verification retries once with a clean directory before failing.
   $unpacked = Join-Path $stage 'unpacked'
-  New-Item -ItemType Directory -Path $unpacked | Out-Null
-  # Extract-only verification. Never combine /Q here: /Q means "quiet
-  # INSTALL" and on Windows Server 2022 IExpress it overrides /C, actually
-  # executing the embedded setup instead of extracting it.
-  $extractor = Start-Process -FilePath $target -ArgumentList @('/C', ('/T:"' + $unpacked + '"')) -PassThru
-  if (-not $extractor.WaitForExit(120000)) { throw 'Setup extraction verification timed out.' }
-  if ($extractor.ExitCode -ne 0) { throw "Setup extraction verification failed (exit code $($extractor.ExitCode))." }
-  foreach ($file in (Get-ChildItem -LiteralPath $source -File)) {
-    $actual = Join-Path $unpacked $file.Name
-    if (-not (Test-Path -LiteralPath $actual) -or (Get-FileHash -LiteralPath $actual).Hash -ne (Get-FileHash -LiteralPath $file.FullName).Hash) {
-      throw "Setup embedded file mismatch: $($file.Name)"
+  $sevenZip = Join-Path $env:ProgramFiles '7-Zip\7z.exe'
+  if (-not (Test-Path -LiteralPath $sevenZip)) { $sevenZip = (Get-Command 7z.exe -ErrorAction SilentlyContinue).Source }
+  $verified = $false
+  $lastFailure = ''
+  for ($attempt = 1; $attempt -le 2 -and -not $verified; $attempt++) {
+    if (Test-Path -LiteralPath $unpacked) { Remove-Item -LiteralPath $unpacked -Recurse -Force }
+    New-Item -ItemType Directory -Path $unpacked | Out-Null
+    try {
+      if ($sevenZip) {
+        # Deterministic, UI-free extraction (IExpress packages are CAB SFX).
+        # CI runners ship 7-Zip; executing the EXE there blocks on IExpress UI.
+        & $sevenZip x -y ('-o' + $unpacked) $target | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "Setup archive extraction failed (exit code $($LASTEXITCODE))." }
+      } else {
+        # Extract-only fallback. IExpress shows a confirmation dialog in /C mode on
+        # some builds, so this path is only used where it is known to behave.
+        $extractor = Start-Process -FilePath $target -ArgumentList @('/C', ('/T:"' + $unpacked + '"')) -PassThru
+        if (-not $extractor.WaitForExit(120000)) { throw 'Setup extraction verification timed out.' }
+        if ($extractor.ExitCode -ne 0) { throw "Setup extraction verification failed (exit code $($extractor.ExitCode))." }
+      }
+      foreach ($file in (Get-ChildItem -LiteralPath $source -File)) {
+        $actual = Join-Path $unpacked $file.Name
+        if (-not (Test-Path -LiteralPath $actual) -or (Get-FileHash -LiteralPath $actual).Hash -ne (Get-FileHash -LiteralPath $file.FullName).Hash) {
+          throw "Setup embedded file mismatch: $($file.Name)"
+        }
+      }
+      $verified = $true
+    } catch {
+      $lastFailure = $_.Exception.Message
+      $listing = (Get-ChildItem -LiteralPath $unpacked -File -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }) -join ', '
+      Write-Warning ("Setup verification attempt $attempt failed: $lastFailure (unpacked: [$listing])")
     }
   }
+  if (-not $verified) { throw "Setup verification failed after retries: $lastFailure" }
   Copy-Item -LiteralPath $target -Destination $Output -Force
   $hash = (Get-FileHash -LiteralPath $Output -Algorithm SHA256).Hash.ToLowerInvariant()
   [IO.File]::WriteAllText(($Output + '.sha256'), ($hash + ' *' + [IO.Path]::GetFileName($Output) + "`n"), [Text.UTF8Encoding]::new($false))
