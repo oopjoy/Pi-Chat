@@ -393,7 +393,7 @@ export interface PiChatAppOptions {
   pickRuntimeEntry?: () => Promise<RuntimeEntryInfo | null>;
   runtimeRestart?: (change: RuntimeSetupChange) => Promise<PreparedApplicationRestart>;
   /** Pinned managed-Pi upgrade; install + pointer switch + service-only restart. */
-  piRuntimeUpdate?: (version: string) => Promise<PreparedApplicationRestart>;
+  piRuntimeUpdate?: (version: string, adopt: boolean) => Promise<PreparedApplicationRestart>;
   /** Gracefully terminate the entire Pi Chat service process after explicit user intent. */
   applicationShutdown?: (reason: ApplicationShutdownReason) => void;
   /** Index owns spawn/probe/retry; App only projects and gates capability use. */

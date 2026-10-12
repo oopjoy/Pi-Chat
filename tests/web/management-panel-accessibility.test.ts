@@ -102,6 +102,7 @@ test("Pi Runtime update offers in-place update with an explicit confirmation", a
   const { createRoot } = await import("react-dom/client");
   const { ManagementPanel } = await import("../../src/web/components/ManagementPanel");
   let updateRequested = "";
+  let adoptRequested: boolean | null = null;
   Object.assign(api, {
     checkPiRuntimeUpdate: async () => ({
       packageName: "@earendil-works/pi-coding-agent",
@@ -112,7 +113,7 @@ test("Pi Runtime update offers in-place update with an explicit confirmation", a
       updateAvailable: true,
       inPlaceUpdateAvailable: true,
     }),
-    updatePiRuntime: async (version: string) => { updateRequested = version; },
+    updatePiRuntime: async (version: string, adopt: boolean) => { updateRequested = version; adoptRequested = adopt; },
   });
   const root = createRoot(dom.window.document.getElementById("root")!);
   try {
@@ -136,18 +137,20 @@ test("Pi Runtime update offers in-place update with an explicit confirmation", a
       .find((button) => button.textContent === "确认更新")!;
     await act(async () => { confirm.click(); await Promise.resolve(); });
     assert.equal(updateRequested, "1.1.0");
+    assert.equal(adoptRequested, false, "a managed install must not request adoption");
   } finally {
     await act(async () => root.unmount());
     restoreApi();
   }
 });
 
-test("Pi Runtime update button is hidden for a user-owned Pi install", async () => {
+test("Pi Runtime update offers managed adoption for a user-owned Pi install", async () => {
   const { dom } = installAppDom();
   const { api } = await import("../../src/web/api");
   const restoreApi = captureApiSnapshot(api);
   const { createRoot } = await import("react-dom/client");
   const { ManagementPanel } = await import("../../src/web/components/ManagementPanel");
+  let adoptRequested: boolean | null = null;
   Object.assign(api, {
     checkPiRuntimeUpdate: async () => ({
       packageName: "@earendil-works/pi-coding-agent",
@@ -158,7 +161,7 @@ test("Pi Runtime update button is hidden for a user-owned Pi install", async () 
       updateAvailable: true,
       inPlaceUpdateAvailable: false,
     }),
-    updatePiRuntime: async () => { throw new Error("must not be called"); },
+    updatePiRuntime: async (_version: string, adopt: boolean) => { adoptRequested = adopt; },
   });
   const root = createRoot(dom.window.document.getElementById("root")!);
   try {
@@ -173,10 +176,16 @@ test("Pi Runtime update button is hidden for a user-owned Pi install", async () 
       dom.window.document.querySelector<HTMLButtonElement>(".about-actions .about-link-button")!.click();
       await Promise.resolve();
     });
+    const adoptButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.startsWith("切换到受管 Pi 并更新到 v1.1.0"))!;
+    assert.ok(adoptButton, "a user-owned Pi install must be offered managed adoption");
     assert.equal([...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
-      .some((button) => button.textContent === "更新到 v1.1.0"), false,
-      "a user-owned Pi install must not be offered an in-place update button");
-    assert.ok(dom.window.document.body.textContent?.includes("当前 Pi 不是 PiChat 管理的安装"));
+      .some((button) => button.textContent === "更新到 v1.1.0"), false);
+    await act(async () => adoptButton.click());
+    const confirm = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "确认更新")!;
+    await act(async () => { confirm.click(); await Promise.resolve(); });
+    assert.equal(adoptRequested, true, "adoption must be requested for a user-owned Pi");
   } finally {
     await act(async () => root.unmount());
     restoreApi();

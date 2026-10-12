@@ -15,7 +15,9 @@ import {
   checkPiRuntimeUpdate,
   installManagedPiVersion,
   resolveManagedPiInstall,
+  resolveNpmCli,
   switchManagedPiVersion,
+  writeManagedRuntimeEnv,
 } from "./pi-runtime-update.js";
 import { pickPiRuntimeEntry } from "./file-picker.js";
 import { HttpRequestError } from "./http-transport.js";
@@ -246,20 +248,31 @@ function scheduleServiceRestart(restart: ApplicationRestartOptions): void {
 }
 
 const runtimeRestartAvailable = !options.dev && fileURLToPath(import.meta.url).endsWith(".js");
-async function preparePiRuntimeUpdate(version: string) {
-  const managed = resolveManagedPiInstall(directPiEntry, process.env, projectRoot);
+async function preparePiRuntimeUpdate(version: string, adopt: boolean) {
+  let managed = resolveManagedPiInstall(directPiEntry, process.env, projectRoot);
+  let npmCliPath = managed?.npmCliPath || null;
   if (!managed) {
-    throw new HttpRequestError(409, "当前 Pi 不是 PiChat 管理的安装，不能直接更新；请通过安装目录的 Setup 或 Pi 自带方式升级。", "PI_RUNTIME_NOT_MANAGED");
+    if (!adopt) {
+      throw new HttpRequestError(409, "当前 Pi 不是 PiChat 管理的安装；可改用 Setup，或在更新面板选择“切换到受管 Pi 并更新”。", "PI_RUNTIME_NOT_MANAGED");
+    }
+    // Adopt an isolated managed Runtime beside the app. The user's own Pi is
+    // never modified; the launcher only prefers this root via runtime.env.
+    const envRoot = process.env.PI_CHAT_MANAGED_INSTALL_ROOT?.trim() || process.env.PI_MANAGED_INSTALL_ROOT?.trim();
+    managed = { root: envRoot ? resolve(envRoot) : resolve(projectRoot, "..", "runtime", "managed-pi"), currentEntry: null, npmCliPath: null };
+    npmCliPath = await resolveNpmCli(projectRoot);
   }
-  if (!managed.npmCliPath) {
+  if (!npmCliPath) {
     throw new HttpRequestError(409, "当前安装缺少可用于更新的 npm，请通过 Setup 更新 Pi Runtime。", "PI_RUNTIME_UPDATE_UNAVAILABLE");
   }
   // Download/install outside the barrier is unsafe (the version may vanish),
   // but installing a new release directory is additive: the live pointer only
   // moves inside `promote()` after the second quiescence check.
-  await installManagedPiVersion(managed.root, version, managed.npmCliPath);
+  await installManagedPiVersion(managed.root, version, npmCliPath);
   return {
-    promote: async () => { await switchManagedPiVersion(managed.root, version); },
+    promote: async () => {
+      await switchManagedPiVersion(managed.root, version);
+      if (!managed.currentEntry) await writeManagedRuntimeEnv(projectRoot, managed.root);
+    },
     discard: async () => {},
     handoff: () => scheduleServiceRestart({
       projectRoot,

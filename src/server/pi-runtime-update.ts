@@ -107,6 +107,52 @@ export async function assertPiVersionExists(version: string): Promise<void> {
  * the live `current-version` pointer. The pointer flips only after the install
  * succeeds and the service quiescence gate has passed.
  */
+/**
+ * Locate a usable npm-cli.js for installing managed Pi versions: prefer the
+ * runtime bundled next to the app, then the system-global npm installation.
+ */
+export async function resolveNpmCli(projectRoot: string = process.cwd()): Promise<string | null> {
+  const bundled = join(resolve(projectRoot, "..", "runtime", "node"), "node_modules", "npm", "bin", "npm-cli.js");
+  if (existsSync(bundled)) return bundled;
+  try {
+    const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
+    const { stdout } = await execFileAsync(npmCmd, ["root", "-g"], { windowsHide: true, maxBuffer: 1024 * 1024 });
+    const globalRoot = stdout.trim().split(/\r?\n/).pop()?.trim();
+    if (globalRoot) {
+      const globalCli = join(globalRoot, "npm", "bin", "npm-cli.js");
+      if (existsSync(globalCli)) return globalCli;
+    }
+  } catch {
+    // No usable system npm; callers surface a clear update-unavailable error.
+  }
+  return null;
+}
+
+/** Persist (or replace) the managed-root binding in the launcher's runtime.env. */
+export async function writeManagedRuntimeEnv(projectRoot: string, managedRoot: string): Promise<string> {
+  const { access, readFile } = await import("node:fs/promises");
+  const localConfig = join(projectRoot, "config");
+  const parentConfig = join(projectRoot, "..", "config");
+  let configRoot = localConfig;
+  try {
+    await access(localConfig);
+  } catch {
+    configRoot = parentConfig;
+  }
+  await mkdir(configRoot, { recursive: true });
+  const envFile = join(configRoot, "runtime.env");
+  let lines: string[] = [];
+  try {
+    lines = (await readFile(envFile, "utf8")).split(/\r?\n/)
+      .filter((line) => line.trim() && !/^PI_CHAT_MANAGED_INSTALL_ROOT=/.test(line));
+  } catch {
+    // First managed binding; start from an empty env file.
+  }
+  lines.push(`PI_CHAT_MANAGED_INSTALL_ROOT=${managedRoot}`);
+  await writeFile(envFile, lines.join("\n") + "\n", "utf8");
+  return envFile;
+}
+
 export async function installManagedPiVersion(
   managedRoot: string,
   version: string,

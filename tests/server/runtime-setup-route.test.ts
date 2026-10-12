@@ -77,8 +77,8 @@ test("Pi Runtime update check is read-only and guarded by the local API authorit
 test("Pi Runtime direct update requires quiescence and hands off a service restart", async () => {
   const calls: string[] = [];
   const f = await fixture({
-    piRuntimeUpdate: async (version: string) => {
-      calls.push("prepare:" + version);
+    piRuntimeUpdate: async (version: string, adopt: boolean) => {
+      calls.push("prepare:" + version + ":" + adopt);
       return {
         promote: async () => { calls.push("commit"); },
         discard: async () => { calls.push("discard"); },
@@ -90,10 +90,30 @@ test("Pi Runtime direct update requires quiescence and hands off a service resta
     await f.connect();
     const response = await fetch(`${f.origin}/api/runtime/update`, { method: "POST", headers: f.headers, body: JSON.stringify({ version: "1.1.0" }) });
     assert.equal(response.status, 202, JSON.stringify(await response.json()));
-    assert.deepEqual(calls, ["prepare:1.1.0", "commit", "handoff"]);
+    assert.deepEqual(calls, ["prepare:1.1.0:false", "commit", "handoff"]);
     assert.equal(f.rpc.commands.filter(c => c.type === "get_state").length, 2);
     const malformed = await fetch(`${f.origin}/api/runtime/update`, { method: "POST", headers: f.headers, body: JSON.stringify({ version: "../escape" }) });
     assert.equal(malformed.status, 400);
+  } finally { await f.close(); }
+});
+
+test("Pi Runtime update forwards the managed-adoption flag", async () => {
+  const calls: string[] = [];
+  const f = await fixture({
+    piRuntimeUpdate: async (version: string, adopt: boolean) => {
+      calls.push("prepare:" + version + ":" + adopt);
+      return {
+        promote: async () => { calls.push("commit"); },
+        discard: async () => { calls.push("discard"); },
+        handoff: () => { calls.push("handoff"); },
+      };
+    },
+  });
+  try {
+    await f.connect();
+    const adopt = await fetch(`${f.origin}/api/runtime/update`, { method: "POST", headers: f.headers, body: JSON.stringify({ version: "1.1.0", adopt: true }) });
+    assert.equal(adopt.status, 202, JSON.stringify(await adopt.json()));
+    assert.deepEqual(calls, ["prepare:1.1.0:true", "commit", "handoff"]);
   } finally { await f.close(); }
 });
 

@@ -221,12 +221,14 @@ try {
   $managedPath = $null
   if ($existing) {
     Log ("检测到本机 Pi " + $existing.version + "：" + $existing.entry)
-    $useExisting = $true
+    # The managed Runtime is the product default: isolated from the user's Pi,
+    # always updatable in-app. The user can still explicitly keep their own Pi.
+    $installManaged = $true
     if (-not $NonInteractive -and $env:PI_CHAT_NONINTERACTIVE -ne "1") {
-      $answer = Read-Host "是否使用检测到的本机 Pi？[Y/n]"
-      $useExisting = $answer -notmatch '^(n|no|否)$'
+      $answer = Read-Host "推荐安装 PiChat 管理的最新 Pi Runtime（与本机 Pi 隔离、支持应用内更新）。输入 Y 安装受管 Pi，输入 n 沿用本机 Pi [Y/n]"
+      $installManaged = $answer -notmatch '^(n|no|否)$'
     }
-    if (-not $useExisting) { $managedPath = InstallManagedPi }
+    if ($installManaged) { $managedPath = InstallManagedPi } else { Log "沿用本机已安装的 Pi。" }
   } else {
     Log "未检测到可用 Pi，将安装 PiChat 管理的 Pi Runtime。"
     if (-not $SkipPiInstall) { $managedPath = InstallManagedPi }
