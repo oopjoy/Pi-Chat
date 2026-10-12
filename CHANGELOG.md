@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 0.5.2
+
+### Productization
+
+- Added a single-file Windows Setup (`pi-chat-setup.exe`) that installs an isolated app into `%LOCALAPPDATA%\PiChat`, downloads and checksum-verifies a private Node.js 22 runtime, detects an existing Pi first with a PiChat-managed fallback in Pi's native `~/.pi/agent/install` layout, creates desktop and Start-menu shortcuts, and registers a Windows uninstaller.
+- Node.js and npm registry downloads fall back to the npmmirror mirror so first-run installs survive networks where nodejs.org or registry.npmjs.org are unreachable; the npmjs SHA256 verification is unchanged.
+- Setup refuses to run while Pi Chat is running (port 30170 or a Node process under the install root) instead of failing mid-upgrade on file locks.
+- The About panel can now update the Pi Runtime in place: managed installs switch the pinned `current-version` pointer after a verified install; npm-global installs run an explicit `npm install -g` (keeping the user's Pi CLI in lockstep) with rollback, both gated by the full lifecycle quiescence barrier. Custom Pi entries are never modified.
+- Update availability reporting distinguishes managed, npm-global, and custom entry sources so the UI only offers upgrade paths that actually apply.
+
+### Fixes
+
+- Optimistic user prompts now reconcile after Runtime settlement instead of lingering when the persisted echo becomes visible through a different projection path.
+- Oversized Session JSONL files keep at least the most recent 50 turns readable across cold views, active bootstrap, hot recovery, workspace, and read-only paths instead of failing the whole view.
+- npm-cli discovery for in-app updates covers npm bundled inside the Node.js installation (the common Windows layout) in addition to a PiChat-bundled runtime.
+- The Setup console wrapper sets a UTF-8 codepage so Chinese install messages render on non-Chinese system codepages.
+
 ## 0.5.1
 
 ### Reliability and maintainability

@@ -1,5 +1,6 @@
 import type { ExtensionUiRequest, ModelInfo, PiMessage, PrimaryRuntimeReadiness, QueuedPrompt, SessionActivityState } from "../../shared/types";
 import type { StreamingMessageAppend } from "../../shared/streaming-wire";
+import type { LocalUserTurn } from "../lib/local-user-turn";
 
 export function handlePiRuntimeLifecycleEvents(scope: Record<string, any>): boolean {
   const {
@@ -327,7 +328,7 @@ export function handlePiRuntimeLifecycleEvents(scope: Record<string, any>): bool
             // reconciliation loop so the bubble is removed as soon as the
             // authoritative persisted echo becomes visible; uncertain delivery
             // remains visible if no echo ever arrives.
-            if ((localUserTurnsRef.current.get(eventSessionId) || []).some((turn: any) => !turn.revealOnMessageStart))
+            if ((localUserTurnsRef.current.get(eventSessionId) || []).some((turn: LocalUserTurn) => !turn.revealOnMessageStart))
               requestPromptReconcileRef.current(eventSessionId);
           }
           scheduleSidebarRefresh();
