@@ -74,8 +74,10 @@ function InstallShortcuts {
   if (-not (Test-Path -LiteralPath $shortcutScript -PathType Leaf)) {
     throw "安装后的快捷方式脚本缺失。"
   }
-  $desktop = [Environment]::GetFolderPath('DesktopDirectory')
-  $startMenu = Join-Path ([Environment]::GetFolderPath('StartMenu')) 'Programs\\Pi Chat'
+  $desktop = $env:PI_CHAT_SETUP_DESKTOP_PATH
+  if ([string]::IsNullOrWhiteSpace($desktop)) { $desktop = [Environment]::GetFolderPath('DesktopDirectory') }
+  $startMenu = $env:PI_CHAT_SETUP_START_MENU_PATH
+  if ([string]::IsNullOrWhiteSpace($startMenu)) { $startMenu = Join-Path ([Environment]::GetFolderPath('StartMenu')) 'Programs\\Pi Chat' }
   Log "创建桌面和开始菜单快捷方式"
   & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $shortcutScript -DesktopPath $desktop -StartMenuPath $startMenu
   if ($LASTEXITCODE -ne 0) { throw "Pi Chat 快捷方式创建失败。" }
