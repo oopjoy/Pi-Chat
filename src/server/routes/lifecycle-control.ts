@@ -3,11 +3,11 @@ import { bodyJson, HttpRequestError, json, methodNotAllowed, requestClientId, re
 import type { RuntimeSetupChange } from "../../shared/runtime-setup.js";
 import { parseRuntimeSetupChange } from "../runtime-setup.js";
 
-export function parsePiUpdateRequest(body: Record<string, unknown>): { version: string; adopt: boolean } {
+export function parsePiUpdateRequest(body: Record<string, unknown>): string {
   if (typeof body.version !== "string" || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(body.version)) {
     throw new HttpRequestError(400, "Pi Runtime 更新请求无效，请重新检查更新。", "PI_RUNTIME_UPDATE_INVALID");
   }
-  return { version: body.version, adopt: body.adopt === true };
+  return body.version;
 }
 
 export interface LifecycleControlRouteHost {
@@ -25,7 +25,7 @@ export interface LifecycleControlRouteHost {
     handoff(): void;
   }>;
   runtimeRestart?(change: RuntimeSetupChange): ReturnType<LifecycleControlRouteHost["restart"]>;
-  piRuntimeUpdate?(version: string, adopt: boolean): ReturnType<LifecycleControlRouteHost["restart"]>;
+  piRuntimeUpdate?(version: string): ReturnType<LifecycleControlRouteHost["restart"]>;
   reportIncident(error: unknown, input: unknown): { incidentId: string };
 }
 
@@ -86,8 +86,8 @@ export async function handleLifecycleControlRoute(
   }
   // A slow or malformed body cannot hold the exclusive lifecycle barrier.
   const runtimeChange = runtimeRestart ? parseRuntimeSetupChange(await bodyJson(request, 8192)) : null;
-  const updateRequest = piUpdate ? parsePiUpdateRequest(await bodyJson(request, 8192)) : null;
-  if ((runtimeChange || updateRequest) && !host.isConnectedWindowPage(clientId, pageId)) {
+  const updateVersion = piUpdate ? parsePiUpdateRequest(await bodyJson(request, 8192)) : null;
+  if ((runtimeChange || updateVersion) && !host.isConnectedWindowPage(clientId, pageId)) {
     json(response, 409, { error: "当前页面已断开，请重新连接后再继续。", code: "LIFECYCLE_PAGE_NOT_CONNECTED" });
     return true;
   }
@@ -101,7 +101,7 @@ export async function handleLifecycleControlRoute(
       host.shutdown?.("api-shutdown");
       return true;
     }
-    const prepared = runtimeChange ? await host.runtimeRestart!(runtimeChange) : updateRequest ? await host.piRuntimeUpdate!(updateRequest.version, updateRequest.adopt) : await host.restart();
+    const prepared = runtimeChange ? await host.runtimeRestart!(runtimeChange) : updateVersion ? await host.piRuntimeUpdate!(updateVersion) : await host.restart();
     try {
       await host.verifyApplicationQuiescent("完成重启");
       await prepared.promote();

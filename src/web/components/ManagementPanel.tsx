@@ -255,11 +255,11 @@ function AboutPanel({ buildIdentity, webBuildIdentity, piVersion, primaryRuntime
       setPiUpdateChecking(false);
     }
   };
-  const runPiUpdate = async (version: string, adopt: boolean) => {
+  const runPiUpdate = async (version: string) => {
     setPiUpdating(true);
     setPiUpdateError("");
     try {
-      await api.updatePiRuntime(version, adopt);
+      await api.updatePiRuntime(version);
       setPiUpdate(null);
     } catch (cause) {
       setPiUpdateError(cause instanceof Error ? cause.message : String(cause));
@@ -267,6 +267,11 @@ function AboutPanel({ buildIdentity, webBuildIdentity, piVersion, primaryRuntime
       setPiUpdating(false);
       setPiUpdateConfirming(false);
     }
+  };
+  const copyNpmUpgradeCommand = (version: string) => {
+    void navigator.clipboard?.writeText(`npm install -g ${piUpdate?.packageName || "@earendil-works/pi-coding-agent"}@${version}`)
+      .then(() => setPiUpdateError(""))
+      .catch(() => setPiUpdateError("复制失败，请手动执行 npm install -g。"));
   };
   const version = buildIdentity.packageVersion || "unknown";
   const identityMismatch = webBuildIdentity.fingerprint !== "unknown"
@@ -300,25 +305,26 @@ function AboutPanel({ buildIdentity, webBuildIdentity, piVersion, primaryRuntime
     {piUpdate && <div className={`about-update ${piUpdate.updateAvailable ? "is-update" : "is-current"}`}>
       <strong>{piUpdate.updateAvailable ? `发现 Pi 内核更新 v${piUpdate.latestVersion}` : piUpdate.updateAvailable === false ? "当前 Pi 内核已是最新版本" : `已找到 Pi 内核 v${piUpdate.latestVersion}`}</strong>
       <span>{piUpdate.currentVersion ? `当前 v${piUpdate.currentVersion} · ` : "当前未检测到可用版本 · "}{new Date(piUpdate.checkedAt).toLocaleString()}</span>
-      {piUpdate.updateAvailable && piUpdate.inPlaceUpdateAvailable && !piUpdateConfirming && (
+      {piUpdate.updateAvailable && piUpdate.updateMode && !piUpdateConfirming && (
         <button type="button" className="about-link-button" disabled={piUpdating} onClick={() => setPiUpdateConfirming(true)}>
-          更新到 v{piUpdate.latestVersion}
+          {piUpdate.updateMode === "npm-global" ? `升级本机 Pi 到 v${piUpdate.latestVersion}` : `更新到 v${piUpdate.latestVersion}`}
         </button>
       )}
-      {piUpdate.updateAvailable && !piUpdate.inPlaceUpdateAvailable && !piUpdateConfirming && (
-        <button type="button" className="about-link-button" disabled={piUpdating} onClick={() => setPiUpdateConfirming(true)}>
-          切换到受管 Pi 并更新到 v{piUpdate.latestVersion}（推荐）
-        </button>
+      {piUpdate.updateAvailable && piUpdate.updateMode === "npm-global" && (
+        <span>将执行 npm 全局安装，你的 Pi CLI 会同步升级（版本保持一致，避免数据冲突）；配置、会话和 Skills 不受影响。</span>
       )}
-      {piUpdate.updateAvailable && !piUpdate.inPlaceUpdateAvailable && (
-        <span>会安装 PiChat 隔离管理的最新 Pi Runtime；你本机已有的 Pi 不会被修改或卸载。</span>
+      {piUpdate.updateAvailable && piUpdate.updateMode === "npm-global" && (
+        <button type="button" className="about-link-button" disabled={piUpdating} onClick={() => copyNpmUpgradeCommand(piUpdate.latestVersion)}>复制 npm 命令</button>
+      )}
+      {piUpdate.updateAvailable && !piUpdate.updateMode && (
+        <span>当前 Pi 指向自定义入口，Pi Chat 不会修改它；请手动升级后重启服务。</span>
       )}
       {piUpdateConfirming && (
         <div className="about-update-confirm">
-          <span>{piUpdate.inPlaceUpdateAvailable
-            ? `确认更新到 Pi Runtime v${piUpdate.latestVersion}？Pi Chat 会在所有对话空闲后安全重启服务。`
-            : `确认切换到 PiChat 受管 Pi v${piUpdate.latestVersion}？将在应用目录内安装隔离的 Pi Runtime（不修改你本机的 Pi），并在所有对话空闲后安全重启服务。`}</span>
-          <button type="button" className="about-primary-action" disabled={piUpdating} onClick={() => void runPiUpdate(piUpdate.latestVersion, !piUpdate.inPlaceUpdateAvailable)}>
+          <span>{piUpdate.updateMode === "npm-global"
+            ? `确认升级本机 Pi 到 v${piUpdate.latestVersion}？将执行 npm 全局安装，你的 Pi CLI 也会被升级（两者版本保持一致，避免数据格式冲突）；所有对话空闲后 Pi Chat 服务会安全重启。不会修改你的配置、会话和 Skills。`
+            : `确认更新到 Pi Runtime v${piUpdate.latestVersion}？Pi Chat 会在所有对话空闲后安全重启服务。`}</span>
+          <button type="button" className="about-primary-action" disabled={piUpdating} onClick={() => void runPiUpdate(piUpdate.latestVersion)}>
             {piUpdating ? "正在更新…" : "确认更新"}
           </button>
           <button type="button" className="about-link-button" disabled={piUpdating} onClick={() => setPiUpdateConfirming(false)}>取消</button>
@@ -336,7 +342,7 @@ function AboutPanel({ buildIdentity, webBuildIdentity, piVersion, primaryRuntime
       <button type="button" className="about-link-button" disabled={Boolean(piUpdateChecking) || piUpdating} onClick={() => { setPiUpdateConfirming(false); void checkPiRuntime(); }}>{piUpdateChecking ? "正在检查 Pi 内核…" : "检查 Pi 内核更新"}</button>
       <a className="about-link-button" href={PI_CHAT_RELEASES_URL} target="_blank" rel="noreferrer">打开 GitHub Releases</a>
     </div>
-    <p className="about-footnote">检查只在你主动点击后访问 npm Registry；更新只安装 PiChat 隔离管理的 Pi Runtime，绝不修改或卸载你自行安装的 Pi；更新前会确认所有对话空闲并安全重启本地服务。</p>
+    <p className="about-footnote">检查只在你主动点击后访问 npm Registry；更新前会确认所有对话空闲并安全重启本地服务；npm 全局升级会同步升级你的 Pi CLI，配置、会话和 Skills 不受影响。</p>
     <div className="about-diagnostics-section">
       <DiagnosticsPanel busy={diagnosticsBusy} onExport={onExportDiagnostics} />
     </div>

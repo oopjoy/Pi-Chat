@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, rename, writeFile } from "node:fs/promises";
-import { delimiter, dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import type { PiRuntimeUpdateCheck } from "../shared/pi-runtime-update.js";
 
@@ -52,43 +52,71 @@ export async function checkPiRuntimeUpdate(
     registryUrl: PI_RUNTIME_REGISTRY_URL,
     checkedAt: new Date().toISOString(),
     updateAvailable: comparison === null ? null : comparison < 0,
-    inPlaceUpdateAvailable: false,
+    updateMode: null,
   };
 }
 
-export interface ManagedPiInstall {
-  /** The managed install root that owns `current-version` and `releases/`. */
-  root: string;
-  /** Current entry resolved through this managed root, when it is the live one. */
-  currentEntry: string | null;
-  /** Bundled npm-cli.js usable for installing new versions. */
-  npmCliPath: string | null;
+export interface PiEngineClassification {
+  source: "managed" | "npm-global" | "other";
+  /** Managed root owning the entry, when source === "managed". */
+  managedRoot: string | null;
 }
 
 /**
- * Locate the managed install root that owns the current Pi entry. Only a
- * PiChat-managed root (or the shared `~/.pi/agent/install` layout) may be
- * upgraded in place; a user-owned npm/global install is never modified.
+ * Classify the live Pi entry so the update flow can pick a safe upgrade path.
+ * Managed layouts keep version pins; npm-global installs are upgraded with an
+ * explicit `npm install -g` (keeping the user's CLI in lockstep); anything
+ * else (explicit custom entries) is never modified.
  */
-export function resolveManagedPiInstall(
+export function classifyPiEntry(
   currentEntry: string | null,
   env: NodeJS.ProcessEnv = process.env,
-  projectRoot: string = process.cwd(),
-): ManagedPiInstall | null {
-  const home = process.platform === "win32" ? (env.USERPROFILE || "") : (env.HOME || "");
-  const candidates: string[] = [];
-  const envRoot = env.PI_CHAT_MANAGED_INSTALL_ROOT?.trim() || env.PI_MANAGED_INSTALL_ROOT?.trim();
-  if (envRoot) candidates.push(resolve(envRoot));
-  if (home) candidates.push(resolve(home, ".pi", "agent", "install"));
-  const nodeRoot = resolve(projectRoot, "..", "runtime", "node");
-  const npmCliPath = join(nodeRoot, "node_modules", "npm", "bin", "npm-cli.js");
-  for (const root of candidates) {
-    const releases = join(root, "releases");
-    if (!currentEntry || !currentEntry.startsWith(releases + "\\") && !currentEntry.startsWith(releases + "/")) continue;
-    return { root, currentEntry, npmCliPath: existsSync(npmCliPath) ? npmCliPath : null };
+): PiEngineClassification {
+  if (currentEntry) {
+    const home = process.platform === "win32" ? (env.USERPROFILE || "") : (env.HOME || "");
+    const managedRoots = [
+      env.PI_CHAT_MANAGED_INSTALL_ROOT?.trim(),
+      env.PI_MANAGED_INSTALL_ROOT?.trim(),
+      ...(home ? [join(home, ".pi", "agent", "install")] : []),
+    ].filter((root): root is string => Boolean(root));
+    for (const root of managedRoots) {
+      const releases = join(root, "releases");
+      if (currentEntry.startsWith(releases + sep) || currentEntry.startsWith(releases + "/")) {
+        return { source: "managed", managedRoot: root };
+      }
+    }
+    if (currentEntry.includes("node_modules")) return { source: "npm-global", managedRoot: null };
+    return { source: "other", managedRoot: null };
   }
-  return null;
+  return { source: "other", managedRoot: null };
 }
+
+/**
+ * Upgrade an npm-global Pi installation to one pinned version. Runs `npm
+ * install -g` with the located npm-cli.js; throws with an actionable message
+ * on failure (locked files, permissions) so the caller can offer the manual
+ * command fallback.
+ */
+export async function upgradeNpmGlobalPi(
+  version: string,
+  npmCliPath: string,
+  nodePath: string = process.execPath,
+): Promise<void> {
+  await assertPiVersionExists(version);
+  try {
+    await execFileAsync(
+      nodePath,
+      [npmCliPath, "install", "-g", `${PI_RUNTIME_PACKAGE}@${version}`, "--ignore-scripts", "--no-audit", "--no-fund"],
+      { windowsHide: true, maxBuffer: 4 * 1024 * 1024 },
+    );
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `升级本机 Pi 失败：${detail}\n请关闭正在运行的 Pi CLI 窗口后重试，或手动执行：npm install -g ${PI_RUNTIME_PACKAGE}@${version}`,
+    );
+  }
+}
+
 
 export async function assertPiVersionExists(version: string): Promise<void> {
   if (!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version)) {
@@ -144,31 +172,6 @@ export async function resolveNpmCli(projectRoot: string = process.cwd()): Promis
     // No usable system npm; callers surface a clear update-unavailable error.
   }
   return null;
-}
-
-/** Persist (or replace) the managed-root binding in the launcher's runtime.env. */
-export async function writeManagedRuntimeEnv(projectRoot: string, managedRoot: string): Promise<string> {
-  const { access, readFile } = await import("node:fs/promises");
-  const localConfig = join(projectRoot, "config");
-  const parentConfig = join(projectRoot, "..", "config");
-  let configRoot = localConfig;
-  try {
-    await access(localConfig);
-  } catch {
-    configRoot = parentConfig;
-  }
-  await mkdir(configRoot, { recursive: true });
-  const envFile = join(configRoot, "runtime.env");
-  let lines: string[] = [];
-  try {
-    lines = (await readFile(envFile, "utf8")).split(/\r?\n/)
-      .filter((line) => line.trim() && !/^PI_CHAT_MANAGED_INSTALL_ROOT=/.test(line));
-  } catch {
-    // First managed binding; start from an empty env file.
-  }
-  lines.push(`PI_CHAT_MANAGED_INSTALL_ROOT=${managedRoot}`);
-  await writeFile(envFile, lines.join("\n") + "\n", "utf8");
-  return envFile;
 }
 
 export async function installManagedPiVersion(

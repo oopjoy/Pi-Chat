@@ -13,11 +13,11 @@ import { PiRpcClient } from "./rpc-client.js";
 import { RuntimeSetupStore, validateRuntimeEntry } from "./runtime-setup.js";
 import {
   checkPiRuntimeUpdate,
+  classifyPiEntry,
   installManagedPiVersion,
-  resolveManagedPiInstall,
   resolveNpmCli,
   switchManagedPiVersion,
-  writeManagedRuntimeEnv,
+  upgradeNpmGlobalPi,
 } from "./pi-runtime-update.js";
 import { pickPiRuntimeEntry } from "./file-picker.js";
 import { HttpRequestError } from "./http-transport.js";
@@ -248,32 +248,46 @@ function scheduleServiceRestart(restart: ApplicationRestartOptions): void {
 }
 
 const runtimeRestartAvailable = !options.dev && fileURLToPath(import.meta.url).endsWith(".js");
-async function preparePiRuntimeUpdate(version: string, adopt: boolean) {
-  let managed = resolveManagedPiInstall(directPiEntry, process.env, projectRoot);
-  let npmCliPath = managed?.npmCliPath || null;
-  if (!managed) {
-    if (!adopt) {
-      throw new HttpRequestError(409, "当前 Pi 不是 PiChat 管理的安装；可改用 Setup，或在更新面板选择“切换到受管 Pi 并更新”。", "PI_RUNTIME_NOT_MANAGED");
-    }
-    // Adopt an isolated managed Runtime beside the app. The user's own Pi is
-    // never modified; the launcher only prefers this root via runtime.env.
-    const envRoot = process.env.PI_CHAT_MANAGED_INSTALL_ROOT?.trim() || process.env.PI_MANAGED_INSTALL_ROOT?.trim();
-    managed = { root: envRoot ? resolve(envRoot) : resolve(projectRoot, "..", "runtime", "managed-pi"), currentEntry: null, npmCliPath: null };
-    npmCliPath = await resolveNpmCli(projectRoot);
+async function preparePiRuntimeUpdate(version: string) {
+  const engine = classifyPiEntry(directPiEntry, process.env);
+  if (engine.source === "other") {
+    throw new HttpRequestError(409, "当前 Pi 指向自定义入口，Pi Chat 不会修改它；请手动升级后重启服务。", "PI_RUNTIME_NOT_UPGRADABLE");
   }
+  const npmCliPath = await resolveNpmCli(projectRoot);
   if (!npmCliPath) {
-    throw new HttpRequestError(409, "当前安装缺少可用于更新的 npm，请通过 Setup 更新 Pi Runtime。", "PI_RUNTIME_UPDATE_UNAVAILABLE");
+    throw new HttpRequestError(409, "当前安装缺少可用的 npm，请手动执行：npm install -g @earendil-works/pi-coding-agent@" + version, "PI_RUNTIME_UPDATE_UNAVAILABLE");
   }
   // Download/install outside the barrier is unsafe (the version may vanish),
-  // but installing a new release directory is additive: the live pointer only
-  // moves inside `promote()` after the second quiescence check.
-  await installManagedPiVersion(managed.root, version, npmCliPath);
+  // but both upgrade paths are version-pinned and leave the live entry
+  // untouched until `promote()` runs after the second quiescence check.
+  if (engine.source === "managed") {
+    await installManagedPiVersion(engine.managedRoot!, version, npmCliPath);
+    return {
+      promote: async () => { await switchManagedPiVersion(engine.managedRoot!, version); },
+      discard: async () => {},
+      handoff: () => scheduleServiceRestart({
+        projectRoot,
+        serverEntry: fileURLToPath(import.meta.url),
+        runtimeDist,
+        host: options.host,
+        port,
+        cwd: options.cwd,
+        dev: false,
+        expectedBuildFingerprint: buildIdentity.fingerprint,
+      }),
+    };
+  }
+  // npm-global: `npm install -g` upgrades the user's Pi CLI in lockstep, so
+  // the engine and CLI can never skew on shared ~/.pi/agent state. Rollback
+  // reinstalls the version that was live when the update was prepared.
+  const previousVersion = piVersion;
   return {
-    promote: async () => {
-      await switchManagedPiVersion(managed.root, version);
-      if (!managed.currentEntry) await writeManagedRuntimeEnv(projectRoot, managed.root);
+    promote: async () => { await upgradeNpmGlobalPi(version, npmCliPath); },
+    discard: async () => {
+      if (previousVersion && previousVersion !== version) {
+        await upgradeNpmGlobalPi(previousVersion, npmCliPath).catch(() => {});
+      }
     },
-    discard: async () => {},
     handoff: () => scheduleServiceRestart({
       projectRoot,
       serverEntry: fileURLToPath(import.meta.url),
@@ -335,9 +349,8 @@ const app = new PiChatApp({
   runtimeSetupStatus: () => ({ ...runtimeSetup.status(directPiEntry ? { entry: directPiEntry, version: piVersion } : null), restartAvailable: runtimeRestartAvailable }),
   piRuntimeUpdateCheck: async () => {
     const check = await checkPiRuntimeUpdate(piVersion);
-    // The UI must know before offering a button: only a PiChat-managed install
-    // root (or the shared ~/.pi/agent/install layout) may be upgraded in place.
-    return { ...check, inPlaceUpdateAvailable: resolveManagedPiInstall(directPiEntry, process.env, projectRoot) !== null };
+    const engine = classifyPiEntry(directPiEntry, process.env);
+    return { ...check, updateMode: engine.source === "other" ? null : engine.source };
   },
   pickRuntimeEntry: async () => {
     const entry = await pickPiRuntimeEntry();

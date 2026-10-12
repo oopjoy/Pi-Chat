@@ -102,7 +102,6 @@ test("Pi Runtime update offers in-place update with an explicit confirmation", a
   const { createRoot } = await import("react-dom/client");
   const { ManagementPanel } = await import("../../src/web/components/ManagementPanel");
   let updateRequested = "";
-  let adoptRequested: boolean | null = null;
   Object.assign(api, {
     checkPiRuntimeUpdate: async () => ({
       packageName: "@earendil-works/pi-coding-agent",
@@ -111,9 +110,9 @@ test("Pi Runtime update offers in-place update with an explicit confirmation", a
       registryUrl: "https://registry.npmjs.org/%40earendil-works%2Fpi-coding-agent",
       checkedAt: "2026-10-12T00:00:00.000Z",
       updateAvailable: true,
-      inPlaceUpdateAvailable: true,
+      updateMode: "managed" as const,
     }),
-    updatePiRuntime: async (version: string, adopt: boolean) => { updateRequested = version; adoptRequested = adopt; },
+    updatePiRuntime: async (version: string) => { updateRequested = version; },
   });
   const root = createRoot(dom.window.document.getElementById("root")!);
   try {
@@ -137,20 +136,19 @@ test("Pi Runtime update offers in-place update with an explicit confirmation", a
       .find((button) => button.textContent === "确认更新")!;
     await act(async () => { confirm.click(); await Promise.resolve(); });
     assert.equal(updateRequested, "1.1.0");
-    assert.equal(adoptRequested, false, "a managed install must not request adoption");
   } finally {
     await act(async () => root.unmount());
     restoreApi();
   }
 });
 
-test("Pi Runtime update offers managed adoption for a user-owned Pi install", async () => {
+test("Pi Runtime update upgrades an npm-global Pi with a manual-command fallback", async () => {
   const { dom } = installAppDom();
   const { api } = await import("../../src/web/api");
   const restoreApi = captureApiSnapshot(api);
   const { createRoot } = await import("react-dom/client");
   const { ManagementPanel } = await import("../../src/web/components/ManagementPanel");
-  let adoptRequested: boolean | null = null;
+  let updateRequested = "";
   Object.assign(api, {
     checkPiRuntimeUpdate: async () => ({
       packageName: "@earendil-works/pi-coding-agent",
@@ -159,9 +157,9 @@ test("Pi Runtime update offers managed adoption for a user-owned Pi install", as
       registryUrl: "https://registry.npmjs.org/x",
       checkedAt: "2026-10-12T00:00:00.000Z",
       updateAvailable: true,
-      inPlaceUpdateAvailable: false,
+      updateMode: "npm-global" as const,
     }),
-    updatePiRuntime: async (_version: string, adopt: boolean) => { adoptRequested = adopt; },
+    updatePiRuntime: async (version: string) => { updateRequested = version; },
   });
   const root = createRoot(dom.window.document.getElementById("root")!);
   try {
@@ -176,16 +174,21 @@ test("Pi Runtime update offers managed adoption for a user-owned Pi install", as
       dom.window.document.querySelector<HTMLButtonElement>(".about-actions .about-link-button")!.click();
       await Promise.resolve();
     });
-    const adoptButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => button.textContent?.startsWith("切换到受管 Pi 并更新到 v1.1.0"))!;
-    assert.ok(adoptButton, "a user-owned Pi install must be offered managed adoption");
+    const upgradeButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "升级本机 Pi 到 v1.1.0")!;
+    assert.ok(upgradeButton, "an npm-global Pi must be offered the in-app upgrade");
+    const copyButton = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "复制 npm 命令")!;
+    assert.ok(copyButton, "the manual npm command fallback must remain available");
     assert.equal([...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
       .some((button) => button.textContent === "更新到 v1.1.0"), false);
-    await act(async () => adoptButton.click());
+    await act(async () => upgradeButton.click());
     const confirm = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
       .find((button) => button.textContent === "确认更新")!;
+    assert.ok(confirm, "npm-global upgrade must require an explicit confirmation");
+    assert.ok(dom.window.document.body.textContent?.includes("你的 Pi CLI 也会被升级"));
     await act(async () => { confirm.click(); await Promise.resolve(); });
-    assert.equal(adoptRequested, true, "adoption must be requested for a user-owned Pi");
+    assert.equal(updateRequested, "1.1.0");
   } finally {
     await act(async () => root.unmount());
     restoreApi();

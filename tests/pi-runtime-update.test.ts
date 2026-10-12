@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { checkPiRuntimeUpdate, comparePiVersions, PI_RUNTIME_PACKAGE, resolveManagedPiInstall, resolveNpmCli, switchManagedPiVersion } from "../src/server/pi-runtime-update";
+import { checkPiRuntimeUpdate, classifyPiEntry, comparePiVersions, PI_RUNTIME_PACKAGE, resolveNpmCli, switchManagedPiVersion } from "../src/server/pi-runtime-update";
 
 test("Pi Runtime version comparison handles release versions", () => {
   assert.equal(comparePiVersions("1.0.1", "1.0.1"), 0);
@@ -26,18 +26,18 @@ test("Pi Runtime update check is read-only and reports the npm latest version", 
   assert.match(result.checkedAt, /^\d{4}-\d{2}-\d{2}T/);
 });
 
-test("managed install resolution only claims entries inside a managed releases root", async () => {
+test("classifyPiEntry routes managed, npm-global, and custom entries to safe update paths", async () => {
   const home = await mkdtemp(join(tmpdir(), "pi-chat-managed-res-"));
   try {
     const managedRoot = join(home, ".pi", "agent", "install");
-    const entry = join(managedRoot, "releases", "1.1.0", "node_modules", "@earendil-works", "pi-coding-agent", "dist", "rpc-entry.js");
-    await mkdir(join(managedRoot, "releases", "1.1.0"), { recursive: true });
     const env = { USERPROFILE: home, HOME: home } as NodeJS.ProcessEnv;
-    const inside = resolveManagedPiInstall(entry, env, join(home, "app"));
-    assert.ok(inside);
-    assert.equal(inside.root, managedRoot);
-    const outside = resolveManagedPiInstall("C:\\ elsewhere \\npm\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\rpc-entry.js", env, join(home, "app"));
-    assert.equal(outside, null, "a user-owned npm install must never be claimed for in-place updates");
+    const managed = classifyPiEntry(join(managedRoot, "releases", "1.1.0", "node_modules", "@earendil-works", "pi-coding-agent", "dist", "rpc-entry.js"), env);
+    assert.deepEqual(managed, { source: "managed", managedRoot });
+    const npmGlobal = classifyPiEntry("C:\\Users\\opjoy\\AppData\\Roaming\\npm\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\rpc-entry.js", env);
+    assert.deepEqual(npmGlobal, { source: "npm-global", managedRoot: null });
+    const custom = classifyPiEntry("D:\\custom\\pi\\dist\\rpc-entry.js", env);
+    assert.deepEqual(custom, { source: "other", managedRoot: null }, "an explicit custom entry must never be modified");
+    assert.deepEqual(classifyPiEntry(null, env), { source: "other", managedRoot: null });
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 

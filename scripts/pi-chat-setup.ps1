@@ -32,7 +32,9 @@ if ($env:PI_CHAT_SETUP_SKIP_RELEASE_DOWNLOAD -eq "1") { $SkipReleaseDownload = $
 $temporary = Join-Path ([IO.Path]::GetTempPath()) ("pi-chat-setup-" + [guid]::NewGuid().ToString("N"))
 $appRoot = Join-Path $InstallRoot "app"
 $nodeRoot = Join-Path $InstallRoot "runtime\node"
-$managedRoot = Join-Path $InstallRoot "runtime\managed-pi"
+# Pi's own managed-install layout: shares ~/.pi/agent state with the user's CLI
+# without version skew, and is understood by Pi's native launcher as well.
+$managedRoot = Join-Path $env:USERPROFILE ".pi\agent\install"
 $configRoot = Join-Path $InstallRoot "config"
 
 function Fail([string]$Message) {
@@ -221,14 +223,12 @@ try {
   $managedPath = $null
   if ($existing) {
     Log ("检测到本机 Pi " + $existing.version + "：" + $existing.entry)
-    # The managed Runtime is the product default: isolated from the user's Pi,
-    # always updatable in-app. The user can still explicitly keep their own Pi.
-    $installManaged = $true
+    $useExisting = $true
     if (-not $NonInteractive -and $env:PI_CHAT_NONINTERACTIVE -ne "1") {
-      $answer = Read-Host "推荐安装 PiChat 管理的最新 Pi Runtime（与本机 Pi 隔离、支持应用内更新）。输入 Y 安装受管 Pi，输入 n 沿用本机 Pi [Y/n]"
-      $installManaged = $answer -notmatch '^(n|no|否)$'
+      $answer = Read-Host "是否使用检测到的本机 Pi？[Y/n]"
+      $useExisting = $answer -notmatch '^(n|no|否)$'
     }
-    if ($installManaged) { $managedPath = InstallManagedPi } else { Log "沿用本机已安装的 Pi。" }
+    if (-not $useExisting) { $managedPath = InstallManagedPi }
   } else {
     Log "未检测到可用 Pi，将安装 PiChat 管理的 Pi Runtime。"
     if (-not $SkipPiInstall) { $managedPath = InstallManagedPi }
