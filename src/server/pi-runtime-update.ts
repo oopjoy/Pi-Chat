@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, rename, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { PiRuntimeUpdateCheck } from "../shared/pi-runtime-update.js";
 
@@ -114,9 +114,27 @@ export async function assertPiVersionExists(version: string): Promise<void> {
 export async function resolveNpmCli(projectRoot: string = process.cwd()): Promise<string | null> {
   const bundled = join(resolve(projectRoot, "..", "runtime", "node"), "node_modules", "npm", "bin", "npm-cli.js");
   if (existsSync(bundled)) return bundled;
+  // npm bundled inside the Node.js installation (the common Windows layout):
+  // the npm command shim sits next to node.exe, with npm-cli.js beside it.
+  const searchPath = process.env.PATH || (process.platform === "win32" ? process.env.Path : "") || "";
+  for (const rawEntry of searchPath.split(delimiter)) {
+    const pathEntry = rawEntry.replace(/^"(.*)"$/, "$1").trim();
+    if (!pathEntry) continue;
+    const shimName = process.platform === "win32" ? "npm.cmd" : "npm";
+    if (!existsSync(join(pathEntry, shimName))) continue;
+    const nodeBundledCli = join(pathEntry, "node_modules", "npm", "bin", "npm-cli.js");
+    if (existsSync(nodeBundledCli)) return nodeBundledCli;
+  }
+  // npm installed as a true global package (its own node_modules root).
+  const appData = process.env.APPDATA;
+  if (appData) {
+    const appDataCli = join(appData, "npm", "node_modules", "npm", "bin", "npm-cli.js");
+    if (existsSync(appDataCli)) return appDataCli;
+  }
   try {
+    // Windows .cmd shims require a shell; npm root -g only prints a path.
     const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
-    const { stdout } = await execFileAsync(npmCmd, ["root", "-g"], { windowsHide: true, maxBuffer: 1024 * 1024 });
+    const { stdout } = await execFileAsync(npmCmd, ["root", "-g"], { shell: process.platform === "win32", windowsHide: true, maxBuffer: 1024 * 1024 });
     const globalRoot = stdout.trim().split(/\r?\n/).pop()?.trim();
     if (globalRoot) {
       const globalCli = join(globalRoot, "npm", "bin", "npm-cli.js");

@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { checkPiRuntimeUpdate, comparePiVersions, PI_RUNTIME_PACKAGE, resolveManagedPiInstall, switchManagedPiVersion } from "../src/server/pi-runtime-update";
+import { checkPiRuntimeUpdate, comparePiVersions, PI_RUNTIME_PACKAGE, resolveManagedPiInstall, resolveNpmCli, switchManagedPiVersion } from "../src/server/pi-runtime-update";
 
 test("Pi Runtime version comparison handles release versions", () => {
   assert.equal(comparePiVersions("1.0.1", "1.0.1"), 0);
@@ -53,6 +53,12 @@ test("managed pointer switch is atomic and refuses uninstalled versions", async 
     await switchManagedPiVersion(managedRoot, "2.0.0");
     assert.equal(await import("node:fs/promises").then(m => m.readFile(join(managedRoot, "current-version"), "utf8")), "2.0.0");
   } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("resolveNpmCli finds a usable npm-cli.js on this machine", { skip: process.platform !== "win32" }, async () => {
+  const cli = await resolveNpmCli("D:\\nonexistent-pi-chat-app");
+  assert.ok(cli, "expected a usable npm-cli.js beside the Node.js installation");
+  assert.match(cli, /npm-cli\.js$/);
 });
 
 test("Pi Runtime update check fails closed on malformed registry metadata", async () => {
