@@ -12,7 +12,7 @@ Pi Chat 连接本机 Pi RPC，负责聊天展示、Session 浏览、流式输出
 
 ### 一键 Setup
 
-从 GitHub Release 下载并完整解压 `pi-chat-windows-*.zip`，再运行其中的 `pi-chat-setup.cmd`。Setup 会在当前用户目录安装 Pi Chat 自带的 Node.js Runtime，检测本机已有的 Pi，并在安装前询问是否复用它：
+从 GitHub Release 下载并运行 `pi-chat-setup.exe`。Setup 会在当前用户目录安装 Pi Chat 自带的 Node.js Runtime，检测本机已有的 Pi，并在安装前询问是否复用它。若系统阻止运行 `.exe`，也可以下载并完整解压 `pi-chat-windows-*.zip`，运行其中的 `pi-chat-setup.cmd`：
 
 - 已有可兼容 Pi：默认使用本机 Pi，不修改或升级它；
 - 没有 Pi，或明确选择不复用：安装隔离的 PiChat managed Runtime；

@@ -17,7 +17,7 @@ Run every item from a clean, isolated staging directory. Do not replace the live
 
 ## Windows Package
 
-- [ ] Run `pi-chat-setup.cmd` from a fully extracted release ZIP on a clean Windows user profile; confirm it installs the bundled Node.js Runtime, detects an existing Pi before choosing a Runtime, and opens the browser without requiring global Node/npm.
+- [ ] Run the standalone `pi-chat-setup.exe` on a clean Windows user profile; confirm it installs the bundled Node.js Runtime, detects an existing Pi before choosing a Runtime, and opens the browser without requiring global Node/npm. Keep the ZIP's `pi-chat-setup.cmd` fallback tested as well.
 - [ ] Confirm choosing an existing compatible Pi does not modify or upgrade that installation; confirm declining it installs the isolated PiChat managed Runtime and persists only the managed-root launch preference.
 - [ ] Build the ZIP from the verified staged artifact, never from live `dist/`; the release packaging command must reject live `dist/`, canonical aliases, and overlapping staging/output directories.
 - [ ] Confirm the ZIP contains the root launchers, `resources/icons/pi-chat.ico`, `scripts/pi-chat-launch-process.ps1`, and `scripts/pi-chat-port-ready.ps1`; these launcher dependencies must also be included in the build fingerprint.

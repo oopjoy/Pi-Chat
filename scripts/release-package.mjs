@@ -183,11 +183,13 @@ export async function packageRelease({
   const outputPath = join(output, finalZipName);
   const checksumPath = `${outputPath}.sha256`;
   const manifestPath = `${outputPath}.manifest.json`;
+  const setupPath = join(output, "pi-chat-setup.exe");
   await mkdir(output, { recursive: true });
   await Promise.all([
     rm(outputPath, { force: true }),
     rm(checksumPath, { force: true }),
     rm(manifestPath, { force: true }),
+    ...(process.platform === "win32" ? [rm(setupPath, { force: true })] : []),
   ]);
   await assertCleanWorktree(root);
   await access(join(stage, "build-identity.json"));
@@ -214,6 +216,15 @@ export async function packageRelease({
     // Validate the actual packaged tree, not just the identity file in staging.
     await assertRuntimeFiles(packageRoot);
     await createArchive({ packageRootName, outputPath, packageStage });
+    const setupScript = join(root, "scripts", "build-setup-exe.ps1");
+    if (process.platform === "win32" && await access(setupScript).then(() => true).catch(() => false)) {
+      await execFile("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", setupScript, "-Output", setupPath], {
+        cwd: root,
+        windowsHide: true,
+        maxBuffer: 1024 * 1024,
+      });
+      await access(setupPath);
+    }
     const { checksum } = await writePortableChecksum({
       zipPath: outputPath,
       checksumPath,
@@ -230,12 +241,13 @@ export async function packageRelease({
       checksum,
     });
     await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
-    return { outputPath, checksumPath, manifestPath, manifest };
+    return { outputPath, checksumPath, manifestPath, setupPath: process.platform === "win32" && await access(setupPath).then(() => true).catch(() => false) ? setupPath : undefined, manifest };
   } catch (error) {
     await Promise.all([
       rm(outputPath, { force: true }),
       rm(checksumPath, { force: true }),
       rm(manifestPath, { force: true }),
+      ...(process.platform === "win32" ? [rm(setupPath, { force: true })] : []),
     ]);
     throw error;
   } finally {

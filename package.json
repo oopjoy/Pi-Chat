@@ -83,7 +83,8 @@
     "benchmark:pi-runtime-startup": "node --import tsx benchmarks/run-pi-runtime-startup-bench.mts",
     "test:e2e": "npm run build && playwright test",
     "test:e2e:ui": "npm run build && playwright test --ui",
-    "install:shortcuts": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-shortcuts.ps1"
+    "install:shortcuts": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-shortcuts.ps1",
+    "build:setup": "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/build-setup-exe.ps1"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "1.0.1",
