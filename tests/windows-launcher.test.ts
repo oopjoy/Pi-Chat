@@ -173,6 +173,7 @@ test("shortcut installer supports checkout paths with shell metacharacters", { s
   const sandbox = await mkdtemp(join(tmpdir(), "pi-chat-shortcuts-"));
   const portableRoot = join(sandbox, "Pi Chat's & (portable)");
   const desktop = join(sandbox, "Desktop");
+  const startMenu = join(sandbox, "Start Menu", "Programs", "Pi Chat");
   try {
     await mkdir(join(portableRoot, "scripts"), { recursive: true });
     await mkdir(join(portableRoot, "resources", "icons"), { recursive: true });
@@ -185,21 +186,25 @@ test("shortcut installer supports checkout paths with shell metacharacters", { s
       "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
       "-File", join(portableRoot, "scripts", "install-shortcuts.ps1"),
       "-DesktopPath", desktop,
+      "-StartMenuPath", startMenu,
     ], { cwd: portableRoot, stdio: "pipe" });
     const inspect = [
       "$shell = New-Object -ComObject WScript.Shell",
-      "$names = @('Pi Chat.lnk', 'Pi Chat Web.lnk')",
-      "$names | ForEach-Object {",
-      "  $shortcut = $shell.CreateShortcut((Join-Path $env:PI_CHAT_TEST_DESKTOP $_))",
-      "  [pscustomobject]@{ Name = $_; TargetPath = $shortcut.TargetPath; Arguments = $shortcut.Arguments; WorkingDirectory = $shortcut.WorkingDirectory; IconLocation = $shortcut.IconLocation }",
+      "$locations = @($env:PI_CHAT_TEST_DESKTOP, $env:PI_CHAT_TEST_START_MENU)",
+      "$locations | ForEach-Object {",
+      "  $location = $_",
+      "  @('Pi Chat.lnk', 'Pi Chat Web.lnk') | ForEach-Object {",
+      "    $shortcut = $shell.CreateShortcut((Join-Path $location $_))",
+      "    [pscustomobject]@{ Location = $location; Name = $_; TargetPath = $shortcut.TargetPath; Arguments = $shortcut.Arguments; WorkingDirectory = $shortcut.WorkingDirectory; IconLocation = $shortcut.IconLocation }",
+      "  }",
       "} | ConvertTo-Json -Compress",
     ].join("; ");
     const output = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", inspect], {
       encoding: "utf8",
-      env: { ...process.env, PI_CHAT_TEST_DESKTOP: desktop },
+      env: { ...process.env, PI_CHAT_TEST_DESKTOP: desktop, PI_CHAT_TEST_START_MENU: startMenu },
     });
     const shortcuts = JSON.parse(output) as Array<Record<string, string>>;
-    assert.equal(shortcuts.length, 2);
+    assert.equal(shortcuts.length, 4);
     assert.match(shortcuts[0].TargetPath, /powershell\.exe$/i);
     assert.match(shortcuts[0].Arguments, /start-pi-chat-ui\.ps1" pwa$/i);
     assert.match(shortcuts[1].Arguments, /start-pi-chat-ui\.ps1" web$/i);

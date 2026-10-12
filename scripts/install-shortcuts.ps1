@@ -1,5 +1,6 @@
 param(
-  [string]$DesktopPath = [Environment]::GetFolderPath('DesktopDirectory')
+  [string]$DesktopPath = [Environment]::GetFolderPath('DesktopDirectory'),
+  [string]$StartMenuPath = ""
 )
 
 $ErrorActionPreference = 'Stop'
@@ -16,6 +17,10 @@ if ([string]::IsNullOrWhiteSpace($DesktopPath)) {
   throw 'Windows Desktop directory could not be resolved.'
 }
 [void](New-Item -ItemType Directory -Force -Path $DesktopPath)
+if ([string]::IsNullOrWhiteSpace($StartMenuPath)) {
+  $StartMenuPath = Join-Path ([Environment]::GetFolderPath('StartMenu')) 'Programs\Pi Chat'
+}
+[void](New-Item -ItemType Directory -Force -Path $StartMenuPath)
 
 $powershellPath = Join-Path $PSHOME 'powershell.exe'
 $shell = New-Object -ComObject WScript.Shell
@@ -27,16 +32,18 @@ function Install-PiChatShortcut {
     [Parameter(Mandatory = $true)][string]$Description
   )
 
-  $shortcutPath = Join-Path $DesktopPath ($Name + '.lnk')
-  $shortcut = $shell.CreateShortcut($shortcutPath)
-  $shortcut.TargetPath = $powershellPath
-  $shortcut.Arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $launcherUi + '" ' + $Mode
-  $shortcut.WorkingDirectory = $project
-  $shortcut.WindowStyle = 7
-  $shortcut.IconLocation = $iconPath + ',0'
-  $shortcut.Description = $Description
-  $shortcut.Save()
-  Write-Host "Installed $shortcutPath"
+  foreach ($destination in @($DesktopPath, $StartMenuPath)) {
+    $shortcutPath = Join-Path $destination ($Name + '.lnk')
+    $shortcut = $shell.CreateShortcut($shortcutPath)
+    $shortcut.TargetPath = $powershellPath
+    $shortcut.Arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $launcherUi + '" ' + $Mode
+    $shortcut.WorkingDirectory = $project
+    $shortcut.WindowStyle = 7
+    $shortcut.IconLocation = $iconPath + ',0'
+    $shortcut.Description = $Description
+    $shortcut.Save()
+    Write-Host "Installed $shortcutPath"
+  }
 }
 
 Install-PiChatShortcut -Name 'Pi Chat' -Mode 'pwa' -Description 'Open Pi Chat as an Edge app'

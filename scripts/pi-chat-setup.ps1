@@ -49,6 +49,38 @@ function EnsureDirectory([string]$Path) {
   New-Item -ItemType Directory -Force -Path $Path | Out-Null
 }
 
+function Test-PiChatRunning {
+  if ($env:PI_CHAT_SETUP_SKIP_RUNNING_CHECK -eq "1") { return $false }
+  $rootPattern = [regex]::Escape([IO.Path]::GetFullPath($InstallRoot).TrimEnd('\\'))
+  try {
+    $processes = @(Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" -ErrorAction Stop)
+    foreach ($process in $processes) {
+      if ([string]$process.CommandLine -match $rootPattern) { return $true }
+    }
+  } catch {
+    Log ("无法读取 Node.js 进程列表，将继续检查 30170 端口：" + $_.Exception.Message)
+  }
+  try {
+    $listeners = @(Get-NetTCPConnection -LocalPort 30170 -State Listen -ErrorAction SilentlyContinue)
+    if ($listeners.Count -gt 0) { return $true }
+  } catch {
+    # Get-NetTCPConnection is unavailable on some older Windows builds.
+  }
+  return $false
+}
+
+function InstallShortcuts {
+  $shortcutScript = Join-Path $appRoot "scripts\\install-shortcuts.ps1"
+  if (-not (Test-Path -LiteralPath $shortcutScript -PathType Leaf)) {
+    throw "安装后的快捷方式脚本缺失。"
+  }
+  $desktop = [Environment]::GetFolderPath('DesktopDirectory')
+  $startMenu = Join-Path ([Environment]::GetFolderPath('StartMenu')) 'Programs\\Pi Chat'
+  Log "创建桌面和开始菜单快捷方式"
+  & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $shortcutScript -DesktopPath $desktop -StartMenuPath $startMenu
+  if ($LASTEXITCODE -ne 0) { throw "Pi Chat 快捷方式创建失败。" }
+}
+
 function Get-ReleaseAsset {
   $uri = if ($ReleaseTag -eq "latest") {
     "https://api.github.com/repos/$repo/releases/latest"
@@ -104,6 +136,7 @@ function InstallApp($asset) {
     Set-Content -LiteralPath (Join-Path $appRoot "package.json") -Value ($packageJson | ConvertTo-Json -Depth 10)
     Copy-Item -LiteralPath (Join-Path $projectRoot "scripts") -Destination (Join-Path $appRoot "scripts") -Recurse
     Copy-Item -LiteralPath (Join-Path $projectRoot "dist") -Destination (Join-Path $appRoot "dist") -Recurse
+    Copy-Item -LiteralPath (Join-Path $projectRoot "resources") -Destination (Join-Path $appRoot "resources") -Recurse -ErrorAction SilentlyContinue
     Copy-Item -LiteralPath (Join-Path $projectRoot "pi-chat-launch.cmd") -Destination (Join-Path $appRoot "pi-chat-launch.cmd")
     Copy-Item -LiteralPath (Join-Path $projectRoot "start-pi-chat.cmd") -Destination (Join-Path $appRoot "start-pi-chat.cmd") -ErrorAction SilentlyContinue
     Copy-Item -LiteralPath (Join-Path $projectRoot "start-pi-chat-ui.ps1") -Destination (Join-Path $appRoot "start-pi-chat-ui.ps1") -ErrorAction SilentlyContinue
@@ -175,6 +208,9 @@ function InstallManagedPi {
 try {
   EnsureDirectory $InstallRoot
   EnsureDirectory $temporary
+  if (Test-PiChatRunning) {
+    throw "检测到 Pi Chat 正在运行（端口 30170 或安装目录中的 Node.js 进程）。请先关闭 Pi Chat 后再安装或升级。"
+  }
   Log ("准备安装 Pi Chat 到 " + $InstallRoot)
   InstallNode
   $asset = if ($SkipReleaseDownload) { @{ Tag = "local-test" } } else { Get-ReleaseAsset }
@@ -202,6 +238,7 @@ try {
   }
   $launcher = Join-Path $appRoot "pi-chat-launch.cmd"
   if (-not (Test-Path $launcher)) { throw "安装后的 Pi Chat 启动器缺失。" }
+  InstallShortcuts
   Log ("安装完成：" + $asset.Tag)
   Log "首次启动将打开浏览器，并继续使用本机 Pi 或 PiChat 管理的 Pi Runtime。"
   if (-not $SkipLaunch) { Start-Process -FilePath $launcher -WorkingDirectory $appRoot }
