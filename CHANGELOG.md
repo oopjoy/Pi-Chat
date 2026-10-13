@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Desktop usability fixes
+
+- Preserve Windows path separators and command backslashes in tool summaries; long paths retain their filename instead of truncating it away.
+- Return keyboard focus to the process summary when collapsing from its footer, without scrolling a retired or reopened card on a later frame.
+- Ignore superseded resource scans when switching Settings categories; scan failures no longer claim that no resources are installed.
+- Give npm-command Copy explicit success, unavailable-clipboard and permission-error feedback while keeping the complete command selectable; copying no longer clears an unrelated upgrade error.
+- Retire the previous Pi update action while rechecking and clarify that busy conversations reject an update rather than automatically scheduling it.
+- Document the current Windows desktop-only maintenance scope; retain existing narrow-layout code without expanding mobile support.
+
 ## 0.5.2
 
 ### Productization

@@ -29,6 +29,12 @@ Closing a browser window is distinct from an SSE/EventSource drop. An SSE/EventS
 
 ## Hard product boundaries (0.5.x)
 
+Current maintenance targets Windows desktop browsers and PWA windows. Desktop
+resizing and split-screen usability remain in scope; mobile/tablet layouts,
+touch-specific interactions and mobile-browser adaptation are not product
+commitments. Existing narrow-layout code and regression tests are retained, not
+expanded into a mobile product or removed as an unrelated cleanup.
+
 The status of each current capability is tracked in [`feature-surface.md`](feature-surface.md). A capability marked removed there must not retain a hidden route, browser wrapper, shared type, or feature-specific regression test.
 
 ### In scope

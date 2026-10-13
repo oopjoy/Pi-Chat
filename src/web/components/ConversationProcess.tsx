@@ -60,23 +60,25 @@ function parseToolArguments(argumentsText: string | undefined): Record<string, u
   }
 }
 
-function compactToolValue(value: unknown, limit = 72): string | undefined {
+function compactToolValue(value: unknown, limit?: number): string | undefined {
   if (typeof value !== "string") return undefined;
-  const compact = value.replace(/\\s+/g, " ").trim();
+  const compact = value.replace(/\s+/g, " ").trim();
   if (!compact) return undefined;
-  return compact.length > limit ? `${compact.slice(0, limit - 1)}…` : compact;
+  return limit !== undefined && compact.length > limit ? `${compact.slice(0, limit - 1)}…` : compact;
 }
 
 function compactToolPath(value: unknown, limit = 56): string | undefined {
-  const compact = compactToolValue(value, limit);
+  // Preserve the filename before applying the display bound to a long path.
+  const compact = compactToolValue(value);
   if (!compact) return undefined;
-  const normalized = compact.replaceAll("\\\\", "/");
+  const normalized = compact.replaceAll("\\", "/");
   if (normalized.length <= limit) return normalized;
   const parts = normalized.split("/");
   let result = parts.at(-1) || normalized;
-  for (let index = parts.length - 2; index >= 0 && result.length + parts[index]!.length + 4 <= limit; index -= 1)
+  if (result.length > limit - 2) return `…${result.slice(-(limit - 1))}`;
+  for (let index = parts.length - 2; index >= 0 && result.length + parts[index]!.length + 3 <= limit; index -= 1)
     result = `${parts[index]}/${result}`;
-  return result.length > limit ? `…${result.slice(-(limit - 1))}` : result;
+  return `…/${result}`;
 }
 
 /** One-line, source-oriented context for an individual tool row. */
@@ -147,8 +149,13 @@ function PersistentDetails({ disclosureKey, className, children, footerCollapse 
   };
   const collapse = () => {
     const details = detailsRef.current;
+    // Move focus before the focused footer button is removed. Never defer this
+    // focus change: a later frame may already belong to another conversation.
+    details?.querySelector<HTMLElement>(":scope > summary")?.focus({ preventScroll: true });
     setDisclosure(false);
-    const revealSummary = () => details?.scrollIntoView?.({ block: "nearest" });
+    const revealSummary = () => {
+      if (details?.isConnected && !details.open) details.scrollIntoView?.({ block: "nearest" });
+    };
     if (typeof window.requestAnimationFrame === "function") window.requestAnimationFrame(revealSummary);
     else revealSummary();
   };

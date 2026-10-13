@@ -1038,6 +1038,7 @@ details.conversation-process { display: block; padding: 0; }
 .about-notice.is-warning, .about-update.is-update { border-color: color-mix(in srgb, var(--warning, #b36b00), transparent 55%); background: color-mix(in srgb, var(--warning, #b36b00), transparent 92%); }
 .about-update.is-current { border-color: color-mix(in srgb, var(--success, #18864b), transparent 60%); background: color-mix(in srgb, var(--success, #18864b), transparent 94%); }
 .about-update span { color: var(--muted); }
+.about-update-command { overflow-wrap: anywhere; white-space: pre-wrap; user-select: text; }
 .about-update-confirm { display: grid; gap: 6px; margin-top: 4px; }
 .about-update-confirm .about-primary-action, .about-update-confirm .about-link-button { justify-self: start; }
 .about-update a, .about-link-button { color: var(--accent); font: inherit; font-size: 11px; font-weight: 700; text-decoration: none; }

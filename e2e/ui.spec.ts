@@ -487,6 +487,44 @@ test("Pi connection settings detects without restarting and keeps the unsent dra
   await expect(input).toHaveValue("keep my unsent draft");
 });
 
+test("Pi update command Copy reports unavailable clipboard and recovers without installing", { tag: "@desktop-only" }, async ({ page }) => {
+  const command = "npm install -g @earendil-works/pi-coding-agent@1.1.0";
+  let updateRequests = 0;
+  await page.route("**/api/runtime/update-check", route => route.fulfill({ json: {
+    packageName: "@earendil-works/pi-coding-agent", currentVersion: "1.0.1", latestVersion: "1.1.0",
+    registryUrl: "https://registry.npmjs.org/x", checkedAt: "2026-10-12T00:00:00.000Z",
+    updateAvailable: true, updateMode: "npm-global",
+  } }));
+  await page.route("**/api/runtime/update", async route => {
+    updateRequests++;
+    await route.fulfill({ status: 409, json: { error: "E2E never installs a real Pi" } });
+  });
+  await page.setViewportSize({ width: 1024, height: 768 });
+  await openInitialSession(page);
+  await page.getByRole("button", { name: "打开设置", exact: true }).click();
+  await page.getByRole("button", { name: "关于", exact: true }).click();
+  const panel = page.locator(".about-panel");
+  await panel.getByRole("button", { name: "检查 Pi 内核更新", exact: true }).click();
+  const copy = panel.getByRole("button", { name: "复制 npm 命令", exact: true });
+  await expect(copy).toBeVisible();
+  const originalClipboard = await page.evaluateHandle(() => navigator.clipboard);
+  await page.evaluate(() => Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined }));
+  await copy.click();
+  await expect(panel.getByRole("alert")).toContainText("不支持剪贴板写入");
+  await expect(panel.locator(".about-update-command")).toHaveText(command);
+  expect(await panel.locator(".about-update-command").evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await page.evaluate(clipboard => Object.defineProperty(navigator, "clipboard", { configurable: true, value: clipboard }), originalClipboard);
+  await copy.click();
+  await expect(panel.getByRole("status")).toHaveText("npm 命令已复制");
+  await expect(panel.getByRole("alert")).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(command);
+  await panel.getByRole("button", { name: "升级本机 Pi 到 v1.1.0", exact: true }).click();
+  await panel.getByRole("button", { name: "取消", exact: true }).click();
+  await expect(panel.getByRole("button", { name: "确认更新", exact: true })).toHaveCount(0);
+  expect(updateRequests).toBe(0);
+  await originalClipboard.dispose();
+});
+
 test("Provider disclosure exposes native desktop keyboard semantics", { tag: "@desktop-only" }, async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "设置" }).click();
@@ -773,6 +811,7 @@ test("Files and Changes sidebar previews and explicitly opens recent mutations w
   await expect(diff).toHaveAttribute("inert", "");
   await process.getByRole("button", { name: "收起过程" }).click();
   await expect(process).not.toHaveAttribute("open", "");
+  await expect(process.locator(":scope > summary")).toBeFocused();
 });
 
 test("assistant local-file links use the Session-addressed opener while Web links stay external", { tag: "@desktop-only" }, async ({ page }) => {

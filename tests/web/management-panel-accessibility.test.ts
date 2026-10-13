@@ -31,6 +31,38 @@ function panelProps(models: Array<{ id: string; name: string; provider: string; 
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: Error) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+async function settingsFixture() {
+  const { dom } = installAppDom();
+  const { api } = await import("../../src/web/api");
+  const restoreApi = captureApiSnapshot(api);
+  const { createRoot } = await import("react-dom/client");
+  const { ManagementPanel } = await import("../../src/web/components/ManagementPanel");
+  const root = createRoot(dom.window.document.getElementById("root")!);
+  await act(async () => root.render(createElement(ManagementPanel, panelProps([]))));
+  return {
+    dom, api,
+    button(label: string) {
+      const button = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent?.trim() === label);
+      assert.ok(button, `missing button: ${label}`);
+      return button;
+    },
+    async close() { await act(async () => root.unmount()); restoreApi(); },
+  };
+}
+
+const availableNpmUpdate = {
+  packageName: "@earendil-works/pi-coding-agent", currentVersion: "1.0.1", latestVersion: "1.1.0",
+  registryUrl: "https://registry.npmjs.org/x", checkedAt: "2026-10-12T00:00:00.000Z",
+  updateAvailable: true, updateMode: "npm-global" as const,
+};
+
 test("Settings navigation and Provider disclosure use native non-nested controls", async () => {
   const { dom } = installAppDom();
   const { createRoot } = await import("react-dom/client");
@@ -193,6 +225,111 @@ test("Pi Runtime update upgrades an npm-global Pi with a manual-command fallback
     await act(async () => root.unmount());
     restoreApi();
   }
+});
+
+test("Settings resource loading ignores late failures from a previous category", async () => {
+  const f = await settingsFixture();
+  const skills = deferred<Awaited<ReturnType<typeof f.api.skills>>>();
+  const extensions = deferred<Awaited<ReturnType<typeof f.api.extensions>>>();
+  f.api.skills = () => skills.promise;
+  f.api.extensions = () => extensions.promise;
+  try {
+    await act(async () => f.button("Skills").click());
+    await act(async () => f.button("Extensions").click());
+    await act(async () => skills.reject(new Error("obsolete Skills failure")));
+    assert.ok(f.dom.window.document.querySelector(".resource-error") === null, "the current category must not display an obsolete error");
+    assert.match(f.dom.window.document.querySelector(".settings-resource-list")?.textContent || "", /正在扫描/);
+    await act(async () => extensions.resolve({ resources: [], diagnostics: [] }));
+    assert.match(f.dom.window.document.querySelector(".settings-resource-list")?.textContent || "", /当前没有已启用的 Extensions/);
+  } finally { await f.close(); }
+});
+
+test("Settings revisiting a resource category cannot restore an older scan", async () => {
+  const f = await settingsFixture();
+  const first = deferred<Awaited<ReturnType<typeof f.api.skills>>>();
+  const second = deferred<Awaited<ReturnType<typeof f.api.skills>>>();
+  let requests = 0;
+  f.api.skills = () => (++requests === 1 ? first.promise : second.promise);
+  const skill = { id: "example", name: "Old scan", description: "", pathLabel: "skills/example", source: "user" as const, enabled: true, content: "" };
+  try {
+    await act(async () => f.button("Skills").click());
+    await act(async () => f.button("外观").click());
+    await act(async () => f.button("Skills").click());
+    await act(async () => second.resolve({ resources: [{ ...skill, name: "New scan" }], diagnostics: [] }));
+    await act(async () => first.resolve({ resources: [skill], diagnostics: [] }));
+    const list = f.dom.window.document.querySelector(".settings-resource-list")!;
+    assert.match(list.textContent || "", /New scan/);
+    assert.doesNotMatch(list.textContent || "", /Old scan/);
+  } finally { await f.close(); }
+});
+
+test("Settings resource errors are not presented as an empty installed inventory", async () => {
+  const f = await settingsFixture();
+  f.api.skills = async () => { throw new Error("Skills scan failed"); };
+  try {
+    await act(async () => f.button("Skills").click());
+    assert.match(f.dom.window.document.querySelector(".resource-error")?.textContent || "", /Skills scan failed/);
+    assert.doesNotMatch(f.dom.window.document.querySelector(".settings-resource-list")?.textContent || "", /当前没有已启用/);
+  } finally { await f.close(); }
+});
+
+test("npm command Copy exposes unavailable clipboard and reports success on retry", async () => {
+  const f = await settingsFixture();
+  f.api.checkPiRuntimeUpdate = async () => availableNpmUpdate;
+  Object.defineProperty(f.dom.window.navigator, "clipboard", { configurable: true, value: undefined });
+  try {
+    await act(async () => f.button("关于").click());
+    await act(async () => f.button("检查 Pi 内核更新").click());
+    await act(async () => f.button("复制 npm 命令").click());
+    assert.match(f.dom.window.document.querySelector(".resource-error")?.textContent || "", /不支持剪贴板|复制失败/);
+    const writes: string[] = [];
+    Object.defineProperty(f.dom.window.navigator, "clipboard", { configurable: true, value: { writeText: async (text: string) => { writes.push(text); } } });
+    await act(async () => f.button("复制 npm 命令").click());
+    assert.deepEqual(writes, ["npm install -g @earendil-works/pi-coding-agent@1.1.0"]);
+    assert.match(f.dom.window.document.querySelector('[role="status"]')?.textContent || "", /已复制/);
+    assert.ok(f.dom.window.document.querySelector(".resource-error") === null, "successful copying clears the copy error");
+  } finally { await f.close(); }
+});
+
+test("npm command Copy preserves an upgrade error and recovers from permission denial", async () => {
+  const f = await settingsFixture();
+  f.api.checkPiRuntimeUpdate = async () => availableNpmUpdate;
+  f.api.updatePiRuntime = async () => { throw new Error("测试：对话运行中，更新被拒绝"); };
+  let denied = true;
+  Object.defineProperty(f.dom.window.navigator, "clipboard", { configurable: true, value: { writeText: async () => { if (denied) throw new Error("NotAllowedError"); } } });
+  try {
+    await act(async () => f.button("关于").click());
+    await act(async () => f.button("检查 Pi 内核更新").click());
+    await act(async () => f.button("升级本机 Pi 到 v1.1.0").click());
+    await act(async () => f.button("确认更新").click());
+    await act(async () => f.button("复制 npm 命令").click());
+    assert.match(f.dom.window.document.querySelector(".about-panel")?.textContent || "", /NotAllowedError/);
+    assert.equal(f.dom.window.document.querySelector(".about-update-command")?.textContent, "npm install -g @earendil-works/pi-coding-agent@1.1.0");
+    denied = false;
+    await act(async () => f.button("复制 npm 命令").click());
+    assert.match(f.dom.window.document.querySelector('[role="status"]')?.textContent || "", /已复制/);
+    assert.match(f.dom.window.document.querySelector(".resource-error")?.textContent || "", /更新被拒绝/);
+    assert.doesNotMatch(f.dom.window.document.querySelector(".about-panel")?.textContent || "", /NotAllowedError/);
+  } finally { await f.close(); }
+});
+
+test("checking Pi updates again retires the previous confirmation and upgrade button", async () => {
+  const f = await settingsFixture();
+  f.api.checkPiRuntimeUpdate = async () => availableNpmUpdate;
+  const recheck = deferred<Awaited<ReturnType<typeof f.api.checkPiRuntimeUpdate>>>();
+  let updates = 0;
+  f.api.updatePiRuntime = async () => { updates++; };
+  try {
+    await act(async () => f.button("关于").click());
+    await act(async () => f.button("检查 Pi 内核更新").click());
+    await act(async () => f.button("升级本机 Pi 到 v1.1.0").click());
+    f.api.checkPiRuntimeUpdate = () => recheck.promise;
+    await act(async () => f.button("检查 Pi 内核更新").click());
+    assert.equal(f.dom.window.document.querySelectorAll(".about-update button").length, 0);
+    await act(async () => recheck.resolve({ ...availableNpmUpdate, updateAvailable: false }));
+    assert.equal(f.dom.window.document.querySelectorAll(".about-update button").length, 0);
+    assert.equal(updates, 0, "checking metadata never dispatches an upgrade");
+  } finally { await f.close(); }
 });
 
 test("Provider editor preserves the stable source key when saving an edited model", async () => {

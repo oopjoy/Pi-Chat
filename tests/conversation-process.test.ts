@@ -12,7 +12,7 @@ import {
   shouldFoldCoordinationText,
 } from "../src/web/components/CoordinationMessage";
 import { ChatMessage } from "../src/web/components/ChatMessage";
-import { ConversationProcess, toolLabel } from "../src/web/components/ConversationProcess";
+import { ConversationProcess, toolLabel, toolSummaryDetail } from "../src/web/components/ConversationProcess";
 import { EditDiffSidebar } from "../src/web/components/EditToolDiff";
 import { groupConversation, messageItemKey } from "../src/web/lib/conversation-process";
 
@@ -61,6 +61,22 @@ test("collapsed process summaries expose compact tool context without terminal c
   assert.match(html, /bash grep -n/);
   assert.doesNotMatch(html, /process-summary-detail/);
   assert.doesNotMatch(html, /Done|lines|行\)/);
+});
+
+test("tool summaries preserve Windows path names and keep the long-path filename", () => {
+  const path = String.raw`C:\src\sessions\server.ts`;
+  assert.equal(toolSummaryDetail({ kind: "tool", name: "read", arguments: JSON.stringify({ path }) }), "C:/src/sessions/server.ts");
+  const longPath = "C:/" + "long-workspace-directory/".repeat(4) + "src/server/session-index.ts";
+  const detail = toolSummaryDetail({ kind: "tool", name: "read", arguments: JSON.stringify({ path: longPath }) })!;
+  assert.ok(detail.length <= 56);
+  assert.ok(detail.startsWith("…/"));
+  assert.ok(detail.endsWith("src/server/session-index.ts"), detail);
+});
+
+test("tool command summaries collapse real whitespace without altering backslash arguments", () => {
+  const command = String.raw`  rg "\s+" C:\src` + "\n\t--files   --hidden  ";
+  assert.equal(toolSummaryDetail({ kind: "tool", name: "bash", arguments: JSON.stringify({ command }) }), String.raw`rg "\s+" C:\src --files --hidden`);
+  assert.equal(toolSummaryDetail({ kind: "tool", name: "read", arguments: "{" }), undefined);
 });
 
 test("thinking stays collapsed to a 思考 row while tool and edit entries keep their fold", () => {
@@ -798,8 +814,12 @@ test("the expanded process can be collapsed from its footer", async () => {
   assert.equal(details.open, true);
   const collapse = dom.window.document.querySelector<HTMLButtonElement>(".conversation-process-footer button");
   assert.ok(collapse);
+  const summary = details.querySelector<HTMLElement>(":scope > summary")!;
+  collapse.focus();
+  assert.equal(dom.window.document.activeElement, collapse);
   await act(async () => collapse.click());
   assert.equal(details.open, false);
+  assert.ok(dom.window.document.activeElement === summary, "collapsing from the footer returns keyboard focus to its visible summary");
   await act(async () => root.render(createElement(ConversationProcess, { disclosureKey, entries: [{ kind: "thinking", text: "updated thought" }] })));
   assert.equal(dom.window.document.querySelector<HTMLDetailsElement>(".conversation-process")?.open, false);
   await act(async () => root.unmount());

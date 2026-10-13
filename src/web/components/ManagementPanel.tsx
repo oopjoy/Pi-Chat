@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { PiRuntimeUpdateCheck } from "../../shared/pi-runtime-update";
 import type { BootstrapData, BuildIdentity, CustomProviderInput, ExtensionResource, ModelInfo, PackageResource, PiState, PrimaryRuntimeReadiness, SkillResource } from "../../shared/types";
 import { useModalFocus } from "../lib/modal-focus";
+import { writeClipboardText } from "../lib/clipboard";
 import { api, PI_CHAT_RELEASES_URL, type UpdateCheckResult } from "../api";
 import { DEFAULT_APPEARANCE, snapToStep, type AppearancePreferences, type FontPreference, type ThemePreference } from "../lib/preferences";
 import { CompactSelect, type CompactSelectOption } from "./CompactSelect";
@@ -97,14 +98,22 @@ export function ManagementPanel({ section, appearance, workspaceCwd, workspacePi
   useEffect(() => {
     setResourceError("");
     setResourceNotice("");
-    if (!section || !["skills", "extensions", "packages"].includes(settingsTab)) return;
+    if (!section || !["skills", "extensions", "packages"].includes(settingsTab)) {
+      setLoading(false);
+      return;
+    }
+    let current = true;
     setLoading(true);
     const load = settingsTab === "skills" ? api.skills() : settingsTab === "extensions" ? api.extensions() : api.packages();
     load.then((result) => {
+      if (!current) return;
       if (settingsTab === "skills") setSkills(result.resources as SkillResource[]);
       else if (settingsTab === "extensions") setExtensions(result.resources as ExtensionResource[]);
       else setPackages(result.resources as PackageResource[]);
-    }).catch((error) => setResourceError(error instanceof Error ? error.message : String(error))).finally(() => setLoading(false));
+    }).catch((error) => {
+      if (current) setResourceError(error instanceof Error ? error.message : String(error));
+    }).finally(() => { if (current) setLoading(false); });
+    return () => { current = false; };
   }, [section, settingsTab]);
   if (!section) return null;
 
@@ -231,6 +240,8 @@ function AboutPanel({ buildIdentity, webBuildIdentity, piVersion, primaryRuntime
   const [piUpdating, setPiUpdating] = useState(false);
   const [error, setError] = useState("");
   const [piUpdateError, setPiUpdateError] = useState("");
+  const [npmCopyStatus, setNpmCopyStatus] = useState<"idle" | "copying" | "copied">("idle");
+  const [npmCopyError, setNpmCopyError] = useState("");
   const check = async () => {
     setChecking(true);
     setError("");
@@ -245,7 +256,11 @@ function AboutPanel({ buildIdentity, webBuildIdentity, piVersion, primaryRuntime
   };
   const checkPiRuntime = async () => {
     setPiUpdateChecking(true);
+    setPiUpdate(null);
+    setPiUpdateConfirming(false);
     setPiUpdateError("");
+    setNpmCopyStatus("idle");
+    setNpmCopyError("");
     try {
       setPiUpdate(await api.checkPiRuntimeUpdate());
     } catch (cause) {
@@ -268,10 +283,18 @@ function AboutPanel({ buildIdentity, webBuildIdentity, piVersion, primaryRuntime
       setPiUpdateConfirming(false);
     }
   };
-  const copyNpmUpgradeCommand = (version: string) => {
-    void navigator.clipboard?.writeText(`npm install -g ${piUpdate?.packageName || "@earendil-works/pi-coding-agent"}@${version}`)
-      .then(() => setPiUpdateError(""))
-      .catch(() => setPiUpdateError("复制失败，请手动执行 npm install -g。"));
+  const npmUpgradeCommand = piUpdate ? `npm install -g ${piUpdate.packageName}@${piUpdate.latestVersion}` : "";
+  const copyNpmUpgradeCommand = async () => {
+    if (!npmUpgradeCommand || npmCopyStatus === "copying") return;
+    setNpmCopyStatus("copying");
+    setNpmCopyError("");
+    try {
+      await writeClipboardText(npmUpgradeCommand);
+      setNpmCopyStatus("copied");
+    } catch (cause) {
+      setNpmCopyStatus("idle");
+      setNpmCopyError(`复制失败：${cause instanceof Error ? cause.message : String(cause)}。可选中下方完整命令自行复制。`);
+    }
   };
   const version = buildIdentity.packageVersion || "unknown";
   const identityMismatch = webBuildIdentity.fingerprint !== "unknown"
@@ -301,7 +324,7 @@ function AboutPanel({ buildIdentity, webBuildIdentity, piVersion, primaryRuntime
     </div>
     {primaryRuntime.status === "failed" && <div className="about-notice is-warning">Primary Runtime 暂不可用，但历史 Session 与 JSONL 浏览仍可继续。{primaryRuntime.error ? ` ${primaryRuntime.error}` : ""}</div>}
     {onRuntimeSetup && <button type="button" className="about-link-button" onClick={onRuntimeSetup}>Pi 连接设置 / 重试</button>}
-    {piUpdateError && <div className="resource-error">{piUpdateError}</div>}
+    {piUpdateError && <div className="resource-error" role="alert">{piUpdateError}</div>}
     {piUpdate && <div className={`about-update ${piUpdate.updateAvailable ? "is-update" : "is-current"}`}>
       <strong>{piUpdate.updateAvailable ? `发现 Pi 内核更新 v${piUpdate.latestVersion}` : piUpdate.updateAvailable === false ? "当前 Pi 内核已是最新版本" : `已找到 Pi 内核 v${piUpdate.latestVersion}`}</strong>
       <span>{piUpdate.currentVersion ? `当前 v${piUpdate.currentVersion} · ` : "当前未检测到可用版本 · "}{new Date(piUpdate.checkedAt).toLocaleString()}</span>
@@ -311,19 +334,22 @@ function AboutPanel({ buildIdentity, webBuildIdentity, piVersion, primaryRuntime
         </button>
       )}
       {piUpdate.updateAvailable && piUpdate.updateMode === "npm-global" && (
-        <span>将执行 npm 全局安装，你的 Pi CLI 会同步升级（版本保持一致，避免数据冲突）；配置、会话和 Skills 不受影响。</span>
+        <span>将修改本机 Pi 的 npm 全局安装，Pi CLI 下次启动也会使用新版。请先结束其他 Pi CLI 中的任务；更新流程不主动修改配置、会话和 Skills。</span>
       )}
-      {piUpdate.updateAvailable && piUpdate.updateMode === "npm-global" && (
-        <button type="button" className="about-link-button" disabled={piUpdating} onClick={() => copyNpmUpgradeCommand(piUpdate.latestVersion)}>复制 npm 命令</button>
-      )}
+      {piUpdate.updateAvailable && piUpdate.updateMode === "npm-global" && <>
+        {npmCopyError && <div className="resource-error" role="alert">{npmCopyError}</div>}
+        <code className="about-update-command">{npmUpgradeCommand}</code>
+        <button type="button" className="about-link-button" disabled={piUpdating || npmCopyStatus === "copying"} onClick={() => void copyNpmUpgradeCommand()}>{npmCopyStatus === "copying" ? "正在复制…" : "复制 npm 命令"}</button>
+        {npmCopyStatus === "copied" && <span role="status">npm 命令已复制</span>}
+      </>}
       {piUpdate.updateAvailable && !piUpdate.updateMode && (
         <span>当前 Pi 指向自定义入口，Pi Chat 不会修改它；请手动升级后重启服务。</span>
       )}
       {piUpdateConfirming && (
         <div className="about-update-confirm">
           <span>{piUpdate.updateMode === "npm-global"
-            ? `确认升级本机 Pi 到 v${piUpdate.latestVersion}？将执行 npm 全局安装，你的 Pi CLI 也会被升级（两者版本保持一致，避免数据格式冲突）；所有对话空闲后 Pi Chat 服务会安全重启。不会修改你的配置、会话和 Skills。`
-            : `确认更新到 Pi Runtime v${piUpdate.latestVersion}？Pi Chat 会在所有对话空闲后安全重启服务。`}</span>
+            ? `确认升级本机 Pi 到 v${piUpdate.latestVersion}？将执行 npm 全局安装，你的 Pi CLI 也会被升级。请先结束其他 Pi CLI 中的任务；Pi Chat 对话忙碌时会拒绝本次更新，不会自动等待或终止任务。更新成功后重启 Pi Chat 服务。`
+            : `确认更新到 Pi Runtime v${piUpdate.latestVersion}？Pi Chat 对话忙碌时会拒绝本次更新，请稍后重试；更新成功后重启服务。`}</span>
           <button type="button" className="about-primary-action" disabled={piUpdating} onClick={() => void runPiUpdate(piUpdate.latestVersion)}>
             {piUpdating ? "正在更新…" : "确认更新"}
           </button>
@@ -339,10 +365,10 @@ function AboutPanel({ buildIdentity, webBuildIdentity, piVersion, primaryRuntime
     </div>}
     <div className="about-actions">
       <button type="button" className="about-primary-action" disabled={checking} onClick={() => void check()}>{checking ? "正在检查…" : "检查更新"}</button>
-      <button type="button" className="about-link-button" disabled={Boolean(piUpdateChecking) || piUpdating} onClick={() => { setPiUpdateConfirming(false); void checkPiRuntime(); }}>{piUpdateChecking ? "正在检查 Pi 内核…" : "检查 Pi 内核更新"}</button>
+      <button type="button" className="about-link-button" disabled={piUpdateChecking || piUpdating || npmCopyStatus === "copying"} onClick={() => { setPiUpdateConfirming(false); void checkPiRuntime(); }}>{piUpdateChecking ? "正在检查 Pi 内核…" : "检查 Pi 内核更新"}</button>
       <a className="about-link-button" href={PI_CHAT_RELEASES_URL} target="_blank" rel="noreferrer">打开 GitHub Releases</a>
     </div>
-    <p className="about-footnote">检查只在你主动点击后访问 npm Registry；更新前会确认所有对话空闲并安全重启本地服务；npm 全局升级会同步升级你的 Pi CLI，配置、会话和 Skills 不受影响。</p>
+    <p className="about-footnote">检查 Pi Chat 版本会访问 GitHub Releases，检查 Pi 内核会访问 npm Registry；均只在主动点击后进行。确认更新时若有对话运行，服务端会拒绝更新，请稍后重试。npm 全局升级会修改本机 Pi 安装，请先结束其他 Pi CLI 中的任务；更新流程不主动修改配置、会话和 Skills。</p>
     <div className="about-diagnostics-section">
       <DiagnosticsPanel busy={diagnosticsBusy} onExport={onExportDiagnostics} />
     </div>
@@ -595,7 +621,7 @@ function SettingsResourceList<T extends { id: string; name: string }>({ title, d
       {loading ? <p className="resource-loading">正在扫描…</p> : resources.map((item) => <article key={item.id} className="settings-resource-row">
         <div><strong>{item.name}</strong><code title={pathFor(item)}>{pathFor(item)}</code></div>
       </article>)}
-      {!loading && !resources.length && <p className="resource-loading">当前没有已启用的 {title}</p>}
+      {!loading && !error && !resources.length && <p className="resource-loading">当前没有已启用的 {title}</p>}
     </div>
   </div>;
 }

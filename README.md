@@ -89,7 +89,7 @@ Pi Chat 默认只监听本机回环地址，关闭浏览器窗口不会停止本
 - 设置与 Models 使用居中 Windows 式小窗口
 - Thinking 和工具调用折叠显示
 - Pi 扩展的 select / confirm / input / editor 对话框；模型可见的澄清类 Extension 可复用同一条 Session 控制、恢复和响应通道
-- 响应式桌面和移动端界面
+- Windows 桌面浏览器 / PWA 界面，支持桌面窗口缩放与分屏；当前不承诺移动端功能或适配
 
 ## 版本与路线
 
