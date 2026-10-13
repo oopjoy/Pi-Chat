@@ -682,7 +682,7 @@ test("concurrent activation never exceeds six Secondary workers or seven hot con
     const rejected = responses[rejectedIndex];
     assert.ok(rejected);
     const rejection = await rejected.json() as { error: string; code: string };
-    assert.match(rejection.error, /7\/7 个执行对话都在工作/);
+    assert.match(rejection.error, /7\/7 个执行对话都在工作或受保护/);
     assert.match(rejection.error, /仍可只读浏览/);
     assert.equal(rejection.code, "RUNTIME_CAPACITY_EXHAUSTED");
     assert.equal(internals.runtimes.size, 6);

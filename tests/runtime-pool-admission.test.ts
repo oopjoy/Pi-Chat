@@ -492,7 +492,7 @@ test("four reserved cold starts run concurrently without exceeding the Secondary
   const firstFour = paths.slice(0, 4).map((path) => targetPool.ensure(idForPath(path)));
   for (let turn = 0; turn < 20 && started < 4; turn += 1) await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(started, 4, "every free slot starts before any slow readiness resolves");
-  await assert.rejects(() => targetPool.ensure(idForPath(paths[4])), /执行对话上限/);
+  await assert.rejects(() => targetPool.ensure(idForPath(paths[4])), /Pi Runtime 容量已满/);
   assert.equal(started, 4, "the fifth Session never spawns without a reservation");
   for (const start of starts.slice(0, 4)) start.resolve();
   await Promise.all(firstFour);

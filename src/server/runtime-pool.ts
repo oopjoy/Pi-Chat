@@ -476,7 +476,7 @@ export class RuntimePool {
     const secondaries = this.runtimes.size;
     const busy = [...this.runtimes.values()].filter((runtime) => !this.isIdle(runtime)).length;
     return new RuntimeCapacityError(
-      `Pi Runtime 容量已满：${secondaries + 1}/${this.maxSecondaryRuntimes + 1} 个执行对话都在工作（${busy} 个忙碌）或受保护，没有可安全回收的空闲对话。该会话的历史仍可只读浏览；请等待任一对话完成后重试`,
+      `Pi Runtime 容量已满：当前 ${secondaries + 1}/${this.maxSecondaryRuntimes + 1} 个执行对话都在工作或受保护（${busy} 个忙碌），没有可安全回收的空闲对话。该会话的历史仍可只读浏览；请等待任一对话完成后重试`,
     );
   }
 
