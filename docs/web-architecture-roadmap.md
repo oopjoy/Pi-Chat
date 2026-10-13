@@ -557,6 +557,16 @@ v0.5.0   当前正式发布，包含 Web/Server decomposition checkpoint 与 Win
 
 v0.5.x 只接受缺陷、类型安全、发布、安全、平台兼容或测量驱动变更；不以文件大小或抽象数量为目标继续拆分 `App.tsx` 或 `server/app.ts`。
 
+### 五.1、后续抽取的评估口径（2026-10 复审确认）
+
+对外部 review 中“继续拆 `App.tsx`”类意见的采纳口径固定如下：
+
+1. **目标是不变量 ownership，不是 LOC。** `App.tsx` 当前约 3900 行、160+ 个 `useState/useRef`，真正的问题是它仍直接持有多个领域的状态机（session 导航、prompt 生命周期、live turn reconciliation、SSE admission、model/workspace/preferences、runtime projection）。最终规模可能稳定在 1500–2500 行，只要其中主要是 subsystem composition 与 wiring，即视为健康。
+2. **评价一次抽取是否成功，看四个指标**：authoritative writer 数量是否收敛；coordinator 是否独占其领域的状态转换规则；`App.tsx` 是否退出业务判定（条件分支、generation 比较）；同一生命周期的 effect 是否按 subsystem 聚集成 hook/coordinator，而非散落在 App 中。
+3. **候选顺序**（仅记录，不启动）：`LiveTurnCoordinator`（optimistic turns ↔ dispatch confirmation ↔ live projection ↔ authoritative JSONL reconciliation，本轮 settlement 残留消息缺陷即发生在该接缝）＞ application bootstrap 与 preferences 分离（两者生命周期与失败语义不同，不合并为一个 coordinator）＞ `AppView` feature-oriented view model（替代扁平 props 洪流）。
+4. **触发条件**：每个候选以上述 freeze 允许的驱动（可复现正确性缺陷、安全边界、测量问题、authority 收敛）之一实际出现时才立项；立项时必须声明移除的是哪个 authority、哪个模块成为唯一 owner、修正的具体行为，并补 boundary 回归测试。
+5. **防回流优先于压行数**：在抽取发生时再扩展 `check:writer-boundaries` 的 import 规则（如 App 不得直接 import `pi-events` 解析、`reconciliation`、持久化实现），防止已抽出的 ownership 回流；LOC 仅设软告警用于防重新失控，不作为 CI 失败条件。
+
 `e14ba25` 将以下逻辑从 `App.tsx` 提取为纯 admission boundary：
 
 ```text
