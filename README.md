@@ -1,5 +1,9 @@
 # Pi Chat
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/oopjoy/Pi-Chat)](https://github.com/oopjoy/Pi-Chat/releases/latest)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6.svg)](https://github.com/oopjoy/Pi-Chat)
+
 > **Windows-first、local-first 的 Pi RPC 客户端。**
 >
 > 不重写 Agent loop，不引入第二套 Runtime，不暴露远程端口：让现有 Pi 用户获得一个可靠、可恢复、接近桌面应用体验的本地 Web/PWA 界面。
@@ -16,10 +20,9 @@ Pi Chat 连接本机 Pi RPC，负责聊天展示、Session 浏览、流式输出
 
 - 已有可兼容 Pi：默认使用本机 Pi，不修改或升级它；
 - 没有 Pi，或明确选择不复用：安装隔离的 PiChat managed Runtime；
-- 不需要 Git、npm 或管理员权限；
-- 安装完成后自动启动本地服务并打开浏览器。
-
-Setup 不会复制或上传模型密钥。首次使用模型时，仍可能需要在 Pi 中完成登录或 Provider 配置。以后可在「设置 → 关于 → Pi 连接设置」中重新检测、选择入口或切换 Runtime。
+- 不需要 Git、npm 或管理员权限，也不依赖系统 Node.js（安装器自带经校验的私有 Node Runtime）；
+- 安装完成后创建桌面与开始菜单快捷方式、注册 Windows 卸载程序，并自动启动本地服务、打开浏览器；
+- 以后可在「设置 → 关于」直接更新 Pi Runtime（受管安装切换版本指针；npm 全局 Pi 经确认后同步升级），或在「设置 → 关于 → Pi 连接设置」中重新检测、选择入口或切换 Runtime；卸载仅移除 Pi Chat 本体，保留你的 Pi 数据与会话。
 
 ### 手动安装
 
@@ -30,7 +33,7 @@ Setup 不会复制或上传模型密钥。首次使用模型时，仍可能需�
    pi --version
    ```
    运行 `pi`，通过 `/login` 配置模型服务。已有 Pi 安装和模型配置无需重复安装。
-3. 从 [v0.5.1 Release](https://github.com/oopjoy/Pi-Chat/releases/tag/v0.5.1) 下载 `pi-chat-windows-0.5.1.zip`，解压后运行 `start-pi-chat.cmd`。
+3. 从 [最新 Release](https://github.com/oopjoy/Pi-Chat/releases/latest) 下载 `pi-chat-windows-*.zip`（例如 `pi-chat-windows-0.5.2.zip`），解压后运行 `start-pi-chat.cmd`。
 4. 浏览器打开 `http://127.0.0.1:30170`，或运行 `start-pi-chat-ui.ps1` 使用独立窗口体验。
 
 **请选择 `pi-chat-windows-*.zip`，不是 GitHub 自动生成的 `Source code.zip`。** 完整解压后再启动，不要直接在压缩包内运行。发布包包含编译好的服务和网页，仍需要 Node.js，但不需要 Git、npm 依赖安装或本地构建；它不会自动下载或安装软件。
@@ -93,14 +96,15 @@ Pi Chat 默认只监听本机回环地址，关闭浏览器窗口不会停止本
 
 ## 版本与路线
 
-当前发布版本为 **0.5.1**，定位为 Windows-first、local-first 的可靠性与可维护性版本，仍不应被理解为功能和平台边界已经最终定型的 1.0 或 adoption release。Runtime、Active Session、hot-read、model catalogue authority、Prompt reconciliation、SSE 生命周期、LaTeX 渲染边界和 Runtime 连接设置收敛已经完成；后续工作以缺陷、类型安全、发布、安全和测量驱动维护为主。完整限制见 [`release-notes-v0.5.1.md`](release-notes-v0.5.1.md)。
+当前发布版本为 **0.5.2**：在 0.5.1 的可靠性基线上补完了产品化闭环——单文件 `pi-chat-setup.exe` 安装器（自带私有 Node Runtime、优先复用本机 Pi、镜像回退、快捷方式与卸载注册）、应用内 Pi Runtime 更新，以及带图片消息持久化、超大 Session 完整历史分页等一批用户可见修复。限制与说明见 [`release-notes-v0.5.2.md`](release-notes-v0.5.2.md)。
 
 路线与 authority 说明见 [`docs/architecture.md`](docs/architecture.md)、[`docs/web-architecture-roadmap.md`](docs/web-architecture-roadmap.md) 和 [`v0.4.7 authority 收敛稳定性矩阵`](docs/v0.4.7-stability-matrix.md)。
 
 ## 环境要求
 
-- **Node.js** 22.19 或更高版本（用来运行 Pi Chat 本地服务）
+- **Node.js** 22.19 或更高版本——只有手动安装/源码运行需要；一键 Setup 安装器会自动安装自带的私有 Node Runtime
 - **已全局安装并完成模型认证的 Pi**：`pi --version`  
+  一键 Setup 没有检测到 Pi 时会安装隔离的受管 Pi Runtime；以下说明针对手动安装与既有 Pi 用户。
   Pi Chat **不会**用进程内共享 Pi 内核托管多个 Session；服务仍会为每个执行对话拉起独立 Pi RPC。Runtime 直接使用本机安装的全局 Pi，并继续从该安装读取配置、Extension、Package、CLI 与 package-relative 资源。Pi 尚未就绪时，已保存的 Session JSONL 仍可浏览；发送或其他需要 Pi 的操作会提示 Runtime 不可用。
 - Windows 桌面快捷方式可选；Edge PWA 仅影响独立窗口体验，不是硬性依赖
 
