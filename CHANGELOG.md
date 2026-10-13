@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Usability
+
+- Runtime capacity rejection now states concrete occupancy (n/N hot conversations, how many are busy) and explicitly notes the Session history remains readable; error code `RUNTIME_CAPACITY_EXHAUSTED` is unchanged.
+- Recorded the 2026-10 external review dispositions (hot capacity, lifecycle, Files/Gate) in `docs/review-dispositions-2026-10.md`.
+
 ### Large-history fixes
 
 - Preserve naming-entry IDs and parent links in Session outlines so a rename/Fork boundary cannot hide earlier turns; invalidate old derived index caches once.

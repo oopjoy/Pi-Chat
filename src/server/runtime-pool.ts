@@ -473,7 +473,11 @@ export class RuntimePool {
   }
 
   private capacityError(): RuntimeCapacityError {
-    return new RuntimeCapacityError(`已达到 ${this.maxSecondaryRuntimes + 1} 个执行对话上限（含受保护的新对话），当前没有可关闭的空闲热对话。请等待任一对话完成后重试`);
+    const secondaries = this.runtimes.size;
+    const busy = [...this.runtimes.values()].filter((runtime) => !this.isIdle(runtime)).length;
+    return new RuntimeCapacityError(
+      `Pi Runtime 容量已满：${secondaries + 1}/${this.maxSecondaryRuntimes + 1} 个执行对话都在工作（${busy} 个忙碌）或受保护，没有可安全回收的空闲对话。该会话的历史仍可只读浏览；请等待任一对话完成后重试`,
+    );
   }
 
   private async reclaimOldestAvailable(): Promise<boolean> {
