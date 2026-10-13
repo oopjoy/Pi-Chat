@@ -158,6 +158,29 @@ test("accepted duplicate Prompts remain one row per Prompt across reload", { tag
   await expect(page.locator(".message-user .message-content").filter({ hasText: promptText })).toHaveCount(2);
 });
 
+test("a normalized image prompt never remains below its completed answer or reappears on reload", { tag: "@desktop-only" }, async ({ page }) => {
+  const { input } = await openInitialSession(page);
+  const png = await page.evaluate(() => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 4; canvas.height = 4;
+    const context = canvas.getContext("2d")!;
+    context.fillStyle = "red"; context.fillRect(0, 0, 4, 4);
+    return canvas.toDataURL("image/png").split(",")[1];
+  });
+  await page.locator('input[type="file"][accept*="image/png"]').setInputFiles({ name: "fixture.png", mimeType: "image/png", buffer: Buffer.from(png, "base64") });
+  await input.fill("image normalized echo smoke");
+  await page.getByRole("button", { name: "发送消息", exact: true }).click();
+  await expect(page.locator(".message-assistant", { hasText: "Live response complete" })).toBeVisible();
+  const user = page.locator(".message-user", { hasText: "image normalized echo smoke" });
+  await expect(user).toHaveCount(1);
+  await expect(user).toContainText("[Image: original");
+  await expect.poll(() => page.locator(".message").last().getAttribute("class")).toContain("message-assistant");
+  await page.reload();
+  await expect(user).toHaveCount(1);
+  await expect(user).toContainText("[Image: original");
+  await expect.poll(() => page.locator(".message").last().getAttribute("class")).toContain("message-assistant");
+});
+
 test("reconnect after an interrupted SSE connection does not duplicate persisted turns", { tag: "@desktop-only" }, async ({ page }) => {
   let interruptNextStream = false;
   let interrupted = false;

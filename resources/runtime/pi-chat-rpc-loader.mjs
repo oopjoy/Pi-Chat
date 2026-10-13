@@ -1,4 +1,7 @@
+import { createHash as __piChatCreateHash } from "node:crypto";
+
 const RPC_MODE_SUFFIX = "/dist/modes/rpc/rpc-mode.js";
+const AGENT_SESSION_SUFFIX = "/dist/core/agent-session.js";
 const EXTENSION_LOADER_SUFFIX = "/dist/core/extensions/loader.js";
 
 const FOLLOW_UP_CASES = [
@@ -63,17 +66,63 @@ export function patchPiExtensionLoaderSource(source) {
     );
 }
 
+/** Fixed wire contract shared with the Host's promptPayloadFingerprint. */
+export function piChatPromptReceipt(message) {
+  if (!message || message.role !== "user" || !Number.isFinite(message.timestamp)) return undefined;
+  const content = typeof message.content === "string" ? [["text", message.content]]
+    : Array.isArray(message.content) ? message.content.map(block => block.type === "image"
+      ? ["image", block.data || "", block.mimeType || ""]
+      : [block.type, block.text || ""]) : [];
+  return {
+    version: 1,
+    timestamp: message.timestamp,
+    payloadFingerprint: __piChatCreateHash("sha256").update(JSON.stringify(content)).digest("hex"),
+  };
+}
+
+/** Only add metadata to native preflight; never change messages or persistence. */
+export function patchPiPromptReceiptSource(source) {
+  if (source.includes("__piChatPromptReceipt")) return source;
+  const marker = 'preflightResult?.("started");';
+  const deferred = '() => preflightResult?.("started")';
+  const prepared = 'onStarted?.();';
+  let patched;
+  if (source.split(marker).length === 2 && source.includes('await this._runAgentPrompt(messages);')) {
+    patched = source.replace(marker, 'preflightResult?.("started", __piChatPromptReceipt(messages.find(message => message.role === "user")));');
+  } else if (source.split(deferred).length === 2 && source.split(prepared).length === 2
+    && source.includes('messages = await this._prepareRun(trigger);')) {
+    // Pi 1.2 prepares the same canonical user message inside _startRun.
+    patched = source.replace(deferred, '(piChatUserMessage) => preflightResult?.("started", piChatUserMessage)')
+      .replace(prepared, 'onStarted?.(__piChatPromptReceipt(messages.find(message => message.role === "user")));');
+  } else return source;
+  return 'import { createHash as __piChatCreateHash } from "node:crypto";\n'
+    + `const __piChatPromptReceipt = ${piChatPromptReceipt.toString()};\n`
+    + patched;
+}
+
+export function patchPiPromptResponseSource(source) {
+  if (source.includes("piChatUserMessage")) return source;
+  const callback = "preflightResult: (disposition) => {";
+  const response = 'output(success(id, "prompt", { disposition }));';
+  if (source.split(callback).length !== 2 || source.split(response).length !== 2) return source;
+  return source.replace(callback, "preflightResult: (disposition, piChatUserMessage) => {")
+    .replace(response, 'output(success(id, "prompt", { disposition, ...(piChatUserMessage ? { piChatUserMessage } : {}) }));');
+}
+
 export async function load(url, context, nextLoad) {
   const loaded = await nextLoad(url, context);
   const pathname = new URL(url).pathname.replace(/\\/g, "/");
   const shouldPatchRpc = pathname.endsWith(RPC_MODE_SUFFIX);
   const shouldPatchExtensions = pathname.endsWith(EXTENSION_LOADER_SUFFIX);
-  if (!shouldPatchRpc && !shouldPatchExtensions) return loaded;
+  const shouldPatchPrompt = pathname.endsWith(AGENT_SESSION_SUFFIX);
+  if (!shouldPatchRpc && !shouldPatchExtensions && !shouldPatchPrompt) return loaded;
   if (loaded.source === null || loaded.source === undefined) return loaded;
   const source = typeof loaded.source === "string"
     ? loaded.source
     : Buffer.from(loaded.source).toString("utf8");
   if (shouldPatchRpc)
-    return { ...loaded, source: patchPiRpcModeSource(source) };
+    return { ...loaded, source: patchPiPromptResponseSource(patchPiRpcModeSource(source)) };
+  if (shouldPatchPrompt)
+    return { ...loaded, source: patchPiPromptReceiptSource(source) };
   return { ...loaded, source: patchPiExtensionLoaderSource(source) };
 }

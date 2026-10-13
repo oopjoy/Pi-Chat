@@ -14,6 +14,7 @@ import {
   type RpcRequestObserver,
 } from "./rpc-client.js";
 import { incidentReference } from "./incident-diagnostics.js";
+import { promptPersistenceReceipt, type PromptPersistenceReceipt } from "./prompt-receipt.js";
 
 /** Prompt RPC resolves only after Pi preflight (may auto-compact). */
 export const PROMPT_PREPARE_TIMEOUT_MS = 200_000;
@@ -105,6 +106,8 @@ export interface PromptPublicationPort {
   broadcast(event: Record<string, unknown>): void;
   /** Publish the server-derived activity snapshot after a queue-state mutation. */
   publishSessionActivity?(sessionId: string): void;
+  /** Late acceptance can supply the canonical witness after an unknown outcome. */
+  onPromptReceipt?(sessionId: string, promptId: string, receipt: PromptPersistenceReceipt | undefined): void;
   /** `promptAt` is the original user-admission time, including queued prompts. */
   onPrimaryPromptAccepted(
     sessionId: string,
@@ -114,6 +117,7 @@ export interface PromptPublicationPort {
     settings?: PromptSettingsSnapshot,
     promptId?: string,
     clientPromptOperationId?: string,
+    receipt?: PromptPersistenceReceipt,
   ): void;
   onSecondaryPromptAccepted(
     runtime: SecondaryRuntime,
@@ -123,6 +127,7 @@ export interface PromptPublicationPort {
     settings?: PromptSettingsSnapshot,
     promptId?: string,
     clientPromptOperationId?: string,
+    receipt?: PromptPersistenceReceipt,
   ): void;
 }
 
@@ -347,10 +352,10 @@ export class PromptScheduler {
       const observe = this.promptRpcObserver(rpc, sessionId, promptId);
       this.tracePrompt(sessionId, promptId, "dispatch");
       try {
-        await rpc.send(
+        const response = await rpc.send(
           { type: "prompt", message: message || "请查看这些图片。", ...(images.length ? { images } : {}) },
           PROMPT_PREPARE_TIMEOUT_MS,
-          observe ? { observe } : undefined,
+          { observe, onLateResponse: (late) => this.publication.onPromptReceipt?.(sessionId, promptId, promptPersistenceReceipt(late)) },
         );
         this.publication.onPrimaryPromptAccepted(
           this.runtime.activeSessionId(),
@@ -360,6 +365,7 @@ export class PromptScheduler {
           acceptedSettings,
           promptId,
           clientPromptOperationId,
+          promptPersistenceReceipt(response),
         );
         return "confirmed";
       } catch (error) {
@@ -399,8 +405,9 @@ export class PromptScheduler {
     settings?: PromptSettingsSnapshot,
     promptId?: string,
     clientPromptOperationId?: string,
+    receipt?: PromptPersistenceReceipt,
   ): void {
-    this.publication.onSecondaryPromptAccepted(runtime, promptAt, message, images, settings, promptId, clientPromptOperationId);
+    this.publication.onSecondaryPromptAccepted(runtime, promptAt, message, images, settings, promptId, clientPromptOperationId, receipt);
   }
 
   async dispatchPrimaryNext(): Promise<void> {
@@ -569,10 +576,10 @@ export class PromptScheduler {
       this.publication.publishSessionActivity?.(runtime.id);
       const observe = this.promptRpcObserver(runtime.rpc, runtime.id, next.id);
       this.tracePrompt(runtime.id, next.id, "dispatch");
-      await runtime.rpc.send(
+      const response = await runtime.rpc.send(
         { type: "prompt", message: next.message || "请查看这些图片。", ...(next.images.length ? { images: next.images } : {}) },
         PROMPT_PREPARE_TIMEOUT_MS,
-        observe ? { observe } : undefined,
+        { observe, onLateResponse: (late) => this.publication.onPromptReceipt?.(runtime.id, next.id, promptPersistenceReceipt(late)) },
       );
       this.publication.onSecondaryPromptAccepted(
         runtime,
@@ -582,6 +589,7 @@ export class PromptScheduler {
         acceptedSettings,
         next.id,
         next.clientPromptOperationId,
+        promptPersistenceReceipt(response),
       );
     } catch (error) {
       // A write timeout can occur after the prompt JSONL command reached Pi

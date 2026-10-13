@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Prompt persistence fix
+
+- Reconcile image prompts against a request-addressed fingerprint of Pi's post-preflight user message, rather than assuming original text/image bytes survive Pi image normalization unchanged. The raw pending bubble is retired only after a matching persisted JSONL row is observed, including after reload.
+- Keep late acceptance, repeated image prompts, image-only first turns and rewritten history fenced by the existing Prompt identity and persistence owners; no message is removed merely because a run settled.
+
 ### Desktop usability fixes
 
 - Preserve Windows path separators and command backslashes in tool summaries; long paths retain their filename instead of truncating it away.

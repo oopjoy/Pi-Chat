@@ -1,6 +1,7 @@
 import type { PromptImage, PromptSettingsSnapshot } from "../../shared/types.js";
 import type { AppliedTurnSettings } from "../runtime-pool.js";
 import { RpcRequestTimeoutError } from "../rpc-client.js";
+import type { PromptPersistenceReceipt } from "../prompt-receipt.js";
 
 export interface SecondaryPromptDispatchPorts {
   applySettings(): Promise<AppliedTurnSettings>;
@@ -12,10 +13,10 @@ export interface SecondaryPromptDispatchPorts {
   setRunning(running: boolean): void;
   traceAdmitted(): void;
   broadcastActivity(): void;
-  sendPrompt(message: string, images: PromptImage[]): Promise<void>;
+  sendPrompt(message: string, images: PromptImage[]): Promise<PromptPersistenceReceipt | void>;
   outcomeUnknown(error: unknown): boolean;
   traceDeliveryUncertain(): void;
-  notifyAccepted(settings?: PromptSettingsSnapshot): void;
+  notifyAccepted(settings?: PromptSettingsSnapshot, receipt?: PromptPersistenceReceipt): void;
   onFailure(): void;
 }
 
@@ -49,8 +50,9 @@ export async function dispatchSecondaryPrompt(
     ports.setRunning(true);
     ports.traceAdmitted();
     ports.broadcastActivity();
+    let receipt: PromptPersistenceReceipt | void;
     try {
-      await ports.sendPrompt(input.message || "请查看这些图片。", input.images);
+      receipt = await ports.sendPrompt(input.message || "请查看这些图片。", input.images);
     } catch (error) {
       if (!(error instanceof RpcRequestTimeoutError) || !ports.outcomeUnknown(error)) throw error;
       ports.traceDeliveryUncertain();
@@ -60,7 +62,7 @@ export async function dispatchSecondaryPrompt(
         body: { accepted: true, queued: false, promptId: input.promptId, deliveryUncertain: true },
       };
     }
-    ports.notifyAccepted(input.settings);
+    ports.notifyAccepted(input.settings, receipt || undefined);
     return {
       status: 202,
       body: { accepted: true, queued: false, promptId: input.promptId },

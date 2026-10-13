@@ -3,7 +3,8 @@ import test from "node:test";
 import { MAX_PROMPT_IMAGES_ENCODED_BYTES } from "../src/shared/rpc-contracts.ts";
 import { PromptScheduler } from "../src/server/prompt-scheduler.ts";
 import { promptSchedulerHost } from "./helpers/prompt-scheduler-host.ts";
-import { RpcRequestTimeoutError } from "../src/server/rpc-client.ts";
+import { RpcRequestTimeoutError, type RpcSendOptions } from "../src/server/rpc-client.ts";
+import type { PromptPersistenceReceipt } from "../src/server/prompt-receipt";
 
 test("scheduler host groups keep runtime, preparation, observation, and publication boundaries distinct", async () => {
   const steps: string[] = [];
@@ -40,6 +41,39 @@ test("scheduler host groups keep runtime, preparation, observation, and publicat
   });
   await scheduler.sendPrimaryPrompt("one", [], 1, "strict", "prompt-1");
   assert.deepEqual(steps, ["ready", "settings", "gate", "dispatch", "send", "accepted"]);
+});
+
+test("Primary and queued Secondary dispatch pass canonical receipts to the existing acceptance owner", async () => {
+  const receipt: PromptPersistenceReceipt = { version: 1, timestamp: 100, payloadFingerprint: "a".repeat(64) };
+  const rpc = { send: async () => ({ command: "prompt", success: true, data: { disposition: "started", piChatUserMessage: receipt } }), isRunning: () => true };
+  const host = promptSchedulerHost({ primaryRpc: () => rpc as never });
+  const accepted: Array<PromptPersistenceReceipt | undefined> = [];
+  host.publication.onPrimaryPromptAccepted = (_id, _time, _text, _images, _settings, _prompt, _client, witness) => { accepted.push(witness); };
+  host.publication.onSecondaryPromptAccepted = (_runtime, _time, _text, _images, _settings, _prompt, _client, witness) => { accepted.push(witness); };
+  const scheduler = new PromptScheduler(host);
+  await scheduler.sendPrimaryPrompt("inspect", [], 10, undefined, "primary-prompt");
+  const runtime = { id: "secondary", rpc, running: false, queuePaused: false, dispatching: false, promptQueue: [], pendingTurnSettings: {}, abortGeneration: 0, failed: false };
+  scheduler.enqueueRuntime(runtime as never, "inspect", [], 10);
+  await scheduler.dispatchRuntimeNext(runtime as never);
+  assert.deepEqual(accepted, [receipt, receipt]);
+});
+
+test("late Primary acceptance forwards a receipt without a second prompt write", async () => {
+  const receipt: PromptPersistenceReceipt = { version: 1, timestamp: 100, payloadFingerprint: "b".repeat(64) };
+  let late: RpcSendOptions["onLateResponse"];
+  let writes = 0;
+  const host = promptSchedulerHost({ primaryRpc: () => ({ send: async (_command: unknown, _timeout: unknown, options?: RpcSendOptions) => {
+    writes++; late = options?.onLateResponse;
+    throw new RpcRequestTimeoutError("prompt");
+  } }) as never });
+  const observed: unknown[] = [];
+  host.publication.onPromptReceipt = (sessionId, promptId, receipt) => { observed.push({ sessionId, promptId, receipt }); };
+  const scheduler = new PromptScheduler(host);
+  assert.equal(await scheduler.sendPrimaryPrompt("inspect", [], 10, undefined, "late-prompt"), "unknown");
+  assert.ok(late);
+  late({ command: "prompt", success: true, data: { disposition: "started", piChatUserMessage: receipt } }, "rpc-id");
+  assert.equal(writes, 1);
+  assert.deepEqual(observed, [{ sessionId: "primary", promptId: "late-prompt", receipt }]);
 });
 
 test("enqueue limits protect queue length and image payload size", () => {

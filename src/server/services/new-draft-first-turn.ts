@@ -1,6 +1,7 @@
 import type { PiState, PromptImage, PromptSettingsSnapshot, SessionRuntimeReadyData, SessionSummary } from "../../shared/types.js";
 import type { AppliedTurnSettings } from "../runtime-pool.js";
 import { RpcRequestTimeoutError } from "../rpc-client.js";
+import type { PromptPersistenceReceipt } from "../prompt-receipt.js";
 
 export interface NewDraftFirstTurnPorts {
   requireControl(): void;
@@ -14,12 +15,12 @@ export interface NewDraftFirstTurnPorts {
   setRunning(running: boolean): void;
   traceAdmitted(promptId: string): void;
   broadcastActivity(): void;
-  sendPrompt(message: string, images: PromptImage[], promptId: string): Promise<void>;
+  sendPrompt(message: string, images: PromptImage[], promptId: string): Promise<PromptPersistenceReceipt | void>;
   sendExtensionPrompt(message: string): Promise<void>;
   readState(): Promise<PiState>;
   adoptExtensionState(state: PiState): Promise<void>;
   noteUserPrompt(): void;
-  notifyPromptAccepted(promptId: string): void;
+  notifyPromptAccepted(promptId: string, receipt?: PromptPersistenceReceipt): void;
   traceDeliveryUncertain(promptId: string): void;
   readyData(): SessionRuntimeReadyData;
   sessionData(): SessionSummary;
@@ -89,8 +90,8 @@ export async function dispatchNewDraftFirstTurn(
           },
         };
       }
-      await ports.sendPrompt(input.message || "请查看这些图片。", input.images, input.promptId);
-      ports.notifyPromptAccepted(input.promptId);
+      const receipt = await ports.sendPrompt(input.message || "请查看这些图片。", input.images, input.promptId);
+      ports.notifyPromptAccepted(input.promptId, receipt || undefined);
     } catch (error) {
       if (!(error instanceof RpcRequestTimeoutError) || !error.outcomeUnknown) throw error;
       uncertain = true;

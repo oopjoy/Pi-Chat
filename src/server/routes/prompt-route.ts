@@ -18,6 +18,7 @@ import { admitPromptExtension } from "../services/prompt-extension-admission.js"
 import { admitPromptToQueue } from "../services/prompt-queue-admission.js";
 import { dispatchPrimaryPrompt } from "../services/prompt-primary-dispatch.js";
 import { dispatchSecondaryPrompt } from "../services/prompt-secondary-dispatch.js";
+import { promptPersistenceReceipt } from "../prompt-receipt.js";
 
 type PromptRouteSchedulerPort = Pick<PromptScheduler, "assertCanEnqueue" | "enqueueRuntime" | "enqueuePrimary" | "notifySecondaryPromptAccepted" | "runtimeBusyForQueue" | "primaryBusyForQueue"> & {
   primaryAbortGeneration: number;
@@ -455,11 +456,11 @@ export async function handlePromptRoute(host: PromptRouteHost, request: Incoming
             message: promptMessage,
             ...(promptImages.length ? { images: promptImages } : {}),
           },
-        ).then(() => undefined),
+        ).then(promptPersistenceReceipt),
         outcomeUnknown: (error) => host.rpcOutcomeUnknown(error),
         traceDeliveryUncertain: () =>
           host.tracePrompt("delivery-uncertain", secondaryRuntime.id, promptId),
-        notifyAccepted: (settings) => host.scheduler.notifySecondaryPromptAccepted(
+        notifyAccepted: (settings, receipt) => host.scheduler.notifySecondaryPromptAccepted(
           secondaryRuntime,
           promptAt,
           message,
@@ -467,6 +468,7 @@ export async function handlePromptRoute(host: PromptRouteHost, request: Incoming
           settings,
           promptId,
           requestedClientPromptOperationId || undefined,
+          receipt,
         ),
         onFailure: () => {
           secondaryRuntime.running = false;

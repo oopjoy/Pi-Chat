@@ -235,6 +235,7 @@ import { parsePromptRouteInput } from "./routes/prompt-input.js";
 import { handleWindowControlRoute } from "./routes/window-control.js";
 import { SubagentStatusProvider } from "./subagent-status-provider.js";
 import { apiRouteAdmission, PROMPT_BODY_LIMIT } from "./api-route-admission.js";
+import { promptPersistenceReceipt, type PromptPersistenceReceipt } from "./prompt-receipt.js";
 import {
   assistantLinkedWorkspaceFiles,
   normalizeWorkspaceRelativePath,
@@ -443,6 +444,8 @@ interface PersistedPromptIdentity {
   timestamp?: number;
 }
 interface PendingAcceptedPrompt {
+  /** Exact post-preflight payload witness returned by this Prompt's RPC request. */
+  receipt?: PromptPersistenceReceipt;
   id: string;
   promptId: string;
   /** Browser correlation only; never Server Prompt authority. */
@@ -869,8 +872,9 @@ export class PiChatApp {
         broadcast: (event) => this.broadcast(event),
         publishSessionActivity: (sessionId) =>
           this.broadcastSessionActivity(sessionId),
-        onPrimaryPromptAccepted: (sessionId, promptAt, message, images, settings, promptId, clientPromptOperationId) => {
-          this.recordAcceptedPrompt(sessionId, promptId || randomUUID(), promptAt, message, images, settings, clientPromptOperationId);
+        onPromptReceipt: (sessionId, promptId, receipt) => this.recordPromptReceipt(sessionId, promptId, receipt),
+        onPrimaryPromptAccepted: (sessionId, promptAt, message, images, settings, promptId, clientPromptOperationId, receipt) => {
+          this.recordAcceptedPrompt(sessionId, promptId || randomUUID(), promptAt, message, images, settings, clientPromptOperationId, receipt);
           this.warmPrimaryMessageSnapshot();
           this.broadcast({
             type: "pi_chat_sessions_changed",
@@ -878,8 +882,8 @@ export class PiChatApp {
             sessionId,
           });
         },
-        onSecondaryPromptAccepted: (runtime, promptAt, message, images, settings, promptId, clientPromptOperationId) => {
-          this.recordAcceptedPrompt(runtime.id, promptId || randomUUID(), promptAt, message, images, settings, clientPromptOperationId);
+        onSecondaryPromptAccepted: (runtime, promptAt, message, images, settings, promptId, clientPromptOperationId, receipt) => {
+          this.recordAcceptedPrompt(runtime.id, promptId || randomUUID(), promptAt, message, images, settings, clientPromptOperationId, receipt);
           this.warmRuntimeMessageSnapshot(runtime);
           // Keep draftSession until agent_settled confirms JSONL has the user turn.
           // Mark prompted so sessionSummaries can inject a sidebar row immediately —
@@ -1529,7 +1533,7 @@ export class PiChatApp {
       return await rpc.send(
         command,
         PROMPT_PREPARE_TIMEOUT_MS,
-        observe ? { observe } : undefined,
+        { observe, onLateResponse: (response) => this.recordPromptReceipt(sessionId, promptId, promptPersistenceReceipt(response)) },
       );
     } catch (error) {
       if (!(error instanceof RpcRequestTimeoutError) || !error.outcomeUnknown)
@@ -4013,7 +4017,10 @@ export class PiChatApp {
         && !claimed.has(message)
         && !pending.baselinePersistedUserIds.has(persistedId)
         && (!message.piChatPromptId || message.piChatPromptId === pending.promptId)
-        && this.promptPayloadKey(message) === payloadKey
+        && (pending.receipt
+          ? message.timestamp === pending.receipt.timestamp
+            && this.promptPayloadFingerprint(message) === pending.receipt.payloadFingerprint
+          : this.promptPayloadKey(message) === payloadKey)
         && typeof message.timestamp === "number"
         && Number.isFinite(message.timestamp)
         && message.timestamp >= admittedAt
@@ -4086,6 +4093,19 @@ export class PiChatApp {
         : null),
     };
   }
+  private recordPromptReceipt(sessionId: string, promptId: string, receipt: PromptPersistenceReceipt | undefined): void {
+    if (!receipt) return;
+    // A late successful response enriches only an existing uncertain admission.
+    // It cannot recreate a retired Prompt, change execution state or resend it.
+    const pending = this.pendingAcceptedPromptsBySession.get(sessionId)?.find(item => item.promptId === promptId);
+    if (!pending || pending.receipt || receipt.timestamp < (pending.message.timestamp ?? 0)) return;
+    pending.receipt = receipt;
+    if (sessionId === this.activeSessionId) this.warmPrimaryMessageSnapshot();
+    else {
+      const runtime = this.runtimePool.get(sessionId);
+      if (runtime) this.warmRuntimeMessageSnapshot(runtime);
+    }
+  }
   private recordAcceptedPrompt(
     sessionId: string,
     promptId: string,
@@ -4094,6 +4114,7 @@ export class PiChatApp {
     images: PromptImage[],
     settings?: PromptSettingsSnapshot,
     clientPromptOperationId?: string,
+    receipt?: PromptPersistenceReceipt,
   ): void {
     this.recordUserPrompt(sessionId, promptAt);
     if (!sessionId) return;
@@ -4109,6 +4130,7 @@ export class PiChatApp {
       id,
       promptId,
       message: this.pendingPromptMessage(id, promptId, message, images, promptAt),
+      ...(receipt && receipt.timestamp >= promptAt ? { receipt } : null),
       expectedTurnTotal: persisted.filter((item) => item.role === "user").length + existing.length + 1,
       baselinePersistedUserIds: new Set(
         persisted.flatMap((item) =>

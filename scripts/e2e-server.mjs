@@ -98,12 +98,13 @@ import { createInterface } from "node:readline";
 import { appendFile, writeFile as writeBenchmarkReport } from "node:fs/promises";
 import { basename, dirname, extname, join } from "node:path";
 import { readStreamingBenchmarkConfig, streamingBenchmarkDelay, streamingBenchmarkSnapshots } from ${JSON.stringify(streamBenchmarkHelperUrl)};
+import { piChatPromptReceipt } from ${JSON.stringify(pathToFileURL(join(projectRoot, "resources/runtime/pi-chat-rpc-loader.mjs")).href)};
 const sessionIndex = process.argv.indexOf("--session");
 const sessionFile = sessionIndex >= 0 ? process.argv[sessionIndex + 1] : process.env.PI_CHAT_E2E_ACTIVE;
 const sessionId = basename(sessionFile, extname(sessionFile));
 let isStreaming = false;
 const write = (value) => process.stdout.write(JSON.stringify(value) + "\n");
-const reply = (id, data) => write({ type: "response", id, success: true, data });
+const reply = (id, data, command) => write({ type: "response", id, success: true, data, ...(command ? { command } : {}) });
 const sleep = (milliseconds) => new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
 const persistedMessages = [];
 let lastMessageId = sessionId + "-assistant";
@@ -161,9 +162,13 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
       });
       return;
     }
+    const imageSmoke = command.message === "image normalized echo smoke" && command.images?.length > 0;
     const userMessage = {
       role: "user",
-      content: typeof command.message === "string" ? command.message : "",
+      content: imageSmoke ? [
+        { type: "text", text: command.message + "\n\n[Image: original 2550x1214, displayed at 2000x952. Multiply coordinates by 1.27 to map to original image.]" },
+        { type: "image", mimeType: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jw1cAAAAASUVORK5CYII=" },
+      ] : typeof command.message === "string" ? command.message : "",
       timestamp: Date.now(),
       ...(typeof command.piChatPromptId === "string" ? { piChatPromptId: command.piChatPromptId } : null),
     };
@@ -172,7 +177,7 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
     await persist({ type: "message", id: userMessageId, parentId: lastMessageId, timestamp: new Date(userMessage.timestamp).toISOString(), message: userMessage });
     lastMessageId = userMessageId;
     write({ type: "agent_start" });
-    reply(command.id, {});
+    reply(command.id, imageSmoke ? { disposition: "started", piChatUserMessage: piChatPromptReceipt(userMessage) } : {}, "prompt");
     const retrySmoke = typeof command.message === "string" && command.message.includes("retry identity smoke");
     const exhaustedRetrySmoke = typeof command.message === "string" && command.message.includes("retry exhausted smoke");
     if (retrySmoke || exhaustedRetrySmoke) {

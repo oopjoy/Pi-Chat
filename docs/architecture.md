@@ -203,6 +203,28 @@ Prefer small hooks and pure libs over growing `App.tsx` further.
 - Viewed idle runtimes may be reclaimed (not permanent pins)
 - Model/Thinking changes are shared-write and never claim control
 
+### Post-preflight Prompt persistence witness
+
+Pi may resize/re-encode user images, append dimension notes, or transform input
+before a run starts. Original browser bytes are therefore not a reliable key for
+its persisted user message. The process-local RPC loader adds a bounded
+`piChatUserMessage` receipt (schema version, native timestamp, SHA-256 payload
+fingerprint) to the **same request's** successful `prompt`/`started` response.
+It reads Pi's prepared message without altering that message, global Pi files,
+or Session JSONL. The adapter covers the verified Pi 1.0 inline-preflight and
+1.2 `_startRun` source shapes; unknown source shapes are left untouched.
+
+The existing `PiChatApp` pending-accepted-Prompt ledger owns this witness. Primary,
+Secondary, queued, and New dispatch paths pass it through their existing
+acceptance callbacks. Only an eligible persisted User row with the exact native
+timestamp and fingerprint can retire a receipt-bearing admission and receive its
+Server Prompt ID. Acceptance alone, agent settlement, a similar text, or an image
+count is not proof of persistence. Legacy responses without a receipt retain the
+existing exact-payload fallback. A matching late RPC response may enrich an
+existing uncertain admission, but never recreate a retired Prompt or resend it.
+The persisted-ID fingerprint cache continues to invalidate rewritten rows, and
+no receipt or correlation ID is added to Pi's canonical session file.
+
 ## Session control (0.4)
 
 - Multi-window **shared write**: every live browser window submits prompts, Steer, Compact, queue operations, and settings into one Session-scoped FIFO; the single live Agent serializes them (Harness-aligned)

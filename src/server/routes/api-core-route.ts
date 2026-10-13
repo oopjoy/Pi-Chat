@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { promptPersistenceReceipt, type PromptPersistenceReceipt } from "../prompt-receipt.js";
 
 export async function handleApiCoreRoute(
   host: Record<string, any>,
@@ -556,7 +557,7 @@ export async function handleApiCoreRoute(
           broadcastActivity: () => host.broadcastSessionActivity(runtime.id),
           sendPrompt: (message: any, images: any, promptId: any) => host.sendPromptRpc(runtime.rpc, runtime.id, promptId, {
             type: "prompt", message, ...(images.length ? { images } : {}),
-          }).then(() => undefined),
+          }).then(promptPersistenceReceipt),
           sendExtensionPrompt: async (message: any) => { await runtime.rpc.send({ type: "prompt", message }, PROMPT_PREPARE_TIMEOUT_MS); },
           readState: async () => asState(await runtime.rpc.send({ type: "get_state" })),
           adoptExtensionState: async (state: any) => {
@@ -567,7 +568,7 @@ export async function handleApiCoreRoute(
             await host.finalizePersistedDraft(runtime);
           },
           noteUserPrompt: () => host.noteUserPrompt(runtime.id, promptAt),
-          notifyPromptAccepted: (id: any) => host.scheduler.notifySecondaryPromptAccepted(runtime, promptAt, input.message, input.images, initialSettings, id, input.clientPromptOperationId || undefined),
+          notifyPromptAccepted: (id: string, receipt?: PromptPersistenceReceipt) => host.scheduler.notifySecondaryPromptAccepted(runtime, promptAt, input.message, input.images, initialSettings, id, input.clientPromptOperationId || undefined, receipt),
           traceDeliveryUncertain: (id: any) => host.tracePrompt("delivery-uncertain", runtime.id, id),
           readyData: () => host.runtimeReady(runtime),
           sessionData: () => ({ ...(runtime.draftSession || { id: runtime.id, sessionId: runtime.lastState?.sessionId || runtime.id, name: "新对话", preview: "新对话", cwd: runtime.cwd, updatedAt: host.now(), messageCount: 1, active: true }), active: true }),
@@ -576,7 +577,7 @@ export async function handleApiCoreRoute(
         }, {
           message: input.message,
           images: input.images,
-          promptId: input.message ? randomUUID() : "",
+          promptId: input.message || input.images.length ? randomUUID() : "",
           settings: initialSettings,
         });
         return {
