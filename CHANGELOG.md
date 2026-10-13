@@ -15,6 +15,10 @@
 - Reconcile image prompts against a request-addressed fingerprint of Pi's post-preflight user message, rather than assuming original text/image bytes survive Pi image normalization unchanged. The raw pending bubble is retired only after a matching persisted JSONL row is observed, including after reload.
 - Keep late acceptance, repeated image prompts, image-only first turns and rewritten history fenced by the existing Prompt identity and persistence owners; no message is removed merely because a run settled.
 
+### Licensing
+
+- Adopted the MIT License for this repository. `LICENSE` (copyright 2026, oopjoy and Pi Chat contributors) now applies to the code and documentation; `package.json` declares `license: MIT`, the README license section was updated, and the Windows release ZIP ships `LICENSE`. Releases published before this change (through v0.5.2) carried no open-source license.
+
 ### Desktop usability fixes
 
 - Preserve Windows path separators and command backslashes in tool summaries; long paths retain their filename instead of truncating it away.

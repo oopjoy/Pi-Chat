@@ -11,6 +11,7 @@ const execFile = promisify(execFileCallback);
 const projectRoot = resolve(import.meta.dirname, "..");
 const packageFiles = [
   "package.json",
+  "LICENSE",
   "README.md",
   "SECURITY.md",
   "pi-chat-launch.cmd",

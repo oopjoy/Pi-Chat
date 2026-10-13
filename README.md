@@ -177,7 +177,9 @@ npm run build
 
 ## 安全与许可证
 
-Pi Chat 默认只服务本机回环地址，不是远程多用户服务。安全问题请优先通过 GitHub 的私密安全报告渠道提交，详见 [`SECURITY.md`](SECURITY.md)。本仓库目前尚未选择并附带开源许可证；在许可证文件加入前，请不要将代码视为已授予 MIT、Apache-2.0 或其他再分发许可。
+Pi Chat 默认只服务本机回环地址，不是远程多用户服务。安全问题请优先通过 GitHub 的私密安全报告渠道提交，详见 [`SECURITY.md`](SECURITY.md)。
+
+本仓库以 [MIT License](LICENSE) 发布（版权起始 2026，oopjoy 及 Pi Chat 贡献者）。第三方依赖、随包分发的字体与资源仍遵循各自的许可条款，不因本仓库选择 MIT 而改变。
 
 快速聚焦验证通过 npm 别名直接进入官方 harness，不会触发 `npm test` 的 `pretest` 全量构建：
 

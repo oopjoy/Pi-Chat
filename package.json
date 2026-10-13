@@ -2,6 +2,7 @@
   "name": "pi-chat",
   "version": "0.5.2",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "description": "A local-first Web/PWA client for Pi RPC",
   "bin": {

@@ -200,6 +200,7 @@ test("release packaging creates a ZIP, portable checksum and identity manifest",
       await readFile(join(fixtureRepo, "package.json"), "utf8"),
     ).version as string;
     await copy(join(repositoryRoot, "README.md"), join(fixtureRepo, "README.md"));
+    await copy(join(repositoryRoot, "LICENSE"), join(fixtureRepo, "LICENSE"));
     await copy(join(repositoryRoot, "SECURITY.md"), join(fixtureRepo, "SECURITY.md"));
     await copy(join(repositoryRoot, ".gitattributes"), join(fixtureRepo, ".gitattributes"));
     await copy(join(repositoryRoot, "resources"), join(fixtureRepo, "resources"), { recursive: true });
@@ -260,6 +261,7 @@ test("release packaging creates a ZIP, portable checksum and identity manifest",
     for (const entry of [
       `pi-chat-windows-${packageVersion}/pi-chat-launch.cmd`,
       `pi-chat-windows-${packageVersion}/SECURITY.md`,
+      `pi-chat-windows-${packageVersion}/LICENSE`,
       `pi-chat-windows-${packageVersion}/start-pi-chat-ui.ps1`,
       `pi-chat-windows-${packageVersion}/pi-chat-setup.cmd`,
       `pi-chat-windows-${packageVersion}/scripts/pi-chat-launch-process.ps1`,
