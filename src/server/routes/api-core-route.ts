@@ -165,6 +165,11 @@ export async function handleApiCoreRoute(
         {
           listSessions: (input: any) => host.listSessionsRoute(input),
           sessionView: (input: any) => host.sessionViewRoute(input),
+          sessionHistoryPage: async (id: string, before: string, turns: number) => {
+            const page = await host.options.sessions.historyPageForId(id, before, turns);
+            if (page) host.reconcilePendingAcceptedPrompts(id, page.messages);
+            return page;
+          }
         },
         request,
         response,

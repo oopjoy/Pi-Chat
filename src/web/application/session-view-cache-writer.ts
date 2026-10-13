@@ -1,4 +1,4 @@
-import type { PiMessage, SessionViewData } from "../../shared/types";
+import type { PiMessage, SessionHistoryPage, SessionViewData } from "../../shared/types";
 import {
   SessionViewCache,
   type PaneTransientPatch,
@@ -92,6 +92,11 @@ export class SessionViewCacheWriter {
   ): SessionViewSnapshot | undefined {
     if (this.sessionDeleted(sessionId)) return undefined;
     return this.cache.patch(sessionId, patch);
+  }
+
+  prependHistory(page: SessionHistoryPage, authority: SessionViewCacheWriteAuthority): SessionViewSnapshot | undefined {
+    if (!this.accepts(page.sessionId, authority)) return undefined;
+    return this.cache.prependHistory(page);
   }
 
   updateLiveCurrent(

@@ -2971,6 +2971,12 @@ export function App({ promptReconcileScheduler }: AppProps = {}) {
     queueProjectionRevision: (id: string) => queueProjectionRevisionRef.current.get(id) || 0,
     viewCacheRevision: (id: string) => viewCacheRef.current.revisionFor(id),
     fetchSessionView,
+    currentView: (id: string) => viewCacheRef.current.get(id),
+    prependHistoryPage: (page: import("../shared/types").SessionHistoryPage, authority: Parameters<typeof viewCacheWriter.prependHistory>[1]) => viewCacheWriter.prependHistory(page, authority),
+    fetchHistoryPage: (id: string, before: string, signal: AbortSignal) => {
+      if (subagentAddressesRef.current.has(id)) throw new Error("子代理历史暂不支持此分段读取入口");
+      return api.viewSessionHistory(id, before, signal);
+    },
     turnTotal: () => turnTotal,
     paneAuthorityCanCommit,
     recordRejected: (id: string, reason: string) => recordBrowserStateDiagnostic("projection", "session-view-rejected", { sessionId: id, details: { authorityPresent: true, decisionReason: reason } }),

@@ -381,7 +381,7 @@ test("session index invalidates cached subagent summaries with derived Fork suff
     const fileStat = await stat(path);
     const fingerprint = await sessionFileFingerprint(path);
     await writeFile(cachePath, JSON.stringify({
-      version: 6,
+      version: 7,
       entries: {
         [path]: {
           mtimeMs: fileStat.mtimeMs,
@@ -856,7 +856,7 @@ test("session index persists negative results and rechecks them only after file 
       version: number;
       entries: Record<string, { summary: unknown }>;
     };
-    assert.equal(stored.version, 6);
+    assert.equal(stored.version, 7);
     assert.equal(typeof (stored.entries[empty] as { fingerprint?: unknown })?.fingerprint, "string");
     assert.equal(stored.entries[empty]?.summary, null);
 

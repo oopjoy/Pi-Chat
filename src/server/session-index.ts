@@ -4,7 +4,7 @@ import { open, readdir, stat, type FileHandle } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { homedir } from "node:os";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
-import { LOCAL_COORDINATION_ROLE, type PiMessage, type PromptImage, type SessionSummary, type ThinkingLevel } from "../shared/types.js";
+import { LOCAL_COORDINATION_ROLE, type PiMessage, type PromptImage, type SessionHistoryPage, type SessionSummary, type ThinkingLevel } from "../shared/types.js";
 import { compareSessionsByLastUserPrompt } from "../shared/session-order.js";
 import { loadSessionCache, saveSessionCache, type SessionCacheEntry } from "./session-index-cache.js";
 import { MAX_JSONL_ENTRY_BYTES, MAX_SESSION_SNAPSHOT_BYTES, SessionProjection, sessionFileFingerprint } from "./session-projection.js";
@@ -377,6 +377,115 @@ export async function readSessionTailSnapshot(
   };
 }
 
+/** Bounded I/O/metadata budgets for explicit older-history requests, not full snapshots. */
+export const SESSION_HISTORY_MAX_SCAN_BYTES = 4 * MAX_SESSION_SNAPSHOT_BYTES;
+const SESSION_HISTORY_MAX_ENTRIES = 200_000;
+
+/**
+ * Seek an older page on the active parent chain. Scan only compact entry/offset
+ * metadata, then materialize at most one retained-byte budget from that branch.
+ * No Runtime is started and no complete transcript is retained in memory.
+ */
+export async function readSessionHistoryPage(path: string, beforeMessageId: string, turnLimit = 10): Promise<SessionHistoryPage | null> {
+  const match = /^(.{1,400}):0$/.exec(beforeMessageId);
+  if (!match || !Number.isInteger(turnLimit) || turnLimit < 1 || turnLimit > 100) return null;
+  const handle = await open(path, "r");
+  try {
+    const initial = await handle.stat();
+    if (!initial.isFile()) return null;
+    if (initial.size > SESSION_HISTORY_MAX_SCAN_BYTES) throw new Error("Session 历史索引超过 512 MiB 扫描上限，未载入完整文件");
+    const entries: SessionEntry[] = [];
+    const positions = new Map<SessionEntry, { start: number; length: number; fingerprint: string }>();
+    const ids = new Set<string>();
+    let parts: Buffer[] = [];
+    let lineBytes = 0;
+    let lineStart = 0;
+    const acceptLine = () => {
+      const rawLine = Buffer.concat(parts, lineBytes);
+      const line = rawLine.toString("utf8");
+      let entry: SessionEntry;
+      try { entry = JSON.parse(line) as SessionEntry; }
+      catch { return; }
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return;
+      if (typeof entry.type !== "string" || entry.type.length > 64) return;
+      if (entry.type === "message" && (typeof entry.message?.role !== "string" || entry.message.role.length > 64)) throw new Error("历史消息角色无效");
+      if (entry.type === "thinking_level_change" && (typeof entry.thinkingLevel !== "string" || entry.thinkingLevel.length > 32)) throw new Error("历史思考等级无效");
+      if (entry.id && (typeof entry.id !== "string" || entry.id.length > 400)) throw new Error("历史条目标识无效");
+      if (entry.parentId && (typeof entry.parentId !== "string" || entry.parentId.length > 400)) throw new Error("历史父条目标识无效");
+      if (entry.id && ids.has(entry.id)) throw new Error("Session 包含重复历史条目标识，无法安全分页");
+      if (entry.id) ids.add(entry.id);
+      const outline: SessionEntry = {
+        type: entry.type, id: entry.id, parentId: entry.parentId,
+        thinkingLevel: entry.type === "thinking_level_change" ? entry.thinkingLevel : undefined,
+        ...(entry.type === "message" ? { message: { role: entry.message?.role || "unknown", content: "" } } : null),
+      };
+      if (entries.length >= SESSION_HISTORY_MAX_ENTRIES) throw new Error("Session 历史索引条目数超过安全上限");
+      entries.push(outline);
+      positions.set(outline, { start: lineStart, length: lineBytes, fingerprint: createHash("sha256").update(rawLine).digest("hex") });
+    };
+    for (let offset = 0; offset < initial.size;) {
+      const buffer = Buffer.allocUnsafe(Math.min(SESSION_TAIL_READ_CHUNK_BYTES, initial.size - offset));
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, offset);
+      if (!bytesRead) return null;
+      let cursor = 0;
+      while (cursor < bytesRead) {
+        const newline = buffer.indexOf(0x0a, cursor);
+        const end = newline < 0 || newline >= bytesRead ? bytesRead : newline;
+        const part = buffer.subarray(cursor, end);
+        lineBytes += part.length;
+        if (lineBytes > MAX_JSONL_ENTRY_BYTES) throw new Error("单条 Session 历史记录超过安全读取上限");
+        parts.push(part);
+        if (end === bytesRead) break;
+        acceptLine();
+        parts = []; lineBytes = 0; lineStart = offset + end + 1;
+        cursor = end + 1;
+      }
+      offset += bytesRead;
+    }
+    if (lineBytes) acceptLine();
+    const branch = activeSessionBranch(entries);
+    const boundary = branch.findIndex(entry => entry.id === match[1]);
+    if (boundary < 0 || branch[0]?.parentId) return null;
+    let start = boundary;
+    let bytes = 0;
+    let turns = 0;
+    // Reserve space for response metadata and projected identity fields.
+    while (start > 0 && turns < turnLimit) {
+      const entry = branch[start - 1];
+      const size = positions.get(entry)!.length;
+      if (bytes + size > SESSION_TAIL_MAX_RETAINED_BYTES - 64 * 1024) break;
+      bytes += size; start--;
+      if (entry.type === "message" && entry.message?.role === "user") turns++;
+    }
+    if (start === boundary && boundary > 0) throw new Error("单条历史记录超过分页显示上限，无法继续展开；原始 JSONL 未修改");
+    const retained: SessionEntry[] = [];
+    for (const entry of branch.slice(start, boundary)) {
+      const position = positions.get(entry)!;
+      const buffer = Buffer.allocUnsafe(position.length);
+      let received = 0;
+      while (received < buffer.length) {
+        const result = await handle.read(buffer, received, buffer.length - received, position.start + received);
+        if (!result.bytesRead) return null;
+        received += result.bytesRead;
+      }
+      if (createHash("sha256").update(buffer).digest("hex") !== position.fingerprint) return null;
+      retained.push(JSON.parse(buffer.toString("utf8")) as SessionEntry);
+    }
+    if (!sameSessionFileStats(initial, await handle.stat()) || !sameSessionFileStats(initial, await stat(path))) return null;
+    const previousThinking = branch.slice(0, start).reverse().find(entry => entry.type === "thinking_level_change");
+    const snapshot = sessionSnapshotFromBranch(previousThinking ? [previousThinking, ...retained] : retained);
+    if (snapshot.messages.some(message => !message.piChatPersistedMessageId)) throw new Error("历史记录缺少稳定标识，无法安全分页");
+    const hasMore = branch.slice(0, start).some(entry => entry.type === "message" || entry.type === "custom_message");
+    if (!snapshot.messages.length && hasMore) throw new Error("本页没有可显示的历史记录，请重新加载会话");
+    return {
+      sessionId: idForPath(path), beforeMessageId, messages: snapshot.messages,
+      messageTotal: branch.filter(entry => entry.type === "message").length,
+      turnTotal: branch.filter(entry => entry.type === "message" && entry.message?.role === "user").length,
+      messagesTruncated: hasMore,
+    };
+  } finally { await handle.close(); }
+}
+
 /** Sidebar scans retain branch identity and compact user facts, never full replies/tool payloads. */
 function outlineSessionEntry(entry: SessionEntry): SessionEntry | null {
   if (entry.type === "session") {
@@ -387,7 +496,9 @@ function outlineSessionEntry(entry: SessionEntry): SessionEntry | null {
       ...(typeof entry.parentSession === "string" ? { parentSession: entry.parentSession } : null),
     };
   }
-  if (entry.type === "session_info") return { type: entry.type, name: entry.name };
+  // Naming is file-global, but Pi may link later messages through this entry.
+  // Dropping its identity severs the active branch at a rename/Fork boundary.
+  if (entry.type === "session_info") return { type: entry.type, id: entry.id, parentId: entry.parentId, name: entry.name };
   if (entry.type !== "message") return entry.id || entry.parentId
     ? { type: entry.type, id: entry.id, parentId: entry.parentId, timestamp: entry.timestamp }
     : null;
@@ -673,6 +784,8 @@ export class SessionIndex {
   private readonly snapshotCacheMaxEntries = 32;
   private readonly snapshotCacheMaxBytes = 64 * 1024 * 1024;
   private readonly snapshotReads = new Map<string, Promise<SessionFileSnapshot | null>>();
+  /** Explicit history scans share one memory budget even across browser windows. */
+  private historyReadTail: Promise<void> = Promise.resolve();
   private forkNameOverrideReader?: (sessionId: string) => Promise<string | null>;
 
   constructor(
@@ -681,8 +794,11 @@ export class SessionIndex {
     statFile: (path: string) => Promise<Stats> = stat,
     parseFile: typeof parseSession = parseSession,
   ) {
-    this.root = root || process.env.PI_CODING_AGENT_SESSION_DIR || join(homedir(), ".pi", "agent", "sessions");
-    this.cachePath = cachePath || (root ? join(this.root, ".pi-chat-session-index.json") : join(homedir(), ".pi", "agent", "pi-chat-session-index.json"));
+    const configuredRoot = root || process.env.PI_CODING_AGENT_SESSION_DIR;
+    this.root = configuredRoot || join(homedir(), ".pi", "agent", "sessions");
+    // An environment-selected test/alternate Session root must not overwrite
+    // the real user's default index cache.
+    this.cachePath = cachePath || (configuredRoot ? join(this.root, ".pi-chat-session-index.json") : join(homedir(), ".pi", "agent", "pi-chat-session-index.json"));
     this.statFile = statFile;
     this.parseFile = parseFile;
     this.incrementalProjectionEnabled = parseFile === parseSession;
@@ -1127,9 +1243,9 @@ export class SessionIndex {
     if (fileStat.size <= MAX_SESSION_SNAPSHOT_BYTES) return this.snapshotForId(id);
 
     // Oversized JSONL is intentionally projected from a larger bounded recent
-    // window than the browser's ordinary display window. The final view may
-    // still render fewer turns, but loading 50 turns here keeps recovery,
-    // refresh, and navigation useful instead of failing at the 128 MiB gate.
+    // window than the browser's ordinary display window. Fifty turns is a
+    // target, not a guarantee: the byte budget can yield fewer turns. Explicit
+    // history pages cross that boundary without materializing a full snapshot.
     const effectiveTurnLimit = Math.max(
       OVERSIZED_SESSION_RECENT_TURN_LIMIT,
       Math.floor(Number.isFinite(turnLimit) ? turnLimit : OVERSIZED_SESSION_RECENT_TURN_LIMIT),
@@ -1205,6 +1321,19 @@ export class SessionIndex {
     // the snapshot intentionally omits cross-version cumulative totals.
     const summary = await this.cachedSummaryForId(id);
     return summary ? { snapshot, summary } : null;
+  }
+
+  /** Older history is always a target-only disk read, including for a hot Session. */
+  async historyPageForId(id: string, beforeMessageId: string, turns = 10): Promise<SessionHistoryPage | null> {
+    const read = this.historyReadTail.then(async () => {
+      const summary = this.summaryForId(id) || await this.cachedSummaryForId(id);
+      const path = this.pathForId(id);
+      if (!summary || !path || !isValidCachedSessionPath(this.root, path, id)) return null;
+      const page = await readSessionHistoryPage(path, beforeMessageId, turns);
+      return isValidCachedSessionPath(this.root, path, id) ? page : null;
+    });
+    this.historyReadTail = read.then(() => undefined, () => undefined);
+    return read;
   }
 
   /** Resolve one browser-visible persisted User message back to Pi's active-branch entry. */

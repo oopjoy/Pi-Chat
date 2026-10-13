@@ -12,6 +12,7 @@ export type SessionsReadRouteHost = {
     offset: number;
     limit: number;
   }): Promise<unknown>;
+  sessionHistoryPage?(sessionId: string, beforeMessageId: string, turns: number): Promise<unknown | null>;
   sessionView(input: {
     sessionId: string;
     clientId: string;
@@ -78,6 +79,16 @@ export async function handleSessionsReadRoute(
         limit,
       }),
     );
+    return true;
+  }
+  const historyMatch = new RegExp(`^/api/sessions/${SESSION_ID}/history$`).exec(url.pathname);
+  if (historyMatch) {
+    if (request.method !== "GET") { methodNotAllowed(response); return true; }
+    const before = url.searchParams.get("before") || "";
+    if (!/^.{1,400}:0$/.test(before)) { json(response, 400, { error: "缺少有效的历史消息边界" }); return true; }
+    if (!host.sessionHistoryPage) { json(response, 501, { error: "当前服务不支持历史分段读取" }); return true; }
+    const page = await host.sessionHistoryPage(historyMatch[1], before, options.turnIncrement);
+    json(response, page ? 200 : 409, page || { error: "历史边界已变化，请重新打开对话后重试", code: "HISTORY_BOUNDARY_CHANGED" });
     return true;
   }
   const match = new RegExp(`^/api/sessions/${SESSION_ID}/view$`).exec(url.pathname);

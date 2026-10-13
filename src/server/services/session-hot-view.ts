@@ -218,8 +218,13 @@ export async function sessionViewFromCurrentProjection(
       let snapshot = busy
         ? (sessionIndex.cachedSnapshotForId?.(id) ?? null)
         : null;
-      if (!snapshot && !busy && sessionIndex.snapshotForId)
-        snapshot = await sessionIndex.snapshotForId(id);
+      if (!snapshot && !busy) {
+        // An idle hot Session must use the same bounded disk path as cold views.
+        // A full snapshot throws before the old oversized-repair fallback runs.
+        snapshot = sessionIndex.recentSnapshotForId
+          ? await sessionIndex.recentSnapshotForId(id, Math.max(OVERSIZED_SESSION_RECENT_TURN_LIMIT, turnLimit))
+          : await sessionIndex.snapshotForId?.(id) || null;
+      }
       assertCurrentHotRuntime?.();
       const persistedRuntimeMessages =
         id === ports.activeSessionId && ports.lastPrimaryMessagesSessionId === id
@@ -261,6 +266,7 @@ export async function sessionViewFromCurrentProjection(
               id,
               Math.max(OVERSIZED_SESSION_RECENT_TURN_LIMIT, turnLimit),
             );
+            snapshot = recentSnapshot || snapshot;
             persistedMessages = recentSnapshot?.messages ?? await readSessionMessages(path);
             assertCurrentHotRuntime?.();
             messages = reconcilePersistedHistory(
@@ -392,6 +398,8 @@ export async function sessionViewFromCurrentProjection(
       const pendingPrompt = ports.pendingPromptForSession(id);
       const pendingSteerProjection = ports.pendingSteerProjection(id);
       const windowed = messageWindow(messages, turnLimit);
+      const missingHistory = snapshot?.sourceMessagesTruncated === true
+        || (!snapshot && session.messageCount > messages.length);
       const stats = statsResponse
         ? await ports.statsForSession(id, statsResponse)
         : busy
@@ -432,10 +440,10 @@ export async function sessionViewFromCurrentProjection(
           isStreaming: presentationBusy || liveState.isStreaming,
         }),
         messages: windowed.messages,
-        messageTotal: windowed.total,
-        turnTotal: windowed.turns,
+        messageTotal: snapshot?.sourceMessageTotal ?? (missingHistory ? Math.max(windowed.total, session.messageCount) : windowed.total),
+        turnTotal: snapshot?.sourceTurnTotal ?? (missingHistory ? Math.max(windowed.turns, session.turnCount || 0) : windowed.turns),
         visibleTurnCount: windowed.visibleTurns,
-        messagesTruncated: windowed.truncated,
+        messagesTruncated: windowed.truncated || missingHistory,
         isActive: true,
         runtimeStatus: "active",
         isStreaming: presentationBusy || liveState.isStreaming,

@@ -1,5 +1,5 @@
 import { ApiRequestError } from "../api";
-import type { SessionViewData } from "../../shared/types";
+import type { SessionHistoryPage, SessionViewData } from "../../shared/types";
 
 export function createHistoryPaginationFlow(host: Record<string, any>) {
   return async function loadEarlierTurns(): Promise<void> {
@@ -10,7 +10,9 @@ export function createHistoryPaginationFlow(host: Record<string, any>) {
     if (!id || !host.messagesTruncated() || existingRequest?.navigationEpoch === navigationEpoch) return;
     const timeline = host.scrollElement();
     const previousHeight = timeline?.scrollHeight || 0;
-    const requestedTurns = Math.min(10_000, host.visibleTurnCount() + 10);
+    // A byte-bounded window can end at e.g. 21 turns; the server still admits
+    // only multiples of ten, so adding ten directly would send an invalid 31.
+    const requestedTurns = Math.min(10_000, Math.ceil(host.visibleTurnCount() / 10) * 10 + 10);
     const requestToken = Symbol(id);
     const controller = new AbortController();
     host.setLoadingRequest(id, { token: requestToken, navigationEpoch, controller });
@@ -35,8 +37,23 @@ export function createHistoryPaginationFlow(host: Record<string, any>) {
         host.recordRejected(id, "stale-pane-authority");
         return;
       }
+      let paged = false;
+      if (view.messagesTruncated && (view.visibleTurnCount ?? 0) <= host.visibleTurnCount()) {
+        // Expanding the same tail cannot cross its byte budget. Seek strictly
+        // before the displayed persisted boundary instead of retrying forever.
+        const current: SessionViewData | undefined = host.currentView?.(id);
+        const before = current?.messages.find(message => message.piChatPersistedMessageId)?.piChatPersistedMessageId;
+        if (!before || !host.fetchHistoryPage) throw new Error("历史读取窗口未能扩展，请重新打开对话后重试");
+        const page: SessionHistoryPage = await host.fetchHistoryPage(id, before, controller.signal);
+        if (!host.paneAuthorityCanCommit(authority)) return;
+        if (page.sessionId !== id || page.beforeMessageId !== before) throw new Error("历史响应与当前会话不匹配");
+        const merged: SessionViewData | undefined = host.prependHistoryPage(page, authority);
+        if (!merged) throw new Error("历史边界已变化，请重新打开对话后重试");
+        view = merged;
+        paged = true;
+      }
       const eventVersion = host.sessionEventVersion(id);
-      const loadedView = eventVersion === requestVersion
+      const loadedView = paged || eventVersion === requestVersion
         ? view
         : host.mergeNavigationView(view, requestStartRevision, authority);
       if (!loadedView) return;

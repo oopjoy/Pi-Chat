@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Large-history fixes
+
+- Preserve naming-entry IDs and parent links in Session outlines so a rename/Fork boundary cannot hide earlier turns; invalidate old derived index caches once.
+- Keep the index cache beside an explicitly configured Session root, including environment-selected E2E roots, instead of overwriting the default user's cache.
+- Preserve cumulative history counts and the earlier-history entry point when a hot/bootstrapped view contains only a bounded suffix; idle hot views no longer attempt an oversized full snapshot first.
+- Continue before a persisted message when a cumulative tail stops growing at its byte budget. Older pages use active-branch identity, bounded materialization and file-version/record-hash checks, without starting a Runtime or editing JSONL.
+- Round partial-window requests to valid ten-turn increments, and prepend pages through the existing cache writer without dropping live state, unsent drafts or pending SSE tails.
+
 ### Prompt persistence fix
 
 - Reconcile image prompts against a request-addressed fingerprint of Pi's post-preflight user message, rather than assuming original text/image bytes survive Pi image normalization unchanged. The raw pending bubble is retired only after a matching persisted JSONL row is observed, including after reload.

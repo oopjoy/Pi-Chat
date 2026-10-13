@@ -214,6 +214,9 @@ export async function bootstrap(ports: any, clientId = "", coherenceRetry = 0): 
       // does not send another get_state for a controller-owned Primary.
       return ports.bootstrap(clientId, coherenceRetry + 1);
     }
+    const missingHistory = diskSnapshot?.sourceMessagesTruncated === true
+      || diskReadFailedWithBoundedFallback
+      || (ports.primarySummarySnapshot?.messageCount || 0) > windowedMessages.total;
     const forkOrigin = ports.activeSessionId
       ? await ports.forkOriginForSession(ports.activeSessionId)
       : undefined;
@@ -229,10 +232,10 @@ export async function bootstrap(ports: any, clientId = "", coherenceRetry = 0): 
       pendingSteers: pendingSteerProjection.items,
       pendingSteerRevision: pendingSteerProjection.revision,
       messages: windowedMessages.messages,
-      messageTotal: windowedMessages.total,
-      turnTotal: windowedMessages.turns,
+      messageTotal: diskSnapshot?.sourceMessageTotal ?? (missingHistory ? Math.max(windowedMessages.total, ports.primarySummarySnapshot?.messageCount || 0) : windowedMessages.total),
+      turnTotal: diskSnapshot?.sourceTurnTotal ?? (missingHistory ? Math.max(windowedMessages.turns, ports.primarySummarySnapshot?.turnCount || 0) : windowedMessages.turns),
       visibleTurnCount: windowedMessages.visibleTurns,
-      messagesTruncated: windowedMessages.truncated,
+      messagesTruncated: windowedMessages.truncated || missingHistory,
       activeSessionId: ports.activeSessionId,
       activeSessionIds: ports.activeSessionIds(),
       liveMessage: ports.liveMessage,

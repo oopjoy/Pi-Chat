@@ -311,7 +311,7 @@ export function ConversationPane({
         ) : <>
           {messagesTruncated && <div className="message-window-notice" role="status">
             <span>当前显示最近 {visibleTurnCount} 轮（共 {turnTotal} 轮、{messageTotal} 条消息）</span>
-            <button type="button" onClick={onLoadEarlier} disabled={loadingEarlier}>{loadingEarlier ? "正在加载…" : "加载更早 10 轮"}</button>
+            <button type="button" onClick={onLoadEarlier} disabled={loadingEarlier} title="每次最多加载 10 轮；超大记录会按内容大小分段加载">{loadingEarlier ? "正在加载…" : "加载更早 10 轮"}</button>
           </div>}
           {conversationItems.map((item, index) => {
             const inActiveRunningTurn = state.isStreaming && index >= activeTurnItemStart;

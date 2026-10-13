@@ -326,6 +326,45 @@ test("long Session navigation opens at the real bottom and restores its reading 
   await expect.poll(() => timeline.evaluate((element) => element.scrollTop === element.scrollHeight - element.clientHeight)).toBe(true);
 });
 
+test("bounded history continues through older pages without replacing the latest answer or draft", { tag: "@desktop-only" }, async ({ page }) => {
+  const rows = (id: string, text: string) => [
+    { role: "user", content: text, piChatPersistedMessageId: `${id}:0` },
+    { role: "assistant", content: `${text} answer`, piChatPersistedMessageId: `${id}-answer:0` },
+  ];
+  let sessionId = "";
+  const boundaries: string[] = [];
+  let runtimeWrites = 0;
+  page.on("request", request => { if (request.method() === "POST" && /\/(?:warm|activate|prompt)$/.test(new URL(request.url()).pathname)) runtimeWrites++; });
+  await page.route(/\/api\/sessions\/[^/]+\/view(?:\?|$)/, async route => {
+    const response = await route.fetch({ headers: { ...route.request().headers(), origin: new URL(route.request().url()).origin } });
+    const data = await response.json() as SessionViewData;
+    if (data.session?.name !== "Second session") { await route.fulfill({ response, json: data }); return; }
+    sessionId = data.session.id;
+    await route.fulfill({ response, json: { ...data, messages: rows("third", "latest bounded"), messageTotal: 6, turnTotal: 3, visibleTurnCount: 1, messagesTruncated: true } });
+  });
+  await page.route(/\/api\/sessions\/[^/]+\/history\?/, async route => {
+    const before = new URL(route.request().url()).searchParams.get("before")!;
+    boundaries.push(before);
+    const older = before === "third:0" ? rows("second", "older middle") : rows("first", "oldest retained");
+    await route.fulfill({ json: { sessionId, beforeMessageId: before, messages: older, messageTotal: 6, turnTotal: 3, messagesTruncated: before === "third:0" } });
+  });
+  await page.goto("/");
+  await page.locator(".session-item", { hasText: "Second session" }).click();
+  await expect(page.getByText("latest bounded answer", { exact: true })).toBeVisible();
+  const input = page.getByRole("textbox", { name: "消息输入" });
+  await input.fill("keep the unsent draft");
+  await page.getByRole("button", { name: "加载更早 10 轮" }).click();
+  await expect(page.getByText("older middle", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "加载更早 10 轮" }).click();
+  await expect(page.getByText("oldest retained", { exact: true })).toBeVisible();
+  await expect(page.locator(".message-window-notice")).toHaveCount(0);
+  await expect(page.locator(".message-user")).toHaveCount(3);
+  await expect(page.locator(".message").last()).toContainText("latest bounded answer");
+  await expect(input).toHaveValue("keep the unsent draft");
+  expect(boundaries).toEqual(["third:0", "second:0"]);
+  expect(runtimeWrites).toBe(0);
+});
+
 test("desktop composer keeps Model and Thinking labels clear of their dropdown affordances", { tag: "@desktop-only" }, async ({ page }) => {
   await page.goto("/");
   for (const selector of [".composer-model-select", ".thinking-control"]) {

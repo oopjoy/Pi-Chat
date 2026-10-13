@@ -336,6 +336,16 @@ export interface PendingPromptProjection {
   settings?: PromptSettingsSnapshot;
 }
 
+/** Read-only, bounded active-branch records strictly before a persisted message. */
+export interface SessionHistoryPage {
+  sessionId: string;
+  beforeMessageId: string;
+  messages: PiMessage[];
+  messageTotal: number;
+  turnTotal: number;
+  messagesTruncated: boolean;
+}
+
 export interface SessionViewData {
   session: SessionSummary;
   /** Server-owned accepted turn retained until JSONL visibility is confirmed. */

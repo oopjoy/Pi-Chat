@@ -1,5 +1,5 @@
 import { mergeMessageHistory, reconcilePersistedHistory, userTurnCount } from "../../shared/streaming-assistant";
-import type { PiMessage, PiState, SessionActivityState, SessionViewData } from "../../shared/types";
+import type { PiMessage, PiState, SessionActivityState, SessionHistoryPage, SessionViewData } from "../../shared/types";
 
 export type SessionViewSnapshot = SessionViewData & { cachedAt: number };
 
@@ -282,6 +282,32 @@ export class SessionViewCache {
       cachedAt: this.now(),
     };
     this.views.delete(id);
+    this.views.set(id, next);
+    return next;
+  }
+
+  /** Add disk-backed older rows without promoting cached SSE tails to persistence. */
+  prependHistory(page: SessionHistoryPage): SessionViewSnapshot | undefined {
+    const id = page.sessionId;
+    const previous = this.get(id);
+    const persisted = this.persistedMessages.get(id);
+    if (!previous || !persisted) return undefined;
+    const first = persisted.find(message => message.piChatPersistedMessageId)?.piChatPersistedMessageId;
+    if (first !== page.beforeMessageId || (!page.messages.length && page.messagesTruncated)) return undefined;
+    const seen = new Set(previous.messages.flatMap(message => message.piChatPersistedMessageId ? [message.piChatPersistedMessageId] : []));
+    for (const message of page.messages) {
+      if (!message.piChatPersistedMessageId || seen.has(message.piChatPersistedMessageId)) return undefined;
+      seen.add(message.piChatPersistedMessageId);
+    }
+    const messages = [...page.messages, ...previous.messages];
+    this.persistedMessages.set(id, [...page.messages, ...persisted]);
+    const next: SessionViewSnapshot = {
+      ...previous, messages, cachedAt: this.now(), viewSource: "browser-cache",
+      messageTotal: Math.max(previous.messageTotal, page.messageTotal, messages.length),
+      turnTotal: Math.max(previous.turnTotal || 0, page.turnTotal),
+      visibleTurnCount: userTurnCount(messages),
+      messagesTruncated: page.messagesTruncated,
+    };
     this.views.set(id, next);
     return next;
   }

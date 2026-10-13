@@ -114,6 +114,8 @@ export function projectHotMemoryView(
   const pendingSteerProjection = host.pendingSteers(input.id);
   const windowed = messageWindow(messages, input.turnLimit);
   const state = host.stateWithPendingPromptSettings(input.id, source.state);
+  // A terminal-only or bounded Runtime cache is not the full JSONL history.
+  const missingHistory = source.summary.messageCount > messages.length;
   return {
     session: {
       ...source.summary,
@@ -125,10 +127,10 @@ export function projectHotMemoryView(
     },
     state: host.stateWithFastMode(input.id, { ...state, isStreaming: source.streaming }),
     messages: windowed.messages,
-    messageTotal: windowed.total,
-    turnTotal: windowed.turns,
+    messageTotal: Math.max(windowed.total, source.summary.messageCount),
+    turnTotal: missingHistory ? Math.max(windowed.turns, source.summary.turnCount || 0) : windowed.turns,
     visibleTurnCount: windowed.visibleTurns,
-    messagesTruncated: windowed.truncated,
+    messagesTruncated: windowed.truncated || missingHistory,
     isActive: true,
     runtimeStatus: "active",
     isStreaming: source.streaming,
@@ -145,8 +147,8 @@ export function projectHotMemoryView(
     ...(pendingPrompt ? { pendingPrompt } : null),
     pendingSteers: pendingSteerProjection.items,
     pendingSteerRevision: pendingSteerProjection.revision,
-    historyPending: source.historyPending,
-    reconcilePending: source.reconcilePending,
+    historyPending: source.historyPending || missingHistory,
+    reconcilePending: source.reconcilePending || missingHistory,
     viewSource: "hot-memory",
     ...host.controlState(input.id, input.clientId),
   };

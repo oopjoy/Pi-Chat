@@ -203,6 +203,34 @@ Prefer small hooks and pure libs over growing `App.tsx` further.
 - Viewed idle runtimes may be reclaimed (not permanent pins)
 - Model/Thinking changes are shared-write and never claim control
 
+### Bounded older-history paging
+
+A bounded tail is not a complete history. Hot-memory and bootstrap responses keep
+`messagesTruncated` and known cumulative counts when their transcript is only a
+suffix; an idle hot disk read uses the same bounded snapshot path as a cold read.
+The 50-turn oversized-tail target remains subject to its 8 MiB retained-byte
+budget and is not a guarantee of 50 materialized turns.
+
+When increasing the cumulative turn window no longer returns more history,
+`GET /api/sessions/:id/history?before=<persisted-message-id>` reads records strictly
+before that boundary. SessionIndex validates its known file, streams compact
+entry/offset metadata, follows the active parent chain (including naming-entry
+links), and materializes one bounded page. It rejects unknown/sibling-branch
+anchors, ambiguous IDs and changing files. Selected raw records are hash-checked
+against their indexed bytes before publication. Per-page materialization remains
+below 8 MiB; explicit metadata scans are limited to 512 MiB and 200,000 entries,
+with the existing per-entry JSONL bound. A record too large for a page produces
+an explicit error, not a false end-of-history. SessionIndex serializes these
+explicit scans across windows to bound concurrent memory use.
+
+The browser rounds cumulative requests to valid ten-turn steps. Older pages pass
+its existing navigation/process authority and SessionViewCacheWriter, then
+prepend only at the still-current persisted boundary. The cache's persisted
+prefix grows without promoting its own pending SSE terminal rows, replacing
+Runtime/queue state, or clearing the unsent Composer. The new endpoint neither
+starts nor queries Pi and never writes JSONL. It is a normal-session history
+surface; parent-addressed Subagent reads retain their separate authorization.
+
 ### Post-preflight Prompt persistence witness
 
 Pi may resize/re-encode user images, append dimension notes, or transform input
