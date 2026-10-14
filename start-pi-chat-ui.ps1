@@ -1,4 +1,4 @@
-param(
+﻿param(
   [ValidateSet('web', 'pwa')]
   [string]$Mode = 'web'
 )
@@ -244,7 +244,10 @@ $exitTimer.Interval = 50
 $exitTimer.Add_Tick({
   if ($script:failureShown -or $script:successHandled) { return }
   if ($process -and -not $process.HasExited) { return }
-  if ($process) { $script:launcherExitCode = Get-PiChatLauncherExitCode -Process $process }
+  if ($process) {
+    try { $script:launcherExitCode = Get-PiChatLauncherExitCode -Process $process }
+    catch { Add-Content -LiteralPath $logPath -Value $_.Exception.ToString(); $script:launcherExitCode = 1 }
+  }
   if ($script:launcherExitCode -ne 0) {
     $script:failureShown = $true
     Add-Content -LiteralPath $logPath -Value "`r`n--- Pi Chat Launcher stdout ---"
@@ -270,6 +273,9 @@ $exitTimer.Add_Tick({
       }
     }
 
+    if ($script:launcherExitCode -eq 2) {
+      $summary = '另一版本占用了 30170，请使用对应入口或安全关闭旧服务。'
+    }
     $label.Text = 'Pi Chat 启动失败'
     $label.ForeColor = [System.Drawing.Color]::FromArgb(176, 32, 37)
     $label.Font = New-Object System.Drawing.Font('Segoe UI', 11, [System.Drawing.FontStyle]::Bold)

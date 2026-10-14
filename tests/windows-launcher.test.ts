@@ -134,29 +134,34 @@ test("PowerShell launcher wrapper preserves exit code and captures output throug
   const stderrPath = join(sandbox, "launcher stderr.log");
   try {
     await mkdir(portableRoot, { recursive: true });
-    await writeFile(launcher, "@echo off\r\necho mode=%~1\r\necho captured-error 1>&2\r\nexit /b 0\r\n", "utf8");
+    await writeFile(launcher, "@echo off\r\necho mode=%~1\r\necho captured-error 1>&2\r\nexit /b %PI_CHAT_TEST_EXIT%\r\n", "utf8");
     const invoke = [
       ". $env:PI_CHAT_PROCESS_HELPER",
-      "$process = Start-PiChatLauncherProcess -ProjectDirectory $env:PI_CHAT_TEST_ROOT -LauncherPath $env:PI_CHAT_TEST_LAUNCHER -Mode 'pwa' -StandardOutputPath $env:PI_CHAT_TEST_OUT -StandardErrorPath $env:PI_CHAT_TEST_ERR",
+      "$process = Start-PiChatLauncherProcess -ProjectDirectory $env:PI_CHAT_TEST_ROOT -LauncherPath $env:PI_CHAT_TEST_LAUNCHER -Mode $env:PI_CHAT_TEST_MODE -StandardOutputPath $env:PI_CHAT_TEST_OUT -StandardErrorPath $env:PI_CHAT_TEST_ERR",
+      "while (-not $process.HasExited) { Start-Sleep -Milliseconds 10 }",
       "$exitCode = Get-PiChatLauncherExitCode -Process $process",
       "$process.Dispose()",
       "[pscustomobject]@{ ExitCode = $exitCode; Stdout = [string](Get-Content -LiteralPath $env:PI_CHAT_TEST_OUT -Raw); Stderr = [string](Get-Content -LiteralPath $env:PI_CHAT_TEST_ERR -Raw) } | ConvertTo-Json -Compress",
     ].join("; ");
-    const output = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", invoke], {
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        PI_CHAT_PROCESS_HELPER: join(root, "scripts", "pi-chat-launch-process.ps1"),
-        PI_CHAT_TEST_ROOT: portableRoot,
-        PI_CHAT_TEST_LAUNCHER: launcher,
-        PI_CHAT_TEST_OUT: stdoutPath,
-        PI_CHAT_TEST_ERR: stderrPath,
-      },
-    });
-    const result = JSON.parse(output) as { ExitCode: number; Stdout: string; Stderr: string };
-    assert.equal(result.ExitCode, 0);
-    assert.match(result.Stdout, /mode=pwa/);
-    assert.match(result.Stderr, /captured-error/);
+    for (const [expected, mode] of [[0, "web"], [7, "pwa"], [2, "web"]] as const) {
+      const output = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", invoke], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          PI_CHAT_PROCESS_HELPER: join(root, "scripts", "pi-chat-launch-process.ps1"),
+          PI_CHAT_TEST_ROOT: portableRoot,
+          PI_CHAT_TEST_EXIT: String(expected),
+          PI_CHAT_TEST_MODE: mode,
+          PI_CHAT_TEST_LAUNCHER: launcher,
+          PI_CHAT_TEST_OUT: stdoutPath,
+          PI_CHAT_TEST_ERR: stderrPath,
+        },
+      });
+      const result = JSON.parse(output) as { ExitCode: number; Stdout: string; Stderr: string };
+      assert.equal(result.ExitCode, expected);
+      assert.ok(result.Stdout.includes(`mode=${mode}`));
+      assert.match(result.Stderr, /captured-error/);
+    }
   } finally {
     await rm(sandbox, { recursive: true, force: true });
   }
@@ -215,24 +220,22 @@ test("shortcut installer supports checkout paths with shell metacharacters", { s
     ], { cwd: portableRoot, stdio: "pipe" });
     const inspect = [
       "$shell = New-Object -ComObject WScript.Shell",
-      "$locations = @($env:PI_CHAT_TEST_DESKTOP, $env:PI_CHAT_TEST_START_MENU)",
-      "$locations | ForEach-Object {",
-      "  $location = $_",
-      "  @('Pi Chat.lnk', 'Pi Chat Web.lnk') | ForEach-Object {",
-      "    $shortcut = $shell.CreateShortcut((Join-Path $location $_))",
-      "    [pscustomobject]@{ Location = $location; Name = $_; TargetPath = $shortcut.TargetPath; Arguments = $shortcut.Arguments; WorkingDirectory = $shortcut.WorkingDirectory; IconLocation = $shortcut.IconLocation }",
-      "  }",
+      "$locations = @($env:PI_CHAT_TEST_DESKTOP, $env:PI_CHAT_TEST_START_MENU, $env:PI_CHAT_TEST_PROJECT)",
+      "$items = @($locations | ForEach-Object { Get-ChildItem -LiteralPath $_ -Filter '*.lnk' -File })",
+      "$items | ForEach-Object {",
+      "  $shortcut = $shell.CreateShortcut($_.FullName)",
+      "  [pscustomobject]@{ Location = $_.DirectoryName; Name = $_.Name; TargetPath = $shortcut.TargetPath; Arguments = $shortcut.Arguments; WorkingDirectory = $shortcut.WorkingDirectory; IconLocation = $shortcut.IconLocation }",
       "} | ConvertTo-Json -Compress",
     ].join("; ");
     const output = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", inspect], {
       encoding: "utf8",
-      env: { ...process.env, PI_CHAT_TEST_DESKTOP: desktop, PI_CHAT_TEST_START_MENU: startMenu },
+      env: { ...process.env, PI_CHAT_TEST_DESKTOP: desktop, PI_CHAT_TEST_START_MENU: startMenu, PI_CHAT_TEST_PROJECT: portableRoot },
     });
     const shortcuts = JSON.parse(output) as Array<Record<string, string>>;
-    assert.equal(shortcuts.length, 4);
+    assert.equal(shortcuts.length, 6);
+    assert.equal(shortcuts.filter(s => s.Name === "Pi Chat PWA.lnk").length, 1);
+    assert.ok(shortcuts.some(s => s.Name === "Pi Chat Web.lnk" && s.Location.includes("Pi Chat's & (portable)")));
     assert.match(shortcuts[0].TargetPath, /powershell\.exe$/i);
-    assert.match(shortcuts[0].Arguments, /start-pi-chat-ui\.ps1" pwa$/i);
-    assert.match(shortcuts[1].Arguments, /start-pi-chat-ui\.ps1" web$/i);
     const canonicalPortableRoot = await realpath(portableRoot);
     for (const shortcut of shortcuts) {
       // Windows may expose the Node-created temporary directory through an 8.3
@@ -240,6 +243,7 @@ test("shortcut installer supports checkout paths with shell metacharacters", { s
       assert.equal(await realpath(shortcut.WorkingDirectory), canonicalPortableRoot);
       assert.ok(shortcut.Arguments.includes("Pi Chat's & (portable)"));
       assert.match(shortcut.IconLocation, /resources\\icons\\pi-chat\.ico,0$/i);
+      assert.ok(shortcut.Arguments.endsWith(shortcut.Name === "Pi Chat PWA.lnk" ? '" pwa' : '" web'));
     }
   } finally {
     await rm(sandbox, { recursive: true, force: true });

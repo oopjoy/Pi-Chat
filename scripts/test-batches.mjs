@@ -16,6 +16,7 @@ export const ARTIFACT_TEST_PATHS = new Set([
   "tests/startup-smoke.test.ts",
   "tests/web-build-artifacts.test.ts",
   "tests/windows-launcher.test.ts",
+  "tests/windows-launcher-ui.test.ts",
 ]);
 
 // Benchmark implementations are intentionally retained and run in their own

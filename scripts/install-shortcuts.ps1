@@ -29,10 +29,11 @@ function Install-PiChatShortcut {
   param(
     [Parameter(Mandatory = $true)][string]$Name,
     [Parameter(Mandatory = $true)][ValidateSet('web', 'pwa')][string]$Mode,
-    [Parameter(Mandatory = $true)][string]$Description
+    [Parameter(Mandatory = $true)][string]$Description,
+    [string[]]$Destinations = @($DesktopPath, $StartMenuPath)
   )
 
-  foreach ($destination in @($DesktopPath, $StartMenuPath)) {
+  foreach ($destination in $Destinations) {
     $shortcutPath = Join-Path $destination ($Name + '.lnk')
     $shortcut = $shell.CreateShortcut($shortcutPath)
     $shortcut.TargetPath = $powershellPath
@@ -46,5 +47,7 @@ function Install-PiChatShortcut {
   }
 }
 
-Install-PiChatShortcut -Name 'Pi Chat' -Mode 'pwa' -Description 'Open Pi Chat as an Edge app'
+Install-PiChatShortcut -Name 'Pi Chat' -Mode 'web' -Description 'Open Pi Chat in the default browser'
 Install-PiChatShortcut -Name 'Pi Chat Web' -Mode 'web' -Description 'Open Pi Chat in the default browser'
+Install-PiChatShortcut -Name 'Pi Chat Web' -Mode 'web' -Description 'Open Pi Chat in the default browser' -Destinations @($project)
+Install-PiChatShortcut -Name 'Pi Chat PWA' -Mode 'pwa' -Description 'Optional: open Pi Chat as a browser app' -Destinations @($StartMenuPath)

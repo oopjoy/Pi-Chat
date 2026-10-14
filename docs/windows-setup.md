@@ -15,6 +15,10 @@ Only the optional Pi installation uses the network.
 
 - Per-user installation; no administrator privilege, Electron or browser bundle.
 - Default `%LOCALAPPDATA%\PiChat`; the destination page supports other paths.
+- The finished page, primary Start-menu entry and Desktop entries default to
+  Web in the system default browser. The install root also contains a tracked
+  `Pi Chat Web.lnk`; optional `Pi Chat PWA` remains in the Start menu. Browser
+  install-as-app/profile setup is not performed by the installer.
 - Existing Pi is detected and reused without upgrade or credential/config copy.
 - Missing Pi is not an application-installation failure. The finished page offers
   optional Pi installation, then application launch. Both actions are skipped in
@@ -72,7 +76,8 @@ checks; a pinned version is not an excuse to ignore runtime security updates.
 `npm run test:setup` uses the actual bundled Node to build an isolated artifact,
 compiles a test-identity Inno EXE, installs into an unusual temporary path, and
 checks native installation/upgrade/uninstall, registration, missing-Pi startup,
-existing-Pi reuse and optional online failure. The test owns its processes and
+existing-Pi reuse and optional online failure. It also verifies npm under the
+private Node and that native uninstall removes the generated root Web shortcut. The test owns its processes and
 never launches a real model request, maps the live user sessions, writes the
 production uninstall key or stops the production listener.
 

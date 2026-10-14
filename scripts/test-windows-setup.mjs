@@ -49,6 +49,14 @@ try {
   assert.ok(await exists(join(install, "runtime/node/LICENSE")));
   const node = join(install, "runtime/node/node.exe");
   assert.equal((await execute(node, ["--version"], { env })).stdout.trim(), `v${inputs.node.version}`);
+  const npmVersion = (await execute(node, [join(install, "runtime/node/node_modules/npm/bin/npm-cli.js"), "--version"], { env, windowsHide: true })).stdout.trim();
+  assert.match(npmVersion, /^\d+\.\d+\.\d+$/);
+  const rootShortcut = join(install, "Pi Chat Web.lnk");
+  assert.ok(await exists(rootShortcut), "installation root must contain a native-uninstall-owned Web entry");
+  const shortcutResult = await ps('$w=New-Object -ComObject WScript.Shell; $s=$w.CreateShortcut($env:SETUP_CHECK_SHORTCUT); $s | Select-Object Arguments,WorkingDirectory | ConvertTo-Json -Compress', { SETUP_CHECK_SHORTCUT: rootShortcut });
+  const shortcut = JSON.parse(shortcutResult.stdout);
+  assert.match(shortcut.Arguments, /start-pi-chat-ui\.ps1" web$/);
+  assert.equal(await realpath(shortcut.WorkingDirectory), await realpath(join(install, "app")));
   const identity = JSON.parse(await readFile(join(install, "app/dist/build-identity.json"), "utf8"));
   assert.ok(await exists(join(install, "app/dist/web/index.html")));
   assert.ok(!await exists(join(root, "profile/.pi/agent/install")), "silent base install must not fetch Pi");
@@ -116,6 +124,7 @@ try {
   console.log("[Setup check] Uninstall native files/registration, preserve Pi data");
   await execute(uninstaller, ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", `/LOG=${join(root, "uninstall.log")}`], { env, windowsHide: true, timeout: 90_000 });
   assert.equal(await exists(node), false);
+  assert.equal(await exists(rootShortcut), false, "native uninstall must remove the generated root shortcut");
   assert.equal(await exists(join(install, "app/dist/server/server/index.js")), false);
   assert.equal(await readFile(sentinelFile, "utf8"), '{"userData":"preserve"}\n');
   const removed = await ps('if(Test-Path -LiteralPath $env:SETUP_CHECK_KEY){exit 1}', { SETUP_CHECK_KEY: key });

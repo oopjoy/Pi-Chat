@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Web-default launch and private Node checks
+
+- Default Setup completion and primary shortcuts to Web in the system default browser; add a tracked `Pi Chat Web.lnk` in the installation root and an explicit Desktop Web alias. Keep `Pi Chat PWA` as an optional Start-menu entry, with browser application setup owned by the browser.
+- Retain the native launcher process handle so fast nonzero exits cannot become a null-to-zero false success. On a different build at 30170, show a readable conflict instead of opening the wrong instance.
+- Encode the Chinese WinForms launcher with a UTF-8 BOM for Windows PowerShell 5. Add real hidden-WinForms checks for readable Chinese failure/buttons, Web/PWA dispatch, and no browser open after failure.
+- Verify npm and actual app/Web/handshake serving under the installed private Node; preserve isolated agent/session data and the production listener.
+
 ### One complete Windows Setup
 
 - Replace the IExpress/Web downloader with one Inno Setup EXE embedding App + private pinned Node/npm. No Web EXE or portable application ZIP is produced; historical v0.5.2 assets remain unchanged.

@@ -38,6 +38,10 @@ test("Setup embeds App and Node while Pi remains optional and native uninstall n
   assert.match(script, /PayloadRoot.*runtime\\node.*DestDir: "\{app\}\\runtime\\node"/);
   assert.match(script, /PrivilegesRequired=lowest/);
   assert.match(script, /CloseApplications=no/);
+  const launcherIcons = script.split("\n").filter(line => line.startsWith('Name: "') && line.includes("start-pi-chat-ui.ps1"));
+  assert.ok(launcherIcons.some(line => line.startsWith('Name: "{app}\\Pi Chat Web"')));
+  for (const line of launcherIcons) assert.ok(line.includes(line.includes("Pi Chat PWA") ? '"" pwa"' : '"" web"'));
+  assert.match(script, /start-pi-chat-ui\.ps1"" web"; WorkingDir: "\{app\}\\app"; Description: "Open Pi Chat in the default browser"/);
   assert.match(script, /Check: NeedsPi/);
   assert.match(script, /postinstall skipifsilent runhidden/);
   assert.doesNotMatch(script, /https:\/\/nodejs|releases\/download|Type: filesandordirs/);
