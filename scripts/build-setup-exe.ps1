@@ -22,7 +22,25 @@ $source = Join-Path $stage "source"
 $sed = Join-Path $stage "pi-chat-setup.sed"
 try {
   New-Item -ItemType Directory -Force -Path $source, (Split-Path -Parent $Output) | Out-Null
-  $wrapper = "@echo off`r`nchcp 65001 >nul`r`necho Pi Chat Setup starting> `"%TEMP%\pi-chat-setup-wrapper.log`"`r`npowershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File `"%~dp0pi-chat-setup.ps1`"`r`nexit /b %ERRORLEVEL%`r`n"
+  $wrapper = @'
+@echo off
+setlocal EnableExtensions
+chcp 65001 >nul
+echo Pi Chat Setup starting> "%TEMP%\pi-chat-setup-wrapper.log"
+echo [Pi Chat Setup] Online installer - Internet access required.
+echo This downloads Node.js and Pi Chat. Existing Pi is detected before any Pi installation.
+echo.
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0pi-chat-setup.ps1"
+set "PI_CHAT_SETUP_EXIT=%ERRORLEVEL%"
+if "%PI_CHAT_SETUP_EXIT%"=="0" exit /b 0
+echo.
+echo [Pi Chat Setup] Installation did not complete. Exit code: %PI_CHAT_SETUP_EXIT%
+echo Log: "%TEMP%\pi-chat-setup.log"
+echo If Pi Chat is running, close it safely before installing or updating.
+if not "%PI_CHAT_SETUP_NONINTERACTIVE%"=="1" if not "%PI_CHAT_NONINTERACTIVE%"=="1" pause
+exit /b %PI_CHAT_SETUP_EXIT%
+'@
+  $wrapper = $wrapper.Replace("`r`n", "`n").Replace("`n", "`r`n") + "`r`n"
   [IO.File]::WriteAllText((Join-Path $source "pi-chat-setup.cmd"), $wrapper, [Text.ASCIIEncoding]::new())
   Copy-Item -LiteralPath (Join-Path $projectRoot "scripts\pi-chat-setup.ps1") -Destination (Join-Path $source "pi-chat-setup.ps1")
   $target = Join-Path $stage 'pi-chat-setup.exe'

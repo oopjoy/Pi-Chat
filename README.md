@@ -14,15 +14,28 @@ Pi Chat 连接本机 Pi RPC，负责聊天展示、Session 浏览、流式输出
 
 ## Windows 安装（推荐使用一键 Setup）
 
-### 一键 Setup
+### 在线 Setup（需要联网）
 
-从 GitHub Release 下载并运行 `pi-chat-setup.exe`。Setup 会在当前用户目录安装 Pi Chat 自带的 Node.js Runtime，检测本机已有的 Pi，并在安装前询问是否复用它。若系统阻止运行 `.exe`，也可以下载并完整解压 `pi-chat-windows-*.zip`，运行其中的 `pi-chat-setup.cmd`：
+下载并运行 [pi-chat-setup.exe](https://github.com/oopjoy/Pi-Chat/releases/latest/download/pi-chat-setup.exe)。**这是在线引导安装器，不是离线完整安装包**：v0.5.2 的 EXE 约 192 KB，只内嵌安装脚本；运行时会下载并校验 Node.js Runtime、Pi Chat 应用 ZIP，并在需要时安装 Pi。无需手动预装 Node，但安装过程必须能访问下载源。
+
+Setup 会在当前用户目录安装私有 Node Runtime，检测本机已有的 Pi，并询问是否复用它。若系统阻止运行 `.exe`，也可以下载并完整解压 `pi-chat-windows-*.zip`，运行其中的 `pi-chat-setup.cmd`（同样需要联网）：
 
 - 已有可兼容 Pi：默认使用本机 Pi，不修改或升级它；
 - 没有 Pi，或明确选择不复用：安装隔离的 PiChat managed Runtime；
-- 不需要 Git、npm 或管理员权限，也不依赖系统 Node.js（安装器自带经校验的私有 Node Runtime）；
+- 不需要 Git、npm 或管理员权限，也不依赖系统 Node.js（安装时联网下载并校验私有 Node Runtime）；
 - 安装完成后创建桌面与开始菜单快捷方式、注册 Windows 卸载程序，并自动启动本地服务、打开浏览器；
 - 以后可在「设置 → 关于」直接更新 Pi Runtime（受管安装切换版本指针；npm 全局 Pi 经确认后同步升级），或在「设置 → 关于 → Pi 连接设置」中重新检测、选择入口或切换 Runtime；卸载仅移除 Pi Chat 本体，保留你的 Pi 数据与会话。
+
+**如果 Pi Chat 正在运行，Setup 会拒绝安装或覆盖升级。** 请先等所有任务完成，再在设置中选择“关闭 Pi Chat”，之后重新运行安装器，不要按端口或 PID 强杀服务。若失败窗口已经关闭，可查看 `%TEMP%\pi-chat-setup.log`。
+
+Setup 不会复制或上传模型密钥。首次使用模型仍可能需要在 Pi 中完成登录或 Provider 配置。
+
+| Release 文件 | 用途 |
+|---|---|
+| `pi-chat-setup.exe` | 在线安装入口；安装时下载应用 ZIP、Node，按需安装 Pi |
+| `pi-chat-windows-*.zip` | 含编译好的服务端、网页和启动器；已有 Node/Pi 时可直接手动运行，也是在线 Setup 下载的应用载荷 |
+| `*.sha256` / `*.manifest.json` | 校验文件与应用构建身份记录 |
+| GitHub 自动生成的 `Source code` | 源码归档，不是可直接运行的安装包 |
 
 ### 手动安装
 
@@ -96,13 +109,15 @@ Pi Chat 默认只监听本机回环地址，关闭浏览器窗口不会停止本
 
 ## 版本与路线
 
-当前发布版本为 **0.5.2**：在 0.5.1 的可靠性基线上补完了产品化闭环——单文件 `pi-chat-setup.exe` 安装器（自带私有 Node Runtime、优先复用本机 Pi、镜像回退、快捷方式与卸载注册）、应用内 Pi Runtime 更新，以及带图片消息持久化、超大 Session 完整历史分页等一批用户可见修复。限制与说明见 [`release-notes-v0.5.2.md`](release-notes-v0.5.2.md)。
+当前发布版本为 **0.5.2**，Release 资产固定绑定 `012b500`：新增在线 Setup（安装时下载私有 Node Runtime、优先复用本机 Pi、快捷方式与卸载注册）和应用内 Pi Runtime 更新。限制与说明见 [`release-notes-v0.5.2.md`](release-notes-v0.5.2.md)。
+
+**当前 `main` 还有发布后的修复**，包括带图片消息的原生处理结果关联、超大 Session 完整历史分页和桌面反馈改进，详见 [`CHANGELOG.md` 的 Unreleased](CHANGELOG.md#unreleased)。它们没有被回填进 v0.5.2 下载资产；需要等待后续正式发布，或由源码工作区安全构建后使用。
 
 路线与 authority 说明见 [`docs/architecture.md`](docs/architecture.md)、[`docs/web-architecture-roadmap.md`](docs/web-architecture-roadmap.md) 和 [`v0.4.7 authority 收敛稳定性矩阵`](docs/v0.4.7-stability-matrix.md)。
 
 ## 环境要求
 
-- **Node.js** 22.19 或更高版本——只有手动安装/源码运行需要；一键 Setup 安装器会自动安装自带的私有 Node Runtime
+- **Node.js** 22.19 或更高版本——只有手动安装/源码运行需要；在线 Setup 安装器会联网下载并安装私有 Node Runtime
 - **已全局安装并完成模型认证的 Pi**：`pi --version`  
   一键 Setup 没有检测到 Pi 时会安装隔离的受管 Pi Runtime；以下说明针对手动安装与既有 Pi 用户。
   Pi Chat **不会**用进程内共享 Pi 内核托管多个 Session；服务仍会为每个执行对话拉起独立 Pi RPC。Runtime 直接使用本机安装的全局 Pi，并继续从该安装读取配置、Extension、Package、CLI 与 package-relative 资源。Pi 尚未就绪时，已保存的 Session JSONL 仍可浏览；发送或其他需要 Pi 的操作会提示 Runtime 不可用。

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Setup feedback
+
+- Label the small Setup EXE as an online bootstrapper: it downloads the private Node Runtime and application ZIP at install time, rather than embedding an offline payload. README now distinguishes published v0.5.2 assets from subsequent main-branch fixes.
+- Keep the EXE's installer window open on failure with its script exit code, log location and running-service guidance; explicit noninteractive environment switches suppress the pause. Verify the actual EXE-embedded CMD against isolated success/failure fixtures.
+
 ### Usability
 
 - Runtime capacity rejection now states concrete occupancy (n/N hot conversations, how many are busy) and explicitly notes the Session history remains readable; error code `RUNTIME_CAPACITY_EXHAUSTED` is unchanged.
