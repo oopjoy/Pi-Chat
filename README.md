@@ -14,44 +14,30 @@ Pi Chat 连接本机 Pi RPC，负责聊天展示、Session 浏览、流式输出
 
 ## Windows 安装（推荐使用一键 Setup）
 
-### 在线 Setup（需要联网）
+### 一个完整 Setup：应用 + Node 内置，Pi 按需安装
 
-下载并运行 [pi-chat-setup.exe](https://github.com/oopjoy/Pi-Chat/releases/latest/download/pi-chat-setup.exe)。**这是在线引导安装器，不是离线完整安装包**：v0.5.2 的 EXE 约 192 KB，只内嵌安装脚本；运行时会下载并校验 Node.js Runtime、Pi Chat 应用 ZIP，并在需要时安装 Pi。无需手动预装 Node，但安装过程必须能访问下载源。
+**以下是当前 `main` 的新分发方式，尚未打新 tag。** 已发布的 [v0.5.2](https://github.com/oopjoy/Pi-Chat/releases/tag/v0.5.2) 仍是约 192 KB 的历史在线引导安装器；不会原地替换旧资产。
 
-Setup 会在当前用户目录安装私有 Node Runtime，检测本机已有的 Pi，并询问是否复用它。若系统阻止运行 `.exe`，也可以下载并完整解压 `pi-chat-windows-*.zip`，运行其中的 `pi-chat-setup.cmd`（同样需要联网）：
+后续 Release 只提供 **`pi-chat-setup.exe` 一个安装入口**，不再提供 Web EXE 或 portable ZIP（校验文件和构建清单不是额外安装包）。安装向导基于 Inno Setup，不依赖 Electron：
 
-- 已有可兼容 Pi：默认使用本机 Pi，不修改或升级它；
-- 没有 Pi，或明确选择不复用：安装隔离的 PiChat managed Runtime；
-- 不需要 Git、npm 或管理员权限，也不依赖系统 Node.js（安装时联网下载并校验私有 Node Runtime）；
-- 安装完成后创建桌面与开始菜单快捷方式、注册 Windows 卸载程序，并自动启动本地服务、打开浏览器；
-- 以后可在「设置 → 关于」直接更新 Pi Runtime（受管安装切换版本指针；npm 全局 Pi 经确认后同步升级），或在「设置 → 关于 → Pi 连接设置」中重新检测、选择入口或切换 Runtime；卸载仅移除 Pi Chat 本体，保留你的 Pi 数据与会话。
+1. EXE 已内置编译好的 Pi Chat 和固定版本的私有 Node Runtime（含 npm），**安装主体无需联网，也无需预装 Git、Node 或 npm**。
+2. 默认安装到 `%LOCALAPPDATA%\PiChat`，也可选择其他目录；创建开始菜单入口、可选桌面快捷方式和原生 Windows 卸载程序。
+3. 检测到现有 Pi 时优先直接复用，不升级它、不复制模型凭证、配置、Skills 或 JSONL。
+4. 未检测到 Pi 时，完成页提供明确的可选联网安装项。跳过或下载失败都不撤销应用安装；应用能打开并提示 Pi 未就绪，之后可连接既有 Pi，或重新运行 Setup 选择安装 Pi。
+5. 完成页可启动 Pi Chat。没有模型凭证时仍需通过 Pi 完成登录或配置 Provider。
 
-**如果 Pi Chat 正在运行，Setup 会拒绝安装或覆盖升级。** 请先等所有任务完成，再在设置中选择“关闭 Pi Chat”，之后重新运行安装器，不要按端口或 PID 强杀服务。若失败窗口已经关闭，可查看 `%TEMP%\pi-chat-setup.log`。
+**正在运行的目标安装会拒绝覆盖升级和卸载**，不会强杀 Node/Pi。另一个目录的 Pi Chat 服务也不会被接管；如占用了 30170，请在原窗口安全关闭服务后再启动新安装。
 
-Setup 不会复制或上传模型密钥。首次使用模型仍可能需要在 Pi 中完成登录或 Provider 配置。
+Inno Setup 自动记录安装日志；可用 `/LOG="D:\PiChat-setup.log"` 指定日志位置。可选 Pi 安装日志位于 `%TEMP%\pi-chat-pi-install.log`。卸载只移除应用、私有 Node 和该安装自己的配置，不删除 `~/.pi/agent` 中的 Pi、凭证、Skills 或会话。
 
-| Release 文件 | 用途 |
+| 后续 Release 文件 | 用途 |
 |---|---|
-| `pi-chat-setup.exe` | 在线安装入口；安装时下载应用 ZIP、Node，按需安装 Pi |
-| `pi-chat-windows-*.zip` | 含编译好的服务端、网页和启动器；已有 Node/Pi 时可直接手动运行，也是在线 Setup 下载的应用载荷 |
-| `*.sha256` / `*.manifest.json` | 校验文件与应用构建身份记录 |
-| GitHub 自动生成的 `Source code` | 源码归档，不是可直接运行的安装包 |
+| `pi-chat-setup.exe` | 唯一用户安装包，内置 App + Node；仅可选 Pi 安装需要联网 |
+| `pi-chat-setup.exe.sha256` | 安装包 SHA256 校验 |
+| `pi-chat-setup.exe.manifest.json` | 应用 revision/fingerprint、安装包摘要、内置 Node 和编译器版本 |
+| GitHub 自动生成的 `Source code` | 源码归档，不是第二种安装包 |
 
-### 手动安装
-
-1. 安装 Node.js 22.19+。
-2. 安装并完成模型认证的 Pi。可以使用 [Pi 官方安装器](https://pi.dev)，也可以使用 npm：
-   ```powershell
-   npm install -g --ignore-scripts @earendil-works/pi-coding-agent
-   pi --version
-   ```
-   运行 `pi`，通过 `/login` 配置模型服务。已有 Pi 安装和模型配置无需重复安装。
-3. 从 [最新 Release](https://github.com/oopjoy/Pi-Chat/releases/latest) 下载 `pi-chat-windows-*.zip`（例如 `pi-chat-windows-0.5.2.zip`），解压后运行 `start-pi-chat.cmd`。
-4. 浏览器打开 `http://127.0.0.1:30170`，或运行 `start-pi-chat-ui.ps1` 使用独立窗口体验。
-
-**请选择 `pi-chat-windows-*.zip`，不是 GitHub 自动生成的 `Source code.zip`。** 完整解压后再启动，不要直接在压缩包内运行。发布包包含编译好的服务和网页，仍需要 Node.js，但不需要 Git、npm 依赖安装或本地构建；它不会自动下载或安装软件。
-
-源码 checkout 的首次准备方法见下文「开发」。启动器会检查 Node 版本和关键运行文件；源码未构建时给出准备命令，发布包不完整时提示重新下载。双击 CMD 启动失败会保留窗口；自动化可设置 `PI_CHAT_NONINTERACTIVE=1` 禁止暂停。图形启动器另提供日志和重试按钮。
+源码 checkout 的准备方法见下文「开发」。Windows 启动脚本仍用于源码开发和已安装应用，不作为另一个 portable 分发入口。
 
 Pi Chat 默认只监听本机回环地址，关闭浏览器窗口不会停止本地服务。
 
@@ -117,9 +103,9 @@ Pi Chat 默认只监听本机回环地址，关闭浏览器窗口不会停止本
 
 ## 环境要求
 
-- **Node.js** 22.19 或更高版本——只有手动安装/源码运行需要；在线 Setup 安装器会联网下载并安装私有 Node Runtime
+- **Node.js** 22.19 或更高版本——源码运行需要；新的完整 Setup 已内置私有 Node Runtime，不依赖系统 Node
 - **已全局安装并完成模型认证的 Pi**：`pi --version`  
-  一键 Setup 没有检测到 Pi 时会安装隔离的受管 Pi Runtime；以下说明针对手动安装与既有 Pi 用户。
+  完整 Setup 未检测到 Pi 时提供可选联网安装；以下说明针对源码运行与既有 Pi 用户。
   Pi Chat **不会**用进程内共享 Pi 内核托管多个 Session；服务仍会为每个执行对话拉起独立 Pi RPC。Runtime 直接使用本机安装的全局 Pi，并继续从该安装读取配置、Extension、Package、CLI 与 package-relative 资源。Pi 尚未就绪时，已保存的 Session JSONL 仍可浏览；发送或其他需要 Pi 的操作会提示 Runtime 不可用。
 - Windows 桌面快捷方式可选；Edge PWA 仅影响独立窗口体验，不是硬性依赖
 
@@ -278,7 +264,7 @@ Pi Chat 不提供 Todo 功能，也不会安装或管理 Todo Extension。历史
 
 Pi Chat 保留普通浏览器访问，同时提供适合 Edge / Chrome 的独立窗口安装配置。启动服务后，用 Edge 或 Chrome 打开 `http://127.0.0.1:30170`，在浏览器菜单中选择“应用 / Apps → 将此站点安装为应用（Install this site as an app）”。
 
-安装后会以独立 Pi Chat 窗口启动，不显示地址栏、标签页、书签栏或浏览器导航；普通浏览器访问仍然可用。该模式不使用 Service Worker，避免本地更新后被旧前端缓存遮挡。关闭最后一个浏览器/PWA 窗口不会停止本地服务；刷新、BFCache、网络/SSE 断线以及测试或临时浏览器退出都不会让 Pi Chat 离线。需要停止服务时，请使用设置中的“关闭 Pi Chat”显式关闭；可通过桌面的 **Pi Chat** / **Pi Chat Web** 再次打开窗口。源码工作目录需在停服后显式执行 `npm run build` 才会应用本地改动，启动器不自动构建；Windows Release ZIP 已内置编译产物，不需要 npm、源码或构建工具即可启动。
+安装后会以独立 Pi Chat 窗口启动，不显示地址栏、标签页、书签栏或浏览器导航；普通浏览器访问仍然可用。该模式不使用 Service Worker，避免本地更新后被旧前端缓存遮挡。关闭最后一个浏览器/PWA 窗口不会停止本地服务；刷新、BFCache、网络/SSE 断线以及测试或临时浏览器退出都不会让 Pi Chat 离线。需要停止服务时，请使用设置中的“关闭 Pi Chat”显式关闭；可通过桌面的 **Pi Chat** / **Pi Chat Web** 再次打开窗口。源码工作目录需在停服后显式执行 `npm run build` 才会应用本地改动，启动器不自动构建；完整 Setup 已内置编译产物和私有 Node，不需要系统 npm、源码或构建工具即可启动。
 
 ## 构建与运行
 

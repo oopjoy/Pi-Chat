@@ -1,45 +1,61 @@
 # Release Checklist
 
-Run every item from a clean, isolated staging directory. Do not replace the live `dist/`, restart the live service, or operate the normal listener until an authorized deployment window and a quiescent Runtime state exist.
+Work from isolated staging. Never overwrite live dist, restart the current
+service, or interrupt active Sessions without an authorized quiescent window.
 
-## Build And Tests
+## Source and artifact gates
 
-- [ ] `npm run typecheck` passes.
-- [ ] `npm run lint` completes; the initial rollout may report warnings while the existing debt is reduced.
-- [ ] `npm run check:type-debt` passes without exceeding the committed baseline.
-- [ ] Full unit validation passes with a unique absolute `PI_CHAT_DIST_DIR` under the OS temp directory.
-- [ ] Complete Playwright passes with a different unique absolute `PI_CHAT_DIST_DIR` under the OS temp directory.
-- [ ] Release staging paths are recorded; do not use the auto-cleaning contributor wrapper for the artifact that will be packaged.
-- [ ] Build the release staging tree with `PI_CHAT_RELEASE_MODE=1`, `PI_CHAT_RELEASE_TAG=vX.Y.Z`, and a unique absolute `PI_CHAT_DIST_DIR`; release mode requires the checked-out `HEAD` to equal the tag target and writes the full commit SHA into `build-identity.json`.
-- [ ] `git diff HEAD --check` passes before commit, `git show --check --format= HEAD` passes for the release commit, and `npm run check:committed-text` passes against committed text blobs.
-- [ ] The staged `build-identity.json` has the intended package version, exact Git revision, and a non-`unknown` fingerprint.
-- [ ] Run `node scripts/release-package.mjs --staging <staging-dist> --output <release-output> --tag vX.Y.Z`; keep the generated ZIP, portable `.sha256`, and `.manifest.json` together. Do not calculate a checksum by redirecting `sha256sum` without replacing its local path with the ZIP basename.
+- [ ] Typecheck, lint, writer-boundaries, type-debt and committed-text checks pass.
+- [ ] `verify:unit` passes in its own temporary staging directory.
+- [ ] Desktop browser and forced-colors checks pass in separate staging. Retained
+      mobile regressions may remain in CI, but no mobile product is promised.
+- [ ] `verify:artifact` passes; missing package/runtime assets fail closed.
+- [ ] `npm run test:setup` passes using the checksum-pinned private Node binary,
+      not merely the developer/system Node. Installer test processes, agent/session
+      directories and native uninstall identity are isolated from production.
+- [ ] Node/compiler pin versions and SHA256 values in
+      `scripts/installer-dependencies.json` were reviewed; upstream runtime
+      security updates were considered. No unverified dependency is executed.
+- [ ] Test install, refusal while running, upgrade and uninstall; confirm Pi user
+      state remains untouched, and optional Pi failure preserves the base app.
+- [ ] Test the visible wizard and shortcuts on a clean Windows user profile;
+      record any native/SmartScreen/antivirus checks not performed.
 
-## Windows Package
+## One Windows Setup
 
-- [ ] Run the standalone `pi-chat-setup.exe` on a clean Windows user profile; confirm it installs the bundled Node.js Runtime, detects an existing Pi before choosing a Runtime, and opens the browser without requiring global Node/npm. Keep the ZIP's `pi-chat-setup.cmd` fallback tested as well.
-- [ ] Confirm choosing an existing compatible Pi does not modify or upgrade that installation; confirm declining it installs the isolated PiChat managed Runtime and persists only the managed-root launch preference.
-- [ ] Build the ZIP from the verified staged artifact, never from live `dist/`; the release packaging command must reject live `dist/`, canonical aliases, and overlapping staging/output directories.
-- [ ] Confirm the ZIP contains the root launchers, `resources/icons/pi-chat.ico`, `scripts/pi-chat-launch-process.ps1`, and `scripts/pi-chat-port-ready.ps1`; these launcher dependencies must also be included in the build fingerprint.
-- [ ] Verify the generated checksum with `sha256sum -c <zip>.sha256` (or the Windows equivalent) from a directory containing the ZIP; the record must name only the portable ZIP basename.
-- [ ] Inspect the ZIP's `dist/build-identity.json`; revision and fingerprint match the release commit and staged build.
-- [ ] Inspect the generated `.manifest.json`; package version, tag, full revision, fingerprint, ZIP name, size, and SHA-256 must match the ZIP and embedded identity.
-- [ ] If packaging fails, confirm stale ZIP, checksum, and manifest sidecars were removed; do not publish a previous sidecar as current evidence.
-- [ ] Verify the staged server, Web assets, direct Pi RPC adapter, startup probe, minimal package identity, and all Windows launcher dependencies exist. `scripts/runtime-required-files.json` is the shared required-file list; both release packaging and Windows preflight call `scripts/check-runtime-files.mjs`. Packaging must fail before creating an archive if any listed file or HTML JS/CSS entry asset is missing or empty.
-- [ ] Confirm the ZIP includes `scripts/pi-chat-preflight.ps1`, `scripts/pi-chat-start-server.ps1`, `scripts/check-runtime-files.mjs`, and `scripts/runtime-required-files.json`; no npm/source checkout is needed to launch a complete release.
-- [ ] Verify missing/old Node and an unbuilt source checkout show actionable errors without downloading dependencies. Double-click CMD failures stay visible; automated callers use `PI_CHAT_NONINTERACTIVE=1`.
-- [ ] Verify both npm and official managed Pi installs resolve through the server, and an invalid explicit `PI_CHAT_PI_ENTRY` never falls back to another install. A portable, source-free isolated startup fixture covers managed discovery with fake RPC.
-- [ ] On the verified Pi version, confirm startup logs resolve the expected direct entry and that a child starts only through the local RPC adapter; missing or incompatible Pi must fail closed while JSONL browsing remains available.
-- [ ] Verify the connection-settings dialog detects without starting Pi, refuses to replace an explicit environment entry, and applies a selected trusted entry only after confirmation and idle checks. Service-only retry must work without npm/source and must not modify live dist; record any native picker/manual checks not performed.
-- [ ] Confirm Primary and at least two Secondary Sessions have distinct child PIDs while sharing the same frozen launch plan; no shared SDK host, broker, or process rebinding is introduced.
-- [ ] In a clean directory, launch the ZIP and verify its startup handshake identity matches the embedded Web bundle identity.
-- [ ] Verify the listener on the selected port reports the expected build identity.
-- [ ] Start a second package with another fingerprint and verify its launcher reports a conflict without requesting `/api/shutdown` or terminating the first instance.
+See [Windows Setup](windows-setup.md) for layout and build instructions.
 
-## Publish
+- [ ] Use a clean Git worktree and a release tag matching package version and HEAD.
+- [ ] Build into a unique temporary `PI_CHAT_DIST_DIR` with release mode enabled
+      and the exact tag/revision. Record the staging path.
+- [ ] `build-identity.json` package version, full SHA and fingerprint are correct.
+- [ ] Package with `node scripts/release-package.mjs --staging <dist> --output <dir> --tag vX.Y.Z`.
+- [ ] Output contains only `pi-chat-setup.exe`, `.exe.sha256` and
+      `.exe.manifest.json`. No Web EXE or portable application ZIP is produced.
+- [ ] The EXE embeds App + private Node/npm and their license/resource files.
+      Installing these components does not download them.
+- [ ] The schema-2 manifest identifies the Setup name/size/digest, embedded App
+      revision/fingerprint, Node version/archive checksum and compiler version.
+- [ ] Verify the checksum from the output directory; the record contains only the
+      EXE basename, never a build-machine path.
+- [ ] Packaging rejects live-dist aliases, overlapping staging/output directories,
+      missing assets, dirty source and mismatching build/tag identity.
+- [ ] Failed packaging removes stale EXE and sidecars; do not reuse previous ones.
+- [ ] Existing Pi is preferred and not upgraded. Optional missing-Pi installation
+      occurs only after explicit choice; silent setup does not download Pi.
+- [ ] With no Pi/network, base App + Node still install. The app opens with a
+      clear unavailable-Runtime state, not an apparently working model.
+- [ ] A different running checkout is never stopped or taken over. Matching
+      launch-plan identity and per-Session child/writer boundaries remain intact.
+- [ ] Native uninstall refuses an active destination, removes only its own files,
+      shortcuts and registration, and preserves `~/.pi/agent` and managed Pi.
+- [ ] Build/transcript/credential state is not copied into distributable payloads.
 
-- [ ] Commit and tag point to the verified source revision.
-- [ ] Windows Release CI publishes the exact ZIP, checksum, and manifest produced by its verified staging job; do not manually bridge a separately built ZIP into the public Release.
-- [ ] The repository has a protected `refs/tags/v*` ruleset that rejects tag update/delete/force-move after publication.
-- [ ] Source archive is described as source-only; the Windows ZIP is identified as the runnable package.
-- [ ] Release notes include the ZIP checksum and known platform scope.
+## Publication
+
+- [ ] Branch CI is green before creating a release tag.
+- [ ] Tag Release CI publishes the exact verified Setup and two sidecars.
+- [ ] Existing published tags/assets remain immutable; no `--clobber` uploads.
+- [ ] Release notes describe one Setup, optional Pi networking, platform/architecture,
+      known limitations and unsigned status. GitHub source archives are source-only.
+- [ ] Historical v0.5.2 assets are not replaced by the new installer implementation.

@@ -50,9 +50,9 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       console.error("This is a source checkout. In this project directory, run:");
       console.error("  npm ci --include=dev");
       console.error("  npm run build");
-      console.error("Or download the runnable pi-chat-windows ZIP from GitHub Releases, not Source code.");
+      console.error("Or install the complete pi-chat-setup.exe from GitHub Releases, not Source code.");
     } else {
-      console.error("The Windows package is incomplete. Re-download and fully extract the pi-chat-windows ZIP from GitHub Releases.");
+      console.error("The installation is incomplete. Reinstall using the complete pi-chat-setup.exe from GitHub Releases.");
       console.error("Do not run npm install or build inside the release package.");
     }
     process.exitCode = 1;

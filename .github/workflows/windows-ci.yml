@@ -42,6 +42,8 @@ jobs:
         run: npm run verify:artifact
         env:
           PI_CHAT_BUILD_REVISION: ${{ github.sha }}
+      - name: Verify self-contained Setup
+        run: npm run test:setup
       - name: Check pull request diff
         if: github.event_name == 'pull_request'
         run: git diff --check "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}"

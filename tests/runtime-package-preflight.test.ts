@@ -83,7 +83,7 @@ test("runtime preflight distinguishes source setup from an incomplete release", 
     } catch (error) { return String((error as { stderr: string }).stderr); }
   };
   try {
-    assert.match(run(), /fully extract/);
+    assert.match(run(), /Reinstall using the complete pi-chat-setup\.exe/);
     assert.match(run(), /Do not run npm install/);
     await mkdir(join(root, "src/server"), { recursive: true });
     await writeFile(join(root, "src/server/index.ts"), "// fixture\n");

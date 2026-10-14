@@ -1,0 +1,14 @@
+{
+  "node": {
+    "version": "22.19.0",
+    "archive": "node-v22.19.0-win-x64.zip",
+    "url": "https://nodejs.org/dist/v22.19.0/node-v22.19.0-win-x64.zip",
+    "sha256": "ea3fad0e67a991d8477d8c01344b56e69c676ccb733f065b22436994b1253f86"
+  },
+  "inno": {
+    "version": "6.4.3",
+    "archive": "innosetup-6.4.3.exe",
+    "url": "https://github.com/jrsoftware/issrc/releases/download/is-6_4_3/innosetup-6.4.3.exe",
+    "sha256": "f3c42116542c4cc57263c5ba6c4feabfc49fe771f2f98a79d2f7628b8762723b"
+  }
+}

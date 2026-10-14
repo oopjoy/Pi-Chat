@@ -1,300 +1,93 @@
 ﻿[CmdletBinding()]
 param(
-  [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA "PiChat"),
-  [string]$ReleaseTag = "latest",
-  [switch]$NonInteractive,
-  [switch]$SkipLaunch,
-  [switch]$SkipPiInstall
+  [Parameter(Mandatory = $true)][ValidateSet('CheckRunning', 'Detect', 'InstallPi')][string]$Action,
+  [Parameter(Mandatory = $true)][string]$InstallRoot,
+  [Parameter(Mandatory = $true)][string]$ResultFile
 )
 
-$ErrorActionPreference = "Stop"
-$ProgressPreference = "SilentlyContinue"
-$logPath = Join-Path ([IO.Path]::GetTempPath()) ("pi-chat-setup.log")
-try { $logStream = New-Object IO.StreamWriter($logPath, $true) } catch { $logStream = $null }
-function Log([string]$Message) {
-  Write-Host $Message
-  if ($logStream) { $logStream.WriteLine(('[{0}] {1}' -f (Get-Date -Format o), $Message)); $logStream.Flush() }
+# Inno Setup owns files, shortcuts and uninstall. This helper never downloads
+# the application/Node and never upgrades an already detected Pi.
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$InstallRoot = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')
+$appRoot = Join-Path $InstallRoot 'app'
+$node = Join-Path $InstallRoot 'runtime\node\node.exe'
+$staging = $null
+$logPath = Join-Path ([IO.Path]::GetTempPath()) 'pi-chat-pi-install.log'
+function Report([bool]$Found, [string]$Message, [string]$Entry = '', [string]$Version = '') {
+  $Message = $Message.Replace("`r", ' ').Replace("`n", ' ')
+  $lines = @('[Pi]', ('Found=' + [int]$Found), ('Message=' + $Message), ('Entry=' + $Entry), ('Version=' + $Version))
+  [IO.File]::WriteAllLines($ResultFile, $lines, [Text.Encoding]::Unicode)
 }
-function LogError([string]$Message) {
-  [Console]::Error.WriteLine($Message)
-  if ($logStream) { $logStream.WriteLine(('[{0}] ERROR {1}' -f (Get-Date -Format o), $Message)); $logStream.Flush() }
-}
-$repo = "oopjoy/Pi-Chat"
-$nodeVersion = "22.19.0"
-$piPackage = "@earendil-works/pi-coding-agent"
-if ($env:PI_CHAT_SETUP_INSTALL_ROOT) { $InstallRoot = $env:PI_CHAT_SETUP_INSTALL_ROOT }
-if ($env:PI_CHAT_SETUP_RELEASE_TAG) { $ReleaseTag = $env:PI_CHAT_SETUP_RELEASE_TAG }
-if ($env:PI_CHAT_SETUP_NONINTERACTIVE -eq "1") { $NonInteractive = $true }
-if ($env:PI_CHAT_SETUP_SKIP_LAUNCH -eq "1") { $SkipLaunch = $true }
-if ($env:PI_CHAT_SETUP_SKIP_PI_INSTALL -eq "1") { $SkipPiInstall = $true }
-if ($env:PI_CHAT_SETUP_USE_SYSTEM_NODE -eq "1") { $UseSystemNode = $true }
-if ($env:PI_CHAT_SETUP_SKIP_RELEASE_DOWNLOAD -eq "1") { $SkipReleaseDownload = $true }
-$temporary = Join-Path ([IO.Path]::GetTempPath()) ("pi-chat-setup-" + [guid]::NewGuid().ToString("N"))
-$appRoot = Join-Path $InstallRoot "app"
-$nodeRoot = Join-Path $InstallRoot "runtime\node"
-# Pi's own managed-install layout: shares ~/.pi/agent state with the user's CLI
-# without version skew, and is understood by Pi's native launcher as well.
-$managedRoot = Join-Path $env:USERPROFILE ".pi\agent\install"
-$configRoot = Join-Path $InstallRoot "config"
-
-function Fail([string]$Message) {
-  LogError("[Pi Chat Setup] $Message")
-  exit 1
-}
-
-function Download([string]$Url, [string]$Path) {
-  Log ("下载 " + $Url)
-  Invoke-WebRequest -Uri $Url -OutFile $Path -UseBasicParsing
-}
-
-# Primary hosts can be unreachable from some networks (e.g. nodejs.org 403);
-# mirror fallbacks keep first-run installs working without user intervention.
-function DownloadWithFallback([string[]]$Urls, [string]$Path) {
-  $lastError = $null
-  foreach ($url in $Urls) {
-    try { Download $url $Path; return }
-    catch { $lastError = $_; Log ("下载失败，尝试镜像：" + $_.Exception.Message) }
-  }
-  throw $lastError
-}
-
-function EnsureDirectory([string]$Path) {
-  New-Item -ItemType Directory -Force -Path $Path | Out-Null
-}
-
-function Test-PiChatRunning {
-  if ($env:PI_CHAT_SETUP_SKIP_RUNNING_CHECK -eq "1") { return $false }
-  $rootPattern = [regex]::Escape([IO.Path]::GetFullPath($InstallRoot).TrimEnd('\\'))
-  try {
-    $processes = @(Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" -ErrorAction Stop)
-    foreach ($process in $processes) {
-      if ([string]$process.CommandLine -match $rootPattern) { return $true }
+function DetectPi {
+  $envFile = Join-Path $InstallRoot 'config\runtime.env'
+  if (Test-Path -LiteralPath $envFile) {
+    foreach ($line in Get-Content -LiteralPath $envFile) {
+      if ($line -match '^PI_CHAT_MANAGED_INSTALL_ROOT=(.+)$') { $env:PI_CHAT_MANAGED_INSTALL_ROOT = $matches[1] }
     }
-  } catch {
-    Log ("无法读取 Node.js 进程列表，将继续检查 30170 端口：" + $_.Exception.Message)
   }
-  try {
-    $listeners = @(Get-NetTCPConnection -LocalPort 30170 -State Listen -ErrorAction SilentlyContinue)
-    if ($listeners.Count -gt 0) { return $true }
-  } catch {
-    # Get-NetTCPConnection is unavailable on some older Windows builds.
-  }
-  return $false
-}
-
-function InstallShortcuts {
-  $shortcutScript = Join-Path $appRoot "scripts\\install-shortcuts.ps1"
-  if (-not (Test-Path -LiteralPath $shortcutScript -PathType Leaf)) {
-    throw "安装后的快捷方式脚本缺失。"
-  }
-  $desktop = $env:PI_CHAT_SETUP_DESKTOP_PATH
-  if ([string]::IsNullOrWhiteSpace($desktop)) { $desktop = [Environment]::GetFolderPath('DesktopDirectory') }
-  $startMenu = $env:PI_CHAT_SETUP_START_MENU_PATH
-  if ([string]::IsNullOrWhiteSpace($startMenu)) { $startMenu = Join-Path ([Environment]::GetFolderPath('StartMenu')) 'Programs\\Pi Chat' }
-  Log "创建桌面和开始菜单快捷方式"
-  & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $shortcutScript -DesktopPath $desktop -StartMenuPath $startMenu
-  if ($LASTEXITCODE -ne 0) { throw "Pi Chat 快捷方式创建失败。" }
-}
-
-function RegisterUninstall([string]$tag) {
-  $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Pi Chat'
-  [void](New-Item -Path $key -Force)
-  $displayVersion = ([string]$tag).TrimStart('v')
-  if ($displayVersion -notmatch '^\d+\.\d+') { $displayVersion = "0.0.0" }
-  $uninstallScript = Join-Path $appRoot "scripts\pi-chat-uninstall.ps1"
-  $properties = @{
-    DisplayName = 'Pi Chat'
-    DisplayVersion = $displayVersion
-    Publisher = 'oopjoy'
-    InstallLocation = $InstallRoot
-    UninstallString = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $uninstallScript + '"'
-    QuietUninstallString = 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $uninstallScript + '" -NonInteractive'
-    DisplayIcon = (Join-Path $appRoot "resources\icons\pi-chat.ico")
-    NoModify = 1
-    NoRepair = 1
-  }
-  foreach ($name in $properties.Keys) {
-    New-ItemProperty -Path $key -Name $name -Value $properties[$name] -Force | Out-Null
-  }
-  Log "已注册卸载程序（设置 → 应用 → 安装的应用 → Pi Chat → 卸载）"
-}
-
-function Get-ReleaseAsset {
-  $uri = if ($ReleaseTag -eq "latest") {
-    "https://api.github.com/repos/$repo/releases/latest"
-  } else {
-    "https://api.github.com/repos/$repo/releases/tags/$ReleaseTag"
-  }
-  $release = Invoke-RestMethod -Uri $uri -Headers @{ Accept = "application/vnd.github+json" } -UseBasicParsing
-  $asset = @($release.assets) | Where-Object { $_.name -match '^pi-chat-windows-\d+\.\d+\.\d+\.zip$' } | Select-Object -First 1
-  if (-not $asset) { throw ("Release {0} 没有可用的 Windows Pi Chat ZIP。" -f $release.tag_name) }
-  $checksumName = [string]$asset.name + ".sha256"
-  $checksumAsset = @($release.assets) | Where-Object { $_.name -eq $checksumName } | Select-Object -First 1
-  if (-not $checksumAsset) { throw ("Release {0} 缺少 Pi Chat ZIP 校验文件。" -f $release.tag_name) }
-  return @{ Tag = [string]$release.tag_name; Name = [string]$asset.name; Url = [string]$asset.browser_download_url; ChecksumUrl = [string]$checksumAsset.browser_download_url }
-}
-
-function InstallNode {
-  if ($UseSystemNode -and (Get-Command node.exe -ErrorAction SilentlyContinue)) {
-    Log "使用系统 Node.js 进行隔离测试"
-    if (Test-Path $nodeRoot) { Remove-Item -LiteralPath $nodeRoot -Recurse -Force }
-    EnsureDirectory $nodeRoot
-    Copy-Item -LiteralPath (Get-Command node.exe).Source -Destination (Join-Path $nodeRoot "node.exe")
-    return
-  }
-  EnsureDirectory $temporary
-  $archiveName = "node-v$nodeVersion-win-x64.zip"
-  $archive = Join-Path $temporary $archiveName
-  $checksums = Join-Path $temporary "SHASUMS256.txt"
-  DownloadWithFallback @(
-    "https://nodejs.org/dist/v$nodeVersion/$archiveName",
-    "https://registry.npmmirror.com/-/binary/node/v$nodeVersion/$archiveName"
-  ) $archive
-  DownloadWithFallback @(
-    "https://nodejs.org/dist/v$nodeVersion/SHASUMS256.txt",
-    "https://registry.npmmirror.com/-/binary/node/v$nodeVersion/SHASUMS256.txt"
-  ) $checksums
-  $archivePattern = '\s' + [regex]::Escape($archiveName) + '$'
-  $record = Get-Content -LiteralPath $checksums | Where-Object { $_ -match $archivePattern } | Select-Object -First 1
-  if (-not $record) { throw "无法取得 Node.js $nodeVersion 的校验值。" }
-  $expected = ($record -split "\s+")[0].ToLowerInvariant()
-  $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-  if ($actual -ne $expected) { throw "Node.js 下载校验失败。" }
-  $extract = Join-Path $temporary "node-extract"
-  Expand-Archive -LiteralPath $archive -DestinationPath $extract -Force
-  $source = Join-Path $extract "node-v$nodeVersion-win-x64"
-  if (-not (Test-Path (Join-Path $source "node.exe"))) { throw "Node.js 压缩包内容不完整。" }
-  if (Test-Path $nodeRoot) { Remove-Item -LiteralPath $nodeRoot -Recurse -Force }
-  EnsureDirectory (Split-Path $nodeRoot -Parent)
-  Move-Item -LiteralPath $source -Destination $nodeRoot
-}
-
-function InstallApp($asset) {
-  if ($SkipReleaseDownload) {
-    Log "跳过 Release 下载，使用本地源码构建进行隔离测试"
-    if (Test-Path $appRoot) { Remove-Item -LiteralPath $appRoot -Recurse -Force }
-    EnsureDirectory $appRoot
-    $projectRoot = Split-Path -Parent $PSScriptRoot
-    if (-not (Test-Path (Join-Path $projectRoot "scripts\pi-chat-setup.ps1"))) { $projectRoot = "D:\git_project\pi-chat" }
-    $packageJson = Get-Content -LiteralPath (Join-Path $projectRoot "package.json") -Raw | ConvertFrom-Json
-    Set-Content -LiteralPath (Join-Path $appRoot "package.json") -Value ($packageJson | ConvertTo-Json -Depth 10)
-    Copy-Item -LiteralPath (Join-Path $projectRoot "scripts") -Destination (Join-Path $appRoot "scripts") -Recurse
-    Copy-Item -LiteralPath (Join-Path $projectRoot "dist") -Destination (Join-Path $appRoot "dist") -Recurse
-    Copy-Item -LiteralPath (Join-Path $projectRoot "resources") -Destination (Join-Path $appRoot "resources") -Recurse -ErrorAction SilentlyContinue
-    Copy-Item -LiteralPath (Join-Path $projectRoot "pi-chat-launch.cmd") -Destination (Join-Path $appRoot "pi-chat-launch.cmd")
-    Copy-Item -LiteralPath (Join-Path $projectRoot "start-pi-chat.cmd") -Destination (Join-Path $appRoot "start-pi-chat.cmd") -ErrorAction SilentlyContinue
-    Copy-Item -LiteralPath (Join-Path $projectRoot "start-pi-chat-ui.ps1") -Destination (Join-Path $appRoot "start-pi-chat-ui.ps1") -ErrorAction SilentlyContinue
-    return
-  }
-  $archive = Join-Path $temporary $asset.Name
-  $checksumFile = Join-Path $temporary ([string]$asset.Name + ".sha256")
-  Download $asset.Url $archive
-  Download $asset.ChecksumUrl $checksumFile
-  $assetPattern = '^([a-fA-F0-9]{64})\s+[* ]?' + [regex]::Escape([string]$asset.Name) + '$'
-  $record = Get-Content -LiteralPath $checksumFile | Where-Object { $_ -match $assetPattern } | Select-Object -First 1
-  if (-not $record) { throw "Pi Chat Release 校验文件格式无效。" }
-  $expected = ($record -split "\s+")[0].ToLowerInvariant()
-  $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-  if ($actual -ne $expected) { throw "Pi Chat Release 下载校验失败。" }
-  $extract = Join-Path $temporary "app-extract"
-  Expand-Archive -LiteralPath $archive -DestinationPath $extract -Force
-  $source = Get-ChildItem -LiteralPath $extract -Directory | Select-Object -First 1
-  if (-not $source -or -not (Test-Path (Join-Path $source.FullName "dist\server\server\index.js"))) {
-    throw "Pi Chat Release 内容不完整。"
-  }
-  $old = $null
-  try {
-    if (Test-Path $appRoot) {
-      $old = Join-Path $InstallRoot ("app-previous-" + [DateTime]::UtcNow.ToString("yyyyMMddHHmmss"))
-      Move-Item -LiteralPath $appRoot -Destination $old
-    }
-    Move-Item -LiteralPath $source.FullName -Destination $appRoot
-  } catch {
-    if ($old -and (Test-Path -LiteralPath $old) -and -not (Test-Path -LiteralPath $appRoot)) {
-      Move-Item -LiteralPath $old -Destination $appRoot -Force
-    }
-    throw
-  }
-}
-
-function DetectExistingPi {
-  $node = Join-Path $nodeRoot "node.exe"
-  $probe = Join-Path $appRoot "scripts\detect-pi-entry.mjs"
-  if (-not (Test-Path $probe)) { return $null }
-  try {
-    $json = & $node $probe 2>$null
-    if ($LASTEXITCODE -eq 0 -and $json) { return ($json | ConvertFrom-Json) }
-    if ($env:PI_CHAT_PI_ENTRY) { throw "PI_CHAT_PI_ENTRY 指向的 Pi RPC 入口不可用，请先修复该环境变量。" }
-  } catch {
-    if ($env:PI_CHAT_PI_ENTRY) { throw }
-  }
+  $value = & $node (Join-Path $appRoot 'scripts\detect-pi-entry.mjs') 2>>$logPath
+  if ($LASTEXITCODE -ne 0) { throw 'Pi detection failed; check PI_CHAT_PI_ENTRY or connection settings.' }
+  if ($value) { return ($value | ConvertFrom-Json) }
   return $null
 }
-
-function InstallManagedPi {
-  $packageEncoded = [uri]::EscapeDataString($piPackage)
-  $registryUri = 'https://registry.npmjs.org/' + $packageEncoded
-  $metadata = Invoke-RestMethod -Uri $registryUri -Headers @{ Accept = "application/json" } -UseBasicParsing
-  $version = [string]$metadata.'dist-tags'.latest
-  if ($version -notmatch '^\d+\.\d+\.\d+') { throw "npm Registry 没有返回有效的 Pi Runtime 版本。" }
-  $releaseRoot = Join-Path $managedRoot ("releases\" + $version)
-  EnsureDirectory $releaseRoot
-  $node = Join-Path $nodeRoot "node.exe"
-  $npm = Join-Path $nodeRoot "node_modules\npm\bin\npm-cli.js"
-  if (-not (Test-Path $npm)) { throw "随 Node.js 提供的 npm 不完整，无法安装 Pi Runtime。" }
-  Log ("安装 Pi Runtime " + $version + " 到 " + $releaseRoot)
-  & $node $npm install --prefix $releaseRoot "$piPackage@$version" --ignore-scripts --no-audit --no-fund | Out-Host
-  if ($LASTEXITCODE -ne 0 -and -not $env:PI_CHAT_NPM_REGISTRY) {
-    Log "npm 官方源安装失败，尝试 npmmirror 镜像源"
-    & $node $npm install --prefix $releaseRoot "$piPackage@$version" --ignore-scripts --no-audit --no-fund --registry https://registry.npmmirror.com | Out-Host
-  }
-  if ($LASTEXITCODE -ne 0) { throw "Pi Runtime 安装失败。" }
-  Set-Content -LiteralPath (Join-Path $managedRoot "current-version") -Value $version -NoNewline -Encoding ascii
-  return $managedRoot
-}
-
 try {
-  EnsureDirectory $InstallRoot
-  EnsureDirectory $temporary
-  if (Test-PiChatRunning) {
-    throw "检测到 Pi Chat 正在运行（端口 30170 或安装目录中的 Node.js 进程）。请先关闭 Pi Chat 后再安装或升级。"
-  }
-  Log ("准备安装 Pi Chat 到 " + $InstallRoot)
-  InstallNode
-  $asset = if ($SkipReleaseDownload) { @{ Tag = "local-test" } } else { Get-ReleaseAsset }
-  InstallApp $asset
-  $existing = DetectExistingPi
-  $managedPath = $null
-  if ($existing) {
-    Log ("检测到本机 Pi " + $existing.version + "：" + $existing.entry)
-    $useExisting = $true
-    if (-not $NonInteractive -and $env:PI_CHAT_NONINTERACTIVE -ne "1") {
-      $answer = Read-Host "是否使用检测到的本机 Pi？[Y/n]"
-      $useExisting = $answer -notmatch '^(n|no|否)$'
+  if ($Action -eq 'CheckRunning') {
+    # A different checkout on 30170 cannot lock this installation. Its launcher
+    # still refuses a foreign listener; never stop it or force-close processes.
+    $pattern = [regex]::Escape($InstallRoot + '\')
+    $processes = @(Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" -ErrorAction Stop)
+    foreach ($process in $processes) {
+      if ([string]$process.CommandLine -match $pattern -or [string]$process.ExecutablePath -match $pattern) {
+        Report $false 'Pi Chat is running from this installation. Close it safely in Settings before installing or uninstalling.'
+        exit 11
+      }
     }
-    if (-not $useExisting) { $managedPath = InstallManagedPi }
-  } else {
-    Log "未检测到可用 Pi，将安装 PiChat 管理的 Pi Runtime。"
-    if (-not $SkipPiInstall) { $managedPath = InstallManagedPi }
+    Report $false 'Installation files are not owned by a running Node process.'
+    exit 0
   }
-  EnsureDirectory $configRoot
-  $envFile = Join-Path $configRoot "runtime.env"
-  if ($managedPath) {
-    Set-Content -LiteralPath $envFile -Value "PI_CHAT_MANAGED_INSTALL_ROOT=$managedPath" -Encoding utf8
-  } else {
-    Remove-Item -LiteralPath $envFile -Force -ErrorAction SilentlyContinue
+  $existing = DetectPi
+  if ($existing) {
+    Report $true ('Using existing Pi ' + $existing.version + '; no upgrade or configuration copy performed.') ([string]$existing.entry) ([string]$existing.version)
+    exit 0
   }
-  $launcher = Join-Path $appRoot "pi-chat-launch.cmd"
-  if (-not (Test-Path $launcher)) { throw "安装后的 Pi Chat 启动器缺失。" }
-  InstallShortcuts
-  RegisterUninstall ([string]$asset.Tag)
-  Log ("安装完成：" + $asset.Tag)
-  Log "首次启动将打开浏览器，并继续使用本机 Pi 或 PiChat 管理的 Pi Runtime。"
-  if (-not $SkipLaunch) { Start-Process -FilePath $launcher -WorkingDirectory $appRoot }
+  if ($Action -eq 'Detect') {
+    Report $false 'Pi is not installed. Pi Chat and its private Node are ready; install Pi optionally, or configure its entry later.'
+    exit 0
+  }
+  $package = '@earendil-works/pi-coding-agent'
+  $metadata = Invoke-RestMethod -Uri ('https://registry.npmjs.org/' + [uri]::EscapeDataString($package)) -TimeoutSec 20 -UseBasicParsing
+  $version = [string]$metadata.'dist-tags'.latest
+  if ($version -notmatch '^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$') { throw 'Pi registry version is invalid.' }
+  $managed = Join-Path $env:USERPROFILE '.pi\agent\install'
+  $release = Join-Path $managed ('releases\' + $version)
+  $entry = Join-Path $release 'node_modules\@earendil-works\pi-coding-agent\dist\rpc-entry.js'
+  if (-not (Test-Path -LiteralPath $entry)) {
+    if (Test-Path -LiteralPath $release) { throw 'An incomplete Pi release directory already exists; use Pi connection settings to repair it.' }
+    $staging = Join-Path $managed ('releases\.install-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $staging | Out-Null
+    $npm = Join-Path $InstallRoot 'runtime\node\node_modules\npm\bin\npm-cli.js'
+    & $node $npm install --prefix $staging ($package + '@' + $version) --ignore-scripts --no-audit --no-fund --fetch-retries=1 --fetch-timeout=20000 >>$logPath 2>&1
+    if ($LASTEXITCODE -ne 0) { throw ('Pi download failed. The application remains installed. Log: ' + $logPath) }
+    $preparedEntry = Join-Path $staging 'node_modules\@earendil-works\pi-coding-agent\dist\rpc-entry.js'
+    if (-not (Test-Path -LiteralPath $preparedEntry)) { throw 'Downloaded Pi is missing its RPC entry.' }
+    Move-Item -LiteralPath $staging -Destination $release
+    $staging = $null
+  }
+  $pointer = Join-Path $managed 'current-version'
+  $temporary = $pointer + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
+  [IO.File]::WriteAllText($temporary, $version, [Text.Encoding]::ASCII)
+  if (Test-Path -LiteralPath $pointer) { [IO.File]::Replace($temporary, $pointer, $null) }
+  else { [IO.File]::Move($temporary, $pointer) }
+  $config = Join-Path $InstallRoot 'config'
+  New-Item -ItemType Directory -Force -Path $config | Out-Null
+  $envFile = Join-Path $config 'runtime.env'
+  $previous = if (Test-Path -LiteralPath $envFile) { @(Get-Content -LiteralPath $envFile | Where-Object { $_ -notmatch '^PI_CHAT_MANAGED_INSTALL_ROOT=' }) } else { @() }
+  [IO.File]::WriteAllLines($envFile, @($previous) + @('PI_CHAT_MANAGED_INSTALL_ROOT=' + $managed), [Text.UTF8Encoding]::new($false))
+  Report $true ('Installed Pi ' + $version + '. Existing credentials, Skills and sessions are unchanged.') $entry $version
 } catch {
-  LogError $_.Exception.ToString()
-  Fail $_.Exception.Message
+  Report $false ('Pi operation could not finish: ' + $_.Exception.Message + ' The application remains installed; retry from connection settings.')
+  exit 1
 } finally {
-  if ($logStream) { $logStream.Dispose() }
-  Remove-Item -LiteralPath $temporary -Recurse -Force -ErrorAction SilentlyContinue
+  if ($staging -and (Test-Path -LiteralPath $staging)) { Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue }
 }

@@ -20,7 +20,6 @@ const inputRoots = [
   "pi-chat-launch.cmd",
   "start-pi-chat.cmd",
   "start-pi-chat-ui.ps1",
-  "pi-chat-setup.cmd",
   "resources",
 ];
 

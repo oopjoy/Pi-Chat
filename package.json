@@ -17,14 +17,12 @@
     "start-pi-chat.cmd",
     "pi-chat-launch.cmd",
     "start-pi-chat-ui.ps1",
-    "pi-chat-setup.cmd",
     "scripts/install-shortcuts.ps1",
     "scripts/pi-chat-launch-process.ps1",
     "scripts/pi-chat-port-ready.ps1",
     "scripts/pi-chat-preflight.ps1",
     "scripts/pi-chat-start-server.ps1",
     "scripts/pi-chat-setup.ps1",
-    "scripts/pi-chat-uninstall.ps1",
     "scripts/detect-pi-entry.mjs",
     "scripts/check-runtime-files.mjs",
     "scripts/runtime-required-files.json",
@@ -86,7 +84,9 @@
     "test:e2e": "npm run build && playwright test",
     "test:e2e:ui": "npm run build && playwright test --ui",
     "install:shortcuts": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-shortcuts.ps1",
-    "build:setup": "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/build-setup-exe.ps1"
+    "setup:inputs": "node scripts/prepare-setup-inputs.mjs",
+    "test:setup": "node scripts/test-windows-setup.mjs",
+    "build:setup": "node scripts/setup-package.mjs"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "1.0.1",

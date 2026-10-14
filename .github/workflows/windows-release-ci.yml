@@ -29,6 +29,8 @@ jobs:
           node-version: 22.19.0
           cache: npm
       - run: npm ci
+      - name: Prepare checksum-pinned installer inputs
+        run: npm run setup:inputs
       - run: npx playwright install chromium
       - run: npm run typecheck
       - run: npm run lint
@@ -42,6 +44,11 @@ jobs:
           PI_CHAT_RELEASE_TAG: ""
           PI_CHAT_BUILD_REVISION: ""
         run: npm run verify:artifact
+      - name: Verify self-contained Windows install and uninstall
+        env:
+          PI_CHAT_RELEASE_MODE: "0"
+          PI_CHAT_RELEASE_TAG: ""
+        run: npm run test:setup
       - name: Build and package release candidate
         shell: pwsh
         run: |
@@ -63,17 +70,16 @@ jobs:
           $env:PI_CHAT_RELEASE_TAG = $env:GITHUB_REF_NAME
           $env:PI_CHAT_BUILD_REVISION = $env:GITHUB_SHA
           node scripts/release-package.mjs --staging $stage --output $output --tag $env:PI_CHAT_RELEASE_TAG
-          $zip = Get-ChildItem -LiteralPath $output -Filter "*.zip" | Select-Object -First 1
-          if (-not $zip) { throw "Release package did not produce a ZIP" }
-          $hash = (Get-FileHash -LiteralPath $zip.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-          $record = (Get-Content -LiteralPath "$($zip.FullName).sha256" -Raw).Trim()
-          if ($record -ne "$hash *$($zip.Name)") {
-            throw "Portable checksum does not match the generated ZIP"
-          }
-          $manifest = Get-Content -LiteralPath "$($zip.FullName).manifest.json" -Raw | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw "Setup packaging failed" }
+          $setup = Get-Item -LiteralPath (Join-Path $output "pi-chat-setup.exe")
+          $hash = (Get-FileHash -LiteralPath $setup.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          $record = (Get-Content -LiteralPath "$($setup.FullName).sha256" -Raw).Trim()
+          if ($record -ne "$hash *$($setup.Name)") { throw "Setup checksum mismatch" }
+          $manifest = Get-Content -LiteralPath "$($setup.FullName).manifest.json" -Raw | ConvertFrom-Json
           if ($manifest.tag -ne $env:PI_CHAT_RELEASE_TAG) { throw "Manifest tag does not match the pushed tag" }
           if ($manifest.revision -ne $env:GITHUB_SHA) { throw "Manifest revision does not match the pushed commit" }
-          if ($manifest.zip.sha256 -ne $hash) { throw "Manifest checksum does not match the generated ZIP" }
+          if ($manifest.setup.sha256 -ne $hash) { throw "Manifest checksum does not match the Setup" }
+          if (@(Get-ChildItem -LiteralPath $output -File).Count -ne 3) { throw "Expected one Setup and two sidecars only" }
       - name: Upload verified release candidate
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
@@ -87,7 +93,7 @@ jobs:
         run: |
           $tag = $env:GITHUB_REF_NAME
           $output = Join-Path $env:RUNNER_TEMP "pi-chat-release-output"
-          $assets = Get-ChildItem -LiteralPath $output -File | ForEach-Object { $_.FullName }
+          $assets = @('pi-chat-setup.exe', 'pi-chat-setup.exe.sha256', 'pi-chat-setup.exe.manifest.json') | ForEach-Object { (Get-Item -LiteralPath (Join-Path $output $_)).FullName }
           if (-not $assets) { throw "No verified release assets were produced" }
           $notes = Join-Path $env:GITHUB_WORKSPACE "release-notes-$tag.md"
           if (Test-Path -LiteralPath $notes) {
@@ -97,8 +103,7 @@ jobs:
           }
           gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag --repo $env:GITHUB_REPOSITORY --clobber @assets
-            gh release edit $tag --repo $env:GITHUB_REPOSITORY --title "Pi Chat $tag" --draft=false --prerelease=false @notesArgs
+            throw "Release already exists; published assets are immutable. Use a new tag."
           } else {
             gh release create $tag --repo $env:GITHUB_REPOSITORY --verify-tag --title "Pi Chat $tag" --draft=false --prerelease=false @notesArgs @assets
           }

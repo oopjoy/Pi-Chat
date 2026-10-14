@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
-import { cp, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -72,47 +72,6 @@ test("double-click wrapper preserves errors and offers an explicit noninteractiv
     });
     const wrapper = await readProjectFile("start-pi-chat.cmd");
     assert.match(wrapper, /PI_CHAT_NONINTERACTIVE.*pause/);
-  } finally { await rm(sandbox, { recursive: true, force: true }); }
-});
-
-test("Setup EXE wrapper declares online downloads and preserves installer failure feedback", { skip: process.platform !== "win32" }, async () => {
-  const sandbox = await mkdtemp(join(tmpdir(), "pi-chat-setup-wrapper-"));
-  const output = join(sandbox, "setup.exe");
-  const unpacked = join(sandbox, "unpacked");
-  try {
-    execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", join(root, "scripts/build-setup-exe.ps1"), "-Output", output], { timeout: 30_000, stdio: "pipe" });
-    const bytes = await readFile(output);
-    const offset = bytes.indexOf(Buffer.from("MSCF"));
-    assert.ok(offset >= 0);
-    const size = bytes.readUInt32LE(offset + 8);
-    assert.ok(offset + size <= bytes.length);
-    const cab = join(sandbox, "payload.cab");
-    await writeFile(cab, bytes.subarray(offset, offset + size));
-    await mkdir(unpacked);
-    execFileSync(join(process.env.SystemRoot || "C:/Windows", "System32/expand.exe"), ["-F:*", cab, unpacked], { timeout: 5000, stdio: "pipe" });
-    const wrapper = join(unpacked, "pi-chat-setup.cmd");
-    const script = join(unpacked, "pi-chat-setup.ps1");
-    const source = await readFile(wrapper, "utf8");
-    assert.match(source, /Online installer - Internet access required/);
-    assert.match(source, /PI_CHAT_SETUP_NONINTERACTIVE.*PI_CHAT_NONINTERACTIVE.*pause/);
-    await writeFile(script, "Write-Output 'fixture-install-failure'\r\nexit 7\r\n", "utf8");
-    assert.throws(() => execFileSync("cmd.exe", ["/d", "/c", wrapper], {
-      env: { ...process.env, PI_CHAT_SETUP_NONINTERACTIVE: "1", TEMP: sandbox }, encoding: "utf8", timeout: 5000,
-    }), (error: unknown) => {
-      const result = error as { status: number; stdout: string };
-      assert.equal(result.status, 7, "the CMD entry must preserve the PowerShell failure code");
-      assert.match(result.stdout, /fixture-install-failure/);
-      assert.match(result.stdout, /Installation did not complete/);
-      assert.match(result.stdout, /pi-chat-setup\.log/);
-      assert.match(result.stdout, /close it safely/);
-      return true;
-    });
-    await writeFile(script, "Write-Output 'fixture-install-success'\r\nexit 0\r\n", "utf8");
-    const result = execFileSync("cmd.exe", ["/d", "/c", wrapper], {
-      env: { ...process.env, PI_CHAT_SETUP_NONINTERACTIVE: "1", TEMP: sandbox }, encoding: "utf8", timeout: 5000,
-    });
-    assert.match(result, /fixture-install-success/);
-    assert.doesNotMatch(result, /Installation did not complete/);
   } finally { await rm(sandbox, { recursive: true, force: true }); }
 });
 
@@ -208,48 +167,6 @@ test("packaged icon is a multi-image Windows ICO", async () => {
   assert.equal(icon.readUInt16LE(0), 0);
   assert.equal(icon.readUInt16LE(2), 1);
   assert.ok(icon.readUInt16LE(4) >= 4);
-});
-
-test("uninstall removes the install root and shortcuts but preserves user Pi state", { skip: process.platform !== "win32" }, async () => {
-  const sandbox = await mkdtemp(join(tmpdir(), "pi-chat-uninstall-"));
-  const installRoot = join(sandbox, "PiChat");
-  const desktop = join(sandbox, "Desktop");
-  const startMenu = join(sandbox, "Start Menu", "Programs", "Pi Chat");
-  try {
-    await mkdir(join(installRoot, "app", "dist"), { recursive: true });
-    await mkdir(join(installRoot, "config"), { recursive: true });
-    await mkdir(desktop, { recursive: true });
-    await mkdir(startMenu, { recursive: true });
-    await writeFile(join(installRoot, "app", "dist", "index.js"), "// fixture\n");
-    await writeFile(join(installRoot, "config", "runtime.env"), "PI_CHAT_MANAGED_INSTALL_ROOT=C:\\fixture\n");
-    await writeFile(join(desktop, "Pi Chat.lnk"), "shortcut");
-    await writeFile(join(startMenu, "Pi Chat Web.lnk"), "shortcut");
-    const userState = join(sandbox, "user-pi-state");
-    await mkdir(userState, { recursive: true });
-    await writeFile(join(userState, "session.jsonl"), "{}\n");
-    execFileSync("powershell.exe", [
-      "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-      "-File", join(root, "scripts", "pi-chat-uninstall.ps1"),
-    ], {
-      cwd: root,
-      stdio: "pipe",
-      env: {
-        ...process.env,
-        PI_CHAT_SETUP_INSTALL_ROOT: installRoot,
-        PI_CHAT_SETUP_NONINTERACTIVE: "1",
-        PI_CHAT_SETUP_SKIP_RUNNING_CHECK: "1",
-        PI_CHAT_SETUP_DESKTOP_PATH: desktop,
-        PI_CHAT_SETUP_START_MENU_PATH: startMenu,
-      },
-    });
-    await assert.rejects(stat(installRoot), /ENOENT/);
-    await assert.rejects(stat(join(desktop, "Pi Chat.lnk")), /ENOENT/);
-    await assert.rejects(stat(startMenu), /ENOENT/, "empty start-menu folder must be removed");
-    // User Pi state outside the install root is never touched.
-    assert.equal(await readFile(join(userState, "session.jsonl"), "utf8"), "{}\n");
-  } finally {
-    await rm(sandbox, { recursive: true, force: true });
-  }
 });
 
 test("shortcut installer supports checkout paths with shell metacharacters", { skip: process.platform !== "win32" }, async () => {

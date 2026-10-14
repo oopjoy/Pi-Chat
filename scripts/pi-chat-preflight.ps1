@@ -9,7 +9,7 @@ try {
   $bundledNode = Join-Path $localRuntimeRoot 'node\node.exe'
   $node = if (Test-Path -LiteralPath $bundledNode) { Get-Item -LiteralPath $bundledNode } else { Get-Command node.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 }
   if (-not $node) {
-    throw 'Node.js was not found. Run pi-chat-setup.cmd, or install Node.js 22.19 or newer from https://nodejs.org/, then reopen Pi Chat. A computer restart is not required.'
+    throw 'Node.js was not found. Reinstall using the complete pi-chat-setup.exe, or for a source checkout install Node.js 22.19 or newer from https://nodejs.org/, then reopen Pi Chat. A computer restart is not required.'
   }
   $nodePath = if ($node.FullName) { $node.FullName } else { $node.Source }
   $versionText = (& $nodePath -p 'process.versions.node' | Out-String).Trim()

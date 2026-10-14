@@ -15,6 +15,17 @@ Pi Chat is **not**:
 
 “Lightweight” only means the browser runtime is not bundled. Application lifecycle, multi-session coordination, and Windows launchers may still be non-trivial.
 
+## Windows distribution
+
+The next installer is a single Inno Setup EXE embedding the compiled App and a
+checksum-pinned private Node/npm runtime. App/Node installation does not access
+release/download endpoints. Existing Pi is reused; only an explicit optional
+missing-Pi action accesses npm. Native setup owns files/shortcuts/uninstall;
+PowerShell is only a bounded Pi detection/installation helper. No Web installer,
+portable ZIP or Electron runtime is published alongside it. This does not change
+Runtime/Session/JSONL authority or published historical assets.
+See [Windows Setup](windows-setup.md) and [release checklist](release-checklist.md).
+
 ## Process layers
 
 Three lifetimes must stay distinct:
@@ -47,7 +58,7 @@ The status of each current capability is tracked in [`feature-surface.md`](featu
 - Models list / custom models
 - Skills / Extensions / Packages management **as currently implemented** (maintain, do not deepen into a package platform)
 - Staging restart and conservative single-file resource rollback
-- Windows portable launchers and PWA/Web shortcuts
+- Windows installed/source launchers and PWA/Web shortcuts; one App + Node Setup
 
 ### Explicit non-goals / pseudo-requirements
 
