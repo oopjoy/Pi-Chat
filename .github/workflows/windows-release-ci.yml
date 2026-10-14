@@ -96,6 +96,18 @@ jobs:
           $assets = @('pi-chat-setup.exe', 'pi-chat-setup.exe.sha256', 'pi-chat-setup.exe.manifest.json') | ForEach-Object { (Get-Item -LiteralPath (Join-Path $output $_)).FullName }
           if (-not $assets) { throw "No verified release assets were produced" }
           $notes = Join-Path $env:GITHUB_WORKSPACE "release-notes-$tag.md"
+          $preview = $tag -match '^v\d+\.\d+\.\d+-setup-preview\.[a-f0-9]{12}$'
+          if ($preview) {
+            $version = (Get-Content (Join-Path $env:GITHUB_WORKSPACE 'package.json') -Raw | ConvertFrom-Json).version
+            $expectedPreview = "v$version-setup-preview.$($env:GITHUB_SHA.Substring(0, 12))"
+            if ($tag -ne $expectedPreview) { throw 'Preview tag must name the exact checked-out revision' }
+            $notes = Join-Path $env:GITHUB_WORKSPACE 'release-notes-setup-preview.md'
+            $channelArgs = @('--prerelease', '--latest=false')
+            $title = "Pi Chat $version - Complete Setup test build"
+          } else {
+            $channelArgs = @('--prerelease=false')
+            $title = "Pi Chat $tag"
+          }
           if (Test-Path -LiteralPath $notes) {
             $notesArgs = @('--notes-file', $notes)
           } else {
@@ -105,5 +117,5 @@ jobs:
           if ($LASTEXITCODE -eq 0) {
             throw "Release already exists; published assets are immutable. Use a new tag."
           } else {
-            gh release create $tag --repo $env:GITHUB_REPOSITORY --verify-tag --title "Pi Chat $tag" --draft=false --prerelease=false @notesArgs @assets
+            gh release create $tag --repo $env:GITHUB_REPOSITORY --verify-tag --title $title --draft=false @channelArgs @notesArgs @assets
           }

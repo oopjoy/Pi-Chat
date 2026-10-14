@@ -56,6 +56,13 @@ identity. Outputs:
 - `pi-chat-setup.exe.manifest.json` (schema 2; Setup digest, application identity,
   Node archive checksum and compiler version)
 
+A test-only publication may use
+`v<package-version>-setup-preview.<first-12-characters-of-HEAD>`. Its tag must
+resolve to the exact checked-out revision and its embedded package version must
+still match. The same release gates apply, but GitHub marks it Pre-release and
+explicitly not Latest. It does not move the stable version tag or require a
+new application version just to test the installer.
+
 Do not overwrite an existing Release. Publication fails when a Release already
 exists. Pin updates require explicit review and rerunning the bundled-runtime
 checks; a pinned version is not an excuse to ignore runtime security updates.

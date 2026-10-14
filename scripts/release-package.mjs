@@ -34,10 +34,15 @@ export async function writeArtifactChecksum({ artifactPath, checksumPath, artifa
   return { checksum, record };
 }
 
+export function isSetupPreviewTag(tag, packageVersion, revision) {
+  return typeof revision === "string" && /^[a-f0-9]{40}$/.test(revision)
+    && tag === `v${packageVersion}-setup-preview.${revision.slice(0, 12)}`;
+}
+
 export function assertReleaseIdentity({ buildIdentity, packageVersion, headRevision, tagRevision, tag }) {
   if (buildIdentity?.schemaVersion !== 1) throw new Error(`Unsupported embedded build identity schema: ${buildIdentity?.schemaVersion}`);
   if (!/^[a-f0-9]{64}$/.test(buildIdentity?.fingerprint || "")) throw new Error("Embedded build fingerprint must be 64 lowercase hexadecimal characters");
-  if (tag !== "HEAD" && tag !== `v${packageVersion}`) throw new Error(`Release tag ${tag} does not match package version ${packageVersion}`);
+  if (tag !== "HEAD" && tag !== `v${packageVersion}` && !isSetupPreviewTag(tag, packageVersion, headRevision)) throw new Error(`Release tag ${tag} does not match package version ${packageVersion} or the exact Setup preview revision`);
   if (headRevision !== tagRevision) throw new Error(`Release tag ${tag} does not match HEAD ${headRevision}`);
   if (buildIdentity.revision !== headRevision) throw new Error(`Embedded build revision ${buildIdentity.revision} does not match release revision ${headRevision}`);
   if (buildIdentity.packageVersion !== packageVersion) throw new Error(`Embedded package version ${buildIdentity.packageVersion} does not match ${packageVersion}`);

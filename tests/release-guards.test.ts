@@ -7,7 +7,7 @@ import test from "node:test";
 import { promisify } from "node:util";
 import { assertCommittedLf } from "../scripts/check-committed-text.mjs";
 import { applicationPackageFiles } from "../scripts/setup-package.mjs";
-import { assertSetupArtifactName, assertReleaseIdentity, packageRelease, releaseManifest, sha256File, writeArtifactChecksum } from "../scripts/release-package.mjs";
+import { assertSetupArtifactName, assertReleaseIdentity, isSetupPreviewTag, packageRelease, releaseManifest, sha256File, writeArtifactChecksum } from "../scripts/release-package.mjs";
 
 const execFile = promisify(execFileCallback);
 const repositoryRoot = resolve(import.meta.dirname, "..");
@@ -40,6 +40,19 @@ test("release identity requires tag, HEAD and embedded identity to agree", () =>
     schemaVersion: 2, packageVersion: "0.5.2", tag: "v0.5.2", revision: "abc123", fingerprint: identity.fingerprint,
     setup: { name: "pi-chat-setup.exe", size: 12, sha256: "a".repeat(64), format: "inno-setup" }, runtime,
   });
+});
+
+test("Setup previews bind the package version and exact revision without weakening stable-tag checks", () => {
+  const revision = "a".repeat(40);
+  const tag = `v0.5.2-setup-preview.${revision.slice(0, 12)}`;
+  const input = { buildIdentity: { schemaVersion: 1, revision, packageVersion: "0.5.2", fingerprint: "f".repeat(64) }, packageVersion: "0.5.2", headRevision: revision, tagRevision: revision, tag };
+  assert.equal(isSetupPreviewTag(tag, "0.5.2", revision), true);
+  assert.doesNotThrow(() => assertReleaseIdentity(input));
+  for (const wrong of ["v0.5.3", "v0.5.2-beta", "v0.5.2-setup-preview.bbbbbbbbbbbb", "v0.6.0-setup-preview.aaaaaaaaaaaa"]) {
+    assert.equal(isSetupPreviewTag(wrong, "0.5.2", revision), false);
+    assert.throws(() => assertReleaseIdentity({ ...input, tag: wrong }), /does not match package version/);
+  }
+  assert.throws(() => assertReleaseIdentity({ ...input, tagRevision: "b".repeat(40) }), /does not match HEAD/);
 });
 
 test("release build identity uses the exact checked-out commit", async () => {
@@ -115,6 +128,8 @@ test("branch CI and tag release CI are separated and every third-party action is
     if (name === "windows-release-ci.yml") {
       assert.match(source, /push:\n\s+tags:/); assert.match(source, /PI_CHAT_RELEASE_MODE: ["']?1/);
       assert.match(source, /pi-chat-setup.exe/); assert.doesNotMatch(source, /--clobber|Filter "\*\.zip"/);
+      assert.match(source, /\$channelArgs = @\('--prerelease', '--latest=false'\)/);
+      assert.match(source, /Preview tag must name the exact checked-out revision/);
     }
   }
 });
