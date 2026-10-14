@@ -5,7 +5,7 @@
 ### One complete Windows Setup
 
 - Replace the IExpress/Web downloader with one Inno Setup EXE embedding App + private pinned Node/npm. No Web EXE or portable application ZIP is produced; historical v0.5.2 assets remain unchanged.
-- Use native per-user installation, destination selection, shortcuts and uninstall. Refuse upgrade/uninstall of an active destination without killing it; preserve Pi user data and unknown files.
+- Use native per-user installation, destination selection, shortcuts and uninstall. Refuse upgrade/uninstall of an active destination without killing it; preserve Pi user data and unknown files. Compare file-handle identities as well as launch paths so Windows short-path and junction aliases cannot bypass the running-install guard.
 - Reuse existing Pi without upgrading it. Missing Pi is an explicit optional online action; skipping it or a network failure leaves the base application installed and usable for connection recovery.
 - Pin and checksum Node/compiler downloads on the build machine, validate the built application under the actual private Node, and emit one Setup with SHA256/schema-2 identity sidecars.
 - Add isolated real-installer install/upgrade/uninstall tests, existing-Pi/no-network behavior and published-asset immutability guards. Update README to distinguish the new main-branch installer from the old released online bootstrapper.

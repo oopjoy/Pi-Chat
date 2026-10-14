@@ -35,10 +35,43 @@ try {
   if ($Action -eq 'CheckRunning') {
     # A different checkout on 30170 cannot lock this installation. Its launcher
     # still refuses a foreign listener; never stop it or force-close processes.
+    # GetFullPath is lexical: it does not resolve RUNNER~1, junctions or other
+    # aliases. Compare filesystem identities as well as literal launch paths.
+    if (-not ('PiChatInstallerPaths' -as [type])) {
+      Add-Type -TypeDefinition @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class PiChatInstallerPaths {
+  [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern SafeFileHandle Open(string path, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
+  [DllImport("kernel32.dll", EntryPoint = "GetFinalPathNameByHandleW", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern uint FinalName(SafeFileHandle handle, StringBuilder name, uint size, uint flags);
+  public static string Resolve(string path) {
+    if (String.IsNullOrEmpty(path)) return null;
+    using (var handle = Open(path, 0, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero)) {
+      if (handle.IsInvalid) return null;
+      var text = new StringBuilder(1024);
+      uint length = FinalName(handle, text, (uint)text.Capacity, 0);
+      if (length >= text.Capacity) {
+        text.Capacity = (int)length + 1;
+        length = FinalName(handle, text, (uint)text.Capacity, 0);
+      }
+      return length > 0 && length < text.Capacity ? text.ToString() : null;
+    }
+  }
+}
+'@
+    }
     $pattern = [regex]::Escape($InstallRoot + '\')
+    $canonicalRoot = [PiChatInstallerPaths]::Resolve($InstallRoot)
+    if ($canonicalRoot) { $canonicalRoot = $canonicalRoot.TrimEnd('\') + '\' }
     $processes = @(Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" -ErrorAction Stop)
     foreach ($process in $processes) {
-      if ([string]$process.CommandLine -match $pattern -or [string]$process.ExecutablePath -match $pattern) {
+      $executable = [PiChatInstallerPaths]::Resolve([string]$process.ExecutablePath)
+      $ownsFiles = $canonicalRoot -and $executable -and $executable.StartsWith($canonicalRoot, [StringComparison]::OrdinalIgnoreCase)
+      if ($ownsFiles -or [string]$process.CommandLine -match $pattern -or [string]$process.ExecutablePath -match $pattern) {
         Report $false 'Pi Chat is running from this installation. Close it safely in Settings before installing or uninstalling.'
         exit 11
       }

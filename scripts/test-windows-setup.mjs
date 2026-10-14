@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { once } from "node:events";
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -80,12 +80,17 @@ try {
   assert.ok(!await exists(join(root, "profile/.pi/agent/install/current-version")));
 
   console.log("[Setup check] Running installation refuses upgrade and uninstall without killing the owned process");
-  const sentinel = spawn(node, ["-e", "setInterval(() => {}, 1000)", "--", install + "\\owned-sentinel"], { env, stdio: "ignore", windowsHide: true });
+  const sentinel = spawn(node, ["-e", "console.log('ready'); setInterval(() => {}, 1000)", "--", install + "\\owned-sentinel"], { env, stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
   const stopped = once(sentinel, "exit");
-  await once(sentinel, "spawn");
   try {
-    await assert.rejects(execute(exe, flags, { env, windowsHide: true, timeout: 30_000 }));
-    await assert.rejects(execute(uninstaller, ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"], { env, windowsHide: true, timeout: 30_000 }));
+    await once(sentinel.stdout, "data", { signal: AbortSignal.timeout(15_000) });
+    const canonicalInstall = await realpath(install);
+    console.log(`[Setup check] Running guard: requested=${install}; canonical=${canonicalInstall}`);
+    for (const directory of new Set([install, canonicalInstall])) {
+      await assert.rejects(execute("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", helper, "-Action", "CheckRunning", "-InstallRoot", directory, "-ResultFile", resultIni], { env, windowsHide: true, timeout: 30_000 }), error => error.code === 11, "helper must refuse this running installation through either path spelling");
+    }
+    await assert.rejects(execute(exe, flags, { env, windowsHide: true, timeout: 30_000 }), "installer must reject an active target");
+    await assert.rejects(execute(uninstaller, ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"], { env, windowsHide: true, timeout: 30_000 }), "uninstaller must reject an active target");
     assert.equal(sentinel.exitCode, null, "installer must never kill an active process");
     assert.ok(await exists(node));
   } finally { sentinel.kill("SIGTERM"); await stopped; }

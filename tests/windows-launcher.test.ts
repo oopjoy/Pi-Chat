@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
-import { cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -159,6 +159,31 @@ test("PowerShell launcher wrapper preserves exit code and captures output throug
     assert.match(result.Stderr, /captured-error/);
   } finally {
     await rm(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("installer running guard identifies filesystem aliases and does not block another installation", { skip: process.platform !== "win32" }, async () => {
+  const sandbox = await mkdtemp(join(tmpdir(), "pi-chat-running-alias-"));
+  const actual = join(sandbox, "actual"), alias = join(sandbox, "junction");
+  const result = join(sandbox, "check.ini");
+  await mkdir(actual);
+  await cp(process.execPath, join(actual, "node.exe"));
+  await symlink(actual, alias, "junction");
+  const child = spawn(join(actual, "node.exe"), ["-e", "console.log('ready'); setInterval(() => {}, 1000)"], { stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
+  const exited = once(child, "exit");
+  try {
+    await once(child.stdout!, "data", { signal: AbortSignal.timeout(10_000) });
+    const check = (directory: string) => execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", join(root, "scripts/pi-chat-setup.ps1"), "-Action", "CheckRunning", "-InstallRoot", directory, "-ResultFile", result], { stdio: "pipe", windowsHide: true, timeout: 20_000 });
+    for (const directory of [actual, alias]) {
+      assert.throws(() => check(directory), (error: unknown) => (error as { status: number }).status === 11);
+      assert.match((await readFile(result)).toString("utf16le"), /running from this installation/);
+    }
+    check(join(sandbox, "another-installation"));
+    assert.match((await readFile(result)).toString("utf16le"), /not owned by a running Node process/);
+    assert.equal(child.exitCode, null, "checking aliases must never stop the process");
+  } finally {
+    child.kill("SIGTERM"); await exited;
+    await rm(sandbox, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
 
