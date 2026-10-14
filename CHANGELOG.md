@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Separate Git and Setup launch entries
+
+- Generate source-checkout shortcuts as `Pi Chat Git` / optional `Pi Chat Git PWA` in a separate Start-menu group. Leave Setup-owned generic shortcuts untouched; installer tests guard against claiming the Git names.
+
 ### Web-default launch and private Node checks
 
 - Default Setup completion and primary shortcuts to Web in the system default browser; add a tracked `Pi Chat Web.lnk` in the installation root and an explicit Desktop Web alias. Keep `Pi Chat PWA` as an optional Start-menu entry, with browser application setup owned by the browser.

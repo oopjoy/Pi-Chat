@@ -37,6 +37,7 @@ test("Setup embeds App and Node while Pi remains optional and native uninstall n
   assert.match(script, /PayloadRoot.*app.*DestDir: "\{app\}\\app"/);
   assert.match(script, /PayloadRoot.*runtime\\node.*DestDir: "\{app\}\\runtime\\node"/);
   assert.match(script, /PrivilegesRequired=lowest/);
+  assert.doesNotMatch(script, /Pi Chat Git/, "Setup must not own or delete source-checkout shortcuts");
   assert.match(script, /CloseApplications=no/);
   const launcherIcons = script.split("\n").filter(line => line.startsWith('Name: "') && line.includes("start-pi-chat-ui.ps1"));
   assert.ok(launcherIcons.some(line => line.startsWith('Name: "{app}\\Pi Chat Web"')));

@@ -18,7 +18,7 @@ if ([string]::IsNullOrWhiteSpace($DesktopPath)) {
 }
 [void](New-Item -ItemType Directory -Force -Path $DesktopPath)
 if ([string]::IsNullOrWhiteSpace($StartMenuPath)) {
-  $StartMenuPath = Join-Path ([Environment]::GetFolderPath('StartMenu')) 'Programs\Pi Chat'
+  $StartMenuPath = Join-Path ([Environment]::GetFolderPath('StartMenu')) 'Programs\Pi Chat Git'
 }
 [void](New-Item -ItemType Directory -Force -Path $StartMenuPath)
 
@@ -47,7 +47,8 @@ function Install-PiChatShortcut {
   }
 }
 
-Install-PiChatShortcut -Name 'Pi Chat' -Mode 'web' -Description 'Open Pi Chat in the default browser'
-Install-PiChatShortcut -Name 'Pi Chat Web' -Mode 'web' -Description 'Open Pi Chat in the default browser'
-Install-PiChatShortcut -Name 'Pi Chat Web' -Mode 'web' -Description 'Open Pi Chat in the default browser' -Destinations @($project)
-Install-PiChatShortcut -Name 'Pi Chat PWA' -Mode 'pwa' -Description 'Optional: open Pi Chat as a browser app' -Destinations @($StartMenuPath)
+# Source-checkout shortcuts have their own names and Start-menu group. Never
+# overwrite the generic Pi Chat / Pi Chat Web entries owned by native Setup.
+Install-PiChatShortcut -Name 'Pi Chat Git' -Mode 'web' -Description 'Open this Pi Chat Git checkout in the default browser'
+Install-PiChatShortcut -Name 'Pi Chat Git' -Mode 'web' -Description 'Open this Pi Chat Git checkout in the default browser' -Destinations @($project)
+Install-PiChatShortcut -Name 'Pi Chat Git PWA' -Mode 'pwa' -Description 'Optional: open this Pi Chat Git checkout as a browser app' -Destinations @($StartMenuPath)

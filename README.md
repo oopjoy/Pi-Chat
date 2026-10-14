@@ -246,13 +246,15 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-shortc
 
 | 名称 | 行为与位置 |
 |---|---|
-| **Pi Chat** | 默认浏览器打开 Web；桌面及开始菜单 |
-| **Pi Chat Web** | 明确的 Web 入口；桌面、开始菜单及安装/项目根目录 |
-| **Pi Chat PWA** | 可选的浏览器应用窗口入口；开始菜单，不作为安装后的默认打开方式 |
+| **Pi Chat / Pi Chat Web** | Setup 安装版的 Web 入口；由安装器管理，与 Git 源码入口分开 |
+| **Pi Chat PWA** | Setup 安装版的可选 PWA 入口；不作为默认打开方式 |
+| **Pi Chat Git** | 上述源码脚本生成的 Web 入口；桌面、独立的开始菜单 `Pi Chat Git` 组及 Git 项目根目录 |
+| **Pi Chat Git PWA** | Git 源码版的可选 PWA 入口；仅在独立的开始菜单组中 |
 
 说明：
 
-- 快捷方式始终指向**当前项目目录**的 `start-pi-chat-ui.ps1`，不写死别人的机器路径；**移动或重装项目后请重新运行安装脚本**。
+- 源码脚本只创建带 **Git** 名称的入口，指向**当前源码目录**的 `start-pi-chat-ui.ps1`；Setup 不创建、覆盖或删除这些入口。反复测试安装版不会改变 Git 入口。移动 Git 项目后请重新生成。
+- 两套仍使用同一个本机端口；独立快捷方式不意味着可同时运行或互相接管。切换版本前请在原窗口安全关闭当前服务。
 - 各入口都会显示统一启动浮窗，并按需启动 `127.0.0.1:30170`；启动失败时浮窗会保留并提供日志，不打开可能属于另一构建的网页。
 - 兼容入口：`start-pi-chat.cmd` 等同 Web；也可手动运行 `pi-chat-launch.cmd web` 或 `pi-chat-launch.cmd pwa`。
 - **没有安装全局 Pi** 时的失败行为见上文「没有安装 Pi 时会发生什么」。

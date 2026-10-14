@@ -212,6 +212,16 @@ test("shortcut installer supports checkout paths with shell metacharacters", { s
       cp(join(root, "start-pi-chat-ui.ps1"), join(portableRoot, "start-pi-chat-ui.ps1")),
       cp(join(root, "resources", "icons", "pi-chat.ico"), join(portableRoot, "resources", "icons", "pi-chat.ico")),
     ]);
+    const setupNames = ["Pi Chat.lnk", "Pi Chat Web.lnk"];
+    const setupOwned: string[] = [];
+    for (const directory of [desktop, startMenu]) {
+      await mkdir(directory, { recursive: true });
+      for (const name of setupNames) {
+        const path = join(directory, name);
+        await writeFile(path, "Setup-owned shortcut sentinel");
+        setupOwned.push(path);
+      }
+    }
     execFileSync("powershell.exe", [
       "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
       "-File", join(portableRoot, "scripts", "install-shortcuts.ps1"),
@@ -221,7 +231,7 @@ test("shortcut installer supports checkout paths with shell metacharacters", { s
     const inspect = [
       "$shell = New-Object -ComObject WScript.Shell",
       "$locations = @($env:PI_CHAT_TEST_DESKTOP, $env:PI_CHAT_TEST_START_MENU, $env:PI_CHAT_TEST_PROJECT)",
-      "$items = @($locations | ForEach-Object { Get-ChildItem -LiteralPath $_ -Filter '*.lnk' -File })",
+      "$items = @($locations | ForEach-Object { Get-ChildItem -LiteralPath $_ -Filter 'Pi Chat Git*.lnk' -File })",
       "$items | ForEach-Object {",
       "  $shortcut = $shell.CreateShortcut($_.FullName)",
       "  [pscustomobject]@{ Location = $_.DirectoryName; Name = $_.Name; TargetPath = $shortcut.TargetPath; Arguments = $shortcut.Arguments; WorkingDirectory = $shortcut.WorkingDirectory; IconLocation = $shortcut.IconLocation }",
@@ -232,9 +242,10 @@ test("shortcut installer supports checkout paths with shell metacharacters", { s
       env: { ...process.env, PI_CHAT_TEST_DESKTOP: desktop, PI_CHAT_TEST_START_MENU: startMenu, PI_CHAT_TEST_PROJECT: portableRoot },
     });
     const shortcuts = JSON.parse(output) as Array<Record<string, string>>;
-    assert.equal(shortcuts.length, 6);
-    assert.equal(shortcuts.filter(s => s.Name === "Pi Chat PWA.lnk").length, 1);
-    assert.ok(shortcuts.some(s => s.Name === "Pi Chat Web.lnk" && s.Location.includes("Pi Chat's & (portable)")));
+    assert.equal(shortcuts.length, 4);
+    for (const path of setupOwned) assert.equal(await readFile(path, "utf8"), "Setup-owned shortcut sentinel");
+    assert.equal(shortcuts.filter(s => s.Name === "Pi Chat Git PWA.lnk").length, 1);
+    assert.ok(shortcuts.some(s => s.Name === "Pi Chat Git.lnk" && s.Location.includes("Pi Chat's & (portable)")));
     assert.match(shortcuts[0].TargetPath, /powershell\.exe$/i);
     const canonicalPortableRoot = await realpath(portableRoot);
     for (const shortcut of shortcuts) {
@@ -243,7 +254,7 @@ test("shortcut installer supports checkout paths with shell metacharacters", { s
       assert.equal(await realpath(shortcut.WorkingDirectory), canonicalPortableRoot);
       assert.ok(shortcut.Arguments.includes("Pi Chat's & (portable)"));
       assert.match(shortcut.IconLocation, /resources\\icons\\pi-chat\.ico,0$/i);
-      assert.ok(shortcut.Arguments.endsWith(shortcut.Name === "Pi Chat PWA.lnk" ? '" pwa' : '" web'));
+      assert.ok(shortcut.Arguments.endsWith(shortcut.Name === "Pi Chat Git PWA.lnk" ? '" pwa' : '" web'));
     }
   } finally {
     await rm(sandbox, { recursive: true, force: true });
