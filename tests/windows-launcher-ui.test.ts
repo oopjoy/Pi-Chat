@@ -39,7 +39,12 @@ $watch.Add_Tick({
   $script:watchTicks++
   if ($script:failureShown -or $script:watchTicks -gt 70) { $form.Close() }
 })
-$form.Add_Shown({ $watch.Start() })
+# Hosted CI runners have no interactive desktop, so the Shown event may never
+# fire. Start every timer eagerly instead: WinForms timers only tick once
+# ShowDialog pumps messages, but waiting for Shown would hang forever there.
+[void]$watch.Start()
+[void]$animationTimer.Start()
+[void]$exitTimer.Start()
 $form.Add_FormClosed({
   $watch.Stop()
   $watch.Dispose()
