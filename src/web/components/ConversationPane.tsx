@@ -80,6 +80,7 @@ export interface ConversationPaneProps {
   draftWorkspaceCwd: string;
   workspaceCwd: string;
   openLinkedWorkspaceFile: (sessionId: string, path: string) => Promise<unknown>;
+  readWorkspaceImage: (sessionId: string, path: string, signal?: AbortSignal) => Promise<Blob>;
   workspacePicking: boolean;
   draftWorkspaceOptions: string[];
   onSelectDraftWorkspace: (cwd: string) => void;
@@ -132,6 +133,7 @@ export function ConversationPane({
   draftWorkspaceCwd,
   workspaceCwd,
   openLinkedWorkspaceFile,
+  readWorkspaceImage,
   workspacePicking,
   draftWorkspaceOptions,
   onSelectDraftWorkspace,
@@ -161,6 +163,11 @@ export function ConversationPane({
       throw new Error("请先发送消息并保存当前对话，再打开本地文件");
     await openLinkedWorkspaceFile(viewedSessionId, path);
   }, [localDraft, openLinkedWorkspaceFile, viewedSessionId]);
+  const workspaceImageFetch = useCallback((path: string) => {
+    if (localDraft || !viewedSessionId)
+      return Promise.reject(new Error("请先发送消息并保存当前对话，再显示本地图片"));
+    return readWorkspaceImage(viewedSessionId, path);
+  }, [localDraft, readWorkspaceImage, viewedSessionId]);
   const previousConversationItemsRef = useRef<ConversationItem[]>([]);
   const previousConversationPaneKeyRef = useRef(paneKey);
   // Runtime timing is Session-scoped and exposes only the latest completed run.
@@ -368,6 +375,7 @@ export function ConversationPane({
                 showGeneratedAt={!inActiveRunningTurn}
                 workspacePath={workspaceCwd}
                 onOpenLocalPath={openLocalPath}
+                workspaceImageFetch={workspaceImageFetch}
                 onForkUserMessage={onForkUserMessage}
                 forkUserMessageDisabled={forkUserMessageDisabled}
               />

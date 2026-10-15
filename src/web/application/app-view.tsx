@@ -346,6 +346,7 @@ export function AppView(host: Record<string, any>) {
         draftWorkspaceCwd={draftWorkspaceCwd}
         workspaceCwd={conversationWorkspace}
         openLinkedWorkspaceFile={api.openLinkedWorkspaceFile}
+        readWorkspaceImage={api.workspaceImage}
         workspacePicking={workspacePicking}
         draftWorkspaceOptions={draftWorkspaceOptions}
         onSelectDraftWorkspace={selectDraftWorkspace}

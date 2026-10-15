@@ -134,7 +134,7 @@ export function AssistantMessageHeader({ message, fallback }: { message: PiMessa
   </header>;
 }
 
-export const ChatMessage = memo(function ChatMessage({ message, streaming = false, showAssistantMetadata = true, showGeneratedAt = true, assistantMetadataFallback, workspacePath = "", onOpenLocalPath, onForkUserMessage, forkUserMessageDisabled = false }: { message: PiMessage; streaming?: boolean; showAssistantMetadata?: boolean; showGeneratedAt?: boolean; assistantMetadataFallback?: AssistantMetadataFallback; workspacePath?: string; onOpenLocalPath?: (path: string) => Promise<unknown>; onForkUserMessage?: (message: PiMessage) => void; forkUserMessageDisabled?: boolean }) {
+export const ChatMessage = memo(function ChatMessage({ message, streaming = false, showAssistantMetadata = true, showGeneratedAt = true, assistantMetadataFallback, workspacePath = "", onOpenLocalPath, workspaceImageFetch, onForkUserMessage, forkUserMessageDisabled = false }: { message: PiMessage; streaming?: boolean; showAssistantMetadata?: boolean; showGeneratedAt?: boolean; assistantMetadataFallback?: AssistantMetadataFallback; workspacePath?: string; onOpenLocalPath?: (path: string) => Promise<unknown>; workspaceImageFetch?: (path: string) => Promise<Blob>; onForkUserMessage?: (message: PiMessage) => void; forkUserMessageDisabled?: boolean }) {
   const [copied, setCopied] = useState(false);
   const [copyError, setCopyError] = useState(false);
   const [expandedUserText, setExpandedUserText] = useState(false);
@@ -249,6 +249,7 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
               appendHint={streaming ? streamingAppendHint(message, assistantContent[index]?.sourceIndex ?? index) : undefined}
               workspacePath={workspacePath}
               onOpenLocalPath={streaming ? undefined : onOpenLocalPath}
+              workspaceImageFetch={streaming ? undefined : workspaceImageFetch}
             >{block.text}</MarkdownBody>;
             if (block.type === "image" && block.data && block.mimeType) return <img className="message-image" key={index} src={`data:${block.mimeType};base64,${block.data}`} alt="用户附加图片" />;
             return null;

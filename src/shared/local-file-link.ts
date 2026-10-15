@@ -1,4 +1,5 @@
 export const LOCAL_FILE_LINK_FRAGMENT_PREFIX = "#pi-chat-local:";
+export const LOCAL_FILE_IMAGE_FRAGMENT_PREFIX = "#pi-chat-local-image:";
 const MAX_LOCAL_LINK_CHARS = 4_096;
 const WINDOWS_DRIVE_PATH = /^[A-Za-z]:[\\/]/;
 const URI_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/;
@@ -60,6 +61,11 @@ function relativeDestination(value: string): string | null {
 
 export function encodeLocalFileMarkdownDestination(value: string): string {
   return `${LOCAL_FILE_LINK_FRAGMENT_PREFIX}${encodeURIComponent(value)}`;
+}
+
+/** Marker form for local image sources; the img renderer resolves it per Session. */
+export function encodeLocalFileImageDestination(value: string): string {
+  return `${LOCAL_FILE_IMAGE_FRAGMENT_PREFIX}${encodeURIComponent(value)}`;
 }
 
 /** Whether ReactMarkdown should route this destination through Pi Chat. */

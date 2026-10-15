@@ -557,6 +557,8 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .markdown-local-file-link.is-opened { text-decoration-color: var(--status-green); }
 .markdown-local-file-link.is-error { text-decoration-color: var(--danger); }
 .markdown-link-error { display: inline-block; margin-left: 6px; color: var(--danger); font-size: 11px; }
+.markdown-local-image { max-width: min(100%, var(--reading-width)); border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface-soft); cursor: zoom-in; }
+.markdown-image-fallback { display: inline-flex; align-items: center; gap: var(--space-1); padding: var(--space-1) var(--space-2); border: 1px dashed var(--line-strong); border-radius: var(--radius-md); color: var(--muted); font-size: 11px; }
 .markdown-body blockquote { margin-left: 0; padding: .08rem 1rem; border-left: 3px solid var(--line); color: var(--muted); }
 .markdown-body .inline-code { padding: .12em .34em; border-radius: var(--radius-sm); background: color-mix(in srgb, var(--line), transparent 45%); font-family: ui-monospace, Consolas, monospace; font-size: .88em; }
 .markdown-body ul, .markdown-body ol { padding-left: 1.5em; }

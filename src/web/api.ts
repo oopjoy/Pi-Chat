@@ -447,6 +447,26 @@ export const api = {
       `/api/sessions/${id}/workspace/file?${new URLSearchParams({ path })}`,
       { signal },
     ),
+  // <img> cannot send the request token header, so markdown images are fetched
+  // here (authenticated) and rendered from a same-origin object URL.
+  workspaceImage: async (id: string, path: string, signal?: AbortSignal): Promise<Blob> => {
+    const deadline = createRequestDeadline(signal, API_TIMEOUT_MS);
+    try {
+      const response = await fetch(`/api/sessions/${id}/workspace/image?${new URLSearchParams({ path })}`, {
+        signal: deadline.signal,
+        headers: {
+          ...(requestToken ? { "x-pi-chat-token": requestToken } : {}),
+          "x-pi-chat-client": clientId,
+          "x-pi-chat-page": pageId,
+        },
+      });
+      if (!response.ok)
+        throw new Error(`本地图片加载失败（HTTP ${response.status}）`);
+      return await response.blob();
+    } finally {
+      deadline.cleanup();
+    }
+  },
   openWorkspaceFile: (id: string, path: string, signal?: AbortSignal) =>
     request<{ ok: true; path: string }>(
       `/api/sessions/${id}/workspace/open`,

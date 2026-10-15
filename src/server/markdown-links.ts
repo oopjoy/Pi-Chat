@@ -13,12 +13,26 @@ type LinkNode = {
   children?: LinkNode[];
 };
 
-/** Only real Markdown links can grant authority, never images/code/definitions alone. */
+/**
+ * Only real Markdown links can grant authority, never images/code/definitions
+ * alone. Image destinations get their own render-only authority through
+ * markdownImageDestinations; they must never unlock opening files.
+ */
 export function markdownLinkDestinations(source: string): string[] {
   if (!source.includes("[")) return [];
+  return markdownDestinations(source, new Set(["link", "linkReference"]));
+}
+
+/** Render-only destinations from Markdown images in persisted assistant text. */
+export function markdownImageDestinations(source: string): string[] {
+  if (!source.includes("![")) return [];
+  return markdownDestinations(source, new Set(["image", "imageReference"]));
+}
+
+function markdownDestinations(source: string, wanted: Set<string>): string[] {
   const root = parser.parse(source) as LinkNode;
   const definitions = new Map<string, string>();
-  const links: LinkNode[] = [];
+  const matches: LinkNode[] = [];
   const pending = [root];
   while (pending.length) {
     const node = pending.pop()!;
@@ -28,11 +42,11 @@ export function markdownLinkDestinations(source: string): string[] {
     if (node.type === "html") return [];
     if (node.type === "definition" && node.identifier && node.url && !definitions.has(node.identifier))
       definitions.set(node.identifier, node.url);
-    if (node.type === "link" || node.type === "linkReference") links.push(node);
+    if (wanted.has(node.type)) matches.push(node);
     if (node.children) pending.push(...node.children.slice().reverse());
   }
-  return links.flatMap((node) => {
-    const url = node.type === "link" ? node.url : definitions.get(node.identifier || "");
+  return matches.flatMap((node) => {
+    const url = node.type.endsWith("Reference") ? definitions.get(node.identifier || "") : node.url;
     return url ? [url] : [];
   });
 }

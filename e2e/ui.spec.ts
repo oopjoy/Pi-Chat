@@ -894,6 +894,44 @@ test("assistant local-file links use the Session-addressed opener while Web link
   await expect(external).toHaveAttribute("target", "_blank");
 });
 
+test("assistant local images render through the Session-addressed image endpoint", { tag: "@desktop-only" }, async ({ page }) => {
+  let openedPath = "";
+  await page.route("**/api/sessions/*/workspace/open-link", async (route) => {
+    const body = route.request().postDataJSON() as { path?: unknown };
+    openedPath = typeof body.path === "string" ? body.path : "";
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true, path: openedPath }) });
+  });
+  const imageRequests: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().includes("/workspace/image")) imageRequests.push(request.url());
+  });
+  await page.goto("/");
+  const image = page.locator(".message-assistant img.markdown-local-image");
+  await expect(image).toBeVisible();
+  await expect(image).toHaveAttribute("alt", "T=5000 最终模长与磁场");
+  // The real endpoint served the fixture PNG through the persisted-reply gate;
+  // the <img> itself renders the authenticated blob (token stays in headers).
+  await expect.poll(() => imageRequests.find(url => /\/api\/sessions\/[a-f0-9]{20}\/workspace\/image\?path=fig_final_abspsi_curlA\.png$/.test(url)) ?? "").not.toBe("");
+  await expect.poll(() => image.evaluate(element => (element as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
+  await image.click();
+  await expect.poll(() => openedPath).toBe("fig_final_abspsi_curlA.png");
+});
+
+test("assistant local directory links open through the Session-addressed opener", { tag: "@desktop-only" }, async ({ page }) => {
+  let openedPath = "";
+  await page.route("**/api/sessions/*/workspace/open-link", async (route) => {
+    const body = route.request().postDataJSON() as { path?: unknown };
+    openedPath = typeof body.path === "string" ? body.path : "";
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true, path: openedPath }) });
+  });
+  await page.goto("/");
+  const directory = page.getByRole("link", { name: "打开结果目录" });
+  await expect(directory).toHaveAttribute("href", "#");
+  await directory.click();
+  await expect.poll(() => openedPath).toBe("results");
+  await expect(directory).toHaveClass(/is-opened/);
+});
+
 test("answer footer shows the producing model and copies the complete visible answer", { tag: "@desktop-only" }, async ({ page }) => {
   await openSecondSession(page);
   const answer = page.locator(".message-assistant", { hasText: "Final answer with" });

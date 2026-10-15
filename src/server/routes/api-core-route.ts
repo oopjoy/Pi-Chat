@@ -141,6 +141,7 @@ export async function handleApiCoreRoute(
         {
           workspaceRecentFiles: (input: any) => host.workspaceRecentFilesRoute(input),
           workspaceFile: (input: any) => host.workspaceFileRoute(input),
+          workspaceImage: (input: any) => host.workspaceImageRoute(input),
         },
         request,
         response,

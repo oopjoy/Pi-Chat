@@ -325,6 +325,37 @@ export async function openWithDefaultApplication(
   );
 }
 
+/**
+ * Open one server-validated workspace directory in Explorer. Mirrors the file
+ * opener's verify-then-launch contract so a swapped path cannot redirect the
+ * shell to an unrelated location.
+ */
+export async function openWorkspaceDirectory(
+  targetPath: string,
+  verifyTarget?: () => Promise<string>,
+): Promise<void> {
+  if (process.platform !== "win32") throw new Error("打开本地目录目前仅支持 Windows");
+  if (!isWindowsWorkspacePath(targetPath)) throw new Error("路径无效");
+  if (!isSafeDefaultApplicationFile(targetPath)) throw new Error("为安全起见，此目录不能直接打开");
+  if (verifyTarget && await verifyTarget() !== targetPath) throw new Error("目录路径在打开前发生变化");
+  const targetStat = await lstat(targetPath).catch(() => null);
+  if (!targetStat || targetStat.isSymbolicLink() || !targetStat.isDirectory()) throw new Error("目录不存在");
+  const child = spawn(
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-Command", "Start-Process -FilePath $env:PI_CHAT_OPEN_PATH"],
+    {
+      windowsHide: true,
+      env: { ...process.env, PI_CHAT_OPEN_PATH: targetPath },
+      stdio: ["ignore", "ignore", "pipe"],
+    },
+  );
+  await waitForWindowsShellProcess(
+    child as unknown as WindowsShellProcess,
+    "无法打开本地目录",
+    "打开本地目录超时",
+  );
+}
+
 /** Open a local file or folder through the Windows shell. Loopback-only helper for settings. */
 export async function revealInExplorer(targetPath: string): Promise<void> {
   if (process.platform !== "win32") throw new Error("打开本地目录目前仅支持 Windows");

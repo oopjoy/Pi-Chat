@@ -1,8 +1,10 @@
 import { memo, useEffect, useMemo, useRef, useState, type ComponentProps, type MouseEvent, type ReactNode } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import {
+  encodeLocalFileImageDestination,
   encodeLocalFileMarkdownDestination,
   isLocalFileMarkdownDestination,
+  LOCAL_FILE_IMAGE_FRAGMENT_PREFIX,
   LOCAL_FILE_LINK_FRAGMENT_PREFIX,
   workspaceRelativePathFromMarkdownDestination,
 } from "../../shared/local-file-link";
@@ -22,11 +24,15 @@ interface MarkdownBodyProps {
   appendHint?: StreamingMarkdownAppendHint;
   workspacePath?: string;
   onOpenLocalPath?: (path: string) => Promise<unknown>;
+  /** Fetch a workspace-relative image for inline display (Session-addressed, authenticated). */
+  workspaceImageFetch?: (path: string) => Promise<Blob>;
 }
 
 export function markdownLinkUrlTransform(url: string, key: string, node: Readonly<unknown>): string {
   if (key === "href" && isLocalFileMarkdownDestination(url))
     return encodeLocalFileMarkdownDestination(url);
+  if (key === "src" && isLocalFileMarkdownDestination(url))
+    return encodeLocalFileImageDestination(url);
   void node;
   return defaultUrlTransform(url);
 }
@@ -35,6 +41,70 @@ function localDestinationFromHref(href: string | undefined): string | null {
   if (!href?.startsWith(LOCAL_FILE_LINK_FRAGMENT_PREFIX)) return null;
   try { return decodeURIComponent(href.slice(LOCAL_FILE_LINK_FRAGMENT_PREFIX.length)); }
   catch { return null; }
+}
+
+function localImageDestinationFromSrc(src: string | undefined): string | null {
+  if (!src?.startsWith(LOCAL_FILE_IMAGE_FRAGMENT_PREFIX)) return null;
+  try { return decodeURIComponent(src.slice(LOCAL_FILE_IMAGE_FRAGMENT_PREFIX.length)); }
+  catch { return null; }
+}
+
+type MarkdownImageProps = ComponentProps<"img"> & {
+  node?: unknown;
+  workspacePath?: string;
+  onOpenLocalPath?: (path: string) => Promise<unknown>;
+  workspaceImageFetch?: (path: string) => Promise<Blob>;
+};
+
+function MarkdownImage({ node: _node, src, alt, workspacePath = "", onOpenLocalPath, workspaceImageFetch, className, title, ...props }: MarkdownImageProps) {
+  const localDestination = localImageDestinationFromSrc(src);
+  const relativePath = localDestination === null
+    ? null
+    : workspaceRelativePathFromMarkdownDestination(localDestination, workspacePath);
+  const fetcher = relativePath ? workspaceImageFetch : undefined;
+  const [objectUrl, setObjectUrl] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!fetcher || !relativePath) return;
+    let cancelled = false;
+    let created: string | null = null;
+    setObjectUrl(null);
+    setLoadError(null);
+    fetcher(relativePath)
+      .then((blob) => {
+        if (cancelled) return;
+        created = URL.createObjectURL(blob);
+        setObjectUrl(created);
+      })
+      .catch((cause: unknown) => {
+        if (!cancelled) setLoadError(cause instanceof Error ? cause.message : String(cause));
+      });
+    return () => {
+      cancelled = true;
+      if (created) URL.revokeObjectURL(created);
+    };
+  }, [fetcher, relativePath]);
+  if (localDestination === null)
+    return <img {...props} className={className} src={src} alt={alt} title={title} />;
+  if (!relativePath)
+    return <span className="markdown-image-fallback" title={localDestination}>🖼 {alt || localDestination}（图片不在当前会话 Workspace 内）</span>;
+  if (!fetcher)
+    return <span className="markdown-image-fallback" title={localDestination}>🖼 {alt || relativePath}（回复保存后可显示）</span>;
+  if (loadError)
+    return <span className="markdown-image-fallback" title={loadError}>🖼 {alt || relativePath}（{loadError}）</span>;
+  if (!objectUrl)
+    return <span className="markdown-image-fallback" title={relativePath}>🖼 {alt || relativePath}（加载中…）</span>;
+  const open = onOpenLocalPath
+    ? () => { void onOpenLocalPath(relativePath).catch(() => undefined); }
+    : undefined;
+  return <img
+    {...props}
+    className={`${className || ""} markdown-local-image`.trim()}
+    src={objectUrl}
+    alt={alt}
+    title={title || `使用系统默认应用打开 ${relativePath}`}
+    onClick={open}
+  />;
 }
 
 type LocalLinkStatus = "idle" | "opening" | "opened" | "error";
@@ -115,24 +185,26 @@ const baseMarkdownComponents = {
 function markdownComponentsFor(
   workspacePath: string,
   onOpenLocalPath: ((path: string) => Promise<unknown>) | undefined,
+  workspaceImageFetch: ((path: string) => Promise<Blob>) | undefined,
 ) {
   return {
     ...baseMarkdownComponents,
     a: (props: ComponentProps<"a"> & { node?: unknown }) => <MarkdownLink {...props} workspacePath={workspacePath} onOpenLocalPath={onOpenLocalPath} />,
+    img: (props: ComponentProps<"img"> & { node?: unknown }) => <MarkdownImage {...props} workspacePath={workspacePath} onOpenLocalPath={onOpenLocalPath} workspaceImageFetch={workspaceImageFetch} />,
   };
 }
 
 const streamingRehypePlugins = createMarkdownRehypePlugins();
 
-const StreamingMarkdownSegment = memo(function StreamingMarkdownSegment({ children, workspacePath, onOpenLocalPath }: { children: string; workspacePath: string; onOpenLocalPath?: (path: string) => Promise<unknown> }) {
+const StreamingMarkdownSegment = memo(function StreamingMarkdownSegment({ children, workspacePath, onOpenLocalPath, workspaceImageFetch }: { children: string; workspacePath: string; onOpenLocalPath?: (path: string) => Promise<unknown>; workspaceImageFetch?: (path: string) => Promise<Blob> }) {
   const prepared = useMemo(() => normalizeDisplayMathForRendering(children), [children]);
   const remarkPlugins = useMemo(
     () => createMarkdownRemarkPlugins(prepared.tableMathPipeMarker),
     [prepared.tableMathPipeMarker],
   );
   const components = useMemo(
-    () => markdownComponentsFor(workspacePath, onOpenLocalPath),
-    [onOpenLocalPath, workspacePath],
+    () => markdownComponentsFor(workspacePath, onOpenLocalPath, workspaceImageFetch),
+    [onOpenLocalPath, workspaceImageFetch, workspacePath],
   );
   return <ReactMarkdown
     remarkPlugins={remarkPlugins}
@@ -144,7 +216,7 @@ const StreamingMarkdownSegment = memo(function StreamingMarkdownSegment({ childr
   </ReactMarkdown>;
 });
 
-function StreamingMarkdownBody({ children, appendHint, workspacePath, onOpenLocalPath }: { children: string; appendHint?: StreamingMarkdownAppendHint; workspacePath: string; onOpenLocalPath?: (path: string) => Promise<unknown> }) {
+function StreamingMarkdownBody({ children, appendHint, workspacePath, onOpenLocalPath, workspaceImageFetch }: { children: string; appendHint?: StreamingMarkdownAppendHint; workspacePath: string; onOpenLocalPath?: (path: string) => Promise<unknown>; workspaceImageFetch?: (path: string) => Promise<Blob> }) {
   const stateRef = useRef<StreamingMarkdownState | undefined>(undefined);
   const segments = useMemo(() => {
     // Concurrent React may abandon a render after this ref advances. A later
@@ -156,13 +228,13 @@ function StreamingMarkdownBody({ children, appendHint, workspacePath, onOpenLoca
   }, [appendHint, children]);
   return <div className="markdown-body markdown-streaming">
     {segments.stable.map((segment, index) => (
-      <StreamingMarkdownSegment key={`stable-${index}`} workspacePath={workspacePath} onOpenLocalPath={onOpenLocalPath}>{segment}</StreamingMarkdownSegment>
+      <StreamingMarkdownSegment key={`stable-${index}`} workspacePath={workspacePath} onOpenLocalPath={onOpenLocalPath} workspaceImageFetch={workspaceImageFetch}>{segment}</StreamingMarkdownSegment>
     ))}
-    {segments.tail && <StreamingMarkdownSegment key="tail" workspacePath={workspacePath} onOpenLocalPath={onOpenLocalPath}>{segments.tail}</StreamingMarkdownSegment>}
+    {segments.tail && <StreamingMarkdownSegment key="tail" workspacePath={workspacePath} onOpenLocalPath={onOpenLocalPath} workspaceImageFetch={workspaceImageFetch}>{segments.tail}</StreamingMarkdownSegment>}
   </div>;
 }
 
-function FinalMarkdownBody({ children, workspacePath, onOpenLocalPath }: { children: string; workspacePath: string; onOpenLocalPath?: (path: string) => Promise<unknown> }) {
+function FinalMarkdownBody({ children, workspacePath, onOpenLocalPath, workspaceImageFetch }: { children: string; workspacePath: string; onOpenLocalPath?: (path: string) => Promise<unknown>; workspaceImageFetch?: (path: string) => Promise<Blob> }) {
   const sourceMapped = useMemo(
     () => normalizeDisplayMathWithSourceMap(children),
     [children],
@@ -176,8 +248,8 @@ function FinalMarkdownBody({ children, workspacePath, onOpenLocalPath }: { child
     [sourceMapped.mapOffset],
   );
   const components = useMemo(
-    () => markdownComponentsFor(workspacePath, onOpenLocalPath),
-    [onOpenLocalPath, workspacePath],
+    () => markdownComponentsFor(workspacePath, onOpenLocalPath, workspaceImageFetch),
+    [onOpenLocalPath, workspaceImageFetch, workspacePath],
   );
   const rootRef = useRef<HTMLDivElement>(null);
   const [sourceCopied, setSourceCopied] = useState(false);
@@ -215,10 +287,10 @@ function FinalMarkdownBody({ children, workspacePath, onOpenLocalPath }: { child
   );
 }
 
-export const MarkdownBody = memo(function MarkdownBody({ children, streaming = false, appendHint, workspacePath = "", onOpenLocalPath }: MarkdownBodyProps) {
+export const MarkdownBody = memo(function MarkdownBody({ children, streaming = false, appendHint, workspacePath = "", onOpenLocalPath, workspaceImageFetch }: MarkdownBodyProps) {
   return streaming
-    ? <StreamingMarkdownBody appendHint={appendHint} workspacePath={workspacePath} onOpenLocalPath={onOpenLocalPath}>{children}</StreamingMarkdownBody>
-    : <FinalMarkdownBody workspacePath={workspacePath} onOpenLocalPath={onOpenLocalPath}>{children}</FinalMarkdownBody>;
+    ? <StreamingMarkdownBody appendHint={appendHint} workspacePath={workspacePath} onOpenLocalPath={onOpenLocalPath} workspaceImageFetch={workspaceImageFetch}>{children}</StreamingMarkdownBody>
+    : <FinalMarkdownBody workspacePath={workspacePath} onOpenLocalPath={onOpenLocalPath} workspaceImageFetch={workspaceImageFetch}>{children}</FinalMarkdownBody>;
 });
 
 function CodeBlock({ language, children }: { language: string; children: ReactNode }) {

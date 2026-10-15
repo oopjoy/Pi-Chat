@@ -56,6 +56,7 @@ import {
   pickWorkspaceFolder,
   isSafeDefaultApplicationFile,
   openWithDefaultApplication,
+  openWorkspaceDirectory,
 } from "./file-picker.js";
 import {
   type FileSnapshot,
@@ -237,12 +238,15 @@ import { SubagentStatusProvider } from "./subagent-status-provider.js";
 import { apiRouteAdmission, PROMPT_BODY_LIMIT } from "./api-route-admission.js";
 import { promptPersistenceReceipt, type PromptPersistenceReceipt } from "./prompt-receipt.js";
 import {
+  assistantImageWorkspaceFiles,
   assistantLinkedWorkspaceFiles,
   normalizeWorkspaceRelativePath,
   readWorkspaceFile,
   recentModifiedWorkspaceFiles,
   revalidateRecentWorkspaceFiles,
+  workspaceDirectoryTarget,
   workspaceFileTargetPath,
+  workspaceImageTarget,
 } from "./workspace-files.js";
 export {
   messageWindow,
@@ -4908,7 +4912,36 @@ export class PiChatApp {
     const context = await this.workspaceRecentFileContext(input);
     return context ? readWorkspaceFile(context.cwd, context.path) : null;
   }
+  private async workspaceImageContext(
+    input: { sessionId: string; path: string },
+  ): Promise<{ cwd: string; path: string } | null> {
+    const cwd = await this.workspaceCwdForSession(input.sessionId);
+    if (!cwd) return null;
+    const snapshot = await this.options.sessions.recentSnapshotForId(
+      input.sessionId,
+      OVERSIZED_SESSION_RECENT_TURN_LIMIT,
+    );
+    if (!snapshot) return null;
+    const path = normalizeWorkspaceRelativePath(input.path);
+    const key = process.platform === "win32" ? path.toLowerCase() : path;
+    if (!assistantImageWorkspaceFiles(snapshot.messages, cwd).has(key))
+      throw new HttpRequestError(404, "图片不在当前对话的已保存回复中");
+    return { cwd, path };
+  }
+  async workspaceImageRoute(
+    input: { sessionId: string; path: string },
+  ): Promise<{ target: string; contentType: string; size: number } | null> {
+    const context = await this.workspaceImageContext(input);
+    return context ? workspaceImageTarget(context.cwd, context.path) : null;
+  }
   private async openValidatedWorkspaceFile(context: { cwd: string; path: string }): Promise<{ ok: true; path: string }> {
+    const directory = await workspaceDirectoryTarget(context.cwd, context.path).catch(() => null);
+    if (directory) {
+      await openWorkspaceDirectory(directory, () => workspaceDirectoryTarget(context.cwd, context.path).then(
+        (target) => target ?? Promise.reject(new Error("目录在打开前发生变化")),
+      ));
+      return { ok: true, path: context.path };
+    }
     if (!isSafeDefaultApplicationFile(context.path))
       throw new HttpRequestError(409, "为安全起见，此文件类型不能直接打开");
     const target = await workspaceFileTargetPath(context.cwd, context.path);

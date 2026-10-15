@@ -34,6 +34,10 @@ await mkdir(agentDir, { recursive: true });
 await mkdir(join(root, "src"), { recursive: true });
 await writeFile(join(root, "README.md"), "# E2E Workspace\n\nReadable file preview.\n", "utf8");
 await writeFile(join(root, "src", "example.ts"), `export const example = "${"x".repeat(600)}";\n`, "utf8");
+// Local-image and directory-link fixtures for the session-addressed opener.
+const PNG_1PX_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
+await writeFile(join(root, "fig_final_abspsi_curlA.png"), Buffer.from(PNG_1PX_BASE64, "base64"));
+await mkdir(join(root, "results"), { recursive: true });
 
 const session = (path, id, name, prompt, answer, model = "gpt-test") => writeFile(path, [
   { type: "session", version: 3, id, timestamp: "2026-01-01T00:00:00Z", cwd: root },
@@ -42,7 +46,7 @@ const session = (path, id, name, prompt, answer, model = "gpt-test") => writeFil
   { type: "message", id: `${id}-assistant`, parentId: `${id}-user`, timestamp: "2026-01-01T00:00:02Z", message: { role: "assistant", provider: "test", model, content: answer, timestamp: Date.parse("2026-01-01T00:00:02Z") } },
 ].map(JSON.stringify).join("\n") + "\n", "utf8");
 
-await session(join(sessions, "first.jsonl"), "first", "First session", "Open first", "First answer\n\n[Open README](README.md) · [Web reference](https://example.com/reference)");
+await session(join(sessions, "first.jsonl"), "first", "First session", "Open first", "First answer\n\n[Open README](README.md) · [Web reference](https://example.com/reference)\n\n![T=5000 最终模长与磁场](fig_final_abspsi_curlA.png)\n\n[打开结果目录](results)");
 const streamBenchmarkSessions = [];
 if (streamBenchmarkConfig) {
   for (let index = 1; index <= 4; index += 1) {

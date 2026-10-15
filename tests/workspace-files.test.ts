@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { PiMessage } from "../src/shared/types";
-import { assistantLinkedWorkspaceFiles, readWorkspaceFile, recentModifiedWorkspaceFiles, revalidateRecentWorkspaceFiles, workspaceFileTargetPath } from "../src/server/workspace-files";
+import { assistantImageWorkspaceFiles, assistantLinkedWorkspaceFiles, readWorkspaceFile, recentModifiedWorkspaceFiles, revalidateRecentWorkspaceFiles, workspaceDirectoryTarget, workspaceFileTargetPath, workspaceImageTarget } from "../src/server/workspace-files";
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-workspace-files-"));
@@ -26,6 +26,71 @@ function call(id: string, name: string, path: string): PiMessage {
 function result(id: string, name: string, timestamp: number, isError = false): PiMessage {
   return { role: "toolResult", toolCallId: id, toolName: name, timestamp, isError, content: isError ? "failed" : "ok" };
 }
+
+test("assistant images grant render-only authority without unlocking open authority", async () => {
+  const root = await fixture();
+  try {
+    const messages: PiMessage[] = [
+      { role: "assistant", content: "见下图\n\n![T=5000 最终模长](results/fig_final.png)\n\n[打开结果目录](results) · [报告](results/report.pdf)" },
+    ];
+    assert.deepEqual([...assistantImageWorkspaceFiles(messages, root)].sort(), ["results/fig_final.png"]);
+    assert.deepEqual([...assistantLinkedWorkspaceFiles(messages, root)].sort(), ["results", "results/report.pdf"]);
+    // Raw HTML fails closed for images exactly like links.
+    assert.deepEqual([...assistantImageWorkspaceFiles([{ role: "assistant", content: "<div>![x](results/fig_final.png)</div>" }], root)], []);
+    // Links never grant image authority and vice versa.
+    assert.deepEqual([...assistantImageWorkspaceFiles([{ role: "assistant", content: "[报告](results/report.pdf)" }], root)], []);
+    assert.deepEqual([...assistantLinkedWorkspaceFiles([{ role: "assistant", content: "![图](results/fig_final.png)" }], root)], []);
+    // Absolute destinations resolve only inside the workspace.
+    assert.deepEqual(
+      [...assistantImageWorkspaceFiles([{ role: "assistant", content: `![外](${root.replace(/\\/g, "/")}/results/fig_final.png)` }], root)],
+      ["results/fig_final.png"],
+    );
+    assert.deepEqual(
+      [...assistantImageWorkspaceFiles([{ role: "assistant", content: "![外](D:/elsewhere/fig.png)" }], root)],
+      [],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("workspace image target allows only safe image types inside the workspace", async () => {
+  const root = await fixture();
+  try {
+    await mkdir(join(root, "results"), { recursive: true });
+    await writeFile(join(root, "results", "fig.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    await writeFile(join(root, "results", "vector.svg"), "<svg />");
+    await writeFile(join(root, "results", "page.html"), "<html />");
+    await writeFile(join(root, "results", "archive.zip"), "zip");
+    await mkdir(join(root, "results", "nested"));
+    const image = await workspaceImageTarget(root, "results/fig.png");
+    assert.equal(image.contentType, "image/png");
+    assert.equal(image.size, 4);
+    await assert.rejects(workspaceImageTarget(root, "results/vector.svg"), /不支持内嵌显示/);
+    await assert.rejects(workspaceImageTarget(root, "results/page.html"), /不支持内嵌显示/);
+    await assert.rejects(workspaceImageTarget(root, "results/archive.zip"), /不支持内嵌显示/);
+    await assert.rejects(workspaceImageTarget(root, "results/nested"), /不支持内嵌显示|Workspace 文件不存在/);
+    await assert.rejects(workspaceImageTarget(root, "../outside.png"), /Workspace 路径无效/);
+    await assert.rejects(workspaceImageTarget(root, "missing.png"), /Workspace 路径不存在/);
+    const huge = join(root, "results", "huge.png");
+    await writeFile(huge, Buffer.alloc(33 * 1024 * 1024));
+    await assert.rejects(workspaceImageTarget(root, "results/huge.png"), /图片过大/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("workspace directory target resolves directories and rejects files", async () => {
+  const root = await fixture();
+  try {
+    await mkdir(join(root, "results"), { recursive: true });
+    assert.equal(await workspaceDirectoryTarget(root, "results"), await realpath(join(root, "results")));
+    assert.equal(await workspaceDirectoryTarget(root, "README.md"), null);
+    await assert.rejects(workspaceDirectoryTarget(root, "../sibling"), /Workspace 路径无效/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("recent files project only successful Edit and Write results, newest first and deduplicated", async () => {
   const root = await fixture();

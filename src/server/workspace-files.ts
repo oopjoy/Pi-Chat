@@ -1,13 +1,26 @@
 import type { Stats } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
-import { basename, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { workspaceRelativePathFromMarkdownDestination } from "../shared/local-file-link.js";
 import type { PiMessage, WorkspaceFileData, WorkspaceRecentFilesData } from "../shared/types.js";
 import { HttpRequestError } from "./http-transport.js";
-import { markdownLinkDestinations } from "./markdown-links.js";
+import { markdownImageDestinations, markdownLinkDestinations } from "./markdown-links.js";
 
 const MAX_RECENT_FILES = 50;
 const MAX_PREVIEW_BYTES = 256 * 1024;
+// Inline-render authority for persisted assistant images. SVG is excluded:
+// served same-origin it could execute script when opened directly in a tab.
+const WORKSPACE_IMAGE_CONTENT_TYPES: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+  ".bmp": "image/bmp",
+  ".avif": "image/avif",
+  ".ico": "image/x-icon",
+};
+const MAX_WORKSPACE_IMAGE_BYTES = 32 * 1024 * 1024;
 const MAX_RELATIVE_PATH_CHARS = 4_096;
 const FATAL_UTF8 = new TextDecoder("utf-8", { fatal: true });
 const IGNORED_NAMES = new Set([
@@ -136,6 +149,20 @@ function assistantText(message: PiMessage): string[] {
     : [];
 }
 
+/** Server-authoritative render allowlist from persisted assistant image destinations. */
+export function assistantImageWorkspaceFiles(messages: PiMessage[], cwd: string): Set<string> {
+  const result = new Set<string>();
+  for (const message of messages) {
+    for (const text of assistantText(message)) {
+      for (const destination of markdownImageDestinations(text)) {
+        const path = workspaceRelativePathFromMarkdownDestination(destination, cwd);
+        if (path) result.add(process.platform === "win32" ? path.toLowerCase() : path);
+      }
+    }
+  }
+  return result;
+}
+
 /** Server-authoritative allowlist derived only from rendered persisted assistant links. */
 export function assistantLinkedWorkspaceFiles(messages: PiMessage[], cwd: string): Set<string> {
   const result = new Set<string>();
@@ -207,6 +234,35 @@ export async function revalidateRecentWorkspaceFiles(
     files,
     ...(files.length !== recent.files.length ? { staleCount: recent.files.length - files.length } : {}),
   };
+}
+
+/**
+ * Resolve an inline-renderable workspace image. The extension allowlist keeps
+ * executable/scriptable types (including SVG) out of the same-origin endpoint,
+ * and the size bound keeps one message from pinning the server on a huge file.
+ */
+export async function workspaceImageTarget(
+  cwd: string,
+  rawPath: string,
+): Promise<{ target: string; contentType: string; size: number }> {
+  const path = normalizeWorkspaceRelativePath(rawPath);
+  const contentType = WORKSPACE_IMAGE_CONTENT_TYPES[extname(path).toLowerCase()];
+  if (!contentType) throw new HttpRequestError(409, "该文件类型不支持内嵌显示");
+  const { target, targetStat } = await workspaceTarget(cwd, path);
+  if (!targetStat.isFile()) throw new HttpRequestError(404, "Workspace 文件不存在");
+  if (targetStat.size > MAX_WORKSPACE_IMAGE_BYTES)
+    throw new HttpRequestError(413, "图片过大，暂不支持内嵌显示");
+  await assertStableTarget(cwd, path, target, targetStat);
+  return { target, contentType, size: targetStat.size };
+}
+
+/** Resolve a workspace directory for shell opening, or null when it is not one. */
+export async function workspaceDirectoryTarget(cwd: string, rawPath: string): Promise<string | null> {
+  const path = normalizeWorkspaceRelativePath(rawPath);
+  const { target, targetStat } = await workspaceTarget(cwd, path);
+  if (targetStat.isSymbolicLink() || !targetStat.isDirectory()) return null;
+  await assertStableTarget(cwd, path, target, targetStat);
+  return target;
 }
 
 export async function workspaceFileTargetPath(cwd: string, rawPath: string): Promise<string> {
