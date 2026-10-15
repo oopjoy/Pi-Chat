@@ -109,8 +109,7 @@ export function patchPiPromptResponseSource(source) {
     .replace(response, 'output(success(id, "prompt", { disposition, ...(piChatUserMessage ? { piChatUserMessage } : {}) }));');
 }
 
-export async function load(url, context, nextLoad) {
-  const loaded = await nextLoad(url, context);
+function patchLoadedSource(url, loaded) {
   const pathname = new URL(url).pathname.replace(/\\/g, "/");
   const shouldPatchRpc = pathname.endsWith(RPC_MODE_SUFFIX);
   const shouldPatchExtensions = pathname.endsWith(EXTENSION_LOADER_SUFFIX);
@@ -125,4 +124,15 @@ export async function load(url, context, nextLoad) {
   if (shouldPatchPrompt)
     return { ...loaded, source: patchPiPromptReceiptSource(source) };
   return { ...loaded, source: patchPiExtensionLoaderSource(source) };
+}
+
+// Node 22.15+ can keep this selective adapter on the importing thread. Using
+// the async loader for every dependency adds cross-thread traffic even when
+// none of that dependency's source needs patching.
+export function loadSync(url, context, nextLoad) {
+  return patchLoadedSource(url, nextLoad(url, context));
+}
+
+export async function load(url, context, nextLoad) {
+  return patchLoadedSource(url, await nextLoad(url, context));
 }

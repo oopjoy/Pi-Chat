@@ -102,6 +102,22 @@ try {
     assert.equal(sentinel.exitCode, null, "installer must never kill an active process");
     assert.ok(await exists(node));
   } finally { sentinel.kill("SIGTERM"); await stopped; }
+
+  console.log("[Setup check] System Node with relative app argv also blocks target upgrade/uninstall");
+  const relativeProbe = join(install, "guard-probe");
+  await mkdir(join(relativeProbe, "dist/server/server"), { recursive: true });
+  await writeFile(join(relativeProbe, "dist/server/server/index.js"), "console.log('ready'); setInterval(() => {}, 1000);\n");
+  const external = spawn(process.execPath, ["dist/server/server/index.js"], { cwd: relativeProbe, env, stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
+  const externalExited = once(external, "exit");
+  try {
+    await once(external.stdout, "data", { signal: AbortSignal.timeout(15_000) });
+    await assert.rejects(execute(exe, flags, { env, windowsHide: true, timeout: 30_000 }), "system-Node owner must prevent upgrade");
+    await assert.rejects(execute(uninstaller, ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"], { env, windowsHide: true, timeout: 30_000 }), "system-Node owner must prevent uninstall");
+    assert.equal(external.exitCode, null);
+  } finally {
+    external.kill("SIGTERM"); await externalExited;
+    await rm(relativeProbe, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
   await execute(exe, flags, { env, windowsHide: true, timeout: 120_000 });
 
   console.log("[Setup check] Start installed release without source/system npm or an available Pi");
@@ -120,6 +136,9 @@ try {
     const health = await fetch(url + "/api/health").then(response => response.json());
     assert.equal(health.buildIdentity.fingerprint, identity.fingerprint);
     assert.equal((await fetch(url + "/")).status, 200);
+    const handshake = await fetch(url + "/api/bootstrap/handshake").then(response => response.json());
+    assert.ok(handshake.requestToken);
+    assert.equal(handshake.buildIdentity.fingerprint, identity.fingerprint);
   } finally { service.kill("SIGTERM"); await exited; await writeFile(join(root, "service.log"), output); }
   console.log("[Setup check] Uninstall native files/registration, preserve Pi data");
   await execute(uninstaller, ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", `/LOG=${join(root, "uninstall.log")}`], { env, windowsHide: true, timeout: 90_000 });

@@ -87,6 +87,41 @@ jobs:
       - name: Check committed text line endings
         if: github.event_name != 'push' || github.event.deleted != true
         run: node scripts/check-committed-text.mjs --all
+      - name: Build verified main Setup without a release tag
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: pwsh
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP 'pi-chat-main-setup-dist'
+          $output = Join-Path $env:RUNNER_TEMP 'pi-chat-main-setup-output'
+          New-Item -ItemType Directory -Path $stage, $output -ErrorAction Stop | Out-Null
+          $env:PI_CHAT_DIST_DIR = $stage
+          $env:PI_CHAT_RELEASE_MODE = '1'
+          $env:PI_CHAT_RELEASE_TAG = 'HEAD'
+          npm run build
+          if ($LASTEXITCODE -ne 0) { throw 'Main Setup build failed' }
+          $env:PI_CHAT_RELEASE_MODE = '0'
+          Remove-Item Env:PI_CHAT_RELEASE_TAG -ErrorAction SilentlyContinue
+          Remove-Item Env:PI_CHAT_BUILD_REVISION -ErrorAction SilentlyContinue
+          npm run test:artifact
+          if ($LASTEXITCODE -ne 0) { throw 'Main Setup artifact verification failed' }
+          node scripts/release-package.mjs --staging $stage --output $output --tag HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Main Setup packaging failed' }
+          $setup = Get-Item -LiteralPath (Join-Path $output 'pi-chat-setup.exe')
+          $hash = (Get-FileHash -LiteralPath $setup.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          $record = (Get-Content -LiteralPath "$($setup.FullName).sha256" -Raw).Trim()
+          if ($record -ne "$hash *$($setup.Name)") { throw 'Main Setup checksum mismatch' }
+          $manifest = Get-Content -LiteralPath "$($setup.FullName).manifest.json" -Raw | ConvertFrom-Json
+          if ($manifest.tag -ne 'HEAD' -or $manifest.revision -ne $env:GITHUB_SHA) { throw 'Main Setup revision mismatch' }
+          if ($manifest.setup.sha256 -ne $hash) { throw 'Main Setup manifest digest mismatch' }
+          if (@(Get-ChildItem -LiteralPath $output -File).Count -ne 3) { throw 'Expected Setup and two sidecars only' }
+      - name: Upload verified main Setup
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: pi-chat-setup-main-${{ github.sha }}
+          path: ${{ runner.temp }}/pi-chat-main-setup-output/*
+          if-no-files-found: error
+          retention-days: 30
       - name: Upload Playwright diagnostics
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0

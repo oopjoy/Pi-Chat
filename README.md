@@ -16,7 +16,9 @@ Pi Chat 连接本机 Pi RPC，负责聊天展示、Session 浏览、流式输出
 
 ### 一个完整 Setup：应用 + Node 内置，Pi 按需安装
 
-**以下是当前 `main` 的新分发方式，尚未切换正式 Latest。** 完整 Setup 的测试包通过 [Releases 列表中的 Pre-release](https://github.com/oopjoy/Pi-Chat/releases) 提供（标题为 Complete Setup test build）；若尚未出现，请等待该测试标签的 CI 完成。正式 [v0.5.2](https://github.com/oopjoy/Pi-Chat/releases/tag/v0.5.2) 仍是约 192 KB 的历史在线引导安装器，不会原地替换旧资产。
+**以下是当前 `main` 的新分发方式，尚未切换正式 Latest。** 最新 main 测试包位于 [Windows CI](https://github.com/oopjoy/Pi-Chat/actions/workflows/windows-ci.yml) 成功运行的 Artifacts：`pi-chat-setup-main-<提交号>`（保留 30 天，下载通常需要登录 GitHub）。解压 Actions 的传输 ZIP 后运行其中的 `pi-chat-setup.exe`；这不是 portable 应用包。其 manifest 标记 `tag: HEAD` 并记录完整 revision，不创建或移动 tag。
+
+已有 [Pre-release](https://github.com/oopjoy/Pi-Chat/releases) 保留各自标签时的测试包，不随 main 原地更新。正式 [v0.5.2](https://github.com/oopjoy/Pi-Chat/releases/tag/v0.5.2) 仍是约 192 KB 的历史在线引导安装器，不会替换旧资产。
 
 后续 Release 只提供 **`pi-chat-setup.exe` 一个安装入口**，不再提供 Web EXE 或 portable ZIP（校验文件和构建清单不是额外安装包）。安装向导基于 Inno Setup，不依赖 Electron：
 

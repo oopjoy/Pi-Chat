@@ -27,7 +27,10 @@ Only the optional Pi installation uses the network.
 - Inno Setup owns file deployment, shortcuts and native uninstall registration.
   `pi-chat-setup.ps1` only checks running processes, detects Pi, or explicitly
   installs a missing Pi. No console Read-Host, app downloader or second uninstaller.
-- Upgrade/uninstall refuses a Node process running from the destination; neither
+- Upgrade/uninstall refuses a Node process running from the destination, including
+  system Node with relative `dist/server/server/index.js` argv. A bounded read-only
+  Windows x86/x64 process-parameters query resolves that owner's cwd; an alive,
+  uninspectable candidate fails closed. No process memory is modified. Neither
   installer nor uninstaller force-closes applications. A service in another
   checkout is not stopped; the launcher's existing fingerprint/port guard still
   refuses to take it over.
@@ -60,7 +63,14 @@ identity. Outputs:
 - `pi-chat-setup.exe.manifest.json` (schema 2; Setup digest, application identity,
   Node archive checksum and compiler version)
 
-A test-only publication may use
+Main pushes publish `pi-chat-setup-main-<full-commit>` as a Windows CI artifact
+only after source, browser, artifact and real-installer gates. Its manifest uses
+`tag: HEAD` and the exact checked-out SHA. This route requires no tag creation,
+no tag move and no Release write permission. GitHub wraps the three files in a
+transport ZIP; it is not a portable application distribution. Artifacts expire
+after 30 days and normally require a GitHub login to download.
+
+A separately authorized test-only publication may use
 `v<package-version>-setup-preview.<first-12-characters-of-HEAD>`. Its tag must
 resolve to the exact checked-out revision and its embedded package version must
 still match. The same release gates apply, but GitHub marks it Pre-release and
@@ -77,7 +87,8 @@ checks; a pinned version is not an excuse to ignore runtime security updates.
 compiles a test-identity Inno EXE, installs into an unusual temporary path, and
 checks native installation/upgrade/uninstall, registration, missing-Pi startup,
 existing-Pi reuse and optional online failure. It also verifies npm under the
-private Node and that native uninstall removes the generated root Web shortcut. The test owns its processes and
+private Node and that native uninstall removes the generated root Web shortcut.
+The test owns its processes and
 never launches a real model request, maps the live user sessions, writes the
 production uninstall key or stops the production listener.
 

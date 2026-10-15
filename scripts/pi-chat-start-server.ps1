@@ -16,7 +16,8 @@ try {
   }
   $bundledNode = Join-Path $runtimeRoot 'node\node.exe'
   $node = if (Test-Path -LiteralPath $bundledNode) { $bundledNode } else { (Get-Command node.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source }
-  $process = Start-Process -FilePath $node -ArgumentList @('dist\server\server\index.js', '--port', '30170') -WorkingDirectory $ProjectDirectory -WindowStyle Hidden -RedirectStandardOutput $env:PI_CHAT_SERVER_OUT -RedirectStandardError $env:PI_CHAT_SERVER_ERR -PassThru
+  $entry = Join-Path $ProjectDirectory 'dist\server\server\index.js'
+  $process = Start-Process -FilePath $node -ArgumentList @(('"' + $entry + '"'), '--port', '30170') -WorkingDirectory $ProjectDirectory -WindowStyle Hidden -RedirectStandardOutput $env:PI_CHAT_SERVER_OUT -RedirectStandardError $env:PI_CHAT_SERVER_ERR -PassThru
   # Retain the process handle so Windows PowerShell can read a fast child's exit code.
   $null = $process.Handle
   $deadline = [DateTime]::UtcNow.AddSeconds(60)

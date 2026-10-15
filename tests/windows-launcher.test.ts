@@ -192,6 +192,29 @@ test("installer running guard identifies filesystem aliases and does not block a
   }
 });
 
+test("installer guard finds external Node with relative app argv and permits a different checkout", { skip: process.platform !== "win32" }, async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), "pi-chat-relative-owner-"));
+  const install = join(rootDir, "Pi Chat's & (target)"), foreign = join(rootDir, "foreign");
+  const app = join(install, "app"), result = join(rootDir, "guard.ini");
+  await mkdir(join(app, "dist/server/server"), { recursive: true });
+  await mkdir(foreign);
+  await writeFile(join(app, "dist/server/server/index.js"), "console.log('ready'); setInterval(() => {}, 1000);\n");
+  const child = spawn(process.execPath, ["dist/server/server/index.js"], { cwd: app, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+  const exit = once(child, "exit");
+  try {
+    await once(child.stdout!, "data", { signal: AbortSignal.timeout(10_000) });
+    const check = (target: string) => execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", join(root, "scripts/pi-chat-setup.ps1"), "-Action", "CheckRunning", "-InstallRoot", target, "-ResultFile", result], { windowsHide: true, stdio: "pipe", timeout: 25_000 });
+    assert.throws(() => check(install), (error: unknown) => (error as { status: number }).status === 11);
+    assert.match((await readFile(result)).toString("utf16le"), /running from this installation/);
+    check(foreign);
+    assert.match((await readFile(result)).toString("utf16le"), /not owned by a running Node process/);
+    assert.equal(child.exitCode, null);
+  } finally {
+    child.kill("SIGTERM"); await exit;
+    await rm(rootDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
 test("packaged icon is a multi-image Windows ICO", async () => {
   const icon = await readFile(join(root, "resources/icons/pi-chat.ico"));
   assert.equal(icon.readUInt16LE(0), 0);

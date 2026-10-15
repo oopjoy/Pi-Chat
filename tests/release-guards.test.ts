@@ -134,6 +134,18 @@ test("branch CI and tag release CI are separated and every third-party action is
   }
 });
 
+test("main Setup delivery is verified and commit-addressed without release or tag writes", async () => {
+  const source = await readFile(join(repositoryRoot, ".github/workflows/windows-ci.yml"), "utf8");
+  assert.match(source, /contents: read/);
+  assert.match(source, /name: pi-chat-setup-main-\$\{\{ github.sha \}\}/);
+  assert.match(source, /--tag HEAD/);
+  assert.match(source, /\$manifest\.revision -ne \$env:GITHUB_SHA/);
+  assert.match(source, /if \(\$LASTEXITCODE -ne 0\) \{ throw 'Main Setup artifact verification failed' \}/);
+  assert.doesNotMatch(source, /git push|git tag|gh release|contents: write/);
+  assert.ok(source.indexOf("Verify self-contained Setup") < source.indexOf("Upload verified main Setup"));
+  assert.ok(source.indexOf("Main Setup artifact verification failed") < source.indexOf("Upload verified main Setup"));
+});
+
 test("the committed workflow blob is LF even when Windows checkout conversion is enabled", async () => {
   await assertCommittedLf({ repoRoot: repositoryRoot, paths: [".github/workflows/windows-ci.yml"] });
 });

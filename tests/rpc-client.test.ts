@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -750,9 +753,11 @@ test("process-exit fanout isolates synchronous and asynchronous listeners", asyn
 
 test("global Pi RPC starts and answers state requests",  { skip: !piEntry, timeout: 75_000 }, async () => {
   assert.ok(piEntry);
+  const sandbox = await mkdtemp(join(tmpdir(), "pi-chat-rpc-core-"));
   const incidents = incidentCollector();
   const client = new PiRpcClient({
-    cwd: process.cwd(),
+    cwd: sandbox,
+    childEnvironment: { PI_CODING_AGENT_DIR: sandbox, PI_CODING_AGENT_SESSION_DIR: join(sandbox, "sessions"), HOME: sandbox, USERPROFILE: sandbox },
     piEntry,
     startupProbe: fileURLToPath(new URL("../resources/runtime/pi-chat-startup-probe.mjs", import.meta.url)),
     diagnostics: incidents.diagnostics,
@@ -784,20 +789,24 @@ test("global Pi RPC starts and answers state requests",  { skip: !piEntry, timeo
       assert.ok((startup[index].durationMs ?? 0) >= (startup[index - 1].durationMs ?? 0));
   } finally {
     await client.stop();
+    await rm(sandbox, { recursive: true, force: true });
   }
 });
 
 test("direct RPC startup traces process-local Extension import and factory phases", { skip: !piEntry, timeout: 75_000 }, async () => {
   assert.ok(piEntry);
+  const sandbox = await mkdtemp(join(tmpdir(), "pi-chat-rpc-extension-"));
   const incidents = incidentCollector();
   const client = new PiRpcClient({
-    cwd: process.cwd(),
+    cwd: sandbox,
+    childEnvironment: { PI_CODING_AGENT_DIR: sandbox, PI_CODING_AGENT_SESSION_DIR: join(sandbox, "sessions"), HOME: sandbox, USERPROFILE: sandbox },
     piEntry,
     startupProbe: fileURLToPath(new URL("../resources/runtime/pi-chat-startup-probe.mjs", import.meta.url)),
     rpcRegister: fileURLToPath(new URL("../resources/runtime/pi-chat-rpc-register.mjs", import.meta.url)),
     diagnostics: incidents.diagnostics,
     args: [
       "--no-session",
+      "--no-extensions",
       "--no-skills",
       "--no-prompt-templates",
       "--no-themes",
@@ -812,5 +821,6 @@ test("direct RPC startup traces process-local Extension import and factory phase
     assert.ok(incidents.records.some((record) => record.startupPhase === "extension-factory-end"));
   } finally {
     await client.stop();
+    await rm(sandbox, { recursive: true, force: true });
   }
 });

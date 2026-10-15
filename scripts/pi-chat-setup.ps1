@@ -41,9 +41,69 @@ try {
       Add-Type -TypeDefinition @'
 using System;
 using System.Text;
+using System.IO;
+using System.ComponentModel;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 public static class PiChatInstallerPaths {
+  [DllImport("shell32.dll", SetLastError = true)]
+  private static extern IntPtr CommandLineToArgvW([MarshalAs(UnmanagedType.LPWStr)] string line, out int count);
+  [DllImport("kernel32.dll")] private static extern IntPtr LocalFree(IntPtr memory);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  private static extern SafeProcessHandle OpenProcess(uint access, bool inherit, int pid);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  private static extern bool ReadProcessMemory(SafeProcessHandle process, IntPtr address, byte[] bytes, int count, out IntPtr read);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  private static extern bool IsWow64Process(SafeProcessHandle process, out bool wow64);
+  [DllImport("ntdll.dll")]
+  private static extern int NtQueryInformationProcess(SafeProcessHandle process, int kind, [Out] IntPtr[] data, int size, out int returned);
+  private static byte[] Read(SafeProcessHandle process, IntPtr address, int count) {
+    var bytes = new byte[count]; IntPtr read;
+    if (address == IntPtr.Zero || !ReadProcessMemory(process, address, bytes, count, out read) || read.ToInt64() != count)
+      throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot verify the Pi Chat process working directory");
+    return bytes;
+  }
+  private static IntPtr Pointer(byte[] bytes, int offset, int size) {
+    return size == 8 ? new IntPtr(BitConverter.ToInt64(bytes, offset)) : new IntPtr((long)BitConverter.ToUInt32(bytes, offset));
+  }
+  // Read only the Windows x86/x64 PEB process-parameters pointer and bounded cwd
+  // UNICODE_STRING. Fail closed if that layout cannot be verified. Never scan,
+  // alter arbitrary process memory, or stop the inspected process.
+  private static string WorkingDirectory(int pid) {
+    using (var process = OpenProcess(0x0410, false, pid)) {
+      if (process.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error());
+      bool wow64; int returned;
+      if (!IsWow64Process(process, out wow64)) throw new Win32Exception(Marshal.GetLastWin32Error());
+      int size = wow64 ? 4 : IntPtr.Size;
+      var data = new IntPtr[6];
+      int kind = IntPtr.Size == 8 && wow64 ? 26 : 0;
+      if (NtQueryInformationProcess(process, kind, data, kind == 26 ? IntPtr.Size : IntPtr.Size * data.Length, out returned) != 0)
+        throw new InvalidOperationException("Cannot query Pi Chat process parameters");
+      IntPtr peb = data[kind == 26 ? 0 : 1];
+      var parameters = Pointer(Read(process, IntPtr.Add(peb, size == 8 ? 0x20 : 0x10), size), 0, size);
+      var cwd = Read(process, IntPtr.Add(parameters, size == 8 ? 0x38 : 0x24), size == 8 ? 16 : 8);
+      int length = BitConverter.ToUInt16(cwd, 0);
+      if (length == 0 || length > 65532 || (length % 2) != 0) throw new InvalidOperationException("Invalid Pi Chat working-directory length");
+      return Encoding.Unicode.GetString(Read(process, Pointer(cwd, size == 8 ? 8 : 4, size), length));
+    }
+  }
+  public static bool UsesApp(int pid, string command, string root) {
+    if (String.IsNullOrEmpty(command) || String.IsNullOrEmpty(root)) return false;
+    int count; var args = CommandLineToArgvW(command, out count);
+    if (args == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+    try {
+      if (count > 1024) throw new InvalidOperationException("Too many Pi Chat process arguments");
+      for (int i = 1; i < count; i++) {
+        string arg = Marshal.PtrToStringUni(Marshal.ReadIntPtr(args, i * IntPtr.Size)).Replace('/', '\\');
+        if (!arg.EndsWith("dist\\server\\server\\index.js", StringComparison.OrdinalIgnoreCase)) continue;
+        bool absolute = arg.Length > 2 && arg[1] == ':' && arg[2] == '\\';
+        if (arg.StartsWith("\\\\", StringComparison.Ordinal)) absolute = true;
+        string entry = Resolve(Path.GetFullPath(absolute ? arg : Path.Combine(WorkingDirectory(pid), arg)));
+        if (entry != null && entry.StartsWith(root, StringComparison.OrdinalIgnoreCase)) return true;
+      }
+      return false;
+    } finally { LocalFree(args); }
+  }
   [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode, SetLastError = true)]
   private static extern SafeFileHandle Open(string path, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
   [DllImport("kernel32.dll", EntryPoint = "GetFinalPathNameByHandleW", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -71,6 +131,14 @@ public static class PiChatInstallerPaths {
     foreach ($process in $processes) {
       $executable = [PiChatInstallerPaths]::Resolve([string]$process.ExecutablePath)
       $ownsFiles = $canonicalRoot -and $executable -and $executable.StartsWith($canonicalRoot, [StringComparison]::OrdinalIgnoreCase)
+      if (-not $ownsFiles) {
+        try { $ownsFiles = [PiChatInstallerPaths]::UsesApp([int]$process.ProcessId, [string]$process.CommandLine, $canonicalRoot) }
+        catch {
+          # A process can exit while inspected. Ignore only a confirmed exit;
+          # an alive but unverifiable Pi Chat owner must block, never be killed.
+          if (Get-Process -Id $process.ProcessId -ErrorAction SilentlyContinue) { throw }
+        }
+      }
       if ($ownsFiles -or [string]$process.CommandLine -match $pattern -or [string]$process.ExecutablePath -match $pattern) {
         Report $false 'Pi Chat is running from this installation. Close it safely in Settings before installing or uninstalling.'
         exit 11

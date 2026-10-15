@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { PiRpcClient, resolvePiEntry, rpcData } from "../src/server/rpc-client";
@@ -56,8 +57,10 @@ test("a real Pi RPC child accepts the process-local native dequeue command", { s
     "runtime",
     "pi-chat-rpc-register.mjs",
   );
+  const sandbox = await mkdtemp(join(tmpdir(), "pi-chat-dequeue-overlay-"));
   const client = new PiRpcClient({
-    cwd: process.cwd(),
+    cwd: sandbox,
+    childEnvironment: { PI_CODING_AGENT_DIR: sandbox, PI_CODING_AGENT_SESSION_DIR: join(sandbox, "sessions"), HOME: sandbox, USERPROFILE: sandbox },
     piEntry,
     rpcRegister,
     args: ["--no-session", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files"],
@@ -79,5 +82,6 @@ test("a real Pi RPC child accepts the process-local native dequeue command", { s
     ));
   } finally {
     await client.stop();
+    await rm(sandbox, { recursive: true, force: true });
   }
 });

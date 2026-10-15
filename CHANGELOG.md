@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Review fixes and Runtime startup investigation
+
+- Sandbox WinForms test log initialization explicitly; Windows known-folder APIs ignore `LOCALAPPDATA` overrides. Verify readable failure handling without modifying the real user's launcher logs.
+- Quote Retry's full script path. Identify a running installation even with system Node and relative app argv by bounded read-only working-directory inspection; retain fail-closed checks and never stop another checkout. Supported launcher fallback now passes an absolute app entry.
+- Prefer synchronous Node load hooks for the same process-local RPC patches, retaining the original async compatibility fallback. Warm-cache isolated measurements reduce adapter overhead; they do not prove the observed 65-second cold-start incident is eliminated. See `docs/runtime-startup-investigation-2026-10-14.md`.
+- Main CI publishes a commit-addressed, verified Setup artifact after all gates, without creating/moving tags or overwriting Release assets.
+
 ### Separate Git and Setup launch entries
 
 - Generate source-checkout shortcuts as `Pi Chat Git` / optional `Pi Chat Git PWA` in a separate Start-menu group. Leave Setup-owned generic shortcuts untouched; installer tests guard against claiming the Git names.

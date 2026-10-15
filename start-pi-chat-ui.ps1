@@ -173,7 +173,7 @@ $retryButton.Add_Click({
   $retry = Start-Process -FilePath 'powershell.exe' -ArgumentList @(
     '-NoProfile',
     '-ExecutionPolicy', 'Bypass',
-    '-File', $uiScriptPath,
+    '-File', ('"' + $uiScriptPath + '"'),
     '-Mode', $Mode
   ) -WorkingDirectory $project -PassThru
   if ($retry) { $form.Close() } else { $form.Show() }
