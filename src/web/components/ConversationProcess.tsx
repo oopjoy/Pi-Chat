@@ -110,15 +110,49 @@ export function toolSummary(entry: ToolEntry): string {
   return detail ? `${name} ${detail}` : name;
 }
 
+/** Exported for regression tests: the narrative summary must stay fact-backed. */
+export function processSummaryTitle(entries: ProcessEntry[], streaming = false): string {
+  return summarize(entries, streaming);
+}
+
+/** Semantic buckets backed by confirmed tool names only. Unknown/extension tools stay generic. */
+const READ_TOOLS = new Set(["read", "glob", "find"]);
+const EDIT_TOOLS = new Set(["edit", "write", "multiedit"]);
+const SEARCH_TOOLS = new Set(["grep", "web_search", "antigravity_websearch"]);
+const TERMINAL_TOOLS = new Set(["bash", "powershell"]);
+
+/**
+ * Narrative summary from confirmed facts only:
+ * - counts completed tools per semantic bucket (a finished tool result exists);
+ * - names the single running tool, or its bucket, as current work;
+ * - unknown tools keep a generic count and are never guessed semantically.
+ */
 function summarize(entries: ProcessEntry[], streaming = false): string {
   const tools = entries.filter((entry): entry is ToolEntry => entry.kind === "tool");
   const failed = tools.filter((entry) => entry.isError).length;
-  const subagents = tools.filter((entry) => entry.name === "subagent").length;
-  const labels: string[] = [];
-  if (tools.length) labels.push(`${tools.length} 个工具`);
-  if (subagents) labels.push(`${subagents} 个子任务`);
-  if (!labels.length) labels.push(streaming ? "进行中" : `${entries.length} 个步骤`);
-  return `过程 · ${labels.join(" · ")}${failed ? ` · ${failed} 项失败` : ""}`;
+  const running = tools.filter((entry) => !entry.completed && !entry.isError);
+  const completed = tools.filter((entry) => entry.completed);
+  const count = (set: Set<string>) => completed.filter((entry) => set.has(entry.name)).length;
+  const read = count(READ_TOOLS);
+  const edited = count(EDIT_TOOLS);
+  const searched = count(SEARCH_TOOLS);
+  const terminal = count(TERMINAL_TOOLS);
+  const subagents = completed.filter((entry) => entry.name === "subagent").length;
+  const known = read + edited + searched + terminal + subagents;
+  const otherTools = completed.length - known;
+  const parts: string[] = [];
+  if (read) parts.push(`读取 ${read} 个文件`);
+  if (searched) parts.push(`检索 ${searched} 次`);
+  if (edited) parts.push(`修改 ${edited} 个文件`);
+  if (terminal) parts.push(`执行 ${terminal} 条命令`);
+  if (subagents) parts.push(`派出 ${subagents} 个子任务`);
+  if (otherTools > 0) parts.push(`调用 ${otherTools} 个其他工具`);
+  const headline = parts.length ? parts.join("，") : streaming && tools.length === running.length && running.length ? "正在开始" : streaming ? "进行中" : "已完成";
+  const current = running.length ? running.length === 1
+    ? `正在${running[0]?.name === "read" || running[0]?.name === "find" || running[0]?.name === "glob" ? "读取" : running[0]?.name === "edit" || running[0]?.name === "write" || running[0]?.name === "multiedit" ? "修改" : running[0]?.name === "grep" ? "检索" : running[0]?.name === "bash" || running[0]?.name === "powershell" ? "执行命令" : `执行 ${running[0]?.name}`}`
+    : `${running.length} 项进行中` : "";
+  if (!tools.length) return `过程 · ${streaming ? "思考中" : `${entries.length} 个步骤`}${failed ? ` · ${failed} 项失败` : ""}`;
+  return `过程 · ${headline}${current ? ` · ${current}` : ""}${failed ? ` · ${failed} 项失败` : ""}`;
 }
 
 export function toolLabel(entry: Extract<ProcessEntry, { kind: "tool" }>): string {

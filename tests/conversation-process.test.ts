@@ -6,13 +6,15 @@ import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { JSDOM } from "jsdom";
 import { LOCAL_COORDINATION_ROLE, type PiMessage } from "../src/shared/types";
+import type { ProcessEntry } from "../src/web/lib/conversation-process";
+type ProcessEntryLike = ProcessEntry;
 import {
   COORDINATION_MESSAGE_FOLD_LINE_LIMIT,
   CoordinationMessage,
   shouldFoldCoordinationText,
 } from "../src/web/components/CoordinationMessage";
 import { ChatMessage } from "../src/web/components/ChatMessage";
-import { ConversationProcess, toolLabel, toolSummaryDetail } from "../src/web/components/ConversationProcess";
+import { ConversationProcess, toolLabel, toolSummaryDetail, processSummaryTitle } from "../src/web/components/ConversationProcess";
 import { EditDiffSidebar } from "../src/web/components/EditToolDiff";
 import { groupConversation, messageItemKey } from "../src/web/lib/conversation-process";
 
@@ -160,6 +162,29 @@ test("keeps a failed tool result visible inside the process", () => {
     completed: true,
     isError: true,
   }]);
+});
+
+test("narrative process summary reports confirmed facts without inventing outcomes", () => {
+  const done = (name: string, extra: Partial<Extract<ProcessEntryLike, { kind: "tool" }>> = {}) => ({ kind: "tool" as const, name, id: `${name}-${Math.random()}`, completed: true, ...extra });
+  const pending = (name: string) => ({ kind: "tool" as const, name, id: `${name}-pending` });
+  // Completed buckets are counted semantically.
+  assert.equal(
+    processSummaryTitle([done("read"), done("read"), done("grep"), done("edit"), done("bash")]),
+    "过程 · 读取 2 个文件，检索 1 次，修改 1 个文件，执行 1 条命令",
+  );
+  // Unknown tools stay generic; nothing is guessed for them.
+  assert.equal(
+    processSummaryTitle([done("read"), done("mcp_custom_report")]),
+    "过程 · 读取 1 个文件，调用 1 个其他工具",
+  );
+  // Current work is named, completed work is not claimed as finished overall.
+  assert.equal(processSummaryTitle([done("read"), pending("edit")]), "过程 · 读取 1 个文件 · 正在修改");
+  assert.equal(processSummaryTitle([pending("read")], true), "过程 · 正在开始 · 正在读取");
+  assert.equal(processSummaryTitle([pending("mcp_custom_report")], true), "过程 · 正在开始 · 正在执行 mcp_custom_report");
+  // Failure stays visible and tool completion never becomes "已完成" when tools ran.
+  assert.equal(processSummaryTitle([done("read", { isError: true }), done("read")]), "过程 · 读取 2 个文件 · 1 项失败");
+  assert.equal(processSummaryTitle([{ kind: "thinking", text: "x" }], true), "过程 · 思考中");
+  assert.equal(processSummaryTitle([], true), "过程 · 思考中");
 });
 
 test("completed read, bash and subagent rows omit redundant completion text", () => {
