@@ -91,6 +91,8 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         shell: pwsh
         run: |
+          $env:TEMP = $env:RUNNER_TEMP
+          $env:TMP = $env:RUNNER_TEMP
           $stage = Join-Path $env:RUNNER_TEMP 'pi-chat-main-setup-dist'
           $output = Join-Path $env:RUNNER_TEMP 'pi-chat-main-setup-output'
           New-Item -ItemType Directory -Path $stage, $output -ErrorAction Stop | Out-Null

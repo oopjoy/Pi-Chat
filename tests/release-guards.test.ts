@@ -139,6 +139,8 @@ test("main Setup delivery is verified and commit-addressed without release or ta
   assert.match(source, /contents: read/);
   assert.match(source, /name: pi-chat-setup-main-\$\{\{ github.sha \}\}/);
   assert.match(source, /--tag HEAD/);
+  assert.match(source, /\$env:TEMP = \$env:RUNNER_TEMP/);
+  assert.match(source, /\$env:TMP = \$env:RUNNER_TEMP/);
   assert.match(source, /\$manifest\.revision -ne \$env:GITHUB_SHA/);
   assert.match(source, /if \(\$LASTEXITCODE -ne 0\) \{ throw 'Main Setup artifact verification failed' \}/);
   assert.doesNotMatch(source, /git push|git tag|gh release|contents: write/);
