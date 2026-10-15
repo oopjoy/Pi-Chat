@@ -222,6 +222,9 @@ const child = spawn(process.execPath, [join(serverDist, "server", "server", "ind
   cwd: projectRoot,
   env: {
     ...process.env,
+    // Incident logs must not rotate/contaminate the user's live diagnostics.
+    LOCALAPPDATA: join(root, "local-appdata"),
+    XDG_STATE_HOME: join(root, "state"),
     PI_CHAT_RUNTIME_DIST: runtimeDist,
     PI_CHAT_PI_ENTRY: rpcEntry,
     PI_CODING_AGENT_DIR: agentDir,

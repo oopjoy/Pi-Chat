@@ -3,6 +3,7 @@ import { createHash as __piChatCreateHash } from "node:crypto";
 const RPC_MODE_SUFFIX = "/dist/modes/rpc/rpc-mode.js";
 const AGENT_SESSION_SUFFIX = "/dist/core/agent-session.js";
 const EXTENSION_LOADER_SUFFIX = "/dist/core/extensions/loader.js";
+const MAIN_SUFFIX = "/dist/main.js";
 
 const FOLLOW_UP_CASES = [
   `            case "follow_up": {
@@ -66,6 +67,21 @@ export function patchPiExtensionLoaderSource(source) {
     );
 }
 
+/** Diagnostic-only milestones: no source match means no patch, never a startup failure. */
+export function patchPiStartupMilestones(source) {
+  if (source.includes("/* pi-chat-startup-milestones */")) return source;
+  const anchors = [
+    ['time("parseArgs");', "A"],
+    ['time("createRuntime");', "R"],
+    ['time("createAgentSessionRuntime");', "S"],
+  ];
+  if (anchors.some(([anchor]) => source.split(anchor).length !== 2)) return source;
+  let patched = source;
+  for (const [anchor, marker] of anchors)
+    patched = patched.replace(anchor, `${anchor}\n    try { globalThis.__piChatStartupMark?.("${marker}"); } catch { /* diagnostics are fail-open */ }`);
+  return `/* pi-chat-startup-milestones */\n${patched}`;
+}
+
 /** Fixed wire contract shared with the Host's promptPayloadFingerprint. */
 export function piChatPromptReceipt(message) {
   if (!message || message.role !== "user" || !Number.isFinite(message.timestamp)) return undefined;
@@ -114,11 +130,14 @@ function patchLoadedSource(url, loaded) {
   const shouldPatchRpc = pathname.endsWith(RPC_MODE_SUFFIX);
   const shouldPatchExtensions = pathname.endsWith(EXTENSION_LOADER_SUFFIX);
   const shouldPatchPrompt = pathname.endsWith(AGENT_SESSION_SUFFIX);
-  if (!shouldPatchRpc && !shouldPatchExtensions && !shouldPatchPrompt) return loaded;
+  const shouldPatchMain = pathname.endsWith(MAIN_SUFFIX);
+  if (!shouldPatchRpc && !shouldPatchExtensions && !shouldPatchPrompt && !shouldPatchMain) return loaded;
   if (loaded.source === null || loaded.source === undefined) return loaded;
   const source = typeof loaded.source === "string"
     ? loaded.source
     : Buffer.from(loaded.source).toString("utf8");
+  if (shouldPatchMain)
+    return { ...loaded, source: patchPiStartupMilestones(source) };
   if (shouldPatchRpc)
     return { ...loaded, source: patchPiPromptResponseSource(patchPiRpcModeSource(source)) };
   if (shouldPatchPrompt)

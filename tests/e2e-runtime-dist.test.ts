@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { cp, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -56,7 +56,7 @@ test("E2E runtime follows the staged build directory unless explicitly overridde
   assert.equal(e2eRuntimeDist({}, projectRoot), resolve(projectRoot, "dist"));
 });
 
-test("E2E listener serves the web artifact from its staged runtime", { timeout: 30_000 }, async () => {
+test("E2E listener serves its staged web artifact and isolates incident logs from the parent", { timeout: 30_000 }, async () => {
   const sourceDist = resolve(process.env.PI_CHAT_DIST_DIR || join(projectRoot, "dist"));
   const stagedDist = await mkdtemp(join(tmpdir(), "pi-chat-e2e-runtime-"));
   const serverRoot = await mkdtemp(join(tmpdir(), "pi-chat-e2e-root-"));
@@ -70,6 +70,11 @@ test("E2E listener serves the web artifact from its staged runtime", { timeout: 
     const indexPath = join(stagedDist, "web", "index.html");
     const index = await readFile(indexPath, "utf8");
     await writeFile(indexPath, index.replace("</body>", `<meta name=\"${marker}\" content=\"${marker}\" /></body>`), "utf8");
+    const parentState = join(stagedDist, "parent-state");
+    const logTail = process.platform === "win32" ? ["Pi Chat", "diagnostics"] : ["pi-chat", "diagnostics"];
+    const parentLog = join(parentState, ...logTail, "incidents.jsonl");
+    await mkdir(join(parentState, ...logTail), { recursive: true });
+    await writeFile(parentLog, "parent-log-sentinel\n");
     child = spawn(process.execPath, [
       join(projectRoot, "scripts", "e2e-server.mjs"),
       "--port",
@@ -78,7 +83,7 @@ test("E2E listener serves the web artifact from its staged runtime", { timeout: 
       serverRoot,
     ], {
       cwd: projectRoot,
-      env: { ...process.env, PI_CHAT_DIST_DIR: stagedDist },
+      env: { ...process.env, PI_CHAT_DIST_DIR: stagedDist, LOCALAPPDATA: parentState, XDG_STATE_HOME: parentState },
       stdio: "ignore",
       windowsHide: true,
       detached: process.platform !== "win32",
@@ -86,6 +91,15 @@ test("E2E listener serves the web artifact from its staged runtime", { timeout: 
     observed = observeOwnedProcess(child, process.platform !== "win32");
     const page = await waitForResponse(`http://127.0.0.1:${port}/`, child);
     assert.match(page, new RegExp(marker));
+    const ownedLog = join(serverRoot, process.platform === "win32" ? "local-appdata" : "state", ...logTail, "incidents.jsonl");
+    let records = "";
+    for (let attempt = 0; attempt < 50 && !records.includes('"host.start"'); attempt++) {
+      try { records = await readFile(ownedLog, "utf8"); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      if (!records.includes('"host.start"')) await new Promise(resolveDelay => setTimeout(resolveDelay, 20));
+    }
+    assert.match(records, /"host.start"/);
+    assert.equal(await readFile(parentLog, "utf8"), "parent-log-sentinel\n");
   } catch (error) {
     primaryError = error;
   }

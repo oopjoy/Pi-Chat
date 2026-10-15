@@ -487,6 +487,11 @@ export class PiRpcClient {
     });
     const probe = (child as ChildProcessWithoutNullStreams & { stdio?: Array<NodeJS.ReadableStream | NodeJS.WritableStream | null> }).stdio?.[3];
     let probeBuffer = "";
+    const startupMilestones = new Map<string, IncidentStartupPhase>([
+      ["A", "child-cli-parsed"],
+      ["R", "runtime-initialization-start"],
+      ["S", "runtime-initialization-end"],
+    ]);
     probe?.on("data", (chunk: Buffer | string) => {
       if (this.source !== source) return;
       probeBuffer += chunk.toString();
@@ -500,6 +505,9 @@ export class PiRpcClient {
         } else if (marker === "I" && !source.entryEvaluatedObserved) {
           source.entryEvaluatedObserved = true;
           this.recordStartupPhase(source, "child-entry-evaluated");
+        } else if (startupMilestones.has(marker)) {
+          this.recordStartupPhase(source, startupMilestones.get(marker)!);
+          startupMilestones.delete(marker);
         } else {
           const extensionMarker = marker.match(/^([XYFG])(?::([0-9]+))?$/);
           const extensionPhase = extensionMarker?.[1];

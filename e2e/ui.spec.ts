@@ -96,23 +96,9 @@ test("queued turn process ownership survives a busy refresh and a reload", { tag
   let phase = 0;
   let queued = false;
   await page.route(/\/api\/(?:bootstrap(?:\?|$)|sessions\/[^/]+\/view(?:\?|$))/, async route => {
-    let response;
-    let data: BootstrapData | SessionViewData;
-    try {
-      response = await route.fetch({ headers: { ...route.request().headers(), origin: new URL(route.request().url()).origin } });
-      expect(response.status()).toBe(200);
-      data = await response.json() as BootstrapData | SessionViewData;
-    } catch (error) {
-      // The app aborts superseded fetches through its navigation-epoch fencing,
-      // and a reload tears the old page down; either cancellation disposes the
-      // fetched response mid-handler. That is the race winner, not an app
-      // fault, so drop the route quietly instead of failing the test.
-      if (error instanceof Error && /disposed|abort/i.test(error.message)) {
-        await route.abort("aborted").catch(() => {});
-        return;
-      }
-      throw error;
-    }
+    const response = await route.fetch({ headers: { ...route.request().headers(), origin: new URL(route.request().url()).origin } });
+    expect(response.status()).toBe(200);
+    const data = await response.json() as BootstrapData | SessionViewData;
     data.messages = phase === 0 ? old.slice(0, 3) : phase === 1 ? [...old, next] : [...old, { role: "user", content: "NEW_REQUEST", timestamp: now + 100000, piChatPersistedMessageId: "next-user:0" }, next];
     data.messageTotal = data.messages.length;
     data.turnTotal = phase === 2 ? 2 : 1;

@@ -1,6 +1,6 @@
-import { lstat, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import type { IncidentDiagnostics, IncidentFields } from "../src/server/incident-diagnostics";
 import { PiRpcClient, resolvePiEntry } from "../src/server/rpc-client";
 
@@ -67,7 +67,11 @@ if (!sourceStat.isFile()) throw new Error("Session snapshot is not a regular fil
 const sessionBytes = await readFile(canonicalSource);
 const directEntry = resolvePiEntry();
 if (!directEntry) throw new Error("Global Pi RPC entry is unavailable");
+const piPackage = JSON.parse(await readFile(resolve(dirname(directEntry), "..", "package.json"), "utf8")) as { version?: string };
 const startupProbe = resolve("resources", "runtime", "pi-chat-startup-probe.mjs");
+const rpcRegister = resolve("resources", "runtime", "pi-chat-rpc-register.mjs");
+if (options.profile === "installed-profile")
+  console.error("WARNING: installed-profile explicitly loads your real extensions/settings; use core for isolated, offline measurement.");
 const samples: Array<{
   transportReadyMs: number;
   capabilityReadyMs: number;
@@ -79,13 +83,19 @@ const samples: Array<{
   for (let iteration = 0; iteration < options.iterations; iteration += 1) {
     const root = await mkdtemp(join(tmpdir(), "pi-chat-startup-direct-"));
     const sessionCopy = join(root, "session.jsonl");
+    for (const name of ["agent", "sessions", "appdata"]) await mkdir(join(root, name));
     await writeFile(sessionCopy, sessionBytes, { flag: "wx" });
     const observed = collector();
     const client = new PiRpcClient({
       cwd: root,
       piEntry: directEntry,
-      childEnvironment: {},
+      childEnvironment: options.profile === "core" ? {
+        HOME: root, USERPROFILE: root, APPDATA: join(root, "appdata"), LOCALAPPDATA: join(root, "appdata"),
+        PI_CODING_AGENT_DIR: join(root, "agent"), PI_CODING_AGENT_SESSION_DIR: join(root, "sessions"),
+        PI_OFFLINE: "1", PI_SESSION_ID: undefined, PI_SESSION_FILE: undefined,
+      } : {},
       startupProbe,
+      rpcRegister,
       diagnostics: observed.diagnostics,
       runtimeKind: "secondary",
       args: options.profile === "core"
@@ -129,7 +139,14 @@ const samples: Array<{
         extensionFactoryMs,
       });
     } finally {
-      if (!stopped) await client.stop().catch(() => undefined);
+      // Never delete a diagnostic tree while its child may still own files.
+      if (!stopped) {
+        try { await client.stop(); }
+        catch (error) {
+          console.error(`Startup probe retained after unconfirmed child exit: ${root}`);
+          throw error;
+        }
+      }
       await rm(root, { recursive: true, force: true });
     }
   }
@@ -150,9 +167,12 @@ console.log(JSON.stringify({
   coldDefinition: "fresh-process",
   warning: "Fresh processes do not guarantee an OS- or Defender-cold file cache.",
   nodeVersion: process.versions.node,
+  piVersion: piPackage.version ?? "unknown",
   platform: process.platform,
   architecture: process.arch,
   profile: options.profile,
+  adapter: "production-rpc-register",
+  isolatedOfflineProfile: options.profile === "core",
   iterations: options.iterations,
   sessionBytes: sessionBytes.length,
   sourceLabel: "offline-snapshot",

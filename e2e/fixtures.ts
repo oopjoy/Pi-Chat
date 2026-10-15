@@ -202,6 +202,17 @@ async function replaceFingerprint(root: string, from: string, to: string): Promi
 }
 
 export const test = base.extend<{ isolatedBaseURL: string; mismatchedBaseURL: string }>({
+  page: async ({ page }, use) => {
+    try {
+      await use(page);
+    } finally {
+      // route.fetch() responses belong to the BrowserContext. Retire new
+      // interception and drain in-flight handlers before the built-in fixture
+      // closes that context (and disposes their response bodies). Do not ignore
+      // handler errors: HTTP, JSON and assertion failures must still fail E2E.
+      await page.unrouteAll({ behavior: "wait" });
+    }
+  },
   isolatedBaseURL: [async ({}, use, testInfo) => {
     const port = await freePort();
     await runCapturedServerFixture({
