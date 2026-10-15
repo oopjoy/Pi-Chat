@@ -89,6 +89,9 @@ public static class PiChatInstallerPaths {
   }
   public static bool UsesApp(int pid, string command, string root) {
     if (String.IsNullOrEmpty(command) || String.IsNullOrEmpty(root)) return false;
+    // Bound/fail-closed checks apply only to possible Pi Chat owners, not
+    // unrelated Node tools with many ordinary command-line arguments.
+    if (command.Replace('/', Path.DirectorySeparatorChar).IndexOf(@"dist\server\server\index.js", StringComparison.OrdinalIgnoreCase) < 0) return false;
     int count; var args = CommandLineToArgvW(command, out count);
     if (args == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
     try {

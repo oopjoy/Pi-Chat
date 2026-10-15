@@ -215,6 +215,22 @@ test("installer guard finds external Node with relative app argv and permits a d
   }
 });
 
+test("unrelated Node with many arguments does not block Setup", { skip: process.platform !== "win32" }, async () => {
+  const target = await mkdtemp(join(tmpdir(), "pi-chat-unrelated-owner-"));
+  const result = join(target, "guard.ini");
+  const child = spawn(process.execPath, ["-e", "console.log('ready'); setInterval(() => {}, 1000)", "--", ...Array.from({ length: 1100 }, () => "x")], { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+  const exit = once(child, "exit");
+  try {
+    await once(child.stdout!, "data", { signal: AbortSignal.timeout(10_000) });
+    execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", join(root, "scripts/pi-chat-setup.ps1"), "-Action", "CheckRunning", "-InstallRoot", target, "-ResultFile", result], { windowsHide: true, stdio: "pipe", timeout: 25_000 });
+    assert.match((await readFile(result)).toString("utf16le"), /not owned by a running Node process/);
+    assert.equal(child.exitCode, null);
+  } finally {
+    child.kill("SIGTERM"); await exit;
+    await rm(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
 test("packaged icon is a multi-image Windows ICO", async () => {
   const icon = await readFile(join(root, "resources/icons/pi-chat.ico"));
   assert.equal(icon.readUInt16LE(0), 0);
