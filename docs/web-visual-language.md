@@ -90,11 +90,11 @@
 
 ## 分批计划（每批独立提交 + 验收）
 
-| 批次 | 范围 | 验收 |
-|---|---|---|
-| **A（本批）** | 规则落地 token；Composer 行（toolbar/actions 密度与对齐、发送区主次）；Session 行（行高/padding/元信息字号收敛） | 截图矩阵 |
-| B | 过程/工具活动 summary 层级与展开体验（在 conversation-process 投影之上，不改状态语义） | 截图矩阵 + 流式场景 |
-| C | 全局 typography/spacing 收敛（高频界面：TopBar、notice、对话框、usage 卡） | 截图矩阵 |
-| D | metadata 降权、hover/focus/动效统一、高对比度复核 | 截图矩阵 + 高对比度 |
+| 批次 | 范围 | 验收 | 状态 |
+|---|---|---|---|
+| **A** | 规则落地 token；Composer 行（toolbar/actions 密度与对齐、发送区主次）；Session 行（行高/padding/元信息字号收敛） | 截图矩阵 | ✅ f773e89 |
+| **B** | 过程/工具活动叙事摘要（已确认事实，不改状态语义）；过程卡片视觉收敛 | 截图矩阵 + 语义回归测试 | ✅ 8736904 |
+| **C** | 全局 typography/spacing 收敛（侧栏 chrome、TopBar、notice、队列/Steer、对话框、工作台检查器、diff）；消灭全部中间字号 | 截图矩阵 | ✅ 764a123 |
+| **D** | metadata 降权补漏；hover/focus/动效统一（reduced-motion 补齐过程环）；forced-colors 补等价态 | 截图矩阵 + forced-colors e2e | 本批 |
 
 截图矩阵最低集（每批）：浅/深色 × {空闲, 流式中, 工具运行, 失败/待确认} + 长模型名/长路径 + 键盘焦点可见 + `prefers-reduced-motion`。所有既有 CSS 断言测试（`tests/*style*.test.ts`、composer/session 相关 44 处 `assert.match(css`）必须保持绿或随批更新。
