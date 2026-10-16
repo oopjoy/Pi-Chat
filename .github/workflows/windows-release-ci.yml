@@ -85,6 +85,8 @@ jobs:
         run: |
           $tag = $env:GITHUB_REF_NAME
           if ($tag -notmatch '^v\d+\.\d+\.\d+$') { Write-Output "Skipping portable archive for $tag"; exit 0 }
+          $env:TEMP = $env:RUNNER_TEMP
+          $env:TMP = $env:RUNNER_TEMP
           $nodeTemp = (node -e "process.stdout.write(require('node:os').tmpdir())").TrimEnd('\')
           $stage = Join-Path $nodeTemp "pi-chat-release-dist"
           $output = Join-Path $nodeTemp "pi-chat-release-output"
