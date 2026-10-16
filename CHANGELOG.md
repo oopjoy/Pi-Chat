@@ -1,6 +1,22 @@
 # Changelog
 
-## Unreleased
+## v0.5.3 (2026-10-16)
+
+### Cross-workspace assistant references
+
+- Saved assistant Markdown links and images may reference explicit paths outside the Session workspace: links open through the Session-addressed opener, and allowlisted image types render inline through an authenticated endpoint. Authority comes only from exact destinations in the persisted reply (links never grant render authority and images never grant open authority); traversal, ADS, UNC/network paths, symlinks, sensitive names, and executable types stay blocked, and the Files inspector remains workspace-contained.
+
+### Process activity visual semantics (Phase 1)
+
+- Tools map to semantic families (terminal/message/mutation/document/search/agent/network/image) with one stable icon per family and a wrench fallback, so extension tools join existing visual language without new icons. Thinking rows show an amber bulb; completed checks are status-green, errors danger-red, and the running spinner keeps accent. Presentation mapping is strictly separated from permission semantics.
+
+### Visual-language convergence
+
+- Second token-convergence pass across settings, management, about, welcome, queue/steer, attachment, and subagent surfaces (residual 7px-radius cluster, floating popover radii, scattered control heights, off-scale paddings), plus documented exceptions and the agreed Phase 1-4 process-area roadmap in `docs/web-visual-language.md`.
+
+### Release assets and portable archive
+
+- Releases publish `pi-chat-setup.exe` alone; checksum/manifest sidecars are still generated and verified in CI but no longer uploaded, so a release page shows one installer plus GitHub's two source archives. Version-tag releases additionally publish `pi-chat-portable-<版本>.zip` (app payload with Windows launcher scripts; runs anywhere Node 22.19+ and Pi are available), restoring the cross-platform deployment path without official non-Windows support. The broken ~192 KB historical bootstrapper was removed from v0.5.2 assets.
 
 ### Review fixes and Runtime startup investigation
 
