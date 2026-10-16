@@ -32,7 +32,7 @@ const FONT_OPTIONS: Array<CompactSelectOption<FontPreference>> = [
   { value: "mono", label: "等宽字体" },
 ];
 
-export function ManagementPanel({ section, appearance, workspaceCwd, workspacePicking, workspaceDisabled, models, modelRuntimeSyncPending, state, busy, shutdownBlocked, diagnosticsBusy, buildIdentity, webBuildIdentity, piVersion, primaryRuntime, onClose, onAppearance, onPickWorkspace, onModel, onModelsChanged, onExportDiagnostics, onRuntimeSetup, onRestart, onShutdown }: {
+export function ManagementPanel({ section, appearance, workspaceCwd, workspacePicking, workspaceDisabled, models, modelRuntimeSyncPending, state, busy, shutdownBlocked, restartTitle = "完整重启 Pi Chat 并应用本地更新", shutdownTitle = "检查全部对话后，关闭所有 Pi Chat 窗口、服务和会话进程", diagnosticsBusy, buildIdentity, webBuildIdentity, piVersion, primaryRuntime, onClose, onAppearance, onPickWorkspace, onModel, onModelsChanged, onExportDiagnostics, onRuntimeSetup, onRestart, onShutdown }: {
   section: ManagementSection | null;
   appearance: AppearancePreferences;
   /** Persisted default for future drafts; existing Session cwd values stay immutable. */
@@ -45,6 +45,8 @@ export function ManagementPanel({ section, appearance, workspaceCwd, workspacePi
   busy: boolean;
   /** Identity mismatch blocks ordinary settings, not the guarded shutdown recovery. */
   shutdownBlocked: boolean;
+  restartTitle?: string;
+  shutdownTitle?: string;
   diagnosticsBusy: boolean;
   buildIdentity: BuildIdentity;
   webBuildIdentity: BuildIdentity;
@@ -166,8 +168,8 @@ export function ManagementPanel({ section, appearance, workspaceCwd, workspacePi
                 ))}
               </div>
               <div className="settings-lifecycle">
-                <button type="button" className="settings-restart" disabled={shutdownBlocked} onClick={onRestart} title="完整重启 Pi Chat 并应用本地更新">重启 Pi Chat</button>
-                <button type="button" className="settings-shutdown" disabled={shutdownBlocked} onClick={onShutdown} title="检查全部对话后，关闭所有 Pi Chat 窗口、服务和会话进程">关闭 Pi Chat</button>
+                <button type="button" className="settings-restart" disabled={shutdownBlocked} onClick={onRestart} title={restartTitle}>重启 Pi Chat</button>
+                <button type="button" className="settings-shutdown" disabled={shutdownBlocked} onClick={onShutdown} title={shutdownTitle}>关闭 Pi Chat</button>
               </div>
             </nav>
             <div className="settings-content">

@@ -92,7 +92,7 @@ function ResizeHandle({ width, onWidthChange }: { width: number; onWidthChange: 
   return <div className="sidebar-resize-handle" role="separator" aria-orientation="vertical" aria-label="拖动调整会话栏宽度" aria-valuemin={SIDEBAR_WIDTH_MIN} aria-valuemax={SIDEBAR_WIDTH_MAX} aria-valuenow={Math.round(width)} tabIndex={0} onPointerDown={onPointerDown} onKeyDown={onKeyDown} />;
 }
 
-export function SessionSidebar({ sessions, sessionsTotal, sessionDirectories, inventoryReady, loadingAllSessions, loadingDirectoryKeys, viewedSessionId, workspaceCwd, workspaceEpoch, workspaceRevision, open, width, newDisabled, restartDisabled, shutdownDisabled, copyDisabled, viewBusy, pinnedSessionIds, pinnedDirectoryKeys, collapsedDirectoryKeys, expandedDirectoryKeys, failedSessionIds, unseenReplySessionIds, mutatingSessionIds, onClose, onCollapse, onNew, onLoadAllSessions, onLoadDirectory, onRestart, onShutdown, onView, onTogglePin, onToggleDirectoryPin, onSetDirectoryCollapsed, onClone, onRename, onDelete, onWidthChange }: {
+export function SessionSidebar({ sessions, sessionsTotal, sessionDirectories, inventoryReady, loadingAllSessions, loadingDirectoryKeys, viewedSessionId, workspaceCwd, workspaceEpoch, workspaceRevision, open, width, newDisabled, restartDisabled, shutdownDisabled, restartTitle = "完整重启 Pi Chat 并应用本地更新", shutdownTitle = "检查全部对话后，关闭所有 Pi Chat 窗口、服务和会话进程", copyDisabled, viewBusy, pinnedSessionIds, pinnedDirectoryKeys, collapsedDirectoryKeys, expandedDirectoryKeys, failedSessionIds, unseenReplySessionIds, mutatingSessionIds, onClose, onCollapse, onNew, onLoadAllSessions, onLoadDirectory, onRestart, onShutdown, onView, onTogglePin, onToggleDirectoryPin, onSetDirectoryCollapsed, onClone, onRename, onDelete, onWidthChange }: {
   sessions: SessionSummary[];
   sessionsTotal: number;
   sessionDirectories: SessionDirectorySummary[];
@@ -111,6 +111,8 @@ export function SessionSidebar({ sessions, sessionsTotal, sessionDirectories, in
   newDisabled: boolean;
   restartDisabled: boolean;
   shutdownDisabled: boolean;
+  restartTitle?: string;
+  shutdownTitle?: string;
   copyDisabled: boolean;
   viewBusy: boolean;
   pinnedSessionIds: string[];
@@ -245,8 +247,8 @@ export function SessionSidebar({ sessions, sessionsTotal, sessionDirectories, in
         </div>
         <div className="sidebar-actions">
           <button type="button" className="new-chat" disabled={newDisabled} onClick={onNew}><PlusIcon />New</button>
-          <button type="button" className="restart-pi" disabled={restartDisabled} onClick={onRestart} title="完整重启 Pi Chat 并应用本地更新" aria-label="完整重启 Pi Chat 并应用更新"><RefreshIcon /></button>
-          <button type="button" className="shutdown-pi" disabled={shutdownDisabled} onClick={onShutdown} title="检查全部对话后，关闭所有 Pi Chat 窗口、服务和会话进程" aria-label="关闭 Pi Chat">
+          <button type="button" className="restart-pi" disabled={restartDisabled} onClick={onRestart} title={restartTitle} aria-label="完整重启 Pi Chat 并应用更新"><RefreshIcon /></button>
+          <button type="button" className="shutdown-pi" disabled={shutdownDisabled} onClick={onShutdown} title={shutdownTitle} aria-label="关闭 Pi Chat">
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.6v7.1M5.15 5.55a6.45 6.45 0 1 0 9.7 0" /></svg>
           </button>
         </div>

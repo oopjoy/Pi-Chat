@@ -1,5 +1,6 @@
 import { Suspense, useCallback } from "react";
 import type { PiMessage } from "../../shared/types";
+import { lifecycleActionHoldReason } from "../lib/lifecycle-action-copy";
 
 export function AppView(host: Record<string, any>) {
   const {
@@ -182,6 +183,19 @@ export function AppView(host: Record<string, any>) {
       messagePreview: forkMessagePreview(text, imageCount),
     });
   }, [viewedSession, setSessionDialog, forkableUserMessageText, forkMessagePreview]);
+  const lifecycleHolders = {
+    running: sessions.some((session: { running?: boolean }) => session.running),
+    queued: sessions.some((session: { queued?: boolean }) => session.queued),
+    pendingConfirmation: sessions.some((session: { pendingConfirmation?: boolean }) => session.pendingConfirmation),
+    busy,
+    lifecycleBlocked,
+    loading,
+    refreshing,
+  };
+  const restartTitle = lifecycleActionHoldReason("重启", lifecycleHolders)
+    || "完整重启 Pi Chat 并应用本地更新";
+  const shutdownTitle = lifecycleActionHoldReason("关闭", lifecycleHolders)
+    || "检查全部对话后，关闭所有 Pi Chat 窗口、服务和会话进程";
   return (
     <AppShell
       diffSidebarOpen={diffSidebarOpen}
@@ -236,6 +250,8 @@ export function AppView(host: Record<string, any>) {
         onLoadDirectory={(cwd: any, offset: any) =>
           void loadDirectorySessions(cwd, offset)
         }
+        restartTitle={restartTitle}
+        shutdownTitle={shutdownTitle}
         onRestart={() => void restartPi()}
         onShutdown={() => void shutdownPiChat()}
         onView={(id: any) => {
@@ -469,6 +485,8 @@ export function AppView(host: Record<string, any>) {
         modelRuntimeSyncPending={modelRuntimeSyncPending}
         state={state}
         busy={busy || globalMutationBlocked}
+        restartTitle={restartTitle}
+        shutdownTitle={shutdownTitle}
         shutdownBlocked={
           busy ||
           (buildIdentityMismatch
