@@ -41,7 +41,7 @@ try {
   });
   await writeFile(join(root, "build.log"), build.stdout + build.stderr);
   await buildSetup({ repoRoot: repo, stagingDir: stage, outputPath: exe, inputs, appId });
-  console.log("[Setup check] Install embedded App + Node without Pi/network installation");
+  console.log("[Setup check] Install embedded App + Node; seed bundled Pi only when none exists");
   await execute(exe, flags, { env, windowsHide: true, timeout: 120_000 });
   uninstaller = join(install, "unins000.exe");
   assert.ok(await exists(uninstaller));
@@ -59,12 +59,14 @@ try {
   assert.equal(await realpath(shortcut.WorkingDirectory), await realpath(join(install, "app")));
   const identity = JSON.parse(await readFile(join(install, "app/dist/build-identity.json"), "utf8"));
   assert.ok(await exists(join(install, "app/dist/web/index.html")));
-  assert.ok(!await exists(join(root, "profile/.pi/agent/install")), "silent base install must not fetch Pi");
+  assert.ok(await exists(join(install, "runtime/pi/node_modules/@earendil-works/pi-coding-agent/dist/rpc-entry.js")), "Setup must embed the pinned Pi snapshot");
+  assert.equal(JSON.parse(await readFile(join(install, "runtime/pi/node_modules/@earendil-works/pi-coding-agent/package.json"), "utf8")).version, inputs.pi.version);
+  assert.equal((await readFile(join(root, "profile/.pi/agent/install/current-version"), "utf8")).trim(), inputs.pi.version, "silent install seeds bundled Pi when none is present");
   const key = `HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${appId}_is1`;
   const registration = await ps('$p=Get-ItemProperty -LiteralPath $env:SETUP_CHECK_KEY; $p | Select-Object DisplayVersion,InstallLocation | ConvertTo-Json -Compress', { SETUP_CHECK_KEY: key });
   assert.equal(JSON.parse(registration.stdout).DisplayVersion, identity.packageVersion);
 
-  console.log("[Setup check] Existing Pi is never upgraded; optional Pi failure does not undo the base install");
+  console.log("[Setup check] Existing Pi is never upgraded; bundled Pi seeds offline when missing");
   const piPackage = join(root, "existing-pi");
   await mkdir(join(piPackage, "dist"), { recursive: true });
   await writeFile(join(piPackage, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: "1.0.1" }));
@@ -79,13 +81,18 @@ try {
   assert.equal(await readFile(piEntry, "utf8"), "// existing user-owned Pi fixture\n");
   // Proxy override is local to this one PowerShell process. No machine network
   // settings change, no real npm installation, and no user credentials loaded.
-  const offlineEnv = { ...helperEnv, PI_CHAT_PI_ENTRY: "", APPDATA: join(root, "empty-appdata"),
-    PI_CHAT_MANAGED_INSTALL_ROOT: "", PI_MANAGED_INSTALL_ROOT: "", npm_config_prefix: "", NPM_CONFIG_PREFIX: "",
+  const offlineEnv = { ...helperEnv, PI_CHAT_PI_ENTRY: "", USERPROFILE: join(root, "offline-profile"), HOME: join(root, "offline-profile"),
+    APPDATA: join(root, "empty-appdata"), PI_CHAT_MANAGED_INSTALL_ROOT: "", PI_MANAGED_INSTALL_ROOT: "",
+    npm_config_prefix: "", NPM_CONFIG_PREFIX: "",
     PATH: inputs.nodeRoot + delimiter + join(process.env.SystemRoot, "System32") + delimiter + join(process.env.SystemRoot, "System32/WindowsPowerShell/v1.0") };
-  await assert.rejects(ps('[Net.WebRequest]::DefaultWebProxy = New-Object Net.WebProxy("http://127.0.0.1:9"); ' + invokeHelper, offlineEnv));
-  assert.match((await readFile(resultIni)).toString("utf16le"), /application remains installed/);
+  await mkdir(join(root, "offline-profile"), { recursive: true });
+  await ps('[Net.WebRequest]::DefaultWebProxy = New-Object Net.WebProxy("http://127.0.0.1:9"); ' + invokeHelper, offlineEnv);
+  const offlineResult = (await readFile(resultIni)).toString("utf16le");
+  assert.match(offlineResult, /Found=1/);
+  assert.match(offlineResult, /existing Pi|Installed bundled Pi/);
+  assert.doesNotMatch(offlineResult, /registry|download failed/i);
+  assert.equal((await readFile(join(root, "profile/.pi/agent/install/current-version"), "utf8")).trim(), inputs.pi.version);
   assert.ok(await exists(node));
-  assert.ok(!await exists(join(root, "profile/.pi/agent/install/current-version")));
 
   console.log("[Setup check] Running installation refuses upgrade and uninstall without killing the owned process");
   const sentinel = spawn(node, ["-e", "console.log('ready'); setInterval(() => {}, 1000)", "--", install + "\\owned-sentinel"], { env, stdio: ["ignore", "pipe", "ignore"], windowsHide: true });

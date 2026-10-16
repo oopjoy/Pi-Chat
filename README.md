@@ -22,10 +22,10 @@ Pi Chat 连接本机 Pi RPC，负责聊天展示、Session 浏览、流式输出
 
 版本 Release 提供两个产物：**`pi-chat-setup.exe`**（唯一安装入口）和 **`pi-chat-portable-<版本>.zip`**（便携包）。校验文件和构建清单只在 CI 内验证，不上传到 Release（它们不是额外安装包）。安装向导基于 Inno Setup，不依赖 Electron：
 
-1. EXE 已内置编译好的 Pi Chat 和私有 **Node.js 24.22.0 LTS** Runtime（含 npm），**安装主体无需联网，也无需预装 Git、Node 或 npm**。
+1. EXE 已内置编译好的 Pi Chat、私有 **Node.js 24.22.0 LTS** Runtime（含 npm），以及一份 **Pi 1.3.0** 后备快照。**安装主体无需联网**，也无需预装 Git、Node、npm 或 Pi。
 2. 默认安装到 `%LOCALAPPDATA%\PiChat`，也可选择其他目录；安装完成及主快捷方式默认用系统默认浏览器打开 Web。安装根目录自动附带 `Pi Chat Web.lnk`，开始菜单另保留可选的 `Pi Chat PWA` 入口。
-3. 检测到现有 Pi 时优先直接复用，不升级它、不复制模型凭证、配置、Skills 或 JSONL。
-4. 未检测到 Pi 时，完成页提供明确的可选联网安装项。跳过或下载失败都不撤销应用安装；应用能打开并提示 Pi 未就绪，之后可连接既有 Pi，或重新运行 Setup 选择安装 Pi。
+3. 启动时优先使用本机 Node 22.19+；本机没有或版本过低时改用安装包内的 Node 24.22.0，并提示原因。
+4. 检测到现有 Pi 时优先直接复用，不升级它、不复制模型凭证、配置、Skills 或 JSONL。本机没有 Pi 时离线展开包内的 1.3.0 到 managed 布局（`~/.pi/agent/install`），失败也不撤销应用安装。
 5. 完成页可启动 Pi Chat。没有模型凭证时仍需通过 Pi 完成登录或配置 Provider。
 
 **正在运行的目标安装会拒绝覆盖升级和卸载**，不会强杀 Node/Pi。另一个目录的 Pi Chat 服务也不会被接管；如占用了 30170，请在原窗口安全关闭服务后再启动新安装。

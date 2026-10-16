@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { access, cp, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { access, cp, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -12,7 +12,7 @@ export const applicationPackageFiles = [
   "package.json", "LICENSE", "README.md", "SECURITY.md", "resources",
   "pi-chat-launch.cmd", "start-pi-chat.cmd", "start-pi-chat-ui.ps1",
   "scripts/pi-chat-launch-process.ps1", "scripts/pi-chat-port-ready.ps1",
-  "scripts/pi-chat-preflight.ps1", "scripts/pi-chat-start-server.ps1",
+  "scripts/pi-chat-preflight.ps1", "scripts/pi-chat-resolve-runtime.ps1", "scripts/pi-chat-start-server.ps1",
   "scripts/pi-chat-setup.ps1", "scripts/detect-pi-entry.mjs",
   "scripts/check-runtime-files.mjs", "scripts/runtime-required-files.json",
 ];
@@ -36,16 +36,30 @@ export async function buildSetup({ repoRoot = resolve(import.meta.dirname, "..")
     await cp(dependencies.nodeRoot, join(payload, "runtime/node"), { recursive: true });
     const { stdout } = await execute(join(payload, "runtime/node/node.exe"), ["--version"], { env: windowsBuildEnvironment(), windowsHide: true });
     if (stdout.trim() !== `v${dependencies.node.version}`) throw new Error("Embedded Node version mismatch");
+    if (!dependencies.piRoot) throw new Error("Setup payload is missing the bundled Pi runtime");
+    await cp(dependencies.piRoot, join(payload, "runtime/pi"), { recursive: true });
+    const piPackage = JSON.parse(await readFile(join(payload, "runtime/pi/node_modules/@earendil-works/pi-coding-agent/package.json"), "utf8"));
+    if (piPackage.version !== dependencies.pi.version) throw new Error("Embedded Pi version mismatch");
     await execute("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", join(root, "scripts/build-setup-exe.ps1"),
       "-PayloadRoot", payload, "-CompilerPath", dependencies.compiler, "-Output", resolve(outputPath), ...(appId ? ["-AppId", appId] : [])], {
-      cwd: root, env: windowsBuildEnvironment(), windowsHide: true, timeout: 240_000, maxBuffer: 4 * 1024 * 1024,
+      cwd: root, env: windowsBuildEnvironment(), windowsHide: true, timeout: 600_000, maxBuffer: 8 * 1024 * 1024,
     });
     await access(outputPath);
-    return { nodeVersion: dependencies.node.version, nodeArchiveSha256: dependencies.node.sha256, compilerVersion: dependencies.inno.version };
+    return { nodeVersion: dependencies.node.version, nodeArchiveSha256: dependencies.node.sha256, piPackage: dependencies.pi.package, piVersion: dependencies.pi.version, compilerVersion: dependencies.inno.version };
   } catch (error) {
-    await rm(outputPath, { force: true });
+    try { await rm(outputPath, { force: true, maxRetries: 5, retryDelay: 200 }); } catch { /* keep the compile error */ }
     throw error;
-  } finally { await rm(payload, { recursive: true, force: true }); }
+  } finally {
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      try {
+        await rm(payload, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+        break;
+      } catch (cleanup) {
+        if (attempt === 5) console.error(`[Pi Chat] Setup payload cleanup: ${cleanup.message}`);
+        else await new Promise(resolve => setTimeout(resolve, 250 * (attempt + 1)));
+      }
+    }
+  }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename)) {

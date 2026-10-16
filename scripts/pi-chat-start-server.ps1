@@ -4,20 +4,19 @@ param(
 
 $ErrorActionPreference = 'Stop'
 try {
-  $runtimeRoot = Join-Path $ProjectDirectory 'runtime'
-  if (-not (Test-Path -LiteralPath $runtimeRoot)) { $runtimeRoot = Join-Path (Split-Path -Parent $ProjectDirectory) 'runtime' }
-  $configRoot = Join-Path $ProjectDirectory 'config'
-  if (-not (Test-Path -LiteralPath $configRoot)) { $configRoot = Join-Path (Split-Path -Parent $ProjectDirectory) 'config' }
+  . (Join-Path $PSScriptRoot 'pi-chat-resolve-runtime.ps1')
+  $project = Get-PiChatCanonicalDirectory $ProjectDirectory
+  $configRoot = Join-Path $project 'config'
+  if (-not (Test-Path -LiteralPath $configRoot)) { $configRoot = Join-Path (Split-Path -Parent $project) 'config' }
   $runtimeEnv = Join-Path $configRoot 'runtime.env'
   if (Test-Path -LiteralPath $runtimeEnv) {
     Get-Content -LiteralPath $runtimeEnv | ForEach-Object {
       if ($_ -match '^([A-Z][A-Z0-9_]*)=(.*)$') { Set-Item -Path ("Env:" + $matches[1]) -Value $matches[2] }
     }
   }
-  $bundledNode = Join-Path $runtimeRoot 'node\node.exe'
-  $node = if (Test-Path -LiteralPath $bundledNode) { $bundledNode } else { (Get-Command node.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source }
-  $entry = Join-Path $ProjectDirectory 'dist\server\server\index.js'
-  $process = Start-Process -FilePath $node -ArgumentList @(('"' + $entry + '"'), '--port', '30170') -WorkingDirectory $ProjectDirectory -WindowStyle Hidden -RedirectStandardOutput $env:PI_CHAT_SERVER_OUT -RedirectStandardError $env:PI_CHAT_SERVER_ERR -PassThru
+  $node = (Get-PiChatNodeResolution $project).Path
+  $entry = Join-Path $project 'dist\server\server\index.js'
+  $process = Start-Process -FilePath $node -ArgumentList @(('"' + $entry + '"'), '--port', '30170') -WorkingDirectory $project -WindowStyle Hidden -RedirectStandardOutput $env:PI_CHAT_SERVER_OUT -RedirectStandardError $env:PI_CHAT_SERVER_ERR -PassThru
   # Retain the process handle so Windows PowerShell can read a fast child's exit code.
   $null = $process.Handle
   $deadline = [DateTime]::UtcNow.AddSeconds(60)
@@ -28,7 +27,7 @@ try {
       $exitDetail = if ($null -ne $process.ExitCode) { " (exit code $($process.ExitCode))" } else { '' }
       throw "Pi Chat service exited before it was ready$exitDetail."
     }
-    & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $ProjectDirectory 'scripts\pi-chat-port-ready.ps1') -ProjectDirectory $ProjectDirectory
+    & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $project 'scripts\pi-chat-port-ready.ps1') -ProjectDirectory $project
     if ($LASTEXITCODE -eq 0) { exit 0 }
     if ($LASTEXITCODE -eq 2) { throw 'A different Pi Chat build is listening on port 30170. Close it from its own window before starting this version.' }
     Start-Sleep -Milliseconds 500

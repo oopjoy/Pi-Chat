@@ -6,7 +6,8 @@ param(
 )
 
 # Inno Setup owns files, shortcuts and uninstall. This helper never downloads
-# the application/Node and never upgrades an already detected Pi.
+# the application/Node, never upgrades an already detected Pi, and seeds a
+# missing Pi from the Setup-bundled snapshot instead of the network.
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $InstallRoot = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')
@@ -26,10 +27,13 @@ function DetectPi {
       if ($line -match '^PI_CHAT_MANAGED_INSTALL_ROOT=(.+)$') { $env:PI_CHAT_MANAGED_INSTALL_ROOT = $matches[1] }
     }
   }
+  $previous = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
   $value = & $node (Join-Path $appRoot 'scripts\detect-pi-entry.mjs') 2>>$logPath
-  if ($LASTEXITCODE -ne 0) { throw 'Pi detection failed; check PI_CHAT_PI_ENTRY or connection settings.' }
-  if ($value) { return ($value | ConvertFrom-Json) }
-  return $null
+  $code = $LASTEXITCODE
+  $ErrorActionPreference = $previous
+  if ($code -ne 0 -or -not $value) { return $null }
+  return ($value | ConvertFrom-Json)
 }
 try {
   if ($Action -eq 'CheckRunning') {
@@ -156,25 +160,32 @@ public static class PiChatInstallerPaths {
     exit 0
   }
   if ($Action -eq 'Detect') {
-    Report $false 'Pi is not installed. Pi Chat and its private Node are ready; install Pi optionally, or configure its entry later.'
+    Report $false 'Pi is not installed. The Setup includes a bundled Pi snapshot that can be applied offline.'
     exit 0
   }
-  $package = '@earendil-works/pi-coding-agent'
-  $metadata = Invoke-RestMethod -Uri ('https://registry.npmjs.org/' + [uri]::EscapeDataString($package)) -TimeoutSec 20 -UseBasicParsing
-  $version = [string]$metadata.'dist-tags'.latest
-  if ($version -notmatch '^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$') { throw 'Pi registry version is invalid.' }
+  $payload = Join-Path $InstallRoot 'runtime\pi'
+  $payloadManifest = Join-Path $payload 'node_modules\@earendil-works\pi-coding-agent\package.json'
+  $payloadEntry = Join-Path $payload 'node_modules\@earendil-works\pi-coding-agent\dist\rpc-entry.js'
+  if (-not (Test-Path -LiteralPath $payloadEntry) -or -not (Test-Path -LiteralPath $payloadManifest)) {
+    throw 'This Setup is missing the bundled Pi runtime. Reinstall from pi-chat-setup.exe. The application remains installed.'
+  }
+  $version = [string](Get-Content -LiteralPath $payloadManifest -Raw | ConvertFrom-Json).version
+  if ($version -notmatch '^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$') { throw 'Bundled Pi version is invalid.' }
   $managed = Join-Path $env:USERPROFILE '.pi\agent\install'
   $release = Join-Path $managed ('releases\' + $version)
   $entry = Join-Path $release 'node_modules\@earendil-works\pi-coding-agent\dist\rpc-entry.js'
   if (-not (Test-Path -LiteralPath $entry)) {
     if (Test-Path -LiteralPath $release) { throw 'An incomplete Pi release directory already exists; use Pi connection settings to repair it.' }
-    $staging = Join-Path $managed ('releases\.install-' + [guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Force -Path $staging | Out-Null
-    $npm = Join-Path $InstallRoot 'runtime\node\node_modules\npm\bin\npm-cli.js'
-    & $node $npm install --prefix $staging ($package + '@' + $version) --ignore-scripts --no-audit --no-fund --fetch-retries=1 --fetch-timeout=20000 >>$logPath 2>&1
-    if ($LASTEXITCODE -ne 0) { throw ('Pi download failed. The application remains installed. Log: ' + $logPath) }
+    $staging = Join-Path $managed ('releases\.install-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $staging) | Out-Null
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    & robocopy.exe $payload $staging /E /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
+    $copyCode = $LASTEXITCODE
+    $ErrorActionPreference = $previous
+    if ($copyCode -ge 8) { throw ('Bundled Pi copy failed (robocopy ' + $copyCode + ').') }
     $preparedEntry = Join-Path $staging 'node_modules\@earendil-works\pi-coding-agent\dist\rpc-entry.js'
-    if (-not (Test-Path -LiteralPath $preparedEntry)) { throw 'Downloaded Pi is missing its RPC entry.' }
+    if (-not (Test-Path -LiteralPath $preparedEntry)) { throw 'Bundled Pi is missing its RPC entry after copy.' }
     Move-Item -LiteralPath $staging -Destination $release
     $staging = $null
   }
@@ -188,7 +199,7 @@ public static class PiChatInstallerPaths {
   $envFile = Join-Path $config 'runtime.env'
   $previous = if (Test-Path -LiteralPath $envFile) { @(Get-Content -LiteralPath $envFile | Where-Object { $_ -notmatch '^PI_CHAT_MANAGED_INSTALL_ROOT=' }) } else { @() }
   [IO.File]::WriteAllLines($envFile, @($previous) + @('PI_CHAT_MANAGED_INSTALL_ROOT=' + $managed), [Text.UTF8Encoding]::new($false))
-  Report $true ('Installed Pi ' + $version + '. Existing credentials, Skills and sessions are unchanged.') $entry $version
+  Report $true ('Installed bundled Pi ' + $version + ' because none was found. Existing credentials, Skills and sessions are unchanged.') $entry $version
 } catch {
   Report $false ('Pi operation could not finish: ' + $_.Exception.Message + ' The application remains installed; retry from connection settings.')
   exit 1

@@ -9,9 +9,10 @@ source-only. Published v0.5.2 assets are unchanged and retain their old online
 bootstrapper behavior; this is the current main-branch implementation.
 
 The Inno Setup EXE embeds the compiled application, LICENSE/resources, launchers,
-and a private Windows x64 Node runtime including npm and Node's license notices.
-Application/Node installation has no runtime dependency on GitHub or nodejs.org.
-Only the optional Pi installation uses the network.
+a private Windows x64 Node.js 24.22.0 LTS runtime including npm, and a pinned
+Pi 1.3.0 snapshot. Application/Node installation has no runtime dependency on
+GitHub or nodejs.org. Existing Pi is reused; a missing Pi is seeded offline from
+the payload into `~/.pi/agent/install` and is never upgraded in place.
 
 - Per-user installation; no administrator privilege, Electron or browser bundle.
 - Default `%LOCALAPPDATA%\PiChat`; the destination page supports other paths.
@@ -20,10 +21,11 @@ Only the optional Pi installation uses the network.
   `Pi Chat Web.lnk`; optional `Pi Chat PWA` remains in the Start menu. Browser
   install-as-app/profile setup is not performed by the installer.
 - Existing Pi is detected and reused without upgrade or credential/config copy.
-- Missing Pi is not an application-installation failure. The finished page offers
-  optional Pi installation, then application launch. Both actions are skipped in
-  silent mode. Download failure leaves the application installed and explains
-  how to retry; it does not claim that a usable model/provider exists.
+- Missing Pi is seeded from the bundled 1.3.0 snapshot (offline, including silent
+  mode) into the managed install layout. Copy failure leaves the application
+  installed and explains how to retry; it does not claim that a usable
+  model/provider exists. Launch prefers a system Node 22.19+ and falls back to
+  the bundled 24.22.0 runtime when the machine has none or an older version.
 - Inno Setup owns file deployment, shortcuts and native uninstall registration.
   `pi-chat-setup.ps1` only checks running processes, detects Pi, or explicitly
   installs a missing Pi. No console Read-Host, app downloader or second uninstaller.

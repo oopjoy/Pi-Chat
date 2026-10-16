@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
@@ -107,6 +107,39 @@ test("Windows preflight rejects old Node before loading modern JavaScript", { sk
       return true;
     });
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Windows Node resolution prefers system 22.19+, else bundled beside app\\.", { skip: process.platform !== "win32" }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-node-resolution-"));
+  try {
+    const app = join(root, "app");
+    await mkdir(join(root, "runtime/node"), { recursive: true });
+    const bundled = join(root, "runtime/node/node.exe");
+    try {
+      execFileSync("cmd.exe", ["/c", "mklink", "/H", bundled, process.execPath], { windowsHide: true });
+    } catch {
+      await copyFile(process.execPath, bundled);
+    }
+    const command = [
+      `. (Join-Path $env:PI_CHAT_RESOLVE 'pi-chat-resolve-runtime.ps1')`,
+      `$r = Get-PiChatNodeResolution (Join-Path $env:PI_CHAT_FAKE_ROOT 'app\\.')`,
+      `Write-Output ($r.Source + ' ' + $r.Path)`,
+    ].join("; ");
+    const output = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command], {
+      env: { ...process.env, PI_CHAT_RESOLVE: join(project, "scripts"), PI_CHAT_FAKE_ROOT: root }, encoding: "utf8", windowsHide: true,
+    });
+    assert.match(output, /^(system|bundled) /m);
+    if (/^system /m.test(output)) assert.match(output, /node\.exe/i);
+    else assert.equal(output.trim().split(/\s+/)[1]?.toLowerCase(), bundled.toLowerCase());
+    const old = join(root, "old-node.cmd");
+    await writeFile(old, "@echo off\r\necho 20.19.0\r\nexit /b 0\r\n");
+    const fallback = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
+      "function Get-Command { [pscustomobject]@{ Source = $env:PI_CHAT_OLD_NODE } }; . (Join-Path $env:PI_CHAT_RESOLVE 'pi-chat-resolve-runtime.ps1'); $r = Get-PiChatNodeResolution (Join-Path $env:PI_CHAT_FAKE_ROOT 'app\\.'); Write-Output ($r.Source + '|' + $r.Path)"], {
+      env: { ...process.env, PI_CHAT_RESOLVE: join(project, "scripts"), PI_CHAT_FAKE_ROOT: root, PI_CHAT_OLD_NODE: old }, encoding: "utf8", windowsHide: true,
+    });
+    assert.match(fallback, /^bundled\|/m);
+    assert.match(fallback, /node\.exe/i);
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
 });
 
 test("Windows server launcher reports immediate child exit and includes its diagnostic log", { skip: process.platform !== "win32" }, async () => {

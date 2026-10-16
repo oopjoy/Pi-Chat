@@ -1,4 +1,4 @@
-; Only App + Node are embedded. Pi remains an explicit optional online action.
+; App + private Node + a fallback Pi snapshot are embedded. Existing Pi is reused.
 #ifndef SetupAppId
   #define SetupAppId "PiChat.Desktop"
 #endif
@@ -22,8 +22,8 @@ SetupIconFile={#PayloadRoot}\app\resources\icons\pi-chat.ico
 UninstallDisplayIcon={app}\app\resources\icons\pi-chat.ico
 OutputDir={#OutputDir}
 OutputBaseFilename={#OutputName}
-Compression=lzma2/normal
-SolidCompression=yes
+Compression=lzma2/fast
+SolidCompression=no
 DiskSpanning=no
 CloseApplications=no
 RestartApplications=no
@@ -36,6 +36,7 @@ Name: desktopicon; Description: "Create desktop Web shortcuts"; GroupDescription
 [Files]
 Source: "{#PayloadRoot}\app\*"; DestDir: "{app}\app"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#PayloadRoot}\runtime\node\*"; DestDir: "{app}\runtime\node"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PayloadRoot}\runtime\pi\*"; DestDir: "{app}\runtime\pi"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#PayloadRoot}\app\scripts\pi-chat-setup.ps1"; Flags: dontcopy
 
 [InstallDelete]
@@ -53,7 +54,6 @@ Name: "{autodesktop}\Pi Chat"; Filename: "{sys}\WindowsPowerShell\v1.0\powershel
 Name: "{autodesktop}\Pi Chat Web"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\app\start-pi-chat-ui.ps1"" web"; WorkingDir: "{app}\app"; IconFilename: "{app}\app\resources\icons\pi-chat.ico"; Tasks: desktopicon
 
 [Run]
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ""{app}\app\scripts\pi-chat-setup.ps1"" -Action InstallPi -InstallRoot ""{app}"" -ResultFile ""{tmp}\pi-install.ini"""; Description: "Install Pi if missing (Internet required; existing Pi is never upgraded)"; Flags: postinstall skipifsilent runhidden; Check: NeedsPi; AfterInstall: CheckPiInstallResult
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\app\start-pi-chat-ui.ps1"" web"; WorkingDir: "{app}\app"; Description: "Open Pi Chat in the default browser"; Flags: postinstall skipifsilent nowait
 
 [UninstallDelete]
@@ -87,19 +87,20 @@ begin
   else Result := '';
 end;
 
-function NeedsPi: Boolean;
-begin
-  Result := not PiFound;
-end;
-
 procedure CurStepChanged(CurStep: TSetupStep);
-var IniPath, LegacyPath: String;
+var DetectPath, InstallPath, LegacyPath: String;
 begin
   if CurStep = ssPostInstall then begin
-    IniPath := ExpandConstant('{tmp}\pi-detect.ini');
-    RunHelper(ExpandConstant('{app}\app\scripts\pi-chat-setup.ps1'), 'Detect', IniPath);
-    PiFound := GetIniString('Pi', 'Found', '0', IniPath) = '1';
-    PiMessage := GetIniString('Pi', 'Message', 'Pi not ready. The application is installed; configure Pi connection later.', IniPath);
+    DetectPath := ExpandConstant('{tmp}\pi-detect.ini');
+    RunHelper(ExpandConstant('{app}\app\scripts\pi-chat-setup.ps1'), 'Detect', DetectPath);
+    PiFound := GetIniString('Pi', 'Found', '0', DetectPath) = '1';
+    PiMessage := GetIniString('Pi', 'Message', 'Pi not ready. The application is installed; configure Pi connection later.', DetectPath);
+    if not PiFound then begin
+      InstallPath := ExpandConstant('{tmp}\pi-install.ini');
+      RunHelper(ExpandConstant('{app}\app\scripts\pi-chat-setup.ps1'), 'InstallPi', InstallPath);
+      PiFound := GetIniString('Pi', 'Found', '0', InstallPath) = '1';
+      PiMessage := GetIniString('Pi', 'Message', PiMessage, InstallPath);
+    end;
     Log(PiMessage);
     if RegQueryStringValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\Pi Chat', 'InstallLocation', LegacyPath) and
       (CompareText(RemoveBackslashUnlessRoot(LegacyPath), RemoveBackslashUnlessRoot(ExpandConstant('{app}'))) = 0) then
@@ -110,16 +111,8 @@ end;
 procedure CurPageChanged(CurPageID: Integer);
 begin
   if CurPageID = wpFinished then
-    WizardForm.FinishedLabel.Caption := 'Pi Chat and its private Node runtime are installed.' + #13#10 + #13#10 + PiMessage + #13#10 + #13#10 +
+    WizardForm.FinishedLabel.Caption := 'Pi Chat is installed with a bundled Node.js 24.22.0 LTS runtime (used when the machine has no Node 22.19+).' + #13#10 + #13#10 + PiMessage + #13#10 + #13#10 +
       'No credentials, Skills or Session files were copied or deleted. Another running Pi Chat build must be closed before this one can use port 30170.';
-end;
-
-procedure CheckPiInstallResult;
-var IniPath: String;
-begin
-  IniPath := ExpandConstant('{tmp}\pi-install.ini');
-  if GetIniString('Pi', 'Found', '0', IniPath) <> '1' then
-    SuppressibleMsgBox(GetIniString('Pi', 'Message', 'Pi install did not complete. Pi Chat remains installed; check connection settings.', IniPath), mbInformation, MB_OK, IDOK);
 end;
 
 function InitializeUninstall: Boolean;

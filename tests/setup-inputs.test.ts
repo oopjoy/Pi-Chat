@@ -17,6 +17,8 @@ test("installer build inputs are checksum pinned and do not inherit PowerShell 7
     assert.match(dependency.url, /^https:\/\//);
     assert.ok(dependency.version);
   }
+  assert.equal(config.pi.package, "@earendil-works/pi-coding-agent");
+  assert.equal(config.pi.version, "1.3.0");
   assert.deepEqual(windowsBuildEnvironment({ PSModulePath: "untrusted", Path: "keep" }), { Path: "keep" });
 });
 
@@ -32,10 +34,11 @@ test("cached build dependencies are revalidated and corrupt downloads never repl
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("Setup embeds App and Node while Pi remains optional and native uninstall never deletes user agent data", async () => {
+test("Setup embeds App, Node and a fallback Pi snapshot; existing Pi is never upgraded", async () => {
   const script = await readFile(new URL("../scripts/pi-chat-installer.iss", import.meta.url), "utf8");
   assert.match(script, /PayloadRoot.*app.*DestDir: "\{app\}\\app"/);
   assert.match(script, /PayloadRoot.*runtime\\node.*DestDir: "\{app\}\\runtime\\node"/);
+  assert.match(script, /PayloadRoot.*runtime\\pi.*DestDir: "\{app\}\\runtime\\pi"/);
   assert.match(script, /PrivilegesRequired=lowest/);
   assert.doesNotMatch(script, /Pi Chat Git/, "Setup must not own or delete source-checkout shortcuts");
   assert.match(script, /CloseApplications=no/);
@@ -43,13 +46,20 @@ test("Setup embeds App and Node while Pi remains optional and native uninstall n
   assert.ok(launcherIcons.some(line => line.startsWith('Name: "{app}\\Pi Chat Web"')));
   for (const line of launcherIcons) assert.ok(line.includes(line.includes("Pi Chat PWA") ? '"" pwa"' : '"" web"'));
   assert.match(script, /start-pi-chat-ui\.ps1"" web"; WorkingDir: "\{app\}\\app"; Description: "Open Pi Chat in the default browser"/);
-  assert.match(script, /Check: NeedsPi/);
-  assert.match(script, /postinstall skipifsilent runhidden/);
+  assert.match(script, /InstallPi/);
+  assert.doesNotMatch(script, /Check: NeedsPi/);
+  assert.doesNotMatch(script, /skipifsilent runhidden/);
   assert.doesNotMatch(script, /https:\/\/nodejs|releases\/download|Type: filesandordirs/);
   const helper = await readFile(new URL("../scripts/pi-chat-setup.ps1", import.meta.url), "utf8");
   assert.doesNotMatch(helper, /Read-Host|Get-ReleaseAsset|InstallNode|InstallApp|RegisterUninstall|InstallShortcuts/);
   assert.match(helper, /if \(\$existing\)/);
   assert.match(helper, /existing Pi/i);
+  assert.match(helper, /runtime\\pi/);
+  assert.doesNotMatch(helper, /registry\.npmjs\.org/);
+  const config = JSON.parse(await readFile(new URL("../scripts/installer-dependencies.json", import.meta.url), "utf8"));
+  assert.equal(config.pi.package, "@earendil-works/pi-coding-agent");
+  assert.match(config.pi.version, /^\d+\.\d+\.\d+/);
   assert.ok(applicationPackageFiles.includes("LICENSE"));
+  assert.ok(applicationPackageFiles.includes("scripts/pi-chat-resolve-runtime.ps1"));
   assert.ok(!applicationPackageFiles.some(file => /pi-chat-setup\.cmd|pi-chat-uninstall\.ps1/.test(file)));
 });

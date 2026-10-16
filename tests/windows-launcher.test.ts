@@ -17,7 +17,7 @@ test("Windows launcher assets are packaged and project shortcuts are ignored", a
   ]);
   const pkg = JSON.parse(packageJson) as { files: string[]; scripts: Record<string, string> };
   assert.match(gitignore, /^\*\.lnk$/m);
-  for (const file of ["CONTRIBUTING.md", "docs", "start-pi-chat.cmd", "start-pi-chat-ui.ps1", "scripts/install-shortcuts.ps1", "scripts/pi-chat-launch-process.ps1", "scripts/pi-chat-preflight.ps1", "scripts/pi-chat-start-server.ps1", "scripts/check-runtime-files.mjs", "scripts/runtime-required-files.json", "scripts/assert-safe-live-dist.mjs", "scripts/dist-paths.mjs", "scripts/workspace-artifacts.mjs", "scripts/run-staged-verification.mjs", "resources"]) {
+  for (const file of ["CONTRIBUTING.md", "docs", "start-pi-chat.cmd", "start-pi-chat-ui.ps1", "scripts/install-shortcuts.ps1", "scripts/pi-chat-launch-process.ps1", "scripts/pi-chat-preflight.ps1", "scripts/pi-chat-resolve-runtime.ps1", "scripts/pi-chat-start-server.ps1", "scripts/check-runtime-files.mjs", "scripts/runtime-required-files.json", "scripts/assert-safe-live-dist.mjs", "scripts/dist-paths.mjs", "scripts/workspace-artifacts.mjs", "scripts/run-staged-verification.mjs", "resources"]) {
     assert.ok(pkg.files.includes(file), `${file} must be included in the package`);
   }
   assert.equal(pkg.scripts["install:shortcuts"], "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-shortcuts.ps1");

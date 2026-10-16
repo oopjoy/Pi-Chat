@@ -20,6 +20,7 @@ const PORTABLE_EXTRA_FILES = [
   "scripts/pi-chat-launch-process.ps1",
   "scripts/pi-chat-port-ready.ps1",
   "scripts/pi-chat-preflight.ps1",
+  "scripts/pi-chat-resolve-runtime.ps1",
   "scripts/pi-chat-start-server.ps1",
   "scripts/detect-pi-entry.mjs",
   "scripts/check-runtime-files.mjs",

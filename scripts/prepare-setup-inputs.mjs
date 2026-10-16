@@ -62,7 +62,33 @@ export async function prepareSetupInputs({ cacheRoot = defaultSetupCache } = {})
   await access(compiler);
   const { stdout } = await execute(join(nodeRoot, "node.exe"), ["--version"], { env, windowsHide: true });
   if (stdout.trim() !== `v${specs.node.version}`) throw new Error("Bundled Node version does not match the verified archive");
-  return { nodeRoot, compiler, node: specs.node, inno: specs.inno };
+  if (!specs.pi?.package || !specs.pi?.version) throw new Error("installer-dependencies.json must pin the bundled Pi package version");
+  const piRoot = join(cacheRoot, `pi-${specs.pi.version}`);
+  const piEntry = join(piRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "rpc-entry.js");
+  const piManifest = join(piRoot, "node_modules", "@earendil-works", "pi-coding-agent", "package.json");
+  let piReady = false;
+  try {
+    const cached = JSON.parse(await readFile(piManifest, "utf8"));
+    await access(piEntry);
+    piReady = cached.version === specs.pi.version;
+  } catch {
+    piReady = false;
+  }
+  if (!piReady) {
+    await rm(piRoot, { recursive: true, force: true });
+    await mkdir(piRoot, { recursive: true });
+    console.error(`[Pi Chat Setup build] Install ${specs.pi.package}@${specs.pi.version}`);
+    await execute(join(nodeRoot, "node.exe"), [
+      join(nodeRoot, "node_modules", "npm", "bin", "npm-cli.js"),
+      "install", "--prefix", piRoot, `${specs.pi.package}@${specs.pi.version}`,
+      "--ignore-scripts", "--omit=dev", "--no-audit", "--no-fund",
+      "--fetch-retries=2", "--fetch-timeout=60000",
+    ], { env, windowsHide: true, timeout: 240_000, maxBuffer: 8 * 1024 * 1024 });
+  }
+  const installedPi = JSON.parse(await readFile(piManifest, "utf8"));
+  if (installedPi.version !== specs.pi.version) throw new Error(`Bundled Pi version ${installedPi.version} does not match ${specs.pi.version}`);
+  await access(piEntry);
+  return { nodeRoot, piRoot, compiler, node: specs.node, pi: specs.pi, inno: specs.inno };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename)) {
