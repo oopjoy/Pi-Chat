@@ -1,12 +1,10 @@
 # Changelog
 
-## Unreleased
+## v0.5.3 (2026-10-16)
 
 ### Private Node runtime and bundled Pi fallback
 
 - Setup embeds Node.js 24.22.0 LTS (checksum-pinned win-x64) and a pinned `@earendil-works/pi-coding-agent@1.3.0` snapshot. Launch prefers a system Node 22.19+ when present; if Node is missing or older, it uses the bundled runtime (and says so). Pi still prefers an existing local install and is never upgraded in place; only a machine with no Pi gets the bundled 1.3.0 copy, offline, into the managed `~/.pi/agent/install` layout. Source checkouts and the portable ZIP keep Pi's official Node floor of 22.19+.
-
-## v0.5.3 (2026-10-16)
 
 ### Cross-workspace assistant references
 

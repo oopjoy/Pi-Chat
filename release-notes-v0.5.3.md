@@ -19,9 +19,10 @@ Pi remains the sole authority for Runtime execution, Sessions, JSONL, Prompt del
 
 `pi-chat-setup.exe` is a single-file Inno Setup installer (no Electron):
 
-- Embeds the compiled app and a pinned private Node 22 runtime (with npm). The install itself does not need Git, a system Node, or a network connection.
+- Embeds the compiled app, a checksum-pinned **Node.js 24.22.0 LTS** runtime (with npm), and a pinned **Pi 1.3.0** snapshot. The install itself does not need Git, a system Node, or a network connection.
+- Launch prefers a system Node 22.19 or newer when present; if Node is missing or older, it uses the bundled 24.22.0 runtime and says so.
 - Defaults to `%LOCALAPPDATA%\PiChat`; the destination can be changed. Primary shortcuts open Web in the system default browser. A tracked `Pi Chat Web.lnk` lives in the install root; `Pi Chat PWA` remains an optional Start-menu entry.
-- Reuses an existing local Pi. Missing Pi is an explicit optional online step; skipping it or a download failure still leaves the app installed so a later connection can recover.
+- Reuses an existing local Pi and never upgrades it in place. If none is found, Setup copies the bundled 1.3.0 snapshot offline into `~/.pi/agent/install`. Copy failure still leaves the app installed so a later connection can recover.
 - Registers uninstall (Settings → Apps → Pi Chat). Uninstall removes the app, private Node, and this install's own config; it does not delete `~/.pi/agent` sessions, credentials, or Skills.
 - Refuses upgrade or uninstall of a running destination instead of failing mid-copy. Source-checkout shortcuts stay in a separate `Pi Chat Git` group and are never claimed by Setup.
 
