@@ -1,9 +1,9 @@
 {
   "node": {
-    "version": "22.19.0",
-    "archive": "node-v22.19.0-win-x64.zip",
-    "url": "https://nodejs.org/dist/v22.19.0/node-v22.19.0-win-x64.zip",
-    "sha256": "ea3fad0e67a991d8477d8c01344b56e69c676ccb733f065b22436994b1253f86"
+    "version": "24.22.0",
+    "archive": "node-v24.22.0-win-x64.zip",
+    "url": "https://nodejs.org/dist/v24.22.0/node-v24.22.0-win-x64.zip",
+    "sha256": "f9683a19877e12a9b167305c8db71040d812876359de21f0d2e97c3f321f80c3"
   },
   "inno": {
     "version": "6.4.3",

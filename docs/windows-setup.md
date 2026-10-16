@@ -42,7 +42,8 @@ Only the optional Pi installation uses the network.
 ## Build
 
 `installer-dependencies.json` pins the Node and Inno compiler versions and SHA256
-values. Downloads happen only on the build machine. The official compiler is
+values. The current private runtime is Node.js 24.22.0 LTS (win-x64). Downloads
+happen only on the build machine. The official compiler is
 prepared with its supported `/PORTABLE=1` option inside the build cache, not
 installed system-wide. Cached archives are revalidated before reuse.
 

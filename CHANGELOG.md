@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Private Node runtime
+
+- Setup now embeds Node.js 24.22.0 LTS (checksum-pinned win-x64) instead of 22.19.0. Source checkouts and the portable ZIP keep Pi's official floor of Node 22.19+. Windows CI uses 24.22.0 so the build machine matches the shipped runtime.
+
 ## v0.5.3 (2026-10-16)
 
 ### Cross-workspace assistant references

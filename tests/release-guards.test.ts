@@ -12,7 +12,7 @@ import { assertPortableArtifactName, crc32, writeZip } from "../scripts/portable
 
 const execFile = promisify(execFileCallback);
 const repositoryRoot = resolve(import.meta.dirname, "..");
-const runtime = { nodeVersion: "22.19.0", nodeArchiveSha256: "a".repeat(64), compilerVersion: "6.4.3" };
+const runtime = { nodeVersion: "24.22.0", nodeArchiveSha256: "a".repeat(64), compilerVersion: "6.4.3" };
 const git = (args: string[], cwd = repositoryRoot) => spawnSync("git", args, { cwd, encoding: "utf8" });
 
 test("portable archive names stay versioned and basename-only", () => {

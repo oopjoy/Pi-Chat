@@ -22,7 +22,7 @@ Pi Chat 连接本机 Pi RPC，负责聊天展示、Session 浏览、流式输出
 
 版本 Release 提供两个产物：**`pi-chat-setup.exe`**（唯一安装入口）和 **`pi-chat-portable-<版本>.zip`**（便携包）。校验文件和构建清单只在 CI 内验证，不上传到 Release（它们不是额外安装包）。安装向导基于 Inno Setup，不依赖 Electron：
 
-1. EXE 已内置编译好的 Pi Chat 和固定版本的私有 Node Runtime（含 npm），**安装主体无需联网，也无需预装 Git、Node 或 npm**。
+1. EXE 已内置编译好的 Pi Chat 和私有 **Node.js 24.22.0 LTS** Runtime（含 npm），**安装主体无需联网，也无需预装 Git、Node 或 npm**。
 2. 默认安装到 `%LOCALAPPDATA%\PiChat`，也可选择其他目录；安装完成及主快捷方式默认用系统默认浏览器打开 Web。安装根目录自动附带 `Pi Chat Web.lnk`，开始菜单另保留可选的 `Pi Chat PWA` 入口。
 3. 检测到现有 Pi 时优先直接复用，不升级它、不复制模型凭证、配置、Skills 或 JSONL。
 4. 未检测到 Pi 时，完成页提供明确的可选联网安装项。跳过或下载失败都不撤销应用安装；应用能打开并提示 Pi 未就绪，之后可连接既有 Pi，或重新运行 Setup 选择安装 Pi。
@@ -110,7 +110,7 @@ Pi Chat 默认只监听本机回环地址，关闭浏览器窗口不会停止本
 
 ## 环境要求
 
-- **Node.js** 22.19 或更高版本——源码运行需要；新的完整 Setup 已内置私有 Node Runtime，不依赖系统 Node
+- **Node.js** 源码/便携包需要 22.19 或更高（与 Pi 官方下限一致）；Windows Setup 内置私有 **Node.js 24.22.0 LTS**，不依赖系统 Node
 - **已全局安装并完成模型认证的 Pi**：`pi --version`  
   完整 Setup 未检测到 Pi 时提供可选联网安装；以下说明针对源码运行与既有 Pi 用户。
   Pi Chat **不会**用进程内共享 Pi 内核托管多个 Session；服务仍会为每个执行对话拉起独立 Pi RPC。Runtime 直接使用本机安装的全局 Pi，并继续从该安装读取配置、Extension、Package、CLI 与 package-relative 资源。Pi 尚未就绪时，已保存的 Session JSONL 仍可浏览；发送或其他需要 Pi 的操作会提示 Runtime 不可用。
