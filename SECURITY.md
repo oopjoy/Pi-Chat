@@ -10,7 +10,8 @@ Security boundaries that are especially important include:
 - Pi Runtime, Session JSONL, and tool execution remaining authoritative outside the browser;
 - staged build and live-`dist` safety checks;
 - prompt, Runtime-generation, Session, navigation, and terminal fencing;
-- file-path validation in the read-only Files / Changes inspector.
+- file-path validation in the read-only Files / Changes inspector;
+- exact persisted-assistant Markdown allowlists for local links/images, including explicitly referenced files outside the Workspace. This is not unrestricted filesystem access: sensitive paths, traversal, symlinks and executable opening remain blocked; the inspector and tool-write permissions are unchanged.
 
 ## Reporting a vulnerability
 

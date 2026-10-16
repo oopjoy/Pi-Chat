@@ -3,6 +3,8 @@ import test from "node:test";
 import { act, createElement } from "react";
 import {
   isLocalFileMarkdownDestination,
+  localFileReferenceFromMarkdownDestination,
+  normalizeLocalFileReference,
   windowsPathFromMarkdownDestination,
   workspaceRelativePathFromMarkdownDestination,
 } from "../src/shared/local-file-link";
@@ -31,6 +33,45 @@ test("Windows Markdown destinations become bounded Workspace-relative paths", ()
   assert.equal(workspaceRelativePathFromMarkdownDestination("Desktop/%2e%2e/secret.txt", workspace), null);
   assert.equal(isLocalFileMarkdownDestination("https://example.com/result.csv"), false);
   assert.equal(isLocalFileMarkdownDestination("mailto:test@example.com"), false);
+});
+
+test("explicit local references retain outside-workspace paths without admitting traversal or network paths", () => {
+  const cwd = "C:/Users/opjoy";
+  assert.equal(localFileReferenceFromMarkdownDestination("D:/结果/fig.png", cwd), "D:/结果/fig.png");
+  assert.equal(localFileReferenceFromMarkdownDestination("file:///D:/My%20Results/report.pdf", cwd), "D:/My Results/report.pdf");
+  assert.equal(localFileReferenceFromMarkdownDestination("C:/Users/opjoy2/report.md", cwd), "C:/Users/opjoy2/report.md");
+  assert.equal(localFileReferenceFromMarkdownDestination("C:/Users/opjoy/report.md", cwd), "report.md");
+  assert.equal(localFileReferenceFromMarkdownDestination("/tmp/elsewhere/fig.png", "/tmp/project"), "/tmp/elsewhere/fig.png");
+  assert.equal(localFileReferenceFromMarkdownDestination("/tmp/project/fig.png", "/tmp/project"), "fig.png");
+  for (const path of ["D:/out/../secret.txt", "D:/out/%2e%2e/secret.txt", "../outside.txt", "//host/share/report.pdf", "file://host/share/report.pdf", "D:relative.txt", "D:/out/file.txt:stream", "https://example.com/a"]) {
+    assert.equal(localFileReferenceFromMarkdownDestination(path, cwd), null, path);
+  }
+  assert.equal(normalizeLocalFileReference("D:/out/../secret.txt"), null);
+  assert.equal(normalizeLocalFileReference("D:/out/%20.txt"), "D:/out/%20.txt", "API references are not decoded again");
+});
+
+test("outside-workspace Markdown links and images use Session callbacks", async () => {
+  const { dom } = installAppDom();
+  const { createRoot } = await import("react-dom/client");
+  const { MarkdownBody } = await import("../src/web/components/MarkdownBody");
+  const root = createRoot(dom.window.document.getElementById("root")!);
+  const opened: string[] = [];
+  const fetched: string[] = [];
+  try {
+    await act(async () => root.render(createElement(MarkdownBody, {
+      workspacePath: "C:/Users/opjoy",
+      onOpenLocalPath: async (path: string) => { opened.push(path); },
+      workspaceImageFetch: async (path: string) => { fetched.push(path); return new Blob(["png"], { type: "image/png" }); },
+      children: "[Report](D:/Results/report.md)\n\n![Figure](D:/Results/fig.png)",
+    })));
+    await act(async () => dom.window.document.querySelector<HTMLAnchorElement>(".markdown-local-file-link")!.click());
+    assert.deepEqual(opened, ["D:/Results/report.md"]);
+    assert.deepEqual(fetched, ["D:/Results/fig.png"]);
+    assert.match(dom.window.document.querySelector("img")?.getAttribute("src") || "", /^blob:/);
+    assert.equal(dom.window.document.querySelector(".markdown-link-error"), null);
+  } finally {
+    await act(async () => root.unmount());
+  }
 });
 
 test("rendered local links open through Pi Chat while Web links keep normal navigation", async () => {

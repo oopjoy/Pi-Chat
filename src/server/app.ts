@@ -243,6 +243,7 @@ import {
   normalizeWorkspaceRelativePath,
   readWorkspaceFile,
   recentModifiedWorkspaceFiles,
+  referencedLocalFileContext,
   revalidateRecentWorkspaceFiles,
   workspaceDirectoryTarget,
   workspaceFileTargetPath,
@@ -4894,7 +4895,7 @@ export class PiChatApp {
   }
   private async workspaceLinkedFileContext(
     input: { sessionId: string; path: string },
-  ): Promise<{ cwd: string; path: string } | null> {
+  ): Promise<{ cwd: string; path: string; reference: string } | null> {
     const cwd = await this.workspaceCwdForSession(input.sessionId);
     if (!cwd) return null;
     const snapshot = await this.options.sessions.recentSnapshotForId(
@@ -4902,11 +4903,11 @@ export class PiChatApp {
       OVERSIZED_SESSION_RECENT_TURN_LIMIT,
     );
     if (!snapshot) return null;
-    const path = normalizeWorkspaceRelativePath(input.path);
-    const key = process.platform === "win32" ? path.toLowerCase() : path;
+    const context = referencedLocalFileContext(cwd, input.path);
+    const key = process.platform === "win32" ? context.reference.toLowerCase() : context.reference;
     if (!assistantLinkedWorkspaceFiles(snapshot.messages, cwd).has(key))
       throw new HttpRequestError(404, "文件链接不在当前对话的已保存回复中");
-    return { cwd, path };
+    return context;
   }
   private async workspaceFileRoute(input: { sessionId: string; path: string }): Promise<unknown | null> {
     const context = await this.workspaceRecentFileContext(input);
@@ -4922,11 +4923,11 @@ export class PiChatApp {
       OVERSIZED_SESSION_RECENT_TURN_LIMIT,
     );
     if (!snapshot) return null;
-    const path = normalizeWorkspaceRelativePath(input.path);
-    const key = process.platform === "win32" ? path.toLowerCase() : path;
+    const context = referencedLocalFileContext(cwd, input.path);
+    const key = process.platform === "win32" ? context.reference.toLowerCase() : context.reference;
     if (!assistantImageWorkspaceFiles(snapshot.messages, cwd).has(key))
       throw new HttpRequestError(404, "图片不在当前对话的已保存回复中");
-    return { cwd, path };
+    return context;
   }
   async workspaceImageRoute(
     input: { sessionId: string; path: string },
@@ -4934,13 +4935,13 @@ export class PiChatApp {
     const context = await this.workspaceImageContext(input);
     return context ? workspaceImageTarget(context.cwd, context.path) : null;
   }
-  private async openValidatedWorkspaceFile(context: { cwd: string; path: string }): Promise<{ ok: true; path: string }> {
+  private async openValidatedWorkspaceFile(context: { cwd: string; path: string; reference?: string }): Promise<{ ok: true; path: string }> {
     const directory = await workspaceDirectoryTarget(context.cwd, context.path).catch(() => null);
     if (directory) {
       await openWorkspaceDirectory(directory, () => workspaceDirectoryTarget(context.cwd, context.path).then(
         (target) => target ?? Promise.reject(new Error("目录在打开前发生变化")),
       ));
-      return { ok: true, path: context.path };
+      return { ok: true, path: context.reference ?? context.path };
     }
     if (!isSafeDefaultApplicationFile(context.path))
       throw new HttpRequestError(409, "为安全起见，此文件类型不能直接打开");
@@ -4948,7 +4949,7 @@ export class PiChatApp {
     const verifyTarget = () => workspaceFileTargetPath(context.cwd, context.path);
     if (this.options.openLocalFile) await this.options.openLocalFile(target, verifyTarget);
     else await openWithDefaultApplication(target, verifyTarget);
-    return { ok: true, path: context.path };
+    return { ok: true, path: context.reference ?? context.path };
   }
   private async workspaceOpenFileRoute(input: { sessionId: string; path: string }): Promise<unknown | null> {
     const context = await this.workspaceRecentFileContext(input);

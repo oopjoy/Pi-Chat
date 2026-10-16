@@ -6,6 +6,7 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import {
   encodeLocalFileMarkdownDestination,
+  encodeLocalFileImageDestination,
   isLocalFileMarkdownDestination,
 } from "../../shared/local-file-link";
 import { remarkRestoreMarkdownMathPipes } from "./markdown-math-pipes";
@@ -102,6 +103,11 @@ export function rehypeLocalFileLinks() {
         : "";
       if (href && isLocalFileMarkdownDestination(href))
         node.properties!.href = encodeLocalFileMarkdownDestination(href);
+      const src = node.tagName === "img" && typeof node.properties?.src === "string"
+        ? node.properties.src
+        : "";
+      if (src && isLocalFileMarkdownDestination(src))
+        node.properties!.src = encodeLocalFileImageDestination(src);
       for (const child of node.children || []) visit(child);
     };
     visit(tree);

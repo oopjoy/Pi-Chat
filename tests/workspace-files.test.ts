@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { PiMessage } from "../src/shared/types";
-import { assistantImageWorkspaceFiles, assistantLinkedWorkspaceFiles, readWorkspaceFile, recentModifiedWorkspaceFiles, revalidateRecentWorkspaceFiles, workspaceDirectoryTarget, workspaceFileTargetPath, workspaceImageTarget } from "../src/server/workspace-files";
+import { assistantImageWorkspaceFiles, assistantLinkedWorkspaceFiles, readWorkspaceFile, recentModifiedWorkspaceFiles, referencedLocalFileContext, revalidateRecentWorkspaceFiles, workspaceDirectoryTarget, workspaceFileTargetPath, workspaceImageTarget } from "../src/server/workspace-files";
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-workspace-files-"));
@@ -40,14 +40,14 @@ test("assistant images grant render-only authority without unlocking open author
     // Links never grant image authority and vice versa.
     assert.deepEqual([...assistantImageWorkspaceFiles([{ role: "assistant", content: "[报告](results/report.pdf)" }], root)], []);
     assert.deepEqual([...assistantLinkedWorkspaceFiles([{ role: "assistant", content: "![图](results/fig_final.png)" }], root)], []);
-    // Absolute destinations resolve only inside the workspace.
+    // References preserve inside-workspace compatibility and explicit outside paths.
     assert.deepEqual(
       [...assistantImageWorkspaceFiles([{ role: "assistant", content: `![外](${root.replace(/\\/g, "/")}/results/fig_final.png)` }], root)],
       ["results/fig_final.png"],
     );
     assert.deepEqual(
       [...assistantImageWorkspaceFiles([{ role: "assistant", content: "![外](D:/elsewhere/fig.png)" }], root)],
-      [],
+      [process.platform === "win32" ? "d:/elsewhere/fig.png" : "D:/elsewhere/fig.png"],
     );
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -75,6 +75,30 @@ test("workspace image target allows only safe image types inside the workspace",
     const huge = join(root, "results", "huge.png");
     await writeFile(huge, Buffer.alloc(33 * 1024 * 1024));
     await assert.rejects(workspaceImageTarget(root, "results/huge.png"), /图片过大/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("referenced outside paths reuse all read-only file protections without broadening Workspace reads", async () => {
+  const root = await fixture();
+  const workspace = join(root, "workspace");
+  try {
+    await mkdir(workspace);
+    const reference = join(root, "README.md").replace(/\\/g, "/");
+    const context = referencedLocalFileContext(workspace, reference);
+    assert.equal(await workspaceFileTargetPath(context.cwd, context.path), await realpath(join(root, "README.md")));
+    assert.match((await readWorkspaceFile(context.cwd, context.path)).text, /Workspace preview/);
+    await assert.rejects(readWorkspaceFile(workspace, reference), /相对路径/);
+    for (const path of [join(root, ".env"), join(root, "github-token.txt"), join(root, "src", "..", ".env")]) {
+      assert.throws(() => referencedLocalFileContext(workspace, path.replace(/\\/g, "/")), /路径无效/);
+    }
+    assert.throws(() => referencedLocalFileContext(workspace, "//host/share/report.txt"), /路径无效/);
+    const dir = referencedLocalFileContext(workspace, root.replace(/\\/g, "/"));
+    assert.equal(await workspaceDirectoryTarget(dir.cwd, dir.path), await realpath(root));
+    await symlink(join(root, "src"), join(root, "external-link"), process.platform === "win32" ? "junction" : "dir");
+    const link = referencedLocalFileContext(workspace, join(root, "external-link", "app.ts").replace(/\\/g, "/"));
+    await assert.rejects(workspaceFileTargetPath(link.cwd, link.path), /符号链接/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -151,7 +175,7 @@ test("assistant-linked files require a real persisted Markdown link", () => {
   const expected = process.platform === "win32"
     ? "desktop/奖学金调整/result.csv"
     : "Desktop/奖学金调整/result.csv";
-  assert.deepEqual([...linked], [expected]);
+  assert.deepEqual([...linked], [expected, process.platform === "win32" ? "d:/outside.csv" : "D:/outside.csv"]);
 });
 
 test("link authority excludes code, images, escaped labels and HTML comments", () => {

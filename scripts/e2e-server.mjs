@@ -94,6 +94,9 @@ if (fixtureManifestPath) {
   );
 }
 
+// Read-only public fixture outside the per-test Workspace; no real user data.
+const outsideFigurePath = join(projectRoot, "src", "web", "public", "icons", "pi-chat-192.png").replace(/\\/g, "/");
+const outsideReferenceAnswer = `[Outside image file](<${outsideFigurePath}>)\n\n![Outside workspace figure](<${outsideFigurePath}>)`;
 const streamBenchmarkHelperUrl = pathToFileURL(
   join(projectRoot, "scripts", "e2e-streaming-benchmark.mjs"),
 ).href;
@@ -197,7 +200,7 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
       }
     }
     setTimeout(() => {
-      const assistantMessage = { role: "assistant", provider: "test", model: "gpt-e2e", content: "Live response complete", timestamp: Date.now() };
+      const assistantMessage = { role: "assistant", provider: "test", model: "gpt-e2e", content: command.message === "outside workspace references" ? ${JSON.stringify(outsideReferenceAnswer)} : "Live response complete", timestamp: Date.now() };
       const assistantMessageId = sessionId + "-e2e-assistant-" + persistedMessages.length;
       void (async () => {
         try {

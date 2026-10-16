@@ -1,7 +1,7 @@
 import type { Stats } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
-import { basename, extname, isAbsolute, join, relative, resolve } from "node:path";
-import { workspaceRelativePathFromMarkdownDestination } from "../shared/local-file-link.js";
+import { basename, extname, isAbsolute, join, parse, relative, resolve } from "node:path";
+import { localFileReferenceFromMarkdownDestination, normalizeLocalFileReference } from "../shared/local-file-link.js";
 import type { PiMessage, WorkspaceFileData, WorkspaceRecentFilesData } from "../shared/types.js";
 import { HttpRequestError } from "./http-transport.js";
 import { markdownImageDestinations, markdownLinkDestinations } from "./markdown-links.js";
@@ -81,6 +81,21 @@ export function normalizeWorkspaceRelativePath(value: string): string {
   return parts.join("/");
 }
 
+/**
+ * Resolve a lexical reference into the existing strict read-only path contract.
+ * Callers MUST authorize reference against this Session's persisted Markdown
+ * before using cwd/path. An absolute reference grants no directory enumeration.
+ */
+export function referencedLocalFileContext(cwd: string, rawPath: string): { cwd: string; path: string; reference: string } {
+  const reference = normalizeLocalFileReference(rawPath);
+  if (!reference) throw new HttpRequestError(400, "本地文件路径无效");
+  if (isAbsolute(reference)) {
+    const root = parse(reference).root;
+    return { cwd: root, path: normalizeWorkspaceRelativePath(reference.slice(root.length)), reference };
+  }
+  return { cwd, path: normalizeWorkspaceRelativePath(reference), reference };
+}
+
 function contained(root: string, target: string): boolean {
   const value = relative(root, target);
   return value === "" || (!isAbsolute(value) && value !== ".." && !value.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`));
@@ -149,13 +164,13 @@ function assistantText(message: PiMessage): string[] {
     : [];
 }
 
-/** Server-authoritative render allowlist from persisted assistant image destinations. */
+/** Render-only allowlist from persisted assistant images; references may be absolute. */
 export function assistantImageWorkspaceFiles(messages: PiMessage[], cwd: string): Set<string> {
   const result = new Set<string>();
   for (const message of messages) {
     for (const text of assistantText(message)) {
       for (const destination of markdownImageDestinations(text)) {
-        const path = workspaceRelativePathFromMarkdownDestination(destination, cwd);
+        const path = localFileReferenceFromMarkdownDestination(destination, cwd);
         if (path) result.add(process.platform === "win32" ? path.toLowerCase() : path);
       }
     }
@@ -163,13 +178,13 @@ export function assistantImageWorkspaceFiles(messages: PiMessage[], cwd: string)
   return result;
 }
 
-/** Server-authoritative allowlist derived only from rendered persisted assistant links. */
+/** Open allowlist from persisted assistant links; never grants arbitrary disk access. */
 export function assistantLinkedWorkspaceFiles(messages: PiMessage[], cwd: string): Set<string> {
   const result = new Set<string>();
   for (const message of messages) {
     for (const text of assistantText(message)) {
       for (const destination of markdownLinkDestinations(text)) {
-        const path = workspaceRelativePathFromMarkdownDestination(destination, cwd);
+        const path = localFileReferenceFromMarkdownDestination(destination, cwd);
         if (path) result.add(process.platform === "win32" ? path.toLowerCase() : path);
       }
     }

@@ -6,7 +6,7 @@ import {
   isLocalFileMarkdownDestination,
   LOCAL_FILE_IMAGE_FRAGMENT_PREFIX,
   LOCAL_FILE_LINK_FRAGMENT_PREFIX,
-  workspaceRelativePathFromMarkdownDestination,
+  localFileReferenceFromMarkdownDestination,
 } from "../../shared/local-file-link";
 import { createMarkdownRehypePlugins, createMarkdownRemarkPlugins } from "../lib/markdown";
 import { normalizeDisplayMathForRendering, normalizeDisplayMathWithSourceMap, registerSourceCopyRoot } from "../lib/markdown-source-copy";
@@ -24,7 +24,7 @@ interface MarkdownBodyProps {
   appendHint?: StreamingMarkdownAppendHint;
   workspacePath?: string;
   onOpenLocalPath?: (path: string) => Promise<unknown>;
-  /** Fetch a workspace-relative image for inline display (Session-addressed, authenticated). */
+  /** Fetch a persisted-reply image reference (relative or absolute; Session-authenticated). */
   workspaceImageFetch?: (path: string) => Promise<Blob>;
 }
 
@@ -60,7 +60,7 @@ function MarkdownImage({ node: _node, src, alt, workspacePath = "", onOpenLocalP
   const localDestination = localImageDestinationFromSrc(src);
   const relativePath = localDestination === null
     ? null
-    : workspaceRelativePathFromMarkdownDestination(localDestination, workspacePath);
+    : localFileReferenceFromMarkdownDestination(localDestination, workspacePath);
   const fetcher = relativePath ? workspaceImageFetch : undefined;
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -87,7 +87,7 @@ function MarkdownImage({ node: _node, src, alt, workspacePath = "", onOpenLocalP
   if (localDestination === null)
     return <img {...props} className={className} src={src} alt={alt} title={title} />;
   if (!relativePath)
-    return <span className="markdown-image-fallback" title={localDestination}>🖼 {alt || localDestination}（图片不在当前会话 Workspace 内）</span>;
+    return <span className="markdown-image-fallback" title={localDestination}>🖼 {alt || localDestination}（本地图片路径无效或不受支持）</span>;
   if (!fetcher)
     return <span className="markdown-image-fallback" title={localDestination}>🖼 {alt || relativePath}（回复保存后可显示）</span>;
   if (loadError)
@@ -120,13 +120,13 @@ function MarkdownLink({ children, node: _node, href, workspacePath = "", onOpenL
   const [error, setError] = useState("");
   if (localDestination === null)
     return <a {...props} className={className} href={href} target="_blank" rel="noopener noreferrer">{children}</a>;
-  const relativePath = workspaceRelativePathFromMarkdownDestination(localDestination, workspacePath);
+  const relativePath = localFileReferenceFromMarkdownDestination(localDestination, workspacePath);
   const open = async (event: MouseEvent<HTMLAnchorElement>) => {
     event.preventDefault();
     if (status === "opening") return;
     if (!relativePath) {
       setStatus("error");
-      setError("文件不在当前会话 Workspace 内");
+      setError("本地文件路径无效或不受支持");
       return;
     }
     if (!onOpenLocalPath) {

@@ -71,7 +71,44 @@ export function encodeLocalFileImageDestination(value: string): string {
 /** Whether ReactMarkdown should route this destination through Pi Chat. */
 export function isLocalFileMarkdownDestination(value: string): boolean {
   return windowsPathFromMarkdownDestination(value) !== null
-    || relativeDestination(value) !== null;
+    || relativeDestination(value) !== null
+    || posixPathFromMarkdownDestination(value) !== null;
+}
+
+function posixPathFromMarkdownDestination(value: string): string | null {
+  const decoded = decodeOnce(value.trim());
+  return decoded?.startsWith("/") && !decoded.startsWith("//") ? decoded : null;
+}
+
+/** Lexical normalization only; this does not grant filesystem access. No decoding here. */
+export function normalizeLocalFileReference(value: string): string | null {
+  if (!value || value.length > MAX_LOCAL_LINK_CHARS || /[\u0000-\u001f\u007f]/.test(value)) return null;
+  const candidate = value.replace(/\\/g, "/");
+  if (candidate.startsWith("//")) return null; // No new UNC/device/network authority.
+  const drive = /^[A-Za-z]:\//.test(candidate);
+  const prefix = drive ? `${candidate[0]!.toUpperCase()}:/` : candidate.startsWith("/") ? "/" : "";
+  const tail = candidate.slice(prefix.length).replace(/\/+$/, "");
+  const parts = tail.split("/");
+  if (parts.some((part) => !part || part === "." || part === ".." || part.includes(":"))) return null;
+  return `${prefix}${parts.join("/")}`;
+}
+
+/**
+ * Advisory reference for an explicitly linked file/image. Keep in-workspace paths
+ * relative, but retain local absolute paths outside it. The server must match the
+ * reference against persisted assistant Markdown before resolving any target.
+ */
+export function localFileReferenceFromMarkdownDestination(value: string, workspaceCwd: string): string | null {
+  const relative = workspaceRelativePathFromMarkdownDestination(value, workspaceCwd);
+  if (relative) return normalizeLocalFileReference(relative);
+  const absolute = windowsPathFromMarkdownDestination(value) || posixPathFromMarkdownDestination(value);
+  if (!absolute) return null;
+  // POSIX absolute paths are not drive-relative paths on a Windows host.
+  if (absolute.startsWith("/") && /^[A-Za-z]:[\\/]/.test(workspaceCwd)) return null;
+  const workspace = workspaceCwd.replace(/\/+$/, "");
+  if (absolute.startsWith("/") && workspaceCwd.startsWith("/") && absolute.startsWith(`${workspace}/`))
+    return normalizeLocalFileReference(absolute.slice(workspace.length + 1));
+  return normalizeLocalFileReference(absolute);
 }
 
 /**

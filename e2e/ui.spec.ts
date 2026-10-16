@@ -917,6 +917,28 @@ test("assistant local images render through the Session-addressed image endpoint
   await expect.poll(() => openedPath).toBe("fig_final_abspsi_curlA.png");
 });
 
+test("persisted outside-workspace references display images and send absolute open paths", { tag: "@desktop-only" }, async ({ page }) => {
+  let openedPath = "";
+  await page.route("**/api/sessions/*/workspace/open-link", async (route) => {
+    openedPath = (route.request().postDataJSON() as { path: string }).path;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true, path: openedPath }) });
+  });
+  const { input, send } = await openInitialSession(page);
+  await input.fill("outside workspace references");
+  await send.click();
+  const image = page.getByRole("img", { name: "Outside workspace figure" });
+  await expect(image).toBeVisible();
+  await expect.poll(() => image.evaluate((element) => (element as HTMLImageElement).naturalWidth)).toBe(192);
+  const link = page.getByRole("link", { name: "Outside image file" });
+  await link.click();
+  await expect(link).toHaveClass(/is-opened/);
+  await expect.poll(() => openedPath).toMatch(/^(?:[A-Z]:\/|\/).*\/src\/web\/public\/icons\/pi-chat-192\.png$/);
+  await expect(page.locator(".markdown-link-error")).toHaveCount(0);
+  await page.reload();
+  await expect(image).toBeVisible();
+  await expect.poll(() => image.evaluate((element) => (element as HTMLImageElement).naturalWidth)).toBe(192);
+});
+
 test("assistant local directory links open through the Session-addressed opener", { tag: "@desktop-only" }, async ({ page }) => {
   let openedPath = "";
   await page.route("**/api/sessions/*/workspace/open-link", async (route) => {
