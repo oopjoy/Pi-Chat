@@ -16,11 +16,38 @@ export function composerDraftKeyId(key: ComposerDraftKey): string {
     : `draft:${key.generation}`;
 }
 
+export const MAX_COMPOSER_FILES = 32;
+
 export type ComposerDraft = {
   message: string;
   images: PromptImage[];
+  /** Absolute Windows paths shown as cards; sent as path text, never inlined. */
+  files: string[];
   revision: number;
 };
+
+export function draftFiles(draft: Pick<ComposerDraft, "files"> | { files?: string[] }): string[] {
+  return Array.isArray(draft.files) ? draft.files.filter(Boolean) : [];
+}
+
+function quoteAttachedPath(path: string): string {
+  const clean = path.trim().replace(/^"|"$/g, "");
+  if (!/^[A-Za-z]:[\\/]/.test(clean) || clean.length <= 3) return "";
+  return /\s/.test(clean) ? `"${clean.replace(/"/g, '\\"')}"` : clean;
+}
+
+/** Cards stay in the editor; the prompt Pi receives still includes the paths. */
+export function composePromptWithAttachedFiles(message: string, files: string[]): string {
+  const unique = [...new Set(files.map((path) => path.trim()).filter(Boolean))];
+  const missing = unique.filter((path) => {
+    const quoted = quoteAttachedPath(path);
+    return quoted && !message.includes(quoted);
+  });
+  const block = missing.map(quoteAttachedPath).filter(Boolean).join("\n");
+  if (!block) return message;
+  const trimmed = message.replace(/[ \t]+$/g, "").replace(/\n+$/g, "");
+  return trimmed ? `${trimmed}\n\n${block}` : block;
+}
 
 export type ComposerSnapshot = ComposerDraft & {
   key: ComposerDraftKey;
@@ -51,11 +78,12 @@ function promptImageRawBytes(image: Pick<PromptImage, "data" | "size">): number 
   return Math.max(encodedBytes, declaredBytes);
 }
 
-function payloadBytes(payload: Pick<ComposerDraft, "message" | "images">): number {
+function payloadBytes(payload: Pick<ComposerDraft, "message" | "images" | "files">): number {
   // JS strings are UTF-16. This intentionally estimates retained heap rather
   // than wire size so a queue of Base64 image strings cannot grow unbounded.
   return payload.message.length * 2
-    + payload.images.reduce((total, image) => total + image.data.length * 2, 0);
+    + payload.images.reduce((total, image) => total + image.data.length * 2, 0)
+    + draftFiles(payload).reduce((total, path) => total + path.length * 2, 0);
 }
 
 function payloadImageBytes(payload: Pick<ComposerDraft, "images">): number {
@@ -128,7 +156,7 @@ export type ComposerState = {
 
 export const emptyComposerState = (): ComposerState => ({ partitions: {} });
 
-const emptyDraft = (): ComposerDraft => ({ message: "", images: [], revision: 0 });
+const emptyDraft = (): ComposerDraft => ({ message: "", images: [], files: [], revision: 0 });
 
 function partitionFor(state: ComposerState, key: ComposerDraftKey): ComposerPartition {
   return state.partitions[composerDraftKeyId(key)] || {
@@ -152,7 +180,7 @@ function withPartition(
 
 function editDraft(
   partition: ComposerPartition,
-  patch: Pick<ComposerDraft, "message" | "images">,
+  patch: Pick<ComposerDraft, "message" | "images" | "files">,
 ): ComposerPartition {
   return {
     ...partition,
@@ -170,7 +198,8 @@ function restoreSuspended(partition: ComposerPartition): ComposerPartition {
     partition.inFlight ||
     partition.blocked ||
     partition.draft.message.trim() ||
-    partition.draft.images.length
+    partition.draft.images.length ||
+    draftFiles(partition.draft).length
   )
     return partition;
   return { ...partition, draft: partition.suspended, suspended: undefined };
@@ -178,7 +207,7 @@ function restoreSuspended(partition: ComposerPartition): ComposerPartition {
 
 export type ComposerAction =
   | { type: "edit"; key: ComposerDraftKey; message: string }
-  | { type: "replace"; key: ComposerDraftKey; message: string; images: PromptImage[] }
+  | { type: "replace"; key: ComposerDraftKey; message: string; images: PromptImage[]; files?: string[] }
   | { type: "clear"; key: ComposerDraftKey }
   /** Drop all retained text/images for a structurally deleted Session. */
   | { type: "forget"; key: ComposerDraftKey }
@@ -193,6 +222,7 @@ export type ComposerAction =
       expectedRevision: number;
       message: string;
       images: PromptImage[];
+      files?: string[];
       /** Native Pi dequeue prepends restored queue text to the current editor. */
       prepend?: boolean;
     };
@@ -208,7 +238,7 @@ export function composerReducer(
   if (action.type === "accept") {
     // A caller may retain and later mutate its image array; the accepted
     // snapshot belongs to this transition and must remain immutable.
-    const snapshot = { ...action.snapshot, images: [...action.snapshot.images] };
+    const snapshot = { ...action.snapshot, images: [...action.snapshot.images], files: [...draftFiles(action.snapshot)] };
     const partition = partitionFor(state, snapshot.key);
     const pending = action.retry
       ? [snapshot, ...partition.pending]
@@ -218,6 +248,7 @@ export function composerReducer(
       draft: {
         message: "",
         images: [],
+        files: [],
         revision: partition.draft.revision + 1,
       },
       pending,
@@ -239,6 +270,7 @@ export function composerReducer(
     return withPartition(state, action.key, editDraft(partition, {
       message: action.message,
       images: partition.draft.images,
+      files: draftFiles(partition.draft),
     }));
   if (action.type === "replace")
     return withPartition(state, action.key, {
@@ -246,6 +278,7 @@ export function composerReducer(
       draft: {
         message: action.message,
         images: [...action.images],
+        files: action.files ? [...action.files] : draftFiles(partition.draft),
         revision: partition.draft.revision,
       },
     });
@@ -253,6 +286,7 @@ export function composerReducer(
     return withPartition(state, action.key, editDraft(partition, {
       message: "",
       images: [],
+      files: [],
     }));
   if (action.type === "start-delivery") {
     const [next, ...pending] = partition.pending;
@@ -268,7 +302,7 @@ export function composerReducer(
   if (action.type === "delivery-rejected") {
     const failed = partition.inFlight;
     if (!failed) return state;
-    const hasNewerDraft = partition.draft.message.trim() || partition.draft.images.length;
+    const hasNewerDraft = partition.draft.message.trim() || partition.draft.images.length || draftFiles(partition.draft).length;
     return withPartition(state, action.key, {
       ...partition,
       inFlight: undefined,
@@ -278,6 +312,7 @@ export function composerReducer(
       draft: {
         message: failed.message,
         images: [...failed.images],
+        files: draftFiles(failed),
         revision: partition.draft.revision,
       },
     });
@@ -296,6 +331,9 @@ export function composerReducer(
         images: action.prepend
           ? [...action.images, ...partition.draft.images]
           : [...action.images],
+        files: action.prepend
+          ? [...draftFiles(action), ...draftFiles(partition.draft)]
+          : [...draftFiles(action)],
         revision: partition.draft.revision,
       },
     });

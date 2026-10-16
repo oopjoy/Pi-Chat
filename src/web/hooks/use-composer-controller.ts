@@ -2,9 +2,11 @@ import { useCallback, useEffect, useReducer, useRef } from "react";
 import type { PromptDelivery, PromptImage } from "../../shared/types";
 import {
   composerAcceptError,
+  composePromptWithAttachedFiles,
   composerDraftKeyId,
   composerPartition,
   composerReducer,
+  draftFiles,
   emptyComposerState,
   type ComposerAction,
   type ComposerDraftKey,
@@ -18,6 +20,7 @@ export type ComposerRestoredDraft = {
   expectedDraftRevision: number;
   message: string;
   images: PromptImage[];
+  files?: string[];
   prepend?: boolean;
 };
 
@@ -97,7 +100,7 @@ export function useComposerController({
     onRevisionRef.current?.(
       key,
       partition.draft.revision,
-      Boolean(partition.draft.message.trim() || partition.draft.images.length),
+      Boolean(partition.draft.message.trim() || partition.draft.images.length || draftFiles(partition.draft).length),
     );
     onPendingRef.current?.(
       composerDraftKeyId(key),
@@ -184,6 +187,7 @@ export function useComposerController({
       expectedRevision: restoredDraft.expectedDraftRevision,
       message: restoredDraft.message,
       images: restoredDraft.images,
+      files: restoredDraft.files,
       prepend: restoredDraft.prepend,
     });
   }, [commit, draftKey, restoredDraft]);
@@ -192,8 +196,8 @@ export function useComposerController({
   const edit = useCallback((message: string) => {
     commit({ type: "edit", key: keyRef.current, message });
   }, [commit]);
-  const replace = useCallback((message: string, images: PromptImage[]) => {
-    commit({ type: "replace", key: keyRef.current, message, images });
+  const replace = useCallback((message: string, images: PromptImage[], files?: string[]) => {
+    commit({ type: "replace", key: keyRef.current, message, images, ...(files ? { files } : null) });
   }, [commit]);
   const clear = useCallback(() => {
     commit({ type: "clear", key: keyRef.current });
@@ -209,8 +213,9 @@ export function useComposerController({
       // Steer is meaningful only for the currently active Runtime. Normal
       // queued prompts capture their immutable ordinary target for navigation.
       ...(targetSessionId && delivery !== "steer" ? { targetSessionId } : null),
-      message: current.draft.message,
+      message: composePromptWithAttachedFiles(current.draft.message, draftFiles(current.draft)),
       images: [...current.draft.images],
+      files: [...draftFiles(current.draft)],
       revision: current.draft.revision,
       delivery,
     };

@@ -7,7 +7,9 @@ import {
 import type { PromptDelivery, PromptImage, SlashCommand } from "../../shared/types";
 import { useComposerController, type ComposerRestoredDraft } from "../hooks/use-composer-controller";
 import { composerDraftKeyId, type ComposerDraftKey } from "../state/composer";
-import { CloseIcon, FileSearchIcon, ImageIcon, PaperclipIcon, SendIcon } from "./Icons";
+import { MAX_COMPOSER_FILES, composePromptWithAttachedFiles, draftFiles } from "../state/composer";
+export { composePromptWithAttachedFiles };
+import { CloseIcon, FileIcon, FileSearchIcon, ImageIcon, PaperclipIcon, SendIcon } from "./Icons";
 
 const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 const COMPOSITION_END_ENTER_GRACE_MS = 100;
@@ -119,6 +121,11 @@ export function fileReferences(paths: string[]): string {
   return [...new Set(paths.map((path) => quoteWindowsPath(path)).filter(Boolean))].join(" ");
 }
 
+export function windowsFileName(path: string): string {
+  const clean = path.replace(/[\\/]+$/, "");
+  return clean.split(/[\\/]/).pop() || path;
+}
+
 export function windowsPathsFromText(text: string): string[] {
   return [...new Set(text.split(/\r?\n/).map(parsedWindowsPathLine).filter(Boolean))];
 }
@@ -164,7 +171,7 @@ export function commandMatches(value: string, commands: SlashCommand[]): SlashCo
   }).sort((a, b) => a.rank - b.rank || a.score - b.score || a.command.name.localeCompare(b.command.name)).slice(0, 9).map(({ command }) => command);
 }
 
-export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, placeholder, acceptsImages, imageInputPending = false, restoredDraft, onDraftRevisionChange, draftKey, forgottenComposerKeys = [], submissionScope, submissionTargetSessionId, allowFollowupSubmissions = true, submissionPaused = false, onSubmissionPendingChange, commands, controls, notices, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles = async () => [], onError }: {
+export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, placeholder, acceptsImages, imageInputPending = false, restoredDraft, onDraftRevisionChange, draftKey, forgottenComposerKeys = [], submissionScope, submissionTargetSessionId, allowFollowupSubmissions = true, submissionPaused = false, onSubmissionPendingChange, commands, controls, notices, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles = async () => [], onOpenLocalFile, onError }: {
   /** True when a submission will enter the local queue. */
   streaming: boolean;
   /** True only while Pi is actively generating and can be stopped. */
@@ -201,6 +208,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   onAbort: () => Promise<void>;
   onPickLocalFiles: () => Promise<string[]>;
   onReadClipboardFiles?: (files: Array<{ name: string; size: number }>) => Promise<string[]>;
+  onOpenLocalFile?: (path: string) => Promise<void>;
   onError: (message: string) => void;
 }) {
   const [dragging, setDragging] = useState(false);
@@ -240,6 +248,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   });
   const value = composer.draft.message;
   const images = composer.draft.images;
+  const files = draftFiles(composer.draft);
   const suggestions = useMemo(() => commandMatches(value, commands), [commands, value]);
   const invokedCommand = value.startsWith("/") ? commands.find((command) => command.name === value.slice(1).split(/\s/, 1)[0]) : undefined;
   const isExtensionCommand = invokedCommand?.source === "extension";
@@ -359,7 +368,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   const submit = (delivery: PromptDelivery = "queue") => {
     const current = composer.currentDraft();
     const message = current.message.trim();
-    if (!message && !current.images.length) return;
+    if (!message && !current.images.length && !draftFiles(current).length) return;
     if (delivery === "steer" && message.startsWith("/")) {
       onError("Slash 指令不能作为 Steer 消息发送");
       return;
@@ -393,25 +402,18 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     }
   };
 
-  const appendFileReferences = (paths: string[], expectedDraftKeyId?: string, selection?: { start: number; end: number }) => {
+  const attachFiles = (paths: string[], expectedDraftKeyId?: string) => {
     if (editorDisabledRef.current) return;
-    const references = fileReferences(paths);
-    if (!references) return;
+    const incoming = [...new Set(paths.map((path) => path.trim()).filter((path) => isWindowsAbsolutePath(path)))];
+    if (!incoming.length) return;
     const current = composer.currentDraft();
     if (expectedDraftKeyId && currentDraftKeyIdRef.current !== expectedDraftKeyId) return;
-    const textarea = textareaRef.current;
-    const start = Math.max(0, Math.min(selection?.start ?? textarea?.selectionStart ?? current.message.length, current.message.length));
-    const end = Math.max(start, Math.min(selection?.end ?? textarea?.selectionEnd ?? start, current.message.length));
-    const next = `${current.message.slice(0, start)}${references}${current.message.slice(end)}`;
-    composer.edit(next);
-    const draftKeyId = currentDraftKeyIdRef.current;
-    window.setTimeout(() => {
-      const input = textareaRef.current;
-      if (!input || currentDraftKeyIdRef.current !== draftKeyId || input.disabled) return;
-      const caret = start + references.length;
-      input.focus();
-      input.setSelectionRange(caret, caret);
-    }, 0);
+    const next = [...new Set([...draftFiles(current), ...incoming])];
+    if (next.length > MAX_COMPOSER_FILES) {
+      onError(`一次最多附加 ${MAX_COMPOSER_FILES} 个本地文件`);
+      return;
+    }
+    composer.replace(current.message, current.images, next);
   };
 
   const paste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
@@ -431,7 +433,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     const paths = [...new Set([...directPaths, ...textPaths])];
     if (paths.length) {
       event.preventDefault();
-      appendFileReferences(paths);
+      attachFiles(paths);
       return;
     }
     if (clipboardFiles.length || event.clipboardData.types.includes("Files")) {
@@ -440,7 +442,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
       const files = clipboardFiles.map((file) => ({ name: file.name, size: file.size }));
       void onReadClipboardFiles(files).then((nativePaths) => {
         if (currentDraftKeyIdRef.current !== draftKeyId || editorDisabledRef.current) return;
-        if (nativePaths.length) appendFileReferences(nativePaths, draftKeyId);
+        if (nativePaths.length) attachFiles(nativePaths, draftKeyId);
         else onError("无法取得文件的本地路径，请使用发送按钮旁的附件按钮选择本地文件");
       }).catch(() => {
         if (currentDraftKeyIdRef.current === draftKeyId && !editorDisabledRef.current)
@@ -461,7 +463,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
       const directPaths = ordinaryFiles.map((file) => (file as File & { path?: string }).path || "").filter(Boolean);
       const transferredPaths = windowsPathsFromText(event.dataTransfer.getData("text/uri-list") || event.dataTransfer.getData("text/plain"));
       const paths = [...new Set([...directPaths, ...transferredPaths])];
-      if (paths.length) appendFileReferences(paths);
+      if (paths.length) attachFiles(paths);
       else onError("浏览器未提供文件的绝对路径，请使用发送按钮旁的附件按钮选择本地文件");
     }
   };
@@ -471,14 +473,10 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     setAttachmentOpen(false);
     setPickingFiles(true);
     const targetDraftKeyId = currentDraftKeyIdRef.current;
-    const textarea = textareaRef.current;
-    const selection = textarea
-      ? { start: textarea.selectionStart, end: textarea.selectionEnd }
-      : undefined;
     composer.edit(composer.currentDraft().message);
     try {
       const paths = await onPickLocalFiles();
-      appendFileReferences(paths, targetDraftKeyId, selection);
+      attachFiles(paths, targetDraftKeyId);
       textareaRef.current?.focus();
     } catch (error) {
       onError(error instanceof Error ? error.message : String(error));
@@ -493,24 +491,34 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
       {composer.blocked && <div className="composer-submission-status is-failed" role="status">发送失败，草稿已恢复；{composer.blockedError || "修改后可重试"}</div>}
       <div className={`composer ${dragging ? "is-dragging" : ""}`} onDragOver={(event) => { event.preventDefault(); if (!editorDisabled) setDragging(true); }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }} onDrop={drop}>
         {!editorDisabled && suggestions.length > 0 && <div id={suggestionListId} className="command-suggestions" role="listbox" aria-label="Pi 指令联想">{suggestions.map((command, index) => <button id={`${suggestionListId}-option-${index}`} type="button" role="option" aria-selected={index === suggestionIndex} className={index === suggestionIndex ? "is-active" : ""} key={`${command.source}-${command.name}`} onMouseDown={(event) => event.preventDefault()} onClick={() => completeCommand(command)}><strong>/{command.name}</strong><span>{command.description || "Pi 指令"}</span><small>{command.source}</small></button>)}</div>}
-        {images.length > 0 && <div className="image-previews">{images.map((image, index) => <div className="image-preview" key={`${image.fileName}-${index}`}><img src={`data:${image.mimeType};base64,${image.data}`} alt={image.fileName || `图片 ${index + 1}`} /><button type="button" disabled={editorDisabled} onClick={() => { const current = composer.currentDraft(); composer.edit(current.message); composer.replace(current.message, current.images.filter((_, itemIndex) => itemIndex !== index)); }} aria-label={`移除 ${image.fileName || "图片"}`}><CloseIcon /></button><small>{image.fileName || "粘贴的图片"}</small></div>)}</div>}
+        {(images.length > 0 || files.length > 0) && <div className="composer-attachments" aria-label="附件">
+          {images.map((image, index) => <div className="image-preview" key={`${image.fileName}-${index}`}><img src={`data:${image.mimeType};base64,${image.data}`} alt={image.fileName || `图片 ${index + 1}`} /><button type="button" disabled={editorDisabled} onClick={() => { const current = composer.currentDraft(); composer.replace(current.message, current.images.filter((_, itemIndex) => itemIndex !== index), draftFiles(current)); }} aria-label={`移除 ${image.fileName || "图片"}`}><CloseIcon /></button><small>{image.fileName || "粘贴的图片"}</small></div>)}
+          {files.map((path) => <div className="file-attachment-card" key={path}>
+            <button type="button" className="file-attachment-open" disabled={editorDisabled} title={path} onClick={() => { void onOpenLocalFile?.(path).catch((error) => onError(error instanceof Error ? error.message : String(error))); }}>
+              <FileIcon className="file-attachment-icon" />
+              <strong>{windowsFileName(path)}</strong>
+              <small>本地文件</small>
+            </button>
+            <button type="button" className="file-attachment-remove" disabled={editorDisabled} aria-label={`移除 ${windowsFileName(path)}`} onClick={() => { const current = composer.currentDraft(); composer.replace(current.message, current.images, draftFiles(current).filter((item) => item !== path)); }}><CloseIcon /></button>
+          </div>)}
+        </div>}
         <textarea ref={textareaRef} value={value} onChange={(event) => composer.edit(event.target.value)} onPaste={paste} onKeyDown={keyDown} onCompositionStart={() => { composingRef.current = true; }} onCompositionEnd={() => { composingRef.current = false; lastCompositionEndAtRef.current = Date.now(); }} disabled={editorDisabled} rows={1} placeholder={editorDisabled ? disabledPlaceholder || "输入消息，或粘贴、拖入附件" : placeholder || (streaming ? "继续输入，发送后加入队列；输入 / 查看指令" : "输入消息，或粘贴、拖入附件")} aria-label="消息输入" aria-autocomplete="list" aria-expanded={suggestions.length > 0} aria-controls={suggestions.length > 0 ? suggestionListId : undefined} aria-activedescendant={suggestions.length > 0 ? `${suggestionListId}-option-${suggestionIndex}` : undefined} />
         <div className="composer-toolbar">
           <div className="composer-toolbar-controls">{controls}</div>
           <div className="composer-actions">
-            {streaming && <button type="button" className="queue-submit-button" disabled={(!value.trim() && !images.length) || editorDisabled || stopping} onClick={() => submit("queue")}>{isExtensionCommand ? "执行" : "排队"}</button>}
-            {activelyStreaming && !value.trimStart().startsWith("/") && <button type="button" className="steer-submit-button" disabled={(!value.trim() && !images.length) || editorDisabled || stopping} onClick={() => submit("steer")} title="在当前 assistant turn 的工具调用结束后、下一次模型调用前优先送达">Steer</button>}
+            {streaming && <button type="button" className="queue-submit-button" disabled={(!value.trim() && !images.length && !files.length) || editorDisabled || stopping} onClick={() => submit("queue")}>{isExtensionCommand ? "执行" : "排队"}</button>}
+            {activelyStreaming && !value.trimStart().startsWith("/") && <button type="button" className="steer-submit-button" disabled={(!value.trim() && !images.length && !files.length) || editorDisabled || stopping} onClick={() => submit("steer")} title="在当前 assistant turn 的工具调用结束后、下一次模型调用前优先送达">Steer</button>}
             <div className="attachment-control" ref={attachmentRef}>
               <button ref={attachmentButtonRef} type="button" className={`attachment-button ${attachmentOpen ? "is-open" : ""}`} disabled={editorDisabled || pickingFiles} onClick={() => attachmentOpen ? closeAttachmentMenu(true) : setAttachmentOpen(true)} title="添加附件" aria-label="添加附件" aria-haspopup="menu" aria-expanded={attachmentOpen}><PaperclipIcon /></button>
               {attachmentOpen && <div ref={attachmentMenuRef} className="attachment-menu" role="menu">
                 <button type="button" role="menuitem" disabled={imageAttachmentLimitReached} onClick={() => { setAttachmentOpen(false); composer.edit(composer.currentDraft().message); imageInputRef.current?.click(); }}><ImageIcon className="attachment-menu-icon" /><strong>图片</strong><small>{imageAttachmentHint}</small></button>
-                <button type="button" role="menuitem" disabled={pickingFiles} onClick={() => void pickFiles()}><FileSearchIcon className="attachment-menu-icon" /><strong>{pickingFiles ? "选择中…" : "本地文件"}</strong><small>引用 Windows 绝对路径</small></button>
+                <button type="button" role="menuitem" disabled={pickingFiles} onClick={() => void pickFiles()}><FileSearchIcon className="attachment-menu-icon" /><strong>{pickingFiles ? "选择中…" : "本地文件"}</strong><small>按需读取，不上传全文</small></button>
               </div>}
               <input ref={imageInputRef} className="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple onChange={(event) => { void addImages([...event.target.files || []]); event.target.value = ""; }} />
             </div>
             {activelyStreaming
               ? <button type="button" className="stop-button" disabled={disabled || stopping} onClick={() => void onAbort()} aria-label={stopping ? "正在停止" : "停止生成"} title={stopping ? "正在停止" : "停止生成"}><span aria-hidden="true" /></button>
-              : !streaming && <button type="button" className="send-button" disabled={(!value.trim() && !images.length) || editorDisabled || stopping} onClick={() => submit()} aria-label={isExtensionCommand ? "执行指令" : "发送消息"} title={isExtensionCommand ? "执行指令" : "发送消息"}><SendIcon /></button>}
+              : !streaming && <button type="button" className="send-button" disabled={(!value.trim() && !images.length && !files.length) || editorDisabled || stopping} onClick={() => submit()} aria-label={isExtensionCommand ? "执行指令" : "发送消息"} title={isExtensionCommand ? "执行指令" : "发送消息"}><SendIcon /></button>}
           </div>
         </div>
         {dragging && <div className="drop-hint">松开以添加附件</div>}

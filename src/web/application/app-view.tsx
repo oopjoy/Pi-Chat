@@ -447,6 +447,7 @@ export function AppView(host: Record<string, any>) {
           },
           onPickLocalFiles: async () => (await api.pickLocalFiles()).paths,
           onReadClipboardFiles: async (files: any) => (await api.clipboardLocalFiles(files)).paths,
+          onOpenLocalFile: async (path: string) => { await api.openLocalFile(path); },
           onError: setError,
           onAbort: stopGeneration,
         }}

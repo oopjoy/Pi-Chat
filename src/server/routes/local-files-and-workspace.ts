@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { resolve } from "node:path";
 import { stat } from "node:fs/promises";
 import { bodyJson, json, methodNotAllowed } from "../http-transport.js";
+import { openWithDefaultApplication, parsePickerOutput } from "../file-picker.js";
 
 export interface LocalFilesWorkspaceRouteHost {
   pickLocalFiles(): Promise<string[]>;
@@ -43,6 +44,21 @@ export async function handleLocalFilesWorkspaceRoute(
     }
     const body = await bodyJson(request);
     json(response, 200, { paths: await host.readClipboardFiles(clipboardFiles(body)) });
+    return true;
+  }
+  if (url.pathname === "/api/local-files/open") {
+    if (request.method !== "POST") {
+      methodNotAllowed(response);
+      return true;
+    }
+    const body = await bodyJson(request);
+    const path = typeof body.path === "string" ? body.path : "";
+    if (parsePickerOutput(JSON.stringify([path]))[0] !== path) {
+      json(response, 400, { error: "路径无效" });
+      return true;
+    }
+    await openWithDefaultApplication(path);
+    json(response, 200, { ok: true });
     return true;
   }
   if (url.pathname === "/api/workspace/draft-pick") {

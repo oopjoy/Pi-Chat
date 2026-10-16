@@ -25,6 +25,7 @@ import {
   clipboardWindowsPaths,
   fileReferences,
   isWindowsAbsolutePath,
+  windowsFileName,
   promptImageAdditionError,
   promptImagesByteLength,
   windowsPathsFromText,
@@ -145,6 +146,8 @@ test("attachment path helpers preserve Windows absolute paths without prompt boi
     "C:\\Users\\me\\paper.pdf",
     "D:\\notes\\data.csv",
   ]);
+  assert.equal(windowsFileName("C:\\papers\\abc.pdf"), "abc.pdf");
+  assert.equal(windowsFileName("D:\\notes\\My Notes\\paper.docx"), "paper.docx");
   assert.equal(fileReferences(["C:\\Users\\me\\paper.pdf"]), "C:\\Users\\me\\paper.pdf");
   assert.equal(fileReferences(["C:\\Users\\me\\My Notes\\paper.pdf"]), '"C:\\Users\\me\\My Notes\\paper.pdf"');
   assert.equal(

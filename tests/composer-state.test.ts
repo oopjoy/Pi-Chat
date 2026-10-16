@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   composerAcceptError,
+  composePromptWithAttachedFiles,
   composerDraftKeyId,
   composerPartition,
   composerPendingUsage,
@@ -15,7 +16,7 @@ const session = (sessionId: string): ComposerDraftKey => ({ kind: "session", ses
 const fresh = (generation: number): ComposerDraftKey => ({ kind: "new", generation });
 
 function snapshot(key: ComposerDraftKey, message: string): ComposerSnapshot {
-  return { key, message, images: [], revision: 1, delivery: "queue" };
+  return { key, message, images: [], files: [], revision: 1, delivery: "queue" };
 }
 
 test("Composer reducer partitions existing Sessions and New generations", () => {
@@ -171,5 +172,24 @@ test("Composer reducer prepends native dequeued Steers like Pi Alt+Up", () => {
   assert.equal(
     composerPartition(state, key).draft.message,
     "first Steer\n\nsecond Steer\n\ncurrent editor text",
+  );
+});
+
+test("Composer keeps attached files as cards and composes paths only at send time", () => {
+  const key = session("files");
+  let state = composerReducer(emptyComposerState(), {
+    type: "replace",
+    key,
+    message: "请阅读",
+    images: [],
+    files: ["C:\\papers\\a.pdf", "D:\\notes\\b.docx"],
+  });
+  state = composerReducer(state, { type: "edit", key, message: "请阅读这两份" });
+  const draft = composerPartition(state, key).draft;
+  assert.equal(draft.message, "请阅读这两份");
+  assert.deepEqual(draft.files, ["C:\\papers\\a.pdf", "D:\\notes\\b.docx"]);
+  assert.equal(
+    composePromptWithAttachedFiles(draft.message, draft.files),
+    "请阅读这两份\n\nC:\\papers\\a.pdf\nD:\\notes\\b.docx",
   );
 });
