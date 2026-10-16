@@ -65,6 +65,42 @@ test("collapsed process summaries expose compact tool context without terminal c
   assert.doesNotMatch(html, /Done|lines|行\)/);
 });
 
+test("process rows carry per-tool icons, thinking carries the bulb, and checks stay success-colored", () => {
+  const html = renderToStaticMarkup(createElement(ConversationProcess, {
+    entries: [
+      { kind: "thinking", text: "plan the edit" },
+      { kind: "tool", id: "bash-1", name: "bash", arguments: JSON.stringify({ command: "npm test" }), completed: true },
+      { kind: "tool", id: "intercom-1", name: "intercom", arguments: JSON.stringify({ action: "send", to: "peer" }), completed: true },
+      { kind: "tool", id: "edit-1", name: "edit", editDiff: { path: "src/app.ts", patch: "", additions: 1, deletions: 0 }, completed: true },
+      { kind: "tool", id: "web-1", name: "web_search", arguments: "{}", completed: true },
+      { kind: "tool", id: "mystery-1", name: "mcp_custom_thing", arguments: "{}", isError: true, result: "boom" },
+    ],
+  }));
+  assert.match(html, /process-thinking-icon/);
+  assert.match(html, /process-tool-icon/);
+  assert.match(html, /process-status-icon/);
+  assert.match(html, /process-status-icon is-error/);
+  assert.ok(html.indexOf("bash") >= 0 && html.indexOf("intercom") >= 0);
+});
+
+test("toolPresentation maps known tools to semantic families with a generic fallback", async () => {
+  const { toolFamily, toolPresentation } = await import("../src/web/lib/tool-presentation");
+  const known = ["bash", "powershell", "read", "edit", "write", "grep", "find", "intercom", "subagent", "web_search", "fetch", "image"];
+  const families = new Set(known.map((name) => toolFamily(name)));
+  assert.ok(families.size >= 6, "known tools spread across semantic families");
+  assert.equal(toolFamily("bash"), "terminal");
+  assert.equal(toolFamily("edit"), "mutation");
+  assert.equal(toolFamily("web_search"), "network");
+  // Future/extension tools join an existing family without new visual language.
+  assert.equal(toolFamily("shell_exec"), "terminal");
+  assert.equal(toolFamily("ripgrep"), "search");
+  assert.equal(toolFamily("http_fetch"), "network");
+  assert.equal(toolFamily("patch_file"), "mutation");
+  const generic = toolPresentation("mcp_unknown_tool");
+  assert.equal(generic.family, "generic");
+  assert.equal(toolPresentation("totally-new").icon, generic.icon);
+});
+
 test("tool summaries preserve Windows path names and keep the long-path filename", () => {
   const path = String.raw`C:\src\sessions\server.ts`;
   assert.equal(toolSummaryDetail({ kind: "tool", name: "read", arguments: JSON.stringify({ path }) }), "C:/src/sessions/server.ts");
@@ -90,7 +126,7 @@ test("thinking stays collapsed to a 思考 row while tool and edit entries keep 
     ],
   }));
   assert.match(html, /<details class="process-entry process-thinking"/);
-  assert.match(html, /<summary>思考<\/summary>/);
+  assert.match(html, /<summary><svg[^>]*class="process-thinking-icon"[\s\S]*?<\/svg><span>思考<\/span><\/summary>/);
   assert.match(html, /先读取项目结构/);
   assert.match(html, /<summary>.*read/);
   assert.match(html, /<summary>.*edit/);

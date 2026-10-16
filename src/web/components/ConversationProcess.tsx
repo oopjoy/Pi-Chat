@@ -1,8 +1,9 @@
 import { memo, Profiler, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { ProcessEntry } from "../lib/conversation-process";
 import { reactRenderBenchmarkEnabled, recordReactRenderBenchmarkCommit } from "../lib/benchmark-profiler";
-import { AlertIcon, CheckIcon, ChevronUpIcon } from "./Icons";
+import { AlertIcon, CheckIcon, ChevronUpIcon, LightbulbIcon, PencilIcon } from "./Icons";
 import { openEditDiffSidebar } from "../lib/edit-diff-events";
+import { toolPresentation } from "../lib/tool-presentation";
 import { compactEditPath } from "../lib/tool-edit-diff";
 import { MarkdownBody } from "./MarkdownBody";
 
@@ -210,9 +211,9 @@ function PersistentDetails({ disclosureKey, className, children, footerCollapse 
 }
 
 function ThinkingEntry({ text, disclosureKey }: { text: string; disclosureKey: string }) {
-  // Thinking stays a collapsible process step: collapsed it shows only "思考".
+  // Thinking stays a collapsible process step: collapsed it shows only the bulb + "思考".
   return <PersistentDetails className="process-entry process-thinking" disclosureKey={disclosureKey}>
-    <summary>思考</summary>
+    <summary><LightbulbIcon className="process-thinking-icon" /><span>思考</span></summary>
     <pre>{text}</pre>
   </PersistentDetails>;
 }
@@ -238,6 +239,7 @@ export const ConversationProcess = memo(function ConversationProcess({ entries, 
           return <div className={`process-entry process-tool process-edit-entry${entry.isError ? " is-error" : ""}`} key={entry.id || `tool-${index}`}>
             <button type="button" title={editDiff.path} disabled={!completed} onClick={() => { if (completed) openEditDiffSidebar(editDiff); }}>
               {entry.isError ? <AlertIcon className="process-status-icon is-error" /> : completed ? <CheckIcon className="process-status-icon" /> : <span className="process-status-icon is-running" aria-hidden="true" />}
+              <span className="process-tool-icon"><PencilIcon /></span>
               <span>edit</span>
               <strong>{name}</strong>
               <span className="process-edit-stats"><b>+{editDiff.additions}</b><i>-{editDiff.deletions}</i></span>
@@ -247,8 +249,9 @@ export const ConversationProcess = memo(function ConversationProcess({ entries, 
           </div>;
         }
         const toolKey = entry.id || `tool-${index}`;
+        const ToolIcon = toolPresentation(entry.name).icon;
         return <PersistentDetails className={`process-entry process-tool ${entry.isError ? "is-error" : ""}`} disclosureKey={`${disclosureKey}:${toolKey}`} key={toolKey}>
-          <summary><span className="process-summary-label">{entry.isError ? <AlertIcon className="process-status-icon is-error" /> : entry.completed ? <CheckIcon className="process-status-icon" /> : <span className="process-status-icon is-running" aria-hidden="true" />}{toolLabel(entry)}{toolSummaryDetail(entry) && <span className="process-tool-summary" title={toolSummary(entry)}>{toolSummaryDetail(entry)}</span>}</span></summary>
+          <summary><span className="process-summary-label">{entry.isError ? <AlertIcon className="process-status-icon is-error" /> : entry.completed ? <CheckIcon className="process-status-icon" /> : <span className="process-status-icon is-running" aria-hidden="true" />}<span className="process-tool-icon"><ToolIcon /></span>{toolLabel(entry)}{toolSummaryDetail(entry) && <span className="process-tool-summary" title={toolSummary(entry)}>{toolSummaryDetail(entry)}</span>}</span></summary>
           {(entry.arguments || entry.result) && <div className="process-tool-detail">
             {entry.arguments && <section><strong>调用参数</strong><pre>{entry.arguments}</pre></section>}
             {entry.result && <section><strong>{entry.isError ? "错误信息" : "结果"}</strong><pre>{entry.result}</pre></section>}

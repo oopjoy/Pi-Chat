@@ -584,7 +584,7 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .process-summary-label { display: flex; min-width: 0; align-items: center; gap: var(--space-2); overflow: hidden; }
 .process-summary-title { flex: 0 0 auto; }
 .process-tool-summary { min-width: 0; overflow: hidden; color: var(--muted); font-size: 11px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
-.process-status-icon { width: 15px; height: 15px; flex: 0 0 auto; color: var(--accent); }
+.process-status-icon { width: 15px; height: 15px; flex: 0 0 auto; color: var(--status-green); }
 .process-status-icon.is-error { color: var(--danger); }
 .process-status-icon.is-running {
   display: inline-block;
@@ -692,6 +692,10 @@ details.conversation-process { display: block; padding: 0; }
 .edit-tool-diff-note { margin: 0; padding: var(--space-3); color: var(--muted); font-size: 10px; }
 .process-entry pre { max-height: 340px; margin: 0; overflow: auto; padding: var(--space-3) 10px; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.62 ui-monospace, Consolas, monospace; }
 .process-thinking { border-color: transparent; background: transparent; }
+.process-thinking > summary { display: flex; align-items: center; gap: var(--space-2); }
+.process-thinking-icon { width: 13px; height: 13px; flex: 0 0 auto; color: var(--attention-soft); }
+.process-tool-icon { display: inline-grid; width: 15px; flex: 0 0 auto; place-items: center; color: var(--muted); }
+.process-tool-icon svg { width: 13px; height: 13px; }
 .process-thinking pre { padding: 5px 10px; }
 .process-note { padding: var(--space-1) var(--space-3); color: var(--muted); font-size: 12px; line-height: 1.6; }
 .process-note .markdown-body p { margin: .2em 0; }

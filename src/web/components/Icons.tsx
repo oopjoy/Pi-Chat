@@ -135,3 +135,23 @@ export function SearchIcon(props: IconProps) {
 export function PinIcon(props: IconProps) {
   return <LineIcon {...props}><path d="M8.5 4h7M10 4v5l-2 3v1.5h8V12l-2-3V4M12 13.5V21" /></LineIcon>;
 }
+
+export function TerminalIcon(props: IconProps) {
+  return <LineIcon {...props}><rect x="3.5" y="4.5" width="17" height="15" rx="2.5" /><path d="m7 9 3.2 3L7 15M12.5 15H17" /></LineIcon>;
+}
+
+export function MessagesIcon(props: IconProps) {
+  return <LineIcon {...props}><path d="M20 12.5a7.5 7.5 0 0 1-7.5 7.5H5.2L3.6 20.6A1.6 1.6 0 0 1 3 19.3v-6.8A7.5 7.5 0 0 1 10.5 5h2A7.5 7.5 0 0 1 20 12.5Z" /><path d="M8.5 9.5h6M8.5 12.5h4" /></LineIcon>;
+}
+
+export function PencilIcon(props: IconProps) {
+  return <LineIcon {...props}><path d="m14.5 5.5 4 4L8.5 19.5H4.5v-4Z" /><path d="m12.5 7.5 4 4" /></LineIcon>;
+}
+
+export function GlobeIcon(props: IconProps) {
+  return <LineIcon {...props}><circle cx="12" cy="12" r="8.3" /><path d="M3.7 12h16.6M12 3.7c-4.6 4.6-4.6 12 0 16.6 4.6-4.6 4.6-12 0-16.6Z" /></LineIcon>;
+}
+
+export function WrenchIcon(props: IconProps) {
+  return <LineIcon {...props}><path d="M14.2 6.3a4.4 4.4 0 0 0-5.9 5.4L4 16l4 4 4.3-4.3a4.4 4.4 0 0 0 5.4-5.9L14.5 13l-2.6-.7-.7-2.6Z" /></LineIcon>;
+}
