@@ -93,7 +93,7 @@ jobs:
         run: |
           $tag = $env:GITHUB_REF_NAME
           $output = Join-Path $env:RUNNER_TEMP "pi-chat-release-output"
-          $assets = @('pi-chat-setup.exe', 'pi-chat-setup.exe.sha256', 'pi-chat-setup.exe.manifest.json') | ForEach-Object { (Get-Item -LiteralPath (Join-Path $output $_)).FullName }
+          $assets = @((Get-Item -LiteralPath (Join-Path $output 'pi-chat-setup.exe')).FullName)
           if (-not $assets) { throw "No verified release assets were produced" }
           $notes = Join-Path $env:GITHUB_WORKSPACE "release-notes-$tag.md"
           $preview = $tag -match '^v\d+\.\d+\.\d+-setup-preview\.[a-f0-9]{12}$'
