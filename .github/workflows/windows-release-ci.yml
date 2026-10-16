@@ -80,6 +80,19 @@ jobs:
           if ($manifest.revision -ne $env:GITHUB_SHA) { throw "Manifest revision does not match the pushed commit" }
           if ($manifest.setup.sha256 -ne $hash) { throw "Manifest checksum does not match the Setup" }
           if (@(Get-ChildItem -LiteralPath $output -File).Count -ne 3) { throw "Expected one Setup and two sidecars only" }
+      - name: Package portable archive (version tags only)
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          if ($tag -notmatch '^v\d+\.\d+\.\d+$') { Write-Output "Skipping portable archive for $tag"; exit 0 }
+          $nodeTemp = (node -e "process.stdout.write(require('node:os').tmpdir())").TrimEnd('\')
+          $stage = Join-Path $nodeTemp "pi-chat-release-dist"
+          $output = Join-Path $nodeTemp "pi-chat-release-output"
+          node scripts/portable-package.mjs --staging $stage --output $output --tag $tag
+          if ($LASTEXITCODE -ne 0) { throw 'Portable packaging failed' }
+          $zip = Get-ChildItem -LiteralPath $output -Filter 'pi-chat-portable-*.zip' | Select-Object -First 1
+          if (-not $zip) { throw 'Portable archive was not produced' }
+          Write-Output ("Packaged " + $zip.Name + " (" + [math]::Round($zip.Length / 1MB, 1) + " MB)")
       - name: Upload verified release candidate
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
@@ -94,6 +107,8 @@ jobs:
           $tag = $env:GITHUB_REF_NAME
           $output = Join-Path $env:RUNNER_TEMP "pi-chat-release-output"
           $assets = @((Get-Item -LiteralPath (Join-Path $output 'pi-chat-setup.exe')).FullName)
+          $portable = Get-ChildItem -LiteralPath $output -Filter 'pi-chat-portable-*.zip' | Select-Object -First 1
+          if ($portable) { $assets = @($assets) + @($portable.FullName) }
           if (-not $assets) { throw "No verified release assets were produced" }
           $notes = Join-Path $env:GITHUB_WORKSPACE "release-notes-$tag.md"
           $preview = $tag -match '^v\d+\.\d+\.\d+-setup-preview\.[a-f0-9]{12}$'

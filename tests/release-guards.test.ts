@@ -8,11 +8,55 @@ import { promisify } from "node:util";
 import { assertCommittedLf } from "../scripts/check-committed-text.mjs";
 import { applicationPackageFiles } from "../scripts/setup-package.mjs";
 import { assertSetupArtifactName, assertReleaseIdentity, isSetupPreviewTag, packageRelease, releaseManifest, sha256File, writeArtifactChecksum } from "../scripts/release-package.mjs";
+import { assertPortableArtifactName, crc32, writeZip } from "../scripts/portable-package.mjs";
 
 const execFile = promisify(execFileCallback);
 const repositoryRoot = resolve(import.meta.dirname, "..");
 const runtime = { nodeVersion: "22.19.0", nodeArchiveSha256: "a".repeat(64), compilerVersion: "6.4.3" };
 const git = (args: string[], cwd = repositoryRoot) => spawnSync("git", args, { cwd, encoding: "utf8" });
+
+test("portable archive names stay versioned and basename-only", () => {
+  assert.equal(assertPortableArtifactName("pi-chat-portable-0.5.3.zip"), "pi-chat-portable-0.5.3.zip");
+  for (const invalid of ["pi-chat-portable.zip", "pi-chat-portable-0.5.3.exe", "pi-chat-portable-0.5.zip", "C:/temp/pi-chat-portable-0.5.3.zip", "../pi-chat-portable-0.5.3.zip", "pi-chat-portable-0.5.3.zip ", "pi-chat-setup.exe"]) {
+    assert.throws(() => assertPortableArtifactName(invalid), /pi-chat-portable-<version>\.zip/);
+  }
+});
+
+test("portable zip writer emits forward-slash entries with readable central directory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-portable-zip-"));
+  try {
+    const source = join(root, "src"), output = join(root, "out");
+    await mkdir(join(source, "web", "assets"), { recursive: true });
+    await mkdir(output, { recursive: true });
+    await writeFile(join(source, "web", "index.html"), "<html />");
+    await writeFile(join(source, "web", "assets", "app.js"), "export {}");
+    await writeFile(join(source, "README.md"), "readme\n");
+    const zipPath = join(output, "pi-chat-portable-0.5.3.zip");
+    await writeZip([
+      { path: join(source, "web", "index.html"), name: "web/index.html" },
+      { path: join(source, "web", "assets", "app.js"), name: "web/assets/app.js" },
+      { path: join(source, "README.md"), name: "README.md" },
+    ], zipPath);
+    const bytes = await readFile(zipPath);
+    // End of central directory: locate it and walk central headers for names.
+    const eocd = bytes.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+    assert.ok(eocd >= 0, "EOCD record present");
+    assert.equal(bytes.readUInt16LE(eocd + 10), 3, "entry count");
+    let cursor = bytes.readUInt32LE(eocd + 16);
+    const names: string[] = [];
+    for (let index = 0; index < 3; index += 1) {
+      assert.equal(bytes.readUInt32LE(cursor), 0x02014b50, "central header signature");
+      const nameLength = bytes.readUInt16LE(cursor + 28);
+      names.push(bytes.subarray(cursor + 46, cursor + 46 + nameLength).toString("utf8"));
+      cursor += 46 + nameLength + bytes.readUInt16LE(cursor + 30) + bytes.readUInt16LE(cursor + 32);
+    }
+    assert.deepEqual(names.sort(), ["README.md", "web/assets/app.js", "web/index.html"]);
+    assert.ok(names.every(name => !name.includes("\\")), "forward slashes only");
+    assert.equal(crc32(Buffer.from("123456789")), 0xcbf43926, "CRC-32 (ISO 3309) check value");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("release packaging emits only Setup names and path-free checksum records", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-release-guards-"));
@@ -128,6 +172,7 @@ test("branch CI and tag release CI are separated and every third-party action is
     if (name === "windows-release-ci.yml") {
       assert.match(source, /push:\n\s+tags:/); assert.match(source, /PI_CHAT_RELEASE_MODE: ["']?1/);
       assert.match(source, /pi-chat-setup.exe/); assert.doesNotMatch(source, /--clobber|Filter "\*\.zip"/);
+      assert.match(source, /pi-chat-portable-\*\.zip/); assert.match(source, /portable-package\.mjs --staging/);
       assert.match(source, /\$channelArgs = @\('--prerelease', '--latest=false'\)/);
       assert.match(source, /Preview tag must name the exact checked-out revision/);
     }

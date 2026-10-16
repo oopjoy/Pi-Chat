@@ -20,7 +20,7 @@ Pi Chat 连接本机 Pi RPC，负责聊天展示、Session 浏览、流式输出
 
 已有 [Pre-release](https://github.com/oopjoy/Pi-Chat/releases) 保留各自标签时的测试包，不随 main 原地更新。正式 [v0.5.2](https://github.com/oopjoy/Pi-Chat/releases/tag/v0.5.2) 仍是约 192 KB 的历史在线引导安装器，不会替换旧资产。
 
-后续 Release 只提供 **`pi-chat-setup.exe` 一个安装入口**，不再提供 Web EXE 或 portable ZIP（校验文件和构建清单不是额外安装包）。安装向导基于 Inno Setup，不依赖 Electron：
+版本 Release 提供两个产物：**`pi-chat-setup.exe`**（唯一安装入口）和 **`pi-chat-portable-<版本>.zip`**（便携包）。校验文件和构建清单只在 CI 内验证，不上传到 Release（它们不是额外安装包）。安装向导基于 Inno Setup，不依赖 Electron：
 
 1. EXE 已内置编译好的 Pi Chat 和固定版本的私有 Node Runtime（含 npm），**安装主体无需联网，也无需预装 Git、Node 或 npm**。
 2. 默认安装到 `%LOCALAPPDATA%\PiChat`，也可选择其他目录；安装完成及主快捷方式默认用系统默认浏览器打开 Web。安装根目录自动附带 `Pi Chat Web.lnk`，开始菜单另保留可选的 `Pi Chat PWA` 入口。
@@ -31,6 +31,10 @@ Pi Chat 连接本机 Pi RPC，负责聊天展示、Session 浏览、流式输出
 **正在运行的目标安装会拒绝覆盖升级和卸载**，不会强杀 Node/Pi。另一个目录的 Pi Chat 服务也不会被接管；如占用了 30170，请在原窗口安全关闭服务后再启动新安装。
 
 Inno Setup 自动记录安装日志；可用 `/LOG="D:\PiChat-setup.log"` 指定日志位置。可选 Pi 安装日志位于 `%TEMP%\pi-chat-pi-install.log`。卸载只移除应用、私有 Node 和该安装自己的配置，不删除 `~/.pi/agent` 中的 Pi、凭证、Skills 或会话。
+
+### 便携 ZIP（自备 Node 与 Pi 的跨平台部署）
+
+`pi-chat-portable-<版本>.zip` 只包含 Pi Chat 应用本体（Web + 编译后的服务端 + 运行时适配器）与 Windows 启动脚本，**不包含 Node 和 Pi**：适合解压即用或在没有安装器的系统上部署。Windows 下解压后使用 `start-pi-chat-ui.ps1` / `pi-chat-launch.cmd` 启动；Linux/macOS 在装好 Node 22.19+ 与 Pi 后运行 `node dist/server/server/index.js` 即可。文件选择器、资源管理器打开、Setup 管理 Pi 等 Windows 专属功能在非 Windows 上不可用；项目定位仍是 Windows-first，便携包不构成跨平台官方支持承诺。
 
 | 后续 Release 文件 | 用途 |
 |---|---|
