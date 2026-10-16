@@ -3,19 +3,44 @@ import { lstat, stat } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { basename, extname } from "node:path";
 
-const PICKER_SCRIPT = String.raw`
+/** Hidden TopMost owner so a background PowerShell dialog cannot sit behind the browser. */
+const DIALOG_OWNER_PREAMBLE = String.raw`
 Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+function New-PiChatDialogOwner {
+  $owner = New-Object System.Windows.Forms.Form
+  $owner.Text = 'Pi Chat'
+  $owner.TopMost = $true
+  $owner.ShowInTaskbar = $false
+  $owner.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedToolWindow
+  $owner.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
+  $owner.Location = New-Object System.Drawing.Point(-32000, -32000)
+  $owner.Size = New-Object System.Drawing.Size(1, 1)
+  [void]$owner.Show()
+  [void]$owner.Activate()
+  return $owner
+}
+`;
+
+const PICKER_SCRIPT = String.raw`
+` + DIALOG_OWNER_PREAMBLE + String.raw`
 $dialog = New-Object System.Windows.Forms.OpenFileDialog
 $dialog.Title = 'Pi Chat - Local file picker'
 $dialog.Multiselect = $true
 $dialog.CheckFileExists = $true
 $dialog.RestoreDirectory = $true
 $dialog.Filter = '所有文件 (*.*)|*.*'
-if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-  ConvertTo-Json -InputObject @($dialog.FileNames) -Compress
-} else {
-  '[]'
+$owner = New-PiChatDialogOwner
+try {
+  if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) {
+    ConvertTo-Json -InputObject @($dialog.FileNames) -Compress
+  } else {
+    '[]'
+  }
+} finally {
+  $owner.Close()
+  $owner.Dispose()
 }
 `;
 
@@ -81,7 +106,7 @@ public static class PiChatFolderPicker {
   [DllImport("user32.dll")]
   private static extern IntPtr GetForegroundWindow();
 
-  public static string Pick(string initialPath) {
+  public static string Pick(string initialPath, IntPtr parent) {
     IFileOpenDialog dialog = null;
     IShellItem initial = null;
     IShellItem selected = null;
@@ -97,7 +122,8 @@ public static class PiChatFolderPicker {
         SHCreateItemFromParsingName(initialPath, IntPtr.Zero, ref shellItemId, out initial);
         dialog.SetFolder(initial);
       }
-      if (dialog.Show(GetForegroundWindow()) < 0) return null;
+      if (parent == IntPtr.Zero) parent = GetForegroundWindow();
+      if (dialog.Show(parent) < 0) return null;
       dialog.GetResult(out selected);
       IntPtr value;
       selected.GetDisplayName(SIGDN_FILESYSPATH, out value);
@@ -111,8 +137,14 @@ public static class PiChatFolderPicker {
   }
 }
 '@
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$result = [PiChatFolderPicker]::Pick($env:PI_CHAT_PICKER_INITIAL)
+` + DIALOG_OWNER_PREAMBLE + String.raw`
+$owner = New-PiChatDialogOwner
+try {
+  $result = [PiChatFolderPicker]::Pick($env:PI_CHAT_PICKER_INITIAL, $owner.Handle)
+} finally {
+  $owner.Close()
+  $owner.Dispose()
+}
 if ($null -eq $result) { 'null' } else { ConvertTo-Json -InputObject $result -Compress }
 `;
 

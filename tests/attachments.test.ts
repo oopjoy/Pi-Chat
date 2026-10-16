@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { EventEmitter } from "node:events";
 import { createServer } from "node:http";
 import test from "node:test";
@@ -129,6 +130,14 @@ test("file attachments stay drive-only while workspaces accept canonical WSL UNC
   failed.stderr.emit("data", "x".repeat(32 * 1024));
   failed.emit("exit", 1);
   await assert.rejects(failure, (error: Error) => error.message.length <= 16 * 1024);
+});
+
+test("Windows pickers own a TopMost dialog so they cannot open behind the browser", async () => {
+  const source = await readFile(new URL("../src/server/file-picker.ts", import.meta.url), "utf8");
+  assert.match(source, /\$owner\.TopMost = \$true/);
+  assert.match(source, /\$dialog\.ShowDialog\(\$owner\)/);
+  assert.match(source, /PiChatFolderPicker]::Pick\(\$env:PI_CHAT_PICKER_INITIAL, \$owner\.Handle\)/);
+  assert.doesNotMatch(source, /\$dialog\.ShowDialog\(\) -eq/);
 });
 
 test("attachment path helpers preserve Windows absolute paths without prompt boilerplate", () => {
