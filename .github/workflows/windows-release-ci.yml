@@ -125,11 +125,11 @@ jobs:
             $channelArgs = @('--prerelease=false')
             $title = "Pi Chat $tag"
           }
-          if (Test-Path -LiteralPath $notes) {
-            $notesArgs = @('--notes-file', $notes)
-          } else {
-            $notesArgs = @('--generate-notes')
+          if (-not (Test-Path -LiteralPath $notes)) {
+            if ($preview) { throw 'Preview release requires release-notes-setup-preview.md' }
+            throw "Stable release requires release-notes-$tag.md"
           }
+          $notesArgs = @('--notes-file', $notes)
           gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
           if ($LASTEXITCODE -eq 0) {
             throw "Release already exists; published assets are immutable. Use a new tag."

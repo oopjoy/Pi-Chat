@@ -173,6 +173,7 @@ test("branch CI and tag release CI are separated and every third-party action is
       assert.match(source, /push:\n\s+tags:/); assert.match(source, /PI_CHAT_RELEASE_MODE: ["']?1/);
       assert.match(source, /pi-chat-setup.exe/); assert.doesNotMatch(source, /--clobber|Filter "\*\.zip"/);
       assert.match(source, /pi-chat-portable-\*\.zip/); assert.match(source, /portable-package\.mjs --staging/);
+      assert.match(source, /Stable release requires release-notes-\$tag\.md/); assert.doesNotMatch(source, /--generate-notes/);
       assert.match(source, /\$channelArgs = @\('--prerelease', '--latest=false'\)/);
       assert.match(source, /Preview tag must name the exact checked-out revision/);
     }
