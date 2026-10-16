@@ -101,10 +101,9 @@ test("sidebar renders directory hierarchy, status description, and session actio
     open: true,
     width: 320,
     newDisabled: false,
-    refreshDisabled: false,
     restartDisabled: false,
+    shutdownDisabled: false,
     viewBusy: false,
-    refreshing: false,
     pinnedSessionIds: [],
     pinnedDirectoryKeys: [],
     collapsedDirectoryKeys: [],
@@ -112,7 +111,7 @@ test("sidebar renders directory hierarchy, status description, and session actio
     failedSessionIds: [],
     unseenReplySessionIds: [],
     mutatingSessionIds: [],
-    onClose() {}, onCollapse() {}, onNew() {}, onRefresh() {}, onLoadAllSessions() {}, onLoadDirectory() {}, onRestart() {}, onView() {}, onTogglePin() {}, onToggleDirectoryPin() {}, onSetDirectoryCollapsed() {}, onRename() {}, onDelete() {}, onWidthChange() {},
+    onClose() {}, onCollapse() {}, onNew() {}, onLoadAllSessions() {}, onLoadDirectory() {}, onRestart() {}, onShutdown() {}, onView() {}, onTogglePin() {}, onToggleDirectoryPin() {}, onSetDirectoryCollapsed() {}, onRename() {}, onDelete() {}, onWidthChange() {},
   }));
 
   assert.match(html, /<section class="session-directory"[^>]*aria-label="c:\/work，1 个对话"/);

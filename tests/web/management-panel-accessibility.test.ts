@@ -27,6 +27,7 @@ function panelProps(models: Array<{ id: string; name: string; provider: string; 
     onModel: () => {},
     onModelsChanged,
     onExportDiagnostics: async () => {},
+    onRestart: () => {},
     onShutdown: () => {},
   };
 }
@@ -93,6 +94,7 @@ test("Settings navigation and Provider disclosure use native non-nested controls
       onModel: () => {},
       onModelsChanged: () => {},
       onExportDiagnostics: async () => {},
+      onRestart: () => {},
       onShutdown: () => {},
     })));
 

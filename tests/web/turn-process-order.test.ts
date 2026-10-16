@@ -60,7 +60,7 @@ test("busy view refresh cannot move a dispatched user into the preceding process
     // JSONL now includes the previous turn's late tools/final; the new User's
     // receipt is not in the view yet, but its next assistant SSE already is.
     messages = [oldUser, early, late, final, next];
-    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="刷新会话列表"]')!.click());
+    await act(async () => window.dispatchEvent(new Event("pageshow")));
     assert.ok(bootstrapCalls > 1, "manual refresh consumed the new authoritative snapshot");
     const processes = [...document.querySelectorAll<HTMLElement>(".conversation-process")];
     assert.equal(processes.length, 2);
@@ -76,7 +76,7 @@ test("busy view refresh cannot move a dispatched user into the preceding process
 
     messages = [oldUser, early, late, final, { role: "user", content: queued.message, timestamp: now + 45000, piChatPersistedMessageId: "next-user:0" }, next];
     turns = 2;
-    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="刷新会话列表"]')!.click());
+    await act(async () => window.dispatchEvent(new Event("pageshow")));
     assert.equal(userRows().filter(row => row.textContent?.includes("NEW_REQUEST")).length, 1);
     assert.equal(document.querySelectorAll(".conversation-process").length, 2);
   } finally {

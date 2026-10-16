@@ -414,9 +414,7 @@ test("a lost prompt acknowledgement after a same-session refresh keeps its user 
     // A user refresh commits a newer revision of the same Session while the
     // browser still waits for the prompt HTTP acknowledgement.
     await act(async () => {
-      dom.window.document
-        .querySelector<HTMLButtonElement>(".refresh-chat")!
-        .click();
+      dom.window.dispatchEvent(new dom.window.Event("pageshow"));
       await Promise.resolve();
       await Promise.resolve();
     });

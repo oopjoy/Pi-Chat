@@ -202,8 +202,15 @@ export function AppView(host: Record<string, any>) {
         width={sidebarWidth}
         onWidthChange={setSidebarWidth}
         newDisabled={mutationBlocked}
-        refreshDisabled={loading || refreshing}
         restartDisabled={
+          loading ||
+          busy ||
+          refreshing ||
+          (buildIdentityMismatch
+            ? recoveryActionBlocked
+            : globalMutationBlocked)
+        }
+        shutdownDisabled={
           loading ||
           busy ||
           refreshing ||
@@ -213,7 +220,6 @@ export function AppView(host: Record<string, any>) {
         }
         copyDisabled={mutationBlocked}
         viewBusy={sidebarViewBlocked}
-        refreshing={refreshing}
         pinnedSessionIds={sessionNavigation.pinnedSessionIds}
         pinnedDirectoryKeys={sessionNavigation.pinnedDirectoryKeys}
         collapsedDirectoryKeys={sessionNavigation.collapsedDirectoryKeys}
@@ -226,12 +232,12 @@ export function AppView(host: Record<string, any>) {
         onClose={() => setSidebarOpen(false)}
         onCollapse={() => setSidebarOpen(false)}
         onNew={() => void createSession()}
-        onRefresh={() => void refreshManually()}
         onLoadAllSessions={() => void loadAllSessions()}
         onLoadDirectory={(cwd: any, offset: any) =>
           void loadDirectorySessions(cwd, offset)
         }
         onRestart={() => void restartPi()}
+        onShutdown={() => void shutdownPiChat()}
         onView={(id: any) => {
           if (window.matchMedia?.("(max-width: 760px)").matches)
             setSidebarOpen(false);
@@ -492,6 +498,7 @@ export function AppView(host: Record<string, any>) {
         }}
         onRuntimeSetup={openRuntimeSetup}
         onExportDiagnostics={exportStateDiagnostics}
+        onRestart={() => void restartPi()}
         onShutdown={() => void shutdownPiChat()}
       />
       </Suspense>}

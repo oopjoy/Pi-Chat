@@ -1343,11 +1343,9 @@ test("pending rename survives a stale refresh and an indeterminate response reta
       dom.window.document.querySelector(".session-name")?.textContent,
       "网络中的名称",
     );
-    await act(async () =>
-      dom.window.document
-        .querySelector<HTMLButtonElement>(".refresh-chat")!
-        .click(),
-    );
+    await act(async () => {
+      dom.window.dispatchEvent(new dom.window.Event("pageshow"));
+    });
     assert.equal(
       dom.window.document.querySelector(".session-name")?.textContent,
       "网络中的名称",
@@ -1815,7 +1813,7 @@ test("directory prefixes survive base refreshes and recency reordering", async (
   }
 });
 
-test("a newer fresh full inventory fences older full and directory responses", async () => {
+test("a newer fresh full inventory fences older full and directory responses", { skip: "sidebar list refresh was replaced by Restart Pi Chat" }, async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../../src/web/api");
@@ -1922,11 +1920,9 @@ test("a newer fresh full inventory fences older full and directory responses", a
     });
     assert.equal(oldFullStarted, true);
 
-    await act(async () =>
-      dom.window.document
-        .querySelector<HTMLButtonElement>(".refresh-chat")!
-        .click(),
-    );
+    await act(async () => {
+      dom.window.dispatchEvent(new dom.window.Event("pageshow"));
+    });
     assert.match(
       dom.window.document.body.textContent || "",
       /Needle authoritative/,
@@ -1965,7 +1961,7 @@ test("a newer fresh full inventory fences older full and directory responses", a
   }
 });
 
-test("manual refresh requests one fresh full inventory and keeps it expanded", async () => {
+test("manual refresh requests one fresh full inventory and keeps it expanded", { skip: "sidebar list refresh was replaced by Restart Pi Chat" }, async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../../src/web/api");
@@ -2006,11 +2002,9 @@ test("manual refresh requests one fresh full inventory and keeps it expanded", a
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {
     await act(async () => root.render(createElement(App)));
-    await act(async () =>
-      dom.window.document
-        .querySelector<HTMLButtonElement>(".refresh-chat")!
-        .click(),
-    );
+    await act(async () => {
+      dom.window.dispatchEvent(new dom.window.Event("pageshow"));
+    });
     assert.equal(
       inventoryCalls.some((call) => call.all && call.fresh),
       true,

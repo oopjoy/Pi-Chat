@@ -119,7 +119,7 @@ test("queued turn process ownership survives a busy refresh and a reload", { tag
   await expect(page.locator(".prompt-queue article")).toHaveCount(1);
   await expect(page.locator(".message-user")).toHaveCount(1);
   phase = 1; // Complete queue snapshot proves dispatch; JSONL User echo is still missing.
-  await page.getByRole("button", { name: "刷新会话列表", exact: true }).click();
+  await page.evaluate(() => window.dispatchEvent(new Event("pageshow")));
   const processes = page.locator(".conversation-process");
   await expect(processes).toHaveCount(2);
   await expect(processes.nth(0)).toContainText("OLD_EARLY_WORK");
@@ -725,7 +725,7 @@ test("long Runtime notice remains in flow above an unobscured Composer", { tag: 
     contentType: "application/json",
     body: JSON.stringify({ error: longNotice }),
   }));
-  await page.getByRole("button", { name: "刷新会话列表" }).click();
+  await page.evaluate(() => window.dispatchEvent(new Event("pageshow")));
   const notice = page.locator(".app-toast.error");
   const composer = page.locator(".composer");
   await expect(notice).toBeVisible();

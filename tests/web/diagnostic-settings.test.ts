@@ -31,6 +31,7 @@ test("Settings exposes one export-only diagnostic action", async () => {
       onPickWorkspace: () => {},
       onModel: () => {},
       onExportDiagnostics: async () => { calls.push("export"); },
+      onRestart: () => {},
       onShutdown: () => {},
     })));
     const button = (label: string) => [...dom.window.document.querySelectorAll("button")]
@@ -84,6 +85,7 @@ test("Settings About panel shows build diagnostics and checks GitHub releases on
       onPickWorkspace: () => {},
       onModel: () => {},
       onExportDiagnostics: async () => {},
+      onRestart: () => {},
       onShutdown: () => {},
     })));
     const button = (label: string) => [...dom.window.document.querySelectorAll("button")]
