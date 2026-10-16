@@ -197,7 +197,7 @@ body.sidebar-resizing .sidebar { transition: none; will-change: auto; }
 .brand-mark svg { display: block; width: 100%; height: 100%; }
 .welcome-mark svg { display: block; width: 100%; height: 100%; }
 .brand-row strong { overflow: hidden; font-size: 15px; letter-spacing: .01em; text-overflow: ellipsis; white-space: nowrap; }
-.new-chat, .restart-pi {
+.new-chat {
   min-height: 40px;
   border: 1px solid color-mix(in srgb, var(--accent), transparent 45%);
   border-radius: var(--radius-md);
@@ -210,10 +210,11 @@ body.sidebar-resizing .sidebar { transition: none; will-change: auto; }
 .new-chat svg { width: 18px; height: 18px; }
 .restart-pi, .shutdown-pi { display: grid; width: 40px; min-height: 40px; place-items: center; padding: 0; }
 .restart-pi svg, .shutdown-pi svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; }
-.restart-pi { border: 1px solid var(--line-strong); border-radius: var(--radius-md); background: var(--surface); color: var(--text); cursor: pointer; }
+.restart-pi { border: 1px solid color-mix(in srgb, var(--status-yellow), transparent 50%); border-radius: var(--radius-md); background: color-mix(in srgb, var(--status-yellow), transparent 90%); color: var(--status-yellow); cursor: pointer; }
+.restart-pi:hover:not(:disabled) { border-color: var(--status-yellow); }
 .shutdown-pi { border: 1px solid color-mix(in srgb, var(--danger), transparent 60%); border-radius: var(--radius-md); background: color-mix(in srgb, var(--danger), transparent 92%); color: var(--danger); cursor: pointer; }
 .shutdown-pi:hover:not(:disabled) { border-color: var(--danger); }
-.new-chat:hover:not(:disabled), .restart-pi:hover:not(:disabled) { border-color: var(--accent); }
+.new-chat:hover:not(:disabled) { border-color: var(--accent); }
 button:disabled { cursor: not-allowed; opacity: .56; }
 .session-heading { display: flex; justify-content: space-between; padding: var(--space-5) var(--space-3) var(--space-2); color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .04em; }
 .session-search { position: relative; display: block; margin: 0 4px var(--space-3); }
@@ -886,8 +887,8 @@ details.conversation-process { display: block; padding: 0; }
 .settings-nav button.is-active { background: var(--accent-soft); color: var(--accent); }
 .settings-nav button.is-active::before { position: absolute; top: 9px; bottom: 9px; left: 4px; width: 2px; border-radius: 2px; background: var(--accent); content: ""; }
 .settings-lifecycle { display: grid; gap: 6px; margin-top: auto; }
-.settings-restart { min-height: 37px !important; border: 1px solid var(--line-strong) !important; background: var(--surface) !important; color: var(--text) !important; font-weight: 650 !important; }
-.settings-restart:hover:not(:disabled) { border-color: var(--accent) !important; color: var(--accent) !important; }
+.settings-restart { min-height: 37px !important; border: 1px solid color-mix(in srgb, var(--status-yellow), transparent 50%) !important; background: color-mix(in srgb, var(--status-yellow), transparent 90%) !important; color: var(--status-yellow) !important; font-weight: 650 !important; }
+.settings-restart:hover:not(:disabled) { border-color: var(--status-yellow) !important; }
 .settings-shutdown { min-height: 37px !important; border: 1px solid color-mix(in srgb, var(--danger), transparent 58%) !important; background: color-mix(in srgb, var(--danger), transparent 95%) !important; color: var(--danger) !important; font-weight: 650 !important; }
 .settings-shutdown:hover:not(:disabled) { border-color: color-mix(in srgb, var(--danger), transparent 36%) !important; background: color-mix(in srgb, var(--danger), transparent 90%) !important; }
 .settings-content { min-width: 0; overflow-y: auto; scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--muted), transparent 48%) transparent; }
