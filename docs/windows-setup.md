@@ -16,10 +16,11 @@ the payload into `~/.pi/agent/install` and is never upgraded in place.
 
 - Per-user installation; no administrator privilege, Electron or browser bundle.
 - Default `%LOCALAPPDATA%\PiChat`; the destination page supports other paths.
-- The finished page, primary Start-menu entry and Desktop entries default to
-  Web in the system default browser. The install root also contains a tracked
-  `Pi Chat Web.lnk`; optional `Pi Chat PWA` remains in the Start menu. Browser
-  install-as-app/profile setup is not performed by the installer.
+- The finished page, Start-menu `Pi Chat`, and the desktop `Pi Chat Web` shortcut
+  default to Web in the system default browser. Setup no longer creates a desktop
+  `Pi Chat` icon and deletes that leftover on upgrade. The install root also
+  contains a tracked `Pi Chat Web.lnk`; optional `Pi Chat PWA` remains in the
+  Start menu. Browser install-as-app/profile setup is not performed by the installer.
 - Existing Pi is detected and reused without upgrade or credential/config copy.
 - Missing Pi is seeded from the bundled 1.3.0 snapshot (offline, including silent
   mode) into the managed install layout. Copy failure leaves the application

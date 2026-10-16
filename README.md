@@ -23,7 +23,7 @@ Pi Chat 连接本机 Pi RPC，负责聊天展示、Session 浏览、流式输出
 版本 Release 提供两个产物：**`pi-chat-setup.exe`**（唯一安装入口）和 **`pi-chat-portable-<版本>.zip`**（便携包）。校验文件和构建清单只在 CI 内验证，不上传到 Release（它们不是额外安装包）。安装向导基于 Inno Setup，不依赖 Electron：
 
 1. EXE 已内置编译好的 Pi Chat、私有 **Node.js 24.22.0 LTS** Runtime（含 npm），以及一份 **Pi 1.3.0** 后备快照。**安装主体无需联网**，也无需预装 Git、Node、npm 或 Pi。
-2. 默认安装到 `%LOCALAPPDATA%\PiChat`，也可选择其他目录；安装完成及主快捷方式默认用系统默认浏览器打开 Web。安装根目录自动附带 `Pi Chat Web.lnk`，开始菜单另保留可选的 `Pi Chat PWA` 入口。
+2. 默认安装到 `%LOCALAPPDATA%\PiChat`，也可选择其他目录；安装完成及主快捷方式默认用系统默认浏览器打开 Web。桌面只放 **Pi Chat Web**；安装根目录自动附带 `Pi Chat Web.lnk`，开始菜单另保留可选的 `Pi Chat PWA` 入口。升级时会删除旧版桌面上的重复 **Pi Chat** 图标（不会动 **Pi Chat Git**）。
 3. 启动时优先使用本机 Node 22.19+；本机没有或版本过低时改用安装包内的 Node 24.22.0，并提示原因。
 4. 检测到现有 Pi 时优先直接复用，不升级它、不复制模型凭证、配置、Skills 或 JSONL。本机没有 Pi 时离线展开包内的 1.3.0 到 managed 布局（`~/.pi/agent/install`），失败也不撤销应用安装。
 5. 完成页可启动 Pi Chat。没有模型凭证时仍需通过 Pi 完成登录或配置 Provider。
@@ -118,7 +118,7 @@ Pi Chat 默认只监听本机回环地址，关闭浏览器窗口不会停止本
 
 ### 没有安装 Pi 时会发生什么？
 
-双击或运行 `start-pi-chat.cmd`、`pi-chat-launch.cmd`、桌面 **Pi Chat / Pi Chat Web** 时：
+双击或运行 `start-pi-chat.cmd`、`pi-chat-launch.cmd`、桌面 **Pi Chat Web** 时：
 
 1. 启动器先尝试用 **Node** 启动本机 `http://127.0.0.1:30170` 服务；
 2. 服务先开放 Session JSONL 浏览，再在启动时一次性解析并冻结全局 Pi identity，随后使用该安装的 `rpc-entry.js` 启动独立 RPC 并验证协议能力；
@@ -253,7 +253,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-shortc
 
 | 名称 | 行为与位置 |
 |---|---|
-| **Pi Chat / Pi Chat Web** | Setup 安装版的 Web 入口；由安装器管理，与 Git 源码入口分开 |
+| **Pi Chat Web** | Setup 安装版的桌面 Web 入口；由安装器管理，与 Git 源码入口分开。开始菜单仍有 **Pi Chat** |
 | **Pi Chat PWA** | Setup 安装版的可选 PWA 入口；不作为默认打开方式 |
 | **Pi Chat Git** | 上述源码脚本生成的 Web 入口；桌面、独立的开始菜单 `Pi Chat Git` 组及 Git 项目根目录 |
 | **Pi Chat Git PWA** | Git 源码版的可选 PWA 入口；仅在独立的开始菜单组中 |
@@ -274,7 +274,7 @@ Pi Chat 不提供 Todo 功能，也不会安装或管理 Todo Extension。历史
 
 Pi Chat 默认用普通 Web 打开，同时保留可选 PWA 入口。PWA 是浏览器的站点安装/独立窗口能力，不是第二套 Pi Chat 安装包或 Runtime；本项目不会替你安装浏览器、登录账号或创建浏览器应用配置。启动服务后，用 Edge 或 Chrome 打开 `http://127.0.0.1:30170`，在浏览器菜单中选择“应用 / Apps → 将此站点安装为应用（Install this site as an app）”。
 
-通过浏览器完成站点安装后，可以从浏览器生成的图标启动独立 Pi Chat 窗口，不显示地址栏、标签页、书签栏或浏览器导航；普通 Web 访问仍然可用。Pi Chat 的可选 `Pi Chat PWA` 入口保留既有 Edge 打开方式，依赖本机对应的浏览器应用配置；新电脑建议先用 Web 打开，再按需在浏览器中安装。该模式不使用 Service Worker，避免本地更新后被旧前端缓存遮挡。关闭最后一个浏览器/PWA 窗口不会停止本地服务；刷新、BFCache、网络/SSE 断线以及测试或临时浏览器退出都不会让 Pi Chat 离线。需要停止服务时，请使用设置中的“关闭 Pi Chat”显式关闭；可通过桌面的 **Pi Chat** / **Pi Chat Web** 再次打开窗口。源码工作目录需在停服后显式执行 `npm run build` 才会应用本地改动，启动器不自动构建；完整 Setup 已内置编译产物和私有 Node，不需要系统 npm、源码或构建工具即可启动。
+通过浏览器完成站点安装后，可以从浏览器生成的图标启动独立 Pi Chat 窗口，不显示地址栏、标签页、书签栏或浏览器导航；普通 Web 访问仍然可用。Pi Chat 的可选 `Pi Chat PWA` 入口保留既有 Edge 打开方式，依赖本机对应的浏览器应用配置；新电脑建议先用 Web 打开，再按需在浏览器中安装。该模式不使用 Service Worker，避免本地更新后被旧前端缓存遮挡。关闭最后一个浏览器/PWA 窗口不会停止本地服务；刷新、BFCache、网络/SSE 断线以及测试或临时浏览器退出都不会让 Pi Chat 离线。需要停止服务时，请使用设置中的“关闭 Pi Chat”显式关闭；可通过桌面的 **Pi Chat Web** 再次打开窗口。源码工作目录需在停服后显式执行 `npm run build` 才会应用本地改动，启动器不自动构建；完整 Setup 已内置编译产物和私有 Node，不需要系统 npm、源码或构建工具即可启动。
 
 ## 构建与运行
 

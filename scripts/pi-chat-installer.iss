@@ -31,7 +31,7 @@ RestartIfNeededByRun=no
 SetupLogging=yes
 
 [Tasks]
-Name: desktopicon; Description: "Create desktop Web shortcuts"; GroupDescription: "Shortcuts:"
+Name: desktopicon; Description: "Create a desktop Web shortcut"; GroupDescription: "Shortcuts:"
 
 [Files]
 Source: "{#PayloadRoot}\app\*"; DestDir: "{app}\app"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -43,14 +43,13 @@ Source: "{#PayloadRoot}\app\scripts\pi-chat-setup.ps1"; Flags: dontcopy
 ; Retire only known legacy entry points, never an arbitrary application tree.
 Type: files; Name: "{app}\app\pi-chat-setup.cmd"
 Type: files; Name: "{app}\app\scripts\pi-chat-uninstall.ps1"
+Type: files; Name: "{autodesktop}\Pi Chat.lnk"
 
 [Icons]
 Name: "{group}\Pi Chat"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\app\start-pi-chat-ui.ps1"" web"; WorkingDir: "{app}\app"; IconFilename: "{app}\app\resources\icons\pi-chat.ico"
 Name: "{group}\Pi Chat Web"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\app\start-pi-chat-ui.ps1"" web"; WorkingDir: "{app}\app"; IconFilename: "{app}\app\resources\icons\pi-chat.ico"
 Name: "{group}\Pi Chat PWA"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\app\start-pi-chat-ui.ps1"" pwa"; WorkingDir: "{app}\app"; IconFilename: "{app}\app\resources\icons\pi-chat.ico"
 Name: "{app}\Pi Chat Web"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\app\start-pi-chat-ui.ps1"" web"; WorkingDir: "{app}\app"; IconFilename: "{app}\app\resources\icons\pi-chat.ico"
-Name: "{autodesktop}\Pi Chat"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\app\start-pi-chat-ui.ps1"" web"; WorkingDir: "{app}\app"; IconFilename: "{app}\app\resources\icons\pi-chat.ico"; Tasks: desktopicon
-
 Name: "{autodesktop}\Pi Chat Web"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\app\start-pi-chat-ui.ps1"" web"; WorkingDir: "{app}\app"; IconFilename: "{app}\app\resources\icons\pi-chat.ico"; Tasks: desktopicon
 
 [Run]

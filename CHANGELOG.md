@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Setup no longer creates a desktop `Pi Chat` shortcut (it duplicated Web and looked like the old PWA). Desktop keeps `Pi Chat Web` only; an upgrade deletes the leftover desktop `Pi Chat.lnk` and never touches `Pi Chat Git`.
+
 ## v0.5.3 (2026-10-16)
 
 ### Private Node runtime and bundled Pi fallback
