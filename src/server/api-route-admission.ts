@@ -75,7 +75,6 @@ export function apiRouteAdmission(request: IncomingMessage, url: URL): ApiRouteA
   ].includes(url.pathname)
     || url.pathname.startsWith("/api/resources/")
     || url.pathname === "/api/models"
-    || url.pathname === "/api/models/preferences"
     || /^\/api\/models\/[A-Za-z0-9._-]{1,80}\//.test(url.pathname)
     || /^\/api\/sessions\/[a-f0-9]{20}\/viewing$/.test(url.pathname);
   return { bodyBeforeMutationLease: false, validateSessionId: false, ordinaryMutation: !excluded };

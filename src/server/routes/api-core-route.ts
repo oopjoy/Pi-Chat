@@ -606,7 +606,6 @@ export async function handleApiCoreRoute(
         customModelService: () => host.customModelManagementService(),
         runtimeSettingsService: () => host.runtimeSettingsService(),
         beginPromptAdmission: (sessionId: any) => host.beginPromptAdmission(sessionId),
-        preferencesService: () => host.modelPreferencesStore(),
       }, request, response, url, preparedBody)
     ) return;
 

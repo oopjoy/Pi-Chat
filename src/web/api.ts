@@ -541,22 +541,6 @@ export const api = {
   }, PROMPT_PREPARE_TIMEOUT_MS),
   renameSession: (id: string, name: string) => request<{ id: string; name: string }>(`/api/sessions/${id}`, { method: "PATCH", body: JSON.stringify({ name }) }, RUNTIME_OPERATION_TIMEOUT_MS),
   deleteSession: (id: string) => request<BootstrapData>(`/api/sessions/${id}`, { method: "DELETE" }, RUNTIME_OPERATION_TIMEOUT_MS),
-  modelPreferences: () => request<{
-    defaultProvider: string;
-    defaultModel: string;
-    favorites: string[];
-    recent: string[];
-  }>("/api/models/preferences"),
-  patchModelPreferences: (patch: {
-    default?: { provider: string; id: string };
-    favorite?: { provider: string; id: string; on: boolean };
-    used?: { provider: string; id: string };
-  }) => request<{
-    defaultProvider: string;
-    defaultModel: string;
-    favorites: string[];
-    recent: string[];
-  }>("/api/models/preferences", { method: "PATCH", body: JSON.stringify(patch) }),
   getCustomModel: (provider: string, id: string) => request<{ model: CustomModelInput }>(`/api/models/${encodeURIComponent(provider)}/${encodeURIComponent(id)}`),
   getCustomProvider: (provider: string) => request<{ provider: CustomProviderInput }>(`/api/models/provider/${encodeURIComponent(provider)}`),
   addCustomProvider: (config: CustomProviderInput) => request<BootstrapData>("/api/models/provider", { method: "POST", body: JSON.stringify(config) }, RUNTIME_OPERATION_TIMEOUT_MS),
