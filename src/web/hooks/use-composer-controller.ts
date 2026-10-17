@@ -133,7 +133,7 @@ export function useComposerController({
     if (!snapshot) return;
     drainingKeysRef.current.add(keyId);
     void onSendRef.current(
-      snapshot.message,
+      composePromptWithAttachedFiles(snapshot.message, draftFiles(snapshot)),
       snapshot.images,
       snapshot.delivery,
       snapshot.targetSessionId,
@@ -213,7 +213,7 @@ export function useComposerController({
       // Steer is meaningful only for the currently active Runtime. Normal
       // queued prompts capture their immutable ordinary target for navigation.
       ...(targetSessionId && delivery !== "steer" ? { targetSessionId } : null),
-      message: composePromptWithAttachedFiles(current.draft.message, draftFiles(current.draft)),
+      message: current.draft.message,
       images: [...current.draft.images],
       files: [...draftFiles(current.draft)],
       revision: current.draft.revision,

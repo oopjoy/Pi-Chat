@@ -190,6 +190,77 @@ test("Composer keeps attached files as cards and composes paths only at send tim
   assert.deepEqual(draft.files, ["C:\\papers\\a.pdf", "D:\\notes\\b.docx"]);
   assert.equal(
     composePromptWithAttachedFiles(draft.message, draft.files),
-    "请阅读这两份\n\nC:\\papers\\a.pdf\nD:\\notes\\b.docx",
+    "请阅读这两份\n\n[Attached files]\nC:\\papers\\a.pdf\nD:\\notes\\b.docx",
+  );
+});
+
+test("Composer replace advances revision so a late queue restore cannot drop new files", () => {
+  const key = session("A");
+  let state = composerReducer(emptyComposerState(), { type: "edit", key, message: "keep" });
+  const revision = composerPartition(state, key).draft.revision;
+  state = composerReducer(state, {
+    type: "replace",
+    key,
+    message: "keep",
+    images: [],
+    files: ["C:\\papers\\new.pdf"],
+  });
+  assert.ok(composerPartition(state, key).draft.revision > revision);
+  state = composerReducer(state, {
+    type: "restore-cancelled",
+    key,
+    expectedRevision: revision,
+    message: "cancelled queue item",
+    images: [],
+    files: [],
+  });
+  const draft = composerPartition(state, key).draft;
+  assert.equal(draft.message, "keep");
+  assert.deepEqual(draft.files, ["C:\\papers\\new.pdf"]);
+});
+
+test("Composer send failure restores the editor draft, not the composed prompt", () => {
+  const key = session("A");
+  let state = composerReducer(emptyComposerState(), {
+    type: "replace",
+    key,
+    message: "Read this",
+    images: [],
+    files: ["C:\\papers\\a.pdf"],
+  });
+  const snapshot = {
+    key,
+    message: "Read this",
+    images: [] as const,
+    files: ["C:\\papers\\a.pdf"],
+    revision: composerPartition(state, key).draft.revision,
+    delivery: "queue" as const,
+  };
+  state = composerReducer(state, { type: "accept", snapshot, retry: false });
+  state = composerReducer(state, { type: "start-delivery", key });
+  state = composerReducer(state, { type: "delivery-rejected", key, error: "network" });
+  let draft = composerPartition(state, key).draft;
+  assert.equal(draft.message, "Read this");
+  assert.deepEqual(draft.files, ["C:\\papers\\a.pdf"]);
+  state = composerReducer(state, {
+    type: "replace",
+    key,
+    message: draft.message,
+    images: [],
+    files: [],
+  });
+  draft = composerPartition(state, key).draft;
+  assert.equal(draft.message, "Read this");
+  assert.deepEqual(draft.files, []);
+  assert.equal(
+    composePromptWithAttachedFiles(draft.message, draft.files),
+    "Read this",
+  );
+});
+
+test("Composer attached-file composition does not treat a longer path as the same attachment", () => {
+  assert.equal(
+    composePromptWithAttachedFiles("Compare C:\\papers\\report.pdf.bak", ["C:\\papers\\report.pdf"]),
+    "Compare C:\\papers\\report.pdf.bak\n\n[Attached files]\nC:\\papers\\report.pdf",
   );
 });

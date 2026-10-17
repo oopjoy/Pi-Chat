@@ -43,7 +43,6 @@ Source: "{#PayloadRoot}\app\scripts\pi-chat-setup.ps1"; Flags: dontcopy
 ; Retire only known legacy entry points, never an arbitrary application tree.
 Type: files; Name: "{app}\app\pi-chat-setup.cmd"
 Type: files; Name: "{app}\app\scripts\pi-chat-uninstall.ps1"
-Type: files; Name: "{autodesktop}\Pi Chat.lnk"
 
 [Icons]
 Name: "{group}\Pi Chat"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\app\start-pi-chat-ui.ps1"" web"; WorkingDir: "{app}\app"; IconFilename: "{app}\app\resources\icons\pi-chat.ico"
@@ -86,10 +85,40 @@ begin
   else Result := '';
 end;
 
+function ShortcutLooksLikeLegacySetupPiChat(const LinkPath: String): Boolean;
+var
+  Shell, Shortcut: Variant;
+  Target, Args: String;
+begin
+  Result := False;
+  if not FileExists(LinkPath) then Exit;
+  try
+    Shell := CreateOleObject('WScript.Shell');
+    Shortcut := Shell.CreateShortcut(LinkPath);
+    Target := LowerCase(Shortcut.TargetPath);
+    Args := LowerCase(Shortcut.Arguments);
+    Result := (Pos('powershell.exe', Target) > 0)
+      and (Pos('start-pi-chat-ui.ps1', Args) > 0)
+      and (Pos(' pwa', ' ' + Args) = 0);
+  except
+    Result := False;
+  end;
+end;
+
+procedure DeleteLegacyDesktopPiChatShortcut;
+var
+  LinkPath: String;
+begin
+  LinkPath := ExpandConstant('{autodesktop}\Pi Chat.lnk');
+  if ShortcutLooksLikeLegacySetupPiChat(LinkPath) then
+    DeleteFile(LinkPath);
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var DetectPath, InstallPath, LegacyPath: String;
 begin
   if CurStep = ssPostInstall then begin
+    DeleteLegacyDesktopPiChatShortcut;
     DetectPath := ExpandConstant('{tmp}\pi-detect.ini');
     RunHelper(ExpandConstant('{app}\app\scripts\pi-chat-setup.ps1'), 'Detect', DetectPath);
     PiFound := GetIniString('Pi', 'Found', '0', DetectPath) = '1';

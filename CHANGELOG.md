@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Composer send failures restore the original editor draft and file cards, not the path-composed prompt. Adding or removing attachments advances the draft revision so a late queue undo cannot drop them. Attached paths are always sent as a bounded `[Attached files]` block, never skipped because a longer path already appeared in the message. Setup deletes a leftover desktop `Pi Chat.lnk` only when it is a PowerShell Web launcher, not a same-named PWA or hand-made shortcut.
 - Sidebar session refresh is now Restart Pi Chat; the previous restart control is Close Pi Chat. Settings keeps Close Pi Chat and adds Restart Pi Chat above it. Existing confirmation dialogs are unchanged. Disabled Restart/Quit buttons explain on hover why they cannot run (generating, waiting for confirmation, or queued).
 - Composer shows local files as cards (images keep a thumbnail). Sending still gives Pi the absolute path so it can read on demand; clicking a file card opens it with the Windows default application.
 - Setup no longer creates a desktop `Pi Chat` shortcut (it duplicated Web and looked like the old PWA). Desktop keeps `Pi Chat Web` only; an upgrade deletes the leftover desktop `Pi Chat.lnk` and never touches `Pi Chat Git`.

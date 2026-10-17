@@ -36,17 +36,15 @@ function quoteAttachedPath(path: string): string {
   return /\s/.test(clean) ? `"${clean.replace(/"/g, '\\"')}"` : clean;
 }
 
+export const ATTACHED_FILES_HEADING = "[Attached files]";
+
 /** Cards stay in the editor; the prompt Pi receives still includes the paths. */
 export function composePromptWithAttachedFiles(message: string, files: string[]): string {
-  const unique = [...new Set(files.map((path) => path.trim()).filter(Boolean))];
-  const missing = unique.filter((path) => {
-    const quoted = quoteAttachedPath(path);
-    return quoted && !message.includes(quoted);
-  });
-  const block = missing.map(quoteAttachedPath).filter(Boolean).join("\n");
-  if (!block) return message;
+  const block = [...new Set(files.map((path) => quoteAttachedPath(path)).filter(Boolean))].join("\n");
+  if (!block) return message.replace(/\n+$/g, "");
   const trimmed = message.replace(/[ \t]+$/g, "").replace(/\n+$/g, "");
-  return trimmed ? `${trimmed}\n\n${block}` : block;
+  const heading = `${ATTACHED_FILES_HEADING}\n${block}`;
+  return trimmed ? `${trimmed}\n\n${heading}` : heading;
 }
 
 export type ComposerSnapshot = ComposerDraft & {
@@ -279,7 +277,7 @@ export function composerReducer(
         message: action.message,
         images: [...action.images],
         files: action.files ? [...action.files] : draftFiles(partition.draft),
-        revision: partition.draft.revision,
+        revision: partition.draft.revision + 1,
       },
     });
   if (action.type === "clear")
