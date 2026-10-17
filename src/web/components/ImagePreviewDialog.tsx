@@ -8,6 +8,7 @@ export function ImagePreviewDialog({
   width,
   height,
   onClose,
+  returnFocusTo,
 }: {
   src: string;
   alt: string;
@@ -15,13 +16,18 @@ export function ImagePreviewDialog({
   width?: number;
   height?: number;
   onClose: () => void;
+  /** The control that opened the preview; focus returns here on close. */
+  returnFocusTo?: () => HTMLElement | null;
 }) {
   const closeRef = useRef<HTMLButtonElement>(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+  const returnFocusRef = useRef(returnFocusTo);
+  returnFocusRef.current = returnFocusTo;
 
   useEffect(() => {
-    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const opener = returnFocusRef.current?.()
+      || (document.activeElement instanceof HTMLElement ? document.activeElement : null);
     closeRef.current?.focus();
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
@@ -37,7 +43,10 @@ export function ImagePreviewDialog({
     document.addEventListener("keydown", onKey);
     return () => {
       document.removeEventListener("keydown", onKey);
-      previous?.focus();
+      // Restore the opener, not whatever the dialog left active, so keyboard
+      // users resume from the thumbnail they clicked.
+      const target = returnFocusRef.current?.() || opener;
+      if (target?.isConnected) target.focus();
     };
   }, [src]);
 

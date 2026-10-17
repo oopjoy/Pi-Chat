@@ -139,6 +139,8 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
   const [expandedUserText, setExpandedUserText] = useState(false);
   const [previewImage, setPreviewImage] = useState<{ src: string; alt: string; width: number; height: number } | null>(null);
   const copyTimerRef = useRef<number | null>(null);
+  /** Focus returns to the thumbnail the user opened, as before the shared dialog. */
+  const previewTriggerRef = useRef<HTMLElement | null>(null);
   useEffect(() => () => {
     if (copyTimerRef.current) window.clearTimeout(copyTimerRef.current);
   }, []);
@@ -205,7 +207,8 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
         {userImageBlocks.map((block, index) => {
           const src = `data:${block.mimeType};base64,${block.data}`;
           const alt = "用户附加图片";
-          return <button type="button" className="message-image-thumbnail" key={index} onClick={() => {
+          return <button type="button" className="message-image-thumbnail" key={index} onClick={(event) => {
+            previewTriggerRef.current = event.currentTarget;
             const viewport = window.visualViewport;
             setPreviewImage({
               src,
@@ -252,6 +255,7 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
         label="用户附加图片预览"
         width={previewImage.width}
         height={previewImage.height}
+        returnFocusTo={() => previewTriggerRef.current}
         onClose={() => setPreviewImage(null)}
       />}
       {(steerDelivery || sentAt || forkableUserMessage || copyableUserMessage) && <footer className="message-user-actions">

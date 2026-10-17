@@ -335,6 +335,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
 }) {
   const [dragging, setDragging] = useState(false);
   const [previewImage, setPreviewImage] = useState<{ src: string; alt: string } | null>(null);
+  const previewTriggerRef = useRef<HTMLElement | null>(null);
   const [attachmentOpen, setAttachmentOpen] = useState(false);
   const [pickingFiles, setPickingFiles] = useState(false);
   const [attachmentKinds, setAttachmentKinds] = useState<Record<string, "file" | "directory">>({});
@@ -764,7 +765,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
         {!editorDisabled && suggestions.length > 0 && <div id={suggestionListId} className="command-suggestions" role="listbox" aria-label="Pi 指令联想">{suggestions.map((command, index) => <button id={`${suggestionListId}-option-${index}`} type="button" role="option" aria-selected={index === suggestionIndex} className={index === suggestionIndex ? "is-active" : ""} key={`${command.source}-${command.name}`} onMouseDown={(event) => event.preventDefault()} onClick={() => completeCommand(command)}><strong>/{command.name}</strong><span>{command.description || "Pi 指令"}</span><small>{command.source}</small></button>)}</div>}
         {(images.length > 0 || files.length > 0) && <div className="composer-attachments" aria-label="附件">
           {images.map((image, index) => <div className="composer-attachment is-image image-preview" key={`${image.fileName}-${index}`}>
-            <button type="button" className="composer-attachment-face" disabled={editorDisabled} onClick={() => setPreviewImage({ src: `data:${image.mimeType};base64,${image.data}`, alt: image.fileName || `图片 ${index + 1}` })}>
+            <button type="button" className="composer-attachment-face" disabled={editorDisabled} onClick={(event) => { previewTriggerRef.current = event.currentTarget; setPreviewImage({ src: `data:${image.mimeType};base64,${image.data}`, alt: image.fileName || `图片 ${index + 1}` }); }}>
               <img src={`data:${image.mimeType};base64,${image.data}`} alt={image.fileName || `图片 ${index + 1}`} />
             </button>
             <small>{image.fileName || "粘贴的图片"}</small>
@@ -804,7 +805,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
         </div>
         {dragging && <div className="drop-hint">松开以添加附件</div>}
       </div>
-      {previewImage && <ImagePreviewDialog src={previewImage.src} alt={previewImage.alt} label="输入框图片预览" onClose={() => setPreviewImage(null)} />}
+      {previewImage && <ImagePreviewDialog src={previewImage.src} alt={previewImage.alt} label="输入框图片预览" returnFocusTo={() => previewTriggerRef.current} onClose={() => setPreviewImage(null)} />}
     </div>
   );
 }

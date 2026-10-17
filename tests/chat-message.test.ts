@@ -130,7 +130,9 @@ test("user text folding leaves attached images fully visible", () => {
 
 test("chat images use the bounded framed style shared with Composer previews", () => {
   const css = readFileSync(new URL("../src/web/styles.css", import.meta.url), "utf8");
-  assert.match(css, /\.image-preview img \{[^}]*width: 92px;[^}]*height: 72px;[^}]*border: 1px solid var\(--line\);[^}]*object-fit: cover;/s);
+  // Composer image cards and chat thumbnails share one 120x72 face.
+  assert.match(css, /\.composer-attachment-face \{[^}]*width: 120px;[^}]*height: 72px;[^}]*border: 1px solid var\(--line\);/s);
+  assert.match(css, /\.composer-attachment\.is-image img \{[^}]*width: 120px;[^}]*height: 72px;[^}]*object-fit: cover;/s);
   assert.match(css, /\.message-image \{[^}]*border: 1px solid var\(--line\);[^}]*background: var\(--surface-soft\);/s);
   assert.match(css, /\.message-user-attachments \.message-image \{[^}]*width: 160px;[^}]*height: 120px;[^}]*border-radius: 8px;[^}]*object-fit: cover;/s);
 });

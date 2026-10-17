@@ -95,7 +95,7 @@ test("Escape closes the attachment menu and restores focus to its trigger", asyn
   }
 });
 
-test("Explorer path paste inserts at the caret without blank lines or newlines", async () => {
+test("Explorer path paste attaches a card without rewriting the editor text", async () => {
   const { dom } = installAppDom();
   let fallbackReads = 0;
   const root = createRoot(dom.window.document.querySelector("#root")!);
@@ -132,18 +132,20 @@ test("Explorer path paste inserts at the caret without blank lines or newlines",
       textarea.dispatchEvent(event);
       await new Promise<void>((resolve) => dom.window.setTimeout(resolve, 0));
     });
-    const reference = '"C:\\Users\\me\\My Notes\\paper.pdf"';
-    assert.equal(textarea.value, `前缀${reference}后缀`);
-    assert.equal(textarea.value.includes("\n"), false);
-    assert.equal(textarea.selectionStart, 2 + reference.length);
-    assert.equal(textarea.selectionEnd, 2 + reference.length);
-    assert.equal(fallbackReads, 0);
+    // Files are attachments, not prose: the editor text stays byte-identical and
+    // the path is sent later as an `[Attached files]` block.
+    assert.equal(textarea.value, "前缀后缀");
+    const card = dom.window.document.querySelector<HTMLElement>(".composer-attachment.is-file");
+    assert.ok(card, "the pasted path becomes an attachment card");
+    assert.equal(card.querySelector(".composer-attachment-face")?.getAttribute("title"), "C:\\Users\\me\\My Notes\\paper.pdf");
+    assert.equal(card.querySelector("small")?.textContent, "paper.pdf");
+    assert.equal(fallbackReads, 0, "browser text needs no native clipboard read");
   } finally {
     await act(async () => root.unmount());
   }
 });
 
-test("a file-only clipboard paste resolves a matching native path and inserts it at the caret", async () => {
+test("a file-only clipboard paste resolves a matching native path into a card", async () => {
   const { dom } = installAppDom();
   const root = createRoot(dom.window.document.querySelector("#root")!);
   try {
@@ -170,7 +172,10 @@ test("a file-only clipboard paste resolves a matching native path and inserts it
       textarea.dispatchEvent(event);
       await new Promise<void>((resolve) => dom.window.setTimeout(resolve, 0));
     });
-    assert.equal(textarea.value, '前C:\\Users\\me\\paper.pdf后');
+    assert.equal(textarea.value, "前后", "a pasted file never rewrites the message text");
+    const card = dom.window.document.querySelector<HTMLElement>(".composer-attachment.is-file");
+    assert.ok(card);
+    assert.equal(card.querySelector(".composer-attachment-face")?.getAttribute("title"), "C:\\Users\\me\\paper.pdf");
   } finally {
     await act(async () => root.unmount());
   }
