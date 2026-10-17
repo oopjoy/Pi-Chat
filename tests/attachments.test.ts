@@ -14,6 +14,7 @@ import { PiChatApp, promptImages } from "../src/server/app";
 import {
   isSafeDefaultApplicationFile,
   isWindowsWorkspacePath,
+  matchExplorerSelection,
   parsePickerOutput,
   waitForWindowsShellProcess,
 } from "../src/server/file-picker";
@@ -26,6 +27,7 @@ import {
   fileReferences,
   isWindowsAbsolutePath,
   droppedFilePreflightError,
+  explorerWindowsPaths,
   localAttachmentKind,
   MAX_DROPPED_FILE_BYTES,
   windowsFileName,
@@ -155,6 +157,14 @@ test("attachment path helpers preserve Windows absolute paths without prompt boi
   assert.deepEqual(localAttachmentKind("C:\\a\\paper.pdf"), { family: "pdf", label: "PDF" });
   assert.deepEqual(localAttachmentKind("C:\\a\\paper.tex"), { family: "text", label: "TEX" });
   assert.deepEqual(localAttachmentKind("C:\\a\\noext"), { family: "generic", label: "文件" });
+  assert.deepEqual(localAttachmentKind("C:\\a\\noext", "directory"), { family: "folder", label: "文件夹" });
+  assert.deepEqual(explorerWindowsPaths("C:\\Users\\me\\My Notes"), ["C:\\Users\\me\\My Notes"]);
+  assert.deepEqual(clipboardWindowsPaths("", "C:\\Users\\me\\My Notes"), ["C:\\Users\\me\\My Notes"]);
+  assert.deepEqual(
+    matchExplorerSelection(["C:\\Users\\me\\proj", "C:\\Users\\me\\notes.txt"], ["proj"]),
+    ["C:\\Users\\me\\proj"],
+  );
+  assert.deepEqual(matchExplorerSelection(["C:\\a\\proj", "D:\\b\\proj"], ["proj"]), []);
   assert.equal(droppedFilePreflightError(0, [{ name: "a.log", size: 10 }]), null);
   assert.match(droppedFilePreflightError(32, [{ name: "a.log", size: 10 }]) || "", /一次最多附加/);
   assert.match(droppedFilePreflightError(0, [{ name: "huge.log", size: MAX_DROPPED_FILE_BYTES + 1 }]) || "", /超过 64 MB/);

@@ -9,7 +9,7 @@ import { useComposerController, type ComposerRestoredDraft } from "../hooks/use-
 import { composerDraftKeyId, type ComposerDraftKey } from "../state/composer";
 import { MAX_COMPOSER_FILES, composePromptWithAttachedFiles, draftFiles } from "../state/composer";
 export { composePromptWithAttachedFiles };
-import { CloseIcon, FileIcon, FileSearchIcon, FileTextIcon, ImageIcon, PaperclipIcon, SendIcon } from "./Icons";
+import { CloseIcon, FileIcon, FileSearchIcon, FileTextIcon, FolderIcon, ImageIcon, PaperclipIcon, SendIcon } from "./Icons";
 import { ImagePreviewDialog } from "./ImagePreviewDialog";
 
 const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
@@ -96,6 +96,29 @@ function isDroppedDirectory(item: DataTransferItem | undefined): boolean {
   }
 }
 
+function droppedEntryNames(files: File[], items: DataTransferItem[]): string[] {
+  const names: string[] = [];
+  for (const [index, item] of items.entries()) {
+    try {
+      const entry = item.webkitGetAsEntry?.();
+      if (entry?.name) {
+        names.push(entry.name);
+        continue;
+      }
+    } catch { /* Chromium may throw for some items */ }
+    if (files[index]?.name) names.push(files[index].name);
+  }
+  if (!names.length) names.push(...files.map((file) => file.name).filter(Boolean));
+  return [...new Set(names)];
+}
+
+function dataTransferStringReads(data: DataTransfer): Array<Promise<string>> {
+  return [...data.items].filter((item) => item.kind === "string").map((item) => new Promise<string>((resolve) => {
+    try { item.getAsString((value) => resolve(value || "")); }
+    catch { resolve(""); }
+  }));
+}
+
 export function isWindowsAbsolutePath(value: string): boolean {
   return /^[A-Za-z]:[\\/][^<>:"|?*\u0000-\u001f]*$/.test(value)
     && value.length > 3;
@@ -162,9 +185,10 @@ export function windowsFileName(path: string): string {
   return clean.split(/[\\/]/).pop() || path;
 }
 
-export type LocalAttachmentFamily = "pdf" | "log" | "text" | "office" | "sheet" | "slides" | "archive" | "code" | "data" | "generic";
+export type LocalAttachmentFamily = "folder" | "pdf" | "log" | "text" | "office" | "sheet" | "slides" | "archive" | "code" | "data" | "generic";
 
-export function localAttachmentKind(path: string): { family: LocalAttachmentFamily; label: string } {
+export function localAttachmentKind(path: string, fsKind?: "file" | "directory"): { family: LocalAttachmentFamily; label: string } {
+  if (fsKind === "directory") return { family: "folder", label: "文件夹" };
   const name = windowsFileName(path);
   const dotted = name.includes(".") ? name.split(".").pop() || "" : "";
   const ext = dotted.toLowerCase();
@@ -185,6 +209,23 @@ export function windowsPathsFromText(text: string): string[] {
   return [...new Set(text.split(/\r?\n/).map(parsedWindowsPathLine).filter(Boolean))];
 }
 
+function parseExplorerPathLine(line: string): string {
+  const strict = parsedWindowsPathLine(line);
+  if (strict) return strict;
+  const value = line.trim().replace(/^"(.*)"$/s, "$1").replace(/\//g, "\\");
+  if (!isWindowsAbsolutePath(value)) return "";
+  if (/\s(?:and|or)\s/i.test(value) || /\.\s/.test(value)) return "";
+  return value;
+}
+
+/** Explorer file lists are one path per line; spaces in the last component are allowed. */
+export function explorerWindowsPaths(text: string): string[] {
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith("#"));
+  if (!lines.length) return [];
+  const paths = lines.map(parseExplorerPathLine);
+  return paths.every(Boolean) ? [...new Set(paths)] : [];
+}
+
 /** Explorer drag exposes paths in several text flavors; never let an empty uri-list hide text/plain. */
 export function windowsPathsFromDataTransfer(data: { types?: Iterable<string>; getData(type: string): string }): string[] {
   const seen = new Set<string>();
@@ -202,7 +243,7 @@ export function windowsPathsFromDataTransfer(data: { types?: Iterable<string>; g
       // Chromium throws for some internal types during drop.
     }
   }
-  return [...new Set(texts.flatMap(windowsPathsFromText))];
+  return [...new Set(texts.flatMap((text) => [...windowsPathsFromText(text), ...explorerWindowsPaths(text)]))];
 }
 
 /**
@@ -217,6 +258,8 @@ export function clipboardWindowsPaths(uriList: string, plainText: string): strin
       .filter((line) => line && !line.startsWith("#"));
     const paths = windowsPathsFromText(text);
     if (paths.length && paths.length === meaningfulLines.length) return paths;
+    const explorerPaths = explorerWindowsPaths(text);
+    if (explorerPaths.length) return explorerPaths;
   }
   return [];
 }
@@ -246,7 +289,7 @@ export function commandMatches(value: string, commands: SlashCommand[]): SlashCo
   }).sort((a, b) => a.rank - b.rank || a.score - b.score || a.command.name.localeCompare(b.command.name)).slice(0, 9).map(({ command }) => command);
 }
 
-export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, placeholder, acceptsImages, imageInputPending = false, restoredDraft, onDraftRevisionChange, draftKey, forgottenComposerKeys = [], submissionScope, submissionTargetSessionId, allowFollowupSubmissions = true, submissionPaused = false, onSubmissionPendingChange, commands, controls, notices, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles = async () => [], onOpenLocalFile, onStageDroppedFile, onDiscardStagedFile, onError }: {
+export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, placeholder, acceptsImages, imageInputPending = false, restoredDraft, onDraftRevisionChange, draftKey, forgottenComposerKeys = [], submissionScope, submissionTargetSessionId, allowFollowupSubmissions = true, submissionPaused = false, onSubmissionPendingChange, commands, controls, notices, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles = async () => [], onOpenLocalFile, onStageDroppedFile, onDiscardStagedFile, onReadExplorerSelection, onAttachmentKinds, onError }: {
   /** True when a submission will enter the local queue. */
   streaming: boolean;
   /** True only while Pi is actively generating and can be stopped. */
@@ -286,12 +329,17 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   onOpenLocalFile?: (path: string) => Promise<void>;
   onStageDroppedFile?: (file: { name: string; data: string; size: number }) => Promise<string>;
   onDiscardStagedFile?: (path: string) => Promise<void>;
+  onReadExplorerSelection?: (names: string[]) => Promise<string[]>;
+  onAttachmentKinds?: (paths: string[]) => Promise<Array<{ path: string; kind: "file" | "directory" }>>;
   onError: (message: string) => void;
 }) {
   const [dragging, setDragging] = useState(false);
   const [previewImage, setPreviewImage] = useState<{ src: string; alt: string } | null>(null);
   const [attachmentOpen, setAttachmentOpen] = useState(false);
   const [pickingFiles, setPickingFiles] = useState(false);
+  const [attachmentKinds, setAttachmentKinds] = useState<Record<string, "file" | "directory">>({});
+  const attachmentKindsRef = useRef(attachmentKinds);
+  attachmentKindsRef.current = attachmentKinds;
   const [suggestionIndex, setSuggestionIndex] = useState(0);
   const suggestionListId = useId();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -365,6 +413,33 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   const value = composer.draft.message;
   const images = composer.draft.images;
   const files = draftFiles(composer.draft);
+  const attachedFilesKey = files.join("\0");
+  useEffect(() => {
+    const currentFiles = attachedFilesKey ? attachedFilesKey.split("\0") : [];
+    setAttachmentKinds((current) => {
+      const next = { ...current };
+      let changed = false;
+      for (const path of Object.keys(next)) {
+        if (!currentFiles.includes(path)) {
+          delete next[path];
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+    if (!onAttachmentKinds) return;
+    const missing = currentFiles.filter((path) => !attachmentKindsRef.current[path]);
+    if (!missing.length) return;
+    const draftKeyId = currentDraftKeyIdRef.current;
+    void onAttachmentKinds(missing).then((kinds) => {
+      if (currentDraftKeyIdRef.current !== draftKeyId) return;
+      setAttachmentKinds((current) => {
+        const next = { ...current };
+        for (const item of kinds) next[item.path] = item.kind;
+        return next;
+      });
+    }).catch(() => undefined);
+  }, [attachedFilesKey, onAttachmentKinds]);
   const suggestions = useMemo(() => commandMatches(value, commands), [commands, value]);
   const invokedCommand = value.startsWith("/") ? commands.find((command) => command.name === value.slice(1).split(/\s/, 1)[0]) : undefined;
   const isExtensionCommand = invokedCommand?.source === "extension";
@@ -598,17 +673,37 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     }
     const ordinaryFiles = files.filter((file, index) => !(file.type || "").startsWith("image/") && !isDroppedDirectory(items[index]));
     const droppedDirectory = items.some((item) => isDroppedDirectory(item));
-    if (ordinaryFiles.length && onStageDroppedFile) {
-      const preflight = droppedFilePreflightError(draftFiles(composer.currentDraft()).length, ordinaryFiles);
-      if (preflight) {
-        onError(preflight);
-        return;
-      }
-      const draftKeyId = currentDraftKeyIdRef.current;
-      const epoch = beginAttachment();
-      void (async () => {
-        const staged: string[] = [];
-        try {
+    if (imageFiles.length && !ordinaryFiles.length && !droppedDirectory) return;
+    const names = droppedEntryNames(files, items);
+    const stringReads = dataTransferStringReads(event.dataTransfer);
+    const draftKeyId = currentDraftKeyIdRef.current;
+    const epoch = beginAttachment();
+    void (async () => {
+      const staged: string[] = [];
+      try {
+        const asyncTexts = await Promise.all(stringReads);
+        const asyncPaths = [...new Set(asyncTexts.flatMap((text) => [...windowsPathsFromText(text), ...explorerWindowsPaths(text)]))];
+        if (asyncPaths.length) {
+          if (attachmentEpochRef.current === epoch && currentDraftKeyIdRef.current === draftKeyId && !editorDisabledRef.current)
+            attachFiles(asyncPaths, draftKeyId);
+          return;
+        }
+        let selected: string[] = [];
+        if (names.length && onReadExplorerSelection) {
+          try { selected = await onReadExplorerSelection(names); }
+          catch { selected = []; }
+        }
+        if (selected.length) {
+          if (attachmentEpochRef.current === epoch && currentDraftKeyIdRef.current === draftKeyId && !editorDisabledRef.current)
+            attachFiles(selected, draftKeyId);
+          return;
+        }
+        if (ordinaryFiles.length && onStageDroppedFile) {
+          const preflight = droppedFilePreflightError(draftFiles(composer.currentDraft()).length, ordinaryFiles);
+          if (preflight) {
+            onError(preflight);
+            return;
+          }
           for (const file of ordinaryFiles) {
             const data = await readDroppedFileAsBase64(file);
             const path = await onStageDroppedFile({ name: file.name, data, size: file.size });
@@ -624,21 +719,20 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
           }
           if (staged.length) {
             if (!attachFiles(staged, draftKeyId)) await discardStagedPaths(staged);
-          } else onError(droppedDirectory
-            ? "无法取得文件夹的本地路径，请使用发送按钮旁的附件按钮选择"
-            : "浏览器未提供文件的绝对路径，请使用发送按钮旁的附件按钮选择本地文件");
-        } catch (error) {
-          await discardStagedPaths(staged);
-          if (attachmentEpochRef.current === epoch && currentDraftKeyIdRef.current === draftKeyId && !editorDisabledRef.current)
-            onError(error instanceof Error ? error.message : String(error));
-        } finally {
-          endAttachment();
+            return;
+          }
         }
-      })();
-      return;
-    }
-    if (droppedDirectory) onError("无法取得文件夹的本地路径，请使用发送按钮旁的附件按钮选择");
-    else if (ordinaryFiles.length) onError("浏览器未提供文件的绝对路径，请使用发送按钮旁的附件按钮选择本地文件");
+        if (attachmentEpochRef.current !== epoch || currentDraftKeyIdRef.current !== draftKeyId || editorDisabledRef.current) return;
+        if (droppedDirectory) onError("无法取得文件夹的本地路径，请使用发送按钮旁的附件按钮选择");
+        else if (ordinaryFiles.length || names.length) onError("浏览器未提供文件的绝对路径，请使用发送按钮旁的附件按钮选择本地文件");
+      } catch (error) {
+        await discardStagedPaths(staged);
+        if (attachmentEpochRef.current === epoch && currentDraftKeyIdRef.current === draftKeyId && !editorDisabledRef.current)
+          onError(error instanceof Error ? error.message : String(error));
+      } finally {
+        endAttachment();
+      }
+    })();
   };
 
   const pickFiles = async () => {
@@ -677,8 +771,8 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
             <button type="button" className="composer-attachment-remove" disabled={editorDisabled} onClick={() => { const current = composer.currentDraft(); composer.replace(current.message, current.images.filter((_, itemIndex) => itemIndex !== index), draftFiles(current)); }} aria-label={`移除 ${image.fileName || "图片"}`}><CloseIcon /></button>
           </div>)}
           {files.map((path) => {
-            const kind = localAttachmentKind(path);
-            const Icon = kind.family === "log" || kind.family === "text" || kind.family === "code" ? FileTextIcon : FileIcon;
+            const kind = localAttachmentKind(path, attachmentKinds[path]);
+            const Icon = kind.family === "folder" ? FolderIcon : kind.family === "log" || kind.family === "text" || kind.family === "code" ? FileTextIcon : FileIcon;
             return <div className={`composer-attachment is-file is-${kind.family}`} key={path}>
               <button type="button" className="composer-attachment-face" disabled={editorDisabled} title={path} onClick={() => { void onOpenLocalFile?.(path).catch((error) => onError(error instanceof Error ? error.message : String(error))); }}>
                 <Icon className="composer-attachment-icon" />

@@ -54,6 +54,23 @@ if ([System.Windows.Forms.Clipboard]::ContainsFileDropList()) {
 }
 `;
 
+const EXPLORER_SELECTION_SCRIPT = String.raw`
+$ErrorActionPreference = 'SilentlyContinue'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$shell = New-Object -ComObject Shell.Application
+$paths = New-Object System.Collections.Generic.List[string]
+foreach ($window in @($shell.Windows())) {
+  try {
+    $document = $window.Document
+    if ($null -eq $document) { continue }
+    foreach ($item in @($document.SelectedItems())) {
+      if ($item.Path) { [void]$paths.Add([string]$item.Path) }
+    }
+  } catch {}
+}
+ConvertTo-Json -InputObject @($paths.ToArray()) -Compress
+`;
+
 const FOLDER_PICKER_SCRIPT = String.raw`
 Add-Type -TypeDefinition @'
 using System;
@@ -178,7 +195,12 @@ export function parsePickerOutput(output: string): string[] {
   return values.filter((value): value is string => typeof value === "string" && isSafeWindowsFilePath(value));
 }
 
-async function runPicker(script: string, timeoutMessage: string, extraEnv: NodeJS.ProcessEnv = {}): Promise<string> {
+async function runPicker(
+  script: string,
+  timeoutMessage: string,
+  extraEnv: NodeJS.ProcessEnv = {},
+  timeoutMs = 10 * 60_000,
+): Promise<string> {
   if (process.platform !== "win32") throw new Error("本地选择器目前仅支持 Windows");
   return new Promise((resolve, reject) => {
     const child = spawn("powershell.exe", ["-NoProfile", "-STA", "-NonInteractive", "-Command", script], {
@@ -191,7 +213,7 @@ async function runPicker(script: string, timeoutMessage: string, extraEnv: NodeJ
     const timer = setTimeout(() => {
       child.kill();
       reject(new Error(timeoutMessage));
-    }, 10 * 60_000);
+    }, Math.max(1, timeoutMs));
     child.stdout.on("data", (chunk: Buffer) => {
       stdout += chunk.toString("utf8");
       if (stdout.length > 1_000_000) child.kill();
@@ -235,10 +257,56 @@ export async function readClipboardFiles(expected: Array<{ name: string; size: n
 
 function statSyncSize(path: string): number {
   try {
-    return statSync(path).size;
+    const info = statSync(path);
+    // Explorer/Chromium expose folders as size-0 File objects.
+    return info.isDirectory() ? 0 : info.size;
   } catch {
     return -1;
   }
+}
+
+export function matchExplorerSelection(paths: string[], names: string[]): string[] {
+  if (!names.length) return [];
+  const remaining = [...paths];
+  const matched: string[] = [];
+  for (const name of names) {
+    const needle = name.toLowerCase();
+    const hits = remaining.filter((path) => basename(path).toLowerCase() === needle);
+    if (hits.length !== 1) return [];
+    matched.push(hits[0]);
+    remaining.splice(remaining.indexOf(hits[0]), 1);
+  }
+  return matched;
+}
+
+export async function readExplorerSelection(names: string[]): Promise<string[]> {
+  if (!names.length) return [];
+  try {
+    const paths = parsePickerOutput(await runPicker(
+      EXPLORER_SELECTION_SCRIPT,
+      "读取资源管理器选中项超时",
+      {},
+      8_000,
+    ));
+    return matchExplorerSelection(paths, names);
+  } catch (error) {
+    if (error instanceof SyntaxError) throw new Error("无法读取资源管理器选中路径");
+    throw error;
+  }
+}
+
+export async function localPathKinds(paths: string[]): Promise<Array<{ path: string; kind: "file" | "directory" }>> {
+  const unique = [...new Set(paths.filter((path) => parsePickerOutput(JSON.stringify([path]))[0] === path))].slice(0, 32);
+  const kinds: Array<{ path: string; kind: "file" | "directory" }> = [];
+  for (const path of unique) {
+    try {
+      const info = await lstat(path);
+      if (info.isSymbolicLink()) continue;
+      if (info.isDirectory()) kinds.push({ path, kind: "directory" });
+      else if (info.isFile()) kinds.push({ path, kind: "file" });
+    } catch { /* missing paths stay unclassified */ }
+  }
+  return kinds;
 }
 
 export async function pickLocalFiles(): Promise<string[]> {

@@ -843,6 +843,7 @@ details.conversation-process { display: block; padding: 0; }
 .composer-attachment.is-code .composer-attachment-icon, .composer-attachment.is-code .composer-attachment-kind { color: var(--accent); }
 .composer-attachment.is-data .composer-attachment-icon, .composer-attachment.is-data .composer-attachment-kind { color: var(--status-yellow); }
 .composer-attachment.is-generic .composer-attachment-icon, .composer-attachment.is-generic .composer-attachment-kind { color: var(--muted); }
+.composer-attachment.is-folder .composer-attachment-icon, .composer-attachment.is-folder .composer-attachment-kind { color: var(--status-yellow); }
 
 .drop-hint { position: absolute; z-index: 2; inset: 0; display: grid; place-items: center; border-radius: var(--radius-lg); background: color-mix(in srgb, var(--surface), transparent 8%); color: var(--accent); font-size: 13px; font-weight: 700; pointer-events: none; }
 .command-suggestions { position: absolute; z-index: 5; left: var(--space-3); bottom: calc(100% + var(--space-2)); display: grid; width: min(560px, calc(100% - 16px)); max-height: 310px; overflow-y: auto; padding: var(--space-1); border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface); box-shadow: 0 12px 32px rgba(12, 22, 38, .18); }

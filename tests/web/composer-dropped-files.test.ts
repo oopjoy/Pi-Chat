@@ -79,6 +79,51 @@ test("ChatInput waits for in-flight dropped staging before sending the same draf
   }
 });
 
+test("ChatInput attaches a dropped Explorer folder from the current selection", async () => {
+  const { dom } = installAppDom();
+  const { createRoot } = await import("react-dom/client");
+  const { ChatInput } = await import("../../src/web/components/ChatInput");
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  const render = () => createElement(ChatInput, {
+    streaming: false,
+    stopping: false,
+    disabled: false,
+    submissionScope: "session:drop-folder",
+    allowFollowupSubmissions: true,
+    acceptsImages: true,
+    commands: [],
+    onSend: async () => undefined,
+    onAbort: async () => undefined,
+    onPickLocalFiles: async () => [],
+    onReadExplorerSelection: async (names: string[]) => names[0] === "proj" ? ["C:\\Users\\me\\proj"] : [],
+    onAttachmentKinds: async () => [{ path: "C:\\Users\\me\\proj", kind: "directory" as const }],
+    onError: (message: string) => { throw new Error(message); },
+  });
+  try {
+    await act(async () => root.render(createElement(StrictMode, null, render())));
+    const composer = dom.window.document.querySelector<HTMLDivElement>(".composer")!;
+    const drop = new dom.window.Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, "dataTransfer", {
+      value: {
+        files: [],
+        items: [{ kind: "file", type: "", webkitGetAsEntry: () => ({ isDirectory: true, name: "proj" }), getAsString: (done: (value: string) => void) => done("") }],
+        types: ["Files"],
+        getData: () => "",
+      },
+    });
+    await act(async () => {
+      composer.dispatchEvent(drop);
+      const deadline = Date.now() + 2_000;
+      while (!dom.window.document.querySelector(".composer-attachment.is-folder") && Date.now() < deadline)
+        await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    assert.ok(dom.window.document.querySelector(".composer-attachment.is-folder"), "the folder drop should render a folder card");
+    assert.equal(dom.window.document.querySelector(".composer-attachment-kind")?.textContent, "文件夹");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
 test("ImagePreviewDialog focuses the close control and restores the trigger on Escape", async () => {
   const { dom } = installAppDom();
   const { createRoot } = await import("react-dom/client");

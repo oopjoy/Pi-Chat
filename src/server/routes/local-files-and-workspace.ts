@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { stat } from "node:fs/promises";
 import { discardManagedDroppedFile, stageDroppedFileBytes } from "../dropped-files.js";
 import { bodyJson, json, methodNotAllowed } from "../http-transport.js";
-import { openLocalAttachment, parsePickerOutput } from "../file-picker.js";
+import { localPathKinds, openLocalAttachment, parsePickerOutput, readExplorerSelection } from "../file-picker.js";
 
 export interface LocalFilesWorkspaceRouteHost {
   pickLocalFiles(): Promise<string[]>;
@@ -45,6 +45,30 @@ export async function handleLocalFilesWorkspaceRoute(
     }
     const body = await bodyJson(request);
     json(response, 200, { paths: await host.readClipboardFiles(clipboardFiles(body)) });
+    return true;
+  }
+  if (url.pathname === "/api/local-files/explorer-selection") {
+    if (request.method !== "POST") {
+      methodNotAllowed(response);
+      return true;
+    }
+    const body = await bodyJson(request);
+    const names = Array.isArray(body.names)
+      ? body.names.filter((item: unknown): item is string => typeof item === "string" && item.trim().length > 0).slice(0, 32)
+      : [];
+    json(response, 200, { paths: await readExplorerSelection(names) });
+    return true;
+  }
+  if (url.pathname === "/api/local-files/kinds") {
+    if (request.method !== "POST") {
+      methodNotAllowed(response);
+      return true;
+    }
+    const body = await bodyJson(request);
+    const paths = Array.isArray(body.paths)
+      ? body.paths.filter((item: unknown): item is string => typeof item === "string").slice(0, 32)
+      : [];
+    json(response, 200, { kinds: await localPathKinds(paths) });
     return true;
   }
   if (url.pathname === "/api/local-files/open") {
