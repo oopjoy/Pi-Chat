@@ -187,3 +187,38 @@ test("process replacement accepts the replacement catalogue's lower revision", a
     restoreApi();
   }
 });
+
+test("a pending catalogue tells the user the running request keeps its route", async () => {
+  const { dom, FakeEventSource } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const current = model("current", "Current model");
+  const refreshed = model("refreshed", "Refreshed model");
+  Object.assign(api, {
+    bootstrap: async () => bootstrapWithModel(current, 1),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: bootstrap.sessions[0].id }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const source = FakeEventSource.instances.at(-1)!;
+    await act(async () => {
+      source.emitPi({
+        type: "pi_chat_models_updated",
+        models: [refreshed],
+        revision: 2,
+        runtimeSync: "waiting-for-runtime-reload",
+      });
+      await Promise.resolve();
+    });
+    const body = dom.window.document.body.textContent || "";
+    assert.match(body, /当前请求继续使用原配置/, "a Session still owing limits must not report a clean refresh");
+    assert.doesNotMatch(body, /模型目录已更新/);
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});

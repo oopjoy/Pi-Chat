@@ -583,6 +583,8 @@ export class PiChatApp {
   private modelRuntimeSyncInFlight = false;
   /** models.json revision and worker generation actually applied to each live worker. */
   private readonly modelRegistryRevisions = new WeakMap<PiRpcClient, { revision: number; generation: number }>();
+  /** Sessions whose selected Model object still owes the refreshed limits. */
+  private readonly modelLimitsPendingSessions = new Set<string>();
   private modelRuntimeSyncFailures = 0;
   private lastPrimaryCommands: SlashCommand[] = [];
   private lastPrimaryStats:
@@ -1149,17 +1151,6 @@ export class PiChatApp {
           ? (runtime as { rpcGeneration: number }).rpcGeneration
           : 0,
       });
-    // A worker that appears while no change is outstanding read models.json
-    // when it started, so it already carries the current revision. While a
-    // change is pending it is deliberately left unstamped so it must refresh.
-    if (!this.modelRuntimeSyncPending) {
-      for (const client of clients)
-        if (!this.modelRegistryRevisions.has(client.rpc))
-          this.modelRegistryRevisions.set(client.rpc, {
-            revision: this.modelCatalogueRevision,
-            generation: client.generation,
-          });
-    }
     return clients;
   }
 
@@ -1221,10 +1212,31 @@ export class PiChatApp {
     return applied && applied.generation === generation ? applied.revision : undefined;
   }
 
+  /**
+   * When no models.json change is outstanding, no worker is owed a refresh, so
+   * staleness is zero by definition. This is derived instead of written back:
+   * a query must not manufacture its own clean answer.
+   */
   private staleModelWorkers(): number {
+    if (!this.modelRuntimeSyncPending) return 0;
     return this.modelRegistryClients()
       .filter(({ rpc, generation }) => this.appliedModelRevision(rpc, generation) !== this.modelCatalogueRevision)
       .length;
+  }
+
+  /** Work that a bounded retry can still complete; a catalogue gap cannot. */
+  private owedModelSync(): boolean {
+    return this.modelRegistryClients().length > 0
+      && (this.staleModelWorkers() > 0 || this.modelLimitsPendingSessions.size > 0);
+  }
+
+  private publishModelCatalogue(models: ModelInfo[]): void {
+    this.broadcast({
+      type: "pi_chat_models_updated",
+      models: this.mergeHostAndRuntimeModels(models, this.startupModels),
+      revision: this.modelCatalogueRevision,
+      runtimeSync: this.modelRuntimeSyncPending ? "waiting-for-runtime-reload" : "ready",
+    });
   }
 
   /**
@@ -1240,7 +1252,7 @@ export class PiChatApp {
    * A user action therefore always wins: the background pass only ever applies
    * the limits of the model the Session still has selected.
    */
-  private async reconcileSelectedModel(target: { rpc: PiRpcClient; sessionId: string; generation: number }): Promise<"applied" | "skipped" | "failed"> {
+  private async reconcileSelectedModel(target: { rpc: PiRpcClient; sessionId: string; generation: number }): Promise<"applied" | "unchanged" | "deferred" | "failed"> {
     const release = await this.beginPromptAdmission(target.sessionId);
     try {
       const generationUnchanged = () =>
@@ -1250,24 +1262,24 @@ export class PiChatApp {
       let state: PiState;
       let models: ModelInfo[];
       try {
-        state = asState(await target.rpc.send({ type: "get_state" }));
-        if (state.isStreaming) return "skipped";
-        models = asModels(await target.rpc.send({ type: "get_available_models" }));
+        state = asState(await target.rpc.send({ type: "get_state" }, 8_000));
+        if (state.isStreaming) return "deferred";
+        models = asModels(await target.rpc.send({ type: "get_available_models" }, 8_000));
       } catch {
         return "failed";
       }
       const selected = state.model as unknown as Record<string, unknown> | null | undefined;
-      if (!selected || typeof selected.provider !== "string" || typeof selected.id !== "string") return "skipped";
+      if (!selected || typeof selected.provider !== "string" || typeof selected.id !== "string") return "unchanged";
       const fresh = models.find((model) => model.provider === selected.provider && model.id === selected.id);
-      if (!fresh || JSON.stringify(fresh) === JSON.stringify(selected)) return "skipped";
+      if (!fresh || JSON.stringify(fresh) === JSON.stringify(selected)) return "unchanged";
       const thinkingLevel = typeof state.thinkingLevel === "string" ? state.thinkingLevel : "";
-      if (!generationUnchanged()) return "skipped";
+      if (!generationUnchanged()) return "unchanged";
       try {
-        await target.rpc.send({ type: "set_model", provider: fresh.provider, modelId: fresh.id }, 30_000);
+        await target.rpc.send({ type: "set_model", provider: fresh.provider, modelId: fresh.id }, 20_000);
         // Pi recomputes the level from the user default on re-selection, so the
         // Session's own choice is restored rather than silently replaced.
         if (thinkingLevel)
-          await target.rpc.send({ type: "set_thinking_level", level: thinkingLevel }, 20_000);
+          await target.rpc.send({ type: "set_thinking_level", level: thinkingLevel }, 15_000);
         return "applied";
       } catch {
         return "failed";
@@ -1280,72 +1292,109 @@ export class PiChatApp {
   private async syncModelRuntime(): Promise<void> {
     if (!this.modelRuntimeSyncPending || this.closed || this.modelRuntimeSyncInFlight) return;
     this.modelRuntimeSyncInFlight = true;
+    let deferredByTurn = false;
     try {
       const refresh = await this.refreshLiveModelRegistries();
-      if (refresh.targets.length) {
+      // Sessions that already owe new limits are retried even when every worker
+      // has been refreshed: the catalogue and a Session's selected Model object
+      // are separate outcomes.
+      const reconcileTargets = new Map<string, { rpc: PiRpcClient; sessionId: string; generation: number }>();
+      for (const target of refresh.targets) reconcileTargets.set(target.sessionId, target);
+      for (const client of this.modelRegistryClients())
+        if (this.modelLimitsPendingSessions.has(client.sessionId))
+          reconcileTargets.set(client.sessionId, {
+            rpc: client.rpc,
+            sessionId: client.sessionId,
+            generation: client.generation,
+          });
+      if (reconcileTargets.size) {
         // Apply the refreshed limits to each Session's current selection before
         // reporting readiness: a Session still holding the old Model object is a
         // real difference, not a display detail.
-        let reconcileFailed = false;
-        for (const target of refresh.targets) {
-          if (await this.reconcileSelectedModel(target) === "failed") reconcileFailed = true;
+        for (const target of reconcileTargets.values()) {
+          const outcome = await this.reconcileSelectedModel(target);
+          if (outcome === "applied" || outcome === "unchanged")
+            this.modelLimitsPendingSessions.delete(target.sessionId);
+          else if (outcome === "deferred")
+            this.modelLimitsPendingSessions.add(target.sessionId);
+          else {
+            this.modelLimitsPendingSessions.add(target.sessionId);
+            this.modelRuntimeSyncFailures += 1;
+          }
         }
-        const models = asModels(await this.options.rpc.send({ type: "get_available_models" }));
-        this.lastAvailableModels = models;
-        this.modelRuntimeSyncPending = reconcileFailed || this.staleModelWorkers() > 0;
-        if (reconcileFailed) this.modelRuntimeSyncFailures += 1;
+        const models = await this.readPrimaryCatalogue();
+        if (models) this.lastAvailableModels = models;
+        this.modelRuntimeSyncPending = this.owedModelSync();
+        // An unfinished pass (a save landed mid-refresh, or a Session still owes
+        // its limits) consumes the same bounded budget so it cannot loop forever.
+        if (this.modelRuntimeSyncPending) this.modelRuntimeSyncFailures += 1;
         else this.modelRuntimeSyncFailures = 0;
-        this.broadcast({
-          type: "pi_chat_models_updated",
-          models: this.mergeHostAndRuntimeModels(models, this.startupModels),
-          revision: this.modelCatalogueRevision,
-          runtimeSync: this.modelRuntimeSyncPending ? "waiting-for-runtime-reload" : "ready",
-        });
+        this.publishModelCatalogue(this.lastAvailableModels);
         return;
       }
-      // Busy workers are refreshed once they settle; re-broadcasting the same
-      // snapshot on every retry would only add SSE churn.
       if (refresh.busy > 0) {
+        // A running turn keeps the route it already resolved. The settlement
+        // hook schedules the next attempt, so no timer is needed here; this is
+        // deferred work, not a failure.
         this.modelRuntimeSyncPending = true;
+        deferredByTurn = true;
         return;
       }
       if (refresh.failed) {
         this.modelRuntimeSyncFailures += 1;
         return;
       }
-      // Only a Pi that cannot refresh a registry falls back to a full reload,
-      // and only when nothing is running. A waiting reload keeps the lifecycle
-      // label the catalogue change already broadcast.
+      // A worker that cannot be refreshed without the adapter missing is not a
+      // reason to restart the whole Runtime (which stops every secondary).
+      if (!refresh.unsupported) {
+        this.modelRuntimeSyncFailures += 1;
+        return;
+      }
       if (this.busyConversationCount() > 0) return;
+      const targetRevision = this.modelCatalogueRevision;
       await this.withLifecycle("models-refreshing", "同步模型 Runtime", async () => {
         await this.reloadRpc();
         const models = asModels(await this.options.rpc.send({ type: "get_available_models" }));
         this.lastAvailableModels = models;
-        // The reload replaced every worker, so none of them is stale. The
-        // Runtime read its catalogue while starting, at the revision current
-        // when this operation began.
+        // The restarted Runtime read models.json while starting, so it carries
+        // the revision that was current when this operation began. A save that
+        // landed meanwhile leaves every worker stale instead.
         for (const { rpc, generation } of this.modelRegistryClients())
-          this.modelRegistryRevisions.set(rpc, { revision: this.modelCatalogueRevision, generation });
+          this.modelRegistryRevisions.set(rpc, { revision: targetRevision, generation });
+        this.modelLimitsPendingSessions.clear();
         this.modelRuntimeSyncFailures = 0;
+        // An unknown model id after a restart is a catalogue gap (for example a
+        // Provider this Pi cannot load), not stale sync, so it neither retries
+        // nor triggers another reload on its own.
         const hostKeys = new Set(this.startupModels.map((model) => this.modelRouteKey(model)));
         const runtimeKeys = new Set(models.map((model) => this.modelRouteKey(model)));
-        // A restart reads the current models.json, so an unknown model id is a
-        // catalogue gap (for example an unsupported Provider), not stale sync.
         this.modelRuntimeSyncPending = [...hostKeys].some((key) => !runtimeKeys.has(key));
-        this.broadcast({
-          type: "pi_chat_models_updated",
-          models: this.mergeHostAndRuntimeModels(models, this.startupModels),
-          revision: this.modelCatalogueRevision,
-          runtimeSync: this.modelRuntimeSyncPending ? "waiting-for-runtime-reload" : "ready",
-        });
+        this.publishModelCatalogue(models);
       });
+    } catch {
+      // An unexpected failure (for example a quiescence conflict during the
+      // reload) must consume retry budget instead of looping once a second.
+      this.modelRuntimeSyncFailures += 1;
     } finally {
       this.modelRuntimeSyncInFlight = false;
       // Retry with backoff; a persistently failing worker must not turn into a
       // once-per-second RPC loop. After a few attempts the pending flag waits
       // for the next models.json change or the next settled turn.
-      if (this.modelRuntimeSyncPending && !this.closed && this.modelRuntimeSyncFailures < 5)
-        this.scheduleModelRuntimeSync(Math.min(30_000, 1_000 * 2 ** this.modelRuntimeSyncFailures));
+      const retryDelay = deferredByTurn
+        ? 30_000
+        : Math.min(30_000, 250 * 2 ** this.modelRuntimeSyncFailures);
+      if (this.modelRuntimeSyncPending && !this.closed
+        && this.modelRuntimeSyncFailures < 5 && this.owedModelSync())
+        this.scheduleModelRuntimeSync(retryDelay);
+    }
+  }
+
+  private async readPrimaryCatalogue(): Promise<ModelInfo[] | null> {
+    try {
+      return asModels(await this.options.rpc.send({ type: "get_available_models" }));
+    } catch {
+      // Keep the last good catalogue; the caller still publishes pending state.
+      return null;
     }
   }
   private beginMutation(): () => void {

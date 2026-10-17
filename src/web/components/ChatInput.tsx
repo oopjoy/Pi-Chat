@@ -355,6 +355,8 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   const [attachingCount, setAttachingCount] = useState(0);
   const attachmentEpochRef = useRef(0);
   const attachWaitersRef = useRef<Array<() => void>>([]);
+  /** Paths this component wrote into the managed temp staging area. */
+  const stagedPathsRef = useRef(new Set<string>());
   const onDiscardStagedFileRef = useRef(onDiscardStagedFile);
   onDiscardStagedFileRef.current = onDiscardStagedFile;
   // Legacy unit fixtures may provide only a scope. Production App always
@@ -396,7 +398,13 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   const discardStagedPaths = async (paths: string[]) => {
     const discard = onDiscardStagedFileRef.current;
     if (!discard || !paths.length) return;
+    for (const path of paths) stagedPathsRef.current.delete(path);
     await Promise.all(paths.map((path) => discard(path).catch(() => undefined)));
+  };
+  /** A removed card must not leave its staged bytes behind in the temp area. */
+  const discardIfStaged = (path: string) => {
+    if (!stagedPathsRef.current.has(path)) return;
+    void discardStagedPaths([path]);
   };
   const composer = useComposerController({
     draftKey: resolvedDraftKey,
@@ -701,7 +709,10 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
           for (const file of ordinaryFiles) {
             const data = await readDroppedFileAsBase64(file);
             const path = await onStageDroppedFile({ name: file.name, data, size: file.size });
-            if (path) staged.push(path);
+            if (path) {
+              staged.push(path);
+              stagedPathsRef.current.add(path);
+            }
             if (attachmentEpochRef.current !== epoch) {
               await discardStagedPaths(staged);
               return;
@@ -742,6 +753,9 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
         if (attachmentEpochRef.current !== epoch || currentDraftKeyIdRef.current !== draftKeyId || editorDisabledRef.current) return;
         if (droppedDirectory) onError("无法取得文件夹的本地路径，请使用发送按钮旁的附件按钮选择");
         else if (ordinaryFiles.length || names.length) onError("浏览器未提供文件的绝对路径，请使用发送按钮旁的附件按钮选择本地文件");
+        // Nothing usable was dropped (for example a text selection). Say so
+        // instead of silently swallowing the gesture after preventDefault.
+        else onError("拖入的内容不是本地文件；请拖入文件、文件夹，或使用发送按钮旁的附件按钮");
       } catch (error) {
         await discardStagedPaths(staged);
         if (attachmentEpochRef.current === epoch && currentDraftKeyIdRef.current === draftKeyId && !editorDisabledRef.current)
@@ -796,7 +810,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
                 <span className="composer-attachment-kind">{kind.label}</span>
               </button>
               <small>{windowsFileName(path)}</small>
-              <button type="button" className="composer-attachment-remove" disabled={editorDisabled} aria-label={`移除 ${windowsFileName(path)}`} onClick={() => { const current = composer.currentDraft(); composer.replace(current.message, current.images, draftFiles(current).filter((item) => item !== path)); }}><CloseIcon /></button>
+              <button type="button" className="composer-attachment-remove" disabled={editorDisabled} aria-label={`移除 ${windowsFileName(path)}`} onClick={() => { discardIfStaged(path); const current = composer.currentDraft(); composer.replace(current.message, current.images, draftFiles(current).filter((item) => item !== path)); }}><CloseIcon /></button>
             </div>;
           })}
         </div>}

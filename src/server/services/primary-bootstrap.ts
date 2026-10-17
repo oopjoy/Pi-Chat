@@ -156,10 +156,11 @@ export async function bootstrap(ports: any, clientId = "", coherenceRetry = 0): 
         ports.rememberModelContextWindows(models);
         ports.lastAvailableModels = models;
         // A matching provider/id/api list is not proof that the connection
-        // settings reached this worker. Only the per-worker models.json
-        // revision decides whether a refresh is still owed; bootstrap must
-        // never clear that flag on its own.
-        ports.modelRuntimeSyncPending = ports.staleModelWorkers() > 0;
+        // settings reached this worker, and it cannot show that a Session's
+        // selected Model object was updated. Only real sync progress clears
+        // the pending state, so bootstrap preserves what it cannot disprove.
+        ports.modelRuntimeSyncPending = Boolean(ports.modelRuntimeSyncPending)
+          || ports.staleModelWorkers() > 0;
         if (ports.modelRuntimeSyncPending) ports.scheduleModelRuntimeSync();
         modelInventoryPending = false;
       }

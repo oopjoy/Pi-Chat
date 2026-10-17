@@ -226,3 +226,79 @@ test("ImagePreviewDialog focuses the close control and restores the trigger on E
     await act(async () => root.unmount());
   }
 });
+
+test("removing a staged card deletes its temp file and a text drop is not silent", async () => {
+  const { dom } = installAppDom();
+  class ImmediateFileReader {
+    result = "data:application/octet-stream;base64,bG9nLWJvZHk=";
+    onload: ((this: FileReader, ev: ProgressEvent<FileReader>) => unknown) | null = null;
+    onerror: ((this: FileReader, ev: ProgressEvent<FileReader>) => unknown) | null = null;
+    readAsDataURL() { this.onload?.call(this as unknown as FileReader, {} as ProgressEvent<FileReader>); }
+  }
+  Object.defineProperty(dom.window, "FileReader", { configurable: true, writable: true, value: ImmediateFileReader });
+  Object.defineProperty(globalThis, "FileReader", { configurable: true, writable: true, value: ImmediateFileReader });
+  const { createRoot } = await import("react-dom/client");
+  const { ChatInput } = await import("../../src/web/components/ChatInput");
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  const discarded: string[] = [];
+  const errors: string[] = [];
+  try {
+    // No StrictMode here: a double-mount supersedes the staging epoch, which is
+    // correct but would discard this immediately-resolved staging result.
+    await act(async () => root.render(createElement(ChatInput, {
+      streaming: false,
+      stopping: false,
+      disabled: false,
+      submissionScope: "session:drop-cleanup",
+      allowFollowupSubmissions: true,
+      acceptsImages: true,
+      commands: [],
+      onSend: async () => undefined,
+      onAbort: async () => undefined,
+      onPickLocalFiles: async () => [],
+      onStageDroppedFile: async (file: { name: string }) => `C:\\Temp\\staged\\${file.name}`,
+      onDiscardStagedFile: async (path: string) => { discarded.push(path); },
+      onError: (message: string) => errors.push(message),
+    })));
+    const composer = dom.window.document.querySelector<HTMLDivElement>(".composer")!;
+    const drop = new dom.window.Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, "dataTransfer", {
+      value: {
+        files: [new dom.window.File(["x"], "note.log", { type: "text/plain" })],
+        items: [{ kind: "file", type: "text/plain", webkitGetAsEntry: () => ({ isDirectory: false, name: "note.log" }), getAsString: (done: (value: string) => void) => done("") }],
+        types: ["Files"],
+        getData: () => "",
+      },
+    });
+    await act(async () => {
+      composer.dispatchEvent(drop);
+      const deadline = Date.now() + 2_000;
+      while (!dom.window.document.querySelector(".composer-attachment-remove") && Date.now() < deadline)
+        await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    await act(async () => {
+      dom.window.document.querySelector<HTMLButtonElement>(".composer-attachment-remove")!.click();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    assert.deepEqual(discarded, ["C:\\Temp\\staged\\note.log"], "the abandoned temp file is reclaimed");
+
+    // A drag with no file, no directory and no path must explain itself instead
+    // of swallowing the gesture.
+    const textDrop = new dom.window.Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(textDrop, "dataTransfer", {
+      value: {
+        files: [],
+        items: [{ kind: "string", type: "text/plain", getAsString: (done: (value: string) => void) => done("just some prose") }],
+        types: ["text/plain"],
+        getData: () => "just some prose",
+      },
+    });
+    await act(async () => {
+      composer.dispatchEvent(textDrop);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    });
+    assert.ok(errors.some((message) => message.includes("拖入的内容不是本地文件")), JSON.stringify(errors));
+  } finally {
+    await act(async () => root.unmount());
+  }
+});

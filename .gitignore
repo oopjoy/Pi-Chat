@@ -18,3 +18,6 @@ playwright-report/
 
 dist-local/
 .pi-chat-*/
+
+# Local independent-review artifacts (never shipped)
+.review/

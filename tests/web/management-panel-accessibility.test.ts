@@ -413,3 +413,19 @@ test("Provider editor preserves the stable source key when saving an edited mode
     restoreApi();
   }
 });
+
+test("the model catalogue badge never claims ready while sync is pending", async () => {
+  const { dom } = installAppDom();
+  const { createRoot } = await import("react-dom/client");
+  const { ManagementPanel } = await import("../../src/web/components/ManagementPanel");
+  const root = createRoot(dom.window.document.getElementById("root")!);
+  const badge = () => dom.window.document.querySelector(".model-runtime-status")?.textContent || "";
+  try {
+    await act(async () => root.render(createElement(ManagementPanel, { ...panelProps([]), modelRuntimeSyncPending: true })));
+    assert.equal(badge(), "正在刷新模型目录");
+    await act(async () => root.render(createElement(ManagementPanel, { ...panelProps([]), modelRuntimeSyncPending: false })));
+    assert.equal(badge(), "模型目录已刷新");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});

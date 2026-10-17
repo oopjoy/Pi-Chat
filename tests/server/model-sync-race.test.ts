@@ -46,9 +46,25 @@ class LimitChangingRpc extends FakeRpc {
   duringRefresh?: () => Promise<void> | void;
   reconcileAttempts = 0;
   refreshAttempts = 0;
-  modelChangeCommands: string[] = [];
+  thinkingLevelCommands: string[] = [];
   failSetModel = false;
   failRefresh = false;
+  /** True models an older Pi whose loader cannot install the refresh adapter. */
+  unsupportedRefresh = false;
+  /**
+   * The Runtime's own snapshot. Tests that need the pre-fix bootstrap predicate
+   * to be satisfiable must serve the real models.json rows here, otherwise the
+   * comparison is trivially false and the test proves nothing.
+   */
+  catalogue: ModelInfo[] = [{
+    provider: "test",
+    id: "next",
+    name: "Next",
+    api: "openai-completions",
+    reasoning: true,
+    maxTokens: 16_000,
+    contextWindow: 200_000,
+  }];
   private refreshEntered = false;
 
   override async send(command: Record<string, unknown>, ...rest: unknown[]) {
@@ -57,34 +73,22 @@ class LimitChangingRpc extends FakeRpc {
       const firstEntry = !this.refreshEntered;
       this.refreshEntered = true;
       if (firstEntry) await this.duringRefresh?.();
+      if (this.unsupportedRefresh) throw new Error("Unknown command: pi_chat_refresh_models");
       if (this.failRefresh) throw new Error("Pi 模型目录刷新失败");
       return { type: "response", success: true, data: {} };
     }
     if (command.type === "set_model") {
       this.reconcileAttempts += 1;
-      this.modelChangeCommands.push("set_model");
       if (this.failSetModel) throw new Error("Pi set_model 失败");
-      const models = await this.send({ type: "get_available_models" });
-      const list = (models as { data?: { models?: ModelInfo[] } }).data?.models || [];
-      this.model = list.find((model) => model.id === command.modelId) || this.model;
+      this.model = this.catalogue.find((model) => model.id === command.modelId) || this.model;
+      return { type: "response", success: true, data: {} };
+    }
+    if (command.type === "set_thinking_level") {
+      this.thinkingLevelCommands.push(String(command.level));
       return { type: "response", success: true, data: {} };
     }
     if (command.type === "get_available_models") {
-      return {
-        type: "response",
-        success: true,
-        data: {
-          models: [{
-            provider: "test",
-            id: "next",
-            name: "Next",
-            api: "openai-completions",
-            reasoning: true,
-            maxTokens: 16_000,
-            contextWindow: 200_000,
-          }],
-        },
-      };
+      return { type: "response", success: true, data: { models: this.catalogue } };
     }
     return super.send(command, ...(rest as []));
   }
@@ -100,13 +104,31 @@ test("bootstrap never clears a pending model sync that a worker still owes", asy
   primary.failRefresh = true;
   try {
     await models.add({ provider: "local", id: "next", baseUrl: "http://127.0.0.1:2", api: "openai-completions" });
+    // Serve the Runtime the SAME provider/id/api identity that models.json now
+    // declares, which is exactly the condition the old bootstrap trusted. Only
+    // the connection address differs, so a list comparison cannot detect it.
+    primary.catalogue = [{
+      provider: "local",
+      id: "old",
+      name: "old",
+      api: "openai-completions",
+      maxTokens: 2_000,
+      contextWindow: 100_000,
+    }, {
+      provider: "local",
+      id: "next",
+      name: "next",
+      api: "openai-completions",
+      maxTokens: 16_000,
+      contextWindow: 200_000,
+    }];
     // The failing refresh must leave this worker stale, never credited.
     await waitFor(() => state.modelRuntimeSyncFailures > 0);
     const bootstrap = await app.bootstrap();
     assert.equal(
       bootstrap.modelRuntimeSyncPending,
       true,
-      "a matching provider/id list is not proof that the new address reached the worker",
+      "a matching provider/id/api list is not proof that the new address reached the worker",
     );
     assert.equal(state.modelRuntimeSyncPending, true);
   } finally {
@@ -163,7 +185,10 @@ test("a background re-selection waits behind the user's own Session operation", 
   try {
     const release = await state.beginPromptAdmission(state.activeSessionId);
     await models.add({ provider: "local", id: "next", baseUrl: "http://127.0.0.1:2", api: "openai-completions" });
-    await new Promise((resolve) => setTimeout(resolve, 400));
+    // Positive evidence that the background pass actually started; otherwise a
+    // slow machine would pass the negative assertion below without testing it.
+    await waitFor(() => primary.refreshAttempts > 0);
+    await new Promise((resolve) => setTimeout(resolve, 200));
     assert.equal(
       primary.reconcileAttempts,
       0,
@@ -171,6 +196,61 @@ test("a background re-selection waits behind the user's own Session operation", 
     );
     release();
     await waitFor(() => primary.reconcileAttempts > 0);
+  } finally {
+    await app.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an old Pi with a catalogue gap reloads once instead of looping", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-model-gap-"));
+  const primary = new LimitChangingRpc("C:\\sessions\\primary.jsonl", "primary");
+  // This Pi cannot refresh a registry, and its startup catalogue never contains
+  // the configured model, so the gap is permanent rather than stale sync.
+  primary.catalogue = [{ provider: "other", id: "foreign", name: "Foreign", api: "openai-completions" }];
+  primary.unsupportedRefresh = true;
+  const models = new ModelManager(root);
+  await models.add({ provider: "local", id: "old", baseUrl: "http://127.0.0.1:1", api: "openai-completions" });
+  const app = appFor(root, primary);
+  try {
+    await models.add({ provider: "local", id: "next", baseUrl: "http://127.0.0.1:2", api: "openai-completions" });
+    await waitFor(() => primary.restartCount > 0);
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    assert.equal(
+      primary.restartCount,
+      1,
+      "a permanent catalogue gap must not trigger a Runtime restart every retry tick",
+    );
+  } finally {
+    await app.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a background reconcile that fails never escalates to a full Runtime reload", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-no-escalation-"));
+  const primary = new LimitChangingRpc("C:\\sessions\\primary.jsonl", "primary");
+  primary.model = {
+    provider: "test",
+    id: "next",
+    name: "Next",
+    api: "openai-completions",
+    maxTokens: 2_000,
+  } as ModelInfo;
+  primary.failSetModel = true;
+  const models = new ModelManager(root);
+  await models.add({ provider: "local", id: "old", baseUrl: "http://127.0.0.1:1", api: "openai-completions" });
+  const app = appFor(root, primary);
+  try {
+    await models.add({ provider: "local", id: "next", baseUrl: "http://127.0.0.1:2", api: "openai-completions" });
+    await waitFor(() => primary.reconcileAttempts > 0);
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    assert.equal(
+      primary.restartCount,
+      0,
+      "recovering one Session's limits must not stop every other worker",
+    );
+    assert.ok(primary.reconcileAttempts >= 2, "the bounded retry keeps trying");
   } finally {
     await app.close();
     await rm(root, { recursive: true, force: true });
@@ -195,12 +275,17 @@ test("a failed re-selection keeps sync pending instead of reporting ready", asyn
   try {
     await models.add({ provider: "local", id: "next", baseUrl: "http://127.0.0.1:2", api: "openai-completions" });
     await waitFor(() => primary.reconcileAttempts > 0);
-    assert.equal(
-      state.modelRuntimeSyncPending,
-      true,
-      "the Session still carries old limits, so the catalogue refresh is not the whole story",
-    );
+    await waitFor(() => state.modelRuntimeSyncPending);
     assert.ok(state.modelRuntimeSyncFailures > 0, "the failure is scheduled for a bounded retry");
+    // The user-visible consequence: a page reload must not turn this into
+    // "模型目录已刷新" while the Session still carries the old limits.
+    assert.equal(
+      (await app.bootstrap()).modelRuntimeSyncPending,
+      true,
+      "bootstrap must not convert a failed re-selection into ready",
+    );
+    // And it must never escalate to a full Runtime reload for this.
+    assert.equal(primary.restartCount, 0, "a failed re-selection must not restart the Runtime");
   } finally {
     await app.close();
     await rm(root, { recursive: true, force: true });
