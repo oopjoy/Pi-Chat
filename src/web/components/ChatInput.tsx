@@ -689,16 +689,9 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
             attachFiles(asyncPaths, draftKeyId);
           return;
         }
-        let selected: string[] = [];
-        if (names.length && onReadExplorerSelection) {
-          try { selected = await onReadExplorerSelection(names); }
-          catch { selected = []; }
-        }
-        if (selected.length) {
-          if (attachmentEpochRef.current === epoch && currentDraftKeyIdRef.current === draftKeyId && !editorDisabledRef.current)
-            attachFiles(selected, draftKeyId);
-          return;
-        }
+        // A file carries its own bytes, so the content is exactly what was
+        // dragged. Matching a name against other Explorer windows could attach
+        // an unrelated same-named file, so staging bytes always wins for files.
         if (ordinaryFiles.length && onStageDroppedFile) {
           const preflight = droppedFilePreflightError(draftFiles(composer.currentDraft()).length, ordinaryFiles);
           if (preflight) {
@@ -720,6 +713,29 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
           }
           if (staged.length) {
             if (!attachFiles(staged, draftKeyId)) await discardStagedPaths(staged);
+            return;
+          }
+        }
+        // A directory has no bytes to stage, so its original path is the only
+        // usable identity. Accept it only when every dropped name matched
+        // exactly one entry and each entry is really a directory.
+        if (droppedDirectory && names.length && onReadExplorerSelection) {
+          let selected: string[] = [];
+          try { selected = await onReadExplorerSelection(names); }
+          catch { selected = []; }
+          if (selected.length && onAttachmentKinds) {
+            try {
+              const kinds = await onAttachmentKinds(selected);
+              const allDirectories = kinds.length === selected.length
+                && kinds.every((item) => item.kind === "directory");
+              if (!allDirectories) selected = [];
+            } catch {
+              selected = [];
+            }
+          }
+          if (selected.length) {
+            if (attachmentEpochRef.current === epoch && currentDraftKeyIdRef.current === draftKeyId && !editorDisabledRef.current)
+              attachFiles(selected, draftKeyId);
             return;
           }
         }

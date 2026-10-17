@@ -58,6 +58,31 @@ async function settingsFixture() {
   };
 }
 
+test("adding a Provider works while another Session is generating", async () => {
+  const { dom } = installAppDom();
+  const { api } = await import("../../src/web/api");
+  const restoreApi = captureApiSnapshot(api);
+  Object.assign(api, {
+    modelPreferences: async () => ({ defaultProvider: "", defaultModel: "", favorites: [], recent: [] }),
+  });
+  const { createRoot } = await import("react-dom/client");
+  const { ManagementPanel } = await import("../../src/web/components/ManagementPanel");
+  const root = createRoot(dom.window.document.getElementById("root")!);
+  try {
+    await act(async () => root.render(createElement(ManagementPanel, { ...panelProps([]), busy: true })));
+    const add = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "添加自定义提供方")!;
+    // A models.json edit no longer needs global quiescence, so the control must
+    // not look actionable while its handler refuses to run.
+    assert.equal(add.disabled, false);
+    await act(async () => add.click());
+    assert.ok(dom.window.document.querySelector(".model-provider-editor"), "the editor opens on the first click");
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 const availableNpmUpdate = {
   packageName: "@earendil-works/pi-coding-agent", currentVersion: "1.0.1", latestVersion: "1.1.0",
   registryUrl: "https://registry.npmjs.org/x", checkedAt: "2026-10-12T00:00:00.000Z",

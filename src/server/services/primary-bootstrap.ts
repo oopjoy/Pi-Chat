@@ -155,15 +155,12 @@ export async function bootstrap(ports: any, clientId = "", coherenceRetry = 0): 
           : asModels(modelsResponse);
         ports.rememberModelContextWindows(models);
         ports.lastAvailableModels = models;
-        // Preserve the legacy wildcard only for Host rows that truly omit API.
-        // Once a row declares an API route, the Runtime must confirm the same
-        // provider + model + api identity before clearing pending sync.
-        if (ports.startupModels.every((configured: ModelInfo) =>
-          models.some((loaded: ModelInfo) => ports.modelRouteKey(loaded) === ports.modelRouteKey(configured)
-            || (!configured.api
-              && loaded.provider === configured.provider
-              && loaded.id === configured.id))))
-          ports.modelRuntimeSyncPending = false;
+        // A matching provider/id/api list is not proof that the connection
+        // settings reached this worker. Only the per-worker models.json
+        // revision decides whether a refresh is still owed; bootstrap must
+        // never clear that flag on its own.
+        ports.modelRuntimeSyncPending = ports.staleModelWorkers() > 0;
+        if (ports.modelRuntimeSyncPending) ports.scheduleModelRuntimeSync();
         modelInventoryPending = false;
       }
       if (commandsResponse)

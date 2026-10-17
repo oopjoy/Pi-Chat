@@ -446,7 +446,9 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
     setEditingProviderKey("");
   };
   const beginAddProvider = () => {
-    if (busy || saving) return;
+    // Model file edits no longer require global quiescence, so neither button
+    // nor handler may key off another Session's turn.
+    if (saving) return;
     providerLoadSequence.current += 1;
     setEditingProviderKey("");
     setExpandedProvider("__new__");
@@ -559,7 +561,7 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
             <span className="model-provider-count">{providerModels.length} 个模型</span>
             {custom ? <>
               <button type="button" disabled={saving} onClick={() => void beginEditProvider(provider, custom, true)}>编辑</button>
-              <button type="button" className="model-delete-action" disabled={busy || saving} onClick={() => void removeProvider(provider)}>删除</button>
+              <button type="button" className="model-delete-action" disabled={saving} onClick={() => void removeProvider(provider)}>删除</button>
             </> : <span className="model-provider-managed">{providerModels.some((model) => model.authMode === "pi-managed") ? "Pi 登录管理" : "Pi Runtime 管理"}</span>}
           </div>
         </header>

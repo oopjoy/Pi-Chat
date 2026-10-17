@@ -124,6 +124,74 @@ test("ChatInput attaches a dropped Explorer folder from the current selection", 
   }
 });
 
+test("a dropped file uses its own bytes instead of guessing a path from Explorer", async () => {
+  const { dom } = installAppDom();
+  class ImmediateFileReader {
+    result = "data:application/octet-stream;base64,cmVwb3J0";
+    onload: ((this: FileReader, ev: ProgressEvent<FileReader>) => unknown) | null = null;
+    onerror: ((this: FileReader, ev: ProgressEvent<FileReader>) => unknown) | null = null;
+    readAsDataURL() { this.onload?.call(this as unknown as FileReader, {} as ProgressEvent<FileReader>); }
+  }
+  Object.defineProperty(dom.window, "FileReader", { configurable: true, writable: true, value: ImmediateFileReader });
+  Object.defineProperty(globalThis, "FileReader", { configurable: true, writable: true, value: ImmediateFileReader });
+  const { createRoot } = await import("react-dom/client");
+  const { ChatInput } = await import("../../src/web/components/ChatInput");
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  let selectionLookups = 0;
+  const staged: string[] = [];
+  try {
+    await act(async () => root.render(createElement(StrictMode, null, createElement(ChatInput, {
+      streaming: false,
+      stopping: false,
+      disabled: false,
+      submissionScope: "session:drop-bytes",
+      allowFollowupSubmissions: true,
+      acceptsImages: true,
+      commands: [],
+      onSend: async () => undefined,
+      onAbort: async () => undefined,
+      onPickLocalFiles: async () => [],
+      // A same-named file is selected in another Explorer window. Its path must
+      // never be attached to bytes that came from somewhere else.
+      onReadExplorerSelection: async () => { selectionLookups += 1; return ["D:\\elsewhere\\report.txt"]; },
+      onStageDroppedFile: async (file: { name: string }) => {
+        staged.push(file.name);
+        return `C:\\Temp\\staged\\${file.name}`;
+      },
+      onAttachmentKinds: async () => [{ path: "D:\\elsewhere\\report.txt", kind: "file" as const }],
+      onError: (message: string) => { throw new Error(message); },
+    }))));
+    const composer = dom.window.document.querySelector<HTMLDivElement>(".composer")!;
+    const drop = new dom.window.Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, "dataTransfer", {
+      value: {
+        files: [new dom.window.File(["report"], "report.txt", { type: "text/plain" })],
+        items: [{ kind: "file", type: "text/plain", webkitGetAsEntry: () => ({ isDirectory: false, name: "report.txt" }), getAsString: (done: (value: string) => void) => done("") }],
+        types: ["Files"],
+        getData: () => "",
+      },
+    });
+    await act(async () => {
+      composer.dispatchEvent(drop);
+      const deadline = Date.now() + 2_000;
+      while (!dom.window.document.querySelector(".composer-attachments") && Date.now() < deadline)
+        await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    // Counted indirectly: no Explorer lookup may precede the byte staging.
+    assert.deepEqual(staged, ["report.txt"], "the dragged file is staged from its own bytes");
+    const card = dom.window.document.querySelector<HTMLElement>(".composer-attachment.is-file");
+    assert.ok(card);
+    assert.equal(
+      card.querySelector(".composer-attachment-face")?.getAttribute("title"),
+      "C:\\Temp\\staged\\report.txt",
+      "an unrelated same-named file is never substituted",
+    );
+    assert.equal(selectionLookups, 0);
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
 test("ImagePreviewDialog focuses the close control and restores the trigger on Escape", async () => {
   const { dom } = installAppDom();
   const { createRoot } = await import("react-dom/client");
