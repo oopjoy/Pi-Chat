@@ -9,7 +9,7 @@ import { useComposerController, type ComposerRestoredDraft } from "../hooks/use-
 import { composerDraftKeyId, type ComposerDraftKey } from "../state/composer";
 import { MAX_COMPOSER_FILES, composePromptWithAttachedFiles, draftFiles } from "../state/composer";
 export { composePromptWithAttachedFiles };
-import { CloseIcon, FileIcon, FileSearchIcon, ImageIcon, PaperclipIcon, SendIcon } from "./Icons";
+import { CloseIcon, FileIcon, FileSearchIcon, FileTextIcon, ImageIcon, PaperclipIcon, SendIcon } from "./Icons";
 
 const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 const COMPOSITION_END_ENTER_GRACE_MS = 100;
@@ -147,6 +147,22 @@ export function fileReferences(paths: string[]): string {
 export function windowsFileName(path: string): string {
   const clean = path.replace(/[\\/]+$/, "");
   return clean.split(/[\\/]/).pop() || path;
+}
+
+export type LocalAttachmentFamily = "pdf" | "log" | "text" | "office" | "sheet" | "slides" | "archive" | "code" | "data" | "generic";
+
+export function localAttachmentKind(path: string): { family: LocalAttachmentFamily; label: string } {
+  const ext = (windowsFileName(path).split(".").pop() || "").toLowerCase();
+  if (ext === "pdf") return { family: "pdf", label: "PDF" };
+  if (ext === "log" || ext === "out" || ext === "err") return { family: "log", label: "日志" };
+  if (ext === "txt" || ext === "md" || ext === "rst" || ext === "csv") return { family: "text", label: "文本" };
+  if (ext === "json" || ext === "yml" || ext === "yaml" || ext === "xml" || ext === "toml") return { family: "data", label: "数据" };
+  if (ext === "doc" || ext === "docx" || ext === "rtf" || ext === "odt") return { family: "office", label: "Word" };
+  if (ext === "xls" || ext === "xlsx" || ext === "ods") return { family: "sheet", label: "表格" };
+  if (ext === "ppt" || ext === "pptx" || ext === "odp") return { family: "slides", label: "演示" };
+  if (ext === "zip" || ext === "7z" || ext === "rar" || ext === "tar" || ext === "gz") return { family: "archive", label: "压缩包" };
+  if (["js", "ts", "tsx", "jsx", "py", "rs", "go", "c", "h", "cpp", "java", "cs"].includes(ext)) return { family: "code", label: "代码" };
+  return { family: "generic", label: "文件" };
 }
 
 export function windowsPathsFromText(text: string): string[] {
@@ -566,15 +582,23 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
       <div className={`composer ${dragging ? "is-dragging" : ""}`} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; if (!editorDisabled) setDragging(true); }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }} onDrop={drop}>
         {!editorDisabled && suggestions.length > 0 && <div id={suggestionListId} className="command-suggestions" role="listbox" aria-label="Pi 指令联想">{suggestions.map((command, index) => <button id={`${suggestionListId}-option-${index}`} type="button" role="option" aria-selected={index === suggestionIndex} className={index === suggestionIndex ? "is-active" : ""} key={`${command.source}-${command.name}`} onMouseDown={(event) => event.preventDefault()} onClick={() => completeCommand(command)}><strong>/{command.name}</strong><span>{command.description || "Pi 指令"}</span><small>{command.source}</small></button>)}</div>}
         {(images.length > 0 || files.length > 0) && <div className="composer-attachments" aria-label="附件">
-          {images.map((image, index) => <div className="image-preview" key={`${image.fileName}-${index}`}><img src={`data:${image.mimeType};base64,${image.data}`} alt={image.fileName || `图片 ${index + 1}`} /><button type="button" disabled={editorDisabled} onClick={() => { const current = composer.currentDraft(); composer.replace(current.message, current.images.filter((_, itemIndex) => itemIndex !== index), draftFiles(current)); }} aria-label={`移除 ${image.fileName || "图片"}`}><CloseIcon /></button><small>{image.fileName || "粘贴的图片"}</small></div>)}
-          {files.map((path) => <div className="file-attachment-card" key={path}>
-            <button type="button" className="file-attachment-open" disabled={editorDisabled} title={path} onClick={() => { void onOpenLocalFile?.(path).catch((error) => onError(error instanceof Error ? error.message : String(error))); }}>
-              <FileIcon className="file-attachment-icon" />
-              <strong>{windowsFileName(path)}</strong>
-              <small>本地文件</small>
-            </button>
-            <button type="button" className="file-attachment-remove" disabled={editorDisabled} aria-label={`移除 ${windowsFileName(path)}`} onClick={() => { const current = composer.currentDraft(); composer.replace(current.message, current.images, draftFiles(current).filter((item) => item !== path)); }}><CloseIcon /></button>
+          {images.map((image, index) => <div className="composer-attachment is-image" key={`${image.fileName}-${index}`}>
+            <div className="composer-attachment-face"><img src={`data:${image.mimeType};base64,${image.data}`} alt={image.fileName || `图片 ${index + 1}`} /></div>
+            <small>{image.fileName || "粘贴的图片"}</small>
+            <button type="button" className="composer-attachment-remove" disabled={editorDisabled} onClick={() => { const current = composer.currentDraft(); composer.replace(current.message, current.images.filter((_, itemIndex) => itemIndex !== index), draftFiles(current)); }} aria-label={`移除 ${image.fileName || "图片"}`}><CloseIcon /></button>
           </div>)}
+          {files.map((path) => {
+            const kind = localAttachmentKind(path);
+            const Icon = kind.family === "log" || kind.family === "text" || kind.family === "code" ? FileTextIcon : FileIcon;
+            return <div className={`composer-attachment is-file is-${kind.family}`} key={path}>
+              <button type="button" className="composer-attachment-face" disabled={editorDisabled} title={path} onClick={() => { void onOpenLocalFile?.(path).catch((error) => onError(error instanceof Error ? error.message : String(error))); }}>
+                <Icon className="composer-attachment-icon" />
+                <span className="composer-attachment-kind">{kind.label}</span>
+              </button>
+              <small>{windowsFileName(path)}</small>
+              <button type="button" className="composer-attachment-remove" disabled={editorDisabled} aria-label={`移除 ${windowsFileName(path)}`} onClick={() => { const current = composer.currentDraft(); composer.replace(current.message, current.images, draftFiles(current).filter((item) => item !== path)); }}><CloseIcon /></button>
+            </div>;
+          })}
         </div>}
         <textarea ref={textareaRef} value={value} onChange={(event) => composer.edit(event.target.value)} onPaste={paste} onKeyDown={keyDown} onCompositionStart={() => { composingRef.current = true; }} onCompositionEnd={() => { composingRef.current = false; lastCompositionEndAtRef.current = Date.now(); }} disabled={editorDisabled} rows={1} placeholder={editorDisabled ? disabledPlaceholder || "输入消息，或粘贴、拖入附件" : placeholder || (streaming ? "继续输入，发送后加入队列；输入 / 查看指令" : "输入消息，或粘贴、拖入附件")} aria-label="消息输入" aria-autocomplete="list" aria-expanded={suggestions.length > 0} aria-controls={suggestions.length > 0 ? suggestionListId : undefined} aria-activedescendant={suggestions.length > 0 ? `${suggestionListId}-option-${suggestionIndex}` : undefined} />
         <div className="composer-toolbar">

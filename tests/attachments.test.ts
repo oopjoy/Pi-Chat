@@ -25,6 +25,7 @@ import {
   clipboardWindowsPaths,
   fileReferences,
   isWindowsAbsolutePath,
+  localAttachmentKind,
   windowsFileName,
   windowsPathsFromDataTransfer,
   promptImageAdditionError,
@@ -148,6 +149,8 @@ test("attachment path helpers preserve Windows absolute paths without prompt boi
     "D:\\notes\\data.csv",
   ]);
   assert.equal(windowsFileName("C:\\papers\\abc.pdf"), "abc.pdf");
+  assert.deepEqual(localAttachmentKind("C:\\a\\port.log"), { family: "log", label: "日志" });
+  assert.deepEqual(localAttachmentKind("C:\\a\\paper.pdf"), { family: "pdf", label: "PDF" });
   assert.equal(windowsFileName("D:\\notes\\My Notes\\paper.docx"), "paper.docx");
   assert.equal(fileReferences(["C:\\Users\\me\\paper.pdf"]), "C:\\Users\\me\\paper.pdf");
   assert.equal(fileReferences(["C:\\Users\\me\\My Notes\\paper.pdf"]), '"C:\\Users\\me\\My Notes\\paper.pdf"');

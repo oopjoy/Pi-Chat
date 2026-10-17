@@ -72,6 +72,10 @@ export function FileIcon(props: IconProps) {
   return <LineIcon {...props}><path d="M6 3.5h7l5 5V20.5H6Z" /><path d="M13 3.5v5h5" /></LineIcon>;
 }
 
+export function FileTextIcon(props: IconProps) {
+  return <LineIcon {...props}><path d="M6 3.5h7l5 5V20.5H6Z" /><path d="M13 3.5v5h5" /><path d="M8.5 12.5h7M8.5 15.5h7M8.5 18.2h4.5" /></LineIcon>;
+}
+
 export function ChevronRightIcon(props: IconProps) {
   return <LineIcon {...props}><path d="m9 5 7 7-7 7" /></LineIcon>;
 }
