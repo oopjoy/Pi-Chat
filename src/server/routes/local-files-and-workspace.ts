@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { mkdir, stat, writeFile } from "node:fs/promises";
 import { bodyJson, json, methodNotAllowed } from "../http-transport.js";
-import { openWithDefaultApplication, parsePickerOutput } from "../file-picker.js";
+import { openLocalAttachment, parsePickerOutput } from "../file-picker.js";
 
 const MAX_STAGED_DROPPED_FILE_BYTES = 64 * 1024 * 1024;
 
@@ -67,7 +67,7 @@ export async function handleLocalFilesWorkspaceRoute(
       json(response, 400, { error: "路径无效" });
       return true;
     }
-    await openWithDefaultApplication(path);
+    await openLocalAttachment(path);
     json(response, 200, { ok: true });
     return true;
   }

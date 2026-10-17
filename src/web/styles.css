@@ -825,7 +825,7 @@ details.conversation-process { display: block; padding: 0; }
 .composer-attachments { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; padding: 4px 2px 2px; }
 .composer-attachment { position: relative; width: 120px; flex: 0 0 120px; }
 .composer-attachment-face { display: grid; width: 120px; height: 72px; place-items: center; justify-items: center; gap: 2px; padding: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-soft); color: inherit; cursor: pointer; overflow: hidden; }
-.composer-attachment.is-image .composer-attachment-face { cursor: default; padding: 0; }
+.composer-attachment.is-image .composer-attachment-face { padding: 0; }
 .composer-attachment.is-image img { display: block; width: 120px; height: 72px; object-fit: cover; }
 .composer-attachment-icon { width: 22px; height: 22px; }
 .composer-attachment-kind { font-size: 10px; font-weight: 750; letter-spacing: .06em; }

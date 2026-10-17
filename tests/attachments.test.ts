@@ -149,8 +149,10 @@ test("attachment path helpers preserve Windows absolute paths without prompt boi
     "D:\\notes\\data.csv",
   ]);
   assert.equal(windowsFileName("C:\\papers\\abc.pdf"), "abc.pdf");
-  assert.deepEqual(localAttachmentKind("C:\\a\\port.log"), { family: "log", label: "日志" });
+  assert.deepEqual(localAttachmentKind("C:\\a\\port.log"), { family: "log", label: "LOG" });
   assert.deepEqual(localAttachmentKind("C:\\a\\paper.pdf"), { family: "pdf", label: "PDF" });
+  assert.deepEqual(localAttachmentKind("C:\\a\\paper.tex"), { family: "text", label: "TEX" });
+  assert.deepEqual(localAttachmentKind("C:\\a\\noext"), { family: "generic", label: "文件" });
   assert.equal(windowsFileName("D:\\notes\\My Notes\\paper.docx"), "paper.docx");
   assert.equal(fileReferences(["C:\\Users\\me\\paper.pdf"]), "C:\\Users\\me\\paper.pdf");
   assert.equal(fileReferences(["C:\\Users\\me\\My Notes\\paper.pdf"]), '"C:\\Users\\me\\My Notes\\paper.pdf"');

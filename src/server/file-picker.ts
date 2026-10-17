@@ -328,6 +328,23 @@ export function waitForWindowsShellProcess(
   });
 }
 
+/** Open a composer attachment: files with the default app, directories in Explorer. */
+export async function openLocalAttachment(targetPath: string): Promise<void> {
+  if (process.platform !== "win32") throw new Error("打开本地文件目前仅支持 Windows");
+  if (!isWindowsWorkspacePath(targetPath)) throw new Error("路径无效");
+  if (!isSafeDefaultApplicationFile(targetPath)) throw new Error("为安全起见，此文件类型不能直接打开");
+  let targetStat;
+  try { targetStat = await lstat(targetPath); }
+  catch { throw new Error("文件不存在"); }
+  if (targetStat.isSymbolicLink()) throw new Error("文件不存在");
+  if (targetStat.isDirectory()) {
+    await openWorkspaceDirectory(targetPath);
+    return;
+  }
+  if (!targetStat.isFile()) throw new Error("文件不存在");
+  await openWithDefaultApplication(targetPath);
+}
+
 /** Open one server-validated, non-executable file with its Windows default application. */
 export async function openWithDefaultApplication(
   targetPath: string,

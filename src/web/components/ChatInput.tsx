@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import {
   MAX_PROMPT_IMAGE_BYTES,
   MAX_PROMPT_IMAGES,
@@ -152,17 +153,20 @@ export function windowsFileName(path: string): string {
 export type LocalAttachmentFamily = "pdf" | "log" | "text" | "office" | "sheet" | "slides" | "archive" | "code" | "data" | "generic";
 
 export function localAttachmentKind(path: string): { family: LocalAttachmentFamily; label: string } {
-  const ext = (windowsFileName(path).split(".").pop() || "").toLowerCase();
-  if (ext === "pdf") return { family: "pdf", label: "PDF" };
-  if (ext === "log" || ext === "out" || ext === "err") return { family: "log", label: "日志" };
-  if (ext === "txt" || ext === "md" || ext === "rst" || ext === "csv") return { family: "text", label: "文本" };
-  if (ext === "json" || ext === "yml" || ext === "yaml" || ext === "xml" || ext === "toml") return { family: "data", label: "数据" };
-  if (ext === "doc" || ext === "docx" || ext === "rtf" || ext === "odt") return { family: "office", label: "Word" };
-  if (ext === "xls" || ext === "xlsx" || ext === "ods") return { family: "sheet", label: "表格" };
-  if (ext === "ppt" || ext === "pptx" || ext === "odp") return { family: "slides", label: "演示" };
-  if (ext === "zip" || ext === "7z" || ext === "rar" || ext === "tar" || ext === "gz") return { family: "archive", label: "压缩包" };
-  if (["js", "ts", "tsx", "jsx", "py", "rs", "go", "c", "h", "cpp", "java", "cs"].includes(ext)) return { family: "code", label: "代码" };
-  return { family: "generic", label: "文件" };
+  const name = windowsFileName(path);
+  const dotted = name.includes(".") ? name.split(".").pop() || "" : "";
+  const ext = dotted.toLowerCase();
+  const label = ext ? ext.toUpperCase() : "文件";
+  if (ext === "pdf") return { family: "pdf", label };
+  if (ext === "log" || ext === "out" || ext === "err") return { family: "log", label };
+  if (ext === "txt" || ext === "md" || ext === "rst" || ext === "csv" || ext === "tex" || ext === "ltx" || ext === "sty" || ext === "cls") return { family: "text", label };
+  if (ext === "json" || ext === "yml" || ext === "yaml" || ext === "xml" || ext === "toml") return { family: "data", label };
+  if (ext === "doc" || ext === "docx" || ext === "rtf" || ext === "odt") return { family: "office", label };
+  if (ext === "xls" || ext === "xlsx" || ext === "ods") return { family: "sheet", label };
+  if (ext === "ppt" || ext === "pptx" || ext === "odp") return { family: "slides", label };
+  if (ext === "zip" || ext === "7z" || ext === "rar" || ext === "tar" || ext === "gz") return { family: "archive", label };
+  if (["js", "ts", "tsx", "jsx", "py", "rs", "go", "c", "h", "cpp", "java", "cs"].includes(ext)) return { family: "code", label };
+  return { family: "generic", label };
 }
 
 export function windowsPathsFromText(text: string): string[] {
@@ -272,6 +276,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   onError: (message: string) => void;
 }) {
   const [dragging, setDragging] = useState(false);
+  const [previewImage, setPreviewImage] = useState<{ src: string; alt: string } | null>(null);
   const [attachmentOpen, setAttachmentOpen] = useState(false);
   const [pickingFiles, setPickingFiles] = useState(false);
   const [suggestionIndex, setSuggestionIndex] = useState(0);
@@ -583,7 +588,9 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
         {!editorDisabled && suggestions.length > 0 && <div id={suggestionListId} className="command-suggestions" role="listbox" aria-label="Pi 指令联想">{suggestions.map((command, index) => <button id={`${suggestionListId}-option-${index}`} type="button" role="option" aria-selected={index === suggestionIndex} className={index === suggestionIndex ? "is-active" : ""} key={`${command.source}-${command.name}`} onMouseDown={(event) => event.preventDefault()} onClick={() => completeCommand(command)}><strong>/{command.name}</strong><span>{command.description || "Pi 指令"}</span><small>{command.source}</small></button>)}</div>}
         {(images.length > 0 || files.length > 0) && <div className="composer-attachments" aria-label="附件">
           {images.map((image, index) => <div className="composer-attachment is-image" key={`${image.fileName}-${index}`}>
-            <div className="composer-attachment-face"><img src={`data:${image.mimeType};base64,${image.data}`} alt={image.fileName || `图片 ${index + 1}`} /></div>
+            <button type="button" className="composer-attachment-face" disabled={editorDisabled} onClick={() => setPreviewImage({ src: `data:${image.mimeType};base64,${image.data}`, alt: image.fileName || `图片 ${index + 1}` })}>
+              <img src={`data:${image.mimeType};base64,${image.data}`} alt={image.fileName || `图片 ${index + 1}`} />
+            </button>
             <small>{image.fileName || "粘贴的图片"}</small>
             <button type="button" className="composer-attachment-remove" disabled={editorDisabled} onClick={() => { const current = composer.currentDraft(); composer.replace(current.message, current.images.filter((_, itemIndex) => itemIndex !== index), draftFiles(current)); }} aria-label={`移除 ${image.fileName || "图片"}`}><CloseIcon /></button>
           </div>)}
@@ -621,6 +628,12 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
         </div>
         {dragging && <div className="drop-hint">松开以添加附件</div>}
       </div>
+      {previewImage && createPortal(<div className="image-preview-backdrop" role="presentation" onClick={(event) => { if (event.target === event.currentTarget) setPreviewImage(null); }}>
+        <section className="image-preview-dialog" role="dialog" aria-modal="true" aria-label="输入框图片预览">
+          <button type="button" className="image-preview-close" onClick={() => setPreviewImage(null)} aria-label="关闭图片预览" title="关闭图片预览">关闭</button>
+          <img className="image-preview-full" src={previewImage.src} alt={previewImage.alt} />
+        </section>
+      </div>, document.body)}
     </div>
   );
 }
