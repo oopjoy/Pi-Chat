@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { act, createElement } from "react";
-import type { CustomProviderInput } from "../../src/shared/types";
 import { captureApiSnapshot } from "../helpers/api-stub";
 import { installAppDom } from "../helpers/app-dom";
 
@@ -103,26 +102,19 @@ test("Settings navigation and Provider disclosure use native non-nested controls
     assert.equal(modelsTab.getAttribute("aria-current"), "page");
     assert.equal(dom.window.document.querySelectorAll('.settings-nav-tabs [aria-current="page"]').length, 1);
 
+    assert.ok(dom.window.document.querySelector(".model-catalog-list"));
+    assert.match(dom.window.document.body.textContent || "", /Custom/);
+    const manage = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "管理连接")!;
+    await act(async () => manage.click());
     const cards = [...dom.window.document.querySelectorAll<HTMLElement>(".model-provider-card")];
     const customCard = cards.find((card) => card.textContent?.includes("local"))!;
     const customDisclosure = customCard.querySelector<HTMLButtonElement>(".model-provider-disclosure")!;
     assert.equal(customCard.querySelector(".model-provider-head")?.getAttribute("role"), null);
     assert.equal(customDisclosure.tagName, "BUTTON");
-    assert.equal(customDisclosure.getAttribute("aria-expanded"), "false");
     assert.equal(customDisclosure.querySelector("button"), null, "disclosure cannot contain Edit/Delete buttons");
     assert.equal(customCard.querySelectorAll(".model-provider-actions button").length, 2);
 
     const builtInCard = cards.find((card) => card.textContent?.includes("pi"))!;
-    const builtInDisclosure = builtInCard.querySelector<HTMLButtonElement>(".model-provider-disclosure")!;
-    await act(async () => builtInCard.querySelector<HTMLElement>(".model-provider-count")!.click());
-    assert.equal(builtInDisclosure.getAttribute("aria-expanded"), "true", "the former broad pointer target remains available");
-    await act(async () => builtInDisclosure.click());
-    assert.equal(builtInDisclosure.getAttribute("aria-expanded"), "false");
-    await act(async () => builtInDisclosure.click());
-    assert.equal(builtInDisclosure.getAttribute("aria-expanded"), "true", "native disclosure reopens with one click");
-    const panelId = builtInDisclosure.getAttribute("aria-controls")!;
-    assert.ok(panelId);
-    assert.equal(builtInCard.querySelector(`#${panelId}`)?.classList.contains("model-provider-panel"), true);
     assert.match(builtInCard.textContent || "", /Pi Runtime 管理|Pi 登录管理/);
   } finally {
     await act(async () => root.unmount());
@@ -334,25 +326,28 @@ test("checking Pi updates again retires the previous confirmation and upgrade bu
   } finally { await f.close(); }
 });
 
-test("Provider editor preserves the stable source key when saving an edited model", async () => {
+test("single-model editor saves a renamed Model ID through the model API", async () => {
   const { dom } = installAppDom();
   const { api } = await import("../../src/web/api");
   const restoreApi = captureApiSnapshot(api);
   const { createRoot } = await import("react-dom/client");
   const { ManagementPanel } = await import("../../src/web/components/ManagementPanel");
-  let saved: CustomProviderInput | null = null;
+  let savedModel: { provider: string; id: string; model: { id: string } } | null = null;
   Object.assign(api, {
-    getCustomProvider: async () => ({
-      provider: {
+    modelPreferences: async () => ({ defaultProvider: "", defaultModel: "", favorites: [], recent: [] }),
+    getCustomModel: async () => ({
+      model: {
         provider: "local",
-        baseUrl: "https://api.example.com/v1",
+        id: "old-id",
+        name: "Old name",
         api: "openai-responses",
-        apiKey: "",
-        models: [{ id: "old-id", originalId: "old-id", name: "Old name", contextWindow: 128_000 }],
+        reasoning: false,
+        imageInput: false,
+        contextWindow: 128_000,
       },
     }),
-    updateCustomProvider: async (_provider: string, config: CustomProviderInput) => {
-      saved = config;
+    updateCustomModel: async (provider: string, id: string, model: { id: string }) => {
+      savedModel = { provider, id, model };
       return {
         models: [{ id: "renamed-id", name: "Renamed", provider: "local", source: "models-json", authMode: "api-key", custom: true }],
         state: { model: null, isStreaming: false },
@@ -366,13 +361,13 @@ test("Provider editor preserves the stable source key when saving an edited mode
     await act(async () => root.render(createElement(ManagementPanel, panelProps([
       { id: "old-id", name: "Old name", provider: "local", source: "models-json", authMode: "api-key", custom: true },
     ]))));
-    const edit = [...dom.window.document.querySelectorAll<HTMLButtonElement>(".model-provider-actions button")]
+    const edit = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
       .find((button) => button.textContent === "编辑")!;
     await act(async () => {
       edit.click();
       await Promise.resolve();
     });
-    const idInput = dom.window.document.querySelector<HTMLInputElement>('input[aria-label="模型 1 ID"]')!;
+    const idInput = [...dom.window.document.querySelectorAll<HTMLInputElement>("input")].find((input) => input.value === "old-id")!;
     await act(async () => {
       Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value")?.set?.call(idInput, "renamed-id");
       idInput.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "renamed-id" }));
@@ -381,8 +376,10 @@ test("Provider editor preserves the stable source key when saving an edited mode
       dom.window.document.querySelector<HTMLButtonElement>(".model-save-button")!.click();
       await Promise.resolve();
     });
-    assert.ok(saved);
-    assert.deepEqual(saved.models, [{ id: "renamed-id", originalId: "old-id", name: "Old name", contextWindow: 128_000 }]);
+    assert.ok(savedModel);
+    assert.equal(savedModel.provider, "local");
+    assert.equal(savedModel.id, "old-id");
+    assert.equal(savedModel.model.id, "renamed-id");
   } finally {
     await act(async () => root.unmount());
     restoreApi();

@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { PiRuntimeUpdateCheck } from "../../shared/pi-runtime-update";
-import type { BootstrapData, BuildIdentity, CustomProviderInput, ExtensionResource, ModelInfo, PackageResource, PiState, PrimaryRuntimeReadiness, SkillResource } from "../../shared/types";
+import type { BootstrapData, BuildIdentity, ExtensionResource, ModelInfo, PackageResource, PiState, PrimaryRuntimeReadiness, SkillResource } from "../../shared/types";
 import { useModalFocus } from "../lib/modal-focus";
 import { writeClipboardText } from "../lib/clipboard";
 import { api, PI_CHAT_RELEASES_URL, type UpdateCheckResult } from "../api";
 import { DEFAULT_APPEARANCE, snapToStep, type AppearancePreferences, type FontPreference, type ThemePreference } from "../lib/preferences";
 import { CompactSelect, type CompactSelectOption } from "./CompactSelect";
-import { ChevronDownIcon, ChevronRightIcon, CloseIcon, FolderIcon, MinusIcon, PiMarkIcon, PlusIcon, TrashIcon } from "./Icons";
+import { ChevronDownIcon, CloseIcon, FolderIcon, MinusIcon, PiMarkIcon, PlusIcon } from "./Icons";
+import { ModelsPanel } from "./ModelsPanel";
 
 export type ManagementSection = "settings" | "models";
 type SettingsTab = "appearance" | "models" | "skills" | "extensions" | "packages" | "about";
@@ -410,178 +411,6 @@ function DiagnosticsPanel({ busy, onExport }: {
       <button type="button" disabled={busy} onClick={() => void run(onExport)}>导出最近五分钟诊断</button>
     </div>
     <p className="resource-loading">问题出现后请尽量不要刷新页面，直接回到这里导出。</p>
-  </div>;
-}
-
-function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy, onModel, onBrowseModels, onModelsChanged }: {
-  models: ModelInfo[];
-  modelRuntimeSyncPending: boolean;
-  state: PiState;
-  busy: boolean;
-  browseBusy: boolean;
-  onModel: (provider: string, id: string, api?: string) => void;
-  onBrowseModels: () => void;
-  onModelsChanged: (data: Pick<
-    BootstrapData,
-    "models" | "state" | "modelRuntimeSyncPending" | "modelCatalogueRevision"
-  >) => void;
-}) {
-  const [editingProvider, setEditingProvider] = useState<CustomProviderInput | null>(null);
-  const [editingProviderKey, setEditingProviderKey] = useState("");
-  const [expandedProvider, setExpandedProvider] = useState("");
-  const providerLoadSequence = useRef(0);
-  useEffect(() => () => { providerLoadSequence.current += 1; }, []);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
-  const modelGroups = useMemo(() => {
-    const groups = new Map<string, ModelInfo[]>();
-    for (const model of models) groups.set(model.provider, [...(groups.get(model.provider) || []), model]);
-    return [...groups.entries()];
-  }, [models]);
-  const closeProvider = () => {
-    providerLoadSequence.current += 1;
-    setExpandedProvider("");
-    setEditingProvider(null);
-    setEditingProviderKey("");
-  };
-  const beginAddProvider = () => {
-    if (busy || saving) return;
-    providerLoadSequence.current += 1;
-    setEditingProviderKey("");
-    setExpandedProvider("__new__");
-    setEditingProvider({ provider: "", baseUrl: "", api: "openai-completions", apiKey: "", models: [{ id: "", name: "" }] });
-    setError(""); setNotice("");
-  };
-  const beginEditProvider = async (
-    provider: string,
-    custom: boolean,
-    forceOpen = false,
-  ) => {
-    if (saving) return;
-    if (expandedProvider === provider) {
-      if (!forceOpen) closeProvider();
-      return;
-    }
-    const sequence = ++providerLoadSequence.current;
-    setExpandedProvider(provider);
-    setEditingProviderKey(provider);
-    setEditingProvider(null);
-    setError(""); setNotice("");
-    if (!custom) {
-      // Built-in/login-backed Providers are owned by Pi. They have no
-      // models.json URL or API key to edit; expansion is read-only.
-      setEditingProviderKey("");
-      return;
-    }
-    try {
-      const result = await api.getCustomProvider(provider);
-      if (sequence !== providerLoadSequence.current) return;
-      setEditingProvider({ ...result.provider, apiKey: "" });
-    } catch (cause) {
-      if (sequence === providerLoadSequence.current) {
-        setError(cause instanceof Error ? cause.message : String(cause));
-        setEditingProviderKey("");
-      }
-    }
-  };
-  const updateProvider = <K extends keyof CustomProviderInput>(key: K, value: CustomProviderInput[K]) => setEditingProvider((current) => current ? { ...current, [key]: value } : current);
-  const updateModel = (index: number, key: "id" | "name" | "contextWindow" | "maxTokens", value: string) => setEditingProvider((current) => {
-    if (!current) return current;
-    const models = current.models.map((model, modelIndex) => modelIndex === index ? { ...model, [key]: key === "contextWindow" || key === "maxTokens" ? (value ? Number(value) : undefined) : value } : model);
-    return { ...current, models };
-  });
-  const addModelRow = () => setEditingProvider((current) => current ? { ...current, models: [...current.models, { id: "", name: "" }] } : current);
-  const removeModelRow = (index: number) => setEditingProvider((current) => current && current.models.length > 1 ? { ...current, models: current.models.filter((_, modelIndex) => modelIndex !== index) } : current);
-  const saveProvider = async () => {
-    if (!editingProvider || saving) return;
-    setSaving(true); setError(""); setNotice("");
-    try {
-      let result;
-      if (editingProviderKey) result = await api.updateCustomProvider(editingProviderKey, editingProvider);
-      else result = await api.addCustomProvider(editingProvider);
-      onModelsChanged(result);
-      closeProvider();
-      setNotice("Provider 配置已保存，正在刷新模型目录。当前请求仍使用原配置。");
-    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
-    finally { setSaving(false); }
-  };
-  const removeProvider = async (provider: string) => {
-    if (saving || !window.confirm(`删除自定义提供方 ${provider} 及其全部模型？`)) return;
-    setSaving(true); setError(""); setNotice("");
-    try {
-      onModelsChanged(await api.deleteCustomProvider(provider));
-      if (expandedProvider === provider) closeProvider();
-      setNotice("Provider 已删除。");
-    }
-    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
-    finally { setSaving(false); }
-  };
-  const providerEditor = editingProvider ? <div className="model-editor model-provider-editor" aria-label={editingProviderKey ? "编辑 Provider" : "添加 Provider"}>
-    <div className="model-editor-head"><strong>{editingProviderKey ? `${editingProviderKey} 配置` : "添加自定义提供方"}</strong><button type="button" disabled={saving} onClick={closeProvider}>取消</button></div>
-    <div className="model-editor-grid"><label>Provider<input value={editingProvider.provider} disabled={Boolean(editingProviderKey) || saving} onChange={(event) => updateProvider("provider", event.target.value)} /></label><label>API 协议<select value={editingProvider.api} disabled={saving} onChange={(event) => updateProvider("api", event.target.value as CustomProviderInput["api"])}><option value="openai-completions">openai-completions</option><option value="openai-responses">openai-responses</option><option value="anthropic-messages">anthropic-messages</option><option value="google-generative-ai">google-generative-ai</option></select></label><label className="model-editor-wide">API 地址<input value={editingProvider.baseUrl} disabled={saving} placeholder="https://api.example.com/v1" onChange={(event) => updateProvider("baseUrl", event.target.value)} /></label><label className="model-editor-wide">API 密钥<input type="password" value={editingProvider.apiKey || ""} disabled={saving} placeholder="已配置 — 输入新值以替换" onChange={(event) => updateProvider("apiKey", event.target.value)} /></label></div>
-    <div className="provider-models-heading"><span>ID</span><span>显示名称</span><span>上下文</span><span>最大输出</span><span aria-hidden="true" /></div>
-    <div className="provider-model-editor-list">{editingProvider.models.map((model, index) => <div className="provider-model-editor-row" key={index}><input aria-label={`模型 ${index + 1} ID`} placeholder="Model ID" value={model.id} disabled={saving} onChange={(event) => updateModel(index, "id", event.target.value)} /><input aria-label={`模型 ${index + 1} 名称`} placeholder="显示名称" value={model.name} disabled={saving} onChange={(event) => updateModel(index, "name", event.target.value)} /><input aria-label={`模型 ${index + 1} 上下文大小`} type="number" min="1" placeholder="上下文" value={model.contextWindow || ""} disabled={saving} onChange={(event) => updateModel(index, "contextWindow", event.target.value)} /><input aria-label={`模型 ${index + 1} 最大输出`} type="number" min="1" placeholder="最大输出" value={model.maxTokens || ""} disabled={saving} onChange={(event) => updateModel(index, "maxTokens", event.target.value)} /><button type="button" className="model-trash-button" aria-label={`删除模型 ${model.id || index + 1}`} title="删除模型条目" disabled={editingProvider.models.length <= 1 || saving} onClick={() => removeModelRow(index)}><TrashIcon /></button></div>)}</div>
-    <button type="button" className="model-inline-add" disabled={saving} onClick={addModelRow}>＋ 添加模型</button><div className="model-editor-footer"><span>保存不会修改当前正在执行的 Prompt；新请求使用刷新后的配置。</span><button type="button" className="model-save-button" disabled={saving} onClick={() => void saveProvider()}>{saving ? "保存中…" : "保存"}</button></div>
-  </div> : null;
-  return <div className="settings-resource-panel models-panel">
-    <div className="settings-resource-heading"><div className="settings-resource-title"><h3>模型<span className="count-badge">{models.length}</span></h3><p>按 Provider 管理自定义连接和模型目录。内置登录 Provider 由 Pi Runtime 管理。</p><span className={`model-runtime-status ${modelRuntimeSyncPending ? "is-pending" : "is-ready"}`}>{modelRuntimeSyncPending ? "正在刷新模型目录" : "模型目录已刷新"}</span></div><div className="models-panel-actions"><button type="button" className="model-add-button" disabled={saving} onClick={beginAddProvider}>添加自定义提供方</button><button type="button" className="resource-browse-root" title="打开 models.json" aria-label="打开 models.json" disabled={browseBusy} onClick={onBrowseModels}><FolderIcon /></button></div></div>
-    {error && <div className="resource-error">{error}</div>}{notice && !error && <div className="resource-notice">{notice}</div>}
-    {expandedProvider === "__new__" && providerEditor}
-    <div className="model-provider-list">{modelGroups.map(([provider, providerModels], providerIndex) => {
-      const custom = providerModels.some((model) => model.source === "models-json" || model.custom);
-      const expanded = expandedProvider === provider;
-      const panelId = `model-provider-panel-${providerIndex}`;
-      return <section className={`model-provider-card ${expanded ? "is-expanded" : ""}`} key={provider}>
-        <header
-          className="model-provider-head"
-          onClick={(event) => {
-            // Preserve the existing broad pointer target (including narrow
-            // layouts) without making the header itself a second keyboard
-            // control or nesting Edit/Delete inside the disclosure button.
-            if ((event.target as HTMLElement).closest("button")) return;
-            void beginEditProvider(provider, custom);
-          }}
-        >
-          <button
-            type="button"
-            className="model-provider-disclosure"
-            aria-expanded={expanded}
-            aria-controls={panelId}
-            onClick={() => void beginEditProvider(provider, custom)}
-          >
-            <span className="model-provider-chevron" aria-hidden="true">{expanded ? <ChevronDownIcon /> : <ChevronRightIcon />}</span>
-            <strong>{provider}</strong>
-            {custom && <span className="model-custom-badge">自定义</span>}
-            <i className="model-health-dot" title="已发现" />
-          </button>
-          <div className="model-provider-actions">
-            <span className="model-provider-count">{providerModels.length} 个模型</span>
-            {custom ? <>
-              <button type="button" disabled={saving} onClick={() => void beginEditProvider(provider, custom, true)}>编辑</button>
-              <button type="button" className="model-delete-action" disabled={busy || saving} onClick={() => void removeProvider(provider)}>删除</button>
-            </> : <span className="model-provider-managed">{providerModels.some((model) => model.authMode === "pi-managed") ? "Pi 登录管理" : "Pi Runtime 管理"}</span>}
-          </div>
-        </header>
-        {expanded && <div id={panelId} className="model-provider-panel">
-          {editingProviderKey === provider && editingProvider
-            ? providerEditor
-            : custom
-              ? <p className="model-provider-loading">正在读取 Provider 配置…</p>
-              : <>
-                  <p className="model-provider-readonly">这是 Pi 内置登录 Provider，地址、密钥和模型目录由 Pi Runtime 管理。</p>
-                  <div className="model-provider-rows">{providerModels.map((model) => {
-                    const active = state.model?.provider === model.provider && state.model?.id === model.id;
-                    return <article className={`model-provider-row ${active ? "is-active" : ""}`} key={`${model.provider}/${model.id}/${model.api || ""}`}>
-                      <button type="button" className="model-select-row" disabled={busy || active} onClick={() => onModel(model.provider, model.id, model.api)} title={`${model.provider}/${model.id}`}>
-                        <code>{model.id}</code><span>{model.name !== model.id ? model.name : ""}</span>{model.api && <small>{model.api}</small>}{model.contextWindow && <em>{Math.round(model.contextWindow / 1000)}k</em>}
-                      </button>
-                    </article>;
-                  })}</div>
-                </>}
-        </div>}
-      </section>;
-    })}{!models.length && <p className="resource-loading">当前没有可用模型</p>}</div>
   </div>;
 }
 

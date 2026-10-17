@@ -21,6 +21,14 @@ export interface ModelManagementRouteHost {
     setThinking(sessionId: string, level: string): Promise<unknown>;
   };
   beginPromptAdmission(sessionId: string): Promise<() => void>;
+  preferencesService(): {
+    read(): Promise<unknown>;
+    apply(patch: {
+      default?: { provider: string; id: string };
+      favorite?: { provider: string; id: string; on: boolean };
+      used?: { provider: string; id: string };
+    }): Promise<unknown>;
+  };
 }
 
 /** Model/provider routes only coordinate existing management services. */
@@ -31,6 +39,41 @@ export async function handleModelManagementRoute(
   url: URL,
   preparedBody?: Record<string, unknown>,
 ): Promise<boolean> {
+  if (url.pathname === "/api/models/preferences") {
+    if (!host.available()) { json(response, 501, { error: "模型管理不可用" }); return true; }
+    if (request.method === "GET") {
+      json(response, 200, await host.preferencesService().read());
+      return true;
+    }
+    if (request.method === "PATCH") {
+      const body = preparedBody || await bodyJson(request);
+      const patch: {
+        default?: { provider: string; id: string };
+        favorite?: { provider: string; id: string; on: boolean };
+        used?: { provider: string; id: string };
+      } = {};
+      if (body.default && typeof body.default === "object" && !Array.isArray(body.default)) {
+        const value = body.default as Record<string, unknown>;
+        patch.default = { provider: String(value.provider || ""), id: String(value.id || "") };
+      }
+      if (body.favorite && typeof body.favorite === "object" && !Array.isArray(body.favorite)) {
+        const value = body.favorite as Record<string, unknown>;
+        patch.favorite = {
+          provider: String(value.provider || ""),
+          id: String(value.id || ""),
+          on: value.on !== false,
+        };
+      }
+      if (body.used && typeof body.used === "object" && !Array.isArray(body.used)) {
+        const value = body.used as Record<string, unknown>;
+        patch.used = { provider: String(value.provider || ""), id: String(value.id || "") };
+      }
+      json(response, 200, await host.preferencesService().apply(patch));
+      return true;
+    }
+    methodNotAllowed(response);
+    return true;
+  }
   if (url.pathname === "/api/models/provider" && request.method === "POST") {
     if (!host.available()) { json(response, 501, { error: "模型管理不可用" }); return true; }
     const body = preparedBody || await bodyJson(request);

@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { hostVisibleModelsFromConfig, modelsConfigFingerprint } from "./models-config-revision.js";
+import { ModelPreferencesStore } from "./model-preferences.js";
 import { createReadStream, existsSync, readFileSync, watch, type FSWatcher } from "node:fs";
 import { stat } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -4331,6 +4332,9 @@ export class PiChatApp {
   }
   private customModelManagementService(): any {
     return this.runtimeFileActions().customModelManagementService();
+  }
+  private modelPreferencesStore(): ModelPreferencesStore {
+    return new ModelPreferencesStore(dirname(this.options.modelManager!.path));
   }
   private async changeWorkspace(...args: any[]): Promise<any> {
     return (this.runtimeFileActions().changeWorkspace as any)(...args);

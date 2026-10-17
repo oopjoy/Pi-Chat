@@ -1,5 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import type { ModelInfo } from "../../shared/types";
+import { api } from "../api";
+import { composerModelSections, EMPTY_MODEL_PREFERENCES, type ModelPreferencesSnapshot } from "../lib/model-preferences";
 import { CheckIcon, ChipIcon } from "./Icons";
 
 export interface ComposerModelGroup {
@@ -36,14 +38,21 @@ export function ComposerModelSelect({ value, models, inventoryPending = false, d
   const optionRefs = useRef<Array<HTMLDivElement | null>>([]);
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
+  const [prefs, setPrefs] = useState<ModelPreferencesSnapshot>(EMPTY_MODEL_PREFERENCES);
   const currentKey = value ? modelKey(value) : "";
   const selectableModels = useMemo(() => {
     if (!value || models.some((model) => modelKey(model) === currentKey))
       return models;
     return [value, ...models];
   }, [currentKey, models, value]);
-  const groups = useMemo(() => groupComposerModels(selectableModels), [selectableModels]);
-  const options = useMemo(() => groups.flatMap((group) => group.models), [groups]);
+  useEffect(() => {
+    void api.modelPreferences().then(setPrefs).catch(() => undefined);
+  }, [models]);
+  const sections = useMemo(
+    () => composerModelSections(selectableModels, value, prefs.favorites, prefs.recent),
+    [prefs.favorites, prefs.recent, selectableModels, value],
+  );
+  const options = useMemo(() => sections.flatMap((section) => section.models), [sections]);
   const optionIndexes = useMemo(
     () => new Map(options.map((model, index) => [modelKey(model), index])),
     [options],
@@ -59,6 +68,7 @@ export function ComposerModelSelect({ value, models, inventoryPending = false, d
     if (!model) return;
     setOpen(false);
     if (modelKey(model) !== currentKey) onChange(model.provider, model.id, model.api);
+    void api.patchModelPreferences({ used: { provider: model.provider, id: model.id } }).then(setPrefs).catch(() => undefined);
     focusTrigger();
   };
   const openMenu = () => {
@@ -163,12 +173,12 @@ export function ComposerModelSelect({ value, models, inventoryPending = false, d
         aria-activedescendant={options[activeIndex] ? `${id}-option-${activeIndex}` : undefined}
         onKeyDown={handleListKeyDown}
       >
-        {groups.map((group) => <div key={group.provider} className="composer-model-group" role="group" aria-label={group.provider}>
-          <div className="composer-model-provider" data-provider={group.provider} aria-hidden="true">
-            <span>{group.provider}</span>
-            <b>{group.models.length}</b>
+        {sections.map((section) => <div key={section.id} className="composer-model-group" role="group" aria-label={section.label}>
+          <div className="composer-model-provider" data-provider={section.label} aria-hidden="true">
+            <span>{section.label}</span>
+            <b>{section.models.length}</b>
           </div>
-          {group.models.map((model) => {
+          {section.models.map((model) => {
             const key = modelKey(model);
             const index = optionIndexes.get(key)!;
             const isSelected = key === currentKey;

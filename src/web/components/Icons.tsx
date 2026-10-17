@@ -136,6 +136,10 @@ export function SearchIcon(props: IconProps) {
   return <LineIcon {...props}><circle cx="10.5" cy="10.5" r="5.8" /><path d="m15 15 4.2 4.2" /></LineIcon>;
 }
 
+export function StarIcon(props: IconProps) {
+  return <LineIcon {...props}><path d="m12 3.6 2.35 4.76 5.25.76-3.8 3.7.9 5.24L12 15.6l-4.7 2.46.9-5.24-3.8-3.7 5.25-.76Z" /></LineIcon>;
+}
+
 export function PinIcon(props: IconProps) {
   return <LineIcon {...props}><path d="M8.5 4h7M10 4v5l-2 3v1.5h8V12l-2-3V4M12 13.5V21" /></LineIcon>;
 }
