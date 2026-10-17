@@ -843,11 +843,7 @@ details.conversation-process { display: block; padding: 0; }
 .composer-attachment.is-code .composer-attachment-icon, .composer-attachment.is-code .composer-attachment-kind { color: var(--accent); }
 .composer-attachment.is-data .composer-attachment-icon, .composer-attachment.is-data .composer-attachment-kind { color: var(--status-yellow); }
 .composer-attachment.is-generic .composer-attachment-icon, .composer-attachment.is-generic .composer-attachment-kind { color: var(--muted); }
-.image-preview { position: relative; width: 92px; flex: 0 0 92px; }
-.image-preview img { display: block; width: 92px; height: 72px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-soft); object-fit: cover; }
-.image-preview button { position: absolute; top: -5px; right: -5px; display: grid; width: 19px; height: 19px; place-items: center; padding: 0; border: 1px solid var(--line); border-radius: 50%; background: var(--surface); color: var(--text); box-shadow: var(--shadow); cursor: pointer; line-height: 1; }
-.image-preview button svg { width: 11px; height: 11px; }
-.image-preview small { display: block; margin-top: var(--space-1); overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+
 .drop-hint { position: absolute; z-index: 2; inset: 0; display: grid; place-items: center; border-radius: var(--radius-lg); background: color-mix(in srgb, var(--surface), transparent 8%); color: var(--accent); font-size: 13px; font-weight: 700; pointer-events: none; }
 .command-suggestions { position: absolute; z-index: 5; left: var(--space-3); bottom: calc(100% + var(--space-2)); display: grid; width: min(560px, calc(100% - 16px)); max-height: 310px; overflow-y: auto; padding: var(--space-1); border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface); box-shadow: 0 12px 32px rgba(12, 22, 38, .18); }
 .command-suggestions button { display: grid; grid-template-columns: 145px minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); padding: var(--space-2); border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text); cursor: pointer; text-align: left; }

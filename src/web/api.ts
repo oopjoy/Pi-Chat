@@ -387,6 +387,8 @@ export const api = {
   pickLocalFiles: () => request<{ paths: string[] }>("/api/local-files/pick", { method: "POST" }),
   stageDroppedFile: (file: { name: string; data: string; size: number }) =>
     request<{ path: string }>("/api/local-files/stage", { method: "POST", body: JSON.stringify(file) }, 120_000),
+  discardStagedFile: (path: string) =>
+    request<{ ok: boolean }>("/api/local-files/stage/discard", { method: "POST", body: JSON.stringify({ path }) }),
   openLocalFile: (path: string) => request<{ ok: boolean }>("/api/local-files/open", { method: "POST", body: JSON.stringify({ path }) }),
   clipboardLocalFiles: (files: Array<{ name: string; size: number }>) => request<{ paths: string[] }>("/api/local-files/clipboard", { method: "POST", body: JSON.stringify({ files }) }),
   pickDraftWorkspace: () => request<{ cancelled: boolean; cwd?: string }>("/api/workspace/draft-pick", { method: "POST" }),

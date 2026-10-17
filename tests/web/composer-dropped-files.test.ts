@@ -1,0 +1,115 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { act, createElement, StrictMode } from "react";
+import { installAppDom } from "../helpers/app-dom";
+
+test("ChatInput waits for in-flight dropped staging before sending the same draft", async () => {
+  const { dom } = installAppDom();
+  class ImmediateFileReader {
+    result = "data:application/octet-stream;base64,bG9nLWJvZHk=";
+    onload: ((this: FileReader, ev: ProgressEvent<FileReader>) => unknown) | null = null;
+    onerror: ((this: FileReader, ev: ProgressEvent<FileReader>) => unknown) | null = null;
+    readAsDataURL() { this.onload?.call(this as unknown as FileReader, {} as ProgressEvent<FileReader>); }
+  }
+  Object.defineProperty(dom.window, "FileReader", { configurable: true, writable: true, value: ImmediateFileReader });
+  Object.defineProperty(globalThis, "FileReader", { configurable: true, writable: true, value: ImmediateFileReader });
+  const { createRoot } = await import("react-dom/client");
+  const { ChatInput } = await import("../../src/web/components/ChatInput");
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  const sent: string[] = [];
+  let resolveStage: ((path: string) => void) | undefined;
+  const stageStarted = Promise.withResolvers<void>();
+  const discarded: string[] = [];
+  const render = () => createElement(ChatInput, {
+    streaming: false,
+    stopping: false,
+    disabled: false,
+    submissionScope: "session:drop-wait",
+    allowFollowupSubmissions: true,
+    acceptsImages: true,
+    commands: [],
+    onSend: async (message: string) => { sent.push(message); },
+    onAbort: async () => undefined,
+    onPickLocalFiles: async () => [],
+    onStageDroppedFile: async () => {
+      stageStarted.resolve();
+      return await new Promise<string>((resolve) => { resolveStage = resolve; });
+    },
+    onDiscardStagedFile: async (path: string) => { discarded.push(path); },
+    onError: () => undefined,
+  });
+  try {
+    await act(async () => root.render(createElement(StrictMode, null, render())));
+    const textarea = dom.window.document.querySelector<HTMLTextAreaElement>("textarea[aria-label='消息输入']")!;
+    const composer = dom.window.document.querySelector<HTMLDivElement>(".composer")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "阅读这个文件");
+      textarea.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "阅读这个文件" }));
+    });
+    const file = new dom.window.File(["log-body"], "note.log", { type: "text/plain" });
+    const drop = new dom.window.Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, "dataTransfer", {
+      value: {
+        files: [file],
+        items: [{ type: file.type, kind: "file", webkitGetAsEntry: () => ({ isDirectory: false }) }],
+        types: ["Files"],
+        getData: () => "",
+      },
+    });
+    await act(async () => {
+      composer.dispatchEvent(drop);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+    await stageStarted.promise;
+    await act(async () => {
+      dom.window.document.querySelector<HTMLButtonElement>(".send-button")!.click();
+      await Promise.resolve();
+    });
+    assert.deepEqual(sent, []);
+    await act(async () => {
+      resolveStage?.("C:\\Users\\me\\note.log");
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+    assert.equal(sent.length, 1);
+    assert.match(sent[0], /阅读这个文件/);
+    assert.match(sent[0], /C:\\Users\\me\\note\.log/);
+    assert.deepEqual(discarded, []);
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+test("ImagePreviewDialog focuses the close control and restores the trigger on Escape", async () => {
+  const { dom } = installAppDom();
+  const { createRoot } = await import("react-dom/client");
+  const { ImagePreviewDialog } = await import("../../src/web/components/ImagePreviewDialog");
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  const trigger = dom.window.document.createElement("button");
+  trigger.textContent = "open";
+  dom.window.document.body.append(trigger);
+  trigger.focus();
+  try {
+    await act(async () => root.render(createElement(ImagePreviewDialog, {
+      src: "data:image/png;base64,aaaa",
+      alt: "preview",
+      label: "输入框图片预览",
+      onClose: () => { void root.render(null); },
+    })));
+    const close = dom.window.document.querySelector<HTMLButtonElement>(".image-preview-close");
+    assert.ok(close);
+    assert.equal(dom.window.document.activeElement, close);
+    await act(async () => {
+      close!.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }));
+      dom.window.document.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }));
+    });
+    assert.equal(dom.window.document.activeElement, close);
+    await act(async () => {
+      dom.window.document.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+      await Promise.resolve();
+    });
+    assert.equal(dom.window.document.querySelector(".image-preview-dialog"), null);
+    assert.equal(dom.window.document.activeElement, trigger);
+  } finally {
+    await act(async () => root.unmount());
+  }
+});

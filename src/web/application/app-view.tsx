@@ -471,6 +471,7 @@ export function AppView(host: Record<string, any>) {
           onReadClipboardFiles: async (files: any) => (await api.clipboardLocalFiles(files)).paths,
           onOpenLocalFile: async (path: string) => { await api.openLocalFile(path); },
           onStageDroppedFile: async (file: { name: string; data: string; size: number }) => (await api.stageDroppedFile(file)).path,
+          onDiscardStagedFile: async (path: string) => { await api.discardStagedFile(path); },
           onError: setError,
           onAbort: stopGeneration,
         }}

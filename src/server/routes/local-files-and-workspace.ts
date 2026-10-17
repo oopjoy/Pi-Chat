@@ -1,18 +1,9 @@
-import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { tmpdir } from "node:os";
-import { basename, join, resolve } from "node:path";
-import { mkdir, stat, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
+import { stat } from "node:fs/promises";
+import { discardManagedDroppedFile, stageDroppedFileBytes } from "../dropped-files.js";
 import { bodyJson, json, methodNotAllowed } from "../http-transport.js";
 import { openLocalAttachment, parsePickerOutput } from "../file-picker.js";
-
-const MAX_STAGED_DROPPED_FILE_BYTES = 64 * 1024 * 1024;
-
-function safeDroppedFileName(name: string): string {
-  const base = basename(name).replace(/[<>:"|?*\u0000-\u001f]/g, "_").trim();
-  if (!base || base === "." || base === "..") return "dropped.bin";
-  return base.slice(0, 180);
-}
 
 export interface LocalFilesWorkspaceRouteHost {
   pickLocalFiles(): Promise<string[]>;
@@ -85,15 +76,30 @@ export async function handleLocalFilesWorkspaceRoute(
       json(response, 400, { error: "文件内容无效" });
       return true;
     }
-    if (!bytes.length || bytes.length > MAX_STAGED_DROPPED_FILE_BYTES) {
-      json(response, 400, { error: "拖入的文件为空或超过 64 MB" });
+    try {
+      json(response, 200, { path: await stageDroppedFileBytes(name, bytes) });
+    } catch (error) {
+      json(response, 400, { error: error instanceof Error ? error.message : "无法保存拖入的文件" });
+    }
+    return true;
+  }
+  if (url.pathname === "/api/local-files/stage/discard") {
+    if (request.method !== "POST") {
+      methodNotAllowed(response);
       return true;
     }
-    const directory = join(tmpdir(), "pi-chat-dropped", randomUUID());
-    await mkdir(directory, { recursive: true });
-    const path = join(directory, safeDroppedFileName(name));
-    await writeFile(path, bytes);
-    json(response, 200, { path });
+    const body = await bodyJson(request);
+    const path = typeof body.path === "string" ? body.path : "";
+    if (parsePickerOutput(JSON.stringify([path]))[0] !== path) {
+      json(response, 400, { error: "路径无效" });
+      return true;
+    }
+    try {
+      await discardManagedDroppedFile(path);
+      json(response, 200, { ok: true });
+    } catch (error) {
+      json(response, 400, { error: error instanceof Error ? error.message : "无法清理临时文件" });
+    }
     return true;
   }
   if (url.pathname === "/api/workspace/draft-pick") {

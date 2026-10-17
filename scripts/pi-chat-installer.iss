@@ -88,7 +88,7 @@ end;
 function ShortcutLooksLikeLegacySetupPiChat(const LinkPath: String): Boolean;
 var
   Shell, Shortcut: Variant;
-  Target, Args: String;
+  Target, Args, WorkDir, ExpectedScript, ExpectedDir, NormalizedArgs: String;
 begin
   Result := False;
   if not FileExists(LinkPath) then Exit;
@@ -97,8 +97,16 @@ begin
     Shortcut := Shell.CreateShortcut(LinkPath);
     Target := LowerCase(Shortcut.TargetPath);
     Args := LowerCase(Shortcut.Arguments);
+    WorkDir := LowerCase(Shortcut.WorkingDirectory);
+    ExpectedScript := LowerCase(ExpandConstant('{app}\app\start-pi-chat-ui.ps1'));
+    ExpectedDir := LowerCase(ExpandConstant('{app}\app'));
+    NormalizedArgs := StringReplace(StringReplace(Args, '"', '', [rfReplaceAll]), '/', '\', [rfReplaceAll]);
+    ExpectedScript := StringReplace(ExpectedScript, '/', '\', [rfReplaceAll]);
+    ExpectedDir := StringReplace(ExpectedDir, '/', '\', [rfReplaceAll]);
+    WorkDir := StringReplace(WorkDir, '/', '\', [rfReplaceAll]);
     Result := (Pos('powershell.exe', Target) > 0)
-      and (Pos('start-pi-chat-ui.ps1', Args) > 0)
+      and (Pos(ExpectedScript, NormalizedArgs) > 0)
+      and (WorkDir = ExpectedDir)
       and (Pos(' pwa', ' ' + Args) = 0);
   except
     Result := False;

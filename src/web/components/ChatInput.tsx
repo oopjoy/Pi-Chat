@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent, type ReactNode } from "react";
-import { createPortal } from "react-dom";
 import {
   MAX_PROMPT_IMAGE_BYTES,
   MAX_PROMPT_IMAGES,
@@ -11,10 +10,23 @@ import { composerDraftKeyId, type ComposerDraftKey } from "../state/composer";
 import { MAX_COMPOSER_FILES, composePromptWithAttachedFiles, draftFiles } from "../state/composer";
 export { composePromptWithAttachedFiles };
 import { CloseIcon, FileIcon, FileSearchIcon, FileTextIcon, ImageIcon, PaperclipIcon, SendIcon } from "./Icons";
+import { ImagePreviewDialog } from "./ImagePreviewDialog";
 
 const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 const COMPOSITION_END_ENTER_GRACE_MS = 100;
-const MAX_DROPPED_FILE_BYTES = 64 * 1024 * 1024;
+export const MAX_DROPPED_FILE_BYTES = 64 * 1024 * 1024;
+
+export function droppedFilePreflightError(
+  existingCount: number,
+  files: Array<{ name: string; size: number }>,
+): string | null {
+  if (!files.length) return null;
+  if (existingCount + files.length > MAX_COMPOSER_FILES)
+    return `一次最多附加 ${MAX_COMPOSER_FILES} 个本地文件`;
+  const oversized = files.find((file) => file.size > MAX_DROPPED_FILE_BYTES);
+  if (oversized) return `文件 ${oversized.name} 超过 64 MB，无法从拖入附加`;
+  return null;
+}
 
 export function promptImageByteLength(image: Pick<PromptImage, "data" | "size">): number {
   const padding = image.data.endsWith("==") ? 2 : image.data.endsWith("=") ? 1 : 0;
@@ -234,7 +246,7 @@ export function commandMatches(value: string, commands: SlashCommand[]): SlashCo
   }).sort((a, b) => a.rank - b.rank || a.score - b.score || a.command.name.localeCompare(b.command.name)).slice(0, 9).map(({ command }) => command);
 }
 
-export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, placeholder, acceptsImages, imageInputPending = false, restoredDraft, onDraftRevisionChange, draftKey, forgottenComposerKeys = [], submissionScope, submissionTargetSessionId, allowFollowupSubmissions = true, submissionPaused = false, onSubmissionPendingChange, commands, controls, notices, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles = async () => [], onOpenLocalFile, onStageDroppedFile, onError }: {
+export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, placeholder, acceptsImages, imageInputPending = false, restoredDraft, onDraftRevisionChange, draftKey, forgottenComposerKeys = [], submissionScope, submissionTargetSessionId, allowFollowupSubmissions = true, submissionPaused = false, onSubmissionPendingChange, commands, controls, notices, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles = async () => [], onOpenLocalFile, onStageDroppedFile, onDiscardStagedFile, onError }: {
   /** True when a submission will enter the local queue. */
   streaming: boolean;
   /** True only while Pi is actively generating and can be stopped. */
@@ -273,6 +285,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   onReadClipboardFiles?: (files: Array<{ name: string; size: number }>) => Promise<string[]>;
   onOpenLocalFile?: (path: string) => Promise<void>;
   onStageDroppedFile?: (file: { name: string; data: string; size: number }) => Promise<string>;
+  onDiscardStagedFile?: (path: string) => Promise<void>;
   onError: (message: string) => void;
 }) {
   const [dragging, setDragging] = useState(false);
@@ -289,6 +302,12 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   const composingRef = useRef(false);
   const lastCompositionEndAtRef = useRef(0);
   const editorDisabledRef = useRef(disabled);
+  const attachingCountRef = useRef(0);
+  const [attachingCount, setAttachingCount] = useState(0);
+  const attachmentEpochRef = useRef(0);
+  const attachWaitersRef = useRef<Array<() => void>>([]);
+  const onDiscardStagedFileRef = useRef(onDiscardStagedFile);
+  onDiscardStagedFileRef.current = onDiscardStagedFile;
   // Legacy unit fixtures may provide only a scope. Production App always
   // supplies the typed identity; the fallback retains the old fixture contract.
   const resolvedDraftKey: ComposerDraftKey = draftKey || (
@@ -298,6 +317,38 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   );
   const currentDraftKeyIdRef = useRef(composerDraftKeyId(resolvedDraftKey));
   currentDraftKeyIdRef.current = composerDraftKeyId(resolvedDraftKey);
+
+  const lastAttachmentKeyIdRef = useRef(composerDraftKeyId(resolvedDraftKey));
+  useEffect(() => {
+    const next = composerDraftKeyId(resolvedDraftKey);
+    if (lastAttachmentKeyIdRef.current === next) return;
+    lastAttachmentKeyIdRef.current = next;
+    attachmentEpochRef.current += 1;
+  }, [composerDraftKeyId(resolvedDraftKey)]);
+
+  const beginAttachment = () => {
+    attachingCountRef.current += 1;
+    setAttachingCount(attachingCountRef.current);
+    return attachmentEpochRef.current;
+  };
+  const endAttachment = () => {
+    attachingCountRef.current = Math.max(0, attachingCountRef.current - 1);
+    setAttachingCount(attachingCountRef.current);
+    if (attachingCountRef.current === 0) {
+      const waiters = attachWaitersRef.current;
+      attachWaitersRef.current = [];
+      for (const waiter of waiters) waiter();
+    }
+  };
+  const waitForAttachments = () => {
+    if (attachingCountRef.current === 0) return Promise.resolve();
+    return new Promise<void>((resolve) => { attachWaitersRef.current.push(resolve); });
+  };
+  const discardStagedPaths = async (paths: string[]) => {
+    const discard = onDiscardStagedFileRef.current;
+    if (!discard || !paths.length) return;
+    await Promise.all(paths.map((path) => discard(path).catch(() => undefined)));
+  };
   const composer = useComposerController({
     draftKey: resolvedDraftKey,
     forgottenKeys: forgottenComposerKeys,
@@ -407,8 +458,11 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     if (!candidates.length) return;
     const preflightError = promptImageAdditionError(composer.currentDraft().images, candidates);
     if (preflightError) return onError(preflightError);
+    const epoch = beginAttachment();
+    const draftKeyId = currentDraftKeyIdRef.current;
     try {
       const added = await Promise.all(candidates.map(imageFromFile));
+      if (attachmentEpochRef.current !== epoch || currentDraftKeyIdRef.current !== draftKeyId || editorDisabledRef.current) return;
       // FileReader completions may overlap across paste/drop/picker events. Recheck
       // against the latest partition so count and byte caps remain atomic.
       const current = composer.currentDraft();
@@ -417,10 +471,11 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
         added.map((image) => ({ name: image.fileName, size: promptImageByteLength(image) })),
       );
       if (commitError) return onError(commitError);
-      composer.edit(current.message);
-      composer.replace(current.message, [...current.images, ...added]);
+      composer.replace(current.message, [...current.images, ...added], draftFiles(current));
     } catch (error) {
       onError(error instanceof Error ? error.message : String(error));
+    } finally {
+      endAttachment();
     }
   };
 
@@ -431,17 +486,25 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   };
 
   const submit = (delivery: PromptDelivery = "queue") => {
-    const current = composer.currentDraft();
-    const message = current.message.trim();
-    if (!message && !current.images.length && !draftFiles(current).length) return;
-    if (delivery === "steer" && message.startsWith("/")) {
-      onError("Slash 指令不能作为 Steer 消息发送");
-      return;
-    }
-    // ModelInfo.input is advisory metadata, not a client-side admission gate.
-    // Forward the complete prompt and let the upstream model/API decide whether
-    // it can interpret the attached images and return an ordinary response.
-    composer.submit(delivery);
+    const epoch = attachmentEpochRef.current;
+    const draftKeyId = currentDraftKeyIdRef.current;
+    const run = () => {
+      if (attachmentEpochRef.current !== epoch || currentDraftKeyIdRef.current !== draftKeyId) return;
+      const current = composer.currentDraft();
+      const message = current.message.trim();
+      if (!message && !current.images.length && !draftFiles(current).length) return;
+      if (delivery === "steer" && message.startsWith("/")) {
+        onError("Slash 指令不能作为 Steer 消息发送");
+        return;
+      }
+      // ModelInfo.input is advisory metadata, not a client-side admission gate.
+      // Forward the complete prompt and let the upstream model/API decide whether
+      // it can interpret the attached images and return an ordinary response.
+      if (!composer.submit(delivery)) return;
+      attachmentEpochRef.current += 1;
+    };
+    if (attachingCountRef.current === 0) run();
+    else void waitForAttachments().then(run);
   };
 
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -468,17 +531,18 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   };
 
   const attachFiles = (paths: string[], expectedDraftKeyId?: string) => {
-    if (editorDisabledRef.current) return;
+    if (editorDisabledRef.current) return false;
     const incoming = [...new Set(paths.map((path) => path.trim()).filter((path) => isWindowsAbsolutePath(path)))];
-    if (!incoming.length) return;
+    if (!incoming.length) return false;
     const current = composer.currentDraft();
-    if (expectedDraftKeyId && currentDraftKeyIdRef.current !== expectedDraftKeyId) return;
+    if (expectedDraftKeyId && currentDraftKeyIdRef.current !== expectedDraftKeyId) return false;
     const next = [...new Set([...draftFiles(current), ...incoming])];
     if (next.length > MAX_COMPOSER_FILES) {
       onError(`一次最多附加 ${MAX_COMPOSER_FILES} 个本地文件`);
-      return;
+      return false;
     }
     composer.replace(current.message, current.images, next);
+    return true;
   };
 
   const paste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
@@ -504,15 +568,16 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     if (clipboardFiles.length || event.clipboardData.types.includes("Files")) {
       event.preventDefault();
       const draftKeyId = currentDraftKeyIdRef.current;
+      const epoch = beginAttachment();
       const files = clipboardFiles.map((file) => ({ name: file.name, size: file.size }));
       void onReadClipboardFiles(files).then((nativePaths) => {
-        if (currentDraftKeyIdRef.current !== draftKeyId || editorDisabledRef.current) return;
+        if (attachmentEpochRef.current !== epoch || currentDraftKeyIdRef.current !== draftKeyId || editorDisabledRef.current) return;
         if (nativePaths.length) attachFiles(nativePaths, draftKeyId);
         else onError("无法取得文件的本地路径，请使用发送按钮旁的附件按钮选择本地文件");
       }).catch(() => {
-        if (currentDraftKeyIdRef.current === draftKeyId && !editorDisabledRef.current)
+        if (attachmentEpochRef.current === epoch && currentDraftKeyIdRef.current === draftKeyId && !editorDisabledRef.current)
           onError("无法取得文件的本地路径，请使用发送按钮旁的附件按钮选择本地文件");
-      });
+      }).finally(() => endAttachment());
     }
   };
 
@@ -522,7 +587,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     if (editorDisabled) return;
     const files = [...event.dataTransfer.files];
     const items = [...event.dataTransfer.items];
-    const imageFiles = files.filter((file) => file.type.startsWith("image/"));
+    const imageFiles = files.filter((file) => (file.type || "").startsWith("image/"));
     if (imageFiles.length) void addImages(imageFiles);
     const directPaths = files.map((file) => (file as File & { path?: string }).path || "").filter(isWindowsAbsolutePath);
     const transferredPaths = windowsPathsFromDataTransfer(event.dataTransfer);
@@ -531,30 +596,43 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
       attachFiles(paths);
       return;
     }
-    const ordinaryFiles = files.filter((file, index) => !file.type.startsWith("image/") && !isDroppedDirectory(items[index]));
+    const ordinaryFiles = files.filter((file, index) => !(file.type || "").startsWith("image/") && !isDroppedDirectory(items[index]));
     const droppedDirectory = items.some((item) => isDroppedDirectory(item));
     if (ordinaryFiles.length && onStageDroppedFile) {
+      const preflight = droppedFilePreflightError(draftFiles(composer.currentDraft()).length, ordinaryFiles);
+      if (preflight) {
+        onError(preflight);
+        return;
+      }
       const draftKeyId = currentDraftKeyIdRef.current;
+      const epoch = beginAttachment();
       void (async () => {
+        const staged: string[] = [];
         try {
-          const staged: string[] = [];
           for (const file of ordinaryFiles) {
-            if (file.size > MAX_DROPPED_FILE_BYTES) {
-              onError(`文件 ${file.name} 超过 64 MB，无法从拖入附加`);
-              return;
-            }
             const data = await readDroppedFileAsBase64(file);
             const path = await onStageDroppedFile({ name: file.name, data, size: file.size });
             if (path) staged.push(path);
+            if (attachmentEpochRef.current !== epoch) {
+              await discardStagedPaths(staged);
+              return;
+            }
           }
-          if (currentDraftKeyIdRef.current !== draftKeyId || editorDisabledRef.current) return;
-          if (staged.length) attachFiles(staged, draftKeyId);
-          else onError(droppedDirectory
+          if (attachmentEpochRef.current !== epoch || currentDraftKeyIdRef.current !== draftKeyId || editorDisabledRef.current) {
+            await discardStagedPaths(staged);
+            return;
+          }
+          if (staged.length) {
+            if (!attachFiles(staged, draftKeyId)) await discardStagedPaths(staged);
+          } else onError(droppedDirectory
             ? "无法取得文件夹的本地路径，请使用发送按钮旁的附件按钮选择"
             : "浏览器未提供文件的绝对路径，请使用发送按钮旁的附件按钮选择本地文件");
         } catch (error) {
-          if (currentDraftKeyIdRef.current === draftKeyId && !editorDisabledRef.current)
+          await discardStagedPaths(staged);
+          if (attachmentEpochRef.current === epoch && currentDraftKeyIdRef.current === draftKeyId && !editorDisabledRef.current)
             onError(error instanceof Error ? error.message : String(error));
+        } finally {
+          endAttachment();
         }
       })();
       return;
@@ -568,15 +646,18 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     setAttachmentOpen(false);
     setPickingFiles(true);
     const targetDraftKeyId = currentDraftKeyIdRef.current;
+    const epoch = beginAttachment();
     composer.edit(composer.currentDraft().message);
     try {
       const paths = await onPickLocalFiles();
+      if (attachmentEpochRef.current !== epoch || currentDraftKeyIdRef.current !== targetDraftKeyId || editorDisabledRef.current) return;
       attachFiles(paths, targetDraftKeyId);
       textareaRef.current?.focus();
     } catch (error) {
       onError(error instanceof Error ? error.message : String(error));
     } finally {
       setPickingFiles(false);
+      endAttachment();
     }
   };
 
@@ -584,10 +665,11 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     <div className="composer-wrap">
       {notices && <div className="system-notice-stack" aria-live="polite">{notices}</div>}
       {composer.blocked && <div className="composer-submission-status is-failed" role="status">发送失败，草稿已恢复；{composer.blockedError || "修改后可重试"}</div>}
+      {attachingCount > 0 && <div className="composer-submission-status" role="status">正在附加文件…</div>}
       <div className={`composer ${dragging ? "is-dragging" : ""}`} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; if (!editorDisabled) setDragging(true); }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }} onDrop={drop}>
         {!editorDisabled && suggestions.length > 0 && <div id={suggestionListId} className="command-suggestions" role="listbox" aria-label="Pi 指令联想">{suggestions.map((command, index) => <button id={`${suggestionListId}-option-${index}`} type="button" role="option" aria-selected={index === suggestionIndex} className={index === suggestionIndex ? "is-active" : ""} key={`${command.source}-${command.name}`} onMouseDown={(event) => event.preventDefault()} onClick={() => completeCommand(command)}><strong>/{command.name}</strong><span>{command.description || "Pi 指令"}</span><small>{command.source}</small></button>)}</div>}
         {(images.length > 0 || files.length > 0) && <div className="composer-attachments" aria-label="附件">
-          {images.map((image, index) => <div className="composer-attachment is-image" key={`${image.fileName}-${index}`}>
+          {images.map((image, index) => <div className="composer-attachment is-image image-preview" key={`${image.fileName}-${index}`}>
             <button type="button" className="composer-attachment-face" disabled={editorDisabled} onClick={() => setPreviewImage({ src: `data:${image.mimeType};base64,${image.data}`, alt: image.fileName || `图片 ${index + 1}` })}>
               <img src={`data:${image.mimeType};base64,${image.data}`} alt={image.fileName || `图片 ${index + 1}`} />
             </button>
@@ -611,8 +693,8 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
         <div className="composer-toolbar">
           <div className="composer-toolbar-controls">{controls}</div>
           <div className="composer-actions">
-            {streaming && <button type="button" className="queue-submit-button" disabled={(!value.trim() && !images.length && !files.length) || editorDisabled || stopping} onClick={() => submit("queue")}>{isExtensionCommand ? "执行" : "排队"}</button>}
-            {activelyStreaming && !value.trimStart().startsWith("/") && <button type="button" className="steer-submit-button" disabled={(!value.trim() && !images.length && !files.length) || editorDisabled || stopping} onClick={() => submit("steer")} title="在当前 assistant turn 的工具调用结束后、下一次模型调用前优先送达">Steer</button>}
+            {streaming && <button type="button" className="queue-submit-button" disabled={(!value.trim() && !images.length && !files.length && attachingCount === 0) || editorDisabled || stopping} onClick={() => submit("queue")}>{isExtensionCommand ? "执行" : "排队"}</button>}
+            {activelyStreaming && !value.trimStart().startsWith("/") && <button type="button" className="steer-submit-button" disabled={(!value.trim() && !images.length && !files.length && attachingCount === 0) || editorDisabled || stopping} onClick={() => submit("steer")} title="在当前 assistant turn 的工具调用结束后、下一次模型调用前优先送达">Steer</button>}
             <div className="attachment-control" ref={attachmentRef}>
               <button ref={attachmentButtonRef} type="button" className={`attachment-button ${attachmentOpen ? "is-open" : ""}`} disabled={editorDisabled || pickingFiles} onClick={() => attachmentOpen ? closeAttachmentMenu(true) : setAttachmentOpen(true)} title="添加附件" aria-label="添加附件" aria-haspopup="menu" aria-expanded={attachmentOpen}><PaperclipIcon /></button>
               {attachmentOpen && <div ref={attachmentMenuRef} className="attachment-menu" role="menu">
@@ -623,17 +705,12 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
             </div>
             {activelyStreaming
               ? <button type="button" className="stop-button" disabled={disabled || stopping} onClick={() => void onAbort()} aria-label={stopping ? "正在停止" : "停止生成"} title={stopping ? "正在停止" : "停止生成"}><span aria-hidden="true" /></button>
-              : !streaming && <button type="button" className="send-button" disabled={(!value.trim() && !images.length && !files.length) || editorDisabled || stopping} onClick={() => submit()} aria-label={isExtensionCommand ? "执行指令" : "发送消息"} title={isExtensionCommand ? "执行指令" : "发送消息"}><SendIcon /></button>}
+              : !streaming && <button type="button" className="send-button" disabled={(!value.trim() && !images.length && !files.length && attachingCount === 0) || editorDisabled || stopping} onClick={() => submit()} aria-label={isExtensionCommand ? "执行指令" : "发送消息"} title={isExtensionCommand ? "执行指令" : "发送消息"}><SendIcon /></button>}
           </div>
         </div>
         {dragging && <div className="drop-hint">松开以添加附件</div>}
       </div>
-      {previewImage && createPortal(<div className="image-preview-backdrop" role="presentation" onClick={(event) => { if (event.target === event.currentTarget) setPreviewImage(null); }}>
-        <section className="image-preview-dialog" role="dialog" aria-modal="true" aria-label="输入框图片预览">
-          <button type="button" className="image-preview-close" onClick={() => setPreviewImage(null)} aria-label="关闭图片预览" title="关闭图片预览">关闭</button>
-          <img className="image-preview-full" src={previewImage.src} alt={previewImage.alt} />
-        </section>
-      </div>, document.body)}
+      {previewImage && <ImagePreviewDialog src={previewImage.src} alt={previewImage.alt} label="输入框图片预览" onClose={() => setPreviewImage(null)} />}
     </div>
   );
 }

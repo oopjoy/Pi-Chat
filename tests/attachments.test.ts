@@ -25,7 +25,9 @@ import {
   clipboardWindowsPaths,
   fileReferences,
   isWindowsAbsolutePath,
+  droppedFilePreflightError,
   localAttachmentKind,
+  MAX_DROPPED_FILE_BYTES,
   windowsFileName,
   windowsPathsFromDataTransfer,
   promptImageAdditionError,
@@ -153,6 +155,10 @@ test("attachment path helpers preserve Windows absolute paths without prompt boi
   assert.deepEqual(localAttachmentKind("C:\\a\\paper.pdf"), { family: "pdf", label: "PDF" });
   assert.deepEqual(localAttachmentKind("C:\\a\\paper.tex"), { family: "text", label: "TEX" });
   assert.deepEqual(localAttachmentKind("C:\\a\\noext"), { family: "generic", label: "文件" });
+  assert.equal(droppedFilePreflightError(0, [{ name: "a.log", size: 10 }]), null);
+  assert.match(droppedFilePreflightError(32, [{ name: "a.log", size: 10 }]) || "", /一次最多附加/);
+  assert.match(droppedFilePreflightError(0, [{ name: "huge.log", size: MAX_DROPPED_FILE_BYTES + 1 }]) || "", /超过 64 MB/);
+  assert.match(droppedFilePreflightError(0, Array.from({ length: 33 }, (_, i) => ({ name: `${i}.log`, size: 1 }))) || "", /一次最多附加/);
   assert.equal(windowsFileName("D:\\notes\\My Notes\\paper.docx"), "paper.docx");
   assert.equal(fileReferences(["C:\\Users\\me\\paper.pdf"]), "C:\\Users\\me\\paper.pdf");
   assert.equal(fileReferences(["C:\\Users\\me\\My Notes\\paper.pdf"]), '"C:\\Users\\me\\My Notes\\paper.pdf"');

@@ -49,6 +49,9 @@ test("Setup embeds App, Node and a fallback Pi snapshot; existing Pi is never up
   assert.doesNotMatch(script, /Type: files; Name: "\{autodesktop\}\\Pi Chat\.lnk"/);
   assert.match(script, /ShortcutLooksLikeLegacySetupPiChat/);
   assert.match(script, /DeleteLegacyDesktopPiChatShortcut/);
+  assert.match(script, /ExpandConstant\('\{app\}\\app\\start-pi-chat-ui\.ps1'\)/);
+  assert.match(script, /WorkDir = ExpectedDir/);
+  assert.doesNotMatch(script, /Pos\('start-pi-chat-ui\.ps1', Args\)/);
   for (const line of launcherIcons) assert.ok(line.includes(line.includes("Pi Chat PWA") ? '"" pwa"' : '"" web"'));
   assert.match(script, /start-pi-chat-ui\.ps1"" web"; WorkingDir: "\{app\}\\app"; Description: "Open Pi Chat in the default browser"/);
   assert.match(script, /InstallPi/);

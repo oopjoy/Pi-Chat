@@ -1,6 +1,4 @@
 import { memo, Profiler, useEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
-import type { CSSProperties } from "react";
 import type { PiContentBlock, PiMessage } from "../../shared/types";
 import { assistantErrorNotice } from "../../shared/assistant-error";
 import { visibleAssistantBlocksWithSourceIndex } from "../lib/assistant-text";
@@ -10,6 +8,7 @@ import { ErrorDetail } from "./ErrorDetail";
 import { AlertIcon, CheckIcon, CopyIcon, ForkIcon } from "./Icons";
 import { MarkdownBody } from "./MarkdownBody";
 import { writeClipboardText } from "../lib/clipboard";
+import { ImagePreviewDialog } from "./ImagePreviewDialog";
 
 /** Fold only explicit source lines; visual wrapping stays device-dependent. */
 export const USER_MESSAGE_FOLD_LINE_LIMIT = 20;
@@ -140,30 +139,9 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
   const [expandedUserText, setExpandedUserText] = useState(false);
   const [previewImage, setPreviewImage] = useState<{ src: string; alt: string; width: number; height: number } | null>(null);
   const copyTimerRef = useRef<number | null>(null);
-  const previewCloseRef = useRef<HTMLButtonElement>(null);
-  const previewTriggerRef = useRef<HTMLButtonElement | null>(null);
   useEffect(() => () => {
     if (copyTimerRef.current) window.clearTimeout(copyTimerRef.current);
   }, []);
-  useEffect(() => {
-    if (!previewImage) return;
-    previewCloseRef.current?.focus();
-    const closePreview = () => setPreviewImage(null);
-    const keepFocusInDialog = (event: KeyboardEvent) => {
-      if (event.key === "Escape") return closePreview();
-      if (event.key === "Tab") {
-        event.preventDefault();
-        previewCloseRef.current?.focus();
-      }
-    };
-    document.addEventListener("keydown", keepFocusInDialog);
-    return () => document.removeEventListener("keydown", keepFocusInDialog);
-  }, [previewImage]);
-  useEffect(() => {
-    if (previewImage || !previewTriggerRef.current) return;
-    previewTriggerRef.current.focus();
-    previewTriggerRef.current = null;
-  }, [previewImage]);
   if (message.role !== "user" && message.role !== "assistant") return null;
   const assistantContent = message.role === "assistant"
     ? visibleAssistantBlocksWithSourceIndex(message)
@@ -227,8 +205,7 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
         {userImageBlocks.map((block, index) => {
           const src = `data:${block.mimeType};base64,${block.data}`;
           const alt = "用户附加图片";
-          return <button type="button" className="message-image-thumbnail" key={index} onClick={(event) => {
-            previewTriggerRef.current = event.currentTarget;
+          return <button type="button" className="message-image-thumbnail" key={index} onClick={() => {
             const viewport = window.visualViewport;
             setPreviewImage({
               src,
@@ -269,27 +246,14 @@ export const ChatMessage = memo(function ChatMessage({ message, streaming = fals
           {errorNotice.route && <p className="message-error-route">{errorNotice.route}</p>}
         </div>}
       </div>}
-      {previewImage && createPortal(<div
-        className="image-preview-backdrop"
-        role="presentation"
-        onClick={(event) => { if (event.target === event.currentTarget) setPreviewImage(null); }}
-      >
-        <section
-          className="image-preview-dialog"
-          style={{ maxWidth: `${Math.max(0, previewImage.width - 48)}px`, maxHeight: `${Math.max(0, previewImage.height - 48)}px` } as CSSProperties}
-          role="dialog"
-          aria-modal="true"
-          aria-label="用户附加图片预览"
-        >
-          <button ref={previewCloseRef} type="button" className="image-preview-close" onClick={() => setPreviewImage(null)} aria-label="关闭图片预览" title="关闭图片预览">关闭</button>
-          <img
-            className="image-preview-full"
-            style={{ maxWidth: `${Math.max(0, previewImage.width - 74)}px`, maxHeight: `${Math.max(0, previewImage.height - 102)}px` } as CSSProperties}
-            src={previewImage.src}
-            alt={previewImage.alt}
-          />
-        </section>
-      </div>, document.body)}
+      {previewImage && <ImagePreviewDialog
+        src={previewImage.src}
+        alt={previewImage.alt}
+        label="用户附加图片预览"
+        width={previewImage.width}
+        height={previewImage.height}
+        onClose={() => setPreviewImage(null)}
+      />}
       {(steerDelivery || sentAt || forkableUserMessage || copyableUserMessage) && <footer className="message-user-actions">
         {steerDelivery && <span className="message-delivery-label" title="运行过程中发送并已被 Pi 接收的 Steer 指令">Steer</span>}
         {sentAt && <time className="message-sent-at" dateTime={sentAt.dateTime} title={sentAt.title}>{sentAt.label}</time>}
