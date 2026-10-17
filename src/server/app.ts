@@ -1128,32 +1128,70 @@ export class PiChatApp {
       });
     }, delayMs);
   }
-  private modelRegistryClients(): PiRpcClient[] {
-    const clients = new Set<PiRpcClient>();
-    if (this.options.rpc) clients.add(this.options.rpc);
-    for (const runtime of this.runtimePool.values()) clients.add(runtime.rpc);
-    return [...clients];
+  private modelRegistryClients(): Array<{ rpc: PiRpcClient; idle: boolean }> {
+    const clients: Array<{ rpc: PiRpcClient; idle: boolean }> = [];
+    if (this.options.rpc) clients.push({ rpc: this.options.rpc, idle: !this.primaryTurnActive() });
+    for (const runtime of this.runtimePool.values())
+      clients.push({ rpc: runtime.rpc, idle: this.runtimePool.isIdle(runtime) });
+    return clients;
   }
 
-  private async refreshLiveModelRegistries(): Promise<"refreshed" | "unsupported" | "failed"> {
-    const clients = this.modelRegistryClients();
-    if (!clients.length) return "failed";
-    let unsupported = false;
-    for (const client of clients) {
+  /**
+   * A models.json change is a ModelRegistry refresh, not a Runtime reload. Each
+   * worker reloads its own catalogue in place; a worker with a request in
+   * flight keeps its resolved route and is refreshed once it is idle again.
+   */
+  private async refreshLiveModelRegistries(): Promise<{ refreshed: PiRpcClient[]; busy: number; failed: boolean }> {
+    const result: { refreshed: PiRpcClient[]; busy: number; failed: boolean } = { refreshed: [], busy: 0, failed: false };
+    for (const { rpc, idle } of this.modelRegistryClients()) {
+      if (!idle) {
+        result.busy += 1;
+        continue;
+      }
       try {
-        const response = await client.send({ type: "pi_chat_refresh_models" }, 20_000);
+        const response = await rpc.send({ type: "pi_chat_refresh_models" }, 20_000);
         if (response.success === false) {
-          const error = String(response.error || "");
-          if (error.includes("Unknown command")) unsupported = true;
-          else return "failed";
+          // Only an older Pi that lacks the adapter rejects the command; that
+          // alone justifies the heavier Runtime reload fallback.
+          if (!String(response.error || "").includes("Unknown command")) result.failed = true;
+          continue;
         }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (message.includes("Unknown command")) unsupported = true;
-        else return "failed";
+        result.refreshed.push(rpc);
+      } catch {
+        result.failed = true;
       }
     }
-    return unsupported ? "unsupported" : "refreshed";
+    return result;
+  }
+
+  /**
+   * A refresh rebuilds provider composition, so the next request resolves the
+   * new API key and headers. A custom provider's Base URL, cost, maxTokens,
+   * contextWindow, api, reasoning, and input are copied onto each Model object
+   * when it is composed, and the Session keeps the object it selected. Those
+   * fields therefore only change after the same provider/id is re-selected on
+   * the documented RPC. Never do that during a turn: the running request keeps
+   * the route it already resolved.
+   */
+  private async reconcileSelectedModel(rpc: PiRpcClient): Promise<void> {
+    let state: Record<string, unknown>;
+    let models: Array<Record<string, unknown>>;
+    try {
+      state = asState(await rpc.send({ type: "get_state" }));
+      if (state.isStreaming) return;
+      models = asModels(await rpc.send({ type: "get_available_models" })) as unknown as Array<Record<string, unknown>>;
+    } catch {
+      return;
+    }
+    const selected = state.model as Record<string, unknown> | null | undefined;
+    if (!selected || typeof selected.provider !== "string" || typeof selected.id !== "string") return;
+    const fresh = models.find((model) => model.provider === selected.provider && model.id === selected.id);
+    if (!fresh || JSON.stringify(fresh) === JSON.stringify(selected)) return;
+    try {
+      await rpc.send({ type: "set_model", provider: fresh.provider, modelId: fresh.id }, 30_000);
+    } catch {
+      // The catalogue is still refreshed; only this Session's model limits lag.
+    }
   }
 
   private async syncModelRuntime(): Promise<void> {
@@ -1161,21 +1199,22 @@ export class PiChatApp {
     this.modelRuntimeSyncInFlight = true;
     try {
       const refresh = await this.refreshLiveModelRegistries();
-      if (refresh === "refreshed") {
-        await this.withLifecycle("models-refreshing", "刷新模型目录", async () => {
-          const models = asModels(await this.options.rpc.send({ type: "get_available_models" }));
-          this.lastAvailableModels = models;
-          this.modelRuntimeSyncPending = false;
-          this.broadcast({
-            type: "pi_chat_models_updated",
-            models: this.mergeHostAndRuntimeModels(models, this.startupModels),
-            revision: this.modelCatalogueRevision,
-            runtimeSync: "ready",
-          });
+      if (refresh.refreshed.length || refresh.busy > 0) {
+        const models = asModels(await this.options.rpc.send({ type: "get_available_models" }));
+        this.lastAvailableModels = models;
+        this.modelRuntimeSyncPending = refresh.busy > 0;
+        this.broadcast({
+          type: "pi_chat_models_updated",
+          models: this.mergeHostAndRuntimeModels(models, this.startupModels),
+          revision: this.modelCatalogueRevision,
+          runtimeSync: refresh.busy > 0 ? "waiting-for-runtime-reload" : "ready",
         });
+        for (const rpc of refresh.refreshed) await this.reconcileSelectedModel(rpc);
         return;
       }
-      if (refresh === "failed") return;
+      if (refresh.failed) return;
+      // Only a Pi that cannot refresh a registry falls back to a full reload,
+      // and only when nothing is running.
       if (this.busyConversationCount() > 0) {
         this.broadcast({
           type: "pi_chat_models_updated",
