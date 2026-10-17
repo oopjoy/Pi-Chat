@@ -81,11 +81,15 @@ export function handlePiWorkspaceAndSessionEvents(scope: Record<string, any>): b
             : [];
           setModels(nextModels);
           saveModelCatalog(nextModels);
-          setModelRuntimeSyncPending(event.runtimeSync === "waiting-for-runtime-reload");
+          setModelRuntimeSyncPending(
+            event.runtimeSync === "waiting-for-runtime-reload" || event.runtimeSync === "refreshing",
+          );
           setNotice(
             event.runtimeSync === "waiting-for-runtime-reload"
-              ? "模型配置已更新；当前请求继续使用旧 Runtime，新请求将在 Runtime 刷新后应用。"
-              : "模型目录已更新。",
+              ? "模型配置已保存；将在 Runtime 空闲后重载。当前请求继续使用原配置。"
+              : event.runtimeSync === "refreshing"
+                ? "模型配置已保存，正在刷新模型目录；当前请求继续使用原配置。"
+                : "模型目录已更新。",
           );
 
     return true;

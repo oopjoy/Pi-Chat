@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { hostVisibleModelsFromConfig, modelsConfigFingerprint } from "./models-config-revision.js";
 import { createReadStream, existsSync, readFileSync, watch, type FSWatcher } from "node:fs";
 import { stat } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -572,6 +573,8 @@ export class PiChatApp {
   private lastAvailableModels: ModelInfo[] = [];
   /** Host-side model catalogue; refreshed after atomic models.json mutations. */
   private startupModels: ModelInfo[];
+  /** SHA-256 of models.json bytes, including connection fields never sent to the browser. */
+  private modelsConfigFingerprint = "";
   private modelCatalogueRevision = 1;
   private modelRuntimeSyncPending = false;
   private modelCatalogueWatcher?: FSWatcher;
@@ -1046,53 +1049,16 @@ export class PiChatApp {
     return [...result.values()];
   }
   private readStartupModels(): ModelInfo[] {
-    if (!this.options.modelManager) return [];
+    if (!this.options.modelManager) {
+      this.modelsConfigFingerprint = "";
+      return [];
+    }
     try {
-      const raw = JSON.parse(
-        readFileSync(this.options.modelManager.path, "utf8"),
-      ) as { providers?: Record<string, { models?: unknown[]; api?: unknown }> };
-      const models: ModelInfo[] = [];
-      for (const [provider, config] of Object.entries(raw.providers || {})) {
-        for (const item of config?.models || []) {
-          if (!item || typeof item !== "object") continue;
-          const value = item as Record<string, unknown>;
-          if (typeof value.id !== "string" || !value.id) continue;
-          const configuredInput = Array.isArray(value.input)
-            ? value.input.filter(
-                (entry): entry is string =>
-                  entry === "text" || entry === "image",
-              )
-            : [];
-          models.push({
-            provider,
-            id: value.id,
-            ...(typeof value.api === "string"
-              ? { api: value.api }
-              : typeof config.api === "string"
-                ? { api: config.api }
-                : null),
-            name:
-              typeof value.name === "string" && value.name
-                ? value.name
-                : value.id,
-            source: "models-json",
-            authMode: "api-key",
-            reasoning: value.reasoning === true,
-            input: configuredInput.length
-              ? configuredInput
-              : value.imageInput === true
-                ? ["text", "image"]
-                : ["text"],
-            contextWindow:
-              typeof value.contextWindow === "number"
-                ? value.contextWindow
-                : undefined,
-            custom: true,
-          });
-        }
-      }
-      return models;
+      const contents = readFileSync(this.options.modelManager.path);
+      this.modelsConfigFingerprint = modelsConfigFingerprint(contents);
+      return hostVisibleModelsFromConfig(JSON.parse(contents.toString("utf8")));
     } catch {
+      this.modelsConfigFingerprint = "";
       return [];
     }
   }
@@ -1133,10 +1099,10 @@ export class PiChatApp {
     }
   }
   private refreshHostModelCatalogue(): ModelInfo[] {
-    const previous = this.startupModels;
+    const previousFingerprint = this.modelsConfigFingerprint;
     const next = this.readStartupModels();
     this.startupModels = next;
-    const changed = JSON.stringify(previous) !== JSON.stringify(next);
+    const changed = previousFingerprint !== this.modelsConfigFingerprint;
     this.rememberModelContextWindows(next);
     if (changed) {
       this.modelCatalogueRevision += 1;
@@ -1145,7 +1111,7 @@ export class PiChatApp {
         type: "pi_chat_models_updated",
         models: this.mergeHostAndRuntimeModels(this.lastAvailableModels, next),
         revision: this.modelCatalogueRevision,
-        runtimeSync: "waiting-for-runtime-reload",
+        runtimeSync: "refreshing",
       });
       this.scheduleModelRuntimeSync();
     }
@@ -1162,14 +1128,63 @@ export class PiChatApp {
       });
     }, delayMs);
   }
+  private modelRegistryClients(): PiRpcClient[] {
+    const clients = new Set<PiRpcClient>();
+    if (this.options.rpc) clients.add(this.options.rpc);
+    for (const runtime of this.runtimePool.values()) clients.add(runtime.rpc);
+    return [...clients];
+  }
+
+  private async refreshLiveModelRegistries(): Promise<"refreshed" | "unsupported" | "failed"> {
+    const clients = this.modelRegistryClients();
+    if (!clients.length) return "failed";
+    let unsupported = false;
+    for (const client of clients) {
+      try {
+        const response = await client.send({ type: "pi_chat_refresh_models" }, 20_000);
+        if (response.success === false) {
+          const error = String(response.error || "");
+          if (error.includes("Unknown command")) unsupported = true;
+          else return "failed";
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (message.includes("Unknown command")) unsupported = true;
+        else return "failed";
+      }
+    }
+    return unsupported ? "unsupported" : "refreshed";
+  }
+
   private async syncModelRuntime(): Promise<void> {
     if (!this.modelRuntimeSyncPending || this.closed || this.modelRuntimeSyncInFlight) return;
-    if (this.busyConversationCount() > 0) {
-      this.scheduleModelRuntimeSync(500);
-      return;
-    }
     this.modelRuntimeSyncInFlight = true;
     try {
+      const refresh = await this.refreshLiveModelRegistries();
+      if (refresh === "refreshed") {
+        await this.withLifecycle("models-refreshing", "刷新模型目录", async () => {
+          const models = asModels(await this.options.rpc.send({ type: "get_available_models" }));
+          this.lastAvailableModels = models;
+          this.modelRuntimeSyncPending = false;
+          this.broadcast({
+            type: "pi_chat_models_updated",
+            models: this.mergeHostAndRuntimeModels(models, this.startupModels),
+            revision: this.modelCatalogueRevision,
+            runtimeSync: "ready",
+          });
+        });
+        return;
+      }
+      if (refresh === "failed") return;
+      if (this.busyConversationCount() > 0) {
+        this.broadcast({
+          type: "pi_chat_models_updated",
+          models: this.mergeHostAndRuntimeModels(this.lastAvailableModels, this.startupModels),
+          revision: this.modelCatalogueRevision,
+          runtimeSync: "waiting-for-runtime-reload",
+        });
+        return;
+      }
       await this.withLifecycle("models-refreshing", "同步模型 Runtime", async () => {
         await this.reloadRpc();
         const models = asModels(await this.options.rpc.send({ type: "get_available_models" }));
@@ -1186,6 +1201,7 @@ export class PiChatApp {
       });
     } finally {
       this.modelRuntimeSyncInFlight = false;
+      if (this.modelRuntimeSyncPending && !this.closed) this.scheduleModelRuntimeSync(1_000);
     }
   }
   private beginMutation(): () => void {

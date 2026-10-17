@@ -22,7 +22,10 @@ test("Pi Chat adds native dequeue only inside its RPC child", { skip: !resolvePi
   assert.match(patched, /case "dequeue"/);
   assert.match(patched, /session\.clearQueue\(\)/);
   assert.match(patched, /type: "pi_chat_queue_dequeued"/);
+  assert.match(patched, /case "pi_chat_refresh_models"/);
+  assert.match(patched, /session\.modelRuntime\.refresh/);
   assert.equal(overlay.patchPiRpcModeSource(patched), patched);
+  assert.equal(original.includes('case "pi_chat_refresh_models"'), false);
 
   const unchanged = await readFile(rpcModePath, "utf8");
   assert.equal(unchanged, original, "the global Pi installation must remain untouched");

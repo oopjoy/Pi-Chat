@@ -30,25 +30,53 @@ const DEQUEUE_CASE = `            case "dequeue": {
             }
             case "abort": {`;
 
+const GET_AVAILABLE_MODELS_CASE = `            case "get_available_models": {
+                const models = session.modelRuntime.getAvailableSnapshot();
+                return success(id, "get_available_models", { models });
+            }`;
+
+const REFRESH_MODELS_CASE = `
+            case "pi_chat_refresh_models": {
+                const refresh = session.modelRuntime && session.modelRuntime.refresh;
+                if (typeof refresh !== "function") {
+                    return error(id, "pi_chat_refresh_models", "model registry refresh is unavailable");
+                }
+                const result = await refresh.call(session.modelRuntime, { allowNetwork: false });
+                const models = session.modelRuntime.getAvailableSnapshot();
+                return success(id, "pi_chat_refresh_models", { models, aborted: Boolean(result && result.aborted) });
+            }`;
+
+export function patchPiModelRefreshSource(source) {
+  if (source.includes('case "pi_chat_refresh_models"')) return source;
+  if (source.includes(GET_AVAILABLE_MODELS_CASE))
+    return source.replace(GET_AVAILABLE_MODELS_CASE, `${GET_AVAILABLE_MODELS_CASE}${REFRESH_MODELS_CASE}`);
+  const structural = /(^[ \t]*case "get_available_models": \{[\s\S]*?return success\(id, "get_available_models", \{ models \}\);\s*\})/m.exec(source);
+  if (!structural) return source;
+  return source.replace(structural[0], `${structural[0]}${REFRESH_MODELS_CASE}`);
+}
+
 export function patchPiRpcModeSource(source) {
-  if (source.includes('type: "pi_chat_queue_dequeued"')) return source;
-  const matches = FOLLOW_UP_CASES.filter((candidate) => source.includes(candidate));
-  if (matches.length === 1)
-    return source.replace(
-      matches[0],
-      matches[0].replace('            case "abort": {', DEQUEUE_CASE),
-    );
-
-  // Pi 0.85+ adds a disposition result to followUp(). Keep the adapter
-  // process-local while accepting that source evolution; do not patch or
-  // rewrite the globally installed Pi file.
-  const structural = /(^[ \t]*case "follow_up": \{[\s\S]*?)(^[ \t]*case "abort": \{)/m.exec(source);
-  if (structural)
-    return source.replace(structural[0], `${structural[1]}${DEQUEUE_CASE}`);
-
-  throw new Error(
-    "当前 Pi RPC 实现与 Steer 撤回适配器不兼容；未修改全局 Pi，请更新 Pi Chat 适配器",
-  );
+  let next = source;
+  if (!next.includes('type: "pi_chat_queue_dequeued"')) {
+    const matches = FOLLOW_UP_CASES.filter((candidate) => next.includes(candidate));
+    if (matches.length === 1)
+      next = next.replace(
+        matches[0],
+        matches[0].replace('            case "abort": {', DEQUEUE_CASE),
+      );
+    else {
+      // Pi 0.85+ adds a disposition result to followUp(). Keep the adapter
+      // process-local while accepting that source evolution; do not patch or
+      // rewrite the globally installed Pi file.
+      const structural = /(^[ \t]*case "follow_up": \{[\s\S]*?)(^[ \t]*case "abort": \{)/m.exec(next);
+      if (!structural)
+        throw new Error(
+          "当前 Pi RPC 实现与 Steer 撤回适配器不兼容；未修改全局 Pi，请更新 Pi Chat 适配器",
+        );
+      next = next.replace(structural[0], `${structural[1]}${DEQUEUE_CASE}`);
+    }
+  }
+  return patchPiModelRefreshSource(next);
 }
 
 export function patchPiExtensionLoaderSource(source) {

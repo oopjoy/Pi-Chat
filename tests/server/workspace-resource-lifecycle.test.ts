@@ -128,7 +128,7 @@ test("whole-Provider edits cannot remove the model selected by a started Session
   }
 });
 
-test("external models.json changes refresh the Host catalogue and safely reload idle Runtime", async () => {
+test("external models.json changes refresh the Host catalogue without restarting Runtime", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-model-watch-"));
   const path = "C:\\sessions\\primary.jsonl";
   const primary = new FakeRpc(path, "primary");
@@ -152,7 +152,8 @@ test("external models.json changes refresh the Host catalogue and safely reload 
     const afterDelete = await fetch(`${origin}/api/bootstrap`);
     const deletedBody = await afterDelete.json() as { models: Array<{ id: string }> };
     assert.equal(deletedBody.models.some((model) => model.id === "watched"), false);
-    assert.equal(primary.restartCount, 1);
+    assert.equal(primary.restartCount, 0, "models.json changes refresh the live registry instead of restarting Runtime");
+    assert.ok(primary.commands.some((command) => command.type === "pi_chat_refresh_models"));
   } finally {
     server.close();
     await app.close();
