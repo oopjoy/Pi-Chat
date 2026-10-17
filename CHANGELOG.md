@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Dragging files from Explorer into the composer now reads every text drag flavor (an empty uri-list no longer hides text/plain) and accepts `file://C:/` paths. If the browser still withholds the original path, the file is staged under a temp directory and attached by that path. Folders without a resolvable path keep a specific picker prompt.
 - Composer send failures restore the original editor draft and file cards, not the path-composed prompt. Adding or removing attachments advances the draft revision so a late queue undo cannot drop them. Attached paths are always sent as a bounded `[Attached files]` block, never skipped because a longer path already appeared in the message. Setup deletes a leftover desktop `Pi Chat.lnk` only when it is a PowerShell Web launcher, not a same-named PWA or hand-made shortcut.
 - Sidebar session refresh is now Restart Pi Chat; the previous restart control is Close Pi Chat. Settings keeps Close Pi Chat and adds Restart Pi Chat above it. Existing confirmation dialogs are unchanged. Disabled Restart/Quit buttons explain on hover why they cannot run (generating, waiting for confirmation, or queued).
 - Composer shows local files as cards (images keep a thumbnail). Sending still gives Pi the absolute path so it can read on demand; clicking a file card opens it with the Windows default application.

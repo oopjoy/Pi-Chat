@@ -26,6 +26,7 @@ import {
   fileReferences,
   isWindowsAbsolutePath,
   windowsFileName,
+  windowsPathsFromDataTransfer,
   promptImageAdditionError,
   promptImagesByteLength,
   windowsPathsFromText,
@@ -171,6 +172,14 @@ test("attachment path helpers preserve Windows absolute paths without prompt boi
   );
   assert.deepEqual(clipboardWindowsPaths("file://attacker/C:/Users/me/secret.txt", ""), []);
   assert.deepEqual(clipboardWindowsPaths("file://localhost/C:/Users/me/local.txt", ""), ["C:\\Users\\me\\local.txt"]);
+  assert.deepEqual(clipboardWindowsPaths("file://C:/Users/me/drive.txt", ""), ["C:\\Users\\me\\drive.txt"]);
+  assert.deepEqual(
+    windowsPathsFromDataTransfer({
+      types: ["Files", "text/uri-list", "text/plain"],
+      getData: (type: string) => type === "text/uri-list" ? "\n" : type === "text/plain" ? "C:\\Users\\me\\from-explorer.pdf" : "",
+    }),
+    ["C:\\Users\\me\\from-explorer.pdf"],
+  );
   assert.deepEqual(clipboardWindowsPaths("file://user:pass@localhost/C:/Users/me/secret.txt", ""), []);
   assert.deepEqual(clipboardWindowsPaths("file://@localhost/C:/Users/me/secret.txt", ""), []);
   assert.deepEqual(clipboardWindowsPaths("file://:@localhost/C:/Users/me/secret.txt", ""), []);

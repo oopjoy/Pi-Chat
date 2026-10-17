@@ -13,6 +13,7 @@ import { CloseIcon, FileIcon, FileSearchIcon, ImageIcon, PaperclipIcon, SendIcon
 
 const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 const COMPOSITION_END_ENTER_GRACE_MS = 100;
+const MAX_DROPPED_FILE_BYTES = 64 * 1024 * 1024;
 
 export function promptImageByteLength(image: Pick<PromptImage, "data" | "size">): number {
   const padding = image.data.endsWith("==") ? 2 : image.data.endsWith("=") ? 1 : 0;
@@ -60,6 +61,28 @@ function imageFromFile(file: File): Promise<PromptImage> {
   });
 }
 
+function readDroppedFileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error(`无法读取文件：${file.name}`));
+    reader.onload = () => {
+      const value = typeof reader.result === "string" ? reader.result : "";
+      const comma = value.indexOf(",");
+      if (comma < 0) return reject(new Error(`无法读取文件：${file.name}`));
+      resolve(value.slice(comma + 1));
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function isDroppedDirectory(item: DataTransferItem | undefined): boolean {
+  try {
+    return Boolean(item?.webkitGetAsEntry?.()?.isDirectory);
+  } catch {
+    return false;
+  }
+}
+
 export function isWindowsAbsolutePath(value: string): boolean {
   return /^[A-Za-z]:[\\/][^<>:"|?*\u0000-\u001f]*$/.test(value)
     && value.length > 3;
@@ -81,22 +104,22 @@ function parsedWindowsPathLine(line: string): string {
         authorityStart,
         authorityEnd < 0 ? clean.length : authorityEnd,
       );
+      const driveHost = /^[a-z]$/i.test(url.hostname);
       if (
         url.protocol !== "file:"
-        || (url.hostname && url.hostname.toLowerCase() !== "localhost")
+        || (url.hostname && url.hostname.toLowerCase() !== "localhost" && !driveHost)
         || authority.includes("@")
-        || authority.includes(":")
-        || clean.includes("?")
-        || clean.includes("#")
+        || (authority.includes(":") && !/^[A-Za-z]:$/.test(authority))
+        || /[?#]/.test(clean.slice("file:".length))
         || url.username
         || url.password
         || url.port
         || url.search
         || url.hash
       ) return "";
-      clean = decodeURIComponent(url.pathname)
-        .replace(/^\/([A-Za-z]:)/, "$1")
-        .replace(/\//g, "\\");
+      let pathname = decodeURIComponent(url.pathname || "");
+      if (driveHost && pathname.startsWith("/")) pathname = `${url.hostname}:${pathname}`;
+      clean = pathname.replace(/^\/([A-Za-z]:)/, "$1").replace(/\//g, "\\");
     } catch {
       return "";
     }
@@ -128,6 +151,26 @@ export function windowsFileName(path: string): string {
 
 export function windowsPathsFromText(text: string): string[] {
   return [...new Set(text.split(/\r?\n/).map(parsedWindowsPathLine).filter(Boolean))];
+}
+
+/** Explorer drag exposes paths in several text flavors; never let an empty uri-list hide text/plain. */
+export function windowsPathsFromDataTransfer(data: { types?: Iterable<string>; getData(type: string): string }): string[] {
+  const seen = new Set<string>();
+  const texts: string[] = [];
+  const types = new Set(["text/uri-list", "text/plain", "text", ...Array.from(data.types || [])]);
+  for (const type of types) {
+    if (type === "Files") continue;
+    try {
+      const value = data.getData(type);
+      if (value && !seen.has(value)) {
+        seen.add(value);
+        texts.push(value);
+      }
+    } catch {
+      // Chromium throws for some internal types during drop.
+    }
+  }
+  return [...new Set(texts.flatMap(windowsPathsFromText))];
 }
 
 /**
@@ -171,7 +214,7 @@ export function commandMatches(value: string, commands: SlashCommand[]): SlashCo
   }).sort((a, b) => a.rank - b.rank || a.score - b.score || a.command.name.localeCompare(b.command.name)).slice(0, 9).map(({ command }) => command);
 }
 
-export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, placeholder, acceptsImages, imageInputPending = false, restoredDraft, onDraftRevisionChange, draftKey, forgottenComposerKeys = [], submissionScope, submissionTargetSessionId, allowFollowupSubmissions = true, submissionPaused = false, onSubmissionPendingChange, commands, controls, notices, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles = async () => [], onOpenLocalFile, onError }: {
+export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, placeholder, acceptsImages, imageInputPending = false, restoredDraft, onDraftRevisionChange, draftKey, forgottenComposerKeys = [], submissionScope, submissionTargetSessionId, allowFollowupSubmissions = true, submissionPaused = false, onSubmissionPendingChange, commands, controls, notices, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles = async () => [], onOpenLocalFile, onStageDroppedFile, onError }: {
   /** True when a submission will enter the local queue. */
   streaming: boolean;
   /** True only while Pi is actively generating and can be stopped. */
@@ -209,6 +252,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   onPickLocalFiles: () => Promise<string[]>;
   onReadClipboardFiles?: (files: Array<{ name: string; size: number }>) => Promise<string[]>;
   onOpenLocalFile?: (path: string) => Promise<void>;
+  onStageDroppedFile?: (file: { name: string; data: string; size: number }) => Promise<string>;
   onError: (message: string) => void;
 }) {
   const [dragging, setDragging] = useState(false);
@@ -456,16 +500,46 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     setDragging(false);
     if (editorDisabled) return;
     const files = [...event.dataTransfer.files];
+    const items = [...event.dataTransfer.items];
     const imageFiles = files.filter((file) => file.type.startsWith("image/"));
-    const ordinaryFiles = files.filter((file) => !file.type.startsWith("image/"));
     if (imageFiles.length) void addImages(imageFiles);
-    if (ordinaryFiles.length) {
-      const directPaths = ordinaryFiles.map((file) => (file as File & { path?: string }).path || "").filter(Boolean);
-      const transferredPaths = windowsPathsFromText(event.dataTransfer.getData("text/uri-list") || event.dataTransfer.getData("text/plain"));
-      const paths = [...new Set([...directPaths, ...transferredPaths])];
-      if (paths.length) attachFiles(paths);
-      else onError("浏览器未提供文件的绝对路径，请使用发送按钮旁的附件按钮选择本地文件");
+    const directPaths = files.map((file) => (file as File & { path?: string }).path || "").filter(isWindowsAbsolutePath);
+    const transferredPaths = windowsPathsFromDataTransfer(event.dataTransfer);
+    const paths = [...new Set([...directPaths, ...transferredPaths])];
+    if (paths.length) {
+      attachFiles(paths);
+      return;
     }
+    const ordinaryFiles = files.filter((file, index) => !file.type.startsWith("image/") && !isDroppedDirectory(items[index]));
+    const droppedDirectory = items.some((item) => isDroppedDirectory(item));
+    if (ordinaryFiles.length && onStageDroppedFile) {
+      const draftKeyId = currentDraftKeyIdRef.current;
+      void (async () => {
+        try {
+          const staged: string[] = [];
+          for (const file of ordinaryFiles) {
+            if (file.size > MAX_DROPPED_FILE_BYTES) {
+              onError(`文件 ${file.name} 超过 64 MB，无法从拖入附加`);
+              return;
+            }
+            const data = await readDroppedFileAsBase64(file);
+            const path = await onStageDroppedFile({ name: file.name, data, size: file.size });
+            if (path) staged.push(path);
+          }
+          if (currentDraftKeyIdRef.current !== draftKeyId || editorDisabledRef.current) return;
+          if (staged.length) attachFiles(staged, draftKeyId);
+          else onError(droppedDirectory
+            ? "无法取得文件夹的本地路径，请使用发送按钮旁的附件按钮选择"
+            : "浏览器未提供文件的绝对路径，请使用发送按钮旁的附件按钮选择本地文件");
+        } catch (error) {
+          if (currentDraftKeyIdRef.current === draftKeyId && !editorDisabledRef.current)
+            onError(error instanceof Error ? error.message : String(error));
+        }
+      })();
+      return;
+    }
+    if (droppedDirectory) onError("无法取得文件夹的本地路径，请使用发送按钮旁的附件按钮选择");
+    else if (ordinaryFiles.length) onError("浏览器未提供文件的绝对路径，请使用发送按钮旁的附件按钮选择本地文件");
   };
 
   const pickFiles = async () => {
@@ -489,7 +563,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     <div className="composer-wrap">
       {notices && <div className="system-notice-stack" aria-live="polite">{notices}</div>}
       {composer.blocked && <div className="composer-submission-status is-failed" role="status">发送失败，草稿已恢复；{composer.blockedError || "修改后可重试"}</div>}
-      <div className={`composer ${dragging ? "is-dragging" : ""}`} onDragOver={(event) => { event.preventDefault(); if (!editorDisabled) setDragging(true); }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }} onDrop={drop}>
+      <div className={`composer ${dragging ? "is-dragging" : ""}`} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; if (!editorDisabled) setDragging(true); }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }} onDrop={drop}>
         {!editorDisabled && suggestions.length > 0 && <div id={suggestionListId} className="command-suggestions" role="listbox" aria-label="Pi 指令联想">{suggestions.map((command, index) => <button id={`${suggestionListId}-option-${index}`} type="button" role="option" aria-selected={index === suggestionIndex} className={index === suggestionIndex ? "is-active" : ""} key={`${command.source}-${command.name}`} onMouseDown={(event) => event.preventDefault()} onClick={() => completeCommand(command)}><strong>/{command.name}</strong><span>{command.description || "Pi 指令"}</span><small>{command.source}</small></button>)}</div>}
         {(images.length > 0 || files.length > 0) && <div className="composer-attachments" aria-label="附件">
           {images.map((image, index) => <div className="image-preview" key={`${image.fileName}-${index}`}><img src={`data:${image.mimeType};base64,${image.data}`} alt={image.fileName || `图片 ${index + 1}`} /><button type="button" disabled={editorDisabled} onClick={() => { const current = composer.currentDraft(); composer.replace(current.message, current.images.filter((_, itemIndex) => itemIndex !== index), draftFiles(current)); }} aria-label={`移除 ${image.fileName || "图片"}`}><CloseIcon /></button><small>{image.fileName || "粘贴的图片"}</small></div>)}
