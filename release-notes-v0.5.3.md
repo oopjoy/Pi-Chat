@@ -15,6 +15,28 @@ GitHub also attaches the two source archives. Checksum and manifest sidecars are
 
 Pi remains the sole authority for Runtime execution, Sessions, JSONL, Prompt delivery, retry, Steer, tools, models, and transcript state. The Web core remains the only product surface.
 
+## Composer attachments
+
+Drag, paste, or pick local files and folders into the Composer. They appear as cards and are sent to Pi as paths, so Pi reads them on demand instead of uploading contents.
+
+- Files are staged from their own bytes, so a same-named file selected in another Explorer window can never be substituted. Folders keep their real path, and a folder card opens in Explorer.
+- A drag that carries no local file now says so instead of being silently swallowed. Removing a card deletes its staged temp file.
+- Send waits for in-flight staging, so a dropped file cannot land on the next empty draft. Abandoned or rejected temp files are cleaned up.
+- Images keep a thumbnail and open a full preview with Escape, a focus trap, and focus returned to the thumbnail. Non-image files show their real type (PDF, TEX, LOG, ...).
+
+## Model configuration
+
+Editing `models.json` no longer restarts Pi.
+
+- A save is versioned by the file's content hash, so a Base URL, API key, or maxTokens change is no longer treated as "nothing changed" when the model list looks identical.
+- Each idle worker reloads its own catalogue in place through Pi's public registry refresh. A worker with a request in flight is left alone and refreshed once it settles, and only a Pi without that capability falls back to an idle Runtime reload. Editing models is therefore possible while another Session is generating.
+- A Session keeps the model object it selected, so the refreshed limits are applied by re-selecting the same provider/id, which also restores that Session's thinking level.
+- Saved, refreshed, and "the current request keeps its original route" are reported separately. A drop or failure that still owes work stays pending and retries on a bounded backoff instead of claiming a clean refresh.
+
+## Restart and Quit
+
+Restart and Quit are on the Sidebar and in Settings. Restart is yellow and Quit is red; a disabled button explains on hover why it cannot run. Closing a window does not stop the background service.
+
 ## Windows Setup
 
 `pi-chat-setup.exe` is a single-file Inno Setup installer (no Electron):
@@ -24,7 +46,8 @@ Pi remains the sole authority for Runtime execution, Sessions, JSONL, Prompt del
 - Defaults to `%LOCALAPPDATA%\PiChat`; the destination can be changed. Primary shortcuts open Web in the system default browser. A tracked `Pi Chat Web.lnk` lives in the install root; `Pi Chat PWA` remains an optional Start-menu entry.
 - Reuses an existing local Pi and never upgrades it in place. If none is found, Setup copies the bundled 1.3.0 snapshot offline into `~/.pi/agent/install`. Copy failure still leaves the app installed so a later connection can recover.
 - Registers uninstall (Settings → Apps → Pi Chat). Uninstall removes the app, private Node, and this install's own config; it does not delete `~/.pi/agent` sessions, credentials, or Skills.
-- Refuses upgrade or uninstall of a running destination instead of failing mid-copy. Source-checkout shortcuts stay in a separate `Pi Chat Git` group and are never claimed by Setup.
+- Refuses upgrade or uninstall of a running destination instead of failing mid-copy. Source-checkout shortcuts stay in a separate `Pi Chat Git` group and are never claimed by Setup. Desktop keeps only `Pi Chat Web`; an upgrade removes a leftover desktop `Pi Chat.lnk` only when it is this install's own PowerShell Web launcher, never a PWA, another checkout, or a hand-made shortcut.
+- Native file and folder pickers open above the browser window instead of behind it.
 
 ## Portable ZIP
 
@@ -63,8 +86,11 @@ This repository is MIT-licensed (`LICENSE`, copyright 2026, oopjoy and Pi Chat c
 
 Windows Release CI on tag `v0.5.3` built and verified the Setup (including isolated install/upgrade/uninstall) and the portable ZIP from this tagged revision. Main-branch CI also publishes a commit-addressed Setup artifact for testing; those artifacts do not create or move tags.
 
+This revision keeps the `v0.5.3` tag and replaces its release assets, so no new version tag was created.
+
 ## Known boundaries
 
 - Windows-first. Portable ZIP on Linux/macOS is a deployment convenience, not a support commitment.
 - Process-area grouping of consecutive same-family tools (Phase 3) and weakening historical green ticks (Phase 2) are deferred until long runs are observed on this build.
+- A folder dragged from Explorer depends on Windows reporting its path or on the item still being selected there; otherwise Pi Chat asks for the picker instead of guessing.
 - The 65-second cold Session start is not closed; isolated import/factory measurements are much smaller and do not prove the incident is gone. See `docs/runtime-startup-investigation-2026-10-14.md`.
