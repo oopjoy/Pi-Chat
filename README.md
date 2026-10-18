@@ -14,11 +14,17 @@ Pi Chat 连接本机 Pi RPC，负责聊天展示、Session 浏览、流式输出
 
 ## Windows 安装（推荐使用一键 Setup）
 
-### 一个完整 Setup：应用 + Node 内置，Pi 按需安装
+### 一个完整 Setup：应用 + Node 内置，缺少 Pi 时离线安装
 
-**以下是当前 `main` 的新分发方式，尚未切换正式 Latest。** 最新 main 测试包位于 [Windows CI](https://github.com/oopjoy/Pi-Chat/actions/workflows/windows-ci.yml) 成功运行的 Artifacts：`pi-chat-setup-main-<提交号>`（保留 30 天，下载通常需要登录 GitHub）。解压 Actions 的传输 ZIP 后运行其中的 `pi-chat-setup.exe`；这不是 portable 应用包。其 manifest 标记 `tag: HEAD` 并记录完整 revision，不创建或移动 tag。
+正式 [v0.5.3](https://github.com/oopjoy/Pi-Chat/releases/tag/v0.5.3) 已提供完整 Setup 和便携 ZIP。三种渠道不要混用：
 
-已有 [Pre-release](https://github.com/oopjoy/Pi-Chat/releases) 保留各自标签时的测试包，不随 main 原地更新。正式 [v0.5.2](https://github.com/oopjoy/Pi-Chat/releases/tag/v0.5.2) 仍是约 192 KB 的历史在线引导安装器，不会替换旧资产。
+- **Stable**：从 [Latest Release](https://github.com/oopjoy/Pi-Chat/releases/latest) 下载；查看该 Release 的说明及 About 中的 Build Revision，不能只用 `0.5.3` 判断是否包含某项修复。
+- **Preview**：[Pre-release](https://github.com/oopjoy/Pi-Chat/releases) 是对应测试标签的安装包，不随 main 自动更新，也不成为 Latest。
+- **Main**：源码开发版本；成功的**手动** [Windows CI](https://github.com/oopjoy/Pi-Chat/actions/workflows/windows-ci.yml) 可提供 `pi-chat-setup-main-<提交号>` Artifacts（保留 30 天，下载通常需要登录 GitHub）。Actions 传输 ZIP 不是便携包，其 manifest 标记 `tag: HEAD` 并记录完整 revision，不创建或移动 tag。
+
+普通 main 推送和 PR 不自动跑完整 CI；需要提前验证时在 Actions 选择 **Windows CI → Run workflow**。推送 `v*` 版本标签才自动运行完整 Release CI，通过后发布安装包；类型检查、单元/浏览器测试、构建产物和安装器验证均保留。
+
+[v0.5.2](https://github.com/oopjoy/Pi-Chat/releases/tag/v0.5.2) 是约 192 KB 的历史在线引导安装器，不适用下面的完整 Setup 说明，旧资产保持不变。
 
 版本 Release 提供两个产物：**`pi-chat-setup.exe`**（唯一安装入口）和 **`pi-chat-portable-<版本>.zip`**（便携包）。校验文件和构建清单只在 CI 内验证，不上传到 Release（它们不是额外安装包）。安装向导基于 Inno Setup，不依赖 Electron：
 
@@ -36,12 +42,13 @@ Inno Setup 自动记录安装日志；可用 `/LOG="D:\PiChat-setup.log"` 指定
 
 `pi-chat-portable-<版本>.zip` 只包含 Pi Chat 应用本体（Web + 编译后的服务端 + 运行时适配器）与 Windows 启动脚本，**不包含 Node 和 Pi**：适合解压即用或在没有安装器的系统上部署。Windows 下解压后使用 `start-pi-chat-ui.ps1` / `pi-chat-launch.cmd` 启动；Linux/macOS 在装好 Node 22.19+ 与 Pi 后，在解压目录运行 `node server/server/index.js` 即可。文件选择器、资源管理器打开、Setup 管理 Pi 等 Windows 专属功能在非 Windows 上不可用；项目定位仍是 Windows-first，便携包不构成跨平台官方支持承诺。
 
-| 后续 Release 文件 | 用途 |
+| Release 文件 | 用途 |
 |---|---|
-| `pi-chat-setup.exe` | 唯一用户安装包，内置 App + Node；仅可选 Pi 安装需要联网 |
-| `pi-chat-setup.exe.sha256` | 安装包 SHA256 校验 |
-| `pi-chat-setup.exe.manifest.json` | 应用 revision/fingerprint、安装包摘要、内置 Node 和编译器版本 |
-| GitHub 自动生成的 `Source code` | 源码归档，不是第二种安装包 |
+| `pi-chat-setup.exe` | Windows 安装包，内置 App + Node；缺少 Pi 时从包内离线安装后备快照 |
+| `pi-chat-portable-<版本>.zip` | 应用便携包，自备 Node 和 Pi，无安装向导 |
+| GitHub 自动生成的 `Source code` | 源码归档，不是运行包 |
+
+`.sha256` 校验记录和 `.manifest.json` 构建清单在 CI 内生成、验证和留存，不作为 Release 附件发布。
 
 源码 checkout 的准备方法见下文「开发」。Windows 启动脚本仍用于源码开发和已安装应用，不作为另一个 portable 分发入口。
 
@@ -102,17 +109,17 @@ Pi Chat 默认只监听本机回环地址，关闭浏览器窗口不会停止本
 
 ## 版本与路线
 
-当前发布版本为 **0.5.2**，Release 资产固定绑定 `012b500`：新增在线 Setup（安装时下载私有 Node Runtime、优先复用本机 Pi、快捷方式与卸载注册）和应用内 Pi Runtime 更新。限制与说明见 [`release-notes-v0.5.2.md`](release-notes-v0.5.2.md)。
+当前正式发布为 **0.5.3**，该标签的最近一轮产物绑定 `f637871`：完整 Windows Setup、便携 ZIP，以及附件、模型目录刷新和窗口操作修复。见 [`release-notes-v0.5.3.md`](release-notes-v0.5.3.md)。
 
-**当前 `main` 还有发布后的修复**，包括带图片消息的原生处理结果关联、超大 Session 完整历史分页和桌面反馈改进，详见 [`CHANGELOG.md` 的 Unreleased](CHANGELOG.md#unreleased)。它们没有被回填进 v0.5.2 下载资产；需要等待后续正式发布，或由源码工作区安全构建后使用。
+`main` 中比上述 revision 更新的修改不会自动进入既有 Release。后续修复见 [`CHANGELOG.md` 的 Unreleased](CHANGELOG.md#unreleased)；以实际安装包的 Build Revision 为准，不把源码改动等同于已经分发。
 
 路线与 authority 说明见 [`docs/architecture.md`](docs/architecture.md)、[`docs/web-architecture-roadmap.md`](docs/web-architecture-roadmap.md) 和 [`v0.4.7 authority 收敛稳定性矩阵`](docs/v0.4.7-stability-matrix.md)。
 
 ## 环境要求
 
-- **Node.js** 源码/便携包需要 22.19 或更高（与 Pi 官方下限一致）；Windows Setup 内置私有 **Node.js 24.22.0 LTS**，不依赖系统 Node
-- **已全局安装并完成模型认证的 Pi**：`pi --version`  
-  完整 Setup 未检测到 Pi 时提供可选联网安装；以下说明针对源码运行与既有 Pi 用户。
+- **Node.js** 源码/便携包需要 22.19 或更高（与 Pi 官方下限一致）；Windows Setup 优先本机 Node 22.19+，没有合适版本时使用内置 **Node.js 24.22.0 LTS**
+- **已安装并完成模型认证的 Pi**：`pi --version`
+  完整 Setup 未检测到 Pi 时会离线展开包内 Pi 1.3.0 后备快照；模型认证仍需用户配置。以下说明针对源码运行与既有 Pi 用户。
   Pi Chat **不会**用进程内共享 Pi 内核托管多个 Session；服务仍会为每个执行对话拉起独立 Pi RPC。Runtime 直接使用本机安装的全局 Pi，并继续从该安装读取配置、Extension、Package、CLI 与 package-relative 资源。Pi 尚未就绪时，已保存的 Session JSONL 仍可浏览；发送或其他需要 Pi 的操作会提示 Runtime 不可用。
 - Windows 桌面快捷方式可选；Edge PWA 仅影响独立窗口体验，不是硬性依赖
 
@@ -313,8 +320,25 @@ Skills 可以向模型注入指令，Plugins/Packages 可以用当前用户的�
 
 ## 兼容的 Pi 版本
 
-- **已验证：** Pi `1.0.1`（全局 `@earendil-works/pi-coding-agent`；包含 `ask_user_question` RPC dialog fallback 冒烟验证）
+| 范围 | 当前验证口径 |
+|---|---|
+| 开发依赖基线 | `package.json` 仍固定 Pi **1.0.1**；它是依赖/类型基线，不代表其他版本已经跑过同样的完整测试 |
+| Setup 后备 Pi | 固定 **1.3.0**；真实安装器集成测试覆盖离线展开、复用已有 Pi、缺失入口恢复和安装/卸载 |
+| 本机 Pi 1.3.0 集成 | 已运行目录刷新、RPC dequeue、模型重选与 thinking 行为测试；测试会在找不到 Pi 时跳过，因此应同时查看 CI 的实际运行与跳过结果 |
+| 其他 Pi / 扩展组合 | 启动能力探测通过不等于所有行为已验证；`ask_user_question` 有 RPC dialog fallback 冒烟覆盖，不承诺任意 TUI 扩展自动转为 Web UI |
+
+暂不把开发依赖升级、打包后备版本、启动能力探测和完整行为验证混称为“已兼容所有版本”。
 - **探测方式：** 服务启动时冻结一个 Primary/Secondary 共用的 Direct Pi launch plan，解析并记录全局 Pi 版本与入口；显式 `PI_CHAT_PI_ENTRY` 保持 direct-only authority。Primary 随后执行 RPC 能力探测（`get_state` / `get_messages` / `get_available_models` / `get_commands` / `get_session_stats`）。不兼容时 Session 浏览继续可用，而新的或需要恢复的 Runtime 写操作返回明确的不可用状态；已经健康的 Secondary 保持可用。任何 Primary 恢复都会重新探测
 - 升级 Pi 后若启动失败，请先 `pi --version`，再确认 Pi Chat 是否为最新 0.5.x
+
+## 反馈问题时请附上
+
+- Pi Chat 版本、About 中的 **Build Revision / Fingerprint**，以及 Stable / Preview / Main 渠道。
+- Pi 版本（`pi --version`）、浏览器与 Windows 版本。
+- 操作前状态（空闲、生成中、等待确认、发送未返回等）和最短复现步骤。
+- 预期结果、实际结果；截图、短录屏或界面显示的事件 ID。
+- 必要时通过设置导出现有的最近五分钟诊断。分享前检查并去除敏感路径、提示词、凭证及个人数据，不直接上传 `auth.json`、API Key 或完整私有会话。
+
+本页中的草稿保全仍限于当前页面内存；切换 Session 可保留，但刷新/意外关闭后的持久恢复尚未实现，不应把它当成可靠的跨刷新备份。
 
 更完整的模块边界与拆分优先级见 `docs/architecture.md`；日常维护入口见 [`docs/change-map.md`](docs/change-map.md)。

@@ -2,11 +2,12 @@
 
 ## Distribution contract
 
-The next release publishes only `pi-chat-setup.exe` as the user installation
-entry point, plus its SHA256 and JSON identity sidecars. No Web bootstrapper or
-portable application ZIP is produced. GitHub's automatic source archives remain
-source-only. Published v0.5.2 assets are unchanged and retain their old online
-bootstrapper behavior; this is the current main-branch implementation.
+Stable v0.5.3 publishes `pi-chat-setup.exe` as the Windows installation entry
+point and `pi-chat-portable-<version>.zip` for deployments with Node and Pi
+already installed. SHA256 and JSON identity sidecars are generated and verified
+inside CI but are not uploaded as Release assets. GitHub's automatic source
+archives remain source-only. Published v0.5.2 assets are unchanged and retain
+their old online-bootstrapper behavior.
 
 The Inno Setup EXE embeds the compiled application, LICENSE/resources, launchers,
 a private Windows x64 Node.js 24.22.0 LTS runtime including npm, and a pinned
@@ -18,7 +19,9 @@ the payload into `~/.pi/agent/install` and is never upgraded in place.
 - Default `%LOCALAPPDATA%\PiChat`; the destination page supports other paths.
 - The finished page, Start-menu `Pi Chat`, and the desktop `Pi Chat Web` shortcut
   default to Web in the system default browser. Setup no longer creates a desktop
-  `Pi Chat` icon and deletes that leftover on upgrade. The install root also
+  `Pi Chat` icon. On upgrade it removes that leftover only when it belongs to
+  this installation's PowerShell Web launcher and working directory, not a PWA
+  or another checkout. The install root also
   contains a tracked `Pi Chat Web.lnk`; optional `Pi Chat PWA` remains in the
   Start menu. Browser install-as-app/profile setup is not performed by the installer.
 - Existing Pi is detected and reused without upgrade or credential/config copy.
@@ -67,12 +70,22 @@ identity. Outputs:
 - `pi-chat-setup.exe.manifest.json` (schema 2; Setup digest, application identity,
   Node archive checksum and compiler version)
 
-Main pushes publish `pi-chat-setup-main-<full-commit>` as a Windows CI artifact
-only after source, browser, artifact and real-installer gates. Its manifest uses
+Ordinary branch pushes and PRs do not automatically run Windows CI. Use
+**Actions → Windows CI → Run workflow** for explicit verification. A successful
+manual run on main publishes `pi-chat-setup-main-<full-commit>` as an Actions
+artifact only after source, browser, artifact and real-installer gates. Its manifest uses
 `tag: HEAD` and the exact checked-out SHA. This route requires no tag creation,
 no tag move and no Release write permission. GitHub wraps the three files in a
 transport ZIP; it is not a portable application distribution. Artifacts expire
 after 30 days and normally require a GitHub login to download.
+
+Pushing a `v*` tag automatically runs **Windows Release CI**, including all
+source, browser, artifact and installer gates. It packages the Setup, calls
+`portable-package.mjs` for the portable archive, retains the verified sidecars
+as a CI artifact, and publishes only the EXE and application ZIP on the Release.
+The portable archive lays out `server/`, `web/` and `build-identity.json` at the
+extraction root; it does not bundle Node or Pi. Source archives are not runnable
+binaries.
 
 A separately authorized test-only publication may use
 `v<package-version>-setup-preview.<first-12-characters-of-HEAD>`. Its tag must
@@ -81,26 +94,30 @@ still match. The same release gates apply, but GitHub marks it Pre-release and
 explicitly not Latest. It does not move the stable version tag or require a
 new application version just to test the installer.
 
-Do not overwrite an existing Release. Publication fails when a Release already
-exists. Pin updates require explicit review and rerunning the bundled-runtime
-checks; a pinned version is not an excuse to ignore runtime security updates.
+By default an existing Release is immutable: automatic publication fails if
+it already exists, never silently overwrites assets. Only an explicit operator
+request can authorize replacing a stable Release under the same tag (as happened
+for v0.5.3); record the old/new revisions, retarget that same tag, and rerun every
+release gate. A same-version update is distinguishable by Build Revision, not by
+the version string alone. Pin updates require explicit review and rerunning the
+bundled-runtime checks; a pinned version is not an excuse to ignore security updates.
 
 ## Verification
 
 `npm run test:setup` uses the actual bundled Node to build an isolated artifact,
 compiles a test-identity Inno EXE, installs into an unusual temporary path, and
 checks native installation/upgrade/uninstall, registration, missing-Pi startup,
-existing-Pi reuse and optional online failure. It also verifies npm under the
+existing-Pi reuse and missing-Pi offline seeding. It also verifies npm under the
 private Node and that native uninstall removes the generated root Web shortcut.
 The test owns its processes and
 never launches a real model request, maps the live user sessions, writes the
 production uninstall key or stops the production listener.
 
-The optional download-failure test changes .NET proxy settings only inside its
-one child PowerShell process; it never edits machine network settings. Installer
-and application logs are retained with the test staging path on failure.
+Installer and application logs are retained with the test staging path on
+failure. Build-machine downloads are separate from user-machine installation;
+Setup itself does not fetch Pi or Node from the network.
 
 Manual checks still required before adoption: visible wizard/shortcut behavior
-on a clean Windows profile, SmartScreen and antivirus feedback, and successful
-optional Pi download/authentication. The EXE is currently unsigned: embedding
+on a clean Windows profile, SmartScreen and antivirus feedback, and model-provider
+authentication using the user's actual Pi configuration. The EXE is currently unsigned: embedding
 Node is not code signing and cannot guarantee SmartScreen reputation.

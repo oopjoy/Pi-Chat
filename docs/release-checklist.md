@@ -17,11 +17,11 @@ service, or interrupt active Sessions without an authorized quiescent window.
       `scripts/installer-dependencies.json` were reviewed; upstream runtime
       security updates were considered. No unverified dependency is executed.
 - [ ] Test install, refusal while running, upgrade and uninstall; confirm Pi user
-      state remains untouched, and optional Pi failure preserves the base app.
+      state remains untouched, and failed offline Pi seeding preserves the base app.
 - [ ] Test the visible wizard and shortcuts on a clean Windows user profile;
       record any native/SmartScreen/antivirus checks not performed.
 
-## One Windows Setup
+## Windows Setup and portable application ZIP
 
 See [Windows Setup](windows-setup.md) for layout and build instructions.
 
@@ -30,8 +30,12 @@ See [Windows Setup](windows-setup.md) for layout and build instructions.
       and the exact tag/revision. Record the staging path.
 - [ ] `build-identity.json` package version, full SHA and fingerprint are correct.
 - [ ] Package with `node scripts/release-package.mjs --staging <dist> --output <dir> --tag vX.Y.Z`.
-- [ ] Output contains only `pi-chat-setup.exe`, `.exe.sha256` and
-      `.exe.manifest.json`. No Web EXE or portable application ZIP is produced.
+- [ ] Setup packaging produces `pi-chat-setup.exe`, `.exe.sha256` and
+      `.exe.manifest.json`. Separately package the portable app with
+      `node scripts/portable-package.mjs --staging <dist> --output <dir> --tag vX.Y.Z`.
+- [ ] The portable ZIP has forward-slash entries, the same version/revision as
+      Setup, and launchers plus `server/`, `web/` at its extraction root. It does
+      not bundle Node or Pi. No Web bootstrapper EXE is produced.
 - [ ] The EXE embeds App + private Node/npm and their license/resource files.
       Installing these components does not download them.
 - [ ] The schema-2 manifest identifies the Setup name/size/digest, embedded App
@@ -41,10 +45,11 @@ See [Windows Setup](windows-setup.md) for layout and build instructions.
 - [ ] Packaging rejects live-dist aliases, overlapping staging/output directories,
       missing assets, dirty source and mismatching build/tag identity.
 - [ ] Failed packaging removes stale EXE and sidecars; do not reuse previous ones.
-- [ ] Existing Pi is preferred and not upgraded. Optional missing-Pi installation
-      occurs only after explicit choice; silent setup does not download Pi.
-- [ ] With no Pi/network, base App + Node still install. The app opens with a
-      clear unavailable-Runtime state, not an apparently working model.
+- [ ] Existing Pi is preferred and not upgraded. Missing Pi is seeded offline
+      from bundled Pi 1.3.0, including in silent mode; Setup never downloads Pi.
+- [ ] With no Pi/network, App + Node install and bundled Pi is seeded. If seeding
+      fails, the base app remains installed with a clear recovery message.
+      No credentials are invented and no usable model is falsely claimed.
 - [ ] A different running checkout is never stopped or taken over. Matching
       launch-plan identity and per-Session child/writer boundaries remain intact.
 - [ ] Native uninstall refuses an active destination, removes only its own files,
@@ -53,9 +58,19 @@ See [Windows Setup](windows-setup.md) for layout and build instructions.
 
 ## Publication
 
-- [ ] Branch CI is green before creating a release tag.
-- [ ] Tag Release CI publishes the exact verified Setup and two sidecars.
-- [ ] Existing published tags/assets remain immutable; no `--clobber` uploads.
-- [ ] Release notes describe one Setup, optional Pi networking, platform/architecture,
-      known limitations and unsigned status. GitHub source archives are source-only.
+- [ ] Local source/artifact gates pass. Ordinary pushes and PRs do not start
+      full CI. If pre-release cloud verification is desired, use the manual
+      Windows CI workflow; its full checks are unchanged.
+- [ ] Pushing a `v*` version tag automatically runs full Windows Release CI;
+      publication waits for every gate, including installer verification.
+- [ ] The GitHub Release contains exactly the verified Setup EXE and portable
+      application ZIP. Checksum/manifest sidecars remain in CI artifacts only.
+- [ ] Existing published tags/assets remain immutable by default; no `--clobber`
+      uploads. A same-tag replacement requires explicit authorization, old/new
+      revision records, and a complete rerun of Release CI, never a silent overwrite.
+- [ ] Release notes describe both artifacts, bundled offline Pi, local-Node/Pi
+      preference, platform/architecture, known limitations and unsigned status.
+      GitHub source archives are source-only.
+- [ ] README and Release body distinguish Stable, Preview and Main. A fix in main
+      is not claimed to be in Stable until the artifact Build Revision confirms it.
 - [ ] Historical v0.5.2 assets are not replaced by the new installer implementation.
