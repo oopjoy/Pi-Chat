@@ -88,24 +88,27 @@ end;
 function ShortcutLooksLikeLegacySetupPiChat(const LinkPath: String): Boolean;
 var
   Shell, Shortcut: Variant;
-  Target, Args, WorkDir, ExpectedScript, ExpectedDir, NormalizedArgs: String;
+  Target, Args, WorkDir, ExpectedScript, ExpectedDir: String;
 begin
   Result := False;
   if not FileExists(LinkPath) then Exit;
   try
     Shell := CreateOleObject('WScript.Shell');
     Shortcut := Shell.CreateShortcut(LinkPath);
-    Target := LowerCase(Shortcut.TargetPath);
-    Args := LowerCase(Shortcut.Arguments);
-    WorkDir := LowerCase(Shortcut.WorkingDirectory);
+    // A Variant property is not implicitly a String for LowerCase here.
+    Target := LowerCase(String(Shortcut.TargetPath));
+    Args := LowerCase(String(Shortcut.Arguments));
+    WorkDir := LowerCase(String(Shortcut.WorkingDirectory));
     ExpectedScript := LowerCase(ExpandConstant('{app}\app\start-pi-chat-ui.ps1'));
     ExpectedDir := LowerCase(ExpandConstant('{app}\app'));
-    NormalizedArgs := StringReplace(StringReplace(Args, '"', '', [rfReplaceAll]), '/', '\', [rfReplaceAll]);
-    ExpectedScript := StringReplace(ExpectedScript, '/', '\', [rfReplaceAll]);
-    ExpectedDir := StringReplace(ExpectedDir, '/', '\', [rfReplaceAll]);
-    WorkDir := StringReplace(WorkDir, '/', '\', [rfReplaceAll]);
+    // Shortcuts may write either separator, so normalise before matching.
+    // StringChangeEx edits in place; StringReplace is unavailable in this script engine.
+    StringChangeEx(Args, '/', '\', False);
+    StringChangeEx(ExpectedScript, '/', '\', False);
+    StringChangeEx(ExpectedDir, '/', '\', False);
+    StringChangeEx(WorkDir, '/', '\', False);
     Result := (Pos('powershell.exe', Target) > 0)
-      and (Pos(ExpectedScript, NormalizedArgs) > 0)
+      and (Pos(ExpectedScript, Args) > 0)
       and (WorkDir = ExpectedDir)
       and (Pos(' pwa', ' ' + Args) = 0);
   except
