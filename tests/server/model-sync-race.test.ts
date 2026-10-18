@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { PiChatApp } from "../../src/server/app";
-import type { PiRpcClient } from "../../src/server/rpc-client";
+import { RpcRequestTimeoutError, type PiRpcClient } from "../../src/server/rpc-client";
 import type { ResourceManager } from "../../src/server/resource-manager";
 import type { SessionIndex } from "../../src/server/session-index";
 import { ModelManager } from "../../src/server/model-manager";
@@ -37,6 +37,7 @@ function appState(app: PiChatApp) {
     modelCatalogueRevision: number;
     activeSessionId: string;
     beginPromptAdmission(sessionId: string): Promise<() => void>;
+    sessionMutationOutcomePending(sessionId: string): boolean;
   };
 }
 
@@ -286,6 +287,54 @@ test("a failed re-selection keeps sync pending instead of reporting ready", asyn
     );
     // And it must never escalate to a full Runtime reload for this.
     assert.equal(primary.restartCount, 0, "a failed re-selection must not restart the Runtime");
+  } finally {
+    await app.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a timed-out re-selection fences the Session before releasing its lane", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-reconcile-timeout-"));
+  // An acknowledgement that never arrives: the write may still land later.
+  class TimingOutRpc extends LimitChangingRpc {
+    override async send(command: Record<string, unknown>, ...rest: unknown[]) {
+      if (command.type === "set_model") {
+        this.reconcileAttempts += 1;
+        throw new RpcRequestTimeoutError("set_model", "written-outcome-unknown");
+      }
+      return super.send(command, ...(rest as []));
+    }
+  }
+  const primary = new TimingOutRpc("C:\sessions\primary.jsonl", "primary");
+  primary.model = {
+    provider: "test",
+    id: "next",
+    name: "Next",
+    api: "openai-completions",
+    maxTokens: 2_000,
+  } as ModelInfo;
+  const models = new ModelManager(root);
+  await models.add({ provider: "local", id: "old", baseUrl: "http://127.0.0.1:1", api: "openai-completions" });
+  const app = appFor(root, primary);
+  const state = appState(app);
+  // A bound Session is what the fence is keyed by; an unbound primary has no
+  // competing user operation to protect.
+  state.activeSessionId = "session-under-test";
+  try {
+    await models.add({ provider: "local", id: "next", baseUrl: "http://127.0.0.1:2", api: "openai-completions" });
+    await waitFor(() => primary.reconcileAttempts > 0);
+    await waitFor(() => state.sessionMutationOutcomePending("session-under-test"));
+    // The fence exists while the lane is still held, so a user cannot slip in
+    // and then be reverted by the late write.
+    assert.equal(
+      state.sessionMutationOutcomePending("session-under-test"),
+      true,
+      "an unconfirmed background write must be fenced, like the user-facing set_model",
+    );
+    // And it must not be retried blindly on top of an unknown write.
+    const attempts = primary.reconcileAttempts;
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    assert.equal(primary.reconcileAttempts, attempts, "an unconfirmed write is not repeated");
   } finally {
     await app.close();
     await rm(root, { recursive: true, force: true });

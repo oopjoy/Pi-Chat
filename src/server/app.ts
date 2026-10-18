@@ -1226,8 +1226,13 @@ export class PiChatApp {
 
   /** Work that a bounded retry can still complete; a catalogue gap cannot. */
   private owedModelSync(): boolean {
-    return this.modelRegistryClients().length > 0
-      && (this.staleModelWorkers() > 0 || this.modelLimitsPendingSessions.size > 0);
+    if (!this.modelRegistryClients().length) return false;
+    if (this.staleModelWorkers() > 0) return true;
+    // A Session whose write outcome is unconfirmed must not be written again:
+    // the fence reports the unknown result and the user resolves it.
+    for (const sessionId of this.modelLimitsPendingSessions)
+      if (!this.sessionMutationOutcomePending(sessionId)) return true;
+    return false;
   }
 
   private publishModelCatalogue(models: ModelInfo[]): void {
@@ -1274,14 +1279,29 @@ export class PiChatApp {
       if (!fresh || JSON.stringify(fresh) === JSON.stringify(selected)) return "unchanged";
       const thinkingLevel = typeof state.thinkingLevel === "string" ? state.thinkingLevel : "";
       if (!generationUnchanged()) return "unchanged";
+      // A write whose acknowledgement is lost may still land later. The fence
+      // must exist before this lane is released, otherwise the user could take
+      // the lane, switch models, and then be reverted by the late write. This
+      // is the same protection the user-facing set_model path installs.
+      const outcomeToken = randomUUID();
+      const onLateResponse = this.lateRpcOutcomeHandler(target.sessionId, outcomeToken, "generic");
       try {
-        await target.rpc.send({ type: "set_model", provider: fresh.provider, modelId: fresh.id }, 20_000);
+        await target.rpc.send(
+          { type: "set_model", provider: fresh.provider, modelId: fresh.id },
+          20_000,
+          { onLateResponse },
+        );
         // Pi recomputes the level from the user default on re-selection, so the
         // Session's own choice is restored rather than silently replaced.
         if (thinkingLevel)
-          await target.rpc.send({ type: "set_thinking_level", level: thinkingLevel }, 15_000);
+          await target.rpc.send(
+            { type: "set_thinking_level", level: thinkingLevel },
+            15_000,
+            { onLateResponse },
+          );
         return "applied";
-      } catch {
+      } catch (error) {
+        this.markRpcOutcomePending(target.sessionId, error, outcomeToken);
         return "failed";
       }
     } finally {
