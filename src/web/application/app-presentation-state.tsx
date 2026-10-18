@@ -172,6 +172,9 @@ export function useAppPresentationState(host: Record<string, any>) {
     viewedSessionId,
     viewedSessionIdRef,
     viewingSubagentSession,
+    sessionNavigation,
+    mutatingSessionIds,
+    togglePinnedSession,
     warmingSessionIdsRef,
   } = host;
   const diagnosticSidebarCounts = useMemo(() => summarizeDiagnosticSessions(sessions), [sessions]);
@@ -424,23 +427,7 @@ export function useAppPresentationState(host: Record<string, any>) {
       sessionDialogSource?.messageCount === 0),
   );
 
-  const {
-    reconcileSessionMutation,
-    applySessionListSnapshot,
-    clearDeletedSessionProjection,
-    finalizeDeletedSession,
-    selectDeletionFallback,
-    reconcilePendingSessionMutations,
-    refreshManually,
-    restartPi,
-    shutdownPiChat,
-    exportStateDiagnostics,
-    copySessionToNew,
-    confirmCloneSession,
-    confirmForkSession,
-    renameSession,
-    deleteSession,
-  } = createSessionManagementActions({
+  const actions = createSessionManagementActions({
     ApiRequestError,
     activeSessionProjectionWriter,
     anySessionPendingConfirmation,
@@ -556,7 +543,36 @@ export function useAppPresentationState(host: Record<string, any>) {
     viewedSessionIdRef,
     warmingSessionIdsRef,
   });
-
+  const {
+    reconcileSessionMutation,
+    applySessionListSnapshot,
+    clearDeletedSessionProjection,
+    finalizeDeletedSession,
+    selectDeletionFallback,
+    reconcilePendingSessionMutations,
+    refreshManually,
+    restartPi,
+    shutdownPiChat,
+    exportStateDiagnostics,
+    copySessionToNew,
+    confirmCloneSession,
+    confirmForkSession,
+    renameSession,
+    deleteSession,
+    copySessionDeepLink,
+  } = actions;
+  const sessionMenuActions = viewedSessionId && viewedSession && !viewingSubagentSession
+    ? {
+        session: viewedSession,
+        pinnedSessionIds: sessionNavigation.pinnedSessionIds,
+        mutationBusy: Boolean(mutatingSessionIds.length),
+        onTogglePin: togglePinnedSession,
+        onClone: (session: any) => setSessionDialog({ mode: "clone", session }),
+        onCopyDeepLink: copySessionDeepLink,
+        onRename: (session: any) => setSessionDialog({ mode: "rename", session }),
+        onDelete: (session: any) => setSessionDialog({ mode: "delete", session }),
+      }
+    : null;
 
   return {
     diagnosticSidebarRows,
@@ -571,6 +587,7 @@ export function useAppPresentationState(host: Record<string, any>) {
     composerNotices,
     sessionDialogSource,
     sessionDialogCopyBlocked,
+    sessionMenuActions,
     reconcileSessionMutation,
     applySessionListSnapshot,
     clearDeletedSessionProjection,
