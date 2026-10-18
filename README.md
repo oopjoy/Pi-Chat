@@ -34,7 +34,7 @@ Inno Setup 自动记录安装日志；可用 `/LOG="D:\PiChat-setup.log"` 指定
 
 ### 便携 ZIP（自备 Node 与 Pi 的跨平台部署）
 
-`pi-chat-portable-<版本>.zip` 只包含 Pi Chat 应用本体（Web + 编译后的服务端 + 运行时适配器）与 Windows 启动脚本，**不包含 Node 和 Pi**：适合解压即用或在没有安装器的系统上部署。Windows 下解压后使用 `start-pi-chat-ui.ps1` / `pi-chat-launch.cmd` 启动；Linux/macOS 在装好 Node 22.19+ 与 Pi 后运行 `node dist/server/server/index.js` 即可。文件选择器、资源管理器打开、Setup 管理 Pi 等 Windows 专属功能在非 Windows 上不可用；项目定位仍是 Windows-first，便携包不构成跨平台官方支持承诺。
+`pi-chat-portable-<版本>.zip` 只包含 Pi Chat 应用本体（Web + 编译后的服务端 + 运行时适配器）与 Windows 启动脚本，**不包含 Node 和 Pi**：适合解压即用或在没有安装器的系统上部署。Windows 下解压后使用 `start-pi-chat-ui.ps1` / `pi-chat-launch.cmd` 启动；Linux/macOS 在装好 Node 22.19+ 与 Pi 后，在解压目录运行 `node server/server/index.js` 即可。文件选择器、资源管理器打开、Setup 管理 Pi 等 Windows 专属功能在非 Windows 上不可用；项目定位仍是 Windows-first，便携包不构成跨平台官方支持承诺。
 
 | 后续 Release 文件 | 用途 |
 |---|---|

@@ -54,7 +54,7 @@ Restart and Quit are on the Sidebar and in Settings. Restart is yellow and Quit 
 `pi-chat-portable-0.5.3.zip` is the app payload only (Web, compiled server, runtime adapters, Windows launcher scripts, and docs). It does **not** include Node or Pi.
 
 - Windows: extract and run `start-pi-chat-ui.ps1` or `pi-chat-launch.cmd`.
-- Linux/macOS: with Node 22.19+ and Pi already installed, run `node dist/server/server/index.js`.
+- Linux/macOS: with Node 22.19+ and Pi already installed, run `node server/server/index.js` from the extracted folder.
 
 The ZIP uses forward-slash entry names so it extracts cleanly outside Windows. File picker, Explorer reveal, and Setup-managed Pi stay Windows-only. Pi Chat remains Windows-first; the portable archive does not make non-Windows a supported product channel.
 
