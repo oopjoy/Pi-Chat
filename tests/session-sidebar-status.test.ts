@@ -111,7 +111,7 @@ test("sidebar renders directory hierarchy, status description, and session actio
     failedSessionIds: [],
     unseenReplySessionIds: [],
     mutatingSessionIds: [],
-    onClose() {}, onCollapse() {}, onNew() {}, onLoadAllSessions() {}, onLoadDirectory() {}, onRestart() {}, onShutdown() {}, onView() {}, onTogglePin() {}, onToggleDirectoryPin() {}, onSetDirectoryCollapsed() {}, onRename() {}, onDelete() {}, onWidthChange() {},
+    onClose() {}, onCollapse() {}, onNew() {}, onLoadAllSessions() {}, onLoadDirectory() {}, onRestart() {}, onShutdown() {}, onView() {}, onTogglePin() {}, onToggleDirectoryPin() {}, onSetDirectoryCollapsed() {}, onClone() {}, onCopyDeepLink: async () => {}, onRename() {}, onDelete() {}, onWidthChange() {},
   }));
 
   assert.match(html, /<section class="session-directory"[^>]*aria-label="c:\/work，1 个对话"/);

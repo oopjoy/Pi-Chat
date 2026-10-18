@@ -92,7 +92,7 @@ function ResizeHandle({ width, onWidthChange }: { width: number; onWidthChange: 
   return <div className="sidebar-resize-handle" role="separator" aria-orientation="vertical" aria-label="拖动调整会话栏宽度" aria-valuemin={SIDEBAR_WIDTH_MIN} aria-valuemax={SIDEBAR_WIDTH_MAX} aria-valuenow={Math.round(width)} tabIndex={0} onPointerDown={onPointerDown} onKeyDown={onKeyDown} />;
 }
 
-export function SessionSidebar({ sessions, sessionsTotal, sessionDirectories, inventoryReady, loadingAllSessions, loadingDirectoryKeys, viewedSessionId, workspaceCwd, workspaceEpoch, workspaceRevision, open, width, newDisabled, restartDisabled, shutdownDisabled, restartTitle = "完整重启 Pi Chat 并应用本地更新", shutdownTitle = "检查全部对话后，关闭所有 Pi Chat 窗口、服务和会话进程", copyDisabled, viewBusy, pinnedSessionIds, pinnedDirectoryKeys, collapsedDirectoryKeys, expandedDirectoryKeys, failedSessionIds, unseenReplySessionIds, mutatingSessionIds, onClose, onCollapse, onNew, onLoadAllSessions, onLoadDirectory, onRestart, onShutdown, onView, onTogglePin, onToggleDirectoryPin, onSetDirectoryCollapsed, onClone, onRename, onDelete, onWidthChange }: {
+export function SessionSidebar({ sessions, sessionsTotal, sessionDirectories, inventoryReady, loadingAllSessions, loadingDirectoryKeys, viewedSessionId, workspaceCwd, workspaceEpoch, workspaceRevision, open, width, newDisabled, restartDisabled, shutdownDisabled, restartTitle = "完整重启 Pi Chat 并应用本地更新", shutdownTitle = "检查全部对话后，关闭所有 Pi Chat 窗口、服务和会话进程", copyDisabled, viewBusy, pinnedSessionIds, pinnedDirectoryKeys, collapsedDirectoryKeys, expandedDirectoryKeys, failedSessionIds, unseenReplySessionIds, mutatingSessionIds, onClose, onCollapse, onNew, onLoadAllSessions, onLoadDirectory, onRestart, onShutdown, onView, onTogglePin, onToggleDirectoryPin, onSetDirectoryCollapsed, onClone, onCopyDeepLink, onRename, onDelete, onWidthChange }: {
   sessions: SessionSummary[];
   sessionsTotal: number;
   sessionDirectories: SessionDirectorySummary[];
@@ -136,6 +136,7 @@ export function SessionSidebar({ sessions, sessionsTotal, sessionDirectories, in
   onToggleDirectoryPin: (cwd: string) => void;
   onSetDirectoryCollapsed: (cwd: string, collapsed: boolean) => void;
   onClone: (session: SessionSummary) => void;
+  onCopyDeepLink: (sessionId: string) => Promise<void>;
   onRename: (session: SessionSummary) => void;
   onDelete: (session: SessionSummary) => void;
   onWidthChange: (width: number) => void;
@@ -324,7 +325,7 @@ export function SessionSidebar({ sessions, sessionsTotal, sessionDirectories, in
                       }} disabled={mutating} onClick={(event) => {
                         if (sessionMenuId === session.id) return closeSessionMenu(true);
                         const rect = event.currentTarget.getBoundingClientRect();
-                        const menuHeight = 144;
+                        const menuHeight = 180;
                         setSessionMenuPosition({
                           top: rect.bottom + menuHeight + 6 <= window.innerHeight ? rect.bottom + 4 : Math.max(4, rect.top - menuHeight - 4),
                           left: Math.max(4, rect.right - 108),
@@ -351,6 +352,7 @@ export function SessionSidebar({ sessions, sessionsTotal, sessionDirectories, in
       {menuSession && visibleSessionIds.has(menuSession.id) && createPortal(<div className="session-item-menu" ref={sessionMenuRef} role="menu" style={sessionMenuPosition}>
         <button type="button" role="menuitem" onClick={() => { closeSessionMenu(true); onTogglePin(menuSession.id); }}>{pinnedIds.has(menuSession.id) ? "取消置顶" : "置顶"}</button>
         <button type="button" role="menuitem" disabled={copyDisabled || mutatingSessionIds.includes(menuSession.id) || menuSession.running || menuSession.queued || menuSession.pendingConfirmation || menuSession.messageCount === 0} onClick={() => { closeSessionMenu(true); onClone(menuSession); }} title={copyDisabled ? "当前正在执行全局操作，暂时不能复制" : menuSession.running ? "该对话正在生成，完成后才能复制" : menuSession.queued ? "该对话有待发送消息，清空队列后才能复制" : menuSession.pendingConfirmation ? "该对话正在等待确认，处理后才能复制" : menuSession.messageCount === 0 ? "空白对话发送消息后才能复制" : undefined}>复制为新对话</button>
+        <button type="button" role="menuitem" onClick={() => { closeSessionMenu(true); void onCopyDeepLink(menuSession.id); }}>复制对话源路径</button>
         <button type="button" role="menuitem" disabled={mutatingSessionIds.includes(menuSession.id)} onClick={() => { closeSessionMenu(true); onRename(menuSession); }}>重命名</button>
         <button type="button" role="menuitem" className="is-danger" disabled={mutatingSessionIds.includes(menuSession.id) || menuSession.running || menuSession.queued || menuSession.pendingConfirmation} onClick={() => { closeSessionMenu(true); onDelete(menuSession); }} title={mutatingSessionIds.includes(menuSession.id) ? "该对话的管理操作尚未确认" : menuSession.running ? "该对话正在生成，停止后才能删除" : menuSession.queued ? "该对话有待发送消息，清空队列后才能删除" : menuSession.pendingConfirmation ? "该对话正在等待确认，处理后才能删除" : undefined}>删除</button>
       </div>, document.body)}

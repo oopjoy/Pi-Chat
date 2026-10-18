@@ -599,6 +599,7 @@ export function useAppPresentationState(host: Record<string, any>) {
     shutdownPiChat,
     exportStateDiagnostics,
     copySessionToNew,
+    copySessionDeepLink,
     confirmCloneSession,
     confirmForkSession,
     renameSession,

@@ -61,8 +61,15 @@ export function TopBar({ sessionId, conversationName, workspacePath, buildIdenti
     };
   }, [actionsOpen]);
   useEffect(() => {
-    if (sessionId && sessionMenu && actionsOpen) setActionsOpen(false);
-  }, [sessionId, sessionMenu, actionsOpen]);
+    setActionsOpen(false);
+  }, [sessionId]);
+  // A subagent transcript is read-only: its three-dot actions must never appear
+  // even if a stale sessionMenu prop survives the switch. Reset whenever the
+  // read-only trail state flips, not only on session id changes.
+  const hideSessionActions = !sessionMenu?.session || Boolean(childTrail);
+  useEffect(() => {
+    if (hideSessionActions) setActionsOpen(false);
+  }, [hideSessionActions]);
   const title = `当前对话：${conversationName}\n工作路径：${workspacePath}\n${buildIdentity}`;
   return (
     <header className="topbar">
@@ -95,7 +102,7 @@ export function TopBar({ sessionId, conversationName, workspacePath, buildIdenti
         <SubagentStatusControl key={sessionId || "draft"} sessionId={sessionId} onOpenSession={onOpenSubagentSession} />
       </div>
       <div className="topbar-controls">
-        {sessionMenu && sessionMenu.session && !childTrail ? (
+        {!hideSessionActions && sessionMenu?.session ? (
           <div className="topbar-session-actions" ref={actionsRef}>
             <button
               type="button"
@@ -110,7 +117,7 @@ export function TopBar({ sessionId, conversationName, workspacePath, buildIdenti
             {actionsOpen && <div className="session-item-menu topbar-session-actions-menu" role="menu">
               <button type="button" role="menuitem" onClick={() => { setActionsOpen(false); sessionMenu.onTogglePin(sessionId); }}>{sessionMenu.pinnedSessionIds.includes(sessionId) ? "取消置顶" : "置顶"}</button>
               <button type="button" role="menuitem" disabled={sessionMenu.mutationBusy} onClick={() => { setActionsOpen(false); sessionMenu.onClone(sessionMenu.session!); }} title={sessionMenu.mutationBusy ? "该对话的管理操作尚未确认" : undefined}>复制为新对话</button>
-              <button type="button" role="menuitem" onClick={() => { setActionsOpen(false); void sessionMenu.onCopyDeepLink(sessionId); }}>复制深度链接</button>
+              <button type="button" role="menuitem" onClick={() => { setActionsOpen(false); void sessionMenu.onCopyDeepLink(sessionId); }}>复制对话源路径</button>
               <button type="button" role="menuitem" disabled={sessionMenu.mutationBusy} onClick={() => { setActionsOpen(false); sessionMenu.onRename(sessionMenu.session!); }} title={sessionMenu.mutationBusy ? "该对话的管理操作尚未确认" : undefined}>重命名</button>
               <button type="button" role="menuitem" className="is-danger" disabled={sessionMenu.mutationBusy} onClick={() => { setActionsOpen(false); sessionMenu.onDelete(sessionMenu.session!); }} title={sessionMenu.mutationBusy ? "该对话的管理操作尚未确认" : undefined}>删除</button>
             </div>}

@@ -60,7 +60,7 @@ test("TopBar conversation actions mirror the Sidebar menu and copy the verified 
   await expect(entries).toHaveCount(5);
   await expect(entries.nth(0)).toHaveText("置顶");
   await expect(entries.nth(1)).toHaveText("复制为新对话");
-  await expect(entries.nth(2)).toHaveText("复制深度链接");
+  await expect(entries.nth(2)).toHaveText("复制对话源路径");
   await expect(entries.nth(3)).toHaveText("重命名");
   await expect(entries.nth(4)).toHaveText("删除");
   let jsonl = "";

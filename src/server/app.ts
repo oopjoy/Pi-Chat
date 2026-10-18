@@ -214,6 +214,7 @@ import {
   restartPrimaryRuntime as restartPrimaryRuntimeService,
 } from "./services/primary-runtime-lifecycle.js";
 import { handleSessionMutationsRoute } from "./routes/session-mutations.js";
+import { handleSessionReferenceRoute } from "./routes/session-reference.js";
 import { handleSessionRuntimeControlRoute } from "./routes/session-runtime-control.js";
 import { handleQueueControlRoute } from "./routes/queue-control.js";
 import { handleWorkspaceControlRoute } from "./routes/workspace-control.js";
@@ -5364,7 +5365,7 @@ export class PiChatApp {
       clearInterval, dequeueNativeSteering, dispatchNewDraftFirstTurn, gateModeFromCommand,
       handleBootstrapRoute, handleDiagnosticsReadRoute, handleExtensionResponseRoute, handleLifecycleControlRoute, handleRuntimeSetupRoute,
       handleLocalFilesWorkspaceRoute, handleModelManagementRoute, handleNewSessionRoute, handlePromptRoute,
-      handleQueueControlRoute, handleResourcesReadRoute, handleSessionMutationsRoute, handleSessionRuntimeControlRoute,
+      handleQueueControlRoute, handleResourcesReadRoute, handleSessionMutationsRoute, handleSessionReferenceRoute, handleSessionRuntimeControlRoute,
       handleSessionsReadRoute, handleSubagentsReadRoute, handleWindowControlRoute, handleWorkspaceControlRoute,
       handleWorkspaceOpenRoute, handleWorkspaceReadRoute, json, methodNotAllowed,
       pickLocalFiles, pickWorkspaceFolder, randomUUID, readClipboardFiles,

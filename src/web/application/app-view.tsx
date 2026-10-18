@@ -306,6 +306,7 @@ export function AppView(host: Record<string, any>) {
           })
         }
         onClone={(session: any) => setSessionDialog({ mode: "clone", session })}
+        onCopyDeepLink={copySessionDeepLink}
         onRename={(session: any) => setSessionDialog({ mode: "rename", session })}
         onDelete={(session: any) => setSessionDialog({ mode: "delete", session })}
       />

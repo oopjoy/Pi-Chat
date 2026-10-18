@@ -45,6 +45,57 @@ test("Escape closes the Session menu and restores focus to its trigger", async (
   }
 });
 
+test("an existing Session renders and opens the TopBar actions menu", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  Object.assign(api, {
+    bootstrap: async () => bootstrap,
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async (id: string) => ({ viewing: id }),
+    sessions: async () => ({ sessions: bootstrap.sessions, total: bootstrap.sessions.length }),
+    sessionFile: async (id: string) => ({ sessionId: id, sessionFile: "C:/sessions/active.jsonl" }),
+    backgroundSubagents: async () => ({ total: 0, activeCount: 0, attentionCount: 0, truncated: false, steps: [] }),
+  });
+  const copied: string[] = [];
+  Object.defineProperty(dom.window.navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: async (text: string) => { copied.push(text); } },
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const trigger = dom.window.document.querySelector<HTMLButtonElement>(".topbar-session-actions-trigger");
+    assert.ok(trigger, "the active Session exposes its TopBar actions");
+    await act(async () => trigger.click());
+    const entries = [...dom.window.document.querySelectorAll(".topbar-session-actions-menu [role='menuitem']")]
+      .map((item) => item.textContent);
+    assert.deepEqual(entries, ["置顶", "复制为新对话", "复制对话源路径", "重命名", "删除"]);
+    await act(async () => {
+      [...dom.window.document.querySelectorAll<HTMLButtonElement>(".topbar-session-actions-menu [role='menuitem']")]
+        .find((item) => item.textContent === "复制对话源路径")!.click();
+      await Promise.resolve();
+    });
+    assert.deepEqual(copied, ["C:/sessions/active.jsonl"]);
+    const sidebarTrigger = dom.window.document.querySelector<HTMLButtonElement>(".session-menu-trigger")!;
+    await act(async () => sidebarTrigger.click());
+    const sidebarEntries = [...dom.window.document.querySelectorAll(".session-item-menu [role='menuitem']")]
+      .map((item) => item.textContent);
+    assert.deepEqual(sidebarEntries, entries, "sidebar and TopBar expose the same ordered actions");
+    await act(async () => {
+      [...dom.window.document.querySelectorAll<HTMLButtonElement>(".session-item-menu [role='menuitem']")]
+        .find((item) => item.textContent === "复制对话源路径")!.click();
+      await Promise.resolve();
+    });
+    assert.deepEqual(copied, ["C:/sessions/active.jsonl", "C:/sessions/active.jsonl"]);
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
 test("Session menu clone opens the independently created cold conversation", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");

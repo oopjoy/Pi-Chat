@@ -362,8 +362,8 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .topbar-breadcrumb-current { max-width: 260px; flex: 0 1 auto; color: var(--text); font-weight: 650; }
 .topbar-breadcrumb-separator { flex: 0 0 auto; color: var(--text-faint); }
 .topbar-session-actions { position: relative; }
-.topbar-session-actions-trigger { display: grid; width: var(--control-h-lg); height: var(--control-h-lg); place-items: center; padding: 0; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface); color: var(--muted); cursor: pointer; }
-.topbar-session-actions-trigger:hover, .topbar-session-actions-trigger.is-open, .topbar-session-actions-trigger[aria-expanded="true"] { border-color: var(--line-strong); background: var(--surface-hover); color: var(--text); }
+.topbar-session-actions-trigger { display: grid; width: var(--control-h-lg); height: var(--control-h-lg); place-items: center; padding: 0; border: 0; border-radius: var(--radius-md); background: transparent; color: var(--muted); cursor: pointer; }
+.topbar-session-actions-trigger:hover, .topbar-session-actions-trigger.is-open, .topbar-session-actions-trigger[aria-expanded="true"] { background: var(--surface-hover); color: var(--text); }
 .topbar-session-actions-trigger svg { width: 16px; height: 16px; }
 .topbar-session-actions-menu { position: absolute; top: calc(100% + var(--space-2)); right: 0; width: 200px; }
 .topbar-controls { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; }

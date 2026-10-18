@@ -817,7 +817,7 @@ export function createSessionManagementActions(host: Record<string, any>) {
     try {
       const { sessionFile } = await api.sessionFile(sessionId);
       await writeClipboardText(sessionFile);
-      setNotice("已复制对话深度链接：Pi Chat 启动器可解析该 Session JSONL 路径；普通浏览器粘贴只会打开页面。");
+      setNotice("已复制对话源路径（Session JSONL），可用于 Pi Chat 启动器或本地工具。");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
