@@ -1140,16 +1140,14 @@ export class PiChatApp {
         rpc: this.options.rpc,
         idle: !this.primaryTurnActive(),
         sessionId: this.activeSessionId,
-        generation: this.primaryRpcGeneration,
+        generation: this.options.rpc.currentGeneration?.() ?? this.primaryRpcGeneration,
       });
     for (const runtime of this.runtimePool.values())
       clients.push({
         rpc: runtime.rpc,
         idle: this.runtimePool.isIdle(runtime),
         sessionId: runtime.id,
-        generation: typeof (runtime as { rpcGeneration?: number }).rpcGeneration === "number"
-          ? (runtime as { rpcGeneration: number }).rpcGeneration
-          : 0,
+        generation: runtime.rpc.currentGeneration?.() ?? runtime.rpcGeneration,
       });
     return clients;
   }
@@ -1173,14 +1171,19 @@ export class PiChatApp {
    * therefore leaves the worker stale instead of being credited with the newer
    * revision it never read.
    */
-  private async refreshLiveModelRegistries(): Promise<{ targets: Array<{ rpc: PiRpcClient; sessionId: string; generation: number }>; busy: number; failed: boolean; unsupported: boolean }> {
+  private async refreshLiveModelRegistries(): Promise<{ targets: Array<{ rpc: PiRpcClient; sessionId: string; generation: number }>; busy: number; failed: boolean; unsupported: boolean; unconfirmed: boolean }> {
     const result = {
       targets: [] as Array<{ rpc: PiRpcClient; sessionId: string; generation: number }>,
       busy: 0,
       failed: false,
       unsupported: false,
+      unconfirmed: false,
     };
     for (const { rpc, idle, sessionId, generation } of this.modelRegistryClients()) {
+      if (this.sessionMutationOutcomePending(sessionId)) {
+        result.unconfirmed = true;
+        continue;
+      }
       if (this.appliedModelRevision(rpc, generation) === this.modelCatalogueRevision) continue;
       // The Host projection can lag a settled turn, so the worker's own state
       // decides whether a refresh would land mid-request.
@@ -1191,6 +1194,11 @@ export class PiChatApp {
       const targetRevision = this.modelCatalogueRevision;
       try {
         await rpc.send({ type: "pi_chat_refresh_models" }, 20_000);
+        // A replaced worker cannot be credited with the old worker's result.
+        if (!this.modelRegistryTargetIsCurrent({ rpc, sessionId, generation })) {
+          result.failed = true;
+          continue;
+        }
         // A newer save during the call keeps this worker stale by design.
         this.modelRegistryRevisions.set(rpc, { revision: targetRevision, generation });
         result.targets.push({ rpc, sessionId, generation });
@@ -1224,15 +1232,24 @@ export class PiChatApp {
       .length;
   }
 
-  /** Work that a bounded retry can still complete; a catalogue gap cannot. */
+  private modelRegistryTargetIsCurrent(target: { rpc: PiRpcClient; sessionId: string; generation: number }): boolean {
+    return this.modelRegistryClients().some((client) => client.rpc === target.rpc
+      && client.sessionId === target.sessionId && client.generation === target.generation);
+  }
+
+  /** Unfinished work stays pending even when a fence currently prevents retry. */
+  private hasPendingModelSync(): boolean {
+    return this.modelRegistryClients().some(({ rpc, generation, sessionId }) =>
+      this.appliedModelRevision(rpc, generation) !== this.modelCatalogueRevision
+      || this.modelLimitsPendingSessions.has(sessionId));
+  }
+
+  /** Retry eligibility is not completion: an unconfirmed write stays pending. */
   private owedModelSync(): boolean {
-    if (!this.modelRegistryClients().length) return false;
-    if (this.staleModelWorkers() > 0) return true;
-    // A Session whose write outcome is unconfirmed must not be written again:
-    // the fence reports the unknown result and the user resolves it.
-    for (const sessionId of this.modelLimitsPendingSessions)
-      if (!this.sessionMutationOutcomePending(sessionId)) return true;
-    return false;
+    return this.modelRegistryClients().some(({ rpc, generation, sessionId }) =>
+      !this.sessionMutationOutcomePending(sessionId)
+      && (this.appliedModelRevision(rpc, generation) !== this.modelCatalogueRevision
+        || this.modelLimitsPendingSessions.has(sessionId)));
   }
 
   private publishModelCatalogue(models: ModelInfo[]): void {
@@ -1257,13 +1274,13 @@ export class PiChatApp {
    * A user action therefore always wins: the background pass only ever applies
    * the limits of the model the Session still has selected.
    */
-  private async reconcileSelectedModel(target: { rpc: PiRpcClient; sessionId: string; generation: number }): Promise<"applied" | "unchanged" | "deferred" | "failed"> {
+  private async reconcileSelectedModel(target: { rpc: PiRpcClient; sessionId: string; generation: number }): Promise<"applied" | "unchanged" | "deferred" | "failed" | "unconfirmed"> {
     const release = await this.beginPromptAdmission(target.sessionId);
     try {
-      const generationUnchanged = () =>
-        target.sessionId === this.activeSessionId
-          ? target.generation === this.primaryRpcGeneration
-          : true;
+      if (!this.modelRegistryTargetIsCurrent(target)) return "unchanged";
+      // Bootstrap, settlement and another config save can all wake this method.
+      // Timer suppression alone does not protect an already-unconfirmed write.
+      if (this.sessionMutationOutcomePending(target.sessionId)) return "unconfirmed";
       let state: PiState;
       let models: ModelInfo[];
       try {
@@ -1278,13 +1295,22 @@ export class PiChatApp {
       const fresh = models.find((model) => model.provider === selected.provider && model.id === selected.id);
       if (!fresh || JSON.stringify(fresh) === JSON.stringify(selected)) return "unchanged";
       const thinkingLevel = typeof state.thinkingLevel === "string" ? state.thinkingLevel : "";
-      if (!generationUnchanged()) return "unchanged";
+      if (!this.modelRegistryTargetIsCurrent(target)) return "unchanged";
+      if (this.sessionMutationOutcomePending(target.sessionId)) return "unconfirmed";
       // A write whose acknowledgement is lost may still land later. The fence
       // must exist before this lane is released, otherwise the user could take
       // the lane, switch models, and then be reverted by the late write. This
       // is the same protection the user-facing set_model path installs.
       const outcomeToken = randomUUID();
-      const onLateResponse = this.lateRpcOutcomeHandler(target.sessionId, outcomeToken, "generic");
+      const confirmLateOutcome = this.lateRpcOutcomeHandler(target.sessionId, outcomeToken, "generic");
+      const onLateResponse = (response: Record<string, unknown>) => {
+        if (!this.modelRegistryTargetIsCurrent(target)
+          || this.rpcOutcomeTokensBySession.get(target.sessionId) !== outcomeToken) return;
+        confirmLateOutcome(response);
+        // The confirmed response permits a new serial state check. It does not
+        // itself prove the current selection is up to date.
+        if (!this.sessionMutationOutcomePending(target.sessionId)) this.scheduleModelRuntimeSync();
+      };
       try {
         await target.rpc.send(
           { type: "set_model", provider: fresh.provider, modelId: fresh.id },
@@ -1293,6 +1319,8 @@ export class PiChatApp {
         );
         // Pi recomputes the level from the user default on re-selection, so the
         // Session's own choice is restored rather than silently replaced.
+        if (!this.modelRegistryTargetIsCurrent(target)) return "unchanged";
+        if (this.sessionMutationOutcomePending(target.sessionId)) return "unconfirmed";
         if (thinkingLevel)
           await target.rpc.send(
             { type: "set_thinking_level", level: thinkingLevel },
@@ -1335,7 +1363,7 @@ export class PiChatApp {
           const outcome = await this.reconcileSelectedModel(target);
           if (outcome === "applied" || outcome === "unchanged")
             this.modelLimitsPendingSessions.delete(target.sessionId);
-          else if (outcome === "deferred")
+          else if (outcome === "deferred" || outcome === "unconfirmed")
             this.modelLimitsPendingSessions.add(target.sessionId);
           else {
             this.modelLimitsPendingSessions.add(target.sessionId);
@@ -1344,7 +1372,7 @@ export class PiChatApp {
         }
         const models = await this.readPrimaryCatalogue();
         if (models) this.lastAvailableModels = models;
-        this.modelRuntimeSyncPending = this.owedModelSync();
+        this.modelRuntimeSyncPending = this.hasPendingModelSync();
         // An unfinished pass (a save landed mid-refresh, or a Session still owes
         // its limits) consumes the same bounded budget so it cannot loop forever.
         if (this.modelRuntimeSyncPending) this.modelRuntimeSyncFailures += 1;
@@ -1362,6 +1390,10 @@ export class PiChatApp {
       }
       if (refresh.failed) {
         this.modelRuntimeSyncFailures += 1;
+        return;
+      }
+      if (refresh.unconfirmed) {
+        this.modelRuntimeSyncPending = true;
         return;
       }
       // A worker that cannot be refreshed without the adapter missing is not a
