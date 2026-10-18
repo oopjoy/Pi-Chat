@@ -33,6 +33,7 @@ export function AppView(host: Record<string, any>) {
     composerQueueMode,
     composerState,
     composerSubmissionPaused,
+    copySessionDeepLink,
     composerSubmissionScope,
     composerTargetSessionId,
     confirmCloneSession,
@@ -150,6 +151,7 @@ export function AppView(host: Record<string, any>) {
     togglePinnedSession,
     toolStatus,
     topBarSessionId,
+    sessionMenuActions,
     turnTotal,
     unseenReplySessionIds,
     updateComposerPending,
@@ -334,6 +336,7 @@ export function AppView(host: Record<string, any>) {
           onOpenSubagentSession: openSubagentSession,
           subagentBreadcrumb,
           onNavigateSubagentAncestor: navigateSubagentAncestor,
+          sessionMenu: sessionMenuActions,
         }}
         timelineRef={scrollRef}
         onScroll={onScroll}
@@ -470,8 +473,27 @@ export function AppView(host: Record<string, any>) {
           onPickLocalFiles: async () => (await api.pickLocalFiles()).paths,
           onReadClipboardFiles: async (files: any) => (await api.clipboardLocalFiles(files)).paths,
           onOpenLocalFile: async (path: string) => { await api.openLocalFile(path); },
-          onStageDroppedFile: async (file: { name: string; data: string; size: number }) => (await api.stageDroppedFile(file)).path,
-          onDiscardStagedFile: async (path: string) => { await api.discardStagedFile(path); },
+          onStageDroppedFile: async (file: { name: string; data: string; size: number; owner?: string }) => (await api.stageDroppedFile(file)).path,
+          onDiscardStagedFile: async (path: string, owner?: string) => { await api.discardStagedFile(path, owner); },
+          onPrepareLocalFiles: async (paths: string[]) => {
+            for (let offset = 0; offset < paths.length; offset += 16) await api.prepareLocalFiles(paths.slice(offset, offset + 16));
+          },
+          onUpdateAttachmentLeases: async (paths: string[], active: boolean, owner: string) => {
+            for (let offset = 0; offset < paths.length; offset += 16) {
+              const { missing } = await api.leaseLocalFiles(paths.slice(offset, offset + 16), active, owner);
+              if (active && missing.length) throw new Error("部分本地附件已经不存在或无法保留");
+            }
+          },
+          onValidateRecoveredFiles: async (paths: string[], owner: string) => {
+            const missing = new Set<string>();
+            for (let offset = 0; offset < paths.length; offset += 16) {
+              const batch = paths.slice(offset, offset + 16);
+              for (const path of (await api.leaseLocalFiles(batch, true, owner)).missing) missing.add(path);
+              const { kinds } = await api.attachmentKinds(batch);
+              for (const path of batch) if (!kinds.some((item: { path: string }) => item.path === path)) missing.add(path);
+            }
+            return [...missing];
+          },
           onPickLocalFolder: async () => (await api.pickLocalFolder()).paths,
           onAttachmentKinds: async (paths: string[]) => (await api.attachmentKinds(paths)).kinds,
           onError: setError,

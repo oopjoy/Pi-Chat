@@ -288,7 +288,7 @@ export function commandMatches(value: string, commands: SlashCommand[]): SlashCo
   }).sort((a, b) => a.rank - b.rank || a.score - b.score || a.command.name.localeCompare(b.command.name)).slice(0, 9).map(({ command }) => command);
 }
 
-export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, placeholder, acceptsImages, imageInputPending = false, restoredDraft, onDraftRevisionChange, draftKey, forgottenComposerKeys = [], submissionScope, submissionTargetSessionId, allowFollowupSubmissions = true, submissionPaused = false, onSubmissionPendingChange, commands, controls, notices, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles = async () => [], onOpenLocalFile, onStageDroppedFile, onDiscardStagedFile, onPickLocalFolder, onAttachmentKinds, onError }: {
+export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, placeholder, acceptsImages, imageInputPending = false, restoredDraft, onDraftRevisionChange, draftKey, forgottenComposerKeys = [], submissionScope, submissionTargetSessionId, allowFollowupSubmissions = true, submissionPaused = false, onSubmissionPendingChange, commands, controls, notices, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles = async () => [], onOpenLocalFile, onStageDroppedFile, onDiscardStagedFile, onPickLocalFolder, onAttachmentKinds, onPrepareLocalFiles, onUpdateAttachmentLeases, onValidateRecoveredFiles, onError }: {
   /** True when a submission will enter the local queue. */
   streaming: boolean;
   /** True only while Pi is actively generating and can be stopped. */
@@ -326,10 +326,13 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   onPickLocalFiles: () => Promise<string[]>;
   onReadClipboardFiles?: (files: Array<{ name: string; size: number }>) => Promise<string[]>;
   onOpenLocalFile?: (path: string) => Promise<void>;
-  onStageDroppedFile?: (file: { name: string; data: string; size: number }) => Promise<string>;
-  onDiscardStagedFile?: (path: string) => Promise<void>;
+  onStageDroppedFile?: (file: { name: string; data: string; size: number; owner?: string }) => Promise<string>;
+  onDiscardStagedFile?: (path: string, owner?: string) => Promise<void>;
   onPickLocalFolder?: () => Promise<string[]>;
   onAttachmentKinds?: (paths: string[]) => Promise<Array<{ path: string; kind: "file" | "directory" }>>;
+  onPrepareLocalFiles?: (paths: string[]) => Promise<void>;
+  onUpdateAttachmentLeases?: (paths: string[], active: boolean, owner: string) => Promise<void>;
+  onValidateRecoveredFiles?: (paths: string[], owner: string) => Promise<string[]>;
   onError: (message: string) => void;
 }) {
   const [dragging, setDragging] = useState(false);
@@ -398,12 +401,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     const discard = onDiscardStagedFileRef.current;
     if (!discard || !paths.length) return;
     for (const path of paths) stagedPathsRef.current.delete(path);
-    await Promise.all(paths.map((path) => discard(path).catch(() => undefined)));
-  };
-  /** A removed card must not leave its staged bytes behind in the temp area. */
-  const discardIfStaged = (path: string) => {
-    if (!stagedPathsRef.current.has(path)) return;
-    void discardStagedPaths([path]);
+    await Promise.all(paths.map((path) => discard(path, composer.attachmentOwner()).catch(() => undefined)));
   };
   const composer = useComposerController({
     draftKey: resolvedDraftKey,
@@ -417,7 +415,21 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     onSubmissionPendingChange,
     onError,
     onSend,
+    prepareLocalFiles: onPrepareLocalFiles,
+    updateAttachmentLeases: onUpdateAttachmentLeases,
+    validateRecoveredFiles: onValidateRecoveredFiles,
   });
+  const backupNeedsCloseWarning = composer.backupNeedsCloseWarning;
+  useEffect(() => {
+    const beforeClose = (event: BeforeUnloadEvent) => {
+      if (attachingCountRef.current > 0 || backupNeedsCloseWarning()) {
+        event.preventDefault();
+        event.returnValue = "";
+      }
+    };
+    window.addEventListener("beforeunload", beforeClose);
+    return () => window.removeEventListener("beforeunload", beforeClose);
+  }, [backupNeedsCloseWarning]);
   const value = composer.draft.message;
   const images = composer.draft.images;
   const files = draftFiles(composer.draft);
@@ -711,7 +723,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
           if (!path && onStageDroppedFile) {
             const data = await readDroppedFileAsBase64(file);
             if (!stillCurrent()) { await discardStagedPaths(staged); return; }
-            path = await onStageDroppedFile({ name: file.name, data, size: file.size });
+            path = await onStageDroppedFile({ name: file.name, data, size: file.size, owner: composer.attachmentOwner() });
             if (path) { staged.push(path); stagedPathsRef.current.add(path); }
           }
           if (!stillCurrent()) { await discardStagedPaths(staged); return; }
@@ -772,6 +784,19 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     <div className="composer-wrap">
       {notices && <div className="system-notice-stack" aria-live="polite">{notices}</div>}
       {composer.blocked && <div className="composer-submission-status is-failed" role="status">发送失败，草稿已恢复；{composer.blockedError || "修改后可重试"}</div>}
+      {composer.storageWarning && <div className="composer-submission-status is-failed" role="status">{composer.storageWarning}</div>}
+      {composer.recoveryNotice && <div className="composer-submission-status composer-recovery-feedback" role="status">{composer.recoveryNotice}</div>}
+      {composer.draft.recoveryWarning === "delivery-uncertain" && <div className="composer-submission-status is-failed" role="status">上次这份内容的发送结果未确认。这里只恢复了草稿，请先核对历史，避免重复发送。</div>}
+      {composer.recoveries.length > 0 && <div className="composer-submission-status composer-recovery" role="status">
+        <strong>发现本机保存的未发送草稿</strong>
+        {composer.recoveries.slice(0, 3).map((record) => <div className="composer-recovery-row" key={`${record.id}:${record.sequence}`}>
+          <span>{new Date(record.updatedAt).toLocaleString()} · {record.frames.length} 份内容 · {record.frames.reduce((n, frame) => n + frame.images.length + frame.files.length, 0)} 个附件{record.frames.some((frame) => frame.uncertain) ? " · 含发送结果未确认的内容" : ""}</span>
+          <button type="button" disabled={editorDisabled || composer.recovering || composer.pendingCount > 0 || attachingCount > 0} onClick={() => void composer.restoreRecovery(record)}>恢复草稿</button>
+          <button type="button" disabled={editorDisabled || composer.recovering || composer.pendingCount > 0 || attachingCount > 0} onClick={() => void composer.restoreRecovery(record, true)}>仅恢复文字</button>
+          <button type="button" disabled={composer.recovering} onClick={() => composer.dismissRecovery(record)}>忽略这份备份</button>
+        </div>)}
+        <small>不会自动发送，也不会覆盖已输入的内容。新对话恢复后请确认工作路径。备份在本机保留 30 天，可在设置的 About 区清除。备份不证明服务尚未收到这些内容，发送前请核对历史。</small>
+      </div>}
       {composer.retainedDraftCount > 0 && <div className="composer-submission-status composer-retained-drafts" role="status">
         <span>另有 {composer.retainedDraftCount} 份未发送草稿已保留在本页。</span>
         <button type="button" disabled={editorDisabled || composer.pendingCount > 0 || attachingCount > 0} onClick={() => { attachmentEpochRef.current += 1; composer.recoverSuspended(); textareaRef.current?.focus(); }}>恢复下一份草稿</button>
@@ -797,7 +822,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
                 <span className="composer-attachment-kind">{kind.label}</span>
               </button>
               <small>{windowsFileName(path)}</small>
-              <button type="button" className="composer-attachment-remove" disabled={editorDisabled} aria-label={`移除 ${windowsFileName(path)}`} onClick={() => { discardIfStaged(path); const current = composer.currentDraft(); composer.replace(current.message, current.images, draftFiles(current).filter((item) => item !== path)); }}><CloseIcon /></button>
+              <button type="button" className="composer-attachment-remove" disabled={editorDisabled} aria-label={`移除 ${windowsFileName(path)}`} onClick={() => { const current = composer.currentDraft(); composer.replace(current.message, current.images, draftFiles(current).filter((item) => item !== path)); }}><CloseIcon /></button>
             </div>;
           })}
         </div>}

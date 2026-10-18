@@ -3,6 +3,7 @@ import type { RuntimeEntryInfo, RuntimeSetupChange, RuntimeSetupStatus } from ".
 import type { ServerStateDiagnosticSnapshot } from "../shared/state-diagnostics";
 import type { BackgroundSubagentSnapshot, BootstrapData, BootstrapHandshakeData, CustomModelInput, CustomProviderInput, ExtensionResource, GateMode, InitialPromptData, ModelInfo, PackageResource, PromptDelivery, PromptImage, PromptSettingsSnapshot, QueuedPrompt, ResourceResponse, SessionCopyData, SessionDirectorySummary, SessionHistoryPage, SessionRuntimeReadyData, SessionSummary, SessionViewData, SkillResource, ThinkingLevel, WorkspaceFileData, WorkspaceRecentFilesData } from "../shared/types";
 import { recordBrowserStateDiagnostic } from "./lib/state-diagnostics";
+import { draftStorageOwner } from "./lib/draft-recovery";
 
 export type ExtensionResponseInput = {
   id: string;
@@ -140,6 +141,11 @@ const pageId = crypto.randomUUID();
 // One ordering domain per concrete page. Every foreground/background mutation
 // advances the same counter so out-of-order HTTP completion cannot reverse it.
 let presenceRevision = 0;
+let attachmentLeaseRevision = 0;
+function nextAttachmentLeaseRevision(): number {
+  attachmentLeaseRevision = Math.max(attachmentLeaseRevision + 1, Date.now() * 1000);
+  return attachmentLeaseRevision;
+}
 
 function nextPresenceRevision(): number {
   presenceRevision += 1;
@@ -385,10 +391,18 @@ export const api = {
     }),
   }, PROMPT_PREPARE_TIMEOUT_MS),
   pickLocalFiles: () => request<{ paths: string[] }>("/api/local-files/pick", { method: "POST" }),
-  stageDroppedFile: (file: { name: string; data: string; size: number }) =>
-    request<{ path: string }>("/api/local-files/stage", { method: "POST", body: JSON.stringify(file) }, 120_000),
-  discardStagedFile: (path: string) =>
-    request<{ ok: boolean }>("/api/local-files/stage/discard", { method: "POST", body: JSON.stringify({ path }) }),
+  stageDroppedFile: (file: { name: string; data: string; size: number; owner?: string }) =>
+    request<{ path: string }>("/api/local-files/stage", { method: "POST", body: JSON.stringify({ ...file, owner: file.owner || draftStorageOwner() }) }, 120_000),
+  discardStagedFile: (path: string, owner = draftStorageOwner()) =>
+    request<{ ok: boolean }>("/api/local-files/stage/discard", { method: "POST", body: JSON.stringify({ path, owner, revision: nextAttachmentLeaseRevision() }) }),
+  leaseLocalFiles: (paths: string[], active = true, owner = draftStorageOwner()) => request<{ missing: string[] }>("/api/local-files/lease", {
+    method: "POST", body: JSON.stringify({ paths, active, owner, revision: nextAttachmentLeaseRevision() }),
+  }),
+  prepareLocalFiles: (paths: string[]) => request<{ ok: boolean }>("/api/local-files/prepare", { method: "POST", body: JSON.stringify({ paths }) }),
+  openAttachmentStorage: () => request<{ ok: boolean }>("/api/local-files/storage/open", { method: "POST" }),
+  attachmentStorage: (cleanup = false) => request<{ drafts: number; retained: number; bytes: number; removed: number; skipped: number; truncated: boolean }>(
+    "/api/local-files/storage", cleanup ? { method: "POST" } : undefined,
+  ),
   pickLocalFolder: () => request<{ paths: string[] }>("/api/local-files/pick-folder", { method: "POST" }),
   attachmentKinds: (paths: string[]) =>
     request<{ kinds: Array<{ path: string; kind: "file" | "directory" }> }>("/api/local-files/kinds", { method: "POST", body: JSON.stringify({ paths }) }),
@@ -538,6 +552,7 @@ export const api = {
     method: "POST",
     body: JSON.stringify({ persistedMessageId }),
   }, PROMPT_PREPARE_TIMEOUT_MS),
+  sessionFile: (id: string) => request<{ sessionId: string; sessionFile: string }>(`/api/sessions/${id}/session-file`),
   renameSession: (id: string, name: string) => request<{ id: string; name: string }>(`/api/sessions/${id}`, { method: "PATCH", body: JSON.stringify({ name }) }, RUNTIME_OPERATION_TIMEOUT_MS),
   deleteSession: (id: string) => request<BootstrapData>(`/api/sessions/${id}`, { method: "DELETE" }, RUNTIME_OPERATION_TIMEOUT_MS),
   getCustomModel: (provider: string, id: string) => request<{ model: CustomModelInput }>(`/api/models/${encodeURIComponent(provider)}/${encodeURIComponent(id)}`),

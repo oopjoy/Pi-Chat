@@ -1,11 +1,12 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { resolve } from "node:path";
 import { stat } from "node:fs/promises";
-import { discardManagedDroppedFile, stageDroppedFileBytes } from "../dropped-files.js";
-import { bodyJson, json, methodNotAllowed } from "../http-transport.js";
-import { localPathKinds, openLocalAttachment, parsePickerOutput } from "../file-picker.js";
+import type { DroppedFileStore } from "../dropped-files.js";
+import { bodyJson, HttpRequestError, json, methodNotAllowed } from "../http-transport.js";
+import { localPathKinds, openLocalAttachment, openWorkspaceDirectory, parsePickerOutput } from "../file-picker.js";
 
 export interface LocalFilesWorkspaceRouteHost {
+  attachmentStore?: DroppedFileStore;
   pickLocalFiles(): Promise<string[]>;
   readClipboardFiles(files: Array<{ name: string; size: number }>): Promise<string[]>;
   pickWorkspaceFolder(cwd: string): Promise<string | null>;
@@ -22,6 +23,20 @@ function clipboardFiles(body: Record<string, unknown>): Array<{ name: string; si
         && (item as { size: number }).size >= 0,
       )).slice(0, 10)
     : [];
+}
+
+function attachmentPaths(body: Record<string, unknown>): string[] {
+  if (!Array.isArray(body.paths) || body.paths.length > 2048
+    || body.paths.some((path) => typeof path !== "string" || path.length > 32768
+      || parsePickerOutput(JSON.stringify([path]))[0] !== path))
+    throw new HttpRequestError(400, "附件路径列表无效");
+  return [...new Set(body.paths as string[])];
+}
+function leaseIdentity(body: Record<string, unknown>): { owner: string; revision: number } {
+  if (typeof body.owner !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(body.owner)
+    || !Number.isSafeInteger(body.revision) || Number(body.revision) < 1)
+    throw new HttpRequestError(400, "附件草稿租约无效");
+  return { owner: body.owner, revision: Number(body.revision) };
 }
 
 export async function handleLocalFilesWorkspaceRoute(
@@ -104,7 +119,9 @@ export async function handleLocalFilesWorkspaceRoute(
       return true;
     }
     try {
-      json(response, 200, { path: await stageDroppedFileBytes(name, bytes) });
+      if (!host.attachmentStore) throw new Error("当前服务未配置附件存储");
+      const owner = typeof body.owner === "string" ? body.owner : "";
+      json(response, 200, { path: await host.attachmentStore.stage(name, bytes, owner) });
     } catch (error) {
       json(response, 400, { error: error instanceof Error ? error.message : "无法保存拖入的文件" });
     }
@@ -122,11 +139,45 @@ export async function handleLocalFilesWorkspaceRoute(
       return true;
     }
     try {
-      await discardManagedDroppedFile(path);
+      if (!host.attachmentStore) throw new Error("当前服务未配置附件存储");
+      const { owner, revision } = leaseIdentity(body);
+      await host.attachmentStore.discard(path, owner, revision);
       json(response, 200, { ok: true });
     } catch (error) {
       json(response, 400, { error: error instanceof Error ? error.message : "无法清理临时文件" });
     }
+    return true;
+  }
+  if (url.pathname === "/api/local-files/prepare") {
+    if (request.method !== "POST") { methodNotAllowed(response); return true; }
+    const paths = attachmentPaths(await bodyJson(request));
+    // Ordinary user-owned files are not cache entries. Managed payloads must
+    // be retained successfully before the browser can enter the send pipeline.
+    await host.attachmentStore?.retain(paths);
+    json(response, 200, { ok: true });
+    return true;
+  }
+  if (url.pathname === "/api/local-files/lease") {
+    if (request.method !== "POST") { methodNotAllowed(response); return true; }
+    const body = await bodyJson(request);
+    const paths = attachmentPaths(body);
+    const { owner, revision } = leaseIdentity(body);
+    const missing = await host.attachmentStore?.lease(paths, owner, revision, body.active !== false) || [];
+    json(response, 200, { missing });
+    return true;
+  }
+  if (url.pathname === "/api/local-files/storage/open") {
+    if (request.method !== "POST") { methodNotAllowed(response); return true; }
+    if (!host.attachmentStore) { json(response, 501, { error: "当前服务未配置附件存储" }); return true; }
+    await host.attachmentStore.ensureDirectory();
+    await openWorkspaceDirectory(host.attachmentStore.root);
+    json(response, 200, { ok: true });
+    return true;
+  }
+  if (url.pathname === "/api/local-files/storage") {
+    if (request.method !== "GET" && request.method !== "POST") { methodNotAllowed(response); return true; }
+    if (!host.attachmentStore) { json(response, 501, { error: "当前服务未配置附件存储" }); return true; }
+    json(response, 200, await host.attachmentStore.maintain(request.method === "POST"));
     return true;
   }
   if (url.pathname === "/api/workspace/draft-pick") {

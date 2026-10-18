@@ -31,6 +31,10 @@ export function PlusIcon(props: IconProps) {
   return <LineIcon {...props}><path d="M12 5v14M5 12h14" /></LineIcon>;
 }
 
+export function MoreIcon(props: IconProps) {
+  return <LineIcon {...props} fill="currentColor" stroke="none" aria-hidden="true"><circle cx="6" cy="12" r="1.6" /><circle cx="12" cy="12" r="1.6" /><circle cx="18" cy="12" r="1.6" /></LineIcon>;
+}
+
 export function PaperclipIcon(props: IconProps) {
   return <LineIcon data-icon="paperclip" {...props}><path d="m20.5 11.5-8.9 8.9a5.1 5.1 0 0 1-7.2-7.2l9.4-9.4a3.55 3.55 0 0 1 5 5l-9.4 9.4a2 2 0 0 1-2.8-2.8l8.7-8.7" /></LineIcon>;
 }

@@ -1,5 +1,7 @@
 import { MAX_PROMPT_IMAGES_TOTAL_BYTES } from "../../shared/rpc-contracts";
 import type { PromptDelivery, PromptImage } from "../../shared/types";
+import { ATTACHED_FILES_HEADING } from "../../shared/attachment-reference";
+export { ATTACHED_FILES_HEADING };
 
 /**
  * A draft belongs to the ordinary prompt target, not merely the currently
@@ -24,6 +26,8 @@ export type ComposerDraft = {
   /** Absolute Windows paths shown as cards; sent as path text, never inlined. */
   files: string[];
   revision: number;
+  /** Recovery metadata only; never part of the prompt or a restored send queue. */
+  recoveryWarning?: "delivery-uncertain";
 };
 
 export function draftFiles(draft: Pick<ComposerDraft, "files"> | { files?: string[] }): string[] {
@@ -35,8 +39,6 @@ function quoteAttachedPath(path: string): string {
   if (!/^[A-Za-z]:[\\/]/.test(clean) || clean.length <= 3) return "";
   return /\s/.test(clean) ? `"${clean.replace(/"/g, '\\"')}"` : clean;
 }
-
-export const ATTACHED_FILES_HEADING = "[Attached files]";
 
 /** Cards stay in the editor; the prompt Pi receives still includes the paths. */
 export function composePromptWithAttachedFiles(message: string, files: string[]): string {
@@ -187,6 +189,7 @@ function editDraft(
   return {
     ...partition,
     draft: {
+      ...partition.draft,
       ...patch,
       revision: partition.draft.revision + 1,
     },
@@ -218,6 +221,7 @@ export type ComposerAction =
   | { type: "clear"; key: ComposerDraftKey }
   /** Restore one retained draft without sending it or discarding the editor. */
   | { type: "recover-suspended"; key: ComposerDraftKey }
+  | { type: "recover-persisted"; key: ComposerDraftKey; drafts: ComposerDraft[] }
   /** Drop all retained text/images for a structurally deleted Session. */
   | { type: "forget"; key: ComposerDraftKey }
   | { type: "accept"; snapshot: ComposerSnapshot; retry: boolean }
@@ -285,12 +289,27 @@ export function composerReducer(
     return withPartition(state, action.key, {
       ...partition,
       draft: {
+        ...partition.draft,
         message: action.message,
         images: [...action.images],
         files: action.files ? [...action.files] : draftFiles(partition.draft),
         revision: partition.draft.revision + 1,
       },
     });
+  if (action.type === "recover-persisted") {
+    const drafts = action.drafts.map((draft) => ({ ...draft, images: [...draft.images], files: [...draftFiles(draft)] }));
+    if (!drafts.length) return state;
+    const hasEditor = partition.draft.message || partition.draft.images.length || draftFiles(partition.draft).length;
+    if (hasEditor || partition.inFlight || partition.pending.length || partition.blocked)
+      return withPartition(state, action.key, {
+        ...partition, suspended: [...(partition.suspended || []), ...drafts],
+      });
+    const [draft, ...remaining] = drafts;
+    return withPartition(state, action.key, {
+      ...partition, draft: { ...draft, revision: partition.draft.revision + 1 },
+      suspended: [...(partition.suspended || []), ...remaining],
+    });
+  }
   if (action.type === "recover-suspended") {
     if (partition.inFlight || partition.pending.length || !partition.suspended?.length) return state;
     const [draft, ...remaining] = partition.suspended;

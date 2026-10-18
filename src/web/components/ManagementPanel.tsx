@@ -6,6 +6,7 @@ import { writeClipboardText } from "../lib/clipboard";
 import { api, PI_CHAT_RELEASES_URL, type UpdateCheckResult } from "../api";
 import { DEFAULT_APPEARANCE, snapToStep, type AppearancePreferences, type FontPreference, type ThemePreference } from "../lib/preferences";
 import { CompactSelect, type CompactSelectOption } from "./CompactSelect";
+import { DraftStoragePanel } from "./DraftStoragePanel";
 import { ChevronDownIcon, ChevronRightIcon, CloseIcon, FolderIcon, MinusIcon, PiMarkIcon, PlusIcon, TrashIcon } from "./Icons";
 
 export type ManagementSection = "settings" | "models";
@@ -374,6 +375,7 @@ function AboutPanel({ buildIdentity, webBuildIdentity, piVersion, primaryRuntime
     <div className="about-diagnostics-section">
       <DiagnosticsPanel busy={diagnosticsBusy} onExport={onExportDiagnostics} />
     </div>
+    <DraftStoragePanel />
   </div>;
 }
 

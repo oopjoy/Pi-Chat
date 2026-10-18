@@ -1,6 +1,7 @@
 import type { GateMode, SessionDirectorySummary, SessionSummary, SessionViewData } from "../../shared/types";
 import type { ComposerDraftKey } from "../state/composer";
 import type { StateDiagnosticExportBundle } from "../../shared/state-diagnostics";
+import { writeClipboardText } from "../lib/clipboard";
 
 export function createSessionManagementActions(host: Record<string, any>) {
   const {
@@ -810,6 +811,18 @@ export function createSessionManagementActions(host: Record<string, any>) {
   };
 
 
+  const copySessionDeepLink = async (sessionId: string) => {
+    if (buildIdentityMismatch || !sessionId) return;
+    setError("");
+    try {
+      const { sessionFile } = await api.sessionFile(sessionId);
+      await writeClipboardText(sessionFile);
+      setNotice("已复制对话深度链接：Pi Chat 启动器可解析该 Session JSONL 路径；普通浏览器粘贴只会打开页面。");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
   return {
     reconcileSessionMutation,
     applySessionListSnapshot,
@@ -826,5 +839,6 @@ export function createSessionManagementActions(host: Record<string, any>) {
     confirmForkSession,
     renameSession,
     deleteSession,
+    copySessionDeepLink,
   };
 }

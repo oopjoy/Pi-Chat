@@ -219,7 +219,7 @@ test("ImagePreviewDialog focuses the close control and restores the trigger on E
   }
 });
 
-test("removing a staged card deletes its temp file and a text drop is not silent", async () => {
+test("removing a staged card releases its page lease and a text drop is not silent", async () => {
   const { dom } = installAppDom();
   class ImmediateFileReader {
     result = "data:application/octet-stream;base64,bG9nLWJvZHk=";
@@ -233,6 +233,7 @@ test("removing a staged card deletes its temp file and a text drop is not silent
   const { ChatInput } = await import("../../src/web/components/ChatInput");
   const root = createRoot(dom.window.document.querySelector("#root")!);
   const discarded: string[] = [];
+  const released: string[] = [];
   const errors: string[] = [];
   try {
     // No StrictMode here: a double-mount supersedes the staging epoch, which is
@@ -250,6 +251,7 @@ test("removing a staged card deletes its temp file and a text drop is not silent
       onPickLocalFiles: async () => [],
       onStageDroppedFile: async (file: { name: string }) => `C:\\Temp\\staged\\${file.name}`,
       onDiscardStagedFile: async (path: string) => { discarded.push(path); },
+      onUpdateAttachmentLeases: async (paths: string[], active: boolean) => { if (!active) released.push(...paths); },
       onError: (message: string) => errors.push(message),
     })));
     const composer = dom.window.document.querySelector<HTMLDivElement>(".composer")!;
@@ -272,7 +274,8 @@ test("removing a staged card deletes its temp file and a text drop is not silent
       dom.window.document.querySelector<HTMLButtonElement>(".composer-attachment-remove")!.click();
       await new Promise((resolve) => setTimeout(resolve, 50));
     });
-    assert.deepEqual(discarded, ["C:\\Temp\\staged\\note.log"], "the abandoned temp file is reclaimed");
+    assert.deepEqual(released, ["C:\\Temp\\staged\\note.log"], "the page releases only paths no longer used by any of its drafts");
+    assert.deepEqual(discarded, [], "adopted cards use lease ownership, not a blind file deletion");
 
     // A drag with no file, no directory and no path must explain itself instead
     // of swallowing the gesture.

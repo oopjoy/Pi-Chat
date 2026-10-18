@@ -6,6 +6,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PiChatApp } from "./app.js";
+import { attachmentDataRoot, DroppedFileStore } from "./dropped-files.js";
 import { PrimaryRuntimeReadinessController } from "./primary-runtime-readiness.js";
 import { ModelManager } from "./model-manager.js";
 import { ResourceManager } from "./resource-manager.js";
@@ -321,6 +322,7 @@ async function prepareRuntimeRestart(change: RuntimeSetupChange) {
 }
 
 const app = new PiChatApp({
+  attachmentStore: new DroppedFileStore(attachmentDataRoot()),
   rpc,
   // A Secondary Runtime owns its Pi process for its full lifetime. The pool
   // retains at most six idle/active Session runtimes and never rebinds one
