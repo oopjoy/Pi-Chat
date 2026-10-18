@@ -184,7 +184,9 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
     await persist({ type: "message", id: userMessageId, parentId: lastMessageId, timestamp: new Date(userMessage.timestamp).toISOString(), message: userMessage });
     lastMessageId = userMessageId;
     write({ type: "agent_start" });
-    reply(command.id, imageSmoke ? { disposition: "started", piChatUserMessage: piChatPromptReceipt(userMessage) } : {}, "prompt");
+    // Pi 1.3.0's process-local adapter returns the canonical receipt for text
+    // prompts too; restricting it to the image fixture hides clock-skew cases.
+    reply(command.id, { disposition: "started", piChatUserMessage: piChatPromptReceipt(userMessage) }, "prompt");
     const retrySmoke = typeof command.message === "string" && command.message.includes("retry identity smoke");
     const exhaustedRetrySmoke = typeof command.message === "string" && command.message.includes("retry exhausted smoke");
     if (retrySmoke || exhaustedRetrySmoke) {

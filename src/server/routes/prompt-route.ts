@@ -137,6 +137,9 @@ export async function handlePromptRoute(host: PromptRouteHost, request: Incoming
     clientPromptOperationId: requestedClientPromptOperationId,
     images,
   } = promptInput;
+  // The browser preflight improves feedback, but durable retention is also
+  // enforced here for direct API clients, queues and steering submissions.
+  await host.options.attachmentStore?.retainPrompt(message);
   const promptAt = host.nextUserPromptAt();
   const admittedSessionId = requestedSessionId;
   const releasePromptAdmission =

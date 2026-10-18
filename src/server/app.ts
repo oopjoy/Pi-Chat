@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import type { DroppedFileStore } from "./dropped-files.js";
 import { hostVisibleModelsFromConfig, modelsConfigFingerprint } from "./models-config-revision.js";
 import { createReadStream, existsSync, readFileSync, watch, type FSWatcher } from "node:fs";
 import { stat } from "node:fs/promises";
@@ -353,6 +354,7 @@ export interface PiChatAppOptions {
   /** Test seam for the explicit Workspace-preview Open action. */
   openLocalFile?: (path: string, verifyTarget: () => Promise<string>) => Promise<void>;
   modelManager?: ModelManager;
+  attachmentStore?: DroppedFileStore;
   devMiddleware?: (
     request: IncomingMessage,
     response: ServerResponse,
@@ -585,6 +587,7 @@ export class PiChatApp {
   private readonly modelRegistryRevisions = new WeakMap<PiRpcClient, { revision: number; generation: number }>();
   /** Sessions whose selected Model object still owes the refreshed limits. */
   private readonly modelLimitsPendingSessions = new Set<string>();
+  private attachmentMaintenanceTimer?: ReturnType<typeof setInterval>;
   private modelRuntimeSyncFailures = 0;
   private lastPrimaryCommands: SlashCommand[] = [];
   private lastPrimaryStats:
@@ -728,6 +731,13 @@ export class PiChatApp {
     // reasoning/input/contextWindow instead of degrading to a bare-name fallback.
     this.rememberModelContextWindows(this.startupModels);
     this.startModelCatalogueWatcher();
+    if (this.options.attachmentStore) {
+      const maintain = () => { void this.options.attachmentStore!.maintain().catch(() => undefined); };
+      // Do not sweep during startup: give reopening pages time to validate and
+      // renew draft leases before the first hourly maintenance pass.
+      this.attachmentMaintenanceTimer = setInterval(maintain, 60 * 60 * 1000);
+      this.attachmentMaintenanceTimer.unref();
+    }
     this.requestToken =
       options.requestToken || randomBytes(32).toString("base64url");
     this.buildIdentity = options.buildIdentity || {
@@ -1524,6 +1534,7 @@ export class PiChatApp {
     this.modelCatalogueRefreshTimer = undefined;
     this.modelRuntimeSyncTimer = undefined;
     this.modelCatalogueWatcher?.close();
+    if (this.attachmentMaintenanceTimer) clearInterval(this.attachmentMaintenanceTimer);
     this.modelCatalogueWatcher = undefined;
     this.cancelLastWindowShutdown();
     clearInterval(this.secondaryRuntimeSweepTimer);
@@ -4289,7 +4300,10 @@ export class PiChatApp {
           : this.promptPayloadKey(message) === payloadKey)
         && typeof message.timestamp === "number"
         && Number.isFinite(message.timestamp)
-        && message.timestamp >= admittedAt
+        // A correlated native receipt is causal evidence. Separate processes'
+        // wall clocks can differ by a millisecond; legacy text-only matching
+        // still needs the conservative host-time floor.
+        && (pending.receipt || message.timestamp >= admittedAt)
       );
     };
     const positional = users[pending.expectedTurnTotal - 1];
@@ -4364,7 +4378,7 @@ export class PiChatApp {
     // A late successful response enriches only an existing uncertain admission.
     // It cannot recreate a retired Prompt, change execution state or resend it.
     const pending = this.pendingAcceptedPromptsBySession.get(sessionId)?.find(item => item.promptId === promptId);
-    if (!pending || pending.receipt || receipt.timestamp < (pending.message.timestamp ?? 0)) return;
+    if (!pending || pending.receipt) return;
     pending.receipt = receipt;
     if (sessionId === this.activeSessionId) this.warmPrimaryMessageSnapshot();
     else {
@@ -4396,7 +4410,7 @@ export class PiChatApp {
       id,
       promptId,
       message: this.pendingPromptMessage(id, promptId, message, images, promptAt),
-      ...(receipt && receipt.timestamp >= promptAt ? { receipt } : null),
+      ...(receipt ? { receipt } : null),
       expectedTurnTotal: persisted.filter((item) => item.role === "user").length + existing.length + 1,
       baselinePersistedUserIds: new Set(
         persisted.flatMap((item) =>
@@ -4667,6 +4681,16 @@ export class PiChatApp {
   private async validatedSessionDeletePath(path: string, sessionId: string): Promise<string> {
     return this.sessionCopyDeleteActions().validatedSessionDeletePath(path, sessionId);
   }
+  private async sessionFileForReference(id: string): Promise<string> {
+    const sessionId = typeof id === "string" ? id.trim() : "";
+    if (!/^[a-f0-9]{20}$/.test(sessionId)) throw new Error("对话 ID 无效");
+    const path = await this.options.sessions.pathForId(sessionId)
+      || (sessionId === this.activeSessionId ? this.activeSessionPath : "")
+      || (sessionId === this.lastPrimaryState.sessionId ? this.lastPrimaryState.sessionFile : "");
+    if (!path) throw new Error("找不到该对话的 Session JSONL 路径");
+    return resolve(path);
+  }
+
   private async deleteSession(id: string): Promise<BootstrapData> {
     return this.sessionCopyDeleteActions().deleteSession(id);
   }
@@ -4783,6 +4807,7 @@ export class PiChatApp {
       rememberModelContextWindows: (models: any) => this.rememberModelContextWindows(models),
       modelRouteKey: (model: any) => this.modelRouteKey(model),
       staleModelWorkers: () => this.staleModelWorkers(),
+      sessionFileForReference: (id: string) => this.sessionFileForReference(id),
       scheduleModelRuntimeSync: () => this.scheduleModelRuntimeSync(),
       mergeHostAndRuntimeModels: (models: any, startup: any) => this.mergeHostAndRuntimeModels(models, startup),
       statsForSession: (id: string, response: any, usage: any) => this.statsForSession(id, response, usage),

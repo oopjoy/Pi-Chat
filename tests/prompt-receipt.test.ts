@@ -109,7 +109,7 @@ test("unrecognized Pi source is left intact instead of guessing a prompt boundar
   assert.equal(overlay.patchPiPromptResponseSource(unknown), unknown);
 });
 
-test("Pi 1.0 preflight receipt follows native image normalization", async () => {
+test("pinned Pi 1.3.0 preflight receipt follows native image normalization", async () => {
   await exerciseNativePreflight(resolve("node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js"));
 });
 

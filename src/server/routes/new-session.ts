@@ -9,6 +9,7 @@ import { prepareNewDraftRuntime } from "../services/new-draft-preparation.js";
 
 export interface NewSessionRouteHost {
   currentCwd(): string;
+  retainPromptAttachments?(message: string): Promise<void>;
   primaryNeedsRecovery(): boolean;
   waitForPrimaryCompatibility(): Promise<void>;
   acquireDraft(clientId: string, cwd: string): Promise<DraftRuntimeLease>;
@@ -43,6 +44,7 @@ export async function handleNewSessionRoute(
     json(response, parsed.status, { error: parsed.error });
     return true;
   }
+  if (parsed.initial) await host.retainPromptAttachments?.(parsed.message);
   const preparation = await prepareNewDraftRuntime({
     primaryNeedsRecovery: () => host.primaryNeedsRecovery(),
     waitForPrimaryCompatibility: () => host.waitForPrimaryCompatibility(),

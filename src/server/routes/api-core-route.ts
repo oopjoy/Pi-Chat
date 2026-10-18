@@ -40,7 +40,7 @@ export async function handleApiCoreRoute(
     handleResourcesReadRoute,
     handleSessionMutationsRoute,
     handleSessionRuntimeControlRoute,
-    handleSessionsReadRoute,
+    handleSessionReferenceRoute, handleSessionsReadRoute,
     handleSubagentsReadRoute,
     handleWindowControlRoute,
     handleWorkspaceControlRoute,
@@ -255,6 +255,7 @@ export async function handleApiCoreRoute(
     if (
       await handleLocalFilesWorkspaceRoute(
         {
+          attachmentStore: host.options.attachmentStore,
           pickLocalFiles: () => pickLocalFiles(),
           readClipboardFiles: (files: any) => readClipboardFiles(files),
           pickWorkspaceFolder: (cwd: any) => (host.options.pickWorkspaceFolder || pickWorkspaceFolder)(cwd),
@@ -534,6 +535,7 @@ export async function handleApiCoreRoute(
     ) return;
 
     if (await handleNewSessionRoute({
+      retainPromptAttachments: (message: string) => host.options.attachmentStore?.retainPrompt(message) || Promise.resolve(),
       currentCwd: () => host.currentCwd,
       primaryNeedsRecovery: () => host.primaryNeedsRecovery(),
       waitForPrimaryCompatibility: () => host.waitForNewDraftPrimaryCompatibility(),
@@ -598,6 +600,12 @@ export async function handleApiCoreRoute(
       },
       discardDraft: (runtime: any) => host.runtimePool.discardDraft(runtime).then(() => undefined),
     }, request, response, url, clientId, preparedBody)) return;
+
+    if (
+      await handleSessionReferenceRoute({
+        sessionFile: (sessionId: any) => host.sessionFileForReference(sessionId),
+      }, request, response, url)
+    ) return;
 
     if (
       await handleModelManagementRoute({
