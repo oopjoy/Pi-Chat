@@ -159,16 +159,25 @@ test("release packaging rejects live-dist aliases and overlapping staging/output
   } finally { await rm(stage, { recursive: true, force: true }); await rm(output, { recursive: true, force: true }); }
 });
 
-test("push diff policy distinguishes branch, tag and deleted-ref failures", async () => {
+test("manual CI checks the selected commit without relying on push or PR payloads", async () => {
   const workflow = await readFile(join(repositoryRoot, ".github/workflows/windows-ci.yml"), "utf8");
-  for (const pattern of [/github\.ref_type/, /github\.event\.deleted != true/, /Cannot resolve github.event.before/, /check-committed-text.mjs --all/, /Unsupported push ref type/]) assert.match(workflow, pattern);
+  assert.match(workflow, /git show --check --format= "\$\{\{ github.sha \}\}"/);
+  assert.match(workflow, /check-committed-text.mjs --all/);
+  assert.doesNotMatch(workflow, /github\.event\.(before|pull_request|deleted)/);
 });
 
-test("branch CI and tag release CI are separated and every third-party action is SHA pinned", async () => {
+test("only version tags run CI automatically; manual CI and pinned release verification remain available", async () => {
   for (const name of (await readdir(join(repositoryRoot, ".github/workflows"))).filter(name => /\.ya?ml$/.test(name))) {
     const source = await readFile(join(repositoryRoot, ".github/workflows", name), "utf8");
     for (const match of source.matchAll(/uses:\s*(actions\/[^\s#]+)/g)) assert.match(match[1], /@[a-f0-9]{40}$/);
-    if (name === "windows-ci.yml") { assert.match(source, /push:\n\s+branches:/); assert.doesNotMatch(source, /tags:/); }
+    if (name === "windows-ci.yml") {
+      assert.match(source, /on:\n\s+workflow_dispatch:/);
+      assert.doesNotMatch(source, /^\s+(push|pull_request|schedule|workflow_run):/m);
+      assert.match(source, /npm run verify:unit/);
+      assert.match(source, /npm run verify:e2e/);
+      assert.match(source, /npm run test:setup/);
+      assert.doesNotMatch(source, /tags:/);
+    }
     if (name === "windows-release-ci.yml") {
       assert.match(source, /push:\n\s+tags:/); assert.match(source, /PI_CHAT_RELEASE_MODE: ["']?1/);
       assert.match(source, /pi-chat-setup.exe/); assert.doesNotMatch(source, /--clobber|Filter "\*\.zip"/);
@@ -183,6 +192,7 @@ test("branch CI and tag release CI are separated and every third-party action is
 test("main Setup delivery is verified and commit-addressed without release or tag writes", async () => {
   const source = await readFile(join(repositoryRoot, ".github/workflows/windows-ci.yml"), "utf8");
   assert.match(source, /contents: read/);
+  assert.equal((source.match(/github.event_name == 'workflow_dispatch' && github.ref == 'refs\/heads\/main'/g) || []).length, 2);
   assert.match(source, /name: pi-chat-setup-main-\$\{\{ github.sha \}\}/);
   assert.match(source, /--tag HEAD/);
   assert.match(source, /\$env:TEMP = \$env:RUNNER_TEMP/);

@@ -1,12 +1,9 @@
 name: Windows CI
 
+# Ordinary pushes and PRs do not run the full Windows suite automatically.
+# Use Run workflow for an explicit check; version tags use Windows Release CI.
 on:
-  push:
-    branches:
-      - main
-  pull_request:
-    branches:
-      - main
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -44,51 +41,12 @@ jobs:
           PI_CHAT_BUILD_REVISION: ${{ github.sha }}
       - name: Verify self-contained Setup
         run: npm run test:setup
-      - name: Check pull request diff
-        if: github.event_name == 'pull_request'
-        run: git diff --check "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}"
-      - name: Check push diff
-        if: github.event_name == 'push' && github.event.deleted != true
-        shell: pwsh
-        env:
-          PI_CHAT_REF_TYPE: ${{ github.ref_type }}
-          PI_CHAT_EVENT_DELETED: ${{ github.event.deleted }}
-        run: |
-          $before = "${{ github.event.before }}"
-          $head = "${{ github.sha }}"
-          $refType = "${env:PI_CHAT_REF_TYPE}"
-          $beforeCommit = $null
-          if ($before -notmatch '^0+$') {
-            $beforeCommit = git rev-parse --verify "$before^{commit}" 2>$null
-            if ($LASTEXITCODE -ne 0) {
-              $beforeCommit = $null
-            }
-          }
-          if ($refType -eq 'branch') {
-            if ($before -match '^0+$') {
-              git show --check --format= $head
-            } elseif (-not $beforeCommit) {
-              throw "Cannot resolve github.event.before for a branch push; refusing to check only the tip commit."
-            } else {
-              git diff --check $beforeCommit $head
-            }
-          } elseif ($refType -eq 'tag') {
-            if ($beforeCommit) {
-              git diff --check $beforeCommit $head
-            } else {
-              # Tag creation/forced updates may have no trustworthy diff base.
-              # Check the commit patch and every committed LF-governed blob.
-              git show --check --format= $head
-              node scripts/check-committed-text.mjs --all
-            }
-          } else {
-            throw "Unsupported push ref type: $refType"
-          }
+      - name: Check selected commit
+        run: git show --check --format= "${{ github.sha }}"
       - name: Check committed text line endings
-        if: github.event_name != 'push' || github.event.deleted != true
         run: node scripts/check-committed-text.mjs --all
       - name: Build verified main Setup without a release tag
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
         shell: pwsh
         run: |
           $env:TEMP = $env:RUNNER_TEMP
@@ -117,7 +75,7 @@ jobs:
           if ($manifest.setup.sha256 -ne $hash) { throw 'Main Setup manifest digest mismatch' }
           if (@(Get-ChildItem -LiteralPath $output -File).Count -ne 3) { throw 'Expected Setup and two sidecars only' }
       - name: Upload verified main Setup
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: pi-chat-setup-main-${{ github.sha }}
