@@ -54,23 +54,6 @@ if ([System.Windows.Forms.Clipboard]::ContainsFileDropList()) {
 }
 `;
 
-const EXPLORER_SELECTION_SCRIPT = String.raw`
-$ErrorActionPreference = 'SilentlyContinue'
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$shell = New-Object -ComObject Shell.Application
-$paths = New-Object System.Collections.Generic.List[string]
-foreach ($window in @($shell.Windows())) {
-  try {
-    $document = $window.Document
-    if ($null -eq $document) { continue }
-    foreach ($item in @($document.SelectedItems())) {
-      if ($item.Path) { [void]$paths.Add([string]$item.Path) }
-    }
-  } catch {}
-}
-ConvertTo-Json -InputObject @($paths.ToArray()) -Compress
-`;
-
 const FOLDER_PICKER_SCRIPT = String.raw`
 Add-Type -TypeDefinition @'
 using System;
@@ -262,36 +245,6 @@ function statSyncSize(path: string): number {
     return info.isDirectory() ? 0 : info.size;
   } catch {
     return -1;
-  }
-}
-
-export function matchExplorerSelection(paths: string[], names: string[]): string[] {
-  if (!names.length) return [];
-  const remaining = [...paths];
-  const matched: string[] = [];
-  for (const name of names) {
-    const needle = name.toLowerCase();
-    const hits = remaining.filter((path) => basename(path).toLowerCase() === needle);
-    if (hits.length !== 1) return [];
-    matched.push(hits[0]);
-    remaining.splice(remaining.indexOf(hits[0]), 1);
-  }
-  return matched;
-}
-
-export async function readExplorerSelection(names: string[]): Promise<string[]> {
-  if (!names.length) return [];
-  try {
-    const paths = parsePickerOutput(await runPicker(
-      EXPLORER_SELECTION_SCRIPT,
-      "读取资源管理器选中项超时",
-      {},
-      8_000,
-    ));
-    return matchExplorerSelection(paths, names);
-  } catch (error) {
-    if (error instanceof SyntaxError) throw new Error("无法读取资源管理器选中路径");
-    throw error;
   }
 }
 

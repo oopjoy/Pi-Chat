@@ -524,7 +524,7 @@ test("a mismatched Web artifact blocks mutations but keeps guarded recovery acti
   await expect(page.getByRole("button", { name: "关闭 Pi Chat" })).toBeEnabled();
 });
 
-test("Pi connection settings detects without restarting and keeps the unsent draft", { tag: "@desktop-mobile" }, async ({ page }) => {
+test("About keeps only the three update actions and preserves the unsent draft", { tag: "@desktop-mobile" }, async ({ page }) => {
   const { input } = await openInitialSession(page);
   await input.fill("keep my unsent draft");
   if (await page.locator(".sidebar-scrim").isVisible())
@@ -533,19 +533,14 @@ test("Pi connection settings detects without restarting and keeps the unsent dra
   page.on("request", request => { if (request.url().endsWith("/api/runtime/restart")) restarts++; });
   await page.getByRole("button", { name: "打开设置", exact: true }).click();
   await page.getByRole("button", { name: "关于", exact: true }).click();
-  await page.getByRole("button", { name: "Pi 连接设置 / 重试", exact: true }).click();
-  const setup = page.getByRole("dialog", { name: "连接本机 Pi" });
-  await expect(setup).toBeVisible();
-  await expect(setup).toContainText("环境变量 PI_CHAT_PI_ENTRY");
-  await expect(setup.getByRole("button", { name: "选择 rpc-entry.js", exact: true })).toBeDisabled();
-  await setup.getByRole("button", { name: "重新检测", exact: true }).click();
-  const retry = setup.getByRole("button", { name: "重试连接（重启服务）", exact: true });
-  await expect(retry).toBeEnabled();
-  page.once("dialog", dialog => dialog.dismiss());
-  await retry.click();
+  const about = page.locator(".about-panel");
+  await expect(about.getByRole("button", { name: "Pi 连接设置 / 重试", exact: true })).toHaveCount(0);
+  await expect(about.locator(".about-actions > button, .about-actions > a")).toHaveCount(3);
+  await expect(about.getByRole("button", { name: "检查更新", exact: true })).toBeVisible();
+  await expect(about.getByRole("button", { name: "检查 Pi 内核更新", exact: true })).toBeVisible();
+  await expect(about.getByRole("link", { name: "打开 GitHub Releases", exact: true })).toBeVisible();
   expect(restarts).toBe(0);
-  await setup.getByRole("button", { name: "关闭 Pi 连接设置", exact: true }).click();
-  await expect(setup).not.toBeVisible();
+  await page.locator("#pi-chat-settings-dialog .panel-close").click();
   await expect(input).toHaveValue("keep my unsent draft");
 });
 

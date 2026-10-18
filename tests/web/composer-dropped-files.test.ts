@@ -79,7 +79,7 @@ test("ChatInput waits for in-flight dropped staging before sending the same draf
   }
 });
 
-test("ChatInput attaches a dropped Explorer folder from the current selection", async () => {
+test("ChatInput attaches a folder only from the path carried by its drop event", async () => {
   const { dom } = installAppDom();
   const { createRoot } = await import("react-dom/client");
   const { ChatInput } = await import("../../src/web/components/ChatInput");
@@ -95,7 +95,6 @@ test("ChatInput attaches a dropped Explorer folder from the current selection", 
     onSend: async () => undefined,
     onAbort: async () => undefined,
     onPickLocalFiles: async () => [],
-    onReadExplorerSelection: async (names: string[]) => names[0] === "proj" ? ["C:\\Users\\me\\proj"] : [],
     onAttachmentKinds: async () => [{ path: "C:\\Users\\me\\proj", kind: "directory" as const }],
     onError: (message: string) => { throw new Error(message); },
   });
@@ -107,8 +106,8 @@ test("ChatInput attaches a dropped Explorer folder from the current selection", 
       value: {
         files: [],
         items: [{ kind: "file", type: "", webkitGetAsEntry: () => ({ isDirectory: true, name: "proj" }), getAsString: (done: (value: string) => void) => done("") }],
-        types: ["Files"],
-        getData: () => "",
+        types: ["Files", "text/uri-list"],
+        getData: (type: string) => type === "text/uri-list" ? "file:///C:/Users/me/proj" : "",
       },
     });
     await act(async () => {
@@ -137,7 +136,6 @@ test("a dropped file uses its own bytes instead of guessing a path from Explorer
   const { createRoot } = await import("react-dom/client");
   const { ChatInput } = await import("../../src/web/components/ChatInput");
   const root = createRoot(dom.window.document.querySelector("#root")!);
-  let selectionLookups = 0;
   const staged: string[] = [];
   try {
     await act(async () => root.render(createElement(StrictMode, null, createElement(ChatInput, {
@@ -151,14 +149,10 @@ test("a dropped file uses its own bytes instead of guessing a path from Explorer
       onSend: async () => undefined,
       onAbort: async () => undefined,
       onPickLocalFiles: async () => [],
-      // A same-named file is selected in another Explorer window. Its path must
-      // never be attached to bytes that came from somewhere else.
-      onReadExplorerSelection: async () => { selectionLookups += 1; return ["D:\\elsewhere\\report.txt"]; },
       onStageDroppedFile: async (file: { name: string }) => {
         staged.push(file.name);
         return `C:\\Temp\\staged\\${file.name}`;
       },
-      onAttachmentKinds: async () => [{ path: "D:\\elsewhere\\report.txt", kind: "file" as const }],
       onError: (message: string) => { throw new Error(message); },
     }))));
     const composer = dom.window.document.querySelector<HTMLDivElement>(".composer")!;
@@ -177,7 +171,6 @@ test("a dropped file uses its own bytes instead of guessing a path from Explorer
       while (!dom.window.document.querySelector(".composer-attachments") && Date.now() < deadline)
         await new Promise((resolve) => setTimeout(resolve, 20));
     });
-    // Counted indirectly: no Explorer lookup may precede the byte staging.
     assert.deepEqual(staged, ["report.txt"], "the dragged file is staged from its own bytes");
     const card = dom.window.document.querySelector<HTMLElement>(".composer-attachment.is-file");
     assert.ok(card);
@@ -186,7 +179,6 @@ test("a dropped file uses its own bytes instead of guessing a path from Explorer
       "C:\\Temp\\staged\\report.txt",
       "an unrelated same-named file is never substituted",
     );
-    assert.equal(selectionLookups, 0);
   } finally {
     await act(async () => root.unmount());
   }

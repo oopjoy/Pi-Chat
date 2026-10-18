@@ -86,7 +86,7 @@ export function handlePiWorkspaceAndSessionEvents(scope: Record<string, any>): b
           );
           setNotice(
             event.runtimeSync === "waiting-for-runtime-reload"
-              ? "模型配置已保存；将在 Runtime 空闲后重载。当前请求继续使用原配置。"
+              ? "模型配置已保存；仍有会话待同步或结果待确认。当前请求继续使用原配置。"
               : event.runtimeSync === "refreshing"
                 ? "模型配置已保存，正在刷新模型目录；当前请求继续使用原配置。"
                 : "模型目录已更新。",

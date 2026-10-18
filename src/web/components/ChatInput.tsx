@@ -288,7 +288,7 @@ export function commandMatches(value: string, commands: SlashCommand[]): SlashCo
   }).sort((a, b) => a.rank - b.rank || a.score - b.score || a.command.name.localeCompare(b.command.name)).slice(0, 9).map(({ command }) => command);
 }
 
-export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, placeholder, acceptsImages, imageInputPending = false, restoredDraft, onDraftRevisionChange, draftKey, forgottenComposerKeys = [], submissionScope, submissionTargetSessionId, allowFollowupSubmissions = true, submissionPaused = false, onSubmissionPendingChange, commands, controls, notices, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles = async () => [], onOpenLocalFile, onStageDroppedFile, onDiscardStagedFile, onReadExplorerSelection, onAttachmentKinds, onError }: {
+export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, placeholder, acceptsImages, imageInputPending = false, restoredDraft, onDraftRevisionChange, draftKey, forgottenComposerKeys = [], submissionScope, submissionTargetSessionId, allowFollowupSubmissions = true, submissionPaused = false, onSubmissionPendingChange, commands, controls, notices, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles = async () => [], onOpenLocalFile, onStageDroppedFile, onDiscardStagedFile, onPickLocalFolder, onAttachmentKinds, onError }: {
   /** True when a submission will enter the local queue. */
   streaming: boolean;
   /** True only while Pi is actively generating and can be stopped. */
@@ -328,7 +328,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   onOpenLocalFile?: (path: string) => Promise<void>;
   onStageDroppedFile?: (file: { name: string; data: string; size: number }) => Promise<string>;
   onDiscardStagedFile?: (path: string) => Promise<void>;
-  onReadExplorerSelection?: (names: string[]) => Promise<string[]>;
+  onPickLocalFolder?: () => Promise<string[]>;
   onAttachmentKinds?: (paths: string[]) => Promise<Array<{ path: string; kind: "file" | "directory" }>>;
   onError: (message: string) => void;
 }) {
@@ -670,111 +670,85 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     if (editorDisabled) return;
     const files = [...event.dataTransfer.files];
     const items = [...event.dataTransfer.items];
+    const { ordinaryFiles, directoryNames } = droppedLocalEntries(files, items);
     const imageFiles = files.filter((file) => (file.type || "").startsWith("image/"));
     if (imageFiles.length) void addImages(imageFiles);
+    if (imageFiles.length && !ordinaryFiles.length && !directoryNames.length) return;
     const directPaths = files.map((file) => (file as File & { path?: string }).path || "").filter(isWindowsAbsolutePath);
-    const transferredPaths = windowsPathsFromDataTransfer(event.dataTransfer);
-    const paths = [...new Set([...directPaths, ...transferredPaths])];
-    if (paths.length) {
-      attachFiles(paths);
-      return;
-    }
-    const { ordinaryFiles, directoryNames } = droppedLocalEntries(files, items);
-    const droppedDirectory = directoryNames.length > 0;
-    if (imageFiles.length && !ordinaryFiles.length && !droppedDirectory) return;
-    const names = [...ordinaryFiles.map((file) => file.name), ...directoryNames];
+    const eventPaths = [...new Set([...directPaths, ...windowsPathsFromDataTransfer(event.dataTransfer)])];
     const stringReads = dataTransferStringReads(event.dataTransfer);
     const draftKeyId = currentDraftKeyIdRef.current;
     const epoch = beginAttachment();
+    const stillCurrent = () => attachmentEpochRef.current === epoch
+      && currentDraftKeyIdRef.current === draftKeyId && !editorDisabledRef.current;
     void (async () => {
       const staged: string[] = [];
-      let addedFiles = 0;
-      const reportMissingDirectories = () => onError(`${addedFiles ? `已添加 ${addedFiles} 个文件；` : ""}未能添加文件夹：${directoryNames.join("、")}。无法取得文件夹的本地路径，请使用发送按钮旁的附件按钮选择`);
       try {
-        const asyncTexts = await Promise.all(stringReads);
-        const asyncPaths = [...new Set(asyncTexts.flatMap((text) => [...windowsPathsFromText(text), ...explorerWindowsPaths(text)]))];
-        if (asyncPaths.length) {
-          if (attachmentEpochRef.current === epoch && currentDraftKeyIdRef.current === draftKeyId && !editorDisabledRef.current)
-            attachFiles(asyncPaths, draftKeyId);
+        const texts = await Promise.all(stringReads);
+        const paths = [...new Set([...eventPaths, ...texts.flatMap((text) => explorerWindowsPaths(text))])];
+        if (!stillCurrent()) return;
+        // Explicit text/URI path drops carry their own identity too. Never query
+        // unrelated Explorer windows to manufacture a path from a bare name.
+        if (!ordinaryFiles.length && !directoryNames.length) {
+          if (paths.length) attachFiles(paths, draftKeyId);
+          else onError("拖入的内容不是本地文件；请拖入文件、文件夹，或使用发送按钮旁的附件按钮");
           return;
         }
-        // A file carries its own bytes, so the content is exactly what was
-        // dragged. Matching a name against other Explorer windows could attach
-        // an unrelated same-named file, so staging bytes always wins for files.
-        if (ordinaryFiles.length && onStageDroppedFile) {
-          const preflight = droppedFilePreflightError(draftFiles(composer.currentDraft()).length, ordinaryFiles);
-          if (preflight) {
-            onError(preflight);
-            return;
-          }
-          for (const file of ordinaryFiles) {
+        const eventPathFor = (name: string) => {
+          const matches = paths.filter((path) => windowsFileName(path).toLowerCase() === name.toLowerCase());
+          return matches.length === 1 ? matches[0] : "";
+        };
+        const candidates = [
+          ...ordinaryFiles.map((file) => ({ name: file.name, size: eventPathFor(file.name) ? 0 : file.size })),
+          ...directoryNames.filter((name) => eventPathFor(name)).map((name) => ({ name, size: 0 })),
+        ];
+        const preflight = droppedFilePreflightError(draftFiles(composer.currentDraft()).length, candidates);
+        if (preflight) { onError(preflight); return; }
+        const adopted: string[] = [];
+        const missingFiles: string[] = [];
+        for (const file of ordinaryFiles) {
+          let path = eventPathFor(file.name);
+          if (!path && onStageDroppedFile) {
             const data = await readDroppedFileAsBase64(file);
-            const path = await onStageDroppedFile({ name: file.name, data, size: file.size });
-            if (path) {
-              staged.push(path);
-              stagedPathsRef.current.add(path);
-            }
-            if (attachmentEpochRef.current !== epoch) {
-              await discardStagedPaths(staged);
-              return;
-            }
+            if (!stillCurrent()) { await discardStagedPaths(staged); return; }
+            path = await onStageDroppedFile({ name: file.name, data, size: file.size });
+            if (path) { staged.push(path); stagedPathsRef.current.add(path); }
           }
-          if (attachmentEpochRef.current !== epoch || currentDraftKeyIdRef.current !== draftKeyId || editorDisabledRef.current) {
-            await discardStagedPaths(staged);
-            return;
-          }
-          if (staged.length) {
-            if (!attachFiles(staged, draftKeyId)) {
-              await discardStagedPaths(staged);
-              return;
-            }
-            addedFiles = staged.length;
-            // Adopted cards own these files now. A later directory failure must
-            // not delete files that were already attached successfully.
-            staged.length = 0;
-            if (!droppedDirectory) return;
-          }
+          if (!stillCurrent()) { await discardStagedPaths(staged); return; }
+          if (path) adopted.push(path);
+          else missingFiles.push(file.name);
         }
-        // A directory has no bytes to stage, so its original path is the only
-        // usable identity. Accept it only when every dropped name matched
-        // exactly one entry and each entry is really a directory.
-        if (droppedDirectory && onReadExplorerSelection) {
-          let selected: string[] = [];
-          try { selected = await onReadExplorerSelection(directoryNames); }
-          catch { selected = []; }
-          if (selected.length && onAttachmentKinds) {
-            try {
-              const kinds = await onAttachmentKinds(selected);
-              const allDirectories = selected.length === directoryNames.length
-                && selected.every((path) => kinds.some((item) => item.path === path && item.kind === "directory"));
-              if (!allDirectories) selected = [];
-            } catch {
-              selected = [];
-            }
-          }
-          if (selected.length === directoryNames.length) {
-            if (attachmentEpochRef.current === epoch && currentDraftKeyIdRef.current === draftKeyId && !editorDisabledRef.current)
-              attachFiles(selected, draftKeyId);
-            return;
-          }
+        const addedFiles = adopted.length;
+        const missingDirectories: string[] = [];
+        for (const name of directoryNames) {
+          const path = eventPathFor(name);
+          if (path) adopted.push(path);
+          else missingDirectories.push(name);
         }
-        if (attachmentEpochRef.current !== epoch || currentDraftKeyIdRef.current !== draftKeyId || editorDisabledRef.current) return;
-        if (droppedDirectory) reportMissingDirectories();
-        else if (ordinaryFiles.length || names.length) onError("浏览器未提供文件的绝对路径，请使用发送按钮旁的附件按钮选择本地文件");
-        // Nothing usable was dropped (for example a text selection). Say so
-        // instead of silently swallowing the gesture after preventDefault.
-        else onError("拖入的内容不是本地文件；请拖入文件、文件夹，或使用发送按钮旁的附件按钮");
+        if (!stillCurrent()) { await discardStagedPaths(staged); return; }
+        if (adopted.length && !attachFiles(adopted, draftKeyId)) {
+          await discardStagedPaths(staged);
+          return;
+        }
+        // File cards already adopted from this batch must survive a directory
+        // failure. The existing staging lifetime policy is otherwise unchanged.
+        if (missingDirectories.length || missingFiles.length) {
+          const failures = [
+            missingFiles.length ? `未能添加文件：${missingFiles.join("、")}` : "",
+            missingDirectories.length ? `未能添加文件夹：${missingDirectories.join("、")}。无法取得文件夹的本地路径，请从附件菜单选择“本地文件夹”` : "",
+          ].filter(Boolean).join("；");
+          onError(`${addedFiles ? `已添加 ${addedFiles} 个文件；` : ""}${failures}`);
+        }
       } catch (error) {
         await discardStagedPaths(staged);
-        if (attachmentEpochRef.current === epoch && currentDraftKeyIdRef.current === draftKeyId && !editorDisabledRef.current)
-          onError(error instanceof Error ? error.message : String(error));
+        if (stillCurrent()) onError(error instanceof Error ? error.message : String(error));
       } finally {
         endAttachment();
       }
     })();
   };
 
-  const pickFiles = async () => {
+  const pickFiles = async (picker = onPickLocalFiles) => {
     if (editorDisabled) return;
     setAttachmentOpen(false);
     setPickingFiles(true);
@@ -782,7 +756,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     const epoch = beginAttachment();
     composer.edit(composer.currentDraft().message);
     try {
-      const paths = await onPickLocalFiles();
+      const paths = await picker();
       if (attachmentEpochRef.current !== epoch || currentDraftKeyIdRef.current !== targetDraftKeyId || editorDisabledRef.current) return;
       attachFiles(paths, targetDraftKeyId);
       textareaRef.current?.focus();
@@ -838,6 +812,7 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
               {attachmentOpen && <div ref={attachmentMenuRef} className="attachment-menu" role="menu">
                 <button type="button" role="menuitem" disabled={imageAttachmentLimitReached} onClick={() => { setAttachmentOpen(false); composer.edit(composer.currentDraft().message); imageInputRef.current?.click(); }}><ImageIcon className="attachment-menu-icon" /><strong>图片</strong><small>{imageAttachmentHint}</small></button>
                 <button type="button" role="menuitem" disabled={pickingFiles} onClick={() => void pickFiles()}><FileSearchIcon className="attachment-menu-icon" /><strong>{pickingFiles ? "选择中…" : "本地文件"}</strong><small>按需读取，不上传全文</small></button>
+                {onPickLocalFolder && <button type="button" role="menuitem" disabled={pickingFiles} onClick={() => void pickFiles(onPickLocalFolder)}><FolderIcon className="attachment-menu-icon" /><strong>本地文件夹</strong><small>明确选择原目录，不复制目录内容</small></button>}
               </div>}
               <input ref={imageInputRef} className="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple onChange={(event) => { void addImages([...event.target.files || []]); event.target.value = ""; }} />
             </div>

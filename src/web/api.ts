@@ -389,8 +389,7 @@ export const api = {
     request<{ path: string }>("/api/local-files/stage", { method: "POST", body: JSON.stringify(file) }, 120_000),
   discardStagedFile: (path: string) =>
     request<{ ok: boolean }>("/api/local-files/stage/discard", { method: "POST", body: JSON.stringify({ path }) }),
-  explorerSelection: (names: string[]) =>
-    request<{ paths: string[] }>("/api/local-files/explorer-selection", { method: "POST", body: JSON.stringify({ names }) }),
+  pickLocalFolder: () => request<{ paths: string[] }>("/api/local-files/pick-folder", { method: "POST" }),
   attachmentKinds: (paths: string[]) =>
     request<{ kinds: Array<{ path: string; kind: "file" | "directory" }> }>("/api/local-files/kinds", { method: "POST", body: JSON.stringify({ paths }) }),
   openLocalFile: (path: string) => request<{ ok: boolean }>("/api/local-files/open", { method: "POST", body: JSON.stringify({ path }) }),

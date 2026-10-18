@@ -32,7 +32,7 @@ const FONT_OPTIONS: Array<CompactSelectOption<FontPreference>> = [
   { value: "mono", label: "等宽字体" },
 ];
 
-export function ManagementPanel({ section, appearance, workspaceCwd, workspacePicking, workspaceDisabled, models, modelRuntimeSyncPending, state, busy, shutdownBlocked, restartTitle = "完整重启 Pi Chat 并应用本地更新", shutdownTitle = "检查全部对话后，关闭所有 Pi Chat 窗口、服务和会话进程", diagnosticsBusy, buildIdentity, webBuildIdentity, piVersion, primaryRuntime, onClose, onAppearance, onPickWorkspace, onModel, onModelsChanged, onExportDiagnostics, onRuntimeSetup, onRestart, onShutdown }: {
+export function ManagementPanel({ section, appearance, workspaceCwd, workspacePicking, workspaceDisabled, models, modelRuntimeSyncPending, state, busy, shutdownBlocked, restartTitle = "完整重启 Pi Chat 并应用本地更新", shutdownTitle = "检查全部对话后，关闭所有 Pi Chat 窗口、服务和会话进程", diagnosticsBusy, buildIdentity, webBuildIdentity, piVersion, primaryRuntime, onClose, onAppearance, onPickWorkspace, onModel, onModelsChanged, onExportDiagnostics, onRestart, onShutdown }: {
   section: ManagementSection | null;
   appearance: AppearancePreferences;
   /** Persisted default for future drafts; existing Session cwd values stay immutable. */
@@ -61,7 +61,6 @@ export function ManagementPanel({ section, appearance, workspaceCwd, workspacePi
     "models" | "state" | "modelRuntimeSyncPending" | "modelCatalogueRevision"
   >) => void;
   onExportDiagnostics: () => Promise<void>;
-  onRuntimeSetup?: () => void;
   onRestart: () => void;
   onShutdown: () => void;
 }) {
@@ -180,7 +179,6 @@ export function ManagementPanel({ section, appearance, workspaceCwd, workspacePi
                 primaryRuntime={primaryRuntime}
                 diagnosticsBusy={diagnosticsBusy}
                 onExportDiagnostics={onExportDiagnostics}
-                onRuntimeSetup={onRuntimeSetup}
               />}
               {settingsTab === "appearance" && <AppearancePanel value={appearance} workspaceCwd={workspaceCwd} workspacePicking={workspacePicking} workspaceDisabled={workspaceDisabled} onChange={onAppearance} onPickWorkspace={onPickWorkspace} />}
               {settingsTab === "models" && <ModelsPanel models={models} modelRuntimeSyncPending={modelRuntimeSyncPending} state={state} busy={busy} browseBusy={resourceBusy} onModel={onModel} onBrowseModels={() => void browseResource("models-root")} onModelsChanged={onModelsChanged} />}
@@ -229,12 +227,11 @@ export function ManagementPanel({ section, appearance, workspaceCwd, workspacePi
   );
 }
 
-function AboutPanel({ buildIdentity, webBuildIdentity, piVersion, primaryRuntime, diagnosticsBusy, onExportDiagnostics, onRuntimeSetup }: {
+function AboutPanel({ buildIdentity, webBuildIdentity, piVersion, primaryRuntime, diagnosticsBusy, onExportDiagnostics }: {
   buildIdentity: BuildIdentity;
   webBuildIdentity: BuildIdentity;
   piVersion?: string;
   primaryRuntime: PrimaryRuntimeReadiness;
-  onRuntimeSetup?: () => void;
   diagnosticsBusy: boolean;
   onExportDiagnostics: () => Promise<void>;
 }) {
@@ -329,7 +326,6 @@ function AboutPanel({ buildIdentity, webBuildIdentity, piVersion, primaryRuntime
       <AboutValue label="Web / 服务一致性" value={identityMismatch ? "不一致：请完整重启" : "一致"} tone={identityMismatch ? "warning" : "ok"} />
     </div>
     {primaryRuntime.status === "failed" && <div className="about-notice is-warning">Primary Runtime 暂不可用，但历史 Session 与 JSONL 浏览仍可继续。{primaryRuntime.error ? ` ${primaryRuntime.error}` : ""}</div>}
-    {onRuntimeSetup && <button type="button" className="about-link-button" onClick={onRuntimeSetup}>Pi 连接设置 / 重试</button>}
     {piUpdateError && <div className="resource-error" role="alert">{piUpdateError}</div>}
     {piUpdate && <div className={`about-update ${piUpdate.updateAvailable ? "is-update" : "is-current"}`}>
       <strong>{piUpdate.updateAvailable ? `发现 Pi 内核更新 v${piUpdate.latestVersion}` : piUpdate.updateAvailable === false ? "当前 Pi 内核已是最新版本" : `已找到 Pi 内核 v${piUpdate.latestVersion}`}</strong>
@@ -490,6 +486,7 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
   const updateProvider = <K extends keyof CustomProviderInput>(key: K, value: CustomProviderInput[K]) => setEditingProvider((current) => current ? { ...current, [key]: value } : current);
   const updateModel = (index: number, key: "id" | "name" | "contextWindow" | "maxTokens", value: string) => setEditingProvider((current) => {
     if (!current) return current;
+    if ((key === "contextWindow" || key === "maxTokens") && !/^[0-9]*$/.test(value)) return current;
     const models = current.models.map((model, modelIndex) => modelIndex === index ? { ...model, [key]: key === "contextWindow" || key === "maxTokens" ? (value ? Number(value) : undefined) : value } : model);
     return { ...current, models };
   });
@@ -523,7 +520,7 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
     <div className="model-editor-head"><strong>{editingProviderKey ? `${editingProviderKey} 配置` : "添加自定义提供方"}</strong><button type="button" disabled={saving} onClick={closeProvider}>取消</button></div>
     <div className="model-editor-grid"><label>Provider<input value={editingProvider.provider} disabled={Boolean(editingProviderKey) || saving} onChange={(event) => updateProvider("provider", event.target.value)} /></label><label>API 协议<select value={editingProvider.api} disabled={saving} onChange={(event) => updateProvider("api", event.target.value as CustomProviderInput["api"])}><option value="openai-completions">openai-completions</option><option value="openai-responses">openai-responses</option><option value="anthropic-messages">anthropic-messages</option><option value="google-generative-ai">google-generative-ai</option></select></label><label className="model-editor-wide">API 地址<input value={editingProvider.baseUrl} disabled={saving} placeholder="https://api.example.com/v1" onChange={(event) => updateProvider("baseUrl", event.target.value)} /></label><label className="model-editor-wide">API 密钥<input type="password" value={editingProvider.apiKey || ""} disabled={saving} placeholder="已配置 — 输入新值以替换" onChange={(event) => updateProvider("apiKey", event.target.value)} /></label></div>
     <div className="provider-models-heading"><span>ID</span><span>显示名称</span><span>上下文</span><span>最大输出</span><span aria-hidden="true" /></div>
-    <div className="provider-model-editor-list">{editingProvider.models.map((model, index) => <div className="provider-model-editor-row" key={index}><input aria-label={`模型 ${index + 1} ID`} placeholder="Model ID" value={model.id} disabled={saving} onChange={(event) => updateModel(index, "id", event.target.value)} /><input aria-label={`模型 ${index + 1} 名称`} placeholder="显示名称" value={model.name} disabled={saving} onChange={(event) => updateModel(index, "name", event.target.value)} /><input aria-label={`模型 ${index + 1} 上下文大小`} type="number" min="1" placeholder="上下文" value={model.contextWindow || ""} disabled={saving} onChange={(event) => updateModel(index, "contextWindow", event.target.value)} /><input aria-label={`模型 ${index + 1} 最大输出`} type="number" min="1" placeholder="最大输出" value={model.maxTokens || ""} disabled={saving} onChange={(event) => updateModel(index, "maxTokens", event.target.value)} /><button type="button" className="model-trash-button" aria-label={`删除模型 ${model.id || index + 1}`} title="删除模型条目" disabled={editingProvider.models.length <= 1 || saving} onClick={() => removeModelRow(index)}><TrashIcon /></button></div>)}</div>
+    <div className="provider-model-editor-list">{editingProvider.models.map((model, index) => <div className="provider-model-editor-row" key={index}><input aria-label={`模型 ${index + 1} ID`} placeholder="Model ID" value={model.id} disabled={saving} onChange={(event) => updateModel(index, "id", event.target.value)} /><input aria-label={`模型 ${index + 1} 名称`} placeholder="显示名称" value={model.name} disabled={saving} onChange={(event) => updateModel(index, "name", event.target.value)} /><input aria-label={`模型 ${index + 1} 上下文大小`} type="text" inputMode="numeric" pattern="[0-9]*" placeholder="上下文" value={model.contextWindow || ""} disabled={saving} onChange={(event) => updateModel(index, "contextWindow", event.target.value)} /><input aria-label={`模型 ${index + 1} 最大输出`} type="text" inputMode="numeric" pattern="[0-9]*" placeholder="最大输出" value={model.maxTokens || ""} disabled={saving} onChange={(event) => updateModel(index, "maxTokens", event.target.value)} /><button type="button" className="model-trash-button" aria-label={`删除模型 ${model.id || index + 1}`} title="删除模型条目" disabled={editingProvider.models.length <= 1 || saving} onClick={() => removeModelRow(index)}><TrashIcon /></button></div>)}</div>
     <button type="button" className="model-inline-add" disabled={saving} onClick={addModelRow}>＋ 添加模型</button><div className="model-editor-footer"><span>保存不会修改当前正在执行的 Prompt；新请求使用刷新后的配置。</span><button type="button" className="model-save-button" disabled={saving} onClick={() => void saveProvider()}>{saving ? "保存中…" : "保存"}</button></div>
   </div> : null;
   return <div className="settings-resource-panel models-panel">

@@ -472,7 +472,7 @@ export function AppView(host: Record<string, any>) {
           onOpenLocalFile: async (path: string) => { await api.openLocalFile(path); },
           onStageDroppedFile: async (file: { name: string; data: string; size: number }) => (await api.stageDroppedFile(file)).path,
           onDiscardStagedFile: async (path: string) => { await api.discardStagedFile(path); },
-          onReadExplorerSelection: async (names: string[]) => (await api.explorerSelection(names)).paths,
+          onPickLocalFolder: async () => (await api.pickLocalFolder()).paths,
           onAttachmentKinds: async (paths: string[]) => (await api.attachmentKinds(paths)).kinds,
           onError: setError,
           onAbort: stopGeneration,
@@ -518,7 +518,6 @@ export function AppView(host: Record<string, any>) {
           }
           dispatchPane({ type: "RUNTIME_SETTINGS_ADOPTED", target: localDraftRef.current ? { kind: "draft" } : { kind: "session", sessionId: viewedSessionIdRef.current }, state: { model: data.state.model } });
         }}
-        onRuntimeSetup={openRuntimeSetup}
         onExportDiagnostics={exportStateDiagnostics}
         onRestart={() => void restartPi()}
         onShutdown={() => void shutdownPiChat()}

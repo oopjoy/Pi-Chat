@@ -70,15 +70,10 @@ test("two rejected sends preserve every interim draft and the recovery button se
 
 async function checkMixedDrop(resolveDirectory: boolean) {
   const errors: string[] = [];
-  const lookups: string[][] = [];
   const discarded: string[] = [];
   const f = await mountedComposer({
     onStageDroppedFile: async () => "C:/Temp/staged/note.log",
     onDiscardStagedFile: async (path: string) => { discarded.push(path); },
-    onReadExplorerSelection: async (names: string[]) => {
-      lookups.push(names);
-      return resolveDirectory ? ["C:/work/results"] : [];
-    },
     onAttachmentKinds: async (paths: string[]) => paths.map((path) => ({ path, kind: path.endsWith("results") ? "directory" : "file" })),
     onError: (message: string) => { errors.push(message); },
   });
@@ -100,13 +95,13 @@ async function checkMixedDrop(resolveDirectory: boolean) {
         { kind: "file", webkitGetAsEntry: () => ({ isDirectory: true, name: "results" }), getAsFile: () => null },
         { kind: "file", webkitGetAsEntry: () => ({ isDirectory: false, name: "note.log" }), getAsFile: () => file },
       ],
-      types: ["Files"], getData: () => "",
+      types: ["Files", "text/uri-list"],
+      getData: (type: string) => resolveDirectory && type === "text/uri-list" ? "file:///C:/work/results" : "",
     } });
     await act(async () => {
       f.dom.window.document.querySelector(".composer")!.dispatchEvent(drop);
       await new Promise((resolve) => setTimeout(resolve, 20));
     });
-    assert.deepEqual(lookups, [["results"]], "folder lookup must not include the successfully staged file name");
     assert.equal(f.dom.window.document.querySelector('[title="C:/Temp/staged/note.log"]') !== null, true);
     assert.deepEqual(discarded, [], "a folder failure must not delete an adopted file card");
     if (resolveDirectory) {
@@ -119,6 +114,37 @@ async function checkMixedDrop(resolveDirectory: boolean) {
     }
   } finally { globalThis.FileReader = previousReader; await f.close(); }
 }
+
+test("a bare folder name is rejected until the user explicitly chooses a path", async () => {
+  let picks = 0;
+  const errors: string[] = [];
+  const f = await mountedComposer({
+    onPickLocalFolder: async () => { picks += 1; return ["C:/chosen/results"]; },
+    onAttachmentKinds: async (paths: string[]) => paths.map((path) => ({ path, kind: "directory" })),
+    onError: (message: string) => errors.push(message),
+  });
+  try {
+    const event = new f.dom.window.Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "dataTransfer", { value: {
+      files: [], items: [{ kind: "file", webkitGetAsEntry: () => ({ name: "results", isDirectory: true }) }],
+      types: ["Files"], getData: () => "",
+    } });
+    await act(async () => {
+      f.dom.window.document.querySelector(".composer")!.dispatchEvent(event);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    assert.equal(picks, 0, "a drag must not silently choose a directory or open a picker");
+    assert.equal(f.dom.window.document.querySelectorAll(".composer-attachment").length, 0);
+    assert.ok(errors.some((error) => error.includes("results") && error.includes("本地文件夹")));
+    await f.click(".attachment-button");
+    const folder = [...f.dom.window.document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+      .find((button) => button.textContent?.includes("本地文件夹"))!;
+    await act(async () => { folder.click(); });
+    assert.equal(picks, 1);
+    assert.ok(f.dom.window.document.querySelector('[title="C:/chosen/results"]'));
+    assert.ok(f.dom.window.document.querySelector(".is-folder"));
+  } finally { await f.close(); }
+});
 
 test("mixed drop attaches both the staged file and a resolvable folder", async () => {
   await checkMixedDrop(true);

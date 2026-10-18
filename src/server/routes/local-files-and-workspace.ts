@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { stat } from "node:fs/promises";
 import { discardManagedDroppedFile, stageDroppedFileBytes } from "../dropped-files.js";
 import { bodyJson, json, methodNotAllowed } from "../http-transport.js";
-import { localPathKinds, openLocalAttachment, parsePickerOutput, readExplorerSelection } from "../file-picker.js";
+import { localPathKinds, openLocalAttachment, parsePickerOutput } from "../file-picker.js";
 
 export interface LocalFilesWorkspaceRouteHost {
   pickLocalFiles(): Promise<string[]>;
@@ -47,16 +47,19 @@ export async function handleLocalFilesWorkspaceRoute(
     json(response, 200, { paths: await host.readClipboardFiles(clipboardFiles(body)) });
     return true;
   }
-  if (url.pathname === "/api/local-files/explorer-selection") {
+  if (url.pathname === "/api/local-files/pick-folder") {
     if (request.method !== "POST") {
       methodNotAllowed(response);
       return true;
     }
-    const body = await bodyJson(request);
-    const names = Array.isArray(body.names)
-      ? body.names.filter((item: unknown): item is string => typeof item === "string" && item.trim().length > 0).slice(0, 32)
-      : [];
-    json(response, 200, { paths: await readExplorerSelection(names) });
+    const path = await host.pickWorkspaceFolder(host.currentCwd());
+    if (!path) { json(response, 200, { paths: [] }); return true; }
+    // Attachment paths remain drive-local. This picker does not change cwd.
+    if (parsePickerOutput(JSON.stringify([path]))[0] !== path || !(await stat(path)).isDirectory()) {
+      json(response, 400, { error: "所选附件不是有效的本地文件夹" });
+      return true;
+    }
+    json(response, 200, { paths: [path] });
     return true;
   }
   if (url.pathname === "/api/local-files/kinds") {

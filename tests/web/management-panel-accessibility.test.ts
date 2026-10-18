@@ -83,6 +83,19 @@ test("adding a Provider works while another Session is generating", async () => 
   }
 });
 
+test("About has three update actions and no Pi connection setup button", async () => {
+  const f = await settingsFixture();
+  try {
+    await act(async () => f.button("关于").click());
+    const about = f.dom.window.document.querySelector(".about-panel")!;
+    assert.equal(about.querySelectorAll(".about-actions > button, .about-actions > a").length, 3);
+    assert.equal([...about.querySelectorAll("button")].some((button) => button.textContent?.includes("连接设置")), false);
+    assert.match(about.textContent || "", /检查更新/);
+    assert.match(about.textContent || "", /检查 Pi 内核更新/);
+    assert.match(about.textContent || "", /打开 GitHub Releases/);
+  } finally { await f.close(); }
+});
+
 const availableNpmUpdate = {
   packageName: "@earendil-works/pi-coding-agent", currentVersion: "1.0.1", latestVersion: "1.1.0",
   registryUrl: "https://registry.npmjs.org/x", checkedAt: "2026-10-12T00:00:00.000Z",
@@ -397,6 +410,21 @@ test("Provider editor preserves the stable source key when saving an edited mode
       edit.click();
       await Promise.resolve();
     });
+    const context = dom.window.document.querySelector<HTMLInputElement>('input[aria-label="模型 1 上下文大小"]')!;
+    const output = dom.window.document.querySelector<HTMLInputElement>('input[aria-label="模型 1 最大输出"]')!;
+    for (const input of [context, output]) {
+      assert.equal(input.type, "text", "token counts have no numeric stepper arrows");
+      assert.equal(input.inputMode, "numeric");
+    }
+    const fill = (input: HTMLInputElement, value: string) => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value")?.set?.call(input, value);
+      input.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+    };
+    await act(async () => { fill(context, "900000"); fill(output, "80000"); });
+    assert.equal(context.value, "900000");
+    assert.equal(output.value, "80000");
+    await act(async () => { fill(context, "1e6"); });
+    assert.equal(context.value, "900000", "non-integer text is not converted to a different token limit");
     const idInput = dom.window.document.querySelector<HTMLInputElement>('input[aria-label="模型 1 ID"]')!;
     await act(async () => {
       Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value")?.set?.call(idInput, "renamed-id");
@@ -407,7 +435,7 @@ test("Provider editor preserves the stable source key when saving an edited mode
       await Promise.resolve();
     });
     assert.ok(saved);
-    assert.deepEqual(saved.models, [{ id: "renamed-id", originalId: "old-id", name: "Old name", contextWindow: 128_000 }]);
+    assert.deepEqual(saved.models, [{ id: "renamed-id", originalId: "old-id", name: "Old name", contextWindow: 900_000, maxTokens: 80_000 }]);
   } finally {
     await act(async () => root.unmount());
     restoreApi();
