@@ -4,12 +4,13 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { PiRpcClient, resolvePiEntry, rpcData } from "../src/server/rpc-client";
+import { PiRpcClient, rpcData } from "../src/server/rpc-client";
+import { pinnedPiEntry } from "./helpers/pinned-pi";
 
 const overlayUrl = new URL("../resources/runtime/pi-chat-rpc-loader.mjs", import.meta.url).href;
 
-test("Pi Chat adds native dequeue only inside its RPC child", { skip: !resolvePiEntry() }, async () => {
-  const piEntry = resolvePiEntry();
+test("Pi Chat adds native dequeue only inside its RPC child", async () => {
+  const piEntry = pinnedPiEntry;
   assert.ok(piEntry, "global Pi RPC entry must be discoverable");
   const rpcModePath = resolve(dirname(piEntry), "modes", "rpc", "rpc-mode.js");
   const original = await readFile(rpcModePath, "utf8");
@@ -50,8 +51,8 @@ test("the dequeue overlay accepts Pi RPC follow-up signatures before and after s
   }
 });
 
-test("a real Pi RPC child accepts the process-local native dequeue command", { skip: !resolvePiEntry(), timeout: 75_000 }, async () => {
-  const piEntry = resolvePiEntry();
+test("a real Pi RPC child accepts the process-local native dequeue command", { timeout: 75_000 }, async () => {
+  const piEntry = pinnedPiEntry;
   assert.ok(piEntry);
   const rpcRegister = resolve(
     dirname(fileURLToPath(import.meta.url)),

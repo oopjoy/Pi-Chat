@@ -4,13 +4,14 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { PiRpcClient, resolvePiEntry, rpcData } from "../src/server/rpc-client";
+import { PiRpcClient, rpcData } from "../src/server/rpc-client";
+import { pinnedPiEntry } from "./helpers/pinned-pi";
 import type { ModelInfo } from "../src/shared/types";
 
 type ModelsResponse = { models: ModelInfo[] };
 
-test("a real Pi worker refreshes models.json in place without restarting", { skip: !resolvePiEntry(), timeout: 90_000 }, async () => {
-  const piEntry = resolvePiEntry();
+test("a real Pi worker refreshes models.json in place without restarting", { timeout: 90_000 }, async () => {
+  const piEntry = pinnedPiEntry;
   assert.ok(piEntry);
   const rpcRegister = resolve(
     dirname(fileURLToPath(import.meta.url)),
@@ -79,8 +80,8 @@ test("a real Pi worker refreshes models.json in place without restarting", { ski
   }
 });
 
-test("a Session selected model keeps its limits until the refreshed model is re-selected", { skip: !resolvePiEntry(), timeout: 90_000 }, async () => {
-  const piEntry = resolvePiEntry();
+test("a Session selected model keeps its limits until the refreshed model is re-selected", { timeout: 90_000 }, async () => {
+  const piEntry = pinnedPiEntry;
   assert.ok(piEntry);
   const rpcRegister = resolve(
     dirname(fileURLToPath(import.meta.url)),

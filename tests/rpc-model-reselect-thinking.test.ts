@@ -4,19 +4,18 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { PiRpcClient, resolvePiEntry, rpcData } from "../src/server/rpc-client";
+import { PiRpcClient, rpcData } from "../src/server/rpc-client";
+import { pinnedPiEntry as piEntry } from "./helpers/pinned-pi";
 import type { ModelInfo } from "../src/shared/types";
 
-const piEntry = resolvePiEntry();
 const rpcRegister = resolve(dirname(fileURLToPath(import.meta.url)), "..", "resources", "runtime", "pi-chat-rpc-register.mjs");
-const skip = !piEntry;
 
 /**
  * Documents the exact reason the Host compensates after a catalogue refresh:
  * Pi recomputes the thinking level from the user default when the same model
  * is re-selected, which would silently drop a Session-only choice.
  */
-test("re-selecting a model recomputes thinking, so the Host restores the Session level", { skip, timeout: 90_000 }, async () => {
+test("re-selecting a model recomputes thinking, so the Host restores the Session level", { timeout: 90_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-model-thinking-"));
   const writeModels = (maxTokens: number) => writeFile(
     join(root, "models.json"),

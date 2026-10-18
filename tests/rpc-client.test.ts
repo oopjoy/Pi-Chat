@@ -13,12 +13,11 @@ import {
   RpcFrameTooLargeError,
   RpcProcessExitUnconfirmedError,
   RpcRequestTimeoutError,
-  resolvePiEntry,
   type RpcRequestObservation,
   rpcData,
 } from "../src/server/rpc-client";
 
-const piEntry = resolvePiEntry();
+import { pinnedPiEntry as piEntry } from "./helpers/pinned-pi";
 
 function incidentCollector() {
   const records: Array<IncidentFields & { incidentId: string }> = [];
@@ -751,7 +750,7 @@ test("process-exit fanout isolates synchronous and asynchronous listeners", asyn
   }
 });
 
-test("global Pi RPC starts and answers state requests",  { skip: !piEntry, timeout: 75_000 }, async () => {
+test("pinned Pi 1.3.0 RPC starts and answers state requests",  { skip: !piEntry, timeout: 75_000 }, async () => {
   assert.ok(piEntry);
   const sandbox = await mkdtemp(join(tmpdir(), "pi-chat-rpc-core-"));
   const incidents = incidentCollector();
