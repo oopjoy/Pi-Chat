@@ -202,6 +202,9 @@ export function useComposerController({
   const clear = useCallback(() => {
     commit({ type: "clear", key: keyRef.current });
   }, [commit]);
+  const recoverSuspended = useCallback(() => {
+    commit({ type: "recover-suspended", key: keyRef.current });
+  }, [commit]);
   const currentDraft = useCallback(() =>
     composerPartition(stateRef.current, keyRef.current).draft, []);
   const submit = useCallback((delivery: PromptDelivery) => {
@@ -235,6 +238,8 @@ export function useComposerController({
     blocked: Boolean(partition.blocked),
     blockedError: partition.blockedError,
     pendingCount: partition.pending.length + (partition.inFlight ? 1 : 0),
+    retainedDraftCount: partition.suspended?.length || 0,
+    recoverSuspended,
     edit,
     replace,
     clear,

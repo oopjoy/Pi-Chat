@@ -101,7 +101,7 @@ test("Composer reducer restores a definite failure without losing a newer draft"
 
   let partition = composerPartition(state, key);
   assert.equal(partition.draft.message, "send me");
-  assert.equal(partition.suspended?.message, "newer text");
+  assert.equal(partition.suspended?.[0]?.message, "newer text");
   assert.equal(partition.blocked?.message, "send me");
   assert.equal(partition.blockedError, "Pi Runtime 启动超时");
 

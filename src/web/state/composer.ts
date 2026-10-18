@@ -59,7 +59,8 @@ type ComposerPartition = {
   inFlight?: ComposerSnapshot;
   blocked?: ComposerSnapshot;
   blockedError?: string;
-  suspended?: ComposerDraft;
+  /** Unsent editor drafts displaced by definite send failures, oldest first. */
+  suspended?: ComposerDraft[];
 };
 
 /** Browser-local bounds for accepted-but-not-yet-delivered editor payloads. */
@@ -110,7 +111,10 @@ export function composerPendingUsage(state: ComposerState): ComposerPendingUsage
   for (const partition of Object.values(state.partitions)) {
     if (!partition) continue;
     addDraftUsage(usage, partition.draft);
-    if (partition.suspended) addDraftUsage(usage, partition.suspended);
+    for (const draft of partition.suspended || []) {
+      usage.snapshots += 1;
+      addDraftUsage(usage, draft);
+    }
     for (const snapshot of partition.pending) addSnapshotUsage(usage, snapshot);
     if (partition.inFlight) addSnapshotUsage(usage, partition.inFlight);
     if (partition.blocked) addSnapshotUsage(usage, partition.blocked);
@@ -191,7 +195,7 @@ function editDraft(
 
 function restoreSuspended(partition: ComposerPartition): ComposerPartition {
   if (
-    !partition.suspended ||
+    !partition.suspended?.length ||
     partition.pending.length ||
     partition.inFlight ||
     partition.blocked ||
@@ -200,13 +204,20 @@ function restoreSuspended(partition: ComposerPartition): ComposerPartition {
     draftFiles(partition.draft).length
   )
     return partition;
-  return { ...partition, draft: partition.suspended, suspended: undefined };
+  const [draft, ...remaining] = partition.suspended;
+  return {
+    ...partition,
+    draft: { ...draft, revision: partition.draft.revision + 1 },
+    suspended: remaining.length ? remaining : undefined,
+  };
 }
 
 export type ComposerAction =
   | { type: "edit"; key: ComposerDraftKey; message: string }
   | { type: "replace"; key: ComposerDraftKey; message: string; images: PromptImage[]; files?: string[] }
   | { type: "clear"; key: ComposerDraftKey }
+  /** Restore one retained draft without sending it or discarding the editor. */
+  | { type: "recover-suspended"; key: ComposerDraftKey }
   /** Drop all retained text/images for a structurally deleted Session. */
   | { type: "forget"; key: ComposerDraftKey }
   | { type: "accept"; snapshot: ComposerSnapshot; retry: boolean }
@@ -280,6 +291,18 @@ export function composerReducer(
         revision: partition.draft.revision + 1,
       },
     });
+  if (action.type === "recover-suspended") {
+    if (partition.inFlight || partition.pending.length || !partition.suspended?.length) return state;
+    const [draft, ...remaining] = partition.suspended;
+    const current = partition.draft;
+    const hasContent = current.message.trim() || current.images.length || draftFiles(current).length;
+    if (hasContent) remaining.push(current);
+    return withPartition(state, action.key, {
+      ...partition,
+      draft: { ...draft, revision: current.revision + 1 },
+      suspended: remaining.length ? remaining : undefined,
+    });
+  }
   if (action.type === "clear")
     return withPartition(state, action.key, editDraft(partition, {
       message: "",
@@ -306,7 +329,9 @@ export function composerReducer(
       inFlight: undefined,
       blocked: failed,
       blockedError: action.error?.trim().slice(0, 1_000) || "修改后可重试",
-      suspended: hasNewerDraft ? partition.draft : partition.suspended,
+      suspended: hasNewerDraft
+        ? [...(partition.suspended || []), partition.draft]
+        : partition.suspended,
       draft: {
         message: failed.message,
         images: [...failed.images],

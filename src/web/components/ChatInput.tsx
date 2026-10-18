@@ -88,28 +88,27 @@ function readDroppedFileAsBase64(file: File): Promise<string> {
   });
 }
 
-function isDroppedDirectory(item: DataTransferItem | undefined): boolean {
-  try {
-    return Boolean(item?.webkitGetAsEntry?.()?.isDirectory);
-  } catch {
-    return false;
-  }
-}
-
-function droppedEntryNames(files: File[], items: DataTransferItem[]): string[] {
-  const names: string[] = [];
-  for (const [index, item] of items.entries()) {
+/** Capture entries during the drop event; files and items need not share indexes. */
+export function droppedLocalEntries(files: File[], items: DataTransferItem[]): { ordinaryFiles: File[]; directoryNames: string[] } {
+  const directories: string[] = [];
+  const directoryFiles = new Set<File>();
+  const ordinaryItems = new Set<File>();
+  for (const item of items) {
     try {
+      const file = item.getAsFile?.();
       const entry = item.webkitGetAsEntry?.();
-      if (entry?.name) {
-        names.push(entry.name);
-        continue;
-      }
-    } catch { /* Chromium may throw for some items */ }
-    if (files[index]?.name) names.push(files[index].name);
+      if (entry?.isDirectory) {
+        directories.push(entry.name);
+        if (file) directoryFiles.add(file);
+      } else if (file) ordinaryItems.add(file);
+    } catch { /* an unreadable entry is not a usable directory identity */ }
   }
-  if (!names.length) names.push(...files.map((file) => file.name).filter(Boolean));
-  return [...new Set(names)];
+  return {
+    ordinaryFiles: files.filter((file) => !(file.type || "").startsWith("image/")
+      && !directoryFiles.has(file)
+      && (ordinaryItems.has(file) || !directories.includes(file.name))),
+    directoryNames: directories,
+  };
 }
 
 function dataTransferStringReads(data: DataTransfer): Array<Promise<string>> {
@@ -680,15 +679,17 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
       attachFiles(paths);
       return;
     }
-    const ordinaryFiles = files.filter((file, index) => !(file.type || "").startsWith("image/") && !isDroppedDirectory(items[index]));
-    const droppedDirectory = items.some((item) => isDroppedDirectory(item));
+    const { ordinaryFiles, directoryNames } = droppedLocalEntries(files, items);
+    const droppedDirectory = directoryNames.length > 0;
     if (imageFiles.length && !ordinaryFiles.length && !droppedDirectory) return;
-    const names = droppedEntryNames(files, items);
+    const names = [...ordinaryFiles.map((file) => file.name), ...directoryNames];
     const stringReads = dataTransferStringReads(event.dataTransfer);
     const draftKeyId = currentDraftKeyIdRef.current;
     const epoch = beginAttachment();
     void (async () => {
       const staged: string[] = [];
+      let addedFiles = 0;
+      const reportMissingDirectories = () => onError(`${addedFiles ? `已添加 ${addedFiles} 个文件；` : ""}未能添加文件夹：${directoryNames.join("、")}。无法取得文件夹的本地路径，请使用发送按钮旁的附件按钮选择`);
       try {
         const asyncTexts = await Promise.all(stringReads);
         const asyncPaths = [...new Set(asyncTexts.flatMap((text) => [...windowsPathsFromText(text), ...explorerWindowsPaths(text)]))];
@@ -723,35 +724,42 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
             return;
           }
           if (staged.length) {
-            if (!attachFiles(staged, draftKeyId)) await discardStagedPaths(staged);
-            return;
+            if (!attachFiles(staged, draftKeyId)) {
+              await discardStagedPaths(staged);
+              return;
+            }
+            addedFiles = staged.length;
+            // Adopted cards own these files now. A later directory failure must
+            // not delete files that were already attached successfully.
+            staged.length = 0;
+            if (!droppedDirectory) return;
           }
         }
         // A directory has no bytes to stage, so its original path is the only
         // usable identity. Accept it only when every dropped name matched
         // exactly one entry and each entry is really a directory.
-        if (droppedDirectory && names.length && onReadExplorerSelection) {
+        if (droppedDirectory && onReadExplorerSelection) {
           let selected: string[] = [];
-          try { selected = await onReadExplorerSelection(names); }
+          try { selected = await onReadExplorerSelection(directoryNames); }
           catch { selected = []; }
           if (selected.length && onAttachmentKinds) {
             try {
               const kinds = await onAttachmentKinds(selected);
-              const allDirectories = kinds.length === selected.length
-                && kinds.every((item) => item.kind === "directory");
+              const allDirectories = selected.length === directoryNames.length
+                && selected.every((path) => kinds.some((item) => item.path === path && item.kind === "directory"));
               if (!allDirectories) selected = [];
             } catch {
               selected = [];
             }
           }
-          if (selected.length) {
+          if (selected.length === directoryNames.length) {
             if (attachmentEpochRef.current === epoch && currentDraftKeyIdRef.current === draftKeyId && !editorDisabledRef.current)
               attachFiles(selected, draftKeyId);
             return;
           }
         }
         if (attachmentEpochRef.current !== epoch || currentDraftKeyIdRef.current !== draftKeyId || editorDisabledRef.current) return;
-        if (droppedDirectory) onError("无法取得文件夹的本地路径，请使用发送按钮旁的附件按钮选择");
+        if (droppedDirectory) reportMissingDirectories();
         else if (ordinaryFiles.length || names.length) onError("浏览器未提供文件的绝对路径，请使用发送按钮旁的附件按钮选择本地文件");
         // Nothing usable was dropped (for example a text selection). Say so
         // instead of silently swallowing the gesture after preventDefault.
@@ -790,6 +798,11 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     <div className="composer-wrap">
       {notices && <div className="system-notice-stack" aria-live="polite">{notices}</div>}
       {composer.blocked && <div className="composer-submission-status is-failed" role="status">发送失败，草稿已恢复；{composer.blockedError || "修改后可重试"}</div>}
+      {composer.retainedDraftCount > 0 && <div className="composer-submission-status composer-retained-drafts" role="status">
+        <span>另有 {composer.retainedDraftCount} 份未发送草稿已保留在本页。</span>
+        <button type="button" disabled={editorDisabled || composer.pendingCount > 0 || attachingCount > 0} onClick={() => { attachmentEpochRef.current += 1; composer.recoverSuspended(); textareaRef.current?.focus(); }}>恢复下一份草稿</button>
+        <small>恢复只切换编辑内容；当前内容也会保留，不会自动发送。</small>
+      </div>}
       {attachingCount > 0 && <div className="composer-submission-status" role="status">正在附加文件…</div>}
       <div className={`composer ${dragging ? "is-dragging" : ""}`} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; if (!editorDisabled) setDragging(true); }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }} onDrop={drop}>
         {!editorDisabled && suggestions.length > 0 && <div id={suggestionListId} className="command-suggestions" role="listbox" aria-label="Pi 指令联想">{suggestions.map((command, index) => <button id={`${suggestionListId}-option-${index}`} type="button" role="option" aria-selected={index === suggestionIndex} className={index === suggestionIndex ? "is-active" : ""} key={`${command.source}-${command.name}`} onMouseDown={(event) => event.preventDefault()} onClick={() => completeCommand(command)}><strong>/{command.name}</strong><span>{command.description || "Pi 指令"}</span><small>{command.source}</small></button>)}</div>}
