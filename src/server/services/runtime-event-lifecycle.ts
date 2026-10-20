@@ -3,6 +3,7 @@ import type { RuntimeEventTransition } from "../runtime-event-transition.js";
 export interface RuntimeEventLifecyclePorts {
   transition(): RuntimeEventTransition;
   beginRunTiming(generation: number): void;
+  pauseRunTiming(): void;
   finishRunTiming(generation: number): void;
   traceRejected(eventType: string): void;
   activePromptId(): string | undefined;
@@ -50,7 +51,10 @@ export function finalizeAcceptedRuntimeEvent(
   const runGeneration = transition.state.runGeneration;
   if (input.eventType === "agent_start" || input.eventType === "tool_execution_start")
     ports.beginRunTiming(runGeneration);
-  else if (
+  else if (input.eventType === "auto_retry_start") {
+    ports.pauseRunTiming();
+    ports.broadcastActivity();
+  } else if (
     input.eventType === "agent_settled" ||
     input.eventType === "pi_chat_process_error"
   ) ports.finishRunTiming(runGeneration);

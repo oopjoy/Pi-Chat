@@ -40,9 +40,14 @@ function useRunDuration(
       : null;
   if (elapsed === null) return null;
   const active = streaming && validRunTimestamp(runStartedAt);
+  const paused = streaming && !active;
   return {
-    label: `${active ? "运行中" : "运行"} · ${formatRunDuration(elapsed)}`,
-    title: active ? "过程运行时间（从 Pi 确认开始运行起计时）" : `过程运行时间：${formatRunDuration(elapsed)}`,
+    label: `${active ? "运行中" : paused ? "暂停" : "运行"} · ${formatRunDuration(elapsed)}`,
+    title: active
+      ? "过程运行时间（从 Pi 确认开始运行起计时，上游中断期间暂停）"
+      : paused
+        ? "上游中断，计时已暂停；恢复执行后继续累计"
+        : `过程运行时间：${formatRunDuration(elapsed)}`,
     dateTime: `PT${Math.floor(elapsed / 1_000)}S`,
   };
 }

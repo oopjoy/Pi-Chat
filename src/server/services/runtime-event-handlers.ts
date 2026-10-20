@@ -14,6 +14,7 @@ export interface RuntimeEventHost {
   activePromptDiagnostic: (sessionId: string, rpcGeneration: number) => PromptDiagnostic | undefined;
   applyRuntimeEventTransition: (sessionId: string, runtime: SecondaryRuntime | undefined, event: RuntimeEvent) => RuntimeEventTransition;
   beginSessionRunTiming: (sessionId: string, generation: number) => void;
+  pauseSessionRunTiming: (sessionId: string) => void;
   broadcast: (event: RuntimeEvent) => void;
   broadcastPromptFailureLifecycle: (sessionId: string, event: RuntimeEvent, runGeneration: number, rpcGeneration: number) => void;
   broadcastQueue: (sessionId?: string) => void;
@@ -151,6 +152,7 @@ export function handleSecondaryEvent(host: RuntimeEventHost, runtime: SecondaryR
     finalizeAcceptedRuntimeEvent({
       transition: () => host.applyRuntimeEventTransition(runtime.id, runtime, event),
       beginRunTiming: (runGeneration) => host.beginSessionRunTiming(runtime.id, runGeneration),
+      pauseRunTiming: () => host.pauseSessionRunTiming(runtime.id),
       finishRunTiming: (runGeneration) => host.finishSessionRunTiming(runtime.id, runGeneration),
       traceRejected: (eventType) => host.traceState("rpc-event", "rejected", runtime.id, {
         eventType: eventType || "unknown",
@@ -306,6 +308,7 @@ export function handleRpcEvent(host: RuntimeEventHost, event: Record<string, unk
     finalizeAcceptedRuntimeEvent({
       transition: () => host.applyRuntimeEventTransition(sessionId, undefined, event),
       beginRunTiming: (runGeneration) => host.beginSessionRunTiming(sessionId, runGeneration),
+      pauseRunTiming: () => host.pauseSessionRunTiming(sessionId),
       finishRunTiming: (runGeneration) => host.finishSessionRunTiming(sessionId, runGeneration),
       traceRejected: (eventType) => host.traceState("rpc-event", "rejected", sessionId, {
         eventType: eventType || "unknown",

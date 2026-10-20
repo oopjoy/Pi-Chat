@@ -231,6 +231,12 @@ test("process cards show a frozen run duration and format long runs", () => {
     runStartedAt: Date.now() - 10_000,
   }));
   assert.match(running, /class="conversation-process-duration"[^>]*>运行中 · 00:10<\/time>/);
+  const paused = renderToStaticMarkup(React.createElement(ConversationProcess, {
+    entries: [{ kind: "thinking", text: "working" }],
+    streaming: true,
+    runDurationMs: 65_000,
+  }));
+  assert.match(paused, /class="conversation-process-duration"[^>]*>暂停 · 01:05<\/time>/);
 });
 
 test("assistant images retain their full non-previewable rendering", async () => {

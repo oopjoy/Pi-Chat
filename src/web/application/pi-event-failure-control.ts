@@ -136,14 +136,18 @@ export function handlePiFailureAndControlEvents(scope: Record<string, any>): boo
               dispatchPane({
                 type: "RUN_TIMING_UPDATED",
                 sessionId: eventSessionId,
-                ...(finiteRunMetric(next.runStartedAt) !== undefined
-                  ? { runStartedAt: finiteRunMetric(next.runStartedAt) }
-                  : ["idle", "queued", "failed"].includes(String(next.execution))
-                    ? { runStartedAt: null }
-                    : null),
+                ...(next.runClockPaused === true
+                  ? { runStartedAt: null }
+                  : finiteRunMetric(next.runStartedAt) !== undefined
+                    ? { runStartedAt: finiteRunMetric(next.runStartedAt) }
+                    : ["idle", "queued", "failed"].includes(String(next.execution))
+                      ? { runStartedAt: null }
+                      : null),
                 ...(finiteRunMetric(next.lastRunDurationMs) !== undefined
                   ? { lastRunDurationMs: finiteRunMetric(next.lastRunDurationMs) }
-                  : null),
+                  : next.runClockPaused === true
+                    ? { lastRunDurationMs: null }
+                    : null),
               });
             }
             const streaming =

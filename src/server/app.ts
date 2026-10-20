@@ -468,6 +468,10 @@ interface PendingAcceptedPrompt {
 interface ActiveSessionRunTiming {
   generation: number;
   startedAt: number;
+  /** Work time accumulated before the current running segment. */
+  elapsedMs: number;
+  /** Null while the upstream interrupt/retry delay has paused the clock. */
+  segmentStartedAt: number | null;
 }
 interface SettledSessionRunTiming {
   generation: number;
@@ -2231,24 +2235,49 @@ export class PiChatApp {
   private runtimeTurnActive(runtime: SecondaryRuntime): boolean {
     return runtime.running || Boolean(runtime.liveMessage) || Boolean(runtime.toolStatus);
   }
+  private currentRunElapsedMs(timing: ActiveSessionRunTiming, at = this.now()): number {
+    if (timing.segmentStartedAt === null) return timing.elapsedMs;
+    return timing.elapsedMs + Math.max(0, at - timing.segmentStartedAt);
+  }
+  /** Origin that makes `now - runStartedAt` equal work time, excluding pauses. */
+  private virtualRunStartedAt(timing: ActiveSessionRunTiming): number | undefined {
+    if (timing.segmentStartedAt === null) return undefined;
+    return timing.segmentStartedAt - timing.elapsedMs;
+  }
   /** Begin timing only when Pi has produced authoritative execution evidence. */
   private beginSessionRunTiming(sessionId: string, generation: number): ActiveSessionRunTiming {
     const existing = this.activeRunTimingBySession.get(sessionId);
-    if (existing?.generation === generation) return existing;
-    const timing = { generation, startedAt: this.now() } satisfies ActiveSessionRunTiming;
+    const now = this.now();
+    if (existing) {
+      existing.generation = generation;
+      if (existing.segmentStartedAt === null) existing.segmentStartedAt = now;
+      return existing;
+    }
+    const timing = { generation, startedAt: now, elapsedMs: 0, segmentStartedAt: now } satisfies ActiveSessionRunTiming;
     this.activeRunTimingBySession.set(sessionId, timing);
     return timing;
+  }
+  /** Freeze work time across an upstream interrupt; the next start resumes. */
+  private pauseSessionRunTiming(sessionId: string): ActiveSessionRunTiming | undefined {
+    const active = this.activeRunTimingBySession.get(sessionId);
+    if (!active || active.segmentStartedAt === null) return active;
+    const now = this.now();
+    active.elapsedMs += Math.max(0, now - active.segmentStartedAt);
+    active.segmentStartedAt = null;
+    return active;
   }
   /** Freeze the server-observed duration at a terminal lifecycle boundary. */
   private finishSessionRunTiming(sessionId: string, generation: number): SettledSessionRunTiming | undefined {
     const active = this.activeRunTimingBySession.get(sessionId);
     if (!active || active.generation !== generation) return undefined;
-    const endedAt = Math.max(active.startedAt, this.now());
+    const now = this.now();
+    const durationMs = this.currentRunElapsedMs(active, now);
+    const endedAt = Math.max(active.startedAt + durationMs, now);
     const settled = {
       generation,
       startedAt: active.startedAt,
       endedAt,
-      durationMs: endedAt - active.startedAt,
+      durationMs,
     } satisfies SettledSessionRunTiming;
     this.activeRunTimingBySession.delete(sessionId);
     this.settledRunTimingBySession.delete(sessionId);
@@ -2267,11 +2296,16 @@ export class PiChatApp {
     this.activeRunTimingBySession.delete(sessionId);
     this.settledRunTimingBySession.delete(sessionId);
   }
-  private sessionRunTiming(sessionId: string): { runStartedAt?: number; lastRunDurationMs?: number } {
+  private sessionRunTiming(sessionId: string): { runStartedAt?: number; lastRunDurationMs?: number; runClockPaused?: boolean } {
     const active = this.activeRunTimingBySession.get(sessionId);
+    if (active) {
+      if (active.segmentStartedAt === null)
+        return { lastRunDurationMs: active.elapsedMs, runClockPaused: true };
+      const origin = this.virtualRunStartedAt(active);
+      return origin === undefined ? { runClockPaused: true, lastRunDurationMs: active.elapsedMs } : { runStartedAt: origin };
+    }
     const settled = this.settledRunTimingBySession.get(sessionId);
     return {
-      ...(active ? { runStartedAt: active.startedAt } : null),
       ...(settled ? { lastRunDurationMs: settled.durationMs } : null),
     };
   }
@@ -2281,8 +2315,10 @@ export class PiChatApp {
     generation: number | undefined,
   ): { startedAt?: number; durationMs?: number; endedAt?: number } {
     const active = this.activeRunTimingBySession.get(sessionId);
-    if (active && (generation === undefined || active.generation === generation))
-      return { startedAt: active.startedAt };
+    if (active && (generation === undefined || active.generation === generation)) {
+      const origin = this.virtualRunStartedAt(active);
+      return origin === undefined ? {} : { startedAt: origin };
+    }
     const settled = this.settledRunTimingBySession.get(sessionId);
     if (
       settled &&
@@ -2324,6 +2360,7 @@ export class PiChatApp {
     return {
       ...(runTiming.runStartedAt !== undefined ? { runStartedAt: runTiming.runStartedAt } : null),
       ...(runTiming.lastRunDurationMs !== undefined ? { lastRunDurationMs: runTiming.lastRunDurationMs } : null),
+      ...(runTiming.runClockPaused ? { runClockPaused: true } : null),
       ...(failureReason ? { error: failureReason } : null),
       ...(failureIncidentId ? { incidentId: failureIncidentId } : null),
       // `dispatching` also covers the post-settlement FIFO get_state barrier,

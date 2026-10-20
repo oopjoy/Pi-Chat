@@ -356,7 +356,9 @@ export function ConversationPane({
                   entries={item.entries}
                   streaming={activeProcess}
                   runStartedAt={activeProcess && index === latestProcessIndex ? runStartedAt : null}
-                  runDurationMs={settledDuration}
+                  runDurationMs={activeProcess && index === latestProcessIndex && !runStartedAt
+                    ? lastRunDurationMs
+                    : settledDuration}
                 />
               </Fragment>;
               return reactRenderBenchmarkEnabled

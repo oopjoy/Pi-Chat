@@ -34,6 +34,7 @@ function portsFor(
   return {
     transition: () => result,
     beginRunTiming: () => calls.push("begin"),
+    pauseRunTiming: () => calls.push("pause"),
     finishRunTiming: () => calls.push("finish"),
     traceRejected: () => calls.push("reject"),
     activePromptId: () => "prompt-id",
@@ -120,4 +121,14 @@ test("process failure releases the owner queue only after its visible frame", ()
     piChatPromptId: "prompt-id",
     nativeSteeringDroppedCount: 2,
   });
+});
+
+test("auto_retry_start pauses the run clock without settling the turn", () => {
+  const calls: string[] = [];
+  const delivered: Record<string, unknown>[] = [];
+  finalizeAcceptedRuntimeEvent(
+    portsFor(transition({ type: "auto_retry_start" }), calls, delivered),
+    { eventType: "auto_retry_start" },
+  );
+  assert.deepEqual(calls, ["pause", "activity", "failure", "touch", "broadcast"]);
 });

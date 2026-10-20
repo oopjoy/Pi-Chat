@@ -37,21 +37,31 @@ test("App preserves server-owned run timing through terminal SSE and activity sn
   clients.set({ write: (frame) => { frames.push(frame); return true; } }, "client");
   const internals = app as unknown as {
     beginSessionRunTiming(sessionId: string, generation: number): void;
+    pauseSessionRunTiming(sessionId: string): void;
     finishSessionRunTiming(sessionId: string, generation: number): void;
-    sessionActivity(sessionId: string): { runStartedAt?: number; lastRunDurationMs?: number };
+    sessionActivity(sessionId: string): { runStartedAt?: number; lastRunDurationMs?: number; runClockPaused?: boolean };
     broadcastRpcEvent(event: Record<string, unknown>, sessionId: string, generation: number): void;
   };
   try {
     internals.beginSessionRunTiming(SESSION_ID, 2);
     assert.equal(internals.sessionActivity(SESSION_ID).runStartedAt, 10_000);
-    now = 11_234;
-    internals.finishSessionRunTiming(SESSION_ID, 2);
+    now = 11_000;
+    internals.pauseSessionRunTiming(SESSION_ID);
+    assert.equal(internals.sessionActivity(SESSION_ID).runClockPaused, true);
+    assert.equal(internals.sessionActivity(SESSION_ID).lastRunDurationMs, 1_000);
+    assert.equal(internals.sessionActivity(SESSION_ID).runStartedAt, undefined);
+    now = 12_000;
+    internals.beginSessionRunTiming(SESSION_ID, 3);
+    assert.equal(internals.sessionActivity(SESSION_ID).runClockPaused, undefined);
+    assert.equal(internals.sessionActivity(SESSION_ID).runStartedAt, 11_000);
+    now = 12_234;
+    internals.finishSessionRunTiming(SESSION_ID, 3);
     assert.equal(internals.sessionActivity(SESSION_ID).lastRunDurationMs, 1_234);
-    internals.broadcastRpcEvent({ type: "agent_settled" }, SESSION_ID, 2);
+    internals.broadcastRpcEvent({ type: "agent_settled" }, SESSION_ID, 3);
     const settled = payload(frames.at(-1) || "");
     assert.equal(settled.piChatRunStartedAt, 10_000);
     assert.equal(settled.piChatRunDurationMs, 1_234);
-    assert.equal(settled.piChatRunEndedAt, 11_234);
+    assert.equal(settled.piChatRunEndedAt, 12_234);
   } finally {
     clients.clear();
     await app.close();

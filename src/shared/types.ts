@@ -31,10 +31,12 @@ export type SessionExecutionState = "idle" | "queued" | "dispatching" | "running
 export interface SessionActivityState {
   execution: SessionExecutionState;
   awaitingConfirmation: boolean;
-  /** Wall-clock start of the currently executing turn, owned by the server. */
+  /** Wall-clock origin of the currently executing turn, owned by the server. */
   runStartedAt?: number;
   /** Frozen duration of the most recently settled turn, in milliseconds. */
   lastRunDurationMs?: number;
+  /** True while an upstream interrupt has frozen the running-turn clock. */
+  runClockPaused?: boolean;
   /** Short runtime diagnostic retained while this Session remains failed. */
   error?: string;
   /** Local metadata-only incident record shown to the user for support correlation. */
