@@ -1,5 +1,5 @@
 import type { GateMode } from "../lib/gate-mode";
-import type { PromptDelivery, PromptImage, PiMessage, PiState, QueuedPrompt, ModelInfo } from "../../shared/types";
+import type { PromptDelivery, PromptImage, PiMessage, PiState, QueuedPrompt, ModelInfo, ThinkingLevel } from "../../shared/types";
 import type { DraftPaneAuthority, PaneAuthoritySnapshot } from "../application/pane-authority";
 import type { LocalUserTurn } from "../lib/local-user-turn";
 import type { RefObject } from "react";
@@ -355,6 +355,8 @@ export function createPromptSendFlow<THost extends PromptSendFlowHost>(host: THo
         preparationHost,
         {
           alreadyStreaming,
+          displayedModel: state.model,
+          displayedThinkingLevel: state.thinkingLevel as ThinkingLevel | undefined,
           images,
           localDraftRef,
           message,

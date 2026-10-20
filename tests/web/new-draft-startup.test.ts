@@ -789,7 +789,7 @@ test("draft startup races keep the composer usable, preserve newer control, and 
   }
 });
 
-test("a New draft sends Model and Thinking only after an explicit Composer choice", async () => {
+test("a New draft sends the Composer-visible Model so the new Runtime matches the input box", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");
   const { api } = await import("../../src/web/api");
@@ -828,8 +828,55 @@ test("a New draft sends Model and Thinking only after an explicit Composer choic
       await Promise.resolve();
     });
     assert.equal(submitted.length, 1);
-    assert.equal(submitted[0]?.model, undefined);
-    assert.equal(submitted[0]?.thinkingLevel, undefined);
+    assert.equal(submitted[0]?.model?.id, bootstrap.state.model?.id);
+    assert.equal(submitted[0]?.model?.provider, bootstrap.state.model?.provider);
+    assert.equal(submitted[0]?.thinkingLevel, bootstrap.state.thinkingLevel);
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
+test("New conversation 当前模型 follows the Composer selection", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { api } = await import("../../src/web/api");
+  const { App } = await import("../../src/web/App");
+  const restoreApi = captureApiSnapshot(api);
+  const route = {
+    provider: "cpafem",
+    id: "gpt-6.1-sol",
+    name: "6.1-sol",
+    api: "openai-responses",
+    input: ["text"],
+    reasoning: true,
+  };
+  Object.assign(api, {
+    bootstrap: async () => ({
+      ...bootstrap,
+      sessions: [],
+      activeSessionId: undefined,
+      activeSessionIds: [],
+      models: [...bootstrap.models, route],
+    }),
+    eventsUrl: () => "/api/events",
+    markSessionViewed: async () => ({ viewing: "" }),
+    clearSessionViewed: async () => ({ viewing: "" }),
+  });
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(App)));
+    const firstRun = dom.window.document.querySelector<HTMLElement>(".desktop-first-run")!;
+    assert.match(firstRun.textContent || "", /test\/model/);
+    const modelTrigger = dom.window.document.querySelector<HTMLButtonElement>(".composer-model-select .compact-select-trigger")!;
+    await act(async () => { modelTrigger.click(); await Promise.resolve(); });
+    const option = [...dom.window.document.querySelectorAll<HTMLElement>(".composer-model-option")]
+      .find((candidate) => candidate.textContent?.includes("6.1-sol"));
+    assert.ok(option);
+    await act(async () => { option.click(); await Promise.resolve(); });
+    assert.match(modelTrigger.textContent || "", /6\.1-sol/);
+    assert.match(firstRun.textContent || "", /cpafem\/gpt-6\.1-sol/);
+    assert.doesNotMatch(firstRun.textContent || "", /test\/model/);
   } finally {
     await act(async () => root.unmount());
     restoreApi();

@@ -50,6 +50,33 @@ test("prompt flow captures staged Model/Thinking/Gate intent without browser rev
   assert.equal((captured.promptSettings as unknown as { revision?: number }).revision, undefined);
 });
 
+test("a New draft without a click still captures the Composer-visible model", () => {
+  const displayed = { id: "glm-5.3-flash", name: "flash", provider: "cpafem", reasoning: true };
+  const captured = capturePromptSelection({
+    stagedSelection: undefined,
+    models: [displayed],
+    isDraft: true,
+    draftGateMode: undefined,
+    displayedModel: displayed,
+    displayedThinkingLevel: "xhigh",
+  });
+  assert.deepEqual(captured.promptSettings, {
+    model: { provider: "cpafem", modelId: "glm-5.3-flash" },
+    thinkingLevel: "xhigh",
+  });
+  assert.equal(
+    capturePromptSelection({
+      stagedSelection: undefined,
+      models: [displayed],
+      isDraft: false,
+      draftGateMode: undefined,
+      displayedModel: displayed,
+    }).promptSettings,
+    undefined,
+    "existing Sessions still omit display-only defaults",
+  );
+});
+
 test("protected local turn keeps Steer hidden until Pi consumes it", () => {
   const result = buildProtectedLocalTurn({
     turn: { role: "user", content: "steer" },

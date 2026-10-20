@@ -386,6 +386,7 @@ export function AppView(host: Record<string, any>) {
         loadingEarlier={loadingEarlier}
         onLoadEarlier={() => void loadEarlierTurns()}
         state={state}
+        composerState={composerState}
         toolStatus={toolStatus}
         onForkUserMessage={onForkUserMessage}
         forkUserMessageDisabled={Boolean(

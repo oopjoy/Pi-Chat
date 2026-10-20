@@ -1,4 +1,4 @@
-import type { PromptImage, PromptSettingsSnapshot, ModelInfo, SessionRuntimeReadyData } from "../../shared/types";
+import type { PromptImage, PromptSettingsSnapshot, ModelInfo, SessionRuntimeReadyData, ThinkingLevel } from "../../shared/types";
 import type { DraftPaneAuthority, PaneAuthoritySnapshot } from "./pane-authority";
 
 type Callback = (...args: any[]) => any;
@@ -41,6 +41,8 @@ export interface PromptPreparationStageHost {
 
 export interface PromptPreparationStageState {
   alreadyStreaming: boolean;
+  displayedModel?: ModelInfo | null;
+  displayedThinkingLevel?: ThinkingLevel;
   images: PromptImage[];
   localDraftRef: Ref<any>;
   message: string;
@@ -117,6 +119,8 @@ export async function preparePromptRuntime(
     warmSessionRuntime,
     workspaceCwd,
     alreadyStreaming,
+    displayedModel,
+    displayedThinkingLevel,
     images,
     localDraftRef,
     message,
@@ -153,6 +157,8 @@ export async function preparePromptRuntime(
       models,
       isDraft: Boolean(localDraftRef.current),
       draftGateMode: pendingGateModesRef.current.get(DRAFT_PREFS_KEY),
+      displayedModel,
+      displayedThinkingLevel,
     });
     const capturedSelection = captured.selection;
     const capturedPromptSettings = captured.promptSettings;
@@ -231,9 +237,8 @@ export async function preparePromptRuntime(
           cwd: draftWorkspaceCwd || workspaceCwd,
           message,
           images,
-          // PiState supplies the displayed default only. Creating a new
-          // Runtime must mutate Model/Thinking solely for an explicit Composer
-          // selection captured with this first prompt.
+          // A New draft has no Runtime yet. Send the Composer-visible model so
+          // the created Session matches the input box instead of Pi's leftover.
           model: capturedSelection?.model,
           thinkingLevel: capturedPromptSettings?.thinkingLevel,
           gateMode: capturedDraftGateMode,

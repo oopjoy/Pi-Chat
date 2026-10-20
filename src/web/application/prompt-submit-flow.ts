@@ -326,8 +326,11 @@ export function capturePromptSelection(input: {
   models: readonly ModelInfo[];
   isDraft: boolean;
   draftGateMode: GateMode | undefined;
+  /** Composer-visible defaults; a New draft has no Runtime of its own yet. */
+  displayedModel?: ModelInfo | null;
+  displayedThinkingLevel?: ThinkingLevel;
 }): CapturedPromptSelection {
-  const selection = input.stagedSelection
+  const staged = input.stagedSelection
     ? {
         ...input.stagedSelection,
         ...(input.stagedSelection.model
@@ -335,6 +338,17 @@ export function capturePromptSelection(input: {
           : null),
       }
     : undefined;
+  const selection = staged?.model || !input.isDraft || !input.displayedModel
+    ? staged
+    : {
+        revision: staged?.revision || 0,
+        model: { ...input.displayedModel },
+        ...(staged?.thinkingLevel !== undefined
+          ? { thinkingLevel: staged.thinkingLevel }
+          : input.displayedThinkingLevel
+            ? { thinkingLevel: input.displayedThinkingLevel }
+            : null),
+      };
   return {
     ...(selection ? { selection } : null),
     promptSettings: promptSettingsForSelection(selection, input.models),

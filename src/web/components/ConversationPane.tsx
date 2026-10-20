@@ -94,6 +94,8 @@ export interface ConversationPaneProps {
   loadingEarlier: boolean;
   onLoadEarlier: () => void;
   state: PiState;
+  /** Next-turn Composer selection; New drafts have no Runtime of their own yet. */
+  composerState?: PiState;
   toolStatus: string;
   onForkUserMessage: (message: PiMessage) => void;
   forkUserMessageDisabled: boolean;
@@ -147,6 +149,7 @@ export function ConversationPane({
   loadingEarlier,
   onLoadEarlier,
   state,
+  composerState,
   toolStatus,
   onForkUserMessage,
   forkUserMessageDisabled,
@@ -199,10 +202,11 @@ export function ConversationPane({
         : latest,
     -1,
   );
+  const nextTurn = composerState ?? state;
   const activeAssistantMetadata = {
-    provider: state.model?.provider,
-    model: state.model?.id,
-    thinkingLevel: state.thinkingLevel,
+    provider: nextTurn.model?.provider,
+    model: nextTurn.model?.id,
+    thinkingLevel: nextTurn.thinkingLevel,
   };
   const latestProcessIndex = conversationItems.reduce(
     (latest, item, index) => item.kind === "process" ? index : latest,
@@ -287,7 +291,7 @@ export function ConversationPane({
               <dl>
                 <div><dt>Pi Runtime</dt><dd data-status={firstRunGuide.runtimeStatus}>{firstRunRuntimeLabel}</dd></div>
                 <div><dt>Pi 版本</dt><dd>{firstRunGuide.piVersion || "等待检测"}</dd></div>
-                <div><dt>当前模型</dt><dd>{state.model ? `${state.model.provider}/${state.model.id}` : "等待 Runtime 提供模型"}</dd></div>
+                <div><dt>当前模型</dt><dd>{nextTurn.model ? `${nextTurn.model.provider}/${nextTurn.model.id}` : "等待 Runtime 提供模型"}</dd></div>
                 <div><dt>工作路径</dt><dd title={draftWorkspaceCwd || workspaceCwd || undefined}>{draftWorkspaceCwd || workspaceCwd || "尚未选择"}</dd></div>
               </dl>
               <p>确认模型和工作路径后，在下方输入消息；首次发送时才会创建保存的对话。</p>
