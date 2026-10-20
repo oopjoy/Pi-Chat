@@ -450,7 +450,7 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
     providerLoadSequence.current += 1;
     setEditingProviderKey("");
     setExpandedProvider("__new__");
-    setEditingProvider({ provider: "", baseUrl: "", api: "openai-completions", apiKey: "", models: [{ id: "", name: "" }] });
+    setEditingProvider({ provider: "", baseUrl: "", api: "openai-completions", apiKey: "", models: [{ id: "", name: "", reasoning: true }] });
     setError(""); setNotice("");
   };
   const beginEditProvider = async (
@@ -477,7 +477,11 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
     try {
       const result = await api.getCustomProvider(provider);
       if (sequence !== providerLoadSequence.current) return;
-      setEditingProvider({ ...result.provider, apiKey: "" });
+      setEditingProvider({
+        ...result.provider,
+        apiKey: "",
+        models: result.provider.models.map((model) => ({ ...model, reasoning: model.reasoning !== false })),
+      });
     } catch (cause) {
       if (sequence === providerLoadSequence.current) {
         setError(cause instanceof Error ? cause.message : String(cause));
@@ -486,13 +490,18 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
     }
   };
   const updateProvider = <K extends keyof CustomProviderInput>(key: K, value: CustomProviderInput[K]) => setEditingProvider((current) => current ? { ...current, [key]: value } : current);
-  const updateModel = (index: number, key: "id" | "name" | "contextWindow" | "maxTokens", value: string) => setEditingProvider((current) => {
+  const updateModel = (index: number, key: "id" | "name" | "contextWindow" | "maxTokens" | "reasoning", value: string | boolean) => setEditingProvider((current) => {
     if (!current) return current;
-    if ((key === "contextWindow" || key === "maxTokens") && !/^[0-9]*$/.test(value)) return current;
-    const models = current.models.map((model, modelIndex) => modelIndex === index ? { ...model, [key]: key === "contextWindow" || key === "maxTokens" ? (value ? Number(value) : undefined) : value } : model);
+    if ((key === "contextWindow" || key === "maxTokens") && typeof value === "string" && !/^[0-9]*$/.test(value)) return current;
+    const models = current.models.map((model, modelIndex) => {
+      if (modelIndex !== index) return model;
+      if (key === "reasoning") return { ...model, reasoning: value === true };
+      if (key === "contextWindow" || key === "maxTokens") return { ...model, [key]: typeof value === "string" && value ? Number(value) : undefined };
+      return { ...model, [key]: typeof value === "string" ? value : model[key] };
+    });
     return { ...current, models };
   });
-  const addModelRow = () => setEditingProvider((current) => current ? { ...current, models: [...current.models, { id: "", name: "" }] } : current);
+  const addModelRow = () => setEditingProvider((current) => current ? { ...current, models: [...current.models, { id: "", name: "", reasoning: true }] } : current);
   const removeModelRow = (index: number) => setEditingProvider((current) => current && current.models.length > 1 ? { ...current, models: current.models.filter((_, modelIndex) => modelIndex !== index) } : current);
   const saveProvider = async () => {
     if (!editingProvider || saving) return;
@@ -521,8 +530,8 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
   const providerEditor = editingProvider ? <div className="model-editor model-provider-editor" aria-label={editingProviderKey ? "编辑 Provider" : "添加 Provider"}>
     <div className="model-editor-head"><strong>{editingProviderKey ? `${editingProviderKey} 配置` : "添加自定义提供方"}</strong><button type="button" disabled={saving} onClick={closeProvider}>取消</button></div>
     <div className="model-editor-grid"><label>Provider<input value={editingProvider.provider} disabled={Boolean(editingProviderKey) || saving} onChange={(event) => updateProvider("provider", event.target.value)} /></label><label>API 协议<select value={editingProvider.api} disabled={saving} onChange={(event) => updateProvider("api", event.target.value as CustomProviderInput["api"])}><option value="openai-completions">openai-completions</option><option value="openai-responses">openai-responses</option><option value="anthropic-messages">anthropic-messages</option><option value="google-generative-ai">google-generative-ai</option></select></label><label className="model-editor-wide">API 地址<input value={editingProvider.baseUrl} disabled={saving} placeholder="https://api.example.com/v1" onChange={(event) => updateProvider("baseUrl", event.target.value)} /></label><label className="model-editor-wide">API 密钥<input type="password" value={editingProvider.apiKey || ""} disabled={saving} placeholder="已配置 — 输入新值以替换" onChange={(event) => updateProvider("apiKey", event.target.value)} /></label></div>
-    <div className="provider-models-heading"><span>ID</span><span>显示名称</span><span>上下文</span><span>最大输出</span><span aria-hidden="true" /></div>
-    <div className="provider-model-editor-list">{editingProvider.models.map((model, index) => <div className="provider-model-editor-row" key={index}><input aria-label={`模型 ${index + 1} ID`} placeholder="Model ID" value={model.id} disabled={saving} onChange={(event) => updateModel(index, "id", event.target.value)} /><input aria-label={`模型 ${index + 1} 名称`} placeholder="显示名称" value={model.name} disabled={saving} onChange={(event) => updateModel(index, "name", event.target.value)} /><input aria-label={`模型 ${index + 1} 上下文大小`} type="text" inputMode="numeric" pattern="[0-9]*" placeholder="上下文" value={model.contextWindow || ""} disabled={saving} onChange={(event) => updateModel(index, "contextWindow", event.target.value)} /><input aria-label={`模型 ${index + 1} 最大输出`} type="text" inputMode="numeric" pattern="[0-9]*" placeholder="最大输出" value={model.maxTokens || ""} disabled={saving} onChange={(event) => updateModel(index, "maxTokens", event.target.value)} /><button type="button" className="model-trash-button" aria-label={`删除模型 ${model.id || index + 1}`} title="删除模型条目" disabled={editingProvider.models.length <= 1 || saving} onClick={() => removeModelRow(index)}><TrashIcon /></button></div>)}</div>
+    <div className="provider-models-heading"><span>ID</span><span>显示名称</span><span>上下文</span><span>最大输出</span><span>思考</span><span aria-hidden="true" /></div>
+    <div className="provider-model-editor-list">{editingProvider.models.map((model, index) => <div className="provider-model-editor-row" key={index}><input aria-label={`模型 ${index + 1} ID`} placeholder="Model ID" value={model.id} disabled={saving} onChange={(event) => updateModel(index, "id", event.target.value)} /><input aria-label={`模型 ${index + 1} 名称`} placeholder="显示名称" value={model.name} disabled={saving} onChange={(event) => updateModel(index, "name", event.target.value)} /><input aria-label={`模型 ${index + 1} 上下文大小`} type="text" inputMode="numeric" pattern="[0-9]*" placeholder="上下文" value={model.contextWindow || ""} disabled={saving} onChange={(event) => updateModel(index, "contextWindow", event.target.value)} /><input aria-label={`模型 ${index + 1} 最大输出`} type="text" inputMode="numeric" pattern="[0-9]*" placeholder="最大输出" value={model.maxTokens || ""} disabled={saving} onChange={(event) => updateModel(index, "maxTokens", event.target.value)} /><label className="model-reasoning-toggle" title="启用后 Composer 提供 off/minimal/low/medium/high/xhigh/max 七档思考"><input type="checkbox" aria-label={`模型 ${index + 1} 思考`} checked={model.reasoning !== false} disabled={saving} onChange={(event) => updateModel(index, "reasoning", event.target.checked)} /><span>思考</span></label><button type="button" className="model-trash-button" aria-label={`删除模型 ${model.id || index + 1}`} title="删除模型条目" disabled={editingProvider.models.length <= 1 || saving} onClick={() => removeModelRow(index)}><TrashIcon /></button></div>)}</div>
     <button type="button" className="model-inline-add" disabled={saving} onClick={addModelRow}>＋ 添加模型</button><div className="model-editor-footer"><span>保存不会修改当前正在执行的 Prompt；新请求使用刷新后的配置。</span><button type="button" className="model-save-button" disabled={saving} onClick={() => void saveProvider()}>{saving ? "保存中…" : "保存"}</button></div>
   </div> : null;
   return <div className="settings-resource-panel models-panel">

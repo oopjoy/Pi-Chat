@@ -130,9 +130,9 @@ test("provider editor returns a redacted key and updates the whole model directo
   try {
     await writeFile(join(root, "models.json"), JSON.stringify({ providers: { ds: { baseUrl: "https://api.example.com", api: "openai-responses", apiKey: "secret", models: [{ id: "one", name: "One", api: "anthropic-messages", reasoning: true, input: ["text", "image"], cost: { input: 1 }, compat: { supportsDeveloperRole: false } }, { id: "two", name: "Two" }] } } }));
     const manager = new ModelManager(root);
-    assert.deepEqual(await manager.getCustomProvider("ds"), { provider: "ds", baseUrl: "https://api.example.com", api: "openai-responses", apiKey: "", models: [{ id: "one", originalId: "one", name: "One" }, { id: "two", originalId: "two", name: "Two" }] });
+    assert.deepEqual(await manager.getCustomProvider("ds"), { provider: "ds", baseUrl: "https://api.example.com", api: "openai-responses", apiKey: "", models: [{ id: "one", originalId: "one", name: "One", reasoning: true }, { id: "two", originalId: "two", name: "Two", reasoning: true }] });
     const updated = await manager.updateProvider("ds", { provider: "ds", baseUrl: "https://new.example.com", api: "openai-completions", apiKey: "", models: [{ id: "one-renamed", originalId: "one", name: "Renamed", contextWindow: 128000, maxTokens: 4096 }] });
-    assert.deepEqual(updated.models, [{ id: "one-renamed", originalId: "one-renamed", name: "Renamed", contextWindow: 128000, maxTokens: 4096 }]);
+    assert.deepEqual(updated.models, [{ id: "one-renamed", originalId: "one-renamed", name: "Renamed", reasoning: true, contextWindow: 128000, maxTokens: 4096 }]);
     const configured = JSON.parse(await readFile(join(root, "models.json"), "utf8"));
     assert.equal(configured.providers.ds.apiKey, "secret");
     assert.equal(configured.providers.ds.models.length, 1);
@@ -165,4 +165,44 @@ test("provider editor accepts normal IDs containing s and rejects whitespace", a
 test("custom model validation rejects unsafe provider names and invalid endpoints", () => {
   assert.throws(() => validateCustomModel({ provider: "../bad", id: "model", api: "openai-completions" }), /Provider/);
   assert.throws(() => validateCustomModel({ provider: "local", id: "model", api: "openai-completions", baseUrl: "file:///tmp" }), /Base URL/);
+});
+
+test("new provider models default to reasoning and can opt out", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-model-reasoning-default-"));
+  try {
+    const manager = new ModelManager(root);
+    await manager.addProvider({
+      provider: "local",
+      baseUrl: "https://api.example.com/v1",
+      api: "openai-completions",
+      models: [{ id: "alpha", name: "Alpha" }],
+    });
+    let configured = JSON.parse(await readFile(join(root, "models.json"), "utf8"));
+    assert.equal(configured.providers.local.models[0].reasoning, true);
+    assert.equal((await manager.getCustomProvider("local")).models[0].reasoning, true);
+
+    await manager.updateProvider("local", {
+      provider: "local",
+      baseUrl: "https://api.example.com/v1",
+      api: "openai-completions",
+      models: [
+        { id: "alpha", originalId: "alpha", name: "Alpha", reasoning: false },
+        { id: "beta", name: "Beta" },
+      ],
+    });
+    configured = JSON.parse(await readFile(join(root, "models.json"), "utf8"));
+    assert.equal(configured.providers.local.models[0].reasoning, false);
+    assert.equal(configured.providers.local.models[1].reasoning, true);
+    assert.deepEqual(
+      (await manager.getCustomProvider("local")).models.map((model) => [model.id, model.reasoning]),
+      [["alpha", false], ["beta", true]],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("custom model validation defaults omitted reasoning to enabled", () => {
+  assert.equal(validateCustomModel({ provider: "local", id: "model", api: "openai-completions" }).reasoning, true);
+  assert.equal(validateCustomModel({ provider: "local", id: "model", api: "openai-completions", reasoning: false }).reasoning, false);
 });

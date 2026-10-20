@@ -435,7 +435,7 @@ test("Provider editor preserves the stable source key when saving an edited mode
       await Promise.resolve();
     });
     assert.ok(saved);
-    assert.deepEqual(saved.models, [{ id: "renamed-id", originalId: "old-id", name: "Old name", contextWindow: 900_000, maxTokens: 80_000 }]);
+    assert.deepEqual(saved.models, [{ id: "renamed-id", originalId: "old-id", name: "Old name", contextWindow: 900_000, maxTokens: 80_000, reasoning: true }]);
   } finally {
     await act(async () => root.unmount());
     restoreApi();

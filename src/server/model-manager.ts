@@ -30,6 +30,13 @@ function positiveInteger(value: unknown, label: string, maximum: number): number
   return number;
 }
 
+/** New models default to reasoning; only an explicit false locks thinking off. */
+function reasoningEnabled(value: unknown, fallback = true): boolean {
+  if (value === true) return true;
+  if (value === false) return false;
+  return fallback;
+}
+
 export function validateCustomModel(value: unknown): CustomModelInput {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("模型配置必须是对象");
   const input = value as Record<string, unknown>;
@@ -54,7 +61,7 @@ export function validateCustomModel(value: unknown): CustomModelInput {
     baseUrl,
     api,
     apiKey,
-    reasoning: input.reasoning === true,
+    reasoning: reasoningEnabled(input.reasoning),
     imageInput: input.imageInput === true,
     contextWindow: positiveInteger(input.contextWindow, "Context Window", 100_000_000),
     maxTokens: positiveInteger(input.maxTokens, "Max Tokens", 10_000_000),
@@ -129,7 +136,7 @@ export class ModelManager {
       baseUrl: typeof provider.baseUrl === "string" ? provider.baseUrl : "",
       api,
       apiKey: "",
-      reasoning: model.reasoning === true,
+      reasoning: reasoningEnabled(model.reasoning),
       imageInput: input.includes("image"),
       contextWindow: typeof model.contextWindow === "number" ? model.contextWindow : undefined,
       maxTokens: typeof model.maxTokens === "number" ? model.maxTokens : undefined,
@@ -237,6 +244,7 @@ export class ModelManager {
           // original key so an ID rename can merge the edited values back into
           // the full models.json record instead of erasing hidden Pi metadata.
           originalId: model.id,
+          reasoning: reasoningEnabled(model.reasoning),
           ...(typeof model.contextWindow === "number" ? { contextWindow: model.contextWindow } : null),
           ...(typeof model.maxTokens === "number" ? { maxTokens: model.maxTokens } : null),
         }];
@@ -274,7 +282,8 @@ export class ModelManager {
       const name = nonEmptyString(model.name) || id;
       const contextWindow = positiveInteger(model.contextWindow, "Context Window", 100_000_000);
       const maxTokens = positiveInteger(model.maxTokens, "Max Tokens", 10_000_000);
-      return { id, name, ...(originalId ? { originalId } : null), contextWindow, maxTokens };
+      const reasoning = typeof model.reasoning === "boolean" ? model.reasoning : undefined;
+      return { id, name, ...(typeof reasoning === "boolean" ? { reasoning } : null), ...(originalId ? { originalId } : null), contextWindow, maxTokens };
     });
     const ids = new Set<string>();
     if (models.some((model) => ids.has(model.id) || (ids.add(model.id), false))) throw new Error("模型 ID 不能重复");
@@ -303,6 +312,7 @@ export class ModelManager {
         ...(previous || {}),
         id: model.id,
         name: model.name,
+        reasoning: reasoningEnabled(model.reasoning, previous ? previous.reasoning !== false : true),
       };
       delete next.originalId;
       if (model.contextWindow) next.contextWindow = model.contextWindow;
