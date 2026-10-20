@@ -1019,3 +1019,65 @@ test("a burst replacement keeps the metadata decision of the card it replaces", 
     "the replacement inherits the decision instead of re-showing metadata",
   );
 });
+
+test("incremental persisted assistant snapshots in one turn do not duplicate process notes and tools", () => {
+  const items = groupConversation([
+    { role: "user", content: "fix it", timestamp: 1 },
+    { role: "assistant", timestamp: 2, content: [
+      { type: "text", text: "I'll check first." },
+      { type: "toolCall", id: "bash-1", name: "bash", arguments: { command: "ls" } },
+    ] },
+    { role: "toolResult", toolCallId: "bash-1", toolName: "bash", content: "ok", timestamp: 3 },
+    { role: "assistant", timestamp: 4, content: [
+      { type: "text", text: "I'll check first." },
+      { type: "toolCall", id: "bash-1", name: "bash", arguments: { command: "ls" } },
+      { type: "text", text: "Found the cause." },
+      { type: "toolCall", id: "ask-1", name: "ask_user_question", arguments: { questions: [] } },
+    ] },
+    { role: "toolResult", toolCallId: "ask-1", toolName: "ask_user_question", content: "ok", timestamp: 5 },
+  ]);
+  const process = items.find((item) => item.kind === "process");
+  assert.equal(process?.kind, "process");
+  if (process?.kind !== "process") throw new Error("Expected process");
+  assert.deepEqual(
+    process.entries.filter((entry) => entry.kind === "note").map((entry) => entry.kind === "note" ? entry.text : ""),
+    ["I'll check first.", "Found the cause."],
+  );
+  assert.deepEqual(
+    process.entries.filter((entry) => entry.kind === "tool").map((entry) => entry.kind === "tool" ? entry.id : ""),
+    ["bash-1", "ask-1"],
+  );
+});
+
+test("a later live tool snapshot with a different timestamp replaces the persisted prefix", () => {
+  const persisted: PiMessage[] = [
+    { role: "user", content: "question", timestamp: 1 },
+    { role: "assistant", timestamp: 2, content: [
+      { type: "text", text: "Checking." },
+      { type: "toolCall", id: "bash-1", name: "bash", arguments: { command: "ls" } },
+    ] },
+    { role: "toolResult", toolCallId: "bash-1", toolName: "bash", content: "ok", timestamp: 3 },
+  ];
+  const live: PiMessage = {
+    role: "assistant",
+    timestamp: 40,
+    content: [
+      { type: "text", text: "Checking." },
+      { type: "toolCall", id: "bash-1", name: "bash", arguments: { command: "ls" } },
+      { type: "text", text: "Done." },
+      { type: "toolCall", id: "ask-1", name: "ask_user_question", arguments: {} },
+    ],
+  };
+  const items = groupConversation(persisted, { liveMessage: live });
+  const process = items.find((item) => item.kind === "process");
+  assert.equal(process?.kind, "process");
+  if (process?.kind !== "process") throw new Error("Expected process");
+  assert.deepEqual(
+    process.entries.filter((entry) => entry.kind === "note").map((entry) => entry.kind === "note" ? entry.text : ""),
+    ["Checking.", "Done."],
+  );
+  assert.deepEqual(
+    process.entries.filter((entry) => entry.kind === "tool").map((entry) => entry.kind === "tool" ? entry.id : ""),
+    ["bash-1", "ask-1"],
+  );
+});

@@ -693,7 +693,11 @@ export function transcriptConfirmsLocalTurn(
   const firstVisibleTurn = authoritativeTotal - visibleUsers.length + 1;
   // The authoritative suffix has advanced beyond this old local turn. It can no
   // longer be visible, but the later turn watermark proves it was persisted.
-  if (turn.expectedTurnTotal < firstVisibleTurn) return messagesTruncated;
+  // An empty truncated window is missing history, not proof the turn scrolled
+  // away. New sessions can race a busy hot view that reports truncated=true
+  // with zero User rows; confirming here would hide the first prompt behind
+  // "加载更早 10 轮".
+  if (turn.expectedTurnTotal < firstVisibleTurn) return messagesTruncated && visibleUsers.length > 0;
   const candidate = visibleUsers[turn.expectedTurnTotal - firstVisibleTurn];
   return Boolean(
     candidate

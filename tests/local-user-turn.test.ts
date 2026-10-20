@@ -1081,3 +1081,18 @@ test("a turn the window scrolled past is released instead of stranded forever", 
   const retained = protectTranscriptWithLocalTurns([turn], window, 2, 11, false);
   assert.deepEqual(retained.pendingTurns, [turn]);
 });
+
+test("an empty truncated window does not confirm the first local turn of a new session", () => {
+  const first: LocalUserTurn = {
+    sessionId: "new-session",
+    message: { role: "user", content: "first prompt", timestamp: 1_000 },
+    expectedTurnTotal: 1,
+  };
+  const emptyBusyView: PiMessage[] = [
+    { role: "assistant", content: [{ type: "toolCall", id: "bash-1", name: "bash", arguments: {} }] },
+  ];
+  assert.equal(transcriptConfirmsLocalTurn(first, emptyBusyView, 1, true), false);
+  const protectedTranscript = protectTranscriptWithLocalTurns([first], emptyBusyView, 1, 1, true);
+  assert.deepEqual(protectedTranscript.pendingTurns, [first]);
+  assert.equal(protectedTranscript.messages.some((message) => message === first.message), true);
+});

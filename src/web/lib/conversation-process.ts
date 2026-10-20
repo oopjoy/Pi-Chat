@@ -126,9 +126,8 @@ function processBearing(blocksToCheck: PiContentBlock[]): boolean {
   return blocksToCheck.some((block) => block.type === "thinking" || block.type === "toolCall");
 }
 
-function cumulativeAssistantMessage(earlier: PiMessage, later: PiMessage): boolean {
+function cumulativeAssistantPayload(earlier: PiMessage, later: PiMessage): boolean {
   if (earlier.role !== "assistant" || later.role !== "assistant") return false;
-  if (typeof earlier.timestamp !== "number" || !Number.isFinite(earlier.timestamp) || earlier.timestamp !== later.timestamp) return false;
   const earlierBlocks = blocks(earlier);
   const laterBlocks = blocks(later);
   if (!processBearing(earlierBlocks) || !processBearing(laterBlocks) || earlierBlocks.length > laterBlocks.length) return false;
@@ -149,6 +148,50 @@ function cumulativeAssistantMessage(earlier: PiMessage, later: PiMessage): boole
     used.add(match);
     return true;
   });
+}
+
+function cumulativeAssistantMessage(earlier: PiMessage, later: PiMessage): boolean {
+  if (typeof earlier.timestamp !== "number" || !Number.isFinite(earlier.timestamp) || earlier.timestamp !== later.timestamp) return false;
+  return cumulativeAssistantPayload(earlier, later);
+}
+
+/** Pi JSONL often appends a new assistant row after each tool; those are one turn. */
+function sameTurnCumulativeAssistant(earlier: PiMessage, later: PiMessage): boolean {
+  if (earlier.role !== "assistant" || later.role !== "assistant") return false;
+  if (!processBearing(blocks(earlier)) || !processBearing(blocks(later))) return false;
+  return sameAssistantContent(earlier, later) || cumulativeAssistantPayload(earlier, later);
+}
+
+/** Drop earlier tool-bearing assistant snapshots that a later row in the same turn supersedes. */
+function coalesceSameTurnCumulativeAssistants(messages: PiMessage[]): PiMessage[] {
+  const result: PiMessage[] = [];
+  let turnStart = 0;
+  for (const message of messages) {
+    if (message.role === "user" || message.role === LOCAL_COORDINATION_ROLE) {
+      result.push(message);
+      turnStart = result.length;
+      continue;
+    }
+    if (message.role !== "assistant") {
+      result.push(message);
+      continue;
+    }
+    let skip = false;
+    for (let index = result.length - 1; index >= turnStart; index -= 1) {
+      const existing = result[index];
+      if (existing?.role !== "assistant") continue;
+      if (sameTurnCumulativeAssistant(existing, message)) {
+        result.splice(index, 1);
+        continue;
+      }
+      if (sameTurnCumulativeAssistant(message, existing)) {
+        skip = true;
+        break;
+      }
+    }
+    if (!skip) result.push(message);
+  }
+  return result;
 }
 
 /** Reconcile only App's explicit cumulative live snapshot with persisted history. */
@@ -313,32 +356,36 @@ function mergeProcessEntries(entries: ProcessEntry[]): ProcessEntry[] {
     return merged.map((candidate) => candidate.kind === "tool" ? candidate.name : undefined).lastIndexOf(entry.name);
   };
   for (const entry of entries) {
+    if (entry.kind === "note") {
+      if (merged.some((candidate) => candidate.kind === "note" && candidate.text === entry.text)) continue;
+      merged.push(entry);
+      continue;
+    }
     if (entry.kind !== "tool") {
       merged.push(entry);
       continue;
     }
     const targetIndex = matchingToolIndex(entry);
     const target = merged[targetIndex];
-    if (!entry.completed) {
+    if (target?.kind === "tool") {
       // A busy-session refresh can expose a persisted result before the delayed
       // cumulative assistant snapshot carrying its toolCall. Merge in either
       // direction so that transient order does not hide arguments/diff/thinking.
-      if (target?.kind === "tool" && target.completed) {
-        merged[targetIndex] = {
-          ...entry,
-          ...(target.result !== undefined ? { result: target.result } : null),
-          completed: true,
-          isError: target.isError,
-        };
-      } else if (target?.kind === "tool") {
-        merged[targetIndex] = { ...target, ...entry };
-      } else merged.push(entry);
+      // A second completed copy of the same id is the same call, not a new tool.
+      merged[targetIndex] = {
+        ...target,
+        ...entry,
+        id: entry.id || target.id,
+        name: entry.name || target.name,
+        arguments: entry.arguments ?? target.arguments,
+        ...(entry.editDiff ?? target.editDiff ? { editDiff: entry.editDiff ?? target.editDiff } : null),
+        ...(entry.result !== undefined ? { result: entry.result } : target.result !== undefined ? { result: target.result } : null),
+        completed: Boolean(target.completed || entry.completed),
+        isError: entry.isError ?? target.isError,
+      };
       continue;
     }
-    // Completion and output are separate: a tool may succeed with no text.
-    if (target?.kind === "tool" && !target.completed) {
-      merged[targetIndex] = { ...target, ...(entry.result !== undefined ? { result: entry.result } : null), completed: true, isError: entry.isError };
-    } else merged.push(entry);
+    merged.push(entry);
   }
   return merged;
 }
@@ -392,7 +439,9 @@ export function groupConversation(messages: PiMessage[], options: { liveMessage?
     return Boolean(assistantHeader);
   };
 
-  const groupedMessages = withLiveAssistantSnapshot(messages, options.liveMessage);
+  const groupedMessages = coalesceSameTurnCumulativeAssistants(
+    withLiveAssistantSnapshot(messages, options.liveMessage),
+  );
   for (let messageIndex = 0; messageIndex < groupedMessages.length; messageIndex += 1) {
     const message = groupedMessages[messageIndex];
     if (message.role === LOCAL_COORDINATION_ROLE) {
