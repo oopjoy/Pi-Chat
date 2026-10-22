@@ -412,6 +412,10 @@ function DiagnosticsPanel({ busy, onExport }: {
   </div>;
 }
 
+function compareDiscoveredModelId(left: string, right: string): number {
+  return left.localeCompare(right, ["zh-CN", "en"], { numeric: true, sensitivity: "base" });
+}
+
 function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy, onModel, onBrowseModels, onModelsChanged }: {
   models: ModelInfo[];
   modelRuntimeSyncPending: boolean;
@@ -445,6 +449,14 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
     for (const model of models) groups.set(model.provider, [...(groups.get(model.provider) || []), model]);
     return [...groups.entries()];
   }, [models]);
+  const discoveredRows = useMemo(() => {
+    const upstreamIds = new Set(discoveredModels.map((model) => model.id));
+    const missing = (editingProvider?.models || [])
+      .filter((model) => model.id && !upstreamIds.has(model.id))
+      .map((model) => ({ id: model.id, ownedBy: undefined as string | undefined, missingUpstream: true }));
+    const upstream = discoveredModels.map((model) => ({ id: model.id, ownedBy: model.ownedBy, missingUpstream: false }));
+    return [...missing, ...upstream].sort((left, right) => compareDiscoveredModelId(left.id, right.id));
+  }, [discoveredModels, editingProvider]);
   const closeProvider = () => {
     providerLoadSequence.current += 1;
     setExpandedProvider("");
@@ -673,8 +685,10 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
         {probeError && <div className="resource-error">{probeError}</div>}
         {probing && !discoveredModels.length && !probeError && <p className="resource-loading">正在从上游获取模型列表…</p>}
         <ul className="provider-discovered-list">
-          {editingProvider?.models.filter((model) => model.id && !discoveredModels.some((discovered) => discovered.id === model.id)).map((model) => <li key={`kept-${model.id}`}><label><input type="checkbox" checked={selectedDiscoveredIds.has(model.id)} disabled={saving} onChange={(event) => setSelectedDiscoveredIds((current) => { const next = new Set(current); if (event.target.checked) next.add(model.id); else next.delete(model.id); return next; })} /><span>{model.id}<i>已配置，上游未返回</i></span></label></li>)}
-          {discoveredModels.map((model) => <li key={model.id}><label><input type="checkbox" checked={selectedDiscoveredIds.has(model.id)} disabled={saving} onChange={(event) => setSelectedDiscoveredIds((current) => { const next = new Set(current); if (event.target.checked) next.add(model.id); else next.delete(model.id); return next; })} /><span>{model.id}{model.ownedBy ? <i>{model.ownedBy}</i> : null}</span></label></li>)}
+          {discoveredRows.map((model) => <li key={model.id}><label>
+            <span className="provider-discovered-name">{model.id}{model.missingUpstream ? <i>已配置，上游未返回</i> : model.ownedBy ? <i>{model.ownedBy}</i> : null}</span>
+            <input type="checkbox" checked={selectedDiscoveredIds.has(model.id)} disabled={saving} onChange={(event) => setSelectedDiscoveredIds((current) => { const next = new Set(current); if (event.target.checked) next.add(model.id); else next.delete(model.id); return next; })} />
+          </label></li>)}
         </ul>
         <footer className="provider-discovered-actions">
           <button type="button" disabled={saving} onClick={() => setPickerOpen(false)}>取消</button>

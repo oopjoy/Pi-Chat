@@ -1022,8 +1022,9 @@ details.conversation-process { display: block; padding: 0; }
 .provider-discovered-list { overflow: auto; flex: 1 1 auto; min-height: 160px; max-height: 46vh; margin: 0; padding: 0; list-style: none; border: 1px solid var(--line); border-radius: 8px; }
 .provider-discovered-list li { border-top: 1px solid color-mix(in srgb, var(--line), transparent 40%); }
 .provider-discovered-list li:first-child { border-top: 0; }
-.provider-discovered-list label { display: flex; gap: 8px; align-items: flex-start; padding: 8px 10px; cursor: pointer; font: 13px/1.35 var(--app-font); }
-.provider-discovered-list input { width: 14px; height: 14px; margin: 3px 0 0; flex: none; accent-color: var(--accent); }
+.provider-discovered-list label { display: flex; gap: 12px; align-items: center; justify-content: space-between; padding: 8px 12px; cursor: pointer; font: 13px/1.35 var(--app-font); }
+.provider-discovered-name { min-width: 0; flex: 1 1 auto; overflow-wrap: anywhere; }
+.dialog.provider-discovered-dialog input[type="checkbox"] { box-sizing: border-box; width: 14px; height: 14px; min-width: 14px; margin: 0; padding: 0; flex: none; appearance: auto; accent-color: var(--accent); }
 .provider-discovered-list i { display: block; color: var(--muted); font-size: 11px; font-style: normal; }
 .provider-discovered-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 .model-provider-actions { display: flex; align-items: center; gap: 10px; }
