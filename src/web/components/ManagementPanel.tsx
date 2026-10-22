@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { PiRuntimeUpdateCheck } from "../../shared/pi-runtime-update";
 import type { BootstrapData, BuildIdentity, CustomProviderInput, DiscoveredProviderModel, ExtensionResource, ModelInfo, PackageResource, PiState, PrimaryRuntimeReadiness, SkillResource } from "../../shared/types";
 import { useModalFocus } from "../lib/modal-focus";
@@ -434,6 +435,9 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
   const [discoveredModels, setDiscoveredModels] = useState<DiscoveredProviderModel[]>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [selectedDiscoveredIds, setSelectedDiscoveredIds] = useState<Set<string>>(new Set());
+  const [probeError, setProbeError] = useState("");
+  const probeDialogRef = useRef<HTMLElement>(null);
+  useModalFocus(pickerOpen, probeDialogRef);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const modelGroups = useMemo(() => {
@@ -450,6 +454,7 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
     setPickerOpen(false);
     setSelectedDiscoveredIds(new Set());
     setProbing(false);
+    setProbeError("");
   };
   const beginAddProvider = () => {
     // Model file edits no longer require global quiescence, so neither button
@@ -511,11 +516,20 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
   });
   const addModelRow = () => setEditingProvider((current) => current ? { ...current, models: [...current.models, { id: "", name: "", reasoning: true }] } : current);
   const removeModelRow = (index: number) => setEditingProvider((current) => current && current.models.length > 1 ? { ...current, models: current.models.filter((_, modelIndex) => modelIndex !== index) } : current);
+  useEffect(() => {
+    if (!pickerOpen) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      setPickerOpen(false);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [pickerOpen]);
   const probeModels = async () => {
     if (!editingProvider || probing || saving) return;
-    if (!editingProvider.baseUrl.trim()) { setError("请先填写 API 地址"); return; }
-    if (!editingProvider.apiKey?.trim() && !editingProviderKey) { setError("请先填写 API 密钥"); return; }
-    setProbing(true); setError(""); setNotice("");
+    setProbing(true); setProbeError("");
     try {
       const result = await api.probeProviderModels({
         baseUrl: editingProvider.baseUrl,
@@ -526,13 +540,21 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
       const configured = new Set(editingProvider.models.map((model) => model.id).filter(Boolean));
       setDiscoveredModels(result.models);
       setSelectedDiscoveredIds(new Set([...configured]));
-      setPickerOpen(true);
-      setNotice(`探测到 ${result.models.length} 个上游模型。勾选要加入目录的项，然后点应用。`);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setProbeError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setProbing(false);
     }
+  };
+  const openProbeDialog = () => {
+    if (!editingProvider || saving || probing) return;
+    if (!editingProvider.baseUrl.trim()) { setError("请先填写 API 地址"); return; }
+    if (!editingProvider.apiKey?.trim() && !editingProviderKey) { setError("请先填写 API 密钥"); return; }
+    setError("");
+    setProbeError("");
+    setSelectedDiscoveredIds(new Set(editingProvider.models.map((model) => model.id).filter(Boolean)));
+    setPickerOpen(true);
+    void probeModels();
   };
   const applyDiscovered = () => {
     setEditingProvider((current) => {
@@ -576,20 +598,12 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
     <div className="model-editor-head"><strong>{editingProviderKey ? `${editingProviderKey} 配置` : "添加自定义提供方"}</strong><button type="button" disabled={saving} onClick={closeProvider}>取消</button></div>
     <div className="model-editor-grid"><label>Provider<input value={editingProvider.provider} disabled={Boolean(editingProviderKey) || saving} onChange={(event) => updateProvider("provider", event.target.value)} /></label><label>API 协议<select value={editingProvider.api} disabled={saving} onChange={(event) => updateProvider("api", event.target.value as CustomProviderInput["api"])}><option value="openai-completions">openai-completions</option><option value="openai-responses">openai-responses</option><option value="anthropic-messages">anthropic-messages</option><option value="google-generative-ai">google-generative-ai</option></select></label><label className="model-editor-wide">API 地址<input value={editingProvider.baseUrl} disabled={saving} placeholder="https://api.example.com/v1" onChange={(event) => updateProvider("baseUrl", event.target.value)} /></label><label className="model-editor-wide">API 密钥<input type="password" value={editingProvider.apiKey || ""} disabled={saving} placeholder="已配置 — 输入新值以替换" onChange={(event) => updateProvider("apiKey", event.target.value)} /></label></div>
     <div className="provider-models-heading"><span>ID</span><span>显示名称</span><span>上下文</span><span>最大输出</span><span>思考</span><span aria-hidden="true" /></div>
-    <div className="provider-model-editor-list">{editingProvider.models.map((model, index) => <div className="provider-model-editor-row" key={index}><input aria-label={`模型 ${index + 1} ID`} placeholder="Model ID" value={model.id} disabled={saving} onChange={(event) => updateModel(index, "id", event.target.value)} /><input aria-label={`模型 ${index + 1} 名称`} placeholder="显示名称" value={model.name} disabled={saving} onChange={(event) => updateModel(index, "name", event.target.value)} /><input aria-label={`模型 ${index + 1} 上下文大小`} type="text" inputMode="numeric" pattern="[0-9]*" placeholder="上下文" value={model.contextWindow || ""} disabled={saving} onChange={(event) => updateModel(index, "contextWindow", event.target.value)} /><input aria-label={`模型 ${index + 1} 最大输出`} type="text" inputMode="numeric" pattern="[0-9]*" placeholder="最大输出" value={model.maxTokens || ""} disabled={saving} onChange={(event) => updateModel(index, "maxTokens", event.target.value)} /><label className="model-reasoning-toggle" title="启用后 Composer 提供 off/minimal/low/medium/high/xhigh/max 七档思考"><input type="checkbox" aria-label={`模型 ${index + 1} 思考`} checked={model.reasoning !== false} disabled={saving} onChange={(event) => updateModel(index, "reasoning", event.target.checked)} /><span>思考</span></label><button type="button" className="model-trash-button" aria-label={`删除模型 ${model.id || index + 1}`} title="删除模型条目" disabled={editingProvider.models.length <= 1 || saving} onClick={() => removeModelRow(index)}><TrashIcon /></button></div>)}</div>
-    <div className="provider-model-editor-actions"><button type="button" className="model-inline-add" disabled={saving} onClick={addModelRow}>＋ 添加模型</button><button type="button" className="model-probe-button" disabled={saving || probing} onClick={() => { if (discoveredModels.length && !probing) { setSelectedDiscoveredIds(new Set(editingProvider.models.map((model) => model.id).filter(Boolean))); setPickerOpen(true); } else void probeModels(); }}>{probing ? "正在探测…" : discoveredModels.length ? "选择上游模型" : "获取模型列表"}</button></div>
-    {pickerOpen && <div className="provider-discovered-picker" role="region" aria-label="上游模型列表">
-      <div className="provider-discovered-head"><strong>上游模型</strong><button type="button" disabled={probing || saving} onClick={() => void probeModels()}>刷新</button></div>
-      <p>已配置的模型默认勾选。勾选后点应用加入编辑列表，不会立即保存。</p>
-      <ul className="provider-discovered-list">
-        {editingProvider.models.filter((model) => model.id && !discoveredModels.some((discovered) => discovered.id === model.id)).map((model) => <li key={`kept-${model.id}`}><label><input type="checkbox" checked={selectedDiscoveredIds.has(model.id)} disabled={saving} onChange={(event) => setSelectedDiscoveredIds((current) => { const next = new Set(current); if (event.target.checked) next.add(model.id); else next.delete(model.id); return next; })} /><span>{model.id}<i>已配置，上游未返回</i></span></label></li>)}
-        {discoveredModels.map((model) => <li key={model.id}><label><input type="checkbox" checked={selectedDiscoveredIds.has(model.id)} disabled={saving} onChange={(event) => setSelectedDiscoveredIds((current) => { const next = new Set(current); if (event.target.checked) next.add(model.id); else next.delete(model.id); return next; })} /><span>{model.id}{model.ownedBy ? <i>{model.ownedBy}</i> : null}</span></label></li>)}
-      </ul>
-      <div className="provider-discovered-actions"><button type="button" disabled={saving} onClick={() => setPickerOpen(false)}>取消</button><button type="button" className="model-save-button" disabled={saving} onClick={applyDiscovered}>应用所选</button></div>
-    </div>}
+    <div className="provider-model-editor-list">{editingProvider.models.map((model, index) => <div className="provider-model-editor-row" key={index}><input aria-label={`模型 ${index + 1} ID`} placeholder="Model ID" value={model.id} disabled={saving} onChange={(event) => updateModel(index, "id", event.target.value)} /><input aria-label={`模型 ${index + 1} 名称`} placeholder="显示名称" value={model.name} disabled={saving} onChange={(event) => updateModel(index, "name", event.target.value)} /><input aria-label={`模型 ${index + 1} 上下文大小`} type="text" inputMode="numeric" pattern="[0-9]*" placeholder="上下文" value={model.contextWindow || ""} disabled={saving} onChange={(event) => updateModel(index, "contextWindow", event.target.value)} /><input aria-label={`模型 ${index + 1} 最大输出`} type="text" inputMode="numeric" pattern="[0-9]*" placeholder="最大输出" value={model.maxTokens || ""} disabled={saving} onChange={(event) => updateModel(index, "maxTokens", event.target.value)} /><label className="model-reasoning-toggle" title="启用七档思考"><input type="checkbox" aria-label={`模型 ${index + 1} 思考`} checked={model.reasoning !== false} disabled={saving} onChange={(event) => updateModel(index, "reasoning", event.target.checked)} /></label><button type="button" className="model-trash-button" aria-label={`删除模型 ${model.id || index + 1}`} title="删除模型条目" disabled={editingProvider.models.length <= 1 || saving} onClick={() => removeModelRow(index)}><TrashIcon /></button></div>)}</div>
+    <div className="provider-model-editor-actions"><button type="button" className="model-inline-add" disabled={saving} onClick={addModelRow}>＋ 添加模型</button><button type="button" className="model-probe-button" disabled={saving || probing} onClick={openProbeDialog}>{probing ? "正在探测…" : "获取上游模型列表"}</button></div>
     <div className="model-editor-footer"><span>保存不会修改当前正在执行的 Prompt；新请求使用刷新后的配置。</span><button type="button" className="model-save-button" disabled={saving} onClick={() => void saveProvider()}>{saving ? "保存中…" : "保存"}</button></div>
   </div> : null;
-  return <div className="settings-resource-panel models-panel">
+  return <>
+  <div className="settings-resource-panel models-panel">
     <div className="settings-resource-heading"><div className="settings-resource-title"><h3>模型<span className="count-badge">{models.length}</span></h3><p>按 Provider 管理自定义连接和模型目录。内置登录 Provider 由 Pi Runtime 管理。</p><span className={`model-runtime-status ${modelRuntimeSyncPending ? "is-pending" : "is-ready"}`}>{modelRuntimeSyncPending ? "正在刷新模型目录" : "模型目录已刷新"}</span></div><div className="models-panel-actions"><button type="button" className="model-add-button" disabled={saving} onClick={beginAddProvider}>添加自定义提供方</button><button type="button" className="resource-browse-root" title="打开 models.json" aria-label="打开 models.json" disabled={browseBusy} onClick={onBrowseModels}><FolderIcon /></button></div></div>
     {error && <div className="resource-error">{error}</div>}{notice && !error && <div className="resource-notice">{notice}</div>}
     {expandedProvider === "__new__" && providerEditor}
@@ -647,7 +661,30 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
         </div>}
       </section>;
     })}{!models.length && <p className="resource-loading">当前没有可用模型</p>}</div>
-  </div>;
+  </div>
+  {pickerOpen && createPortal(
+    <div className="panel-backdrop provider-discovered-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPickerOpen(false); }}>
+      <section ref={probeDialogRef} className="dialog provider-discovered-dialog" role="dialog" aria-modal="true" aria-labelledby="provider-discovered-title">
+        <header className="provider-discovered-head">
+          <h2 id="provider-discovered-title">上游模型列表</h2>
+          <button type="button" disabled={probing || saving} onClick={() => void probeModels()}>{probing ? "正在探测…" : "刷新"}</button>
+        </header>
+        <p>已配置的模型默认勾选。勾选后点应用加入编辑列表，不会立即保存。</p>
+        {probeError && <div className="resource-error">{probeError}</div>}
+        {probing && !discoveredModels.length && !probeError && <p className="resource-loading">正在从上游获取模型列表…</p>}
+        <ul className="provider-discovered-list">
+          {editingProvider?.models.filter((model) => model.id && !discoveredModels.some((discovered) => discovered.id === model.id)).map((model) => <li key={`kept-${model.id}`}><label><input type="checkbox" checked={selectedDiscoveredIds.has(model.id)} disabled={saving} onChange={(event) => setSelectedDiscoveredIds((current) => { const next = new Set(current); if (event.target.checked) next.add(model.id); else next.delete(model.id); return next; })} /><span>{model.id}<i>已配置，上游未返回</i></span></label></li>)}
+          {discoveredModels.map((model) => <li key={model.id}><label><input type="checkbox" checked={selectedDiscoveredIds.has(model.id)} disabled={saving} onChange={(event) => setSelectedDiscoveredIds((current) => { const next = new Set(current); if (event.target.checked) next.add(model.id); else next.delete(model.id); return next; })} /><span>{model.id}{model.ownedBy ? <i>{model.ownedBy}</i> : null}</span></label></li>)}
+        </ul>
+        <footer className="provider-discovered-actions">
+          <button type="button" disabled={saving} onClick={() => setPickerOpen(false)}>取消</button>
+          <button type="button" className="model-save-button" disabled={saving || probing} onClick={applyDiscovered}>应用所选</button>
+        </footer>
+      </section>
+    </div>,
+    document.body,
+  )}
+  </>;
 }
 
 function filterList<T>(items: T[], filter: string, text: (item: T) => string): T[] {

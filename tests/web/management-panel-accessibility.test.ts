@@ -410,7 +410,7 @@ test("Provider editor preserves the stable source key when saving an edited mode
       edit.click();
       await Promise.resolve();
     });
-    assert.ok([...dom.window.document.querySelectorAll("button")].some((button) => button.textContent === "获取模型列表"), "provider editor exposes upstream model discovery");
+    assert.ok([...dom.window.document.querySelectorAll("button")].some((button) => button.textContent === "获取上游模型列表"), "provider editor exposes upstream model discovery");
     const context = dom.window.document.querySelector<HTMLInputElement>('input[aria-label="模型 1 上下文大小"]')!;
     const output = dom.window.document.querySelector<HTMLInputElement>('input[aria-label="模型 1 最大输出"]')!;
     for (const input of [context, output]) {
