@@ -57,4 +57,10 @@ test("route admission preserves lifecycle and read exclusions", () => {
     acquireMutationLeaseAfterBody: false,
     ordinaryMutation: false,
   });
+  assert.deepEqual(route("POST", "/api/models/probe"), {
+    bodyBeforeMutationLease: true,
+    validateSessionId: false,
+    bodyLimit: DEFAULT_MUTATION_BODY_LIMIT,
+    ordinaryMutation: false,
+  });
 });

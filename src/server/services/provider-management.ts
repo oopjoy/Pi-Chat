@@ -1,8 +1,9 @@
 import type { ModelManager } from "../model-manager.js";
 import { asState } from "../pi-data.js";
+import { probeProviderModels } from "../provider-model-probe.js";
 
 export interface ProviderManagementPorts {
-  manager: Pick<ModelManager, "getCustomProvider" | "addProvider" | "removeProvider" | "updateProvider">;
+  manager: Pick<ModelManager, "getCustomProvider" | "addProvider" | "removeProvider" | "updateProvider" | "storedProviderApiKey">;
   withLifecycle<T>(description: string, mutation: () => Promise<T>): Promise<T>;
   withModelFileTransaction<T>(mutation: () => Promise<T>): Promise<T>;
   primaryState(): Promise<Record<string, unknown>>;
@@ -14,6 +15,18 @@ export interface ProviderManagementPorts {
 export function createProviderManagement(ports: ProviderManagementPorts) {
   return {
     get: (provider: string) => ports.manager.getCustomProvider(provider),
+    probe: async (body: Record<string, unknown>) => {
+      const typedKey = typeof body.apiKey === "string" ? body.apiKey.trim() : "";
+      const provider = typeof body.provider === "string" ? body.provider.trim() : "";
+      const apiKey = typedKey || (provider ? await ports.manager.storedProviderApiKey(provider) : "") || "";
+      return {
+        models: await probeProviderModels({
+          baseUrl: String(body.baseUrl || ""),
+          api: String(body.api || "openai-completions"),
+          apiKey,
+        }),
+      };
+    },
     add: (body: Record<string, unknown>) => ports.withLifecycle("添加 Provider", async () => {
       await ports.withModelFileTransaction(() => ports.manager.addProvider(body));
       return ports.bootstrap();

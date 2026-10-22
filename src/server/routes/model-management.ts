@@ -7,6 +7,7 @@ export interface ModelManagementRouteHost {
   providerService(): {
     add(body: Record<string, unknown>): Promise<unknown>;
     get(provider: string): Promise<unknown>;
+    probe(body: Record<string, unknown>): Promise<unknown>;
     remove(provider: string): Promise<unknown>;
     update(provider: string, body: Record<string, unknown>): Promise<unknown>;
   };
@@ -31,6 +32,17 @@ export async function handleModelManagementRoute(
   url: URL,
   preparedBody?: Record<string, unknown>,
 ): Promise<boolean> {
+  if (url.pathname === "/api/models/probe") {
+    if (request.method !== "POST") { methodNotAllowed(response); return true; }
+    if (!host.available()) { json(response, 501, { error: "模型管理不可用" }); return true; }
+    const body = preparedBody || await bodyJson(request);
+    try { json(response, 200, await host.providerService().probe(body)); }
+    catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      json(response, 400, { error: message });
+    }
+    return true;
+  }
   if (url.pathname === "/api/models/provider" && request.method === "POST") {
     if (!host.available()) { json(response, 501, { error: "模型管理不可用" }); return true; }
     const body = preparedBody || await bodyJson(request);

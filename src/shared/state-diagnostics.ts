@@ -209,6 +209,7 @@ const STATIC_API_ROUTES = new Set([
   "/api/health",
   "/api/local-files/pick",
   "/api/models",
+  "/api/models/probe",
   "/api/models/set",
   "/api/presence",
   "/api/resources/browse",

@@ -154,6 +154,11 @@ export interface CustomProviderInput {
   models: CustomProviderModelInput[];
 }
 
+export interface DiscoveredProviderModel {
+  id: string;
+  ownedBy?: string;
+}
+
 export interface PiContentBlock {
   type: string;
   text?: string;

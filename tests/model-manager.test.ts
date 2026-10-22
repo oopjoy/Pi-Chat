@@ -131,6 +131,7 @@ test("provider editor returns a redacted key and updates the whole model directo
     await writeFile(join(root, "models.json"), JSON.stringify({ providers: { ds: { baseUrl: "https://api.example.com", api: "openai-responses", apiKey: "secret", models: [{ id: "one", name: "One", api: "anthropic-messages", reasoning: true, input: ["text", "image"], cost: { input: 1 }, compat: { supportsDeveloperRole: false } }, { id: "two", name: "Two" }] } } }));
     const manager = new ModelManager(root);
     assert.deepEqual(await manager.getCustomProvider("ds"), { provider: "ds", baseUrl: "https://api.example.com", api: "openai-responses", apiKey: "", models: [{ id: "one", originalId: "one", name: "One", reasoning: true }, { id: "two", originalId: "two", name: "Two", reasoning: true }] });
+    assert.equal(await manager.storedProviderApiKey("ds"), "secret");
     const updated = await manager.updateProvider("ds", { provider: "ds", baseUrl: "https://new.example.com", api: "openai-completions", apiKey: "", models: [{ id: "one-renamed", originalId: "one", name: "Renamed", contextWindow: 128000, maxTokens: 4096 }] });
     assert.deepEqual(updated.models, [{ id: "one-renamed", originalId: "one-renamed", name: "Renamed", reasoning: true, contextWindow: 128000, maxTokens: 4096 }]);
     const configured = JSON.parse(await readFile(join(root, "models.json"), "utf8"));

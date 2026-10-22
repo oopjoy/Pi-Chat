@@ -1,7 +1,7 @@
 import type { PiRuntimeUpdateCheck } from "../shared/pi-runtime-update";
 import type { RuntimeEntryInfo, RuntimeSetupChange, RuntimeSetupStatus } from "../shared/runtime-setup";
 import type { ServerStateDiagnosticSnapshot } from "../shared/state-diagnostics";
-import type { BackgroundSubagentSnapshot, BootstrapData, BootstrapHandshakeData, CustomModelInput, CustomProviderInput, ExtensionResource, GateMode, InitialPromptData, ModelInfo, PackageResource, PromptDelivery, PromptImage, PromptSettingsSnapshot, QueuedPrompt, ResourceResponse, SessionCopyData, SessionDirectorySummary, SessionHistoryPage, SessionRuntimeReadyData, SessionSummary, SessionViewData, SkillResource, ThinkingLevel, WorkspaceFileData, WorkspaceRecentFilesData } from "../shared/types";
+import type { BackgroundSubagentSnapshot, BootstrapData, BootstrapHandshakeData, CustomModelInput, CustomProviderInput, DiscoveredProviderModel, ExtensionResource, GateMode, InitialPromptData, ModelInfo, PackageResource, PromptDelivery, PromptImage, PromptSettingsSnapshot, QueuedPrompt, ResourceResponse, SessionCopyData, SessionDirectorySummary, SessionHistoryPage, SessionRuntimeReadyData, SessionSummary, SessionViewData, SkillResource, ThinkingLevel, WorkspaceFileData, WorkspaceRecentFilesData } from "../shared/types";
 import { recordBrowserStateDiagnostic } from "./lib/state-diagnostics";
 import { draftStorageOwner } from "./lib/draft-recovery";
 
@@ -557,6 +557,8 @@ export const api = {
   deleteSession: (id: string) => request<BootstrapData>(`/api/sessions/${id}`, { method: "DELETE" }, RUNTIME_OPERATION_TIMEOUT_MS),
   getCustomModel: (provider: string, id: string) => request<{ model: CustomModelInput }>(`/api/models/${encodeURIComponent(provider)}/${encodeURIComponent(id)}`),
   getCustomProvider: (provider: string) => request<{ provider: CustomProviderInput }>(`/api/models/provider/${encodeURIComponent(provider)}`),
+  probeProviderModels: (input: { baseUrl: string; api: CustomProviderInput["api"]; apiKey?: string; provider?: string }) =>
+    request<{ models: DiscoveredProviderModel[] }>("/api/models/probe", { method: "POST", body: JSON.stringify(input) }, RUNTIME_OPERATION_TIMEOUT_MS),
   addCustomProvider: (config: CustomProviderInput) => request<BootstrapData>("/api/models/provider", { method: "POST", body: JSON.stringify(config) }, RUNTIME_OPERATION_TIMEOUT_MS),
   updateCustomProvider: (provider: string, config: CustomProviderInput) => request<BootstrapData>(`/api/models/provider/${encodeURIComponent(provider)}`, { method: "PUT", body: JSON.stringify(config) }, RUNTIME_OPERATION_TIMEOUT_MS),
   deleteCustomProvider: (provider: string) => request<BootstrapData>(`/api/models/provider/${encodeURIComponent(provider)}`, { method: "DELETE" }, RUNTIME_OPERATION_TIMEOUT_MS),

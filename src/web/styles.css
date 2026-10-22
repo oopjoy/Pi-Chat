@@ -1008,6 +1008,20 @@ details.conversation-process { display: block; padding: 0; }
 .provider-model-editor-row button:hover:not(:disabled) { color: #e05252; }
 .provider-model-editor-row button:disabled { cursor: default; opacity: .35; }
 .model-inline-add { margin: 10px 0 14px; padding: 6px 9px; border: 1px dashed var(--line); border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; font: 11px/1.2 var(--app-font); }
+.provider-model-editor-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0 14px; }
+.provider-model-editor-actions .model-inline-add { margin: 0; }
+.model-probe-button { padding: 6px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--text); cursor: pointer; font: 11px/1.2 var(--app-font); }
+.model-probe-button:disabled { cursor: default; opacity: .5; }
+.provider-discovered-picker { margin: 0 0 14px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.provider-discovered-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.provider-discovered-head button, .provider-discovered-actions button { padding: 5px 9px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--text); cursor: pointer; font: 11px/1.2 var(--app-font); }
+.provider-discovered-picker p { margin: 6px 0 8px; color: var(--muted); font-size: 11px; }
+.provider-discovered-list { overflow: auto; max-height: 240px; margin: 0; padding: 0; list-style: none; }
+.provider-discovered-list li { border-top: 1px solid color-mix(in srgb, var(--line), transparent 40%); }
+.provider-discovered-list label { display: flex; gap: 8px; align-items: flex-start; padding: 6px 2px; cursor: pointer; font: 12px/1.35 var(--app-font); }
+.provider-discovered-list input { margin: 3px 0 0; }
+.provider-discovered-list i { display: block; color: var(--muted); font-size: 10px; font-style: normal; }
+.provider-discovered-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
 .model-provider-actions { display: flex; align-items: center; gap: 10px; }
 .model-provider-actions button { padding: 6px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--text); cursor: pointer; font: 11px/1.2 var(--app-font); }
 .model-provider-actions button:disabled { cursor: default; opacity: .5; }

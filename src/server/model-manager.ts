@@ -221,6 +221,14 @@ export class ModelManager {
     return input;
   }
 
+  /** Server-only: used to probe /v1/models without round-tripping the secret to the browser. */
+  async storedProviderApiKey(providerValue: unknown): Promise<string | undefined> {
+    const providerName = validateName(String(providerValue || ""), "Provider", /^[A-Za-z0-9._-]+$/, 80);
+    const value = await this.read();
+    const apiKey = value.providers?.[providerName]?.apiKey;
+    return typeof apiKey === "string" && apiKey.trim() ? apiKey.trim() : undefined;
+  }
+
   async getCustomProvider(providerValue: unknown): Promise<CustomProviderInput> {
     const providerName = validateName(String(providerValue || ""), "Provider", /^[A-Za-z0-9._-]+$/, 80);
     const value = await this.read();
