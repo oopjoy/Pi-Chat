@@ -2,7 +2,7 @@
 
 ## Distribution contract
 
-Stable v0.5.3 publishes `pi-chat-setup.exe` as the Windows installation entry
+Stable v0.5.4 publishes `pi-chat-setup.exe` as the Windows installation entry
 point and `pi-chat-portable-<version>.zip` for deployments with Node and Pi
 already installed. SHA256 and JSON identity sidecars are generated and verified
 inside CI but are not uploaded as Release assets. GitHub's automatic source

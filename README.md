@@ -16,9 +16,9 @@ Pi Chat 连接本机 Pi RPC，负责聊天展示、Session 浏览、流式输出
 
 ### 一个完整 Setup：应用 + Node 内置，缺少 Pi 时离线安装
 
-正式 [v0.5.3](https://github.com/oopjoy/Pi-Chat/releases/tag/v0.5.3) 已提供完整 Setup 和便携 ZIP。三种渠道不要混用：
+正式版 [v0.5.4](https://github.com/oopjoy/Pi-Chat/releases/tag/v0.5.4) 提供完整 Setup 和便携 ZIP。三种渠道不要混用：
 
-- **Stable**：从 [Latest Release](https://github.com/oopjoy/Pi-Chat/releases/latest) 下载；查看该 Release 的说明及 About 中的 Build Revision，不能只用 `0.5.3` 判断是否包含某项修复。
+- **Stable**：从 [Latest Release](https://github.com/oopjoy/Pi-Chat/releases/latest) 下载；查看该 Release 的说明及 About 中的 Build Revision，版本与 Build Revision 应同时核对；不要把 main 的源码修复当作已安装版本的能力。
 - **Preview**：[Pre-release](https://github.com/oopjoy/Pi-Chat/releases) 是对应测试标签的安装包，不随 main 自动更新，也不成为 Latest。
 - **Main**：源码开发版本；成功的**手动** [Windows CI](https://github.com/oopjoy/Pi-Chat/actions/workflows/windows-ci.yml) 可提供 `pi-chat-setup-main-<提交号>` Artifacts（保留 30 天，下载通常需要登录 GitHub）。Actions 传输 ZIP 不是便携包，其 manifest 标记 `tag: HEAD` 并记录完整 revision，不创建或移动 tag。
 
@@ -109,7 +109,7 @@ Pi Chat 默认只监听本机回环地址，关闭浏览器窗口不会停止本
 
 ## 版本与路线
 
-当前正式发布为 **0.5.3**，该标签的最近一轮产物绑定 `f637871`：完整 Windows Setup、便携 ZIP，以及附件、模型目录刷新和窗口操作修复。见 [`release-notes-v0.5.3.md`](release-notes-v0.5.3.md)。
+当前发布版本为 **0.5.4**：模型探测安全与请求时序修复、附件生命周期收尾、长会话启动探测修复，以及轻量源码 CI。新标签独立发布完整 Windows Setup 与便携 ZIP，不替换 v0.5.3 的标签或资产。见 [`release-notes-v0.5.4.md`](release-notes-v0.5.4.md)。
 
 `main` 中比上述 revision 更新的修改不会自动进入既有 Release。后续修复见 [`CHANGELOG.md` 的 Unreleased](CHANGELOG.md#unreleased)；以实际安装包的 Build Revision 为准，不把源码改动等同于已经分发。
 

@@ -193,6 +193,9 @@ test("source checks run automatically while full manual and pinned release gates
       assert.match(source, /Stable release requires release-notes-\$tag\.md/); assert.doesNotMatch(source, /--generate-notes/);
       assert.match(source, /\$channelArgs = @\('--prerelease', '--latest=false'\)/);
       assert.match(source, /Preview tag must name the exact checked-out revision/);
+      assert.match(source, /npm run build\n\s+if \(\$LASTEXITCODE -ne 0\) \{ throw "Release build failed" \}/);
+      assert.match(source, /npm run test:artifact\n\s+if \(\$LASTEXITCODE -ne 0\) \{ throw "Release artifact verification failed" \}/);
+      assert.ok(source.indexOf("Release artifact verification failed") < source.indexOf("node scripts/release-package.mjs"));
     }
   }
 });
