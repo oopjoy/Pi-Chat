@@ -109,7 +109,11 @@ test("release build identity uses the exact checked-out commit", async () => {
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("release build identity rejects a tag that does not point to HEAD", async () => {
+test("release build identity rejects a tag that does not point to HEAD", async (t) => {
+  if (git(["rev-parse", "--verify", "HEAD~1^{commit}"]).status !== 0) {
+    t.skip("requires a parent commit; shallow checkouts cannot form HEAD~1");
+    return;
+  }
   const root = await mkdtemp(join(tmpdir(), "pi-chat-release-identity-"));
   try {
     await assert.rejects(execFile(process.execPath, ["scripts/build-identity.mjs"], { cwd: repositoryRoot, env: { ...process.env, PI_CHAT_DIST_DIR: root, PI_CHAT_RELEASE_MODE: "1", PI_CHAT_RELEASE_TAG: "HEAD~1" } }), /does not point to checked-out HEAD/);
@@ -183,6 +187,7 @@ test("source checks run automatically while full manual and pinned release gates
       assert.match(source, /pull_request:/);
       assert.match(source, /contents: read/);
       assert.match(source, /timeout-minutes: 15/);
+      assert.match(source, /fetch-depth: 0/);
       assert.match(source, /npm run preflight/);
       assert.doesNotMatch(source, /npm run (build|verify|test:setup)|gh release|contents: write|workflow_run:|tags:/);
     }

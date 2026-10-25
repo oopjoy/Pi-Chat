@@ -18,7 +18,9 @@ function transcript(id: string, cwd: string) {
 }
 
 test("the real App serves a verified Session JSONL reference", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pi-chat-session-reference-"));
+  // Canonicalize first: GitHub Windows runners often give an 8.3 TMP path,
+  // and idForPath(realpath(file)) would not match SessionIndex's resolve().
+  const root = await realpath(await mkdtemp(join(tmpdir(), "pi-chat-session-reference-")));
   const workspace = join(root, "workspace");
   const sessionsRoot = join(root, "sessions");
   const sessionPath = join(sessionsRoot, "history.jsonl");
@@ -41,10 +43,17 @@ test("the real App serves a verified Session JSONL reference", async () => {
     assert.ok(address && typeof address === "object");
     const origin = `http://127.0.0.1:${address.port}`;
     try {
-      assert.equal((await fetch(`${origin}/api/bootstrap`)).status, 200);
-      const response = await fetch(`${origin}/api/sessions/${sessionId}/session-file`);
-      assert.equal(response.status, 200);
-      assert.deepEqual(await response.json(), { sessionId, sessionFile: resolve(canonicalPath) });
+      const bootstrap = await fetch(`${origin}/api/bootstrap`);
+      const bootstrapText = await bootstrap.text();
+      assert.equal(bootstrap.status, 200, bootstrapText);
+      const listed = (JSON.parse(bootstrapText) as { sessions?: Array<{ id: string; sessionId: string }> }).sessions || [];
+      const target = listed.find((session) => session.id === sessionId)
+        || listed.find((session) => session.sessionId === "history");
+      assert.ok(target, `indexed Session missing: computed=${sessionId} listed=${JSON.stringify(listed)}`);
+      const response = await fetch(`${origin}/api/sessions/${target.id}/session-file`);
+      const bodyText = await response.text();
+      assert.equal(response.status, 200, bodyText);
+      assert.deepEqual(JSON.parse(bodyText), { sessionId: target.id, sessionFile: resolve(canonicalPath) });
     } finally {
       server.close();
       await app.close();

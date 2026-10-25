@@ -73,7 +73,9 @@ artifact 检查失败会立即停止，不能继续上传。
 
 本地收尾验收记录见 `docs/closeout-acceptance-2026-10-25.md`。Windows 下因权限
 不足而跳过的文件 symlink 测试、POSIX 专属项和已停用的旧 Sidebar 刷新测试
-不计为通过；GitHub 实际运行结果以本次 tag 的 Release CI 为准。
+不计为通过；GitHub 实际运行结果以本次 tag 的 Release CI 为准。Source Checks 会拉取完整 git
+历史；Session JSONL 引用测试先规范化 Windows 临时路径，避免 runner 的 8.3 TMP
+名称把合法 Session 变成 500。
 
 - 历史约 65 秒的真实扩展配置冷启动问题**尚未关闭**；隔离 core profile 的
   小样本耗时不能证明真实冷缓存或实际模型首 token 已改善。

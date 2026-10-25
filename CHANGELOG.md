@@ -5,6 +5,8 @@
 ## v0.5.4 (2026-10-25)
 
 - Release packaging now explicitly stops on a failed final build or artifact test before creating or publishing either asset. v0.5.4 uses a new immutable tag; historical v0.5.3 assets remain untouched.
+- Source Checks checkouts include git history so release-identity regressions can run; the parent-commit identity test skips on a true shallow clone instead of failing for missing `HEAD~1`.
+- Session JSONL reference tests canonicalize Windows temp paths before hashing, so GitHub runner 8.3 `TMP` names cannot 500 a valid Session.
 - New conversations use the model shown in the composer; custom-model discovery imports explicitly selected upstream IDs. Process timing pauses across upstream retries, duplicate process notes and initial history folding are corrected, and the session action menu can copy a deep link or Session source path.
 - Upstream model discovery rejects redirects before forwarding credentials or reading a redirect body. Cancelling/reopening the picker, switching Provider or changing connection inputs retires older success/error/finally callbacks. The 404 fallback regression now actually exercises both candidate endpoints.
 - Withdraw experimental cross-refresh draft recovery and its hidden storage-management APIs. Unsent content stays page-memory-only; native leave confirmation is best effort. Existing browser backups are untouched, with explicit inspection/cleanup guidance in README. Managed attachments still renew live leases and retain possibly-sent payloads; failed lease claims/releases retry after edits, reconnect or a bounded heartbeat, without a failure loop.
