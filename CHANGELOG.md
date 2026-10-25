@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Upstream model discovery rejects redirects before forwarding credentials or reading a redirect body. Cancelling/reopening the picker, switching Provider or changing connection inputs retires older success/error/finally callbacks. The 404 fallback regression now actually exercises both candidate endpoints.
+- Withdraw experimental cross-refresh draft recovery and its hidden storage-management APIs. Unsent content stays page-memory-only; native leave confirmation is best effort. Existing browser backups are untouched, with explicit inspection/cleanup guidance in README. Managed attachments still renew live leases and retain possibly-sent payloads; failed lease claims/releases retry after edits, reconnect or a bounded heartbeat, without a failure loop.
+- Main pushes and PRs now run lightweight Source Checks; full Windows verification remains manual and release-tag verification remains complete. Restore the existing type-debt ceiling by typing the newly added callback seams, without raising its allowance.
+- Startup compatibility no longer requests the entire Session through `get_messages`; bounded JSONL history remains readable without risking an oversized startup RPC frame. This is not a claim that the historical slow-start incident is resolved.
+
 - Models token-limit fields are plain numeric-keyboard text inputs, without stepper arrows; invalid non-integer text is not silently converted into a different limit. About keeps its three update/release actions and removes the duplicate Pi connection setup button; failed-Runtime recovery remains available from the Runtime notice.
 - The development dependency and lockfile now pin Pi 1.3.0, matching the bundled fallback version. Core real-RPC integration tests explicitly use that project-local dependency rather than silently selecting or requiring a user's global Pi.
 - Model synchronization distinguishes unfinished work from retry eligibility. A pre-existing unconfirmed mutation blocks every background entry point, not merely the timer; blocked selection reconciliation stays pending until a correlated response permits verification. Runtime generation/identity is rechecked before applying delayed model results.

@@ -141,7 +141,7 @@ export async function handleApiCoreRoute(
         {
           workspaceRecentFiles: (input: any) => host.workspaceRecentFilesRoute(input),
           workspaceFile: (input: any) => host.workspaceFileRoute(input),
-          workspaceImage: (input: any) => host.workspaceImageRoute(input),
+          workspaceImage: (input: { sessionId: string; path: string }) => host.workspaceImageRoute(input),
         },
         request,
         response,
@@ -603,7 +603,7 @@ export async function handleApiCoreRoute(
 
     if (
       await handleSessionReferenceRoute({
-        sessionFile: (sessionId: any) => host.sessionFileForReference(sessionId),
+        sessionFile: (sessionId: string) => host.sessionFileForReference(sessionId),
       }, request, response, url)
     ) return;
 

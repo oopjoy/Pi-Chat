@@ -88,8 +88,10 @@ test("probeProviderModels sends a Bearer token and maps 401 to a Chinese auth er
 });
 
 test("probeProviderModels skips a 404 candidate then reads the next", async () => {
+  const hits: string[] = [];
   const server = createServer((request, response) => {
-    if (request.url === "/v1/models") {
+    hits.push(request.url || "");
+    if (request.url === "/models") {
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ data: [{ id: "recovered" }] }));
       return;
@@ -106,7 +108,55 @@ test("probeProviderModels skips a 404 candidate then reads the next", async () =
       apiKey: "sk-test",
     });
     assert.deepEqual(models.map((model) => model.id), ["recovered"]);
+    assert.deepEqual(hits, ["/v1/models", "/models"], "fallback must exercise both endpoints");
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
+});
+
+// Different loopback ports are different origins. No real provider or secret is used.
+test("provider probes never forward credentials through redirects", async () => {
+  let targetHits = 0;
+  const target = createServer((_request, response) => {
+    targetHits += 1;
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ data: [{ id: "unexpected" }] }));
+  });
+  await new Promise<void>((resolve) => target.listen(0, "127.0.0.1", resolve));
+  const address = target.address();
+  assert.ok(address && typeof address === "object");
+  const source = createServer((_request, response) => {
+    response.writeHead(302, { location: `http://127.0.0.1:${address.port}/models` });
+    response.end();
+  });
+  await new Promise<void>((resolve) => source.listen(0, "127.0.0.1", resolve));
+  const sourceAddress = source.address();
+  assert.ok(sourceAddress && typeof sourceAddress === "object");
+  try {
+    for (const api of ["openai-completions", "openai-responses", "anthropic-messages", "google-generative-ai"]) {
+      await assert.rejects(probeProviderModels({
+        baseUrl: `http://127.0.0.1:${sourceAddress.port}`, api, apiKey: "dummy-review-key",
+      }), /重定向/);
+    }
+    assert.equal(targetHits, 0, "even a stripped credential must not authorize a redirected probe");
+  } finally {
+    await Promise.all([source, target].map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
+  }
+});
+
+test("probe redirects are rejected before reading a body or trying another endpoint", async () => {
+  const requests: string[] = [];
+  let cancelled = false;
+  const fetchImpl: typeof fetch = async (input, init) => {
+    requests.push(String(input));
+    assert.equal(init?.redirect, "manual");
+    return new Response(new ReadableStream({ cancel() { cancelled = true; } }), {
+      status: 307, headers: { location: "/canonical/models" },
+    });
+  };
+  await assert.rejects(probeProviderModels({
+    baseUrl: "https://example.invalid", api: "openai-responses", apiKey: "dummy-key", fetchImpl,
+  }), /重定向/);
+  assert.equal(requests.length, 1);
+  assert.equal(cancelled, true);
 });

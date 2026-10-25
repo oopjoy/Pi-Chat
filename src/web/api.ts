@@ -3,7 +3,7 @@ import type { RuntimeEntryInfo, RuntimeSetupChange, RuntimeSetupStatus } from ".
 import type { ServerStateDiagnosticSnapshot } from "../shared/state-diagnostics";
 import type { BackgroundSubagentSnapshot, BootstrapData, BootstrapHandshakeData, CustomModelInput, CustomProviderInput, DiscoveredProviderModel, ExtensionResource, GateMode, InitialPromptData, ModelInfo, PackageResource, PromptDelivery, PromptImage, PromptSettingsSnapshot, QueuedPrompt, ResourceResponse, SessionCopyData, SessionDirectorySummary, SessionHistoryPage, SessionRuntimeReadyData, SessionSummary, SessionViewData, SkillResource, ThinkingLevel, WorkspaceFileData, WorkspaceRecentFilesData } from "../shared/types";
 import { recordBrowserStateDiagnostic } from "./lib/state-diagnostics";
-import { draftStorageOwner } from "./lib/draft-recovery";
+import { attachmentStorageOwner } from "./lib/attachment-owner";
 
 export type ExtensionResponseInput = {
   id: string;
@@ -392,17 +392,13 @@ export const api = {
   }, PROMPT_PREPARE_TIMEOUT_MS),
   pickLocalFiles: () => request<{ paths: string[] }>("/api/local-files/pick", { method: "POST" }),
   stageDroppedFile: (file: { name: string; data: string; size: number; owner?: string }) =>
-    request<{ path: string }>("/api/local-files/stage", { method: "POST", body: JSON.stringify({ ...file, owner: file.owner || draftStorageOwner() }) }, 120_000),
-  discardStagedFile: (path: string, owner = draftStorageOwner()) =>
+    request<{ path: string }>("/api/local-files/stage", { method: "POST", body: JSON.stringify({ ...file, owner: file.owner || attachmentStorageOwner() }) }, 120_000),
+  discardStagedFile: (path: string, owner = attachmentStorageOwner()) =>
     request<{ ok: boolean }>("/api/local-files/stage/discard", { method: "POST", body: JSON.stringify({ path, owner, revision: nextAttachmentLeaseRevision() }) }),
-  leaseLocalFiles: (paths: string[], active = true, owner = draftStorageOwner()) => request<{ missing: string[] }>("/api/local-files/lease", {
+  leaseLocalFiles: (paths: string[], active = true, owner = attachmentStorageOwner()) => request<{ missing: string[] }>("/api/local-files/lease", {
     method: "POST", body: JSON.stringify({ paths, active, owner, revision: nextAttachmentLeaseRevision() }),
   }),
   prepareLocalFiles: (paths: string[]) => request<{ ok: boolean }>("/api/local-files/prepare", { method: "POST", body: JSON.stringify({ paths }) }),
-  openAttachmentStorage: () => request<{ ok: boolean }>("/api/local-files/storage/open", { method: "POST" }),
-  attachmentStorage: (cleanup = false) => request<{ drafts: number; retained: number; bytes: number; removed: number; skipped: number; truncated: boolean }>(
-    "/api/local-files/storage", cleanup ? { method: "POST" } : undefined,
-  ),
   pickLocalFolder: () => request<{ paths: string[] }>("/api/local-files/pick-folder", { method: "POST" }),
   attachmentKinds: (paths: string[]) =>
     request<{ kinds: Array<{ path: string; kind: "file" | "directory" }> }>("/api/local-files/kinds", { method: "POST", body: JSON.stringify({ paths }) }),

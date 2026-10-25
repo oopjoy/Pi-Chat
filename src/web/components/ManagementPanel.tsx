@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { PiRuntimeUpdateCheck } from "../../shared/pi-runtime-update";
 import type { BootstrapData, BuildIdentity, CustomProviderInput, DiscoveredProviderModel, ExtensionResource, ModelInfo, PackageResource, PiState, PrimaryRuntimeReadiness, SkillResource } from "../../shared/types";
@@ -7,7 +7,6 @@ import { writeClipboardText } from "../lib/clipboard";
 import { api, PI_CHAT_RELEASES_URL, type UpdateCheckResult } from "../api";
 import { DEFAULT_APPEARANCE, snapToStep, type AppearancePreferences, type FontPreference, type ThemePreference } from "../lib/preferences";
 import { CompactSelect, type CompactSelectOption } from "./CompactSelect";
-import { DraftStoragePanel } from "./DraftStoragePanel";
 import { ChevronDownIcon, ChevronRightIcon, CloseIcon, FolderIcon, MinusIcon, PiMarkIcon, PlusIcon, TrashIcon } from "./Icons";
 
 export type ManagementSection = "settings" | "models";
@@ -376,7 +375,6 @@ function AboutPanel({ buildIdentity, webBuildIdentity, piVersion, primaryRuntime
     <div className="about-diagnostics-section">
       <DiagnosticsPanel busy={diagnosticsBusy} onExport={onExportDiagnostics} />
     </div>
-    <DraftStoragePanel />
   </div>;
 }
 
@@ -457,22 +455,27 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
     const upstream = discoveredModels.map((model) => ({ id: model.id, ownedBy: model.ownedBy, missingUpstream: false }));
     return [...missing, ...upstream].sort((left, right) => compareDiscoveredModelId(left.id, right.id));
   }, [discoveredModels, editingProvider]);
-  const closeProvider = () => {
+  // Provider loading and probing share the editor's existing freshness owner.
+  // Closing, changing inputs, or starting a newer probe retires older results.
+  const closeProbeDialog = useCallback(() => {
     providerLoadSequence.current += 1;
+    setPickerOpen(false);
+    setProbing(false);
+    setDiscoveredModels([]);
+    setSelectedDiscoveredIds(new Set());
+    setProbeError("");
+  }, []);
+  const closeProvider = () => {
+    closeProbeDialog();
     setExpandedProvider("");
     setEditingProvider(null);
     setEditingProviderKey("");
-    setDiscoveredModels([]);
-    setPickerOpen(false);
-    setSelectedDiscoveredIds(new Set());
-    setProbing(false);
-    setProbeError("");
   };
   const beginAddProvider = () => {
     // Model file edits no longer require global quiescence, so neither button
     // nor handler may key off another Session's turn.
     if (saving) return;
-    providerLoadSequence.current += 1;
+    closeProbeDialog();
     setEditingProviderKey("");
     setExpandedProvider("__new__");
     setEditingProvider({ provider: "", baseUrl: "", api: "openai-completions", apiKey: "", models: [{ id: "", name: "", reasoning: true }] });
@@ -488,7 +491,8 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
       if (!forceOpen) closeProvider();
       return;
     }
-    const sequence = ++providerLoadSequence.current;
+    closeProbeDialog();
+    const sequence = providerLoadSequence.current;
     setExpandedProvider(provider);
     setEditingProviderKey(provider);
     setEditingProvider(null);
@@ -514,7 +518,10 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
       }
     }
   };
-  const updateProvider = <K extends keyof CustomProviderInput>(key: K, value: CustomProviderInput[K]) => setEditingProvider((current) => current ? { ...current, [key]: value } : current);
+  const updateProvider = <K extends keyof CustomProviderInput>(key: K, value: CustomProviderInput[K]) => {
+    closeProbeDialog();
+    setEditingProvider((current) => current ? { ...current, [key]: value } : current);
+  };
   const updateModel = (index: number, key: "id" | "name" | "contextWindow" | "maxTokens" | "reasoning", value: string | boolean) => setEditingProvider((current) => {
     if (!current) return current;
     if ((key === "contextWindow" || key === "maxTokens") && typeof value === "string" && !/^[0-9]*$/.test(value)) return current;
@@ -534,13 +541,14 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
       if (event.key !== "Escape") return;
       event.preventDefault();
       event.stopImmediatePropagation();
-      setPickerOpen(false);
+      closeProbeDialog();
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [pickerOpen]);
+  }, [pickerOpen, closeProbeDialog]);
   const probeModels = async () => {
     if (!editingProvider || probing || saving) return;
+    const sequence = ++providerLoadSequence.current;
     setProbing(true); setProbeError("");
     try {
       const result = await api.probeProviderModels({
@@ -549,13 +557,15 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
         ...(editingProvider.apiKey?.trim() ? { apiKey: editingProvider.apiKey } : null),
         ...(editingProviderKey || editingProvider.provider ? { provider: editingProviderKey || editingProvider.provider } : null),
       });
+      if (sequence !== providerLoadSequence.current) return;
       const configured = new Set(editingProvider.models.map((model) => model.id).filter(Boolean));
       setDiscoveredModels(result.models);
       setSelectedDiscoveredIds(new Set([...configured]));
     } catch (cause) {
-      setProbeError(cause instanceof Error ? cause.message : String(cause));
+      if (sequence === providerLoadSequence.current)
+        setProbeError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      setProbing(false);
+      if (sequence === providerLoadSequence.current) setProbing(false);
     }
   };
   const openProbeDialog = () => {
@@ -675,7 +685,7 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
     })}{!models.length && <p className="resource-loading">当前没有可用模型</p>}</div>
   </div>
   {pickerOpen && createPortal(
-    <div className="panel-backdrop provider-discovered-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPickerOpen(false); }}>
+    <div className="panel-backdrop provider-discovered-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeProbeDialog(); }}>
       <section ref={probeDialogRef} className="dialog provider-discovered-dialog" role="dialog" aria-modal="true" aria-labelledby="provider-discovered-title">
         <header className="provider-discovered-head">
           <h2 id="provider-discovered-title">上游模型列表</h2>
@@ -687,11 +697,11 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
         <ul className="provider-discovered-list">
           {discoveredRows.map((model) => <li key={model.id}><label>
             <span className="provider-discovered-name">{model.id}{model.missingUpstream ? <i>已配置，上游未返回</i> : model.ownedBy ? <i>{model.ownedBy}</i> : null}</span>
-            <input type="checkbox" checked={selectedDiscoveredIds.has(model.id)} disabled={saving} onChange={(event) => setSelectedDiscoveredIds((current) => { const next = new Set(current); if (event.target.checked) next.add(model.id); else next.delete(model.id); return next; })} />
+            <input type="checkbox" checked={selectedDiscoveredIds.has(model.id)} disabled={saving || probing} onChange={(event) => setSelectedDiscoveredIds((current) => { const next = new Set(current); if (event.target.checked) next.add(model.id); else next.delete(model.id); return next; })} />
           </label></li>)}
         </ul>
         <footer className="provider-discovered-actions">
-          <button type="button" disabled={saving} onClick={() => setPickerOpen(false)}>取消</button>
+          <button type="button" disabled={saving} onClick={closeProbeDialog}>取消</button>
           <button type="button" className="model-save-button" disabled={saving || probing} onClick={applyDiscovered}>应用所选</button>
         </footer>
       </section>

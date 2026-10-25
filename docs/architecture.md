@@ -17,13 +17,13 @@ Pi Chat is **not**:
 
 ## Windows distribution
 
-The next installer is a single Inno Setup EXE embedding the compiled App and a
-checksum-pinned private Node/npm runtime. App/Node installation does not access
-release/download endpoints. Existing Pi is reused; only an explicit optional
-missing-Pi action accesses npm. Native setup owns files/shortcuts/uninstall;
-PowerShell is only a bounded Pi detection/installation helper. No Web installer,
-portable ZIP or Electron runtime is published alongside it. This does not change
-Runtime/Session/JSONL authority or published historical assets.
+The Windows installer is a single Inno Setup EXE embedding the compiled App,
+checksum-pinned private Node/npm, and a pinned Pi 1.3.0 fallback snapshot.
+Installation does not access release/download endpoints. Existing Pi is reused;
+missing Pi is seeded offline without upgrading user installations. Native setup
+owns files/shortcuts/uninstall; PowerShell is a bounded detection/seeding helper.
+A separate application-only portable ZIP requires the user's Node and Pi.
+Neither artifact includes Electron or changes Runtime/Session/JSONL authority.
 See [Windows Setup](windows-setup.md) and [release checklist](release-checklist.md).
 
 ## Process layers
@@ -281,11 +281,16 @@ no receipt or correlation ID is added to Pi's canonical session file.
 
 Prefer **RPC capability probe** over a hard Pi version allowlist.
 
-| Field | Value (0.5.0) |
+| Field | Current verification scope |
 |---|---|
-| Required capabilities | `get_state`, `get_messages`, `get_available_models`, `get_commands`, `get_session_stats` |
-| Last verified Pi | 1.0.1 |
-| Minimum practical | Recent Pi with full RPC surface above |
+| Startup capabilities | `get_state`, `get_available_models`, `get_commands`, `get_session_stats` |
+| Pinned development / Setup fallback Pi | 1.3.0 |
+| Other local Pi versions | Capability-probed; not a promise of full extension/profile compatibility |
+
+Startup never probes the complete `get_messages` transcript. Its unbounded RPC
+line can terminate a healthy long-Session child; bounded JSONL readers own
+history browsing. Remaining explicit RPC history fallbacks are not startup
+compatibility evidence.
 
 Missing required capabilities → fail startup clearly.
 

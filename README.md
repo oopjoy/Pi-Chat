@@ -22,7 +22,7 @@ Pi Chat 连接本机 Pi RPC，负责聊天展示、Session 浏览、流式输出
 - **Preview**：[Pre-release](https://github.com/oopjoy/Pi-Chat/releases) 是对应测试标签的安装包，不随 main 自动更新，也不成为 Latest。
 - **Main**：源码开发版本；成功的**手动** [Windows CI](https://github.com/oopjoy/Pi-Chat/actions/workflows/windows-ci.yml) 可提供 `pi-chat-setup-main-<提交号>` Artifacts（保留 30 天，下载通常需要登录 GitHub）。Actions 传输 ZIP 不是便携包，其 manifest 标记 `tag: HEAD` 并记录完整 revision，不创建或移动 tag。
 
-普通 main 推送和 PR 不自动跑完整 CI；需要提前验证时在 Actions 选择 **Windows CI → Run workflow**。推送 `v*` 版本标签才自动运行完整 Release CI，通过后发布安装包；类型检查、单元/浏览器测试、构建产物和安装器验证均保留。
+普通 main 推送和 PR 自动运行轻量 **Source Checks**（类型、Lint、writer/type-debt 门禁及核心与收尾回归），不构建或发布安装包。完整验证仍在 Actions 选择 **Windows CI → Run workflow**；推送 `v*` 版本标签才自动运行完整 Release CI，通过后发布安装包。
 
 [v0.5.2](https://github.com/oopjoy/Pi-Chat/releases/tag/v0.5.2) 是约 192 KB 的历史在线引导安装器，不适用下面的完整 Setup 说明，旧资产保持不变。
 
@@ -328,7 +328,7 @@ Skills 可以向模型注入指令，Plugins/Packages 可以用当前用户的�
 | 其他 Pi / 扩展组合 | 启动能力探测通过不等于所有行为已验证；`ask_user_question` 有 RPC dialog fallback 冒烟覆盖，不承诺任意 TUI 扩展自动转为 Web UI |
 
 暂不把开发依赖升级、打包后备版本、启动能力探测和完整行为验证混称为“已兼容所有版本”。
-- **探测方式：** 服务启动时冻结一个 Primary/Secondary 共用的 Direct Pi launch plan，解析并记录全局 Pi 版本与入口；显式 `PI_CHAT_PI_ENTRY` 保持 direct-only authority。Primary 随后执行 RPC 能力探测（`get_state` / `get_messages` / `get_available_models` / `get_commands` / `get_session_stats`）。不兼容时 Session 浏览继续可用，而新的或需要恢复的 Runtime 写操作返回明确的不可用状态；已经健康的 Secondary 保持可用。任何 Primary 恢复都会重新探测
+- **探测方式：** 服务启动时冻结一个 Primary/Secondary 共用的 Direct Pi launch plan，解析并记录全局 Pi 版本与入口；显式 `PI_CHAT_PI_ENTRY` 保持 direct-only authority。Primary 随后执行 RPC 能力探测（`get_state` / `get_available_models` / `get_commands` / `get_session_stats`）；启动探测不再读取完整 `get_messages`，避免长会话的响应大小或耗时被误判为协议不兼容。不兼容时 Session 浏览继续可用，而新的或需要恢复的 Runtime 写操作返回明确的不可用状态；已经健康的 Secondary 保持可用。任何 Primary 恢复都会重新探测
 - 升级 Pi 后若启动失败，请先 `pi --version`，再确认 Pi Chat 是否为最新 0.5.x
 
 ## 反馈问题时请附上
@@ -339,6 +339,11 @@ Skills 可以向模型注入指令，Plugins/Packages 可以用当前用户的�
 - 预期结果、实际结果；截图、短录屏或界面显示的事件 ID。
 - 必要时通过设置导出现有的最近五分钟诊断。分享前检查并去除敏感路径、提示词、凭证及个人数据，不直接上传 `auth.json`、API Key 或完整私有会话。
 
-本页中的草稿保全仍限于当前页面内存；切换 Session 可保留，但刷新/意外关闭后的持久恢复尚未实现，不应把它当成可靠的跨刷新备份。
+### 草稿与附件保留边界
+
+- 未发送文字、图片和附件卡片只保留在当前页面内存；切换 Session 和明确发送失败会保留，不承诺刷新、关闭或崩溃后恢复。有未发送内容时会请求浏览器原生离开确认，但浏览器可能不显示，不能代替备份。
+- 拖入的普通文件副本保存在独立用户数据目录（Windows：`%LOCALAPPDATA%/PiChatData/attachments`），不在安装目录或临时 `dist`。未采用的上传有 24 小时宽限；仍被页面引用的文件定期续租，最后一次成功续租后保留 30 天。发送前标记为已发送或可能发送的文件不自动删除，避免历史引用失效；这不等于草稿可以跨刷新恢复。
+- 已撤回实验性的跨刷新草稿恢复及存储管理面板，不再读写该备份。用过实验版本的浏览器可能仍有 `pi-chat.draft-backup.v1.*`、`pi-chat.draft-consumed.v1.*`、`pi-chat.draft-generation.v1` 的 localStorage 项，以及 `pi-chat-draft-recovery-v1` IndexedDB 数据库。应用不会自动恢复或删除它们。需要清理时，先在浏览器开发者工具 Application 中检查并保存所需内容，再显式删除对应条目／数据库；不要直接清空全部站点数据，以免连带删除外观等偏好。
+- 普通用户原文件不会由附件清理器删除。历史中引用的托管附件应在确认不再需要后自行处理；本次没有删除任何真实用户数据。
 
 更完整的模块边界与拆分优先级见 `docs/architecture.md`；日常维护入口见 [`docs/change-map.md`](docs/change-map.md)。

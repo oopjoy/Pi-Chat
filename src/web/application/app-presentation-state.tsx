@@ -567,10 +567,10 @@ export function useAppPresentationState(host: Record<string, any>) {
         pinnedSessionIds: sessionNavigation.pinnedSessionIds,
         mutationBusy: Boolean(mutatingSessionIds.length),
         onTogglePin: togglePinnedSession,
-        onClone: (session: any) => setSessionDialog({ mode: "clone", session }),
+        onClone: (session: SessionSummary) => setSessionDialog({ mode: "clone", session }),
         onCopyDeepLink: copySessionDeepLink,
-        onRename: (session: any) => setSessionDialog({ mode: "rename", session }),
-        onDelete: (session: any) => setSessionDialog({ mode: "delete", session }),
+        onRename: (session: SessionSummary) => setSessionDialog({ mode: "rename", session }),
+        onDelete: (session: SessionSummary) => setSessionDialog({ mode: "delete", session }),
       }
     : null;
 

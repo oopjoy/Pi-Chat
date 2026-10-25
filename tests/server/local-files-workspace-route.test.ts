@@ -96,11 +96,15 @@ test("staged file API uses durable storage and retention survives subsequent car
     assert.equal((await post("/api/local-files/prepare", { paths: [path] })).status, 200);
     assert.equal((await post("/api/local-files/lease", { paths: [path], owner: "pageA", revision: 2, active: false })).status, 200);
     await access(path);
-    const stats = await (await fetch(`${target.origin}/api/local-files/storage`)).json();
-    assert.equal(stats.retained, 1);
-    assert.equal(stats.drafts, 0);
-    const cleanup = await (await fetch(`${target.origin}/api/local-files/storage`, { method: "POST" })).json();
+    const cleanup = await store.maintain();
+    assert.equal(cleanup.retained, 1);
+    assert.equal(cleanup.drafts, 0);
     assert.equal(cleanup.removed, 0);
+    // Removing the draft-storage panel must not leave hidden management APIs.
+    for (const [path, method] of [
+      ["/api/local-files/storage", "GET"], ["/api/local-files/storage", "POST"],
+      ["/api/local-files/storage/open", "POST"],
+    ]) assert.equal((await fetch(`${target.origin}${path}`, { method })).status, 404);
   } finally { await target.close(); await rm(root, { recursive: true, force: true }); }
 });
 

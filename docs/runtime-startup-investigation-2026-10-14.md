@@ -150,3 +150,14 @@ comparison is desired, run the benchmark before tree scans/copies and label the
 first sample separately; reboot still does not guarantee a Defender-cold cache.
 No extension was removed, no global Pi source patched, no security setting changed,
 and no live service restarted by this follow-up.
+
+## Closeout checkpoint — 2026-10-25
+
+The current worktree removes the complete `get_messages` startup probe rather
+than interpreting a large transcript's transport failure as protocol mismatch.
+Full source, browser, artifact and isolated native-installer validation passed.
+An additional five-process Pi 1.3.0 core/offline synthetic-Session sample measured
+transport-ready at 1416–1707 ms (median 1462 ms). These post-test, configuration-
+isolated samples neither reproduce nor close the real installed-profile incident.
+Exact scope, skipped checks, latency caveats and next real-profile acceptance are
+recorded in [the closeout report](closeout-acceptance-2026-10-25.md).

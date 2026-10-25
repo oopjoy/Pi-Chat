@@ -42,7 +42,6 @@ test("RPC compatibility probe reports missing required capabilities", async () =
   const client = new PiRpcClient({ cwd: process.cwd() });
   const responses: Record<string, unknown> = {
     get_state: { isStreaming: false },
-    get_messages: { messages: [] },
     get_available_models: { models: [] },
     get_commands: { commands: [] },
     get_session_stats: { tokens: {} },
@@ -55,11 +54,12 @@ test("RPC compatibility probe reports missing required capabilities", async () =
   assert.match(incompatible.diagnostics.join("\n"), /get_commands/);
 });
 
-test("RPC compatibility probe does not treat get_messages timeout as an unsupported protocol", async () => {
+test("RPC compatibility probe never requests the full Session transcript", async () => {
   const client = new PiRpcClient({ cwd: process.cwd() });
+  const requests: string[] = [];
   Object.assign(client, {
     send: async (command: Record<string, unknown>) => {
-      if (command.type === "get_messages") throw new RpcRequestTimeoutError("get_messages");
+      requests.push(String(command.type));
       const data =
         command.type === "get_state" ? { isStreaming: false }
         : command.type === "get_available_models" ? { models: [] }
@@ -69,22 +69,7 @@ test("RPC compatibility probe does not treat get_messages timeout as an unsuppor
     },
   });
   assert.deepEqual(await client.probeCompatibility(), { compatible: true, diagnostics: [] });
-});
-
-test("RPC compatibility probe does not treat an oversized get_messages frame as incompatibility", async () => {
-  const client = new PiRpcClient({ cwd: process.cwd() });
-  Object.assign(client, {
-    send: async (command: Record<string, unknown>) => {
-      if (command.type === "get_messages") throw new RpcFrameTooLargeError("stdout", 68_157_441, 68_157_440);
-      const data =
-        command.type === "get_state" ? { isStreaming: false }
-        : command.type === "get_available_models" ? { models: [] }
-        : command.type === "get_commands" ? { commands: [] }
-        : { tokens: {} };
-      return { type: "response", success: true, data };
-    },
-  });
-  assert.deepEqual(await client.probeCompatibility(), { compatible: true, diagnostics: [] });
+  assert.equal(requests.includes("get_messages"), false);
 });
 
 function fakeChild() {

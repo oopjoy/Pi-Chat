@@ -68,6 +68,22 @@ test("two rejected sends preserve every interim draft and the recovery button se
   } finally { await f.close(); }
 });
 
+test("unsent input requests a native close warning without claiming a durable backup", async () => {
+  const f = await mountedComposer();
+  const closeRequested = () => {
+    const event = new f.dom.window.Event("beforeunload", { cancelable: true });
+    f.dom.window.dispatchEvent(event);
+    return event.defaultPrevented;
+  };
+  try {
+    assert.equal(closeRequested(), false);
+    await f.type("unsent text");
+    assert.equal(closeRequested(), true);
+    await f.type("");
+    assert.equal(closeRequested(), false);
+  } finally { await f.close(); }
+});
+
 async function checkMixedDrop(resolveDirectory: boolean) {
   const errors: string[] = [];
   const discarded: string[] = [];

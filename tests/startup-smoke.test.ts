@@ -53,7 +53,7 @@ async function removeWithWindowsRetry(path: string): Promise<void> {
 }
 
 async function waitForCapabilityProbe(rpcLog: string, child: ReturnType<typeof spawn>): Promise<string> {
-  const expected = ["get_state", "get_messages", "get_available_models", "get_commands", "get_session_stats"];
+  const expected = ["get_state", "get_available_models", "get_commands", "get_session_stats"];
   const deadline = Date.now() + 12_000;
   while (Date.now() < deadline) {
     if (child.exitCode !== null) throw new Error("Pi Chat 在 capability probe 完成前退出");

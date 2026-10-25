@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { stat } from "node:fs/promises";
 import type { DroppedFileStore } from "../dropped-files.js";
 import { bodyJson, HttpRequestError, json, methodNotAllowed } from "../http-transport.js";
-import { localPathKinds, openLocalAttachment, openWorkspaceDirectory, parsePickerOutput } from "../file-picker.js";
+import { localPathKinds, openLocalAttachment, parsePickerOutput } from "../file-picker.js";
 
 export interface LocalFilesWorkspaceRouteHost {
   attachmentStore?: DroppedFileStore;
@@ -164,20 +164,6 @@ export async function handleLocalFilesWorkspaceRoute(
     const { owner, revision } = leaseIdentity(body);
     const missing = await host.attachmentStore?.lease(paths, owner, revision, body.active !== false) || [];
     json(response, 200, { missing });
-    return true;
-  }
-  if (url.pathname === "/api/local-files/storage/open") {
-    if (request.method !== "POST") { methodNotAllowed(response); return true; }
-    if (!host.attachmentStore) { json(response, 501, { error: "当前服务未配置附件存储" }); return true; }
-    await host.attachmentStore.ensureDirectory();
-    await openWorkspaceDirectory(host.attachmentStore.root);
-    json(response, 200, { ok: true });
-    return true;
-  }
-  if (url.pathname === "/api/local-files/storage") {
-    if (request.method !== "GET" && request.method !== "POST") { methodNotAllowed(response); return true; }
-    if (!host.attachmentStore) { json(response, 501, { error: "当前服务未配置附件存储" }); return true; }
-    json(response, 200, await host.attachmentStore.maintain(request.method === "POST"));
     return true;
   }
   if (url.pathname === "/api/workspace/draft-pick") {

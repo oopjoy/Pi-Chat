@@ -78,13 +78,6 @@ export class RpcFrameTooLargeError extends Error {
   }
 }
 
-/** Timeouts and oversized frames are transport cost, not a missing RPC method. */
-export function isNonProtocolRpcProbeError(error: unknown): boolean {
-  if (error instanceof RpcRequestTimeoutError || error instanceof RpcFrameTooLargeError) return true;
-  const message = error instanceof Error ? error.message : String(error);
-  return /请求超时|单行超过安全上限|已停止|已退出/.test(message);
-}
-
 export class RpcProcessExitUnconfirmedError extends Error {
   readonly code = "PI_RPC_EXIT_UNCONFIRMED";
 
@@ -1215,32 +1208,24 @@ export class PiRpcClient {
       validate: (data: unknown) => boolean,
       label: string,
       initialResponse?: Record<string, unknown>,
-      options: { timeoutMs?: number; optional?: boolean } = {},
     ) => {
       if (initialResponse) {
         if (!validate(initialResponse.data)) diagnostics.push(`RPC ${type} 返回格式不兼容（需要 ${label}）`);
         return;
       }
       try {
-        const response = await this.send({ type }, options.timeoutMs ?? 10_000);
+        const response = await this.send({ type }, 10_000);
         if (!validate(response.data)) diagnostics.push(`RPC ${type} 返回格式不兼容（需要 ${label}）`);
       } catch (error) {
-        // get_messages can time out or exceed the stdout line budget on a large
-        // Session. That is a read cost, not a missing RPC method. Treating it as
-        // "protocol incompatible" bricks a healthy Runtime behind a false banner.
-        if (options.optional && isNonProtocolRpcProbeError(error)) return;
         if (error instanceof RpcRequestTimeoutError) throw error;
         diagnostics.push(`RPC 不支持 ${type}：${error instanceof Error ? error.message : String(error)}`);
       }
     };
     await check("get_state", (data) => Boolean(data && typeof data === "object" && typeof (data as Record<string, unknown>).isStreaming === "boolean"), "isStreaming", initialState);
-    await check(
-      "get_messages",
-      (data) => Boolean(data && typeof data === "object" && Array.isArray((data as Record<string, unknown>).messages)),
-      "messages[]",
-      undefined,
-      { timeoutMs: 3_000, optional: true },
-    );
+    // Never probe get_messages during startup. Its response is the entire Session
+    // transcript and can exceed the RPC line limit, which kills the child before
+    // the remaining capability probes run and disguises a transport failure as
+    // several unsupported RPC commands. Session history has bounded disk readers.
     await check("get_available_models", (data) => Boolean(data && typeof data === "object" && Array.isArray((data as Record<string, unknown>).models)), "models[]");
     await check("get_commands", (data) => Boolean(data && typeof data === "object" && Array.isArray((data as Record<string, unknown>).commands)), "commands[]");
     await check("get_session_stats", (data) => Boolean(data && typeof data === "object" && (data as Record<string, unknown>).tokens && typeof (data as Record<string, unknown>).tokens === "object"), "tokens");

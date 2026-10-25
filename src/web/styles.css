@@ -738,12 +738,6 @@ details.conversation-process { display: block; padding: 0; }
 .system-notice-stack:empty { display: none; }
 .system-notice-stack > * { box-sizing: border-box; width: fit-content; max-width: 100%; margin: 0; overflow-wrap: anywhere; word-break: break-word; white-space: pre-wrap; }
 .composer-submission-status { box-sizing: border-box; width: min(calc(100% - var(--chat-column-gutter)), var(--reading-width), var(--chat-column-max)); margin: 0; padding: var(--space-1) var(--space-2); border: 1px solid color-mix(in srgb, var(--accent), transparent 70%); border-radius: var(--radius-md); background: color-mix(in srgb, var(--accent-soft), transparent 24%); color: var(--muted); font-size: 12px; line-height: 1.4; }
-.composer-recovery-feedback { max-height: calc(var(--control-h-lg) * 6); overflow: auto; overflow-wrap: anywhere; }
-.composer-recovery { max-height: calc(var(--control-h-lg) * 6); overflow: auto; overflow-wrap: anywhere; }
-.composer-recovery-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); padding: var(--space-1) 0; }
-.composer-recovery-row span { flex-basis: 100%; }
-.composer-recovery-row button { min-height: var(--control-h); padding: var(--space-1) var(--space-2); border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); cursor: pointer; font: inherit; }
-.composer-recovery-row button:disabled { cursor: default; opacity: .5; }
 .composer-retained-drafts { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); }
 .composer-retained-drafts button { padding: var(--space-1) var(--space-2); border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); cursor: pointer; font: inherit; }
 .composer-retained-drafts button:disabled { opacity: .5; cursor: default; }
@@ -1124,7 +1118,6 @@ details.conversation-process { display: block; padding: 0; }
 .about-update-confirm .about-primary-action, .about-update-confirm .about-link-button { justify-self: start; }
 .about-update a, .about-link-button { color: var(--accent); font: inherit; font-size: 11px; font-weight: 700; text-decoration: none; }
 .about-update a:hover, .about-link-button:hover { text-decoration: underline; }
-.draft-storage-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); margin-top: var(--space-4); }
 .about-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 18px; }
 .about-primary-action, .about-link-button { min-height: var(--control-h-lg); padding: var(--space-2) var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface); cursor: pointer; }
 .about-primary-action { border-color: color-mix(in srgb, var(--accent), transparent 46%); color: var(--accent); font: inherit; font-size: 11px; font-weight: 700; }

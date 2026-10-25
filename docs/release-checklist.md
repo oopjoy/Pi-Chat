@@ -3,6 +3,9 @@
 Work from isolated staging. Never overwrite live dist, restart the current
 service, or interrupt active Sessions without an authorized quiescent window.
 
+本轮工作区验收结果见 [维护收尾验收 — 2026-10-25](closeout-acceptance-2026-10-25.md)。
+它记录自动化通过、跳过和待人工确认项，不代替下方针对最终发布 revision 的检查。
+
 ## Source and artifact gates
 
 - [ ] Typecheck, lint, writer-boundaries, type-debt and committed-text checks pass.
@@ -58,9 +61,9 @@ See [Windows Setup](windows-setup.md) for layout and build instructions.
 
 ## Publication
 
-- [ ] Local source/artifact gates pass. Ordinary pushes and PRs do not start
-      full CI. If pre-release cloud verification is desired, use the manual
-      Windows CI workflow; its full checks are unchanged.
+- [ ] Local source/artifact gates pass. Main pushes and PRs run lightweight
+      Source Checks, not full CI or publication. For pre-release cloud
+      verification, use manual Windows CI; all full checks remain required.
 - [ ] Pushing a `v*` version tag automatically runs full Windows Release CI;
       publication waits for every gate, including installer verification.
 - [ ] The GitHub Release contains exactly the verified Setup EXE and portable

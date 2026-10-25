@@ -166,7 +166,7 @@ test("manual CI checks the selected commit without relying on push or PR payload
   assert.doesNotMatch(workflow, /github\.event\.(before|pull_request|deleted)/);
 });
 
-test("only version tags run CI automatically; manual CI and pinned release verification remain available", async () => {
+test("source checks run automatically while full manual and pinned release gates remain separate", async () => {
   for (const name of (await readdir(join(repositoryRoot, ".github/workflows"))).filter(name => /\.ya?ml$/.test(name))) {
     const source = await readFile(join(repositoryRoot, ".github/workflows", name), "utf8");
     for (const match of source.matchAll(/uses:\s*(actions\/[^\s#]+)/g)) assert.match(match[1], /@[a-f0-9]{40}$/);
@@ -177,6 +177,14 @@ test("only version tags run CI automatically; manual CI and pinned release verif
       assert.match(source, /npm run verify:e2e/);
       assert.match(source, /npm run test:setup/);
       assert.doesNotMatch(source, /tags:/);
+    }
+    if (name === "source-checks.yml") {
+      assert.match(source, /push:\n\s+branches: \[main\]/);
+      assert.match(source, /pull_request:/);
+      assert.match(source, /contents: read/);
+      assert.match(source, /timeout-minutes: 15/);
+      assert.match(source, /npm run preflight/);
+      assert.doesNotMatch(source, /npm run (build|verify|test:setup)|gh release|contents: write|workflow_run:|tags:/);
     }
     if (name === "windows-release-ci.yml") {
       assert.match(source, /push:\n\s+tags:/); assert.match(source, /PI_CHAT_RELEASE_MODE: ["']?1/);

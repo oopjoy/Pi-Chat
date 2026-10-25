@@ -39,14 +39,14 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-async function settingsFixture() {
+async function settingsFixture(models: Parameters<typeof panelProps>[0] = []) {
   const { dom } = installAppDom();
   const { api } = await import("../../src/web/api");
   const restoreApi = captureApiSnapshot(api);
   const { createRoot } = await import("react-dom/client");
   const { ManagementPanel } = await import("../../src/web/components/ManagementPanel");
   const root = createRoot(dom.window.document.getElementById("root")!);
-  await act(async () => root.render(createElement(ManagementPanel, panelProps([]))));
+  await act(async () => root.render(createElement(ManagementPanel, panelProps(models))));
   return {
     dom, api,
     button(label: string) {
@@ -72,8 +72,8 @@ test("adding a Provider works while another Session is generating", async () => 
     await act(async () => root.render(createElement(ManagementPanel, { ...panelProps([]), busy: true })));
     const add = [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
       .find((button) => button.textContent === "添加自定义提供方")!;
-    // A models.json edit no longer needs global quiescence, so the control must
-    // not look actionable while its handler refuses to run.
+    // A models.json edit no longer needs global quiescence: both the visible
+    // control and its handler must remain actionable while another turn runs.
     assert.equal(add.disabled, false);
     await act(async () => add.click());
     assert.ok(dom.window.document.querySelector(".model-provider-editor"), "the editor opens on the first click");
@@ -457,4 +457,69 @@ test("the model catalogue badge never claims ready while sync is pending", async
   } finally {
     await act(async () => root.unmount());
   }
+});
+
+async function modelProbeFixture() {
+  const f = await settingsFixture(["alpha", "beta"].map((provider) => ({
+    id: "configured", name: "Configured", provider, source: "models-json", authMode: "api-key", custom: true,
+  })));
+  f.api.getCustomProvider = async (provider: string) => ({ provider: {
+    provider, baseUrl: `https://${provider}.invalid/v1`, api: "openai-completions", apiKey: "",
+    models: [{ id: "configured", name: "Configured" }],
+  } });
+  return {
+    ...f,
+    async edit(provider: string) {
+      const button = [...f.dom.window.document.querySelectorAll<HTMLButtonElement>(".model-provider-disclosure")]
+        .find((button) => button.textContent?.includes(provider))!;
+      await act(async () => button.click());
+    },
+    async probe() { await act(async () => f.button("获取上游模型列表").click()); },
+    async cancelProbe() {
+      await act(async () => f.dom.window.document.querySelector<HTMLButtonElement>(".provider-discovered-actions button")!.click());
+    },
+    rows: () => f.dom.window.document.querySelector(".provider-discovered-list")?.textContent || "",
+  };
+}
+
+test("a cancelled model probe cannot replace the result of a reopened picker", async () => {
+  const f = await modelProbeFixture();
+  const first = deferred<Awaited<ReturnType<typeof f.api.probeProviderModels>>>();
+  let requests = 0;
+  f.api.probeProviderModels = () => ++requests === 1 ? first.promise : Promise.resolve({ models: [{ id: "new-result" }] });
+  try {
+    await f.edit("alpha");
+    await f.probe();
+    await f.cancelProbe();
+    assert.equal(f.button("获取上游模型列表").disabled, false, "cancel permits a fresh probe immediately");
+    await f.probe();
+    assert.match(f.rows(), /new-result/);
+    await act(async () => first.resolve({ models: [{ id: "old-result" }] }));
+    assert.match(f.rows(), /new-result/);
+    assert.doesNotMatch(f.rows(), /old-result/);
+    assert.equal(requests, 2);
+  } finally { await f.close(); }
+});
+
+test("an old Provider probe failure cannot unlock or contaminate the new Provider picker", async () => {
+  const f = await modelProbeFixture();
+  const first = deferred<Awaited<ReturnType<typeof f.api.probeProviderModels>>>();
+  const second = deferred<Awaited<ReturnType<typeof f.api.probeProviderModels>>>();
+  f.api.probeProviderModels = (input) => input.provider === "alpha" ? first.promise : second.promise;
+  try {
+    await f.edit("alpha");
+    await f.probe();
+    await f.cancelProbe();
+    await act(async () => f.button("取消").click());
+    await f.edit("beta");
+    await f.probe();
+    await act(async () => first.reject(new Error("obsolete-alpha-failure")));
+    const picker = f.dom.window.document.querySelector(".provider-discovered-dialog")!;
+    assert.doesNotMatch(picker.textContent || "", /obsolete-alpha-failure/);
+    assert.equal(f.button("正在探测…").disabled, true, "old finally cannot finish the new request");
+    assert.equal(f.button("应用所选").disabled, true);
+    await act(async () => second.resolve({ models: [{ id: "beta-result" }] }));
+    assert.match(f.rows(), /beta-result/);
+    assert.equal(f.button("应用所选").disabled, false);
+  } finally { await f.close(); }
 });

@@ -486,16 +486,6 @@ export function AppView(host: Record<string, any>) {
               if (active && missing.length) throw new Error("部分本地附件已经不存在或无法保留");
             }
           },
-          onValidateRecoveredFiles: async (paths: string[], owner: string) => {
-            const missing = new Set<string>();
-            for (let offset = 0; offset < paths.length; offset += 16) {
-              const batch = paths.slice(offset, offset + 16);
-              for (const path of (await api.leaseLocalFiles(batch, true, owner)).missing) missing.add(path);
-              const { kinds } = await api.attachmentKinds(batch);
-              for (const path of batch) if (!kinds.some((item: { path: string }) => item.path === path)) missing.add(path);
-            }
-            return [...missing];
-          },
           onPickLocalFolder: async () => (await api.pickLocalFolder()).paths,
           onAttachmentKinds: async (paths: string[]) => (await api.attachmentKinds(paths)).kinds,
           onError: setError,

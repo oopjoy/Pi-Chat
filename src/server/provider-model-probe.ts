@@ -147,9 +147,15 @@ export async function probeProviderModels(input: {
       const response = await fetchImpl(url, {
         method: "GET",
         headers,
-        redirect: "follow",
+        // Fetch only the explicit endpoint. Custom API-key headers are not
+        // stripped by fetch on a cross-origin redirect (unlike Authorization).
+        redirect: "manual",
         signal: controller.signal,
       });
+      if (response.status >= 300 && response.status < 400) {
+        await response.body?.cancel().catch(() => undefined);
+        throw new Error("模型列表端点发生重定向，已停止以保护 API 密钥；请填写最终 API 地址");
+      }
       return parseProviderModelList(await readLimitedJson(response, apiKey));
     } catch (error) {
       const message = error instanceof Error && error.name === "AbortError"

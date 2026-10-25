@@ -738,8 +738,8 @@ export class PiChatApp {
     this.startModelCatalogueWatcher();
     if (this.options.attachmentStore) {
       const maintain = () => { void this.options.attachmentStore!.maintain().catch(() => undefined); };
-      // Do not sweep during startup: give reopening pages time to validate and
-      // renew draft leases before the first hourly maintenance pass.
+      // Cleanup is periodic, not startup work. Only current in-memory drafts
+      // renew leases; old browser backups are neither loaded nor renewed.
       this.attachmentMaintenanceTimer = setInterval(maintain, 60 * 60 * 1000);
       this.attachmentMaintenanceTimer.unref();
     }

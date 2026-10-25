@@ -288,7 +288,7 @@ export function commandMatches(value: string, commands: SlashCommand[]): SlashCo
   }).sort((a, b) => a.rank - b.rank || a.score - b.score || a.command.name.localeCompare(b.command.name)).slice(0, 9).map(({ command }) => command);
 }
 
-export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, placeholder, acceptsImages, imageInputPending = false, restoredDraft, onDraftRevisionChange, draftKey, forgottenComposerKeys = [], submissionScope, submissionTargetSessionId, allowFollowupSubmissions = true, submissionPaused = false, onSubmissionPendingChange, commands, controls, notices, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles = async () => [], onOpenLocalFile, onStageDroppedFile, onDiscardStagedFile, onPickLocalFolder, onAttachmentKinds, onPrepareLocalFiles, onUpdateAttachmentLeases, onValidateRecoveredFiles, onError }: {
+export function ChatInput({ streaming, activelyStreaming = streaming, stopping, disabled, disabledPlaceholder, placeholder, acceptsImages, imageInputPending = false, restoredDraft, onDraftRevisionChange, draftKey, forgottenComposerKeys = [], submissionScope, submissionTargetSessionId, allowFollowupSubmissions = true, submissionPaused = false, onSubmissionPendingChange, commands, controls, notices, onSend, onAbort, onPickLocalFiles, onReadClipboardFiles = async () => [], onOpenLocalFile, onStageDroppedFile, onDiscardStagedFile, onPickLocalFolder, onAttachmentKinds, onPrepareLocalFiles, onUpdateAttachmentLeases, onError }: {
   /** True when a submission will enter the local queue. */
   streaming: boolean;
   /** True only while Pi is actively generating and can be stopped. */
@@ -332,7 +332,6 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
   onAttachmentKinds?: (paths: string[]) => Promise<Array<{ path: string; kind: "file" | "directory" }>>;
   onPrepareLocalFiles?: (paths: string[]) => Promise<void>;
   onUpdateAttachmentLeases?: (paths: string[], active: boolean, owner: string) => Promise<void>;
-  onValidateRecoveredFiles?: (paths: string[], owner: string) => Promise<string[]>;
   onError: (message: string) => void;
 }) {
   const [dragging, setDragging] = useState(false);
@@ -417,19 +416,20 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
     onSend,
     prepareLocalFiles: onPrepareLocalFiles,
     updateAttachmentLeases: onUpdateAttachmentLeases,
-    validateRecoveredFiles: onValidateRecoveredFiles,
   });
-  const backupNeedsCloseWarning = composer.backupNeedsCloseWarning;
+  const hasUnsentContent = composer.hasUnsentContent;
   useEffect(() => {
+    // A native warning is best effort, not a durable draft backup. Include
+    // off-screen partitions and pending attachment reads, not only this editor.
     const beforeClose = (event: BeforeUnloadEvent) => {
-      if (attachingCountRef.current > 0 || backupNeedsCloseWarning()) {
+      if (attachingCountRef.current > 0 || hasUnsentContent()) {
         event.preventDefault();
         event.returnValue = "";
       }
     };
     window.addEventListener("beforeunload", beforeClose);
     return () => window.removeEventListener("beforeunload", beforeClose);
-  }, [backupNeedsCloseWarning]);
+  }, [hasUnsentContent]);
   const value = composer.draft.message;
   const images = composer.draft.images;
   const files = draftFiles(composer.draft);
@@ -785,18 +785,6 @@ export function ChatInput({ streaming, activelyStreaming = streaming, stopping, 
       {notices && <div className="system-notice-stack" aria-live="polite">{notices}</div>}
       {composer.blocked && <div className="composer-submission-status is-failed" role="status">发送失败，草稿已恢复；{composer.blockedError || "修改后可重试"}</div>}
       {composer.storageWarning && <div className="composer-submission-status is-failed" role="status">{composer.storageWarning}</div>}
-      {composer.recoveryNotice && <div className="composer-submission-status composer-recovery-feedback" role="status">{composer.recoveryNotice}</div>}
-      {composer.draft.recoveryWarning === "delivery-uncertain" && <div className="composer-submission-status is-failed" role="status">上次这份内容的发送结果未确认。这里只恢复了草稿，请先核对历史，避免重复发送。</div>}
-      {composer.recoveries.length > 0 && <div className="composer-submission-status composer-recovery" role="status">
-        <strong>发现本机保存的未发送草稿</strong>
-        {composer.recoveries.slice(0, 3).map((record) => <div className="composer-recovery-row" key={`${record.id}:${record.sequence}`}>
-          <span>{new Date(record.updatedAt).toLocaleString()} · {record.frames.length} 份内容 · {record.frames.reduce((n, frame) => n + frame.images.length + frame.files.length, 0)} 个附件{record.frames.some((frame) => frame.uncertain) ? " · 含发送结果未确认的内容" : ""}</span>
-          <button type="button" disabled={editorDisabled || composer.recovering || composer.pendingCount > 0 || attachingCount > 0} onClick={() => void composer.restoreRecovery(record)}>恢复草稿</button>
-          <button type="button" disabled={editorDisabled || composer.recovering || composer.pendingCount > 0 || attachingCount > 0} onClick={() => void composer.restoreRecovery(record, true)}>仅恢复文字</button>
-          <button type="button" disabled={composer.recovering} onClick={() => composer.dismissRecovery(record)}>忽略这份备份</button>
-        </div>)}
-        <small>不会自动发送，也不会覆盖已输入的内容。新对话恢复后请确认工作路径。备份在本机保留 30 天，可在设置的 About 区清除。备份不证明服务尚未收到这些内容，发送前请核对历史。</small>
-      </div>}
       {composer.retainedDraftCount > 0 && <div className="composer-submission-status composer-retained-drafts" role="status">
         <span>另有 {composer.retainedDraftCount} 份未发送草稿已保留在本页。</span>
         <button type="button" disabled={editorDisabled || composer.pendingCount > 0 || attachingCount > 0} onClick={() => { attachmentEpochRef.current += 1; composer.recoverSuspended(); textareaRef.current?.focus(); }}>恢复下一份草稿</button>

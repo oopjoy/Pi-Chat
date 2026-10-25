@@ -1,0 +1,30 @@
+name: Source Checks
+
+# Fast, source-only checks. Full browser/artifact/installer gates stay in the
+# manual Windows CI and automatic version-tag Release CI workflows.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: source-checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preflight:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24.22.0
+          cache: npm
+      - run: npm ci
+      - run: npm run preflight
+      - name: Safety and closeout regressions
+        run: npm run test:focus -- --file tests/provider-model-probe.test.ts --file tests/web/management-panel-accessibility.test.ts --file tests/web/composer-attachment-lifecycle.test.ts --file tests/release-guards.test.ts

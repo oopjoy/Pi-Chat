@@ -100,7 +100,6 @@
     "esbuild": "0.28.1",
     "eslint": "^10.11.0",
     "eslint-plugin-react-hooks": "^7.1.1",
-    "fake-indexeddb": "6.2.6",
     "jsdom": "^26.1.0",
     "katex": "^0.16.22",
     "react": "^19.2.4",

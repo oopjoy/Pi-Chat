@@ -70,8 +70,9 @@ identity. Outputs:
 - `pi-chat-setup.exe.manifest.json` (schema 2; Setup digest, application identity,
   Node archive checksum and compiler version)
 
-Ordinary branch pushes and PRs do not automatically run Windows CI. Use
-**Actions → Windows CI → Run workflow** for explicit verification. A successful
+Main pushes and PRs automatically run source-only **Source Checks** without
+building or publishing artifacts. Use **Actions → Windows CI → Run workflow**
+for explicit full verification. A successful
 manual run on main publishes `pi-chat-setup-main-<full-commit>` as an Actions
 artifact only after source, browser, artifact and real-installer gates. Its manifest uses
 `tag: HEAD` and the exact checked-out SHA. This route requires no tag creation,

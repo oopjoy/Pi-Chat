@@ -34,6 +34,8 @@ npm run verify
 
 The wrappers create separate unique directories under the OS temp directory. Successful staging is removed automatically. A failed unit or E2E stage is retained and printed for diagnosis. `verify:unit` runs both the batched core source lane and the separately isolated benchmark-contract lane. `npm run verify` runs typecheck, full unit tests, complete Playwright, and `git diff HEAD --check` serially so both staged and unstaged tracked changes are covered.
 
+Main pushes and PRs run the lightweight Source Checks workflow (`preflight` plus targeted safety regressions), without building or publishing artifacts. Full Windows CI remains manual; version tags retain the complete release gates. A green source check is not a release approval.
+
 Release verification is different: follow [`docs/release-checklist.md`](docs/release-checklist.md) and retain the explicitly named staged artifact that will be packaged.
 
 ## Keep one writer
