@@ -1,4 +1,5 @@
 import type { PromptImage, PromptSettingsSnapshot, ModelInfo, SessionRuntimeReadyData, ThinkingLevel } from "../../shared/types";
+import { ApiRequestError } from "../api";
 import type { DraftPaneAuthority, PaneAuthoritySnapshot } from "./pane-authority";
 
 type Callback = (...args: any[]) => any;
@@ -177,20 +178,31 @@ export async function preparePromptRuntime(
       serverPromptId,
       targetSessionId,
     });
-    if (capturedSelection?.model && modelInventoryConfirmed) {
+    // A staged choice must exist in the catalogue. So must the model of an
+    // already-warm Runtime: deleting a Provider that conversation still selects
+    // must surface here, not silently reuse a cached upstream config. A cold or
+    // view-only Session keeps a history-only model that its target Runtime
+    // resolves while warming, so only an authoritative selection is validated.
+    const effectiveModel = capturedSelection?.model ?? displayedModel;
+    const authoritativeModel = Boolean(capturedSelection?.model) || runtimeStatus === "active";
+    if (authoritativeModel && effectiveModel && modelInventoryConfirmed && models.length > 0) {
       const route = validateSelectedRoute(
         models,
-        capturedSelection.model.provider,
-        capturedSelection.model.id,
-        capturedSelection.model.api,
+        effectiveModel.provider,
+        effectiveModel.id,
+        effectiveModel.api,
       );
       if (!route.ok) {
-        setError(
-          `当前模型路由无效：${capturedSelection.model.provider}/${capturedSelection.model.id}`
-          + (capturedSelection.model.api ? `（${capturedSelection.model.api}）` : "")
-          + " 不在当前 Runtime 的模型目录中，请重新选择模型。",
-        );
-        return null;
+        const message = `当前模型不存在：${effectiveModel.provider}/${effectiveModel.id}`
+          + (effectiveModel.api ? `（${effectiveModel.api}）` : "")
+          + " 不在当前 Runtime 的模型目录中，请重新选择模型后再发送。";
+        setError(message);
+        // A 4xx client rejection keeps the unsent draft and the toast. A plain
+        // Error has no status, so the failure recorder treats it as an upstream
+        // miss and writes a transcript card for a message that never left the
+        // composer. MODEL_UNAVAILABLE is reserved for a Runtime refusal and
+        // would force that card, so this local catalogue check uses its own code.
+        throw new ApiRequestError(message, 400, "MODEL_ROUTE_MISSING");
       }
     }
     const preparationRoute = promptPreparationRoute({

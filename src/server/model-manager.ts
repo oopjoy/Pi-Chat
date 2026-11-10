@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { CustomModelInput, CustomProviderInput, ModelInfo } from "../shared/types.js";
+import { parseTokenCount } from "../shared/token-count.js";
 import { writeFileAtomic } from "./file-transaction.js";
 
 export const MODEL_APIS = ["openai-completions", "openai-responses", "anthropic-messages", "google-generative-ai"] as const;
@@ -25,7 +26,12 @@ function validateName(value: string, label: string, pattern: RegExp, maximum: nu
 
 function positiveInteger(value: unknown, label: string, maximum: number): number | undefined {
   if (value === undefined || value === null || value === "") return undefined;
-  const number = typeof value === "number" ? value : Number(value);
+  // Accept the same "500k"/"1m" shorthand as the Provider editor when a
+  // direct API caller sends it; the UI normally sends parsed numbers.
+  const parsed = typeof value === "string" ? parseTokenCount(value) : null;
+  if (parsed && !parsed.ok) throw new Error(`${label} 必须是有效正整数`);
+  const number = parsed ? parsed.value : typeof value === "number" ? value : Number(value);
+  if (number === undefined) return undefined;
   if (!Number.isSafeInteger(number) || number <= 0 || number > maximum) throw new Error(`${label} 必须是有效正整数`);
   return number;
 }

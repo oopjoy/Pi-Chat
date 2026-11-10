@@ -39,8 +39,17 @@ export function apiRouteAdmission(request: IncomingMessage, url: URL): ApiRouteA
   }
   if (request.method === "POST" && url.pathname === "/api/sessions/new")
     return { bodyBeforeMutationLease: true, validateSessionId: false, bodyLimit: PROMPT_BODY_LIMIT, ordinaryMutation: false };
-  if (request.method === "POST" && url.pathname === "/api/models/probe")
-    return { bodyBeforeMutationLease: true, validateSessionId: false, bodyLimit: DEFAULT_MUTATION_BODY_LIMIT, ordinaryMutation: false };
+  // Probe and add-Provider enter models-refreshing (or are read-only) themselves.
+  // A generic mutation lease here makes begin() see its own write and 409:
+  // "仍有 1 个写操作正在完成".
+  if (request.method === "POST" && (url.pathname === "/api/models/probe" || url.pathname === "/api/models/provider"))
+    return {
+      bodyBeforeMutationLease: true,
+      validateSessionId: false,
+      bodyLimit: DEFAULT_MUTATION_BODY_LIMIT,
+      acquireMutationLeaseAfterBody: false,
+      ordinaryMutation: false,
+    };
   const sessionManagementMutation =
     (request.method === "PATCH" || request.method === "DELETE")
     && /^\/api\/sessions\/[a-f0-9]{20}$/.test(url.pathname);

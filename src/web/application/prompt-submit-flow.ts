@@ -14,6 +14,8 @@ import type { LocalUserTurn } from "../lib/local-user-turn";
 import { nextLocalTurnTotal } from "../lib/local-user-turn";
 import {
   promptSettingsForSelection,
+  resolveCatalogueModel,
+  thinkingLevelForModel,
   type SessionComposerSelection,
 } from "../lib/session-composer-selection";
 import type { PromptOperation, PromptOperationEvent } from "./prompt-operation";
@@ -351,9 +353,35 @@ export function capturePromptSelection(input: {
       };
   return {
     ...(selection ? { selection } : null),
-    promptSettings: promptSettingsForSelection(selection, input.models),
+    // The displayed model supplies catalogue metadata for clamping only; a
+    // Thinking-only choice must never send a model command of its own.
+    // A Runtime level the selector cannot show (custom models clamp
+    // minimal/medium upward) is sent as that displayed slot, even when the
+    // user has not staged a new Thinking choice. An unchanged supported level
+    // stays omitted so the Runtime keeps it.
+    promptSettings: promptSettingsForDisplayedThinking(
+      selection,
+      input.models,
+      input.displayedModel,
+      input.displayedThinkingLevel,
+    ),
     ...(input.isDraft ? { draftGateMode: input.draftGateMode } : null),
   };
+}
+
+function promptSettingsForDisplayedThinking(
+  selection: SessionComposerSelection | undefined,
+  models: readonly ModelInfo[],
+  displayedModel: ModelInfo | null | undefined,
+  displayedThinkingLevel: ThinkingLevel | undefined,
+): PromptSettingsSnapshot | undefined {
+  const settings = promptSettingsForSelection(selection, models, displayedModel);
+  if (selection?.thinkingLevel || !displayedModel || !displayedThinkingLevel) return settings;
+  const resolved = resolveCatalogueModel(displayedModel, models) ?? displayedModel;
+  if (resolved.reasoning === false) return settings;
+  const clamped = thinkingLevelForModel(resolved, displayedThinkingLevel, models);
+  if (clamped === displayedThinkingLevel) return settings;
+  return { ...(settings || {}), thinkingLevel: clamped };
 }
 
 export interface LocalPromptProtectionInput {

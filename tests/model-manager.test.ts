@@ -163,6 +163,21 @@ test("provider editor accepts normal IDs containing s and rejects whitespace", a
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("server validation accepts the same k/m shorthand as the Provider editor", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-provider-shorthand-"));
+  try {
+    await writeFile(join(root, "models.json"), JSON.stringify({ providers: { ds: { baseUrl: "https://api.example.com", models: [{ id: "one" }] } } }));
+    const manager = new ModelManager(root);
+    const updated = await manager.updateProvider("ds", { provider: "ds", baseUrl: "https://api.example.com", api: "openai-completions", models: [{ id: "one", name: "One", contextWindow: "500k", maxTokens: "1m" }] });
+    assert.equal(updated.models[0]?.contextWindow, 500_000);
+    assert.equal(updated.models[0]?.maxTokens, 1_000_000);
+    const configured = JSON.parse(await readFile(join(root, "models.json"), "utf8"));
+    assert.equal(configured.providers.ds.models[0].contextWindow, 500_000);
+    await assert.rejects(() => manager.updateProvider("ds", { provider: "ds", baseUrl: "https://api.example.com", api: "openai-completions", models: [{ id: "one", contextWindow: "1e6" }] }), /Context Window/);
+    await assert.rejects(() => manager.updateProvider("ds", { provider: "ds", baseUrl: "https://api.example.com", api: "openai-completions", models: [{ id: "one", maxTokens: "0k" }] }), /Max Tokens/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("custom model validation rejects unsafe provider names and invalid endpoints", () => {
   assert.throws(() => validateCustomModel({ provider: "../bad", id: "model", api: "openai-completions" }), /Provider/);
   assert.throws(() => validateCustomModel({ provider: "local", id: "model", api: "openai-completions", baseUrl: "file:///tmp" }), /Base URL/);

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { act, createElement } from "react";
 import type { CustomProviderInput } from "../../src/shared/types";
@@ -164,6 +165,99 @@ test("Settings navigation and Provider disclosure use native non-nested controls
     assert.match(builtInCard.textContent || "", /Pi Runtime 管理|Pi 登录管理/);
   } finally {
     await act(async () => root.unmount());
+  }
+});
+
+test("Provider Edit and Delete pills darken on hover", () => {
+  const css = readFileSync(new URL("../../src/web/styles.css", import.meta.url), "utf8");
+  assert.match(
+    css,
+    /\.model-provider-actions button\s*{[^}]*border:\s*0/s,
+  );
+  assert.match(
+    css,
+    /\.model-provider-actions button:hover:not\(:disabled\)[^}]*background:\s*var\(--surface-hover\)/s,
+  );
+  assert.match(
+    css,
+    /\.model-provider-actions \.model-delete-action:hover:not\(:disabled\)[^}]*background:\s*color-mix\(in srgb,\s*var\(--danger\)/s,
+  );
+});
+
+test("Provider cards use a larger left-side hover and do not nest an inner editor frame", () => {
+  const css = readFileSync(new URL("../../src/web/styles.css", import.meta.url), "utf8");
+  assert.doesNotMatch(
+    css,
+    /\.model-provider-card:not\(\.is-expanded\):hover/,
+  );
+  assert.match(
+    css,
+    /\.model-provider-disclosure:hover\s*{[^}]*background:\s*var\(--surface-hover\)/s,
+  );
+  assert.match(
+    css,
+    /\.model-provider-panel \.model-editor\s*{[^}]*border:\s*0/s,
+  );
+  assert.doesNotMatch(
+    css,
+    /\.model-provider-card\.is-expanded \.model-provider-head\s*{[^}]*accent-soft/s,
+  );
+  assert.match(
+    css,
+    /\.provider-model-editor-row\s*{[^}]*grid-template-columns:\s*28px minmax\(0,\s*1fr\) minmax\(0,\s*1fr\)/s,
+  );
+  assert.match(
+    css,
+    /\.provider-models-heading\s*{[^}]*grid-template-columns:\s*28px minmax\(0,\s*1fr\) minmax\(0,\s*1fr\)/s,
+  );
+  assert.match(
+    css,
+    /\.provider-model-editor-row input:focus-visible\s*,[^{]*\{[^}]*outline:\s*none/s,
+  );
+  assert.doesNotMatch(css, /\.provider-model-editor-row\.is-drop-target/);
+});
+
+test("Provider editor cancel sits with save and model rows can be reordered", async () => {
+  const { dom } = installAppDom();
+  const { api } = await import("../../src/web/api");
+  const restoreApi = captureApiSnapshot(api);
+  const { createRoot } = await import("react-dom/client");
+  const { ManagementPanel } = await import("../../src/web/components/ManagementPanel");
+  Object.assign(api, {
+    getCustomProvider: async () => ({
+      provider: {
+        provider: "local",
+        baseUrl: "https://api.example.com/v1",
+        api: "openai-responses",
+        apiKey: "",
+        models: [{ id: "first", name: "First" }, { id: "second", name: "Second" }],
+      },
+    }),
+  });
+  const root = createRoot(dom.window.document.getElementById("root")!);
+  try {
+    await act(async () => root.render(createElement(ManagementPanel, panelProps([
+      { id: "first", name: "First", provider: "local", source: "models-json", authMode: "api-key", custom: true },
+      { id: "second", name: "Second", provider: "local", source: "models-json", authMode: "api-key", custom: true },
+    ]))));
+    const edit = [...dom.window.document.querySelectorAll<HTMLButtonElement>(".model-provider-actions button")]
+      .find((button) => button.textContent === "编辑")!;
+    await act(async () => { edit.click(); await Promise.resolve(); });
+    const footer = dom.window.document.querySelector(".model-editor-footer")!;
+    assert.ok(footer.querySelector(".model-cancel-button"), "cancel belongs next to save");
+    assert.ok(footer.querySelector(".model-save-button"));
+    assert.equal(dom.window.document.querySelector(".model-editor-head .model-cancel-button"), null);
+    const ids = () => [...dom.window.document.querySelectorAll<HTMLInputElement>('input[aria-label$=" ID"]')].map((input) => input.value);
+    assert.deepEqual(ids(), ["first", "second"]);
+    const handle = dom.window.document.querySelector<HTMLButtonElement>('[aria-label="拖动调整模型 1 顺序"]')!;
+    assert.equal(handle.draggable, true);
+    await act(async () => {
+      handle.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    });
+    assert.deepEqual(ids(), ["second", "first"]);
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
   }
 });
 
@@ -415,17 +509,15 @@ test("Provider editor preserves the stable source key when saving an edited mode
     const output = dom.window.document.querySelector<HTMLInputElement>('input[aria-label="模型 1 最大输出"]')!;
     for (const input of [context, output]) {
       assert.equal(input.type, "text", "token counts have no numeric stepper arrows");
-      assert.equal(input.inputMode, "numeric");
+      assert.equal(input.inputMode, "text", "k/m suffixes must be typeable");
     }
     const fill = (input: HTMLInputElement, value: string) => {
       Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value")?.set?.call(input, value);
       input.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
     };
-    await act(async () => { fill(context, "900000"); fill(output, "80000"); });
-    assert.equal(context.value, "900000");
-    assert.equal(output.value, "80000");
-    await act(async () => { fill(context, "1e6"); });
-    assert.equal(context.value, "900000", "non-integer text is not converted to a different token limit");
+    await act(async () => { fill(context, "900k"); fill(output, "80K"); });
+    assert.equal(context.value, "900k", "suffix text stays in the editor while typing");
+    assert.equal(output.value, "80K");
     const idInput = dom.window.document.querySelector<HTMLInputElement>('input[aria-label="模型 1 ID"]')!;
     await act(async () => {
       Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value")?.set?.call(idInput, "renamed-id");
@@ -437,6 +529,92 @@ test("Provider editor preserves the stable source key when saving an edited mode
     });
     assert.ok(saved);
     assert.deepEqual(saved.models, [{ id: "renamed-id", originalId: "old-id", name: "Old name", contextWindow: 900_000, maxTokens: 80_000, reasoning: true }]);
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
+test("deleting a Provider is immediate even while another conversation uses it", async () => {
+  const { dom } = installAppDom();
+  const { api } = await import("../../src/web/api");
+  const restoreApi = captureApiSnapshot(api);
+  const { createRoot } = await import("react-dom/client");
+  const { ManagementPanel } = await import("../../src/web/components/ManagementPanel");
+  const calls: string[] = [];
+  Object.assign(api, {
+    deleteCustomProvider: async (provider: string) => {
+      calls.push(provider);
+      return { models: [], state: { model: null, isStreaming: false } };
+    },
+  });
+  const confirms: string[] = [];
+  dom.window.confirm = (message?: string) => { confirms.push(String(message)); return true; };
+  const catalogue = [{ id: "glm-5.3-flash", name: "glm-5.3-flash", provider: "cpafem", source: "models-json" as const, authMode: "api-key" as const, custom: true as const }];
+  const root = createRoot(dom.window.document.getElementById("root")!);
+  let changed = 0;
+  try {
+    await act(async () => root.render(createElement(ManagementPanel, panelProps(catalogue, () => { changed += 1; }))));
+    await act(async () => {
+      dom.window.document.querySelector<HTMLButtonElement>(".model-delete-action")!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.deepEqual(calls, ["cpafem"], "one request, no retry handshake");
+    assert.equal(confirms.length, 1, "only the ordinary delete confirmation is shown");
+    assert.equal(changed, 1);
+    assert.match(dom.window.document.body.textContent || "", /Provider 已删除/);
+    assert.match(
+      dom.window.document.body.textContent || "",
+      /仍在使用其模型的对话会在发送时提示重新选择模型/,
+      "the notice explains how the stale conversation is reported",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    restoreApi();
+  }
+});
+
+test("provider token limits accept k/m shorthand and reject other text", async () => {
+  const { dom } = installAppDom();
+  const { api } = await import("../../src/web/api");
+  const restoreApi = captureApiSnapshot(api);
+  const { createRoot } = await import("react-dom/client");
+  const { ManagementPanel } = await import("../../src/web/components/ManagementPanel");
+  let saved: CustomProviderInput | null = null;
+  Object.assign(api, {
+    modelPreferences: async () => ({ defaultProvider: "", defaultModel: "", favorites: [], recent: [] }),
+    addCustomProvider: async (config: CustomProviderInput) => {
+      saved = config;
+      return { models: [], state: { model: null, isStreaming: false }, modelRuntimeSyncPending: false, modelCatalogueRevision: 2 };
+    },
+  });
+  const root = createRoot(dom.window.document.getElementById("root")!);
+  const button = (label: string) => [...dom.window.document.querySelectorAll<HTMLButtonElement>("button")]
+    .find((candidate) => candidate.textContent?.trim() === label)!;
+  const fill = (input: HTMLInputElement, value: string) => {
+    Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value")?.set?.call(input, value);
+    input.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+  };
+  try {
+    await act(async () => root.render(createElement(ManagementPanel, panelProps([]))));
+    await act(async () => button("添加自定义提供方").click());
+    await act(async () => {
+      fill(dom.window.document.querySelector<HTMLInputElement>(".model-editor-grid input")!, "local");
+      fill(dom.window.document.querySelector<HTMLInputElement>('input[aria-label="模型 1 ID"]')!, "kimi-k2");
+      fill(dom.window.document.querySelector<HTMLInputElement>('input[aria-label="模型 1 上下文大小"]')!, "1e6");
+    });
+    await act(async () => { button("保存").click(); await Promise.resolve(); });
+    assert.equal(saved, null, "invalid text must not reach the API");
+    assert.match(dom.window.document.querySelector(".resource-error")?.textContent || "", /第 1 行上下文大小格式无效/);
+
+    await act(async () => {
+      fill(dom.window.document.querySelector<HTMLInputElement>('input[aria-label="模型 1 上下文大小"]')!, "1m");
+      fill(dom.window.document.querySelector<HTMLInputElement>('input[aria-label="模型 1 最大输出"]')!, "8K");
+    });
+    await act(async () => { button("保存").click(); await Promise.resolve(); });
+    assert.ok(saved, dom.window.document.querySelector(".resource-error")?.textContent || "save failed");
+    assert.deepEqual(saved!.models, [{ id: "kimi-k2", name: "", reasoning: true, contextWindow: 1_000_000, maxTokens: 8_000 }]);
   } finally {
     await act(async () => root.unmount());
     restoreApi();
@@ -481,6 +659,38 @@ async function modelProbeFixture() {
     rows: () => f.dom.window.document.querySelector(".provider-discovered-list")?.textContent || "",
   };
 }
+
+test("the upstream model list can be searched without changing hidden selections", async () => {
+  const f = await modelProbeFixture();
+  const listed = deferred<Awaited<ReturnType<typeof f.api.probeProviderModels>>>();
+  f.api.probeProviderModels = () => listed.promise;
+  const fill = (input: HTMLInputElement, value: string) => {
+    Object.getOwnPropertyDescriptor(f.dom.window.HTMLInputElement.prototype, "value")?.set?.call(input, value);
+    input.dispatchEvent(new f.dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+  };
+  const checked = (id: string) => [...f.dom.window.document.querySelectorAll<HTMLLabelElement>(".provider-discovered-list label")]
+    .find((label) => label.textContent?.includes(id))
+    ?.querySelector<HTMLInputElement>('input[type="checkbox"]')?.checked;
+  try {
+    await f.edit("alpha");
+    await f.probe();
+    await act(async () => listed.resolve({ models: [
+      { id: "glm-5.3-flash" },
+      { id: "deepseek-chat" },
+      { id: "kimi-k2" },
+    ] }));
+    const search = f.dom.window.document.querySelector<HTMLInputElement>('input[aria-label="搜索上游模型"]')!;
+    assert.equal(search.closest("li")?.previousElementSibling, null, "search is the first row");
+    assert.equal(checked("configured"), true);
+    await act(async () => fill(search, "kimi"));
+    assert.match(f.rows(), /kimi-k2/);
+    assert.doesNotMatch(f.rows(), /deepseek-chat/);
+    assert.doesNotMatch(f.rows(), /glm-5\.3-flash/);
+    assert.equal(checked("configured"), undefined, "non-matching rows stay out of the list");
+    await act(async () => fill(search, ""));
+    assert.equal(checked("configured"), true, "filtering does not clear a hidden selection");
+  } finally { await f.close(); }
+});
 
 test("a cancelled model probe cannot replace the result of a reopened picker", async () => {
   const f = await modelProbeFixture();

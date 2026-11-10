@@ -1,6 +1,13 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { DroppedFileStore } from "./dropped-files.js";
-import { hostVisibleModelsFromConfig, modelsConfigFingerprint } from "./models-config-revision.js";
+import {
+  createRemovedHostCatalogue,
+  hostVisibleModelsFromConfig,
+  mergeHostAndRuntimeModels as mergePublishedModelCatalogue,
+  modelsConfigFingerprint,
+  rememberRemovedHostCatalogue,
+  type RemovedHostCatalogue,
+} from "./models-config-revision.js";
 import { createReadStream, existsSync, readFileSync, watch, type FSWatcher } from "node:fs";
 import { stat } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -580,6 +587,8 @@ export class PiChatApp {
   private lastAvailableModels: ModelInfo[] = [];
   /** Host-side model catalogue; refreshed after atomic models.json mutations. */
   private startupModels: ModelInfo[];
+  /** Custom Providers/models dropped from models.json stay suppressed until re-added. */
+  private readonly removedHostCatalogue: RemovedHostCatalogue = createRemovedHostCatalogue();
   /** SHA-256 of models.json bytes, including connection fields never sent to the browser. */
   private modelsConfigFingerprint = "";
   private modelCatalogueRevision = 1;
@@ -730,7 +739,7 @@ export class PiChatApp {
     );
     this.currentCwd = resolve(options.cwd);
     this.primaryRuntimeCwd = this.currentCwd;
-    this.startupModels = this.readStartupModels();
+    this.startupModels = this.readStartupModels() ?? [];
     // Cold JSONL views resolve persisted model metadata through knownModels.
     // Seed it from the configured catalogue so models.json models keep their
     // reasoning/input/contextWindow instead of degrading to a bare-name fallback.
@@ -1061,25 +1070,25 @@ export class PiChatApp {
     return [model.provider, model.id, model.api || ""].join(String.fromCharCode(0));
   }
   private mergeHostAndRuntimeModels(runtimeModels: ModelInfo[], hostModels: ModelInfo[]): ModelInfo[] {
-    const result = new Map<string, ModelInfo>();
-    for (const model of [...runtimeModels, ...hostModels]) {
-      const key = this.modelRouteKey(model);
-      result.set(key, { ...result.get(key), ...model });
-    }
-    return [...result.values()];
+    return mergePublishedModelCatalogue(runtimeModels, hostModels, this.removedHostCatalogue);
   }
-  private readStartupModels(): ModelInfo[] {
+  /**
+   * `undefined` means the file could not be read. That is not an empty
+   * catalogue: publishing [] would tombstone every custom Provider until a
+   * later successful refresh, and a duplicate add never reaches that refresh.
+   */
+  private readStartupModels(): ModelInfo[] | undefined {
     if (!this.options.modelManager) {
       this.modelsConfigFingerprint = "";
       return [];
     }
     try {
       const contents = readFileSync(this.options.modelManager.path);
+      const parsed = JSON.parse(contents.toString("utf8"));
       this.modelsConfigFingerprint = modelsConfigFingerprint(contents);
-      return hostVisibleModelsFromConfig(JSON.parse(contents.toString("utf8")));
+      return hostVisibleModelsFromConfig(parsed);
     } catch {
-      this.modelsConfigFingerprint = "";
-      return [];
+      return undefined;
     }
   }
   private startModelCatalogueWatcher(): void {
@@ -1120,11 +1129,18 @@ export class PiChatApp {
   }
   private refreshHostModelCatalogue(): ModelInfo[] {
     const previousFingerprint = this.modelsConfigFingerprint;
+    const previousHost = this.startupModels;
     const next = this.readStartupModels();
+    if (next === undefined) return previousHost;
     this.startupModels = next;
     const changed = previousFingerprint !== this.modelsConfigFingerprint;
     this.rememberModelContextWindows(next);
     if (changed) {
+      rememberRemovedHostCatalogue(this.removedHostCatalogue, previousHost, next);
+      this.lastAvailableModels = this.lastAvailableModels.filter(
+        (model) => !this.removedHostCatalogue.providers.has(model.provider)
+          && !this.removedHostCatalogue.modelKeys.has(this.modelRouteKey(model)),
+      );
       this.modelCatalogueRevision += 1;
       this.modelRuntimeSyncPending = true;
       this.broadcast({

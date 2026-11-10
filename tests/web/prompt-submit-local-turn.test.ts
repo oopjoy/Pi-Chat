@@ -71,9 +71,43 @@ test("a New draft without a click still captures the Composer-visible model", ()
       isDraft: false,
       draftGateMode: undefined,
       displayedModel: displayed,
+      displayedThinkingLevel: "xhigh",
     }).promptSettings,
     undefined,
-    "existing Sessions still omit display-only defaults",
+    "existing Sessions still omit a Thinking level the selector can already show",
+  );
+});
+
+test("an existing custom-model Session sends the clamped Thinking slot it displays", () => {
+  const displayed = {
+    id: "kimi-k2",
+    name: "Kimi",
+    provider: "local",
+    reasoning: true,
+    source: "models-json" as const,
+    custom: true,
+  };
+  const captured = capturePromptSelection({
+    stagedSelection: undefined,
+    models: [displayed],
+    isDraft: false,
+    draftGateMode: undefined,
+    displayedModel: { provider: "local", id: "kimi-k2", name: "Kimi", reasoning: true },
+    displayedThinkingLevel: "medium",
+  });
+  assert.equal(captured.selection, undefined, "no model command is invented for an unstaged Session");
+  assert.deepEqual(captured.promptSettings, { thinkingLevel: "high" });
+  assert.equal(
+    capturePromptSelection({
+      stagedSelection: undefined,
+      models: [{ provider: "openai", id: "gpt", name: "GPT", reasoning: true }],
+      isDraft: false,
+      draftGateMode: undefined,
+      displayedModel: { provider: "openai", id: "gpt", name: "GPT", reasoning: true },
+      displayedThinkingLevel: "medium",
+    }).promptSettings,
+    undefined,
+    "seven-slot models keep an unstaged Runtime level",
   );
 });
 

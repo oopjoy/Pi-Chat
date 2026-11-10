@@ -10,6 +10,7 @@ import { idForPath } from "../../src/server/session-index";
 import type { SessionIndex } from "../../src/server/session-index";
 import type { ResourceManager } from "../../src/server/resource-manager";
 import { ModelManager } from "../../src/server/model-manager";
+import { createProviderManagement } from "../../src/server/services/provider-management";
 import type { SessionSummary } from "../../src/shared/types";
 import { FakeRpc } from "../helpers/server-app-fixture";
 
@@ -89,6 +90,145 @@ test("model file mutation refreshes the Host catalogue without restarting the Ru
   }
 });
 
+test("adding a Provider does not 409 against its own mutation lease", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-provider-add-"));
+  const primary = new FakeRpc("C:\\sessions\\primary.jsonl", "primary");
+  const models = new ModelManager(root);
+  const app = new PiChatApp({
+    rpc: primary as unknown as PiRpcClient,
+    sessions: { list: async () => [] } as unknown as SessionIndex,
+    resources: {} as ResourceManager,
+    modelManager: models,
+    cwd: process.cwd(),
+    webRoot: process.cwd(),
+  });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/models/provider`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        provider: "added",
+        baseUrl: "https://api.example.com/v1",
+        api: "openai-responses",
+        apiKey: "sk-test",
+        models: [{ id: "m1", name: "M1", reasoning: true }],
+      }),
+    });
+    const body = await response.json() as { error?: string; code?: string; models?: Array<{ id: string; provider: string }> };
+    assert.equal(response.status, 200, JSON.stringify(body));
+    assert.notEqual(body.code, "APPLICATION_BUSY");
+    assert.ok(body.models?.some((model) => model.provider === "added" && model.id === "m1"));
+    const stored = JSON.parse(await readFile(models.path, "utf8"));
+    assert.equal(stored.providers.added.baseUrl, "https://api.example.com/v1");
+  } finally {
+    server.close();
+    await app.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("deleting a Provider succeeds even while a live conversation selects it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-chat-provider-delete-"));
+  const primaryPath = "C:\\sessions\\primary.jsonl";
+  const secondaryPath = "C:\\sessions\\secondary.jsonl";
+  const primaryId = idForPath(primaryPath);
+  const secondaryId = idForPath(secondaryPath);
+  const primary = new FakeRpc(primaryPath, "primary");
+  primary.model = { provider: "cpafem", id: "glm-5.3-flash", name: "glm-5.3-flash" };
+  primary.availableModels = [
+    { provider: "openai", id: "gpt-4", name: "GPT-4", api: "openai-completions", reasoning: true },
+    { provider: "cpafem", id: "glm-5.3-flash", name: "glm-5.3-flash", api: "openai-responses" },
+    { provider: "FEMAI", id: "deepseek-flash", name: "deepseek-flash", api: "openai-responses" },
+  ];
+  const secondary = new FakeRpc(secondaryPath, "secondary");
+  secondary.model = { provider: "FEMAI", id: "deepseek-flash", name: "deepseek-flash" };
+  const summaries = [
+    { id: primaryId, sessionId: "primary", name: "pichat111", preview: "", cwd: process.cwd(), updatedAt: 2, messageCount: 1, active: true },
+    { id: secondaryId, sessionId: "secondary", name: "current chat", preview: "", cwd: process.cwd(), updatedAt: 1, messageCount: 1, active: false },
+  ];
+  const sessions = {
+    list: async () => summaries,
+    summaryForId: (id: string) => summaries.find((session) => session.id === id) || null,
+    pathForId: (id: string) => id === primaryId ? primaryPath : id === secondaryId ? secondaryPath : null,
+    messagesForId: async () => [],
+  } as unknown as SessionIndex;
+  const models = new ModelManager(root);
+  await models.addProvider({
+    provider: "cpafem", baseUrl: "https://cpafem.invalid/v1", api: "openai-responses",
+    models: [{ id: "glm-5.3-flash", name: "glm-5.3-flash" }],
+  });
+  await models.addProvider({
+    provider: "FEMAI", baseUrl: "https://femai.invalid/v1", api: "openai-responses",
+    models: [{ id: "deepseek-flash", name: "deepseek-flash" }],
+  });
+  const app = new PiChatApp({
+    rpc: primary as unknown as PiRpcClient,
+    createRpc: () => secondary as unknown as PiRpcClient,
+    sessions,
+    resources: {} as ResourceManager,
+    modelManager: models,
+    cwd: process.cwd(),
+    webRoot: process.cwd(),
+  });
+  const server = createServer((request, response) => void app.handle(request, response));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    assert.equal((await fetch(`${origin}/api/bootstrap`)).status, 200);
+    assert.equal((await fetch(`${origin}/api/sessions/${secondaryId}/activate`, { method: "POST" })).status, 200);
+    secondary.commands.length = 0;
+
+    const deleted = await fetch(`${origin}/api/models/provider/cpafem`, { method: "DELETE" });
+    const body = await deleted.json() as { error?: string; models?: Array<{ provider: string; id: string }> };
+    assert.equal(deleted.status, 200, JSON.stringify(body));
+    assert.equal(
+      body.models?.some((model) => model.provider === "cpafem"),
+      false,
+      "deleted Provider must leave the published catalogue even while Runtime still lists it",
+    );
+    assert.ok(body.models?.some((model) => model.provider === "FEMAI" && model.id === "deepseek-flash"));
+    assert.ok(body.models?.some((model) => model.provider === "openai" && model.id === "gpt-4"));
+    const after = JSON.parse(await readFile(models.path, "utf8"));
+    assert.equal(after.providers.cpafem, undefined, "models.json is the only authority a delete consults");
+    assert.ok(after.providers.FEMAI, "an unrelated Provider survives");
+    // The stale route stays with the conversation and is reported on its next
+    // send, so deletion must not silently rewrite another conversation's model.
+    assert.equal(secondary.commands.some((command) => command.type === "set_model"), false);
+  } finally {
+    server.close();
+    await app.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Provider deletion never consults Runtime state", async () => {
+  const removed: string[] = [];
+  const service = createProviderManagement({
+    manager: {
+      getCustomProvider: async () => null,
+      addProvider: async () => undefined,
+      removeProvider: async (provider: string) => { removed.push(provider); },
+      updateProvider: async () => undefined,
+      storedProviderApiKey: async () => "",
+    } as unknown as Parameters<typeof createProviderManagement>[0]["manager"],
+    withLifecycle: <T>(_description: string, mutation: () => Promise<T>) => mutation(),
+    withModelFileTransaction: <T>(mutation: () => Promise<T>) => mutation(),
+    // A dead, busy or unreadable Pi must not decide a models.json edit.
+    primaryState: async () => { throw new Error("Pi RPC 未运行"); },
+    secondaryStates: async () => { throw new Error("Pi RPC 未运行"); },
+    bootstrap: async () => ({ ok: true }),
+  });
+
+  await service.remove("cpafem");
+  assert.deepEqual(removed, ["cpafem"], "deletion is a file edit, not a Runtime decision");
+});
+
 test("whole-Provider edits cannot remove the model selected by a started Session", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-chat-provider-active-model-"));
   const path = "C:\\sessions\\primary.jsonl";
@@ -151,7 +291,21 @@ test("external models.json changes refresh the Host catalogue without restarting
     await new Promise((resolve) => setTimeout(resolve, 180));
     const afterDelete = await fetch(`${origin}/api/bootstrap`);
     const deletedBody = await afterDelete.json() as { models: Array<{ id: string }> };
-    assert.equal(deletedBody.models.some((model) => model.id === "watched"), false);
+    assert.equal(
+      deletedBody.models.some((model) => model.id === "watched"),
+      true,
+      "a missing models.json is not an empty catalogue and must not tombstone the last good Providers",
+    );
+    await models.add({ provider: "local", id: "returned", baseUrl: "http://127.0.0.1:1", api: "openai-completions" });
+    await new Promise((resolve) => setTimeout(resolve, 180));
+    const restored = await fetch(`${origin}/api/bootstrap`);
+    const restoredBody = await restored.json() as { models: Array<{ id: string }> };
+    assert.ok(restoredBody.models.some((model) => model.id === "returned"));
+    assert.equal(
+      restoredBody.models.some((model) => model.id === "watched"),
+      false,
+      "a later successful read still drops models the file no longer contains",
+    );
     assert.equal(primary.restartCount, 0, "models.json changes refresh the live registry instead of restarting Runtime");
     assert.ok(primary.commands.some((command) => command.type === "pi_chat_refresh_models"));
   } finally {

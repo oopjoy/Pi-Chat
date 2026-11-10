@@ -530,7 +530,9 @@ export function AppView(host: Record<string, any>) {
             setModelRuntimeSyncPending(data.modelRuntimeSyncPending === true);
             saveModelCatalog(data.models);
           }
-          dispatchPane({ type: "RUNTIME_SETTINGS_ADOPTED", target: localDraftRef.current ? { kind: "draft" } : { kind: "session", sessionId: viewedSessionIdRef.current }, state: { model: data.state.model } });
+          // Catalogue mutations return Primary bootstrap state. Adopting that
+          // model into the viewed pane would rewrite another conversation's
+          // selection, including after deleting an unrelated Provider.
         }}
         onExportDiagnostics={exportStateDiagnostics}
         onRestart={() => void restartPi()}

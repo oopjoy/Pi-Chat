@@ -11,6 +11,7 @@ export interface ProviderManagementPorts {
   bootstrap(): Promise<unknown>;
 }
 
+
 /** The ModelManager owns models.json; this use-case only coordinates safe writes. */
 export function createProviderManagement(ports: ProviderManagementPorts) {
   return {
@@ -31,15 +32,14 @@ export function createProviderManagement(ports: ProviderManagementPorts) {
       await ports.withModelFileTransaction(() => ports.manager.addProvider(body));
       return ports.bootstrap();
     }),
-    remove: async (provider: string) => {
-      const state = asState(await ports.primaryState());
-      if (state.model?.provider === provider)
-        throw new Error("请先切换到其他模型，再删除当前 Provider");
-      return ports.withLifecycle("删除 Provider", async () => {
-        await ports.withModelFileTransaction(() => ports.manager.removeProvider(provider));
-        return ports.bootstrap();
-      });
-    },
+    // Deletion is a models.json edit, so it is always allowed. A conversation
+    // that still selects a model from this Provider keeps that stale route and
+    // reports "当前模型不存在" on its next send, which points the user at the
+    // model selector instead of trapping them behind an unreachable dialog.
+    remove: (provider: string) => ports.withLifecycle("删除 Provider", async () => {
+      await ports.withModelFileTransaction(() => ports.manager.removeProvider(provider));
+      return ports.bootstrap();
+    }),
     update: (provider: string, body: Record<string, unknown>) =>
       ports.withLifecycle("更新 Provider 配置", async () => {
         const primaryState = await ports.primaryState();

@@ -67,6 +67,40 @@ test("Gate control disables an unconfirmed existing Session instead of inventing
   }
 });
 
+test("the runtime model resolves custom catalogue levels in the rendered Composer", async () => {
+  const { dom } = installDom();
+  const { createRoot } = await import("react-dom/client");
+  const { ComposerControls } = await import("../../src/web/components/ComposerControls");
+  // Pi get_state carries only provider/id/api; custom metadata is catalogue-only.
+  const runtimeModel = { provider: "local", id: "kimi-k2", name: "Kimi K2", reasoning: true } as const;
+  const catalogue = [{ ...runtimeModel, source: "models-json" as const, custom: true }];
+  const root = createRoot(dom.window.document.querySelector("#root")!);
+  try {
+    await act(async () => root.render(createElement(ComposerControls, {
+      state: { model: runtimeModel, thinkingLevel: "minimal", isStreaming: false },
+      models: catalogue,
+      disabled: false,
+      gateAvailable: false,
+      onGate: () => undefined,
+      onModel: () => undefined,
+      onThinking: () => undefined,
+    })));
+    const trigger = dom.window.document.querySelector<HTMLButtonElement>(
+      ".thinking-control .compact-select-trigger",
+    )!;
+    assert.match(trigger.textContent || "", /low/, "a stored finer level is shown clamped");
+    await act(async () => trigger.click());
+    assert.deepEqual(
+      [...dom.window.document.querySelectorAll(
+        ".thinking-control .compact-select-option > span:last-of-type",
+      )].map((node) => node.textContent),
+      ["low", "high", "xhigh", "max"],
+    );
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
 test("Thinking chooser follows the selected model's exact provider level map", async () => {
   const { dom } = installDom();
   const { createRoot } = await import("react-dom/client");

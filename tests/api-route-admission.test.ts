@@ -61,6 +61,14 @@ test("route admission preserves lifecycle and read exclusions", () => {
     bodyBeforeMutationLease: true,
     validateSessionId: false,
     bodyLimit: DEFAULT_MUTATION_BODY_LIMIT,
+    acquireMutationLeaseAfterBody: false,
     ordinaryMutation: false,
   });
+  assert.deepEqual(route("POST", "/api/models/provider"), {
+    bodyBeforeMutationLease: true,
+    validateSessionId: false,
+    bodyLimit: DEFAULT_MUTATION_BODY_LIMIT,
+    acquireMutationLeaseAfterBody: false,
+    ordinaryMutation: false,
+  }, "adding a Provider must not hold a generic mutation lease against its own lifecycle");
 });

@@ -30,30 +30,69 @@ const THINKING_LEVEL_SET = new Set(THINKING_LEVELS);
 /** Reasoning models share seven user-facing semantic slots; only non-reasoning models lock to off. */
 export function thinkingLevelsForModel(
   model: ModelInfo | null | undefined,
+  models: readonly ModelInfo[] = [],
 ): readonly ThinkingLevel[] {
-  return model?.reasoning === false ? ["off"] : THINKING_LEVELS;
+  const resolved = resolveCatalogueModel(model, models);
+  if (resolved?.reasoning === false) return ["off"];
+  // Custom models describe one "thinking" switch, not Pi's provider-specific
+  // ladder, so they default to four coarse levels instead of all seven slots.
+  if (isCustomModel(resolved)) return CUSTOM_MODEL_THINKING_LEVELS;
+  return THINKING_LEVELS;
+}
+
+/** Custom (models.json) models default to low/high/xhigh/max only. */
+export const CUSTOM_MODEL_THINKING_LEVELS: readonly ThinkingLevel[] = [
+  "low",
+  "high",
+  "xhigh",
+  "max",
+];
+
+function isCustomModel(model: ModelInfo | null | undefined): boolean {
+  return model?.custom === true || model?.source === "models-json";
+}
+
+/**
+ * Pi's `get_state` model is a route (provider/id/api) without catalogue
+ * metadata. Resolve it against the annotated catalogue so `custom`/
+ * `thinkingLevelMap` still describe the model being displayed or sent to.
+ */
+export function resolveCatalogueModel(
+  model: ModelInfo | null | undefined,
+  models: readonly ModelInfo[] = [],
+): ModelInfo | null | undefined {
+  if (!model || isCustomModel(model) || model.thinkingLevelMap) return model;
+  return models.find((candidate) =>
+    candidate.provider === model.provider
+    && candidate.id === model.id
+    && (model.api ? candidate.api === model.api : true),
+  ) ?? model;
 }
 
 function mappedThinkingLevelsForModel(
   model: ModelInfo | null | undefined,
+  models: readonly ModelInfo[] = [],
 ): readonly ThinkingLevel[] {
-  if (model?.reasoning === false) return ["off"];
-  const map = model?.thinkingLevelMap;
-  if (!map || Object.keys(map).length === 0) return THINKING_LEVELS;
-  const supported = THINKING_LEVELS.filter(
+  const resolved = resolveCatalogueModel(model, models);
+  if (resolved?.reasoning === false) return ["off"];
+  const map = resolved?.thinkingLevelMap;
+  if (!map || Object.keys(map).length === 0)
+    return isCustomModel(resolved) ? CUSTOM_MODEL_THINKING_LEVELS : THINKING_LEVELS;
+  const supported = thinkingLevelsForModel(resolved).filter(
     (level) => typeof map[level] === "string",
   );
   // Contradictory metadata must not erase reasoning controls. Runtime readback
   // remains authoritative if an adapter advertises reasoning but maps no level.
-  return supported.length ? supported : THINKING_LEVELS;
+  return supported.length ? supported : thinkingLevelsForModel(resolved);
 }
 
 /** Map a semantic slot onto the model's real levels, searching upward before downward. */
 export function thinkingLevelForModel(
   model: ModelInfo | null | undefined,
   level: ThinkingLevel,
+  models: readonly ModelInfo[] = [],
 ): ThinkingLevel {
-  const supported = mappedThinkingLevelsForModel(model);
+  const supported = mappedThinkingLevelsForModel(model, models);
   if (supported.includes(level)) return level;
   const requestedIndex = THINKING_LEVELS.indexOf(level);
   return supported.find((candidate) => THINKING_LEVELS.indexOf(candidate) >= requestedIndex)
@@ -148,13 +187,18 @@ export function composerStateForSelection(
 ): PiState {
   if (!selection) return state;
   const model = selectedCatalogueModel(selection, models);
+  // A catalogue-annotated view of the Runtime's own model keeps custom-model
+  // and reasoning rules correct when no explicit model was staged.
+  const effective = model === undefined || model === null
+    ? resolveCatalogueModel(state.model, models)
+    : model;
   return {
     ...state,
     ...(model !== undefined ? { model } : null),
-    ...(model?.reasoning === false
+    ...(effective?.reasoning === false
       ? { thinkingLevel: "off" as const }
       : selection.thinkingLevel !== undefined
-        ? { thinkingLevel: thinkingLevelForModel(model, selection.thinkingLevel) }
+        ? { thinkingLevel: thinkingLevelForModel(effective, selection.thinkingLevel, models) }
         : null),
   };
 }
@@ -167,9 +211,14 @@ export function composerStateForSelection(
 export function promptSettingsForSelection(
   selection: SessionComposerSelection | undefined,
   models: readonly ModelInfo[] = [],
+  /** Catalogue-clamp source when the selection carries no model of its own. */
+  displayedModel?: ModelInfo | null,
 ): PromptSettingsSnapshot | undefined {
   if (!selection) return undefined;
   const model = selectedCatalogueModel(selection, models);
+  const clampSource = model !== undefined
+    ? model
+    : resolveCatalogueModel(displayedModel, models);
   const settings: PromptSettingsSnapshot = {
     ...(model
       ? {
@@ -180,13 +229,14 @@ export function promptSettingsForSelection(
           },
         }
       : null),
-    ...(model?.reasoning === false
+    ...(clampSource?.reasoning === false
       ? null
       : selection.thinkingLevel
         ? {
             thinkingLevel: thinkingLevelForModel(
-              model,
+              clampSource,
               selection.thinkingLevel,
+              models,
             ),
           }
         : null),

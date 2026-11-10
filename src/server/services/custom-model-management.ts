@@ -19,15 +19,12 @@ export function createCustomModelManagement(ports: CustomModelManagementPorts) {
       await ports.withModelFileTransaction(() => ports.manager.add(body));
       return ports.bootstrap();
     }),
-    remove: async (provider: string, modelId: string) => {
-      const state = await ports.primaryState();
-      if (state.model?.provider === provider && state.model.id === modelId)
-        throw new Error("请先切换到其他模型，再删除当前模型");
-      return ports.withLifecycle("删除模型", async () => {
-        await ports.withModelFileTransaction(() => ports.manager.remove(provider, modelId));
-        return ports.bootstrap();
-      });
-    },
+    remove: (provider: string, modelId: string) => ports.withLifecycle("删除模型", async () => {
+      // Same rule as Provider deletion: models.json is the authority and the
+      // send path reports a selection that no longer exists.
+      await ports.withModelFileTransaction(() => ports.manager.remove(provider, modelId));
+      return ports.bootstrap();
+    }),
     update: (provider: string, modelId: string, body: unknown) =>
       ports.withLifecycle("更新模型配置", async () => {
         const state = await ports.primaryState();

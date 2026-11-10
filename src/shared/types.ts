@@ -139,7 +139,7 @@ export interface CustomProviderModelInput {
   name: string;
   /** Stable source key used to preserve non-editor models.json fields across an ID rename. */
   originalId?: string;
-  /** Defaults to true for new models so Composer exposes the seven thinking slots. */
+  /** Defaults to true so Composer exposes coarse thinking levels (low/high/xhigh/max). */
   reasoning?: boolean;
   contextWindow?: number;
   maxTokens?: number;

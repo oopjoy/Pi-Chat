@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { PiRuntimeUpdateCheck } from "../../shared/pi-runtime-update";
-import type { BootstrapData, BuildIdentity, CustomProviderInput, DiscoveredProviderModel, ExtensionResource, ModelInfo, PackageResource, PiState, PrimaryRuntimeReadiness, SkillResource } from "../../shared/types";
+import type { BootstrapData, BuildIdentity, CustomProviderInput, CustomProviderModelInput, DiscoveredProviderModel, ExtensionResource, ModelInfo, PackageResource, PiState, PrimaryRuntimeReadiness, SkillResource } from "../../shared/types";
 import { useModalFocus } from "../lib/modal-focus";
 import { writeClipboardText } from "../lib/clipboard";
 import { api, PI_CHAT_RELEASES_URL, type UpdateCheckResult } from "../api";
 import { DEFAULT_APPEARANCE, snapToStep, type AppearancePreferences, type FontPreference, type ThemePreference } from "../lib/preferences";
+import { parseTokenCount } from "../../shared/token-count";
 import { CompactSelect, type CompactSelectOption } from "./CompactSelect";
-import { ChevronDownIcon, ChevronRightIcon, CloseIcon, FolderIcon, MinusIcon, PiMarkIcon, PlusIcon, TrashIcon } from "./Icons";
+import { ChevronDownIcon, ChevronRightIcon, CloseIcon, FolderIcon, GripIcon, MinusIcon, PiMarkIcon, PlusIcon, TrashIcon } from "./Icons";
 
 export type ManagementSection = "settings" | "models";
 type SettingsTab = "appearance" | "models" | "skills" | "extensions" | "packages" | "about";
@@ -414,6 +415,44 @@ function compareDiscoveredModelId(left: string, right: string): number {
   return left.localeCompare(right, ["zh-CN", "en"], { numeric: true, sensitivity: "base" });
 }
 
+/**
+ * Token limits stay raw text while editing so "500k" or "1m" can be typed.
+ * They are parsed once on save; the browser never sends the raw string.
+ */
+type ProviderModelRow = Omit<CustomProviderModelInput, "contextWindow" | "maxTokens"> & {
+  contextWindowText: string;
+  maxTokensText: string;
+};
+type ProviderEditorInput = Omit<CustomProviderInput, "models"> & { models: ProviderModelRow[] };
+
+function modelRow(model: CustomProviderModelInput): ProviderModelRow {
+  const { contextWindow, maxTokens, ...rest } = model;
+  return {
+    ...rest,
+    contextWindowText: typeof contextWindow === "number" ? String(contextWindow) : "",
+    maxTokensText: typeof maxTokens === "number" ? String(maxTokens) : "",
+  };
+}
+
+/** Returns a per-row message naming the exact field that could not be parsed. */
+function providerEditorInput(editor: ProviderEditorInput): CustomProviderInput | string {
+  const models: CustomProviderModelInput[] = [];
+  for (const [index, row] of editor.models.entries()) {
+    const contextWindow = parseTokenCount(row.contextWindowText);
+    if (!contextWindow.ok) return `第 ${index + 1} 行上下文大小格式无效；可填 128000、128k 或 1m`;
+    const maxTokens = parseTokenCount(row.maxTokensText);
+    if (!maxTokens.ok) return `第 ${index + 1} 行最大输出格式无效；可填 8192、8k 或 1m`;
+    const { contextWindowText: _contextText, maxTokensText: _maxText, ...rest } = row;
+    models.push({
+      ...rest,
+      ...(contextWindow.value ? { contextWindow: contextWindow.value } : null),
+      ...(maxTokens.value ? { maxTokens: maxTokens.value } : null),
+    });
+  }
+  const { models: _rows, ...provider } = editor;
+  return { ...provider, models };
+}
+
 function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy, onModel, onBrowseModels, onModelsChanged }: {
   models: ModelInfo[];
   modelRuntimeSyncPending: boolean;
@@ -427,7 +466,7 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
     "models" | "state" | "modelRuntimeSyncPending" | "modelCatalogueRevision"
   >) => void;
 }) {
-  const [editingProvider, setEditingProvider] = useState<CustomProviderInput | null>(null);
+  const [editingProvider, setEditingProvider] = useState<ProviderEditorInput | null>(null);
   const [editingProviderKey, setEditingProviderKey] = useState("");
   const [expandedProvider, setExpandedProvider] = useState("");
   const providerLoadSequence = useRef(0);
@@ -436,12 +475,15 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
   const [probing, setProbing] = useState(false);
   const [discoveredModels, setDiscoveredModels] = useState<DiscoveredProviderModel[]>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [probeQuery, setProbeQuery] = useState("");
   const [selectedDiscoveredIds, setSelectedDiscoveredIds] = useState<Set<string>>(new Set());
   const [probeError, setProbeError] = useState("");
   const probeDialogRef = useRef<HTMLElement>(null);
   useModalFocus(pickerOpen, probeDialogRef);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [dropIndex, setDropIndex] = useState<number | null>(null);
   const modelGroups = useMemo(() => {
     const groups = new Map<string, ModelInfo[]>();
     for (const model of models) groups.set(model.provider, [...(groups.get(model.provider) || []), model]);
@@ -455,6 +497,10 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
     const upstream = discoveredModels.map((model) => ({ id: model.id, ownedBy: model.ownedBy, missingUpstream: false }));
     return [...missing, ...upstream].sort((left, right) => compareDiscoveredModelId(left.id, right.id));
   }, [discoveredModels, editingProvider]);
+  const visibleDiscoveredRows = useMemo(
+    () => filterList(discoveredRows, probeQuery, (model) => `${model.id} ${model.ownedBy || ""}`),
+    [discoveredRows, probeQuery],
+  );
   // Provider loading and probing share the editor's existing freshness owner.
   // Closing, changing inputs, or starting a newer probe retires older results.
   const closeProbeDialog = useCallback(() => {
@@ -463,6 +509,7 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
     setProbing(false);
     setDiscoveredModels([]);
     setSelectedDiscoveredIds(new Set());
+    setProbeQuery("");
     setProbeError("");
   }, []);
   const closeProvider = () => {
@@ -470,6 +517,8 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
     setExpandedProvider("");
     setEditingProvider(null);
     setEditingProviderKey("");
+    setDragIndex(null);
+    setDropIndex(null);
   };
   const beginAddProvider = () => {
     // Model file edits no longer require global quiescence, so neither button
@@ -478,7 +527,7 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
     closeProbeDialog();
     setEditingProviderKey("");
     setExpandedProvider("__new__");
-    setEditingProvider({ provider: "", baseUrl: "", api: "openai-completions", apiKey: "", models: [{ id: "", name: "", reasoning: true }] });
+    setEditingProvider({ provider: "", baseUrl: "", api: "openai-completions", apiKey: "", models: [modelRow({ id: "", name: "", reasoning: true })] });
     setError(""); setNotice("");
   };
   const beginEditProvider = async (
@@ -509,7 +558,7 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
       setEditingProvider({
         ...result.provider,
         apiKey: "",
-        models: result.provider.models.map((model) => ({ ...model, reasoning: model.reasoning !== false })),
+        models: result.provider.models.map((model) => modelRow({ ...model, reasoning: model.reasoning !== false })),
       });
     } catch (cause) {
       if (sequence === providerLoadSequence.current) {
@@ -518,23 +567,28 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
       }
     }
   };
-  const updateProvider = <K extends keyof CustomProviderInput>(key: K, value: CustomProviderInput[K]) => {
+  const updateProvider = <K extends keyof Omit<ProviderEditorInput, "models">>(key: K, value: ProviderEditorInput[K]) => {
     closeProbeDialog();
     setEditingProvider((current) => current ? { ...current, [key]: value } : current);
   };
-  const updateModel = (index: number, key: "id" | "name" | "contextWindow" | "maxTokens" | "reasoning", value: string | boolean) => setEditingProvider((current) => {
+  const updateModel = (index: number, key: keyof ProviderModelRow, value: string | boolean) => setEditingProvider((current) => {
     if (!current) return current;
-    if ((key === "contextWindow" || key === "maxTokens") && typeof value === "string" && !/^[0-9]*$/.test(value)) return current;
     const models = current.models.map((model, modelIndex) => {
       if (modelIndex !== index) return model;
       if (key === "reasoning") return { ...model, reasoning: value === true };
-      if (key === "contextWindow" || key === "maxTokens") return { ...model, [key]: typeof value === "string" && value ? Number(value) : undefined };
       return { ...model, [key]: typeof value === "string" ? value : model[key] };
     });
     return { ...current, models };
   });
-  const addModelRow = () => setEditingProvider((current) => current ? { ...current, models: [...current.models, { id: "", name: "", reasoning: true }] } : current);
+  const addModelRow = () => setEditingProvider((current) => current ? { ...current, models: [...current.models, modelRow({ id: "", name: "", reasoning: true })] } : current);
   const removeModelRow = (index: number) => setEditingProvider((current) => current && current.models.length > 1 ? { ...current, models: current.models.filter((_, modelIndex) => modelIndex !== index) } : current);
+  const moveModelRow = (from: number, to: number) => setEditingProvider((current) => {
+    if (!current || from === to || from < 0 || to < 0 || from >= current.models.length || to >= current.models.length) return current;
+    const models = current.models.slice();
+    const [moved] = models.splice(from, 1);
+    models.splice(to, 0, moved);
+    return { ...current, models };
+  });
   useEffect(() => {
     if (!pickerOpen) return;
     const onKey = (event: KeyboardEvent) => {
@@ -574,6 +628,7 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
     if (!editingProvider.apiKey?.trim() && !editingProviderKey) { setError("请先填写 API 密钥"); return; }
     setError("");
     setProbeError("");
+    setProbeQuery("");
     setSelectedDiscoveredIds(new Set(editingProvider.models.map((model) => model.id).filter(Boolean)));
     setPickerOpen(true);
     void probeModels();
@@ -585,9 +640,9 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
       const next = current.models.filter((model) => !model.id || selectedDiscoveredIds.has(model.id));
       for (const discovered of discoveredModels) {
         if (!selectedDiscoveredIds.has(discovered.id) || existing.has(discovered.id)) continue;
-        next.push({ id: discovered.id, name: discovered.id, reasoning: true });
+        next.push(modelRow({ id: discovered.id, name: discovered.id, reasoning: true }));
       }
-      return { ...current, models: next.length ? next : [{ id: "", name: "", reasoning: true }] };
+      return { ...current, models: next.length ? next : [modelRow({ id: "", name: "", reasoning: true })] };
     });
     setPickerOpen(false);
     setNotice("已应用到编辑列表，保存后才会写入 models.json。");
@@ -596,9 +651,11 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
     if (!editingProvider || saving) return;
     setSaving(true); setError(""); setNotice("");
     try {
+      const input = providerEditorInput(editingProvider);
+      if (typeof input === "string") throw new Error(input);
       let result;
-      if (editingProviderKey) result = await api.updateCustomProvider(editingProviderKey, editingProvider);
-      else result = await api.addCustomProvider(editingProvider);
+      if (editingProviderKey) result = await api.updateCustomProvider(editingProviderKey, input);
+      else result = await api.addCustomProvider(input);
       onModelsChanged(result);
       closeProvider();
       setNotice("Provider 配置已保存，正在刷新模型目录。当前请求仍使用原配置。");
@@ -611,18 +668,20 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
     try {
       onModelsChanged(await api.deleteCustomProvider(provider));
       if (expandedProvider === provider) closeProvider();
-      setNotice("Provider 已删除。");
+      // Conversations that still selected one of these models keep that stale
+      // route and report it on their next send, next to the model selector.
+      setNotice("Provider 已删除。仍在使用其模型的对话会在发送时提示重新选择模型。");
     }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
     finally { setSaving(false); }
   };
   const providerEditor = editingProvider ? <div className="model-editor model-provider-editor" aria-label={editingProviderKey ? "编辑 Provider" : "添加 Provider"}>
-    <div className="model-editor-head"><strong>{editingProviderKey ? `${editingProviderKey} 配置` : "添加自定义提供方"}</strong><button type="button" disabled={saving} onClick={closeProvider}>取消</button></div>
+    <div className="model-editor-head"><strong>{editingProviderKey ? `${editingProviderKey} 配置` : "添加自定义提供方"}</strong></div>
     <div className="model-editor-grid"><label>Provider<input value={editingProvider.provider} disabled={Boolean(editingProviderKey) || saving} onChange={(event) => updateProvider("provider", event.target.value)} /></label><label>API 协议<select value={editingProvider.api} disabled={saving} onChange={(event) => updateProvider("api", event.target.value as CustomProviderInput["api"])}><option value="openai-completions">openai-completions</option><option value="openai-responses">openai-responses</option><option value="anthropic-messages">anthropic-messages</option><option value="google-generative-ai">google-generative-ai</option></select></label><label className="model-editor-wide">API 地址<input value={editingProvider.baseUrl} disabled={saving} placeholder="https://api.example.com/v1" onChange={(event) => updateProvider("baseUrl", event.target.value)} /></label><label className="model-editor-wide">API 密钥<input type="password" value={editingProvider.apiKey || ""} disabled={saving} placeholder="已配置 — 输入新值以替换" onChange={(event) => updateProvider("apiKey", event.target.value)} /></label></div>
-    <div className="provider-models-heading"><span>ID</span><span>显示名称</span><span>上下文</span><span>最大输出</span><span>思考</span><span aria-hidden="true" /></div>
-    <div className="provider-model-editor-list">{editingProvider.models.map((model, index) => <div className="provider-model-editor-row" key={index}><input aria-label={`模型 ${index + 1} ID`} placeholder="Model ID" value={model.id} disabled={saving} onChange={(event) => updateModel(index, "id", event.target.value)} /><input aria-label={`模型 ${index + 1} 名称`} placeholder="显示名称" value={model.name} disabled={saving} onChange={(event) => updateModel(index, "name", event.target.value)} /><input aria-label={`模型 ${index + 1} 上下文大小`} type="text" inputMode="numeric" pattern="[0-9]*" placeholder="上下文" value={model.contextWindow || ""} disabled={saving} onChange={(event) => updateModel(index, "contextWindow", event.target.value)} /><input aria-label={`模型 ${index + 1} 最大输出`} type="text" inputMode="numeric" pattern="[0-9]*" placeholder="最大输出" value={model.maxTokens || ""} disabled={saving} onChange={(event) => updateModel(index, "maxTokens", event.target.value)} /><label className="model-reasoning-toggle" title="启用七档思考"><input type="checkbox" aria-label={`模型 ${index + 1} 思考`} checked={model.reasoning !== false} disabled={saving} onChange={(event) => updateModel(index, "reasoning", event.target.checked)} /></label><button type="button" className="model-trash-button" aria-label={`删除模型 ${model.id || index + 1}`} title="删除模型条目" disabled={editingProvider.models.length <= 1 || saving} onClick={() => removeModelRow(index)}><TrashIcon /></button></div>)}</div>
+    <div className="provider-models-heading"><span aria-hidden="true" /><span>ID</span><span>显示名称</span><span>上下文</span><span>最大输出</span><span>思考</span><span aria-hidden="true" /></div>
+    <div className="provider-model-editor-list">{editingProvider.models.map((model, index) => <div className={`provider-model-editor-row${dragIndex === index ? " is-dragging" : ""}${dropIndex === index && dragIndex !== index ? " is-drop-target" : ""}`} key={index} onDragOver={(event) => { if (dragIndex === null || saving) return; event.preventDefault(); if (event.dataTransfer) event.dataTransfer.dropEffect = "move"; setDropIndex(index); }} onDrop={(event) => { event.preventDefault(); if (dragIndex !== null) moveModelRow(dragIndex, index); setDragIndex(null); setDropIndex(null); }}><button type="button" className="model-drag-handle" aria-label={`拖动调整模型 ${index + 1} 顺序`} title="拖动调整顺序" draggable={!saving && editingProvider.models.length > 1} disabled={saving || editingProvider.models.length <= 1} onDragStart={(event) => { if (saving || editingProvider.models.length <= 1) { event.preventDefault(); return; } event.dataTransfer.effectAllowed = "move"; try { event.dataTransfer.setData("text/plain", String(index)); } catch { /* JSDOM */ } setDragIndex(index); setDropIndex(index); }} onDragEnd={() => { setDragIndex(null); setDropIndex(null); }} onKeyDown={(event) => { if (event.key === "ArrowUp") { event.preventDefault(); moveModelRow(index, index - 1); } else if (event.key === "ArrowDown") { event.preventDefault(); moveModelRow(index, index + 1); } }}><GripIcon /></button><input aria-label={`模型 ${index + 1} ID`} placeholder="Model ID" value={model.id} disabled={saving} onChange={(event) => updateModel(index, "id", event.target.value)} /><input aria-label={`模型 ${index + 1} 名称`} placeholder="显示名称" value={model.name} disabled={saving} onChange={(event) => updateModel(index, "name", event.target.value)} /><input aria-label={`模型 ${index + 1} 上下文大小`} type="text" inputMode="text" placeholder="如 128k" title="支持 500k、500K、1m、1M 等写法" value={model.contextWindowText} disabled={saving} onChange={(event) => updateModel(index, "contextWindowText", event.target.value)} /><input aria-label={`模型 ${index + 1} 最大输出`} type="text" inputMode="text" placeholder="如 8k" title="支持 500k、500K、1m、1M 等写法" value={model.maxTokensText} disabled={saving} onChange={(event) => updateModel(index, "maxTokensText", event.target.value)} /><label className="model-reasoning-toggle" title="启用思考（low / high / xhigh / max）"><input type="checkbox" aria-label={`模型 ${index + 1} 思考`} checked={model.reasoning !== false} disabled={saving} onChange={(event) => updateModel(index, "reasoning", event.target.checked)} /></label><button type="button" className="model-trash-button" aria-label={`删除模型 ${model.id || index + 1}`} title="删除模型条目" disabled={editingProvider.models.length <= 1 || saving} onClick={() => removeModelRow(index)}><TrashIcon /></button></div>)}</div>
     <div className="provider-model-editor-actions"><button type="button" className="model-inline-add" disabled={saving} onClick={addModelRow}>＋ 添加模型</button><button type="button" className="model-probe-button" disabled={saving || probing} onClick={openProbeDialog}>{probing ? "正在探测…" : "获取上游模型列表"}</button></div>
-    <div className="model-editor-footer"><span>保存不会修改当前正在执行的 Prompt；新请求使用刷新后的配置。</span><button type="button" className="model-save-button" disabled={saving} onClick={() => void saveProvider()}>{saving ? "保存中…" : "保存"}</button></div>
+    <div className="model-editor-footer"><span>保存不会修改当前正在执行的 Prompt；新请求使用刷新后的配置。</span><div className="model-editor-footer-actions"><button type="button" className="model-cancel-button" disabled={saving} onClick={closeProvider}>取消</button><button type="button" className="model-save-button" disabled={saving} onClick={() => void saveProvider()}>{saving ? "保存中…" : "保存"}</button></div></div>
   </div> : null;
   return <>
   <div className="settings-resource-panel models-panel">
@@ -695,10 +754,12 @@ function ModelsPanel({ models, modelRuntimeSyncPending, state, busy, browseBusy,
         {probeError && <div className="resource-error">{probeError}</div>}
         {probing && !discoveredModels.length && !probeError && <p className="resource-loading">正在从上游获取模型列表…</p>}
         <ul className="provider-discovered-list">
-          {discoveredRows.map((model) => <li key={model.id}><label>
+          <li className="provider-discovered-search"><input aria-label="搜索上游模型" placeholder="搜索模型 ID" value={probeQuery} disabled={saving} onChange={(event) => setProbeQuery(event.target.value)} /></li>
+          {visibleDiscoveredRows.map((model) => <li key={model.id}><label>
             <span className="provider-discovered-name">{model.id}{model.missingUpstream ? <i>已配置，上游未返回</i> : model.ownedBy ? <i>{model.ownedBy}</i> : null}</span>
             <input type="checkbox" checked={selectedDiscoveredIds.has(model.id)} disabled={saving || probing} onChange={(event) => setSelectedDiscoveredIds((current) => { const next = new Set(current); if (event.target.checked) next.add(model.id); else next.delete(model.id); return next; })} />
           </label></li>)}
+          {!visibleDiscoveredRows.length && discoveredRows.length > 0 && <li className="provider-discovered-empty">没有匹配的模型</li>}
         </ul>
         <footer className="provider-discovered-actions">
           <button type="button" disabled={saving} onClick={closeProbeDialog}>取消</button>

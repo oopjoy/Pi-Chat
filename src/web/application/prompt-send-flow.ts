@@ -355,7 +355,14 @@ export function createPromptSendFlow<THost extends PromptSendFlowHost>(host: THo
         preparationHost,
         {
           alreadyStreaming,
-          displayedModel: state.model,
+          // A child/view-only transcript is not the send target: its model must
+          // not be validated against the catalogue that serves this prompt. A New
+          // draft does copy the Composer-visible model, so it stays in scope.
+          displayedModel:
+            localDraftRef.current
+            || (targetSessionId && targetSessionId === viewedSessionIdRef.current)
+              ? state.model
+              : undefined,
           displayedThinkingLevel: state.thinkingLevel as ThinkingLevel | undefined,
           images,
           localDraftRef,

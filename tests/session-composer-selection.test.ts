@@ -126,6 +126,54 @@ test("all reasoning models retain seven semantic slots while maps clamp upward b
   }, "max"), "max");
 });
 
+test("custom models expose only the four coarse thinking levels", () => {
+  const custom: ModelInfo = {
+    provider: "local",
+    id: "kimi-k2",
+    name: "Kimi K2",
+    reasoning: true,
+    source: "models-json",
+    custom: true,
+  };
+  assert.deepEqual(thinkingLevelsForModel(custom), ["low", "high", "xhigh", "max"]);
+  assert.deepEqual(thinkingLevelsForModel({ ...custom, thinkingLevelMap: {} }), ["low", "high", "xhigh", "max"]);
+  // Stored provider-specific levels clamp into the coarse slots instead of
+  // showing an option the selector does not offer.
+  assert.equal(thinkingLevelForModel(custom, "minimal"), "low");
+  assert.equal(thinkingLevelForModel(custom, "off"), "low");
+  assert.equal(thinkingLevelForModel(custom, "medium"), "high");
+  assert.equal(thinkingLevelForModel(custom, "max"), "max");
+  // A runtime/Provider model keeps the full seven-slot ladder.
+  assert.deepEqual(thinkingLevelsForModel({ ...custom, source: "pi-runtime", custom: false }), THINKING_LEVELS);
+});
+
+test("a Runtime-shaped model resolves catalogue metadata for custom thinking levels", () => {
+  // Pi's get_state carries provider/id/api only; the custom flag comes from the
+  // annotated catalogue, so both display and send must resolve through it.
+  const runtimeShaped: ModelInfo = { provider: "local", id: "kimi-k2", name: "Kimi K2", reasoning: true };
+  const catalogue: ModelInfo[] = [{ ...runtimeShaped, source: "models-json", custom: true }];
+  assert.deepEqual(thinkingLevelsForModel(runtimeShaped), THINKING_LEVELS, "without a catalogue it stays a provider model");
+  assert.deepEqual(thinkingLevelsForModel(runtimeShaped, catalogue), ["low", "high", "xhigh", "max"]);
+  assert.equal(thinkingLevelForModel(runtimeShaped, "medium", catalogue), "high");
+  const selection = stageSessionComposerSelection(undefined, {
+    model: runtimeShaped,
+    thinkingLevel: "minimal",
+  });
+  assert.deepEqual(promptSettingsForSelection(selection, catalogue), {
+    model: { provider: "local", modelId: "kimi-k2" },
+    thinkingLevel: "low",
+  });
+  assert.equal(
+    composerStateForSelection({ ...runtimeState, model: runtimeShaped }, selection, catalogue).thinkingLevel,
+    "low",
+  );
+  // Thinking-only intent still clamps through the displayed model, without
+  // emitting a model command of its own.
+  const thinkingOnly = stageSessionComposerSelection(undefined, { thinkingLevel: "medium" });
+  assert.deepEqual(promptSettingsForSelection(thinkingOnly, catalogue, runtimeShaped), { thinkingLevel: "high" });
+  assert.deepEqual(promptSettingsForSelection(thinkingOnly, catalogue), { thinkingLevel: "medium" });
+});
+
 test("a stale implicit off is not promoted to durable reasoning intent", () => {
   const staleOffState: PiState = {
     ...runtimeState,

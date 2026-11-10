@@ -53,6 +53,7 @@ test("body-bearing mutations parse before lifecycle admission", () => {
     ["POST", "/api/sessions/0123456789abcdefabcd/clone"],
     ["POST", "/api/sessions/0123456789abcdefabcd/fork"],
     ["PUT", "/api/models/provider/model"],
+    ["POST", "/api/models/provider"],
     ["POST", "/api/models"],
     ["DELETE", "/api/models"],
   ] as const;
@@ -63,6 +64,8 @@ test("body-bearing mutations parse before lifecycle admission", () => {
     );
     assert.equal(admission.bodyBeforeMutationLease, true, `${method} ${pathname}`);
     assert.equal(admission.ordinaryMutation, false, `${method} ${pathname}`);
+    if (pathname.startsWith("/api/models"))
+      assert.equal(admission.acquireMutationLeaseAfterBody, false, `${method} ${pathname} must not take a generic lease`);
   }
 });
 

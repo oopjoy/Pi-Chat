@@ -17,6 +17,8 @@ export class FakeRpc {
   ) => void>();
   streaming = false;
   model: { provider: string; id: string; name?: string; api?: string } | null = null;
+  /** When set, `get_available_models` returns this list instead of the built-in stub. */
+  availableModels: Array<Record<string, unknown>> | null = null;
   stopCount = 0;
   restartCount = 0;
   restartFailures = 0;
@@ -135,7 +137,7 @@ export class FakeRpc {
         type: "response",
         success: true,
         data: {
-          models: [
+          models: this.availableModels ?? [
             {
               provider: "test",
               id: "next",
